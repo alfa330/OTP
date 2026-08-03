@@ -1,0 +1,797 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import FaIcon from '../common/FaIcon';
+import CustomSelect from '../ui/CustomSelect';
+import {
+    APPLE_FONT, iosCard, iosInput, iosGroupLabel,
+    iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
+    IosBadge, IosModal,
+} from '../ui/ios';
+
+/*
+ * Раздел «Настройки SIP» (iCORE Phone).
+ *
+ * Три вкладки:
+ *   Сотрудники — SIP-номер каждого, второй номер для автодозвона и — по
+ *                необходимости — персональные пароль/домен вместо общих.
+ *   Общие      — сервер/домен, база пароля и общий код автодозвона.
+ *   История    — кто и что менял (и в общем, и по конкретному сотруднику).
+ *
+ * Пароль оператора по умолчанию собирается как «база + его SIP-номер», домен
+ * берётся общий; персональные значения перекрывают их только там, где заданы.
+ */
+
+const TABS = [
+    { id: 'operators', label: 'Сотрудники' },
+    { id: 'common', label: 'Общие' },
+    { id: 'history', label: 'История' },
+];
+
+const EMPTY_FORM = {
+    sip_number: '', sip_password: '', sip_domain: '',
+    autodial_number: '', autodial_password: '', autodial_domain: '',
+};
+
+const formFromOperator = (op) => ({
+    sip_number: op?.sip_number || '',
+    sip_password: op?.sip_password || '',
+    sip_domain: op?.sip_domain || '',
+    autodial_number: op?.autodial_number || '',
+    autodial_password: op?.autodial_password || '',
+    autodial_domain: op?.autodial_domain || '',
+});
+
+const hasPersonalParams = (op) => Boolean(
+    op?.sip_password || op?.sip_domain || op?.autodial_password || op?.autodial_domain
+);
+
+const fmtDateTime = (iso) => {
+    if (!iso) return '';
+    try {
+        return new Date(iso).toLocaleString('ru-RU', {
+            day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+        });
+    } catch { return iso; }
+};
+
+/* Поле с показом/скрытием пароля — одинаковое в форме сотрудника и в общих. */
+const SecretInput = ({ value, onChange, placeholder, disabled }) => {
+    const [shown, setShown] = useState(false);
+    return (
+        <div className="relative">
+            <input
+                type={shown ? 'text' : 'password'}
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                placeholder={placeholder}
+                disabled={disabled}
+                autoComplete="new-password"
+                className={`${iosInput} pr-10`}
+            />
+            <button
+                type="button"
+                onClick={() => setShown((v) => !v)}
+                aria-label={shown ? 'Скрыть' : 'Показать'}
+                className="absolute inset-y-0 right-0 grid w-10 place-items-center text-slate-400 transition hover:text-slate-600"
+            >
+                <FaIcon className={`fas ${shown ? 'fa-eye-slash' : 'fa-eye'}`} style={{ width: 14, height: 14 }} />
+            </button>
+        </div>
+    );
+};
+
+const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canEdit = true }) => {
+    const [tab, setTab] = useState('operators');
+
+    const [operators, setOperators] = useState([]);
+    const [settings, setSettings] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [loading, setLoading] = useState(true);
+    const [search, setSearch] = useState('');
+    const [departmentFilter, setDepartmentFilter] = useState('');
+    const [showInactive, setShowInactive] = useState(false);
+
+    const [editing, setEditing] = useState(null);   // строка сотрудника
+    const [form, setForm] = useState({ ...EMPTY_FORM });
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [saving, setSaving] = useState(false);
+
+    const [commonForm, setCommonForm] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [savingCommon, setSavingCommon] = useState(false);
+
+    const [history, setHistory] = useState([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const historyLoadedRef = useRef(false);
+
+    // showToast меняет идентичность при каждом тосте — держим в ref, чтобы не
+    // перезапускать загрузку списка.
+    const showToastRef = useRef(showToast);
+    showToastRef.current = showToast;
+
+    const authHeaders = useCallback(
+        (extra = {}) => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? ''), ...extra }),
+        [withAccessTokenHeader, user?.id]
+    );
+
+    /* ─── загрузка ─── */
+    // Список и общие настройки приходят одним запросом — второй вызов не нужен.
+    const fetchOperators = useCallback(async () => {
+        setLoading(true);
+        try {
+            const qs = showInactive ? '?include_inactive=1' : '';
+            const resp = await fetch(`${apiBaseUrl}/api/sip_config/operators${qs}`, {
+                credentials: 'include',
+                headers: authHeaders(),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            setOperators(Array.isArray(data.operators) ? data.operators : []);
+            const s = data.settings || {};
+            setSettings(s);
+            setCommonForm({
+                sip_server: s.sip_server || '',
+                base_password: s.base_password || '',
+                autodial_code: s.autodial_code || '',
+            });
+        } catch (e) {
+            showToastRef.current?.(`Не удалось загрузить настройки SIP: ${e.message}`, 'error');
+        } finally {
+            setLoading(false);
+        }
+    }, [apiBaseUrl, authHeaders, showInactive]);
+
+    useEffect(() => { fetchOperators(); }, [fetchOperators]);
+
+    const fetchHistory = useCallback(async () => {
+        setHistoryLoading(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/sip_config/history?limit=100`, {
+                credentials: 'include',
+                headers: authHeaders(),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            setHistory(Array.isArray(data.history) ? data.history : []);
+            historyLoadedRef.current = true;
+        } catch (e) {
+            showToastRef.current?.(`Не удалось загрузить историю: ${e.message}`, 'error');
+        } finally {
+            setHistoryLoading(false);
+        }
+    }, [apiBaseUrl, authHeaders]);
+
+    // История нужна редко — грузим при первом открытии вкладки.
+    useEffect(() => {
+        if (tab === 'history' && !historyLoadedRef.current) fetchHistory();
+    }, [tab, fetchHistory]);
+
+    /* ─── производные данные ─── */
+    const departmentOptions = useMemo(() => {
+        const seen = new Map();
+        operators.forEach((op) => {
+            if (op.department_id == null) return;
+            if (!seen.has(String(op.department_id))) seen.set(String(op.department_id), op.department_name || 'Без названия');
+        });
+        return [...seen.entries()].map(([value, label]) => ({ value, label }));
+    }, [operators]);
+
+    // Один номер на двоих ломает привязку звонков — подсвечиваем такие строки.
+    const duplicateNumbers = useMemo(() => {
+        const counts = new Map();
+        operators.forEach((op) => {
+            [op.sip_number, op.autodial_number].forEach((n) => {
+                const key = String(n || '').trim();
+                if (key) counts.set(key, (counts.get(key) || 0) + 1);
+            });
+        });
+        return new Set([...counts.entries()].filter(([, c]) => c > 1).map(([n]) => n));
+    }, [operators]);
+
+    const filtered = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        return operators.filter((op) => {
+            if (departmentFilter && String(op.department_id ?? '') !== departmentFilter) return false;
+            if (!q) return true;
+            return (op.name || '').toLowerCase().includes(q)
+                || (op.sip_number || '').toLowerCase().includes(q)
+                || (op.autodial_number || '').toLowerCase().includes(q)
+                || (op.group_name || '').toLowerCase().includes(q);
+        });
+    }, [operators, search, departmentFilter]);
+
+    const stats = useMemo(() => ({
+        total: operators.length,
+        withSip: operators.filter((op) => op.sip_number).length,
+        withAutodial: operators.filter((op) => op.autodial_number).length,
+    }), [operators]);
+
+    /* ─── эффективные значения (что уйдёт в телефон) ─── */
+    const effective = useMemo(() => {
+        const domain = (form.sip_domain || settings.sip_server || '').trim();
+        const base = settings.base_password || '';
+        const number = form.sip_number.trim();
+        const autodial = form.autodial_number.trim();
+        return {
+            domain,
+            password: form.sip_password || (number && base ? `${base}${number}` : ''),
+            autodialDomain: (form.autodial_domain || settings.sip_server || '').trim(),
+            autodialPassword: form.autodial_password || (autodial && base ? `${base}${autodial}` : ''),
+        };
+    }, [form, settings]);
+
+    // Конфликт видно ещё до сохранения — бэкенд его тоже не пропустит.
+    const conflicts = useMemo(() => {
+        if (!editing) return {};
+        const taken = new Map();
+        operators.forEach((op) => {
+            if (op.id === editing.id) return;
+            [op.sip_number, op.autodial_number].forEach((n) => {
+                const key = String(n || '').trim();
+                if (key && !taken.has(key)) taken.set(key, op.name);
+            });
+        });
+        const main = form.sip_number.trim();
+        const auto = form.autodial_number.trim();
+        return {
+            sip_number: main ? taken.get(main) : null,
+            autodial_number: auto
+                ? (taken.get(auto) || (main && main === auto ? 'совпадает с основным' : null))
+                : null,
+        };
+    }, [editing, operators, form.sip_number, form.autodial_number]);
+
+    /* ─── действия ─── */
+    const openEditor = (op) => {
+        setEditing(op);
+        setForm(formFromOperator(op));
+        setShowAdvanced(hasPersonalParams(op));
+    };
+
+    const closeEditor = () => { setEditing(null); setForm({ ...EMPTY_FORM }); setShowAdvanced(false); };
+
+    const saveOperator = async () => {
+        if (!editing || !canEdit) return;
+        setSaving(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/sip_config/operators/${editing.id}`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify(form),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            setOperators((prev) => prev.map((op) => (op.id === data.operator.id ? { ...op, ...data.operator } : op)));
+            historyLoadedRef.current = false;
+            showToastRef.current?.('SIP-настройки сохранены', 'success');
+            closeEditor();
+        } catch (e) {
+            showToastRef.current?.(e.message, 'error');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const saveCommon = async () => {
+        if (!canEdit) return;
+        setSavingCommon(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/sip_config`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({
+                    sip_server: commonForm.sip_server.trim(),
+                    base_password: commonForm.base_password,
+                    autodial_code: commonForm.autodial_code.trim(),
+                }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            setSettings(data.settings || {});
+            historyLoadedRef.current = false;
+            showToastRef.current?.('Общие настройки сохранены', 'success');
+        } catch (e) {
+            showToastRef.current?.(e.message, 'error');
+        } finally {
+            setSavingCommon(false);
+        }
+    };
+
+    const copyToClipboard = async (value, label) => {
+        if (!value) return;
+        try {
+            await navigator.clipboard.writeText(value);
+            showToastRef.current?.(`${label} скопирован`, 'success');
+        } catch {
+            showToastRef.current?.('Не удалось скопировать', 'error');
+        }
+    };
+
+    const commonDirty = (
+        commonForm.sip_server.trim() !== (settings.sip_server || '')
+        || commonForm.base_password !== (settings.base_password || '')
+        || commonForm.autodial_code.trim() !== (settings.autodial_code || '')
+    );
+
+    /* ─── разметка ─── */
+    return (
+        <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
+            {/* Шапка */}
+            <div className="sticky top-0 z-10 -mx-1 rounded-2xl border border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="grid h-10 w-10 place-items-center rounded-2xl bg-blue-50 text-blue-600">
+                            <FaIcon className="fas fa-headset" />
+                        </div>
+                        <div>
+                            <h2 className="text-[17px] font-semibold tracking-tight text-slate-900">Настройки SIP</h2>
+                            <p className="text-[12px] text-slate-400">
+                                Сотрудников: {stats.total} · с номером: {stats.withSip} · автодозвон: {stats.withAutodial}
+                            </p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1">
+                        {TABS.map((t) => (
+                            <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => setTab(t.id)}
+                                aria-pressed={tab === t.id}
+                                className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+                                    tab === t.id
+                                        ? 'bg-white text-slate-900 shadow-sm'
+                                        : 'text-slate-500 hover:text-slate-800'
+                                }`}
+                            >
+                                {t.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                {tab === 'operators' && (
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <div className="relative">
+                            <FaIcon className="fas fa-search pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" style={{ width: 13, height: 13 }} />
+                            <input
+                                type="text"
+                                placeholder="Имя, номер, группа…"
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                className={`${iosInput} w-56 pl-9`}
+                            />
+                        </div>
+                        {departmentOptions.length > 1 && (
+                            <CustomSelect
+                                className="w-48"
+                                variant="ios"
+                                value={departmentFilter}
+                                onChange={setDepartmentFilter}
+                                ariaLabel="Отдел"
+                                options={[{ value: '', label: 'Все отделы' }, ...departmentOptions]}
+                            />
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => setShowInactive((v) => !v)}
+                            className={`${iosBtnGhost} ${showInactive ? 'bg-slate-100 text-slate-800' : ''}`}
+                            title="Показывать уволенных — чтобы освободить занятый ими номер"
+                        >
+                            <FaIcon className="fas fa-users" />
+                            <span className="hidden sm:inline">Уволенные</span>
+                        </button>
+                        <button onClick={fetchOperators} disabled={loading} className={iosBtnGhost} title="Обновить">
+                            <FaIcon className={`fas fa-sync-alt ${loading ? 'animate-spin' : ''}`} />
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            {/* Сотрудники */}
+            {tab === 'operators' && (
+                loading ? (
+                    <div className="flex items-center justify-center py-16 text-slate-400">
+                        <FaIcon className="fas fa-spinner fa-spin mr-2" /> Загрузка…
+                    </div>
+                ) : filtered.length === 0 ? (
+                    <div className={`${iosCard} flex flex-col items-center justify-center py-16 text-slate-400`}>
+                        <FaIcon className="fas fa-headset mb-2" style={{ width: 28, height: 28 }} />
+                        <p className="text-[13px]">{search || departmentFilter ? 'Ничего не найдено' : 'Нет сотрудников'}</p>
+                    </div>
+                ) : (
+                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                        {filtered.map((op) => {
+                            const isDuplicate = op.sip_number && duplicateNumbers.has(op.sip_number.trim());
+                            const isAutodialDuplicate = op.autodial_number && duplicateNumbers.has(op.autodial_number.trim());
+                            return (
+                                <button
+                                    key={op.id}
+                                    type="button"
+                                    onClick={() => openEditor(op)}
+                                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                                >
+                                    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-[12.5px] font-semibold text-slate-500">
+                                        {(op.name || '?').trim().charAt(0).toUpperCase()}
+                                    </div>
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-2">
+                                            <span className="truncate text-[14px] font-medium text-slate-900">{op.name}</span>
+                                            {(op.status === 'fired' || op.status === 'dismissal') && (
+                                                <IosBadge tone="slate">Уволен</IosBadge>
+                                            )}
+                                        </div>
+                                        <div className="truncate text-[11.5px] text-slate-400">
+                                            {[op.department_name, op.group_name].filter(Boolean).join(' · ') || 'Без отдела'}
+                                        </div>
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-1.5">
+                                        {op.sip_number ? (
+                                            <IosBadge tone={isDuplicate ? 'red' : 'blue'} title={isDuplicate ? 'Этот номер занят ещё кем-то' : 'SIP-номер'}>
+                                                <FaIcon className="fas fa-phone" style={{ width: 11, height: 11 }} />
+                                                <span className="font-mono">{op.sip_number}</span>
+                                            </IosBadge>
+                                        ) : (
+                                            <span className="text-[11.5px] text-slate-300">номер не задан</span>
+                                        )}
+                                        {op.autodial_number && (
+                                            <IosBadge tone={isAutodialDuplicate ? 'red' : 'slate'} className="hidden sm:inline-flex" title="Номер автодозвона">
+                                                <FaIcon className="fas fa-phone-volume" style={{ width: 11, height: 11 }} />
+                                                <span className="font-mono">{op.autodial_number}</span>
+                                            </IosBadge>
+                                        )}
+                                        {hasPersonalParams(op) && (
+                                            <span className="hidden h-6 w-6 place-items-center rounded-full bg-slate-100 text-slate-400 sm:grid" title="Персональный пароль или домен">
+                                                <FaIcon className="fas fa-key" style={{ width: 11, height: 11 }} />
+                                            </span>
+                                        )}
+                                    </div>
+                                    <FaIcon className="fas fa-chevron-right shrink-0 text-slate-300" style={{ width: 12, height: 12 }} />
+                                </button>
+                            );
+                        })}
+                    </div>
+                )
+            )}
+
+            {/* Общие */}
+            {tab === 'common' && (
+                <div className="max-w-2xl space-y-4">
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Подключение</div>
+                        <div className={`${iosCard} space-y-3 p-4`}>
+                            <div>
+                                <label className="text-[12.5px] font-medium text-slate-600">SIP-сервер / домен</label>
+                                <input
+                                    type="text"
+                                    value={commonForm.sip_server}
+                                    onChange={(e) => setCommonForm((f) => ({ ...f, sip_server: e.target.value }))}
+                                    placeholder="напр. 192.168.88.251"
+                                    disabled={!canEdit}
+                                    className={`${iosInput} mt-1`}
+                                />
+                            </div>
+                            <div>
+                                <label className="text-[12.5px] font-medium text-slate-600">База пароля</label>
+                                <div className="mt-1">
+                                    <SecretInput
+                                        value={commonForm.base_password}
+                                        onChange={(v) => setCommonForm((f) => ({ ...f, base_password: v }))}
+                                        placeholder="общая часть пароля"
+                                        disabled={!canEdit}
+                                    />
+                                </div>
+                                <p className="mt-1.5 px-1 text-[11.5px] text-slate-500">
+                                    Пароль сотрудника = база + его SIP-номер. Если у кого-то пароль или домен свой —
+                                    задайте их в его карточке на вкладке «Сотрудники».
+                                </p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Автодозвон</div>
+                        <div className={`${iosCard} space-y-3 p-4`}>
+                            <div>
+                                <label className="text-[12.5px] font-medium text-slate-600">Код подключения</label>
+                                <div className="mt-1 flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        value={commonForm.autodial_code}
+                                        onChange={(e) => setCommonForm((f) => ({ ...f, autodial_code: e.target.value }))}
+                                        placeholder="напр. *55"
+                                        disabled={!canEdit}
+                                        className={`${iosInput} font-mono`}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => copyToClipboard(commonForm.autodial_code.trim(), 'Код')}
+                                        disabled={!commonForm.autodial_code.trim()}
+                                        className={iosBtnSecondary}
+                                        title="Скопировать код"
+                                    >
+                                        <FaIcon className="fas fa-copy" />
+                                    </button>
+                                </div>
+                                <p className="mt-1.5 px-1 text-[11.5px] text-slate-500">
+                                    Код общий для всех: со второго номера на него звонят один раз, чтобы телефон
+                                    подключился к режиму автодозвона.
+                                </p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div className="flex items-center justify-between gap-3 px-1">
+                        <span className="text-[11.5px] text-slate-400">
+                            {settings.updated_at
+                                ? `Изменено ${fmtDateTime(settings.updated_at)}${settings.updated_by_name ? ` · ${settings.updated_by_name}` : ''}`
+                                : 'Ещё не настраивалось'}
+                        </span>
+                        {canEdit && (
+                            <button type="button" onClick={saveCommon} disabled={savingCommon || !commonDirty} className={iosBtnPrimary}>
+                                <FaIcon className={savingCommon ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />
+                                Сохранить
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {/* История */}
+            {tab === 'history' && (
+                <div className="max-w-3xl">
+                    {historyLoading ? (
+                        <div className="flex items-center justify-center py-16 text-slate-400">
+                            <FaIcon className="fas fa-spinner fa-spin mr-2" /> Загрузка…
+                        </div>
+                    ) : history.length === 0 ? (
+                        <div className={`${iosCard} flex flex-col items-center justify-center py-16 text-slate-400`}>
+                            <FaIcon className="fas fa-clock-rotate-left mb-2" style={{ width: 28, height: 28 }} />
+                            <p className="text-[13px]">Изменений пока нет</p>
+                        </div>
+                    ) : (
+                        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                            {history.map((h, i) => {
+                                const s = h.settings || {};
+                                const parts = h.target_user_id
+                                    ? [
+                                        s.sip_number ? `номер ${s.sip_number}` : 'номер снят',
+                                        s.autodial_number ? `автодозвон ${s.autodial_number}` : null,
+                                        s.sip_domain ? `домен ${s.sip_domain}` : null,
+                                        s.sip_password ? 'свой пароль' : null,
+                                    ]
+                                    : [
+                                        s.sip_server ? `сервер ${s.sip_server}` : null,
+                                        s.base_password ? 'база пароля' : null,
+                                        s.autodial_code ? `код ${s.autodial_code}` : null,
+                                    ];
+                                return (
+                                    <div key={i} className="flex items-start gap-3 px-4 py-3">
+                                        <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-400">
+                                            <FaIcon className={`fas ${h.target_user_id ? 'fa-user' : 'fa-globe'}`} style={{ width: 13, height: 13 }} />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-[13.5px] font-medium text-slate-800">
+                                                {h.target_user_id ? (h.target_user_name || 'Сотрудник удалён') : 'Общие настройки'}
+                                            </div>
+                                            <div className="truncate text-[12px] text-slate-500">
+                                                {parts.filter(Boolean).join(' · ') || '—'}
+                                            </div>
+                                        </div>
+                                        <div className="shrink-0 text-right text-[11.5px] text-slate-400">
+                                            <div>{fmtDateTime(h.changed_at)}</div>
+                                            <div>{h.changed_by_name || '—'}</div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Карточка сотрудника */}
+            <IosModal
+                open={!!editing}
+                onClose={closeEditor}
+                title={editing?.name || ''}
+                subtitle={[editing?.department_name, editing?.group_name].filter(Boolean).join(' · ') || 'SIP-настройки'}
+                footer={canEdit ? (
+                    <>
+                        <button type="button" onClick={closeEditor} className={iosBtnSecondary}>Отмена</button>
+                        <button
+                            type="button"
+                            onClick={saveOperator}
+                            disabled={saving || !!conflicts.sip_number || !!conflicts.autodial_number}
+                            className={iosBtnPrimary}
+                        >
+                            <FaIcon className={saving ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />
+                            Сохранить
+                        </button>
+                    </>
+                ) : null}
+            >
+                <div className="space-y-4">
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Основной номер</div>
+                        <div className={`${iosCard} space-y-2 p-4`}>
+                            <input
+                                type="text"
+                                value={form.sip_number}
+                                onChange={(e) => setForm((f) => ({ ...f, sip_number: e.target.value }))}
+                                placeholder="напр. 1024"
+                                disabled={!canEdit}
+                                className={`${iosInput} font-mono`}
+                            />
+                            {conflicts.sip_number && (
+                                <p className="flex items-center gap-1.5 px-1 text-[11.5px] text-rose-600">
+                                    <FaIcon className="fas fa-triangle-exclamation" style={{ width: 11, height: 11 }} />
+                                    Номер уже занят: {conflicts.sip_number}
+                                </p>
+                            )}
+                        </div>
+                    </section>
+
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Номер для автодозвона</div>
+                        <div className={`${iosCard} space-y-2 p-4`}>
+                            <input
+                                type="text"
+                                value={form.autodial_number}
+                                onChange={(e) => setForm((f) => ({ ...f, autodial_number: e.target.value }))}
+                                placeholder="второй номер, необязательно"
+                                disabled={!canEdit}
+                                className={`${iosInput} font-mono`}
+                            />
+                            {conflicts.autodial_number && (
+                                <p className="flex items-center gap-1.5 px-1 text-[11.5px] text-rose-600">
+                                    <FaIcon className="fas fa-triangle-exclamation" style={{ width: 11, height: 11 }} />
+                                    {conflicts.autodial_number === 'совпадает с основным'
+                                        ? 'Совпадает с основным номером'
+                                        : `Номер уже занят: ${conflicts.autodial_number}`}
+                                </p>
+                            )}
+                            {form.autodial_number.trim() && (
+                                <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
+                                    <span className="text-[12px] text-slate-500">
+                                        {settings.autodial_code
+                                            ? <>Позвонить один раз на <span className="font-mono font-medium text-slate-700">{settings.autodial_code}</span> — включится режим автодозвона</>
+                                            : 'Код подключения не задан — заполните его на вкладке «Общие»'}
+                                    </span>
+                                    {settings.autodial_code && (
+                                        <button
+                                            type="button"
+                                            onClick={() => copyToClipboard(settings.autodial_code, 'Код')}
+                                            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-white hover:text-slate-700"
+                                            title="Скопировать код"
+                                        >
+                                            <FaIcon className="fas fa-copy" style={{ width: 12, height: 12 }} />
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </section>
+
+                    {/* Персональные пароль/домен нужны редко — держим под кнопкой */}
+                    <section className="space-y-1.5">
+                        <button
+                            type="button"
+                            onClick={() => setShowAdvanced((v) => !v)}
+                            className="flex w-full items-center justify-between rounded-xl px-1 py-1 text-left"
+                        >
+                            <span className={iosGroupLabel}>Персональные пароль и домен</span>
+                            <FaIcon className={`fas ${showAdvanced ? 'fa-chevron-up' : 'fa-chevron-down'} text-slate-400`} style={{ width: 12, height: 12 }} />
+                        </button>
+                        {showAdvanced && (
+                            <div className={`${iosCard} space-y-3 p-4`}>
+                                <p className="text-[11.5px] text-slate-500">
+                                    Пусто — берутся общие: домен {settings.sip_server || '—'} и пароль «база + номер».
+                                </p>
+                                <div>
+                                    <label className="text-[12.5px] font-medium text-slate-600">Пароль основного номера</label>
+                                    <div className="mt-1">
+                                        <SecretInput
+                                            value={form.sip_password}
+                                            onChange={(v) => setForm((f) => ({ ...f, sip_password: v }))}
+                                            placeholder="как у всех"
+                                            disabled={!canEdit}
+                                        />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="text-[12.5px] font-medium text-slate-600">Домен основного номера</label>
+                                    <input
+                                        type="text"
+                                        value={form.sip_domain}
+                                        onChange={(e) => setForm((f) => ({ ...f, sip_domain: e.target.value }))}
+                                        placeholder="как у всех"
+                                        disabled={!canEdit}
+                                        className={`${iosInput} mt-1`}
+                                    />
+                                </div>
+                                {form.autodial_number.trim() && (
+                                    <>
+                                        <div>
+                                            <label className="text-[12.5px] font-medium text-slate-600">Пароль номера автодозвона</label>
+                                            <div className="mt-1">
+                                                <SecretInput
+                                                    value={form.autodial_password}
+                                                    onChange={(v) => setForm((f) => ({ ...f, autodial_password: v }))}
+                                                    placeholder="как у всех"
+                                                    disabled={!canEdit}
+                                                />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="text-[12.5px] font-medium text-slate-600">Домен номера автодозвона</label>
+                                            <input
+                                                type="text"
+                                                value={form.autodial_domain}
+                                                onChange={(e) => setForm((f) => ({ ...f, autodial_domain: e.target.value }))}
+                                                placeholder="как у всех"
+                                                disabled={!canEdit}
+                                                className={`${iosInput} mt-1`}
+                                            />
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+                    </section>
+
+                    {/* Что реально уйдёт в телефон */}
+                    {form.sip_number.trim() && (
+                        <section className="space-y-1.5">
+                            <div className={iosGroupLabel}>Данные для телефона</div>
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                <EffectiveRow label="Домен" value={effective.domain} />
+                                <EffectiveRow label="Логин" value={form.sip_number.trim()} />
+                                <EffectiveRow label="Пароль" value={effective.password} secret />
+                                {form.autodial_number.trim() && (
+                                    <>
+                                        <EffectiveRow label="Логин автодозвона" value={form.autodial_number.trim()} />
+                                        <EffectiveRow label="Пароль автодозвона" value={effective.autodialPassword} secret />
+                                        {effective.autodialDomain !== effective.domain && (
+                                            <EffectiveRow label="Домен автодозвона" value={effective.autodialDomain} />
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        </section>
+                    )}
+
+                    {editing?.updated_at && (
+                        <p className="px-1 text-[11.5px] text-slate-400">
+                            Изменено {fmtDateTime(editing.updated_at)}{editing.updated_by_name ? ` · ${editing.updated_by_name}` : ''}
+                        </p>
+                    )}
+                </div>
+            </IosModal>
+        </div>
+    );
+};
+
+/* Строка «что уйдёт в телефон»: пароль скрыт до нажатия на глаз. */
+const EffectiveRow = ({ label, value, secret = false }) => {
+    const [shown, setShown] = useState(false);
+    const display = !value ? '—' : (secret && !shown ? '••••••••' : value);
+    return (
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5">
+            <span className="text-[12.5px] text-slate-500">{label}</span>
+            <span className="flex items-center gap-2">
+                <span className="truncate font-mono text-[12.5px] text-slate-800">{display}</span>
+                {secret && value && (
+                    <button
+                        type="button"
+                        onClick={() => setShown((v) => !v)}
+                        aria-label={shown ? 'Скрыть' : 'Показать'}
+                        className="text-slate-400 transition hover:text-slate-600"
+                    >
+                        <FaIcon className={`fas ${shown ? 'fa-eye-slash' : 'fa-eye'}`} style={{ width: 12, height: 12 }} />
+                    </button>
+                )}
+            </span>
+        </div>
+    );
+};
+
+export default SipSettingsView;

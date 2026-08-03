@@ -151,6 +151,23 @@ def normalize_proxy_status_value(value):
     return normalized
 
 
+# SIP-номера и коды: цифры, буквы и служебные символы набора (*, #, +).
+# Пробелы/скобки/дефисы из копипаста вычищаем — АТС их не принимает.
+SIP_IDENTIFIER_RE = re.compile(r'^[A-Za-z0-9*#+._-]{1,64}$')
+
+
+def normalize_sip_identifier(value, field="SIP-номер"):
+    """Нормализует SIP-номер/код: '' если пусто, иначе валидирует набор символов."""
+    if value is None:
+        return ""
+    cleaned = re.sub(r'[\s()–—]', '', str(value))
+    if not cleaned:
+        return ""
+    if not SIP_IDENTIFIER_RE.match(cleaned):
+        raise ValueError(f"{field}: допустимы только цифры, латиница и символы * # + . _ -")
+    return cleaned
+
+
 def _invalidate_shift_auction_runtime_caches(include_participants=False):
     with SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE_LOCK:
         SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE["key"] = None
@@ -3707,6 +3724,33 @@ class Database:
                     changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                     settings JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+            """)
+            # Общий код автодозвона: номер, на который оператор один раз звонит,
+            # чтобы телефон подключился к режиму автодозвона. Один на всех.
+            cursor.execute("""
+                ALTER TABLE sip_config
+                ADD COLUMN IF NOT EXISTS autodial_code VARCHAR(64) NOT NULL DEFAULT '';
+            """)
+            # История ведётся и по общим настройкам, и по персональным аккаунтам:
+            # target_user_id пуст у глобальных изменений.
+            cursor.execute("""
+                ALTER TABLE sip_config_history
+                ADD COLUMN IF NOT EXISTS target_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+            """)
+            # Персональные SIP-параметры сотрудника. Пустая строка = «как у всех»
+            # (общий домен из sip_config и пароль «база + номер»). Второй номер —
+            # для автодозвона; у него свои опциональные пароль/домен.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_sip_settings (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    sip_password VARCHAR(255) NOT NULL DEFAULT '',
+                    sip_domain VARCHAR(255) NOT NULL DEFAULT '',
+                    autodial_number VARCHAR(64) NOT NULL DEFAULT '',
+                    autodial_password VARCHAR(255) NOT NULL DEFAULT '',
+                    autodial_domain VARCHAR(255) NOT NULL DEFAULT '',
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
             cursor.execute("""
@@ -20983,48 +21027,58 @@ class Database:
         """Глобальные настройки SIP для iCORE Phone (singleton id=1)."""
         with self._get_cursor() as cur:
             cur.execute("""
-                SELECT s.sip_server, s.base_password, s.updated_by, s.updated_at, u.name
+                SELECT s.sip_server, s.base_password, s.autodial_code, s.updated_by, s.updated_at, u.name
                 FROM sip_config s
                 LEFT JOIN users u ON u.id = s.updated_by
                 WHERE s.id = 1
             """)
             r = cur.fetchone()
         if not r:
-            return {"sip_server": "", "base_password": "", "updated_by": None,
-                    "updated_by_name": None, "updated_at": None}
+            return {"sip_server": "", "base_password": "", "autodial_code": "",
+                    "updated_by": None, "updated_by_name": None, "updated_at": None}
         return {
             "sip_server": r[0] or "",
             "base_password": r[1] or "",
-            "updated_by": r[2],
-            "updated_by_name": r[4],
-            "updated_at": r[3].isoformat() if r[3] else None,
+            "autodial_code": r[2] or "",
+            "updated_by": r[3],
+            "updated_by_name": r[5],
+            "updated_at": r[4].isoformat() if r[4] else None,
         }
 
+    @staticmethod
+    def _mask_sip_secret(value) -> str:
+        """Пароль для истории: короткие прячем целиком, длинные — с краями."""
+        value = value or ""
+        if len(value) <= 6:
+            return "*" * len(value)
+        return value[:3] + "*" * (len(value) - 5) + value[-2:]
+
     def update_sip_config(self, payload: dict, user_id: Optional[int] = None) -> dict:
-        """Обновить настройки SIP + записать изменение в историю (пароль в истории маскируется)."""
+        """Обновить общие настройки SIP + записать изменение в историю (пароль маскируется)."""
         current = self.get_sip_config()
         sip_server = current["sip_server"]
         base_password = current["base_password"]
+        autodial_code = current["autodial_code"]
         payload = payload or {}
         if payload.get('sip_server') is not None:
             sip_server = str(payload['sip_server']).strip()
         if payload.get('base_password') is not None:
             base_password = str(payload['base_password'])
+        if payload.get('autodial_code') is not None:
+            autodial_code = normalize_sip_identifier(payload['autodial_code'], field="Код автодозвона")
 
-        def _mask(s):
-            s = s or ""
-            if len(s) <= 6:
-                return "*" * len(s)
-            return s[:3] + "*" * (len(s) - 5) + s[-2:]
-
-        snapshot = json.dumps({"sip_server": sip_server, "base_password": _mask(base_password)})
+        snapshot = json.dumps({
+            "sip_server": sip_server,
+            "base_password": self._mask_sip_secret(base_password),
+            "autodial_code": autodial_code,
+        })
         with self._get_cursor() as cur:
             cur.execute("""
                 UPDATE sip_config
-                SET sip_server = %s, base_password = %s,
+                SET sip_server = %s, base_password = %s, autodial_code = %s,
                     updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = 1
-            """, (sip_server, base_password, user_id))
+            """, (sip_server, base_password, autodial_code, user_id))
             cur.execute("""
                 INSERT INTO sip_config_history (changed_by, settings)
                 VALUES (%s, %s::jsonb)
@@ -21032,13 +21086,14 @@ class Database:
         return self.get_sip_config()
 
     def get_sip_config_history(self, limit: int = 100) -> list:
-        """История изменений настроек SIP (для вкладки «История» в панели)."""
+        """История изменений SIP: и общие настройки, и персональные аккаунты."""
         limit = max(1, min(int(limit or 100), 500))
         with self._get_cursor() as cur:
             cur.execute("""
-                SELECT h.changed_at, h.changed_by, u.name, h.settings
+                SELECT h.changed_at, h.changed_by, u.name, h.settings, h.target_user_id, t.name
                 FROM sip_config_history h
                 LEFT JOIN users u ON u.id = h.changed_by
+                LEFT JOIN users t ON t.id = h.target_user_id
                 ORDER BY h.changed_at DESC, h.id DESC
                 LIMIT %s
             """, (limit,))
@@ -21050,8 +21105,262 @@ class Database:
                 "changed_by": r[1],
                 "changed_by_name": r[2],
                 "settings": r[3] or {},
+                "target_user_id": r[4],
+                "target_user_name": r[5],
+                "scope": "operator" if r[4] else "global",
             })
         return out
+
+    # ── Персональные SIP-аккаунты сотрудников (раздел «Настройки SIP») ──────────
+    #
+    # Основной номер живёт в users.sip_number (по нему матчатся звонки Binotel/
+    # Oktell), персональные пароль/домен и второй номер для автодозвона — в
+    # user_sip_settings. Пустая строка = «как у всех»: домен из sip_config,
+    # пароль «база + номер».
+
+    _SIP_OPERATOR_ROLES = ('operator', 'trainee')
+    _SIP_INACTIVE_STATUSES = ('fired', 'dismissal')
+
+    _SIP_OPERATOR_SELECT = """
+        SELECT
+            u.id,
+            u.name,
+            LOWER(COALESCE(u.role, '')) AS role,
+            u.status,
+            u.department_id,
+            dep.name AS department_name,
+            u.supervisor_id,
+            grp.group_name,
+            COALESCE(u.sip_number, '') AS sip_number,
+            COALESCE(s.sip_password, '') AS sip_password,
+            COALESCE(s.sip_domain, '') AS sip_domain,
+            COALESCE(s.autodial_number, '') AS autodial_number,
+            COALESCE(s.autodial_password, '') AS autodial_password,
+            COALESCE(s.autodial_domain, '') AS autodial_domain,
+            s.updated_at,
+            upd.name AS updated_by_name
+        FROM users u
+        LEFT JOIN departments dep ON dep.id = u.department_id
+        LEFT JOIN user_sip_settings s ON s.user_id = u.id
+        LEFT JOIN users upd ON upd.id = s.updated_by
+        LEFT JOIN LATERAL (
+            SELECT g.name AS group_name
+            FROM group_operator_memberships gom
+            JOIN groups g ON g.id = gom.group_id
+            WHERE gom.operator_id = u.id AND gom.end_date IS NULL
+            ORDER BY gom.start_date DESC, gom.id DESC
+            LIMIT 1
+        ) grp ON TRUE
+    """
+
+    @staticmethod
+    def _sip_operator_row(row) -> dict:
+        return {
+            "id": row[0],
+            "name": row[1] or "",
+            "role": row[2] or "",
+            "status": row[3] or "",
+            "department_id": row[4],
+            "department_name": row[5] or "",
+            "supervisor_id": row[6],
+            "group_name": row[7] or "",
+            "sip_number": row[8] or "",
+            "sip_password": row[9] or "",
+            "sip_domain": row[10] or "",
+            "autodial_number": row[11] or "",
+            "autodial_password": row[12] or "",
+            "autodial_domain": row[13] or "",
+            "updated_at": row[14].isoformat() if row[14] else None,
+            "updated_by_name": row[15] or None,
+        }
+
+    def get_sip_operators(self, department_ids=None, supervisor_id=None,
+                          include_inactive: bool = False) -> list:
+        """Сотрудники с телефоном для раздела «Настройки SIP».
+
+        department_ids=None — без ограничения по отделам (админ). Иначе показываем
+        сотрудников этих отделов плюс тех, кого запросивший ведёт лично
+        (supervisor_id) — так операторы без отдела не выпадают из списка.
+        """
+        clauses = ["u.role = ANY(%s)"]
+        params = [list(self._SIP_OPERATOR_ROLES)]
+        if not include_inactive:
+            clauses.append("LOWER(COALESCE(u.status, '')) <> ALL(%s)")
+            params.append(list(self._SIP_INACTIVE_STATUSES))
+        dept_ids = [int(d) for d in (department_ids or []) if d is not None]
+        if department_ids is not None:
+            scope = ["u.department_id = ANY(%s)"]
+            params.append(dept_ids)
+            if supervisor_id:
+                scope.append("u.supervisor_id = %s")
+                params.append(int(supervisor_id))
+            clauses.append("(" + " OR ".join(scope) + ")")
+        sql = f"{self._SIP_OPERATOR_SELECT} WHERE {' AND '.join(clauses)} ORDER BY u.name"
+        with self._get_cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+        return [self._sip_operator_row(r) for r in rows]
+
+    def get_sip_operator(self, user_id: int) -> Optional[dict]:
+        """Одна карточка сотрудника с его SIP-параметрами (или None)."""
+        with self._get_cursor() as cur:
+            cur.execute(f"{self._SIP_OPERATOR_SELECT} WHERE u.id = %s", (int(user_id),))
+            row = cur.fetchone()
+        return self._sip_operator_row(row) if row else None
+
+    def find_sip_number_owners(self, numbers, exclude_user_id=None) -> dict:
+        """{номер: {'user_id', 'name', 'kind'}} — кто уже занял эти номера.
+
+        Один SIP-номер на двоих ломает привязку звонков к оператору, поэтому
+        проверяем оба поля сразу: основной номер и номер автодозвона.
+        """
+        wanted = [str(n).strip() for n in (numbers or []) if str(n or '').strip()]
+        if not wanted:
+            return {}
+        exclude_clause = ""
+        params = [wanted]
+        if exclude_user_id:
+            exclude_clause = " AND u.id <> %s"
+            params.append(int(exclude_user_id))
+        params.append(wanted)
+        if exclude_user_id:
+            params.append(int(exclude_user_id))
+        with self._get_cursor() as cur:
+            cur.execute(f"""
+                SELECT TRIM(u.sip_number), u.id, u.name, 'main'
+                FROM users u
+                WHERE TRIM(COALESCE(u.sip_number, '')) = ANY(%s){exclude_clause}
+                UNION ALL
+                SELECT TRIM(s.autodial_number), u.id, u.name, 'autodial'
+                FROM user_sip_settings s
+                JOIN users u ON u.id = s.user_id
+                WHERE TRIM(COALESCE(s.autodial_number, '')) = ANY(%s){exclude_clause}
+            """, tuple(params))
+            rows = cur.fetchall()
+        owners = {}
+        for number, owner_id, owner_name, kind in rows:
+            owners.setdefault(number, {"user_id": owner_id, "name": owner_name or "", "kind": kind})
+        return owners
+
+    def save_user_sip_settings(self, user_id: int, payload: dict, changed_by=None) -> dict:
+        """Сохранить SIP-аккаунты сотрудника одной транзакцией.
+
+        Основной номер уходит в users.sip_number (+ operator_profiles и
+        user_history, как в карточке сотрудника), персональные пароль/домен и
+        аккаунт автодозвона — в user_sip_settings. Если персональных значений
+        не осталось, строку удаляем, чтобы не копить пустышки.
+        """
+        user_id = int(user_id)
+        payload = payload or {}
+        current = self.get_sip_operator(user_id)
+        if not current:
+            raise ValueError("Сотрудник не найден")
+
+        def _field(key, default):
+            if payload.get(key) is None:
+                return default
+            return str(payload[key]).strip()
+
+        sip_number = normalize_sip_identifier(_field('sip_number', current['sip_number']), field="SIP-номер")
+        autodial_number = normalize_sip_identifier(
+            _field('autodial_number', current['autodial_number']), field="Номер автодозвона")
+        sip_password = _field('sip_password', current['sip_password'])
+        sip_domain = _field('sip_domain', current['sip_domain'])
+        autodial_password = _field('autodial_password', current['autodial_password'])
+        autodial_domain = _field('autodial_domain', current['autodial_domain'])
+
+        if sip_number and autodial_number and sip_number == autodial_number:
+            raise ValueError("Номер автодозвона должен отличаться от основного")
+
+        changed_numbers = [
+            n for n in (sip_number, autodial_number)
+            if n and n not in (current['sip_number'], current['autodial_number'])
+        ]
+        owners = self.find_sip_number_owners(changed_numbers, exclude_user_id=user_id)
+        if owners:
+            number, owner = next(iter(owners.items()))
+            raise ValueError(f"Номер {number} уже занят: {owner['name']}")
+
+        has_overrides = any((sip_password, sip_domain, autodial_number, autodial_password, autodial_domain))
+        changed = any((
+            sip_number != current['sip_number'],
+            sip_password != current['sip_password'],
+            sip_domain != current['sip_domain'],
+            autodial_number != current['autodial_number'],
+            autodial_password != current['autodial_password'],
+            autodial_domain != current['autodial_domain'],
+        ))
+        if not changed:
+            return current
+
+        with self._get_cursor() as cur:
+            if sip_number != current['sip_number']:
+                cur.execute(
+                    "UPDATE users SET sip_number = %s WHERE id = %s",
+                    (sip_number or None, user_id))
+                cur.execute(
+                    "UPDATE operator_profiles SET sip_number = %s WHERE user_id = %s",
+                    (sip_number or None, user_id))
+                cur.execute("""
+                    INSERT INTO user_history (user_id, changed_by, field_changed, old_value, new_value)
+                    VALUES (%s, %s, 'sip_number', %s, %s)
+                """, (user_id, changed_by, current['sip_number'] or None, sip_number or None))
+            if has_overrides:
+                cur.execute("""
+                    INSERT INTO user_sip_settings (
+                        user_id, sip_password, sip_domain,
+                        autodial_number, autodial_password, autodial_domain, updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        sip_password = EXCLUDED.sip_password,
+                        sip_domain = EXCLUDED.sip_domain,
+                        autodial_number = EXCLUDED.autodial_number,
+                        autodial_password = EXCLUDED.autodial_password,
+                        autodial_domain = EXCLUDED.autodial_domain,
+                        updated_by = EXCLUDED.updated_by,
+                        updated_at = EXCLUDED.updated_at
+                """, (user_id, sip_password, sip_domain, autodial_number,
+                      autodial_password, autodial_domain, changed_by))
+            else:
+                cur.execute("DELETE FROM user_sip_settings WHERE user_id = %s", (user_id,))
+            cur.execute("""
+                INSERT INTO sip_config_history (changed_by, target_user_id, settings)
+                VALUES (%s, %s, %s::jsonb)
+            """, (changed_by, user_id, json.dumps({
+                "sip_number": sip_number,
+                "sip_password": self._mask_sip_secret(sip_password),
+                "sip_domain": sip_domain,
+                "autodial_number": autodial_number,
+                "autodial_password": self._mask_sip_secret(autodial_password),
+                "autodial_domain": autodial_domain,
+            })))
+        return self.get_sip_operator(user_id)
+
+    def get_user_sip_account(self, user_id: int) -> dict:
+        """Готовые данные регистрации для iCORE Phone: основной аккаунт + автодозвон."""
+        cfg = self.get_sip_config()
+        row = self.get_sip_operator(int(user_id)) or {}
+        server = (cfg.get("sip_server") or "").strip()
+        base = cfg.get("base_password") or ""
+        sip_number = (row.get("sip_number") or "").strip()
+        autodial_number = (row.get("autodial_number") or "").strip()
+
+        def _account(number, password, domain):
+            if not number:
+                return None
+            return {
+                "username": number,
+                "password": password or (f"{base}{number}" if base else ""),
+                "server": (domain or server),
+                "transport": "UDP",
+            }
+
+        return {
+            "config": cfg,
+            "main": _account(sip_number, row.get("sip_password"), row.get("sip_domain")),
+            "autodial": _account(autodial_number, row.get("autodial_password"), row.get("autodial_domain")),
+            "autodial_code": cfg.get("autodial_code") or "",
+        }
 
     def get_imported_call_keys_for_month(self, month: str) -> dict:
         """{operator_id: set(external_id)} за месяц — чтобы добор пула не дублировал звонки."""
