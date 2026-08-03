@@ -32301,8 +32301,8 @@ def tez_leads_export():
     ws = wb.active
     ws.title = f'Лиды {month:02d}.{year}'[:31]
     headers = ['ФИО', 'Телефон', 'Источник', 'Статус', 'Правило', 'Загрузок',
-               'Первая поездка', 'Оператор', 'Звонок', 'Время разговора',
-               'Дата успешки']
+               'Поездка в прошлом месяце', 'Поездка в отчётном месяце',
+               'Оператор', 'Звонок', 'Время разговора', 'Дата успешки']
     for col, title in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col, value=title)
         cell.font = Font(bold=True, color='FFFFFF')
@@ -32324,16 +32324,29 @@ def tez_leads_export():
         )
         ws.cell(row=idx, column=6, value=row['upload_count'])
         _tez_leads_excel_text_cell(
-            ws, idx, 7, (row['first_order_at'] or '').replace('T', ' ')[:19]
+            ws,
+            idx,
+            7,
+            (row.get('prev_month_first_order_at') or '').replace('T', ' ')[:19],
         )
-        _tez_leads_excel_text_cell(ws, idx, 8, row['operator_name'])
         _tez_leads_excel_text_cell(
-            ws, idx, 9, (row['call_at'] or '').replace('T', ' ')[:19]
+            ws,
+            idx,
+            8,
+            (
+                row.get('month_first_order_at')
+                or row.get('first_order_at')
+                or ''
+            ).replace('T', ' ')[:19],
+        )
+        _tez_leads_excel_text_cell(ws, idx, 9, row['operator_name'])
+        _tez_leads_excel_text_cell(
+            ws, idx, 10, (row['call_at'] or '').replace('T', ' ')[:19]
         )
         duration_seconds = row.get('talk_duration_seconds')
         duration_cell = ws.cell(
             row=idx,
-            column=10,
+            column=11,
             value=(
                 timedelta(seconds=max(int(duration_seconds), 0))
                 if duration_seconds is not None
@@ -32342,10 +32355,10 @@ def tez_leads_export():
         )
         if duration_seconds is not None:
             duration_cell.number_format = '[h]:mm:ss'
-        _tez_leads_excel_text_cell(ws, idx, 11, row['success_date'] or '')
+        _tez_leads_excel_text_cell(ws, idx, 12, row['success_date'] or '')
 
     for col, width in enumerate(
-        [34, 16, 34, 18, 40, 10, 20, 28, 20, 18, 14],
+        [34, 16, 34, 18, 40, 10, 24, 24, 28, 20, 18, 14],
         start=1,
     ):
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width

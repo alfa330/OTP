@@ -79,6 +79,41 @@ const fmtDateTime = (value) => {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 };
 
+const LeadTripDates = ({ row }) => {
+  const previousTrip = row?.prev_month_first_order_at;
+  // first_order_at остаётся fallback для старого backend-контракта во время
+  // поэтапного деплоя; новое имя однозначно означает отчётный месяц.
+  const currentTrip = row?.month_first_order_at || row?.first_order_at;
+  if (!previousTrip && !currentTrip) return <span>—</span>;
+
+  const previousCausedStatus = (
+    row?.status === 'already_working' && row?.status_rule === 'active_prev_month'
+  );
+
+  return (
+    <div className="space-y-1 whitespace-nowrap">
+      {previousTrip && (
+        <div className={previousCausedStatus ? 'text-amber-700' : 'text-gray-500'}>
+          <div className="text-[10px] font-semibold uppercase tracking-wide">
+            Предыдущий месяц{previousCausedStatus ? ' · причина статуса' : ''}
+          </div>
+          <div className={previousCausedStatus ? 'font-medium' : ''}>
+            {fmtDateTime(previousTrip)}
+          </div>
+        </div>
+      )}
+      {currentTrip && (
+        <div className="text-gray-500">
+          <div className="text-[10px] font-semibold uppercase tracking-wide">
+            Отчётный месяц
+          </div>
+          <div>{fmtDateTime(currentTrip)}</div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 /**
  * Подтверждение удаления/отката загрузки. Причину спрашиваем только при удалении:
  * она уходит в журнал и потом видна в строке загрузки, поэтому «почему убрали базу»
@@ -1445,7 +1480,7 @@ const TezLeadsPanel = ({
                   <th className="text-left px-3 py-2">Статус</th>
                   <th className="text-left px-3 py-2">Оператор</th>
                   <th className="text-left px-3 py-2">Звонок</th>
-                  <th className="text-left px-3 py-2">Первая поездка</th>
+                  <th className="text-left px-3 py-2">Поездки</th>
                 </tr>
               </thead>
               <tbody>
@@ -1462,10 +1497,15 @@ const TezLeadsPanel = ({
                       <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[row.status] || ''}`}>
                         {STATUS_LABELS[row.status] || row.status}
                       </span>
+                      {RULE_LABELS[row.status_rule] && (
+                        <div className="mt-1 max-w-[240px] text-[11px] leading-tight text-gray-500">
+                          {RULE_LABELS[row.status_rule]}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-2">{row.operator_name || '—'}</td>
                     <td className="px-3 py-2 text-gray-500">{fmtDateTime(row.call_at)}</td>
-                    <td className="px-3 py-2 text-gray-500">{fmtDateTime(row.first_order_at)}</td>
+                    <td className="px-3 py-2"><LeadTripDates row={row} /></td>
                   </tr>
                 ))}
                 {!leads.length && (

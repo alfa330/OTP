@@ -17062,6 +17062,10 @@ class Database:
                 'status': r[3],
                 'status_rule': r[4],
                 'upload_count': int(r[5] or 1),
+                # Явное имя для поездки внутри отчётного месяца. Старое
+                # first_order_at сохраняем в payload для обратной совместимости,
+                # но оно двусмысленно рядом с prev_month_first_order_at.
+                'month_first_order_at': r[6].isoformat() if r[6] else None,
                 'first_order_at': r[6].isoformat() if r[6] else None,
                 'operator_id': int(r[7]) if r[7] is not None else None,
                 'operator_name': r[8] or '',
