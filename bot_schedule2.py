@@ -20920,9 +20920,38 @@ def sip_config_operators_endpoint():
             "status": "success",
             "operators": operators,
             "settings": db.get_sip_config(),
+            "departments": db.get_sip_department_configs(department_ids=department_ids),
         }), 200
     except Exception as e:
         logging.error(f"Error in sip_config operators: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sip_config/departments/<int:department_id>', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def sip_config_department_endpoint(department_id):
+    """Настройки SIP отдела: свой сервер/домен, база пароля и код автодозвона.
+    Пустые поля возвращают отдел к общим настройкам."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        department_ids, _supervisor_id = _sip_department_scope(requester_id, role)
+        if department_ids is not None and int(department_id) not in set(department_ids):
+            return jsonify({"error": "Это не ваш отдел"}), 403
+        payload = request.get_json(silent=True) or {}
+        department = db.update_sip_department_config(department_id, payload, user_id=requester_id)
+        return jsonify({"status": "success", "department": department}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in sip_config department: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
