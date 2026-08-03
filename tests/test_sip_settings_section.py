@@ -118,6 +118,7 @@ OPERATOR_STATE = {
     "sip_number": "1024", "sip_password": "", "sip_domain": "",
     "autodial_number": "", "autodial_password": "", "autodial_domain": "",
     "updated_at": None, "updated_by_name": None,
+    "department_sip_server": "", "department_base_password": "", "department_autodial_code": "",
 }
 
 
@@ -194,6 +195,12 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self._save({"sip_domain": "PBX.Other"})
         self.assertEqual([("1024", "pbx.other")], self.checked)
 
+    def test_department_domain_is_the_default_for_its_operators(self):
+        """У отдела своя АТС — «пустой» домен сотрудника означает именно её."""
+        self.current["department_sip_server"] = "PBX.Sales"
+        self._save({"sip_number": "1088"})
+        self.assertEqual([("1088", "pbx.sales")], self.checked)
+
     def test_moving_to_another_domain_does_not_flag_the_old_pair(self):
         self.current.update({"sip_domain": "pbx.other"})
         self._save({"sip_password": "x"})
@@ -252,11 +259,11 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
             "bulk_update_user_sip_overrides", "_mask_sip_secret", "normalize_sip_domain",
         })
         # (id, name, sip_password, sip_domain, autodial_number, autodial_password,
-        #  autodial_domain, sip_number)
+        #  autodial_domain, sip_number, department_sip_server)
         rows = [
-            (1, 'Иван', '', '', '2024', '', '', '1024'),        # автодозвон есть, персональных нет
-            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088'),  # были персональные значения
-            (3, 'Мария', '', 'pbx.new', '', '', '', '1099'),    # уже с нужным доменом — не трогаем
+            (1, 'Иван', '', '', '2024', '', '', '1024', ''),        # автодозвон есть, персональных нет
+            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', ''),  # были персональные значения
+            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', ''),    # уже с нужным доменом — не трогаем
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -308,10 +315,23 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertIn("pbx.new", str(ctx.exception))
         self.assertEqual([], [c for c in self.db.cursor.calls if "INSERT" in c[0]])
 
+    def test_department_domain_is_the_default_in_bulk_too(self):
+        """Сотрудник отдела с своей АТС считается на её домене, а не на общем."""
+        rows = [(1, 'Иван', '', '', '', '', '', '1024', 'pbx.sales')]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {"sip_server": "sip.local"}
+        self.db.get_sip_operators_by_ids = lambda ids: []
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: (
+            self.checked.extend(entries) or {})
+        self.checked = []
+        self._bulk({"sip_password": "x"}, ids=(1,))
+        self.assertEqual([("1024", "pbx.sales")], self.checked)
+
     def test_two_selected_landing_on_one_number_and_domain_are_refused(self):
         rows = [
-            (1, 'Иван', '', '', '', '', '', '1024'),
-            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024'),   # тот же номер, но другая АТС
+            (1, 'Иван', '', '', '', '', '', '1024', ''),
+            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', ''),   # тот же номер, но другая АТС
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -376,12 +396,17 @@ class FindSipNumberOwnersTests(unittest.TestCase):
         self.assertEqual(['pbx.other', ''], params[1])   # регистр снят, пустое = общий
         self.assertEqual([41], params[2])
 
-    def test_empty_domain_falls_back_to_the_common_server(self):
+    def test_domain_resolves_personal_then_department_then_common(self):
         sql, _ = self._call([('1024', '')])
         self.assertIn("SELECT LOWER(TRIM(COALESCE(sip_server, ''))) FROM sip_config WHERE id = 1", sql)
         self.assertIn("COALESCE(NULLIF(w.dom, ''), cfg.common)", sql)
-        self.assertIn("COALESCE(NULLIF(LOWER(TRIM(COALESCE(s.sip_domain, ''))), ''), cfg.common)", sql)
-        self.assertIn("COALESCE(NULLIF(LOWER(TRIM(COALESCE(s.autodial_domain, ''))), ''), cfg.common)", sql)
+        self.assertIn("LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id", sql)
+        for personal in ("s.sip_domain", "s.autodial_domain"):
+            self.assertIn(
+                f"COALESCE( NULLIF(LOWER(TRIM(COALESCE({personal}, ''))), ''), "
+                "NULLIF(LOWER(TRIM(COALESCE(dc.sip_server, ''))), ''), cfg.common)",
+                sql,
+            )
 
     def test_both_accounts_are_scanned(self):
         sql, _ = self._call([('1024', '')])
@@ -389,8 +414,68 @@ class FindSipNumberOwnersTests(unittest.TestCase):
         self.assertIn("'autodial'::text", sql)
 
 
+class DepartmentSipConfigTests(unittest.TestCase):
+    """Настройки SIP по отделам: у каждой АТС свой набор номеров."""
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "get_sip_department_configs", "update_sip_department_config", "_mask_sip_secret",
+        })
+        self.db = _StubDb(self.ns, _FakeCursor([]))
+        self.state = {
+            "department_id": 12, "department_name": "СЗоВ", "department_code": "szov",
+            "sip_server": "", "base_password": "", "autodial_code": "",
+            "configured": False, "updated_at": None, "updated_by_name": None,
+            "operators_count": 7,
+        }
+        self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
+
+    def _sql(self):
+        return [sql for sql, _ in self.db.cursor.calls]
+
+    def test_listing_marks_departments_without_their_own_settings(self):
+        db = _StubDb(self.ns, _FakeCursor([
+            (12, 'СЗоВ', 'szov', '', '', '', False, None, None, 7),
+            (367, 'Отдел продаж', 'op', 'pbx.sales', 'sales', '*77', True, None, 'Админ', 3),
+        ]))
+        rows = self.ns["get_sip_department_configs"](db)
+        self.assertEqual([False, True], [r["configured"] for r in rows])
+        self.assertEqual([7, 3], [r["operators_count"] for r in rows])
+        sql, params = db.cursor.calls[0]
+        self.assertIn("LEFT JOIN sip_department_config c ON c.department_id = d.id", sql)
+        self.assertIn("(c.department_id IS NOT NULL) AS configured", sql)
+        self.assertEqual(["operator", "trainee"], params[0])   # считаем только тех, у кого телефон
+
+    def test_saving_upserts_and_validates_the_autodial_code(self):
+        self.ns["update_sip_department_config"](self.db, 12, {"sip_server": "pbx.sales", "autodial_code": "*7 7"}, user_id=5)
+        upsert = next(s for s in self._sql() if "INSERT INTO sip_department_config" in s)
+        self.assertIn("ON CONFLICT (department_id) DO UPDATE SET", upsert)
+        _, params = next((s, p) for s, p in self.db.cursor.calls if "INSERT INTO sip_department_config" in s)
+        self.assertEqual("*77", params[3])    # пробел из копипаста вычищен
+        with self.assertRaises(ValueError):
+            self.ns["update_sip_department_config"](self.db, 12, {"autodial_code": "код"}, user_id=5)
+
+    def test_clearing_every_field_returns_the_department_to_common_settings(self):
+        self.state.update({"sip_server": "pbx.sales", "configured": True})
+        self.ns["update_sip_department_config"](
+            self.db, 12, {"sip_server": "", "base_password": "", "autodial_code": ""}, user_id=5)
+        self.assertTrue(any("DELETE FROM sip_department_config" in s for s in self._sql()))
+
+    def test_history_row_is_scoped_to_the_department_and_masks_the_password(self):
+        self.ns["update_sip_department_config"](self.db, 12, {"base_password": "supersecret"}, user_id=5)
+        sql, params = next((s, p) for s, p in self.db.cursor.calls if "INSERT INTO sip_config_history" in s)
+        self.assertIn("department_id", sql)
+        self.assertEqual((5, 12), (params[0], params[1]))
+        self.assertNotIn("supersecret", params[2])
+
+    def test_unknown_department_is_refused(self):
+        self.db.get_sip_department_configs = lambda ids=None: []
+        with self.assertRaises(ValueError):
+            self.ns["update_sip_department_config"](self.db, 999, {"sip_server": "x"}, user_id=5)
+
+
 class UserSipAccountTests(unittest.TestCase):
-    """Что уезжает в iCORE Phone: пароль «база + номер», домен общий, автодозвон опционален."""
+    """Что уезжает в iCORE Phone: цепочка «персональное → отдела → общее»."""
 
     def setUp(self):
         self.ns = _database_namespace({"get_user_sip_account"})
@@ -429,6 +514,28 @@ class UserSipAccountTests(unittest.TestCase):
     def test_missing_number_gives_no_account_at_all(self):
         self.row["sip_number"] = ""
         self.assertIsNone(self._account()["main"])
+
+    def test_department_settings_win_over_the_common_ones(self):
+        self.row.update({
+            "department_sip_server": "pbx.sales",
+            "department_base_password": "sales",
+            "department_autodial_code": "*77",
+            "autodial_number": "2024",
+        })
+        account = self._account()
+        self.assertEqual("pbx.sales", account["main"]["server"])
+        self.assertEqual("sales1024", account["main"]["password"])
+        self.assertEqual("pbx.sales", account["autodial"]["server"])
+        self.assertEqual("*77", account["autodial_code"])
+
+    def test_personal_values_win_over_the_department_ones(self):
+        self.row.update({
+            "department_sip_server": "pbx.sales", "department_base_password": "sales",
+            "sip_domain": "pbx.own", "sip_password": "own",
+        })
+        main = self._account()["main"]
+        self.assertEqual("pbx.own", main["server"])
+        self.assertEqual("own", main["password"])
 
 
 class SipOperatorsScopeTests(unittest.TestCase):
@@ -494,6 +601,20 @@ class SipEndpointTests(unittest.TestCase):
             body = self._function(name)
             self.assertIn("_can_manage_sip_config(requester_id, role)", body)
             self.assertIn("@require_api_key", self.source.split(f"def {name}")[0].rsplit("@app.route", 1)[1])
+
+    def test_department_settings_route_is_scoped_to_own_departments(self):
+        self.assertIn(
+            "@app.route('/api/sip_config/departments/<int:department_id>', methods=['PUT', 'OPTIONS'])",
+            self.source,
+        )
+        body = self._function("sip_config_department_endpoint")
+        self.assertIn("_can_manage_sip_config(requester_id, role)", body)
+        self.assertIn("_sip_department_scope(requester_id, role)", body)
+        self.assertIn("Это не ваш отдел", body)
+
+    def test_operators_payload_carries_department_settings(self):
+        body = self._function("sip_config_operators_endpoint")
+        self.assertIn("db.get_sip_department_configs(department_ids=department_ids)", body)
 
     def test_bulk_route_does_not_collide_with_the_single_one(self):
         self.assertIn("@app.route('/api/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])", self.source)
@@ -583,7 +704,8 @@ class SipSectionFrontendTests(unittest.TestCase):
         # /api/sip_config нет. Всего четыре обращения — список, история
         # (лениво, при открытии вкладки) и два сохранения.
         self.assertIn("setCommonForm({", view)
-        self.assertEqual(5, view.count("await fetch("))
+        self.assertIn("setDepartments(Array.isArray(data.departments)", view)
+        self.assertEqual(6, view.count("await fetch("))
         self.assertIn("if (tab === 'history' && !historyLoadedRef.current) fetchHistory();", view)
 
     def test_duplicates_and_conflicts_are_scoped_to_the_domain(self):
@@ -593,11 +715,27 @@ class SipSectionFrontendTests(unittest.TestCase):
         # Подсветка дублей и проверка конфликта считают пару, а не голый номер.
         duplicates = view.split("const duplicateKeys = useMemo(", 1)[1].split("}, [", 1)[0]
         self.assertIn("numberKey(number, domain)", duplicates)
-        self.assertIn("effectiveDomain(op.sip_domain, settings.sip_server)", duplicates)
+        # Домен по умолчанию — отдела сотрудника, а не глобальный.
+        self.assertIn("const common = commonFor(op).server;", duplicates)
+        self.assertIn("effectiveDomain(op.sip_domain, common)", duplicates)
         conflicts = view.split("const conflicts = useMemo(", 1)[1].split("}, [", 1)[0]
         self.assertIn("numberKey(form.sip_number, effective.domain)", conflicts)
         self.assertIn("numberKey(form.autodial_number, effective.autodialDomain)", conflicts)
         self.assertNotIn("duplicateNumbers", view)
+
+    def test_common_tab_is_split_by_departments(self):
+        view = _read(VIEW_PATH)
+        # Значения по умолчанию — сначала отдела, потом общие.
+        self.assertIn("server: op?.department_sip_server || settings.sip_server || ''", view)
+        self.assertIn("base: op?.department_base_password || settings.base_password || ''", view)
+        self.assertIn("code: op?.department_autodial_code || settings.autodial_code || ''", view)
+        # Видно, у кого настройки заданы, а кто живёт на общих.
+        self.assertIn("dept.configured", view)
+        self.assertIn("Настроен", view)
+        self.assertIn("По умолчанию", view)
+        self.assertIn("со своими настройками: {departments.filter((d) => d.configured).length}", view)
+        self.assertIn("/api/sip_config/departments/${deptEditing.department_id}", view)
+        self.assertIn("Вернуть общие", view)
 
     def test_ctrl_and_shift_selection_drives_the_bulk_editor(self):
         view = _read(VIEW_PATH)

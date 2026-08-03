@@ -102,6 +102,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
 
     const [operators, setOperators] = useState([]);
     const [settings, setSettings] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [departments, setDepartments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [departmentFilter, setDepartmentFilter] = useState('');
@@ -122,6 +123,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
 
     const [commonForm, setCommonForm] = useState({ sip_server: '', base_password: '', autodial_code: '' });
     const [savingCommon, setSavingCommon] = useState(false);
+
+    const [deptEditing, setDeptEditing] = useState(null);
+    const [deptForm, setDeptForm] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [deptSaving, setDeptSaving] = useState(false);
 
     const [history, setHistory] = useState([]);
     const [historyLoading, setHistoryLoading] = useState(false);
@@ -150,6 +155,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
             setOperators(Array.isArray(data.operators) ? data.operators : []);
+            setDepartments(Array.isArray(data.departments) ? data.departments : []);
             const s = data.settings || {};
             setSettings(s);
             setCommonForm({
@@ -190,6 +196,14 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     }, [tab, fetchHistory]);
 
     /* ─── производные данные ─── */
+    // Значения по умолчанию для сотрудника: сначала настройки его отдела,
+    // потом общие. Персональные поля перекрывают и то, и другое.
+    const commonFor = useCallback((op) => ({
+        server: op?.department_sip_server || settings.sip_server || '',
+        base: op?.department_base_password || settings.base_password || '',
+        code: op?.department_autodial_code || settings.autodial_code || '',
+    }), [settings.sip_server, settings.base_password, settings.autodial_code]);
+
     const departmentOptions = useMemo(() => {
         const seen = new Map();
         operators.forEach((op) => {
@@ -203,9 +217,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const duplicateKeys = useMemo(() => {
         const counts = new Map();
         operators.forEach((op) => {
+            const common = commonFor(op).server;
             [
-                [op.sip_number, effectiveDomain(op.sip_domain, settings.sip_server)],
-                [op.autodial_number, effectiveDomain(op.autodial_domain, settings.sip_server)],
+                [op.sip_number, effectiveDomain(op.sip_domain, common)],
+                [op.autodial_number, effectiveDomain(op.autodial_domain, common)],
             ].forEach(([number, domain]) => {
                 if (!String(number || '').trim()) return;
                 const key = numberKey(number, domain);
@@ -213,25 +228,27 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             });
         });
         return new Set([...counts.entries()].filter(([, c]) => c > 1).map(([k]) => k));
-    }, [operators, settings.sip_server]);
+    }, [operators, commonFor]);
 
     // Фильтр по домену показываем, только когда АТС действительно несколько.
     const domainOptions = useMemo(() => {
         const seen = new Set();
         operators.forEach((op) => {
-            seen.add(effectiveDomain(op.sip_domain, settings.sip_server));
-            if (op.autodial_number) seen.add(effectiveDomain(op.autodial_domain, settings.sip_server));
+            const common = commonFor(op).server;
+            seen.add(effectiveDomain(op.sip_domain, common));
+            if (op.autodial_number) seen.add(effectiveDomain(op.autodial_domain, common));
         });
         return [...seen].filter(Boolean).sort().map((d) => ({ value: d, label: d }));
-    }, [operators, settings.sip_server]);
+    }, [operators, commonFor]);
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
         return operators.filter((op) => {
             if (departmentFilter && String(op.department_id ?? '') !== departmentFilter) return false;
             if (domainFilter) {
-                const domains = [effectiveDomain(op.sip_domain, settings.sip_server)];
-                if (op.autodial_number) domains.push(effectiveDomain(op.autodial_domain, settings.sip_server));
+                const common = commonFor(op).server;
+                const domains = [effectiveDomain(op.sip_domain, common)];
+                if (op.autodial_number) domains.push(effectiveDomain(op.autodial_domain, common));
                 if (!domains.includes(domainFilter)) return false;
             }
             if (!q) return true;
@@ -240,7 +257,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 || (op.autodial_number || '').toLowerCase().includes(q)
                 || (op.group_name || '').toLowerCase().includes(q);
         });
-    }, [operators, search, departmentFilter, domainFilter, settings.sip_server]);
+    }, [operators, search, departmentFilter, domainFilter, commonFor]);
 
     const stats = useMemo(() => ({
         total: operators.length,
@@ -249,18 +266,19 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     }), [operators]);
 
     /* ─── эффективные значения (что уйдёт в телефон) ─── */
+    const editingCommon = useMemo(() => commonFor(editing), [commonFor, editing]);
+
     const effective = useMemo(() => {
-        const domain = (form.sip_domain || settings.sip_server || '').trim();
-        const base = settings.base_password || '';
+        const base = editingCommon.base;
         const number = form.sip_number.trim();
         const autodial = form.autodial_number.trim();
         return {
-            domain,
+            domain: (form.sip_domain || editingCommon.server || '').trim(),
             password: form.sip_password || (number && base ? `${base}${number}` : ''),
-            autodialDomain: (form.autodial_domain || settings.sip_server || '').trim(),
+            autodialDomain: (form.autodial_domain || editingCommon.server || '').trim(),
             autodialPassword: form.autodial_password || (autodial && base ? `${base}${autodial}` : ''),
         };
-    }, [form, settings]);
+    }, [form, editingCommon]);
 
     // Конфликт видно ещё до сохранения — бэкенд его тоже не пропустит.
     // Считаем по паре «номер + домен»: тот же номер на другой АТС — не конфликт.
@@ -269,9 +287,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         const taken = new Map();
         operators.forEach((op) => {
             if (op.id === editing.id) return;
+            const common = commonFor(op).server;
             [
-                [op.sip_number, effectiveDomain(op.sip_domain, settings.sip_server)],
-                [op.autodial_number, effectiveDomain(op.autodial_domain, settings.sip_server)],
+                [op.sip_number, effectiveDomain(op.sip_domain, common)],
+                [op.autodial_number, effectiveDomain(op.autodial_domain, common)],
             ].forEach(([number, domain]) => {
                 if (!String(number || '').trim()) return;
                 const key = numberKey(number, domain);
@@ -288,7 +307,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 ? (taken.get(autoKey) || (main && mainKey === autoKey ? 'совпадает с основным' : null))
                 : null,
         };
-    }, [editing, operators, settings.sip_server, form.sip_number, form.autodial_number,
+    }, [editing, operators, commonFor, form.sip_number, form.autodial_number,
         effective.domain, effective.autodialDomain]);
 
     const selectedOperators = useMemo(
@@ -352,6 +371,53 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             showToastRef.current?.(e.message, 'error');
         } finally {
             setSaving(false);
+        }
+    };
+
+    const openDeptEditor = (dept) => {
+        setDeptEditing(dept);
+        setDeptForm({
+            sip_server: dept.sip_server || '',
+            base_password: dept.base_password || '',
+            autodial_code: dept.autodial_code || '',
+        });
+    };
+
+    const saveDepartment = async (reset = false) => {
+        if (!deptEditing || !canEdit) return;
+        setDeptSaving(true);
+        try {
+            const body = reset
+                ? { sip_server: '', base_password: '', autodial_code: '' }
+                : {
+                    sip_server: deptForm.sip_server.trim(),
+                    base_password: deptForm.base_password,
+                    autodial_code: deptForm.autodial_code.trim(),
+                };
+            const resp = await fetch(`${apiBaseUrl}/api/sip_config/departments/${deptEditing.department_id}`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            const saved = data.department;
+            setDepartments((prev) => prev.map((d) => (d.department_id === saved.department_id ? saved : d)));
+            // Настройки отдела влияют на эффективный домен сотрудников — обновляем их строки.
+            setOperators((prev) => prev.map((op) => (op.department_id === saved.department_id ? {
+                ...op,
+                department_sip_server: saved.sip_server,
+                department_base_password: saved.base_password,
+                department_autodial_code: saved.autodial_code,
+            } : op)));
+            historyLoadedRef.current = false;
+            showToastRef.current?.(reset ? 'Отдел вернулся к общим настройкам' : 'Настройки отдела сохранены', 'success');
+            setDeptEditing(null);
+        } catch (e) {
+            showToastRef.current?.(e.message, 'error');
+        } finally {
+            setDeptSaving(false);
         }
     };
 
@@ -531,8 +597,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 ) : (
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                         {filtered.map((op, index) => {
-                            const mainDomain = effectiveDomain(op.sip_domain, settings.sip_server);
-                            const autodialDomain = effectiveDomain(op.autodial_domain, settings.sip_server);
+                            const commonDomain = commonFor(op).server;
+                            const mainDomain = effectiveDomain(op.sip_domain, commonDomain);
+                            const autodialDomain = effectiveDomain(op.autodial_domain, commonDomain);
                             const isDuplicate = op.sip_number && duplicateKeys.has(numberKey(op.sip_number, mainDomain));
                             const isAutodialDuplicate = op.autodial_number
                                 && duplicateKeys.has(numberKey(op.autodial_number, autodialDomain));
@@ -643,8 +710,63 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             {/* Общие */}
             {tab === 'common' && (
                 <div className="max-w-2xl space-y-4">
+                    {/* Отделы: у каждой АТС свои номера, поэтому подключение
+                        задаётся по отделам, а общие настройки — запасной вариант. */}
                     <section className="space-y-1.5">
-                        <div className={iosGroupLabel}>Подключение</div>
+                        <div className="flex items-end justify-between gap-2">
+                            <div className={iosGroupLabel}>Отделы</div>
+                            <span className="text-[11.5px] text-slate-400">
+                                со своими настройками: {departments.filter((d) => d.configured).length} из {departments.length}
+                            </span>
+                        </div>
+                        {departments.length === 0 ? (
+                            <div className={`${iosCard} px-4 py-6 text-center text-[13px] text-slate-400`}>
+                                Отделы не найдены
+                            </div>
+                        ) : (
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                {departments.map((dept) => (
+                                    <button
+                                        key={dept.department_id}
+                                        type="button"
+                                        onClick={() => openDeptEditor(dept)}
+                                        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                                    >
+                                        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${
+                                            dept.configured ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-400'
+                                        }`}>
+                                            <FaIcon className="fas fa-building" style={{ width: 14, height: 14 }} />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="truncate text-[14px] font-medium text-slate-900">{dept.department_name}</div>
+                                            <div className="truncate text-[11.5px] text-slate-400">
+                                                {dept.configured
+                                                    ? [
+                                                        dept.sip_server ? `домен ${dept.sip_server}` : 'домен общий',
+                                                        dept.base_password ? 'своя база пароля' : null,
+                                                        dept.autodial_code ? `код ${dept.autodial_code}` : null,
+                                                    ].filter(Boolean).join(' · ')
+                                                    : `общие настройки${settings.sip_server ? ` · ${settings.sip_server}` : ''}`}
+                                            </div>
+                                        </div>
+                                        <span className="hidden shrink-0 text-[11.5px] text-slate-400 sm:inline">
+                                            {dept.operators_count} чел.
+                                        </span>
+                                        {dept.configured
+                                            ? <IosBadge tone="blue">Настроен</IosBadge>
+                                            : <IosBadge tone="slate">По умолчанию</IosBadge>}
+                                        <FaIcon className="fas fa-chevron-right shrink-0 text-slate-300" style={{ width: 12, height: 12 }} />
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        <p className="px-1 text-[11.5px] text-slate-500">
+                            Отдел без своих настроек берёт общие — их и правят ниже.
+                        </p>
+                    </section>
+
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Общие: для отделов без своих настроек</div>
                         <div className={`${iosCard} space-y-3 p-4`}>
                             <div>
                                 <label className="text-[12.5px] font-medium text-slate-600">SIP-сервер / домен</label>
@@ -667,19 +789,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         disabled={!canEdit}
                                     />
                                 </div>
-                                <p className="mt-1.5 px-1 text-[11.5px] text-slate-500">
-                                    Пароль сотрудника = база + его SIP-номер. Если у кого-то пароль или домен свой —
-                                    задайте их в его карточке на вкладке «Сотрудники».
-                                </p>
                             </div>
-                        </div>
-                    </section>
-
-                    <section className="space-y-1.5">
-                        <div className={iosGroupLabel}>Автодозвон</div>
-                        <div className={`${iosCard} space-y-3 p-4`}>
                             <div>
-                                <label className="text-[12.5px] font-medium text-slate-600">Код подключения</label>
+                                <label className="text-[12.5px] font-medium text-slate-600">Код подключения к автодозвону</label>
                                 <div className="mt-1 flex items-center gap-2">
                                     <input
                                         type="text"
@@ -699,11 +811,12 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         <FaIcon className="fas fa-copy" />
                                     </button>
                                 </div>
-                                <p className="mt-1.5 px-1 text-[11.5px] text-slate-500">
-                                    Код общий для всех: со второго номера на него звонят один раз, чтобы телефон
-                                    подключился к режиму автодозвона.
-                                </p>
                             </div>
+                            <p className="px-1 text-[11.5px] text-slate-500">
+                                Пароль сотрудника = база + его SIP-номер. На код автодозвона звонят один раз
+                                со второго номера, чтобы включить режим. Персональные пароль и домен —
+                                в карточке сотрудника на вкладке «Сотрудники».
+                            </p>
                         </div>
                     </section>
 
@@ -747,19 +860,21 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         s.sip_password ? 'свой пароль' : null,
                                     ]
                                     : [
-                                        s.sip_server ? `сервер ${s.sip_server}` : null,
-                                        s.base_password ? 'база пароля' : null,
+                                        s.sip_server ? `сервер ${s.sip_server}` : 'сервер общий',
+                                        s.base_password ? 'своя база пароля' : null,
                                         s.autodial_code ? `код ${s.autodial_code}` : null,
                                     ];
+                                const icon = h.target_user_id ? 'fa-user' : (h.department_id ? 'fa-building' : 'fa-globe');
+                                const title = h.target_user_id
+                                    ? (h.target_user_name || 'Сотрудник удалён')
+                                    : (h.department_id ? (h.department_name || 'Отдел удалён') : 'Общие настройки');
                                 return (
                                     <div key={i} className="flex items-start gap-3 px-4 py-3">
                                         <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-400">
-                                            <FaIcon className={`fas ${h.target_user_id ? 'fa-user' : 'fa-globe'}`} style={{ width: 13, height: 13 }} />
+                                            <FaIcon className={`fas ${icon}`} style={{ width: 13, height: 13 }} />
                                         </div>
                                         <div className="min-w-0 flex-1">
-                                            <div className="text-[13.5px] font-medium text-slate-800">
-                                                {h.target_user_id ? (h.target_user_name || 'Сотрудник удалён') : 'Общие настройки'}
-                                            </div>
+                                            <div className="text-[13.5px] font-medium text-slate-800">{title}</div>
                                             <div className="truncate text-[12px] text-slate-500">
                                                 {parts.filter(Boolean).join(' · ') || '—'}
                                             </div>
@@ -775,6 +890,80 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     )}
                 </div>
             )}
+
+            {/* Настройки отдела */}
+            <IosModal
+                open={!!deptEditing}
+                onClose={() => setDeptEditing(null)}
+                title={deptEditing?.department_name || ''}
+                subtitle={deptEditing?.configured ? 'Свои настройки SIP' : 'Сейчас берёт общие настройки'}
+                footer={canEdit ? (
+                    <>
+                        {deptEditing?.configured && (
+                            <button
+                                type="button"
+                                onClick={() => saveDepartment(true)}
+                                disabled={deptSaving}
+                                className="mr-auto inline-flex items-center gap-2 rounded-xl bg-rose-50 px-4 py-2.5 text-[13.5px] font-semibold text-rose-600 transition hover:bg-rose-100 active:scale-[0.98] disabled:opacity-50"
+                            >
+                                <FaIcon className="fas fa-rotate-left" />
+                                Вернуть общие
+                            </button>
+                        )}
+                        <button type="button" onClick={() => setDeptEditing(null)} className={iosBtnSecondary}>Отмена</button>
+                        <button type="button" onClick={() => saveDepartment(false)} disabled={deptSaving} className={iosBtnPrimary}>
+                            <FaIcon className={deptSaving ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />
+                            Сохранить
+                        </button>
+                    </>
+                ) : null}
+            >
+                <div className="space-y-4">
+                    <div className={`${iosCard} space-y-3 p-4`}>
+                        <div>
+                            <label className="text-[12.5px] font-medium text-slate-600">SIP-сервер / домен</label>
+                            <input
+                                type="text"
+                                value={deptForm.sip_server}
+                                onChange={(e) => setDeptForm((f) => ({ ...f, sip_server: e.target.value }))}
+                                placeholder={settings.sip_server ? `общий: ${settings.sip_server}` : 'напр. 192.168.88.251'}
+                                disabled={!canEdit}
+                                className={`${iosInput} mt-1`}
+                            />
+                        </div>
+                        <div>
+                            <label className="text-[12.5px] font-medium text-slate-600">База пароля</label>
+                            <div className="mt-1">
+                                <SecretInput
+                                    value={deptForm.base_password}
+                                    onChange={(v) => setDeptForm((f) => ({ ...f, base_password: v }))}
+                                    placeholder="пусто — общая"
+                                    disabled={!canEdit}
+                                />
+                            </div>
+                        </div>
+                        <div>
+                            <label className="text-[12.5px] font-medium text-slate-600">Код подключения к автодозвону</label>
+                            <input
+                                type="text"
+                                value={deptForm.autodial_code}
+                                onChange={(e) => setDeptForm((f) => ({ ...f, autodial_code: e.target.value }))}
+                                placeholder={settings.autodial_code ? `общий: ${settings.autodial_code}` : 'напр. *55'}
+                                disabled={!canEdit}
+                                className={`${iosInput} mt-1 font-mono`}
+                            />
+                        </div>
+                    </div>
+                    <p className="px-1 text-[11.5px] text-slate-500">
+                        Пустое поле берётся из общих настроек. Сотрудников с телефоном в отделе: {deptEditing?.operators_count ?? 0}.
+                    </p>
+                    {deptEditing?.updated_at && (
+                        <p className="px-1 text-[11.5px] text-slate-400">
+                            Изменено {fmtDateTime(deptEditing.updated_at)}{deptEditing.updated_by_name ? ` · ${deptEditing.updated_by_name}` : ''}
+                        </p>
+                    )}
+                </div>
+            </IosModal>
 
             {/* Массовое изменение пароля и домена */}
             <IosModal
@@ -838,7 +1027,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     </div>
                     <p className="px-1 text-[11.5px] text-slate-500">
                         Меняются только включённые поля, остальное у каждого остаётся своим.
-                        Пустое значение возвращает общие: домен {settings.sip_server || '—'} и пароль «база + номер».
+                        Пустое значение возвращает настройки отдела (или общие): домен АТС и пароль «база + номер».
                         Номера массово не меняются — они у каждого свои.
                     </p>
 
@@ -925,14 +1114,14 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             {form.autodial_number.trim() && (
                                 <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
                                     <span className="text-[12px] text-slate-500">
-                                        {settings.autodial_code
-                                            ? <>Позвонить один раз на <span className="font-mono font-medium text-slate-700">{settings.autodial_code}</span> — включится режим автодозвона</>
+                                        {editingCommon.code
+                                            ? <>Позвонить один раз на <span className="font-mono font-medium text-slate-700">{editingCommon.code}</span> — включится режим автодозвона</>
                                             : 'Код подключения не задан — заполните его на вкладке «Общие»'}
                                     </span>
-                                    {settings.autodial_code && (
+                                    {editingCommon.code && (
                                         <button
                                             type="button"
-                                            onClick={() => copyToClipboard(settings.autodial_code, 'Код')}
+                                            onClick={() => copyToClipboard(editingCommon.code, 'Код')}
                                             className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-white hover:text-slate-700"
                                             title="Скопировать код"
                                         >
@@ -957,7 +1146,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         {showAdvanced && (
                             <div className={`${iosCard} space-y-3 p-4`}>
                                 <p className="text-[11.5px] text-slate-500">
-                                    Пусто — берутся общие: домен {settings.sip_server || '—'} и пароль «база + номер».
+                                    Пусто — берётся домен {editingCommon.server || '—'} ({editing?.department_sip_server ? 'настройки отдела' : 'общие настройки'}) и пароль «база + номер».
                                 </p>
                                 <div>
                                     <label className="text-[12.5px] font-medium text-slate-600">Пароль основного номера</label>
