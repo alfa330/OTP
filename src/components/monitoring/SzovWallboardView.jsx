@@ -2,16 +2,17 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosBtnGhost } from '../ui/ios';
+import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
 
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108).
  *
  * Экран рассчитан на вывод на стену, поэтому:
  *   - обновляется сам, без перезагрузки страницы (опрос раз в 10 с, один общий снапшот);
- *   - цифры крупные и на clamp(), чтобы читались и в сайдбаре, и на телевизоре;
- *   - цветом помечаем ТОЛЬКО отклонения (AR выше нормы, ожидание сверх порога SL).
- *     Нейтральное состояние не красим — иначе табло превращается в светофор из шума.
+ *   - три уровня размера цифр (hero / md / sm) задают иерархию: что важно оперативно,
+ *     видно с другого конца зала, итоги дня — спокойнее;
+ *   - цветом помечаем только то, что несёт смысл: AR вне целевого коридора и статусы
+ *     операторов (у них цвет задан владельцем, чтобы различать причины с расстояния).
  *
  * Все показатели считает бэкенд (/api/szov_wallboard/snapshot) по формулам «Биллинга Oktell»,
  * чтобы табло и отчёт не расходились в цифрах.
@@ -20,9 +21,25 @@ import { APPLE_FONT, iosCard, iosGroupLabel, iosBtnGhost } from '../ui/ios';
 const POLL_INTERVAL_MS = 10000;
 const FULLSCREEN_Z = 150;
 
-// Пороги — отраслевые нормы входящей линии: AR до 5% норма, до 10% терпимо, выше — плохо.
-const AR_WARN_RATIO = 0.05;
-const AR_BAD_RATIO = 0.10;
+/*
+ * AR — не «чем меньше, тем лучше», а коридор (правило владельца):
+ *   зелёный  — 4,0 … 4,9 %  (норма)
+ *   красный  — ниже 3,9 % или выше 5,0 %
+ *   янтарный — узкие зоны 3,9…4,0 и 4,9…5,0: ещё не нарушение, но уже у границы.
+ * Слишком низкий AR — тоже сигнал (перезаложены операторы), поэтому он красный.
+ */
+const AR_RED_BELOW_PERCENT = 3.9;
+const AR_TARGET_MIN_PERCENT = 4.0;
+const AR_TARGET_MAX_PERCENT = 4.9;
+const AR_RED_ABOVE_PERCENT = 5.0;
+
+const arTone = (ratio) => {
+    if (ratio === null || ratio === undefined || !Number.isFinite(Number(ratio))) return 'neutral';
+    const percent = Number(ratio) * 100;
+    if (percent < AR_RED_BELOW_PERCENT || percent > AR_RED_ABOVE_PERCENT) return 'bad';
+    if (percent >= AR_TARGET_MIN_PERCENT && percent <= AR_TARGET_MAX_PERCENT) return 'good';
+    return 'warn';
+};
 
 const formatInt = (value) => (Number.isFinite(Number(value)) ? Number(value).toLocaleString('ru-RU') : '—');
 
@@ -51,57 +68,107 @@ const formatClock = (value) => {
     return match ? match[0] : '—';
 };
 
-const TONE_CLASS = {
+const VALUE_TONE = {
     neutral: 'text-slate-900',
+    good: 'text-emerald-600',
     warn: 'text-amber-600',
     bad: 'text-rose-600',
 };
 
-/**
- * Плитка показателя. Размер задаётся через `scale`, чтобы одна и та же разметка работала
- * и во встроенном виде, и на полном экране (требование «не рендерить тяжёлое дважды»).
- */
-const Tile = ({ label, value, hint, tone = 'neutral', scale = 1, wide = false }) => (
-    <div className={`${iosCard} flex flex-col justify-between gap-1 p-4 ${wide ? 'sm:col-span-2' : ''}`}>
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{label}</div>
+// Размеры цифр. Иерархия важнее абсолютных значений: hero читается через зал,
+// sm — это итоги дня, которые смотрят вблизи.
+const VALUE_SIZE = {
+    hero: [2.5, 4.6, 4.75],
+    md: [2, 3.2, 3.5],
+    sm: [1.625, 2.2, 2.375],
+};
+
+const valueFontSize = (size, scale) => {
+    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.md;
+    return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
+};
+
+const LABEL_CLASS = 'text-[12px] font-semibold uppercase tracking-wide text-slate-500';
+const SECTION_LABEL_CLASS = 'mb-2.5 px-0.5 text-[13px] font-semibold uppercase tracking-wider text-slate-400';
+
+const Tile = ({ label, value, hint, tone = 'neutral', size = 'md', scale = 1 }) => (
+    <div className={`${iosCard} flex flex-col gap-1.5 p-4`}>
+        <div className={LABEL_CLASS}>{label}</div>
         <div
-            className={`font-semibold tabular-nums leading-none ${TONE_CLASS[tone] || TONE_CLASS.neutral}`}
-            style={{ fontSize: `clamp(${1.5 * scale}rem, ${2.6 * scale}vw, ${3 * scale}rem)` }}
+            className={`font-semibold tabular-nums leading-[1.05] ${VALUE_TONE[tone] || VALUE_TONE.neutral}`}
+            style={{ fontSize: valueFontSize(size, scale) }}
         >
             {value}
         </div>
-        {hint ? <div className="text-[11px] leading-tight text-slate-400">{hint}</div> : null}
+        {hint ? <div className="text-[12px] leading-snug text-slate-400">{hint}</div> : null}
     </div>
 );
 
-/** Список операторов в статусе. Пустое состояние — прочерк, без картинок и подсказок. */
-const OperatorList = ({ title, icon, entries, scale = 1 }) => {
+/*
+ * Цвета статусов заданы владельцем: перерыв — оранжевый, тренинг — зелёный,
+ * тех.причина — фиолетовый. Перезвон владелец не называл; взяли синий (акцент приложения),
+ * чтобы он не сливался с тремя остальными.
+ */
+const STATUS_STYLE = {
+    break: { label: 'Перерыв', card: 'bg-orange-50 ring-orange-200/80', value: 'text-orange-600', chip: 'bg-orange-100 text-orange-700' },
+    training: { label: 'Тренинг', card: 'bg-emerald-50 ring-emerald-200/80', value: 'text-emerald-600', chip: 'bg-emerald-100 text-emerald-700' },
+    tech: { label: 'Тех.причина', card: 'bg-violet-50 ring-violet-200/80', value: 'text-violet-600', chip: 'bg-violet-100 text-violet-700' },
+    recall: { label: 'Перезвон', card: 'bg-blue-50 ring-blue-200/80', value: 'text-blue-600', chip: 'bg-blue-100 text-blue-700' },
+};
+
+const StatusTile = ({ statusKey, value, scale = 1 }) => {
+    const style = STATUS_STYLE[statusKey];
+    return (
+        <div className={`rounded-2xl p-4 ring-1 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ${style.card}`}>
+            <div className="text-[12px] font-semibold uppercase tracking-wide text-slate-600">{style.label}</div>
+            <div
+                className={`mt-1.5 font-semibold tabular-nums leading-[1.05] ${style.value}`}
+                style={{ fontSize: valueFontSize('md', scale) }}
+            >
+                {formatInt(value)}
+            </div>
+        </div>
+    );
+};
+
+/** Список операторов в статусе: кто, по какой причине и сколько уже в ней сидит. */
+const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) => {
     const items = Array.isArray(entries) ? entries : [];
     return (
         <div className={`${iosCard} flex min-h-0 flex-col p-4`}>
-            <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            <div className="mb-2.5 flex items-center justify-between gap-2">
+                <div className={`flex items-center gap-2 ${LABEL_CLASS}`}>
                     <FaIcon className={`fas ${icon}`}></FaIcon>
                     <span>{title}</span>
                 </div>
-                <span className="text-[13px] font-semibold tabular-nums text-slate-900">{items.length}</span>
+                <span className="text-[15px] font-semibold tabular-nums text-slate-900">{items.length}</span>
             </div>
             {items.length === 0 ? (
-                <div className="py-2 text-[13px] text-slate-400">Никого</div>
+                <div className="py-2 text-[14px] text-slate-400">Никого</div>
             ) : (
                 <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto">
-                    {items.map((item) => (
-                        <li
-                            key={`${item.operator_id ?? item.name}-${item.since ?? ''}`}
-                            className="flex items-center justify-between gap-3 py-1.5"
-                            style={{ fontSize: `clamp(0.8125rem, ${0.95 * scale}vw, ${1.0625 * scale}rem)` }}
-                        >
-                            <span className="truncate text-slate-700">{item.name}</span>
-                            <span className="shrink-0 tabular-nums font-medium text-slate-500">
-                                {formatDuration(item.seconds)}
-                            </span>
-                        </li>
-                    ))}
+                    {items.map((item) => {
+                        const style = STATUS_STYLE[item.reason_key] || STATUS_STYLE.break;
+                        return (
+                            <li
+                                key={`${item.operator_id ?? item.name}-${item.since ?? ''}`}
+                                className="flex items-center justify-between gap-3 py-2"
+                                style={{ fontSize: `clamp(0.875rem, ${(1.05 * scale).toFixed(2)}vw, ${(1.125 * scale).toFixed(3)}rem)` }}
+                            >
+                                <span className="flex min-w-0 items-center gap-2">
+                                    <span className="truncate text-slate-700">{item.name}</span>
+                                    {showReason ? (
+                                        <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${style.chip}`}>
+                                            {item.reason}
+                                        </span>
+                                    ) : null}
+                                </span>
+                                <span className="shrink-0 font-semibold tabular-nums text-slate-500">
+                                    {formatDuration(item.seconds)}
+                                </span>
+                            </li>
+                        );
+                    })}
                 </ul>
             )}
         </div>
@@ -114,86 +181,94 @@ const WallboardBody = ({ snapshot, scale }) => {
     const today = snapshot?.today || {};
     const slThreshold = Number(snapshot?.sl_threshold_seconds) || 20;
 
-    const arRatio = today.ar_ratio;
-    const arTone = arRatio == null ? 'neutral' : arRatio >= AR_BAD_RATIO ? 'bad' : arRatio >= AR_WARN_RATIO ? 'warn' : 'neutral';
     // Красим ожидание «сейчас» только когда порог SL уже пробит — это настоящее отклонение.
     const waitNow = Number(now.queue_max_wait_seconds) || 0;
     const waitTone = waitNow > slThreshold ? 'bad' : 'neutral';
     const queueTone = Number(now.queue) > 0 && Number(now.operators_free) === 0 ? 'bad' : 'neutral';
 
     return (
-        <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+        <div className="space-y-6" style={{ fontFamily: APPLE_FONT }}>
             <section>
-                <div className={`${iosGroupLabel} mb-2`}>Сейчас на линии</div>
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+                <div className={SECTION_LABEL_CLASS}>Сейчас на линии</div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                     <Tile
                         label="Звонков в очереди"
                         value={formatInt(now.queue)}
                         hint="Ждут ответа оператора"
                         tone={queueTone}
+                        size="hero"
                         scale={scale}
                     />
                     <Tile
                         label="Максимальное ожидание"
                         value={formatDuration(waitNow)}
-                        hint={`Самый долгий звонок в очереди · порог ${slThreshold} с`}
+                        hint={`Самый долгий в очереди · порог ${slThreshold} с`}
                         tone={waitTone}
+                        size="hero"
                         scale={scale}
                     />
                     <Tile
                         label="AR на текущий момент"
-                        value={formatPercent(arRatio)}
-                        hint="Доля потерянных от дошедших до очереди"
-                        tone={arTone}
+                        value={formatPercent(today.ar_ratio)}
+                        hint={`Норма ${String(AR_TARGET_MIN_PERCENT).replace('.', ',')}–${String(AR_TARGET_MAX_PERCENT).replace('.', ',')}%`}
+                        tone={arTone(today.ar_ratio)}
+                        size="hero"
                         scale={scale}
                     />
                 </div>
             </section>
 
             <section>
-                <div className={`${iosGroupLabel} mb-2`}>Звонки с начала дня</div>
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-                    <Tile
-                        label="Всего входящих"
-                        value={formatInt(today.total)}
-                        hint={`Включая ${formatInt(today.greet_drop)} сброшенных на приветствии`}
-                        scale={scale}
-                    />
-                    <Tile label="Принято" value={formatInt(today.served)} hint="Ответил оператор" scale={scale} />
-                    <Tile label="Потеряно" value={formatInt(today.lost)} hint="Не дождались ответа" scale={scale} />
-                    <Tile
-                        label="Среднее ожидание"
-                        value={formatDuration(today.avg_wait_seconds)}
-                        hint="В очереди, по всем дошедшим"
-                        scale={scale}
-                    />
-                    <Tile
-                        label="Максимальное за день"
-                        value={formatDuration(today.max_wait_seconds)}
-                        hint="Самое долгое ожидание в очереди"
-                        scale={scale}
-                    />
-                </div>
-            </section>
-
-            <section>
-                <div className={`${iosGroupLabel} mb-2`}>Операторы</div>
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="На линии в Oktell" scale={scale} />
+                <div className={SECTION_LABEL_CLASS}>Операторы</div>
+                <div className="grid grid-cols-3 gap-3">
+                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" scale={scale} />
                     <Tile label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" scale={scale} />
-                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" scale={scale} />
-                    <Tile label="На перерыве" value={formatInt(now.operators_on_break)} hint="Перерыв, тренинг, тех.причина" scale={scale} />
-                    <Tile label="На перезвоне" value={formatInt(now.operators_on_recall)} hint="Статус «Перезвон»" scale={scale} />
+                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять" scale={scale} />
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <StatusTile statusKey="break" value={now.operators_on_break} scale={scale} />
+                    <StatusTile statusKey="training" value={now.operators_on_training} scale={scale} />
+                    <StatusTile statusKey="tech" value={now.operators_on_tech} scale={scale} />
+                    <StatusTile statusKey="recall" value={now.operators_on_recall} scale={scale} />
                 </div>
                 {Number(now.operators_other) > 0 ? (
-                    <div className="mt-2 px-1 text-[11px] text-slate-400">
+                    <div className="mt-2 px-1 text-[12px] text-slate-400">
                         Прочие статусы (резерв, нет на месте): {formatInt(now.operators_other)}
                     </div>
                 ) : null}
             </section>
 
+            <section>
+                <div className={SECTION_LABEL_CLASS}>Звонки с начала дня</div>
+                <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+                    <Tile
+                        label="Всего входящих"
+                        value={formatInt(today.total)}
+                        hint={`Из них ${formatInt(today.greet_drop)} сброшено на приветствии`}
+                        size="sm"
+                        scale={scale}
+                    />
+                    <Tile label="Принято" value={formatInt(today.served)} hint="Ответил оператор" size="sm" scale={scale} />
+                    <Tile label="Потеряно" value={formatInt(today.lost)} hint="Не дождались в очереди" size="sm" scale={scale} />
+                    <Tile
+                        label="Среднее ожидание"
+                        value={formatDuration(today.avg_wait_seconds)}
+                        hint="В очереди, по всем дошедшим"
+                        size="sm"
+                        scale={scale}
+                    />
+                    <Tile
+                        label="Максимальное за день"
+                        value={formatDuration(today.max_wait_seconds)}
+                        hint="Самое долгое ожидание"
+                        size="sm"
+                        scale={scale}
+                    />
+                </div>
+            </section>
+
             <section className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <OperatorList title="Перерыв" icon="fa-mug-hot" entries={now.break_list} scale={scale} />
+                <OperatorList title="Перерывы" icon="fa-mug-hot" entries={now.break_list} scale={scale} showReason />
                 <OperatorList title="Перезвон" icon="fa-phone-volume" entries={now.recall_list} scale={scale} />
             </section>
         </div>
@@ -351,7 +426,7 @@ export default function SzovWallboardView(props) {
                     subtitle={`${snapshot?.oktell_now ? `Данные Oktell на ${formatClock(snapshot.oktell_now)} · ` : ''}Esc чтобы выйти`}
                     onClose={() => setFullscreen(false)}
                 >
-                    <WallboardBody snapshot={snapshot} scale={1.6} />
+                    <WallboardBody snapshot={snapshot} scale={1.5} />
                 </FullscreenSheet>,
                 document.body,
             ) : null}

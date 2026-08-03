@@ -5,7 +5,13 @@ namespace — так проверяется настоящая логика, а 
 модуль нельзя: он на старте поднимает пул к боевой БД и падает на Windows (time.tzset).
 """
 import ast
+import json
 import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -230,6 +236,7 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL',
             '_SZOV_WALLBOARD_STATE_BUCKETS',
             '_SZOV_WALLBOARD_BREAK_REASONS',
+            '_SZOV_WALLBOARD_DEFAULT_BREAK',
             '_SZOV_WALLBOARD_RECALL_ICODE',
             '_szov_wallboard_department_id',
             '_szov_wallboard_int',
@@ -245,6 +252,8 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
             {'operator_name': 'Занятый', 'state': 5, 'icode': -1, 'in_state_seconds': 20},
             {'operator_name': 'Перерывный', 'state': 2, 'icode': 4, 'in_state_seconds': 30},
             {'operator_name': 'Перезвонный', 'state': 2, 'icode': 2, 'in_state_seconds': 40},
+            {'operator_name': 'Тренинговый', 'state': 2, 'icode': 3, 'in_state_seconds': 45},
+            {'operator_name': 'Технический', 'state': 2, 'icode': 1, 'in_state_seconds': 55},
             {'operator_name': 'Резервный', 'state': 6, 'icode': -1, 'in_state_seconds': 50},
             {'operator_name': 'Отошедший', 'state': 3, 'icode': -1, 'in_state_seconds': 60},
         ]
@@ -253,11 +262,28 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
         result = self._build(rows, matched_names=matched)
         self.assertEqual(result['free'], 1)
         self.assertEqual(result['talking'], 1)
-        self.assertEqual(result['on_break'], 1)
-        self.assertEqual(result['on_recall'], 1)
         self.assertEqual(result['other'], 2)  # резерв + нет на месте
+        # Каждая причина перерыва — свой счётчик
+        self.assertEqual(result['on_break'], 1)
+        self.assertEqual(result['on_training'], 1)
+        self.assertEqual(result['on_tech'], 1)
+        self.assertEqual(result['on_recall'], 1)
         # Онлайн — сумма всех ведер, чтобы плитки на экране сходились
-        self.assertEqual(result['online'], 6)
+        self.assertEqual(result['online'], 8)
+
+    def test_each_break_reason_counted_separately(self):
+        """Перерыв / тренинг / тех.причина больше не сваливаются в один счётчик."""
+        rows = [
+            {'operator_name': f'op{i}', 'state': 2, 'icode': icode, 'in_state_seconds': 10 * i}
+            for i, icode in enumerate([4, 4, 3, 1, 1, 1, 2])
+        ]
+        matched = {row['operator_name']: {'id': 10 + i, 'name': row['operator_name']}
+                   for i, row in enumerate(rows)}
+        result = self._build(rows, matched_names=matched)
+        self.assertEqual(result['on_break'], 2)
+        self.assertEqual(result['on_training'], 1)
+        self.assertEqual(result['on_tech'], 3)
+        self.assertEqual(result['on_recall'], 1)
 
     def test_recall_is_separated_from_break(self):
         """«Перезвон» — под-причина перерыва (ICode=2), но на табло это отдельный список."""
@@ -269,8 +295,37 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
         result = self._build(rows, matched_names=matched)
         self.assertEqual([item['name'] for item in result['recall_list']], ['Оператор А'])
         self.assertEqual(result['recall_list'][0]['reason'], 'Перезвон')
+        self.assertEqual(result['recall_list'][0]['reason_key'], 'recall')
         self.assertEqual([item['name'] for item in result['break_list']], ['Оператор Б'])
         self.assertEqual(result['break_list'][0]['reason'], 'Перерыв')
+        self.assertEqual(result['break_list'][0]['reason_key'], 'break')
+
+    def test_training_and_tech_stay_in_the_break_list_with_their_reason(self):
+        """Список «Перерывы» показывает причину, поэтому тренинг и тех.причина остаются в нём."""
+        rows = [
+            {'operator_name': 'A', 'state': 2, 'icode': 3, 'in_state_seconds': 100},
+            {'operator_name': 'B', 'state': 2, 'icode': 1, 'in_state_seconds': 50},
+        ]
+        matched = {'A': {'id': 10, 'name': 'Оператор А'}, 'B': {'id': 11, 'name': 'Оператор Б'}}
+        result = self._build(rows, matched_names=matched)
+        self.assertEqual(
+            [(item['reason'], item['reason_key']) for item in result['break_list']],
+            [('Тренинг', 'training'), ('Тех.причина', 'tech')],
+        )
+        self.assertEqual(result['recall_list'], [])
+
+    def test_unknown_icode_falls_back_to_plain_break(self):
+        """ICode вне справочника (служебный 1003, автопереход -1) — это всё ещё перерыв."""
+        rows = [
+            {'operator_name': 'A', 'state': 2, 'icode': 1003, 'in_state_seconds': 5},
+            {'operator_name': 'B', 'state': 2, 'icode': -1, 'in_state_seconds': 6},
+        ]
+        matched = {'A': {'id': 10, 'name': 'А'}, 'B': {'id': 11, 'name': 'Б'}}
+        result = self._build(rows, matched_names=matched)
+        self.assertEqual(result['on_break'], 2)
+        self.assertEqual(result['on_training'], 0)
+        self.assertEqual(result['on_tech'], 0)
+        self.assertTrue(all(item['reason'] == 'Перерыв' for item in result['break_list']))
 
     def test_unmatched_technical_accounts_are_excluded(self):
         """admin/supervisor в Oktell — служебные учётки; они не должны завышать «свободных»."""
@@ -353,6 +408,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             '_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS',
             '_SZOV_WALLBOARD_STATE_BUCKETS',
             '_SZOV_WALLBOARD_BREAK_REASONS',
+            '_SZOV_WALLBOARD_DEFAULT_BREAK',
             '_SZOV_WALLBOARD_RECALL_ICODE',
             '_OKTELL_GREETING_ABANDON',
             '_OKTELL_FAILED_CALL',
@@ -463,6 +519,67 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             ns['_szov_wallboard_snapshot']()
 
 
+class SzovWallboardArCorridorTests(unittest.TestCase):
+    """AR — коридор, а не «чем меньше, тем лучше». Проверяем НАСТОЯЩИЙ js через node.
+
+    Правило владельца: выше 5% и ниже 3,9% — красный, 4…4,9 — зелёный.
+    Узкие зоны 3,9…4,0 и 4,9…5,0 остаются янтарными («у границы»).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.view_path = ROOT / "src" / "components" / "monitoring" / "SzovWallboardView.jsx"
+        cls.source = cls.view_path.read_text(encoding="utf-8-sig")
+        if shutil.which("node") is None:
+            raise unittest.SkipTest("node недоступен")
+
+    def _tone(self, percents):
+        """Вырезает константы порогов и функцию arTone из компонента и гоняет их в node."""
+        consts = re.findall(r"^const AR_[A-Z_]+ = [\d.]+;$", self.source, flags=re.MULTILINE)
+        self.assertEqual(len(consts), 4, "ожидались 4 константы порогов AR")
+        fn = re.search(r"^const arTone = \(ratio\) => \{.*?^\};$", self.source,
+                       flags=re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(fn, "не нашли функцию arTone")
+        script = "\n".join(consts) + "\n" + fn.group(0) + "\n" + (
+            f"console.log(JSON.stringify({json.dumps(percents)}"
+            ".map((p) => arTone(p === null ? null : p / 100))));"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as fh:
+            fh.write(script)
+            path = fh.name
+        try:
+            out = subprocess.run([shutil.which("node"), path], capture_output=True,
+                                 text=True, timeout=60)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return json.loads(out.stdout.strip())
+        finally:
+            os.unlink(path)
+
+    def test_corridor_boundaries(self):
+        cases = [
+            (0.0, 'bad'),      # совсем без потерь — тоже отклонение (перезаложены операторы)
+            (3.0, 'bad'),
+            (3.89, 'bad'),
+            (3.9, 'warn'),     # ровно на нижней границе красного — уже не красный
+            (3.95, 'warn'),
+            (4.0, 'good'),
+            (4.5, 'good'),
+            (4.9, 'good'),
+            (4.95, 'warn'),
+            (5.0, 'warn'),     # «больше 5» красный, ровно 5 — ещё нет
+            (5.01, 'bad'),
+            (7.0, 'bad'),
+            (12.0, 'bad'),
+        ]
+        got = self._tone([percent for percent, _ in cases])
+        for (percent, expected), actual in zip(cases, got):
+            self.assertEqual(actual, expected, f"AR {percent}% -> {actual}, ожидали {expected}")
+
+    def test_missing_ar_is_neutral(self):
+        """Ночью, когда звонков ещё не было, AR пустой — красить нечего."""
+        self.assertEqual(self._tone([None]), ['neutral'])
+
+
 class SzovWallboardWiringTests(unittest.TestCase):
     """Раздел должен быть подключён во всех точках App.jsx, иначе он не откроется."""
 
@@ -537,10 +654,31 @@ class SzovWallboardWiringTests(unittest.TestCase):
             "Онлайн",
             "В разговоре",
             "Свободны",
-            "На перерыве",
-            "На перезвоне",
+            "Перерыв",
+            "Тренинг",
+            "Тех.причина",
+            "Перезвон",
         ):
             self.assertIn(label, self.view, label)
+
+    def test_each_status_has_its_own_counter_tile(self):
+        """Владелец просил отдельный счётчик на каждый статус, а не один общий «на перерыве»."""
+        for status_key in ("break", "training", "tech", "recall"):
+            self.assertIn(f'<StatusTile statusKey="{status_key}"', self.view, status_key)
+        for field in ("operators_on_break", "operators_on_training",
+                      "operators_on_tech", "operators_on_recall"):
+            self.assertIn(field, self.view, field)
+
+    def test_status_colours_match_the_owners_choice(self):
+        """Перерыв оранжевый, тренинг зелёный, тех.причина фиолетовая."""
+        self.assertIn("break: { label: 'Перерыв', card: 'bg-orange-50", self.view)
+        self.assertIn("training: { label: 'Тренинг', card: 'bg-emerald-50", self.view)
+        self.assertIn("tech: { label: 'Тех.причина', card: 'bg-violet-50", self.view)
+
+    def test_backend_exposes_every_status_counter(self):
+        for field in ("'operators_on_break'", "'operators_on_training'",
+                      "'operators_on_tech'", "'operators_on_recall'"):
+            self.assertIn(field, self.api, field)
 
     def test_numbers_use_tabular_nums(self):
         """Требование владельца: цифры не должны «прыгать» при обновлении."""
@@ -549,7 +687,10 @@ class SzovWallboardWiringTests(unittest.TestCase):
     def test_fullscreen_reuses_the_same_markup(self):
         """Полный экран не должен дублировать разметку — один WallboardBody с масштабом."""
         self.assertEqual(self.view.count("<WallboardBody"), 2)
-        self.assertIn("scale={1.6}", self.view)
+        scales = [float(value) for value in re.findall(r"<WallboardBody snapshot=\{snapshot\} scale=\{([\d.]+)\}", self.view)]
+        self.assertEqual(len(scales), 2, "у обоих режимов должен быть явный масштаб")
+        self.assertEqual(min(scales), 1.0, "встроенный режим — масштаб 1")
+        self.assertGreater(max(scales), 1.0, "на полном экране цифры должны быть крупнее")
 
 
 if __name__ == "__main__":
