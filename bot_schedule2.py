@@ -28922,13 +28922,18 @@ _SZOV_WALLBOARD_STATE_BUCKETS = {
     5: 'talking',   # Занят
     6: 'reserved',  # Зарезервировано
 }
-# ICode перерыва -> подпись. Значения из oktell_settings.dbo.A_TaskManager_CardLunchStates.
+# ICode перерыва -> (ключ счётчика, подпись). Значения ICode из
+# oktell_settings.dbo.A_TaskManager_CardLunchStates. Каждая причина считается отдельно:
+# на табло у «Перерыва», «Тренинга» и «Тех.причины» свои счётчики и свои цвета.
 _SZOV_WALLBOARD_BREAK_REASONS = {
-    1: 'Тех.причина',
-    2: 'Перезвон',
-    3: 'Тренинг',
-    4: 'Перерыв',
+    1: ('tech', 'Тех.причина'),
+    2: ('recall', 'Перезвон'),
+    3: ('training', 'Тренинг'),
+    4: ('break', 'Перерыв'),
 }
+# ICode вне справочника (например 1003 у служебной учётки или -1 у автоперехода) — это всё
+# равно State=2, поэтому попадает в обычный «Перерыв», а не теряется.
+_SZOV_WALLBOARD_DEFAULT_BREAK = ('break', 'Перерыв')
 _SZOV_WALLBOARD_RECALL_ICODE = 2
 
 _SZOV_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
@@ -29075,9 +29080,15 @@ def _szov_wallboard_operator_lookup():
 
 
 def _szov_wallboard_build_operators(raw_rows):
-    """Сырые строки статусов Oktell -> счётчики + именные списки перерыва/перезвона."""
+    """Сырые строки статусов Oktell -> счётчики по каждому статусу + именные списки.
+
+    Каждая причина перерыва считается отдельно (перерыв / тренинг / тех.причина / перезвон):
+    на табло у них свои счётчики и свои цвета, а «Онлайн» остаётся суммой всех вёдер."""
     lookup, department_id = _szov_wallboard_operator_lookup()
-    counts = {'talking': 0, 'free': 0, 'break': 0, 'recall': 0, 'away': 0, 'reserved': 0}
+    counts = {
+        'talking': 0, 'free': 0, 'away': 0, 'reserved': 0,
+        'break': 0, 'training': 0, 'tech': 0, 'recall': 0,
+    }
     break_list = []
     recall_list = []
     unmatched = []
@@ -29098,21 +29109,19 @@ def _szov_wallboard_build_operators(raw_rows):
             continue
         if bucket == 'break':
             icode = _szov_wallboard_int(row.get('icode'))
-            is_recall = icode == _SZOV_WALLBOARD_RECALL_ICODE
-            reason = _SZOV_WALLBOARD_BREAK_REASONS.get(icode) or 'Перерыв'
+            reason_key, reason = _SZOV_WALLBOARD_BREAK_REASONS.get(
+                icode, _SZOV_WALLBOARD_DEFAULT_BREAK)
             entry = {
                 'operator_id': operator.get('id'),
                 'name': operator.get('name') or oktell_name,
                 'reason': reason,
+                'reason_key': reason_key,
                 'since': row.get('since'),
                 'seconds': max(0, _szov_wallboard_int(row.get('in_state_seconds'))),
             }
-            if is_recall:
-                counts['recall'] += 1
-                recall_list.append(entry)
-            else:
-                counts['break'] += 1
-                break_list.append(entry)
+            counts[reason_key] += 1
+            # «Перезвон» — отдельный список: по ТЗ его смотрят отдельно от перерывов.
+            (recall_list if reason_key == 'recall' else break_list).append(entry)
             continue
         counts[bucket] += 1
     # Самые «засидевшиеся» сверху: супервайзеру важно, кто висит в статусе дольше всех.
@@ -29124,6 +29133,8 @@ def _szov_wallboard_build_operators(raw_rows):
         'talking': counts['talking'],
         'free': counts['free'],
         'on_break': counts['break'],
+        'on_training': counts['training'],
+        'on_tech': counts['tech'],
         'on_recall': counts['recall'],
         'other': counts['away'] + counts['reserved'],
         'break_list': break_list,
@@ -29159,6 +29170,8 @@ def _szov_wallboard_fetch_snapshot():
             'operators_talking': operators['talking'],
             'operators_free': operators['free'],
             'operators_on_break': operators['on_break'],
+            'operators_on_training': operators['on_training'],
+            'operators_on_tech': operators['on_tech'],
             'operators_on_recall': operators['on_recall'],
             'operators_other': operators['other'],
             'break_list': operators['break_list'],
