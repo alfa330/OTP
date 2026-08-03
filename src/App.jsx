@@ -42047,9 +42047,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return visible && focused;
             };
 
-            // Ивенты: бейдж новых постов. Опрашиваем при загрузке пользователя,
-            // при возврате фокуса и фоном раз в 45 c (только пока вкладка активна);
-            // при заходе в раздел гасим.
+            // Ивенты: бейдж новых постов загружаем один раз при смене пользователя.
+            // Фоновый polling unread_count отключён; при заходе в раздел бейдж гасим.
             const fetchEventsUnreadRef = useRef(null);
             fetchEventsUnreadRef.current = fetchEventsUnreadCount;
             useEffect(() => {
@@ -42058,18 +42057,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return undefined;
                 }
                 fetchEventsUnreadRef.current?.();
-                const pollIfActive = () => {
-                    if (isPageActiveForBadges()) fetchEventsUnreadRef.current?.();
-                };
-                const timer = setInterval(pollIfActive, 45000);
-                const onFocus = () => fetchEventsUnreadRef.current?.();
-                window.addEventListener('focus', onFocus);
-                document.addEventListener('visibilitychange', pollIfActive);
-                return () => {
-                    clearInterval(timer);
-                    window.removeEventListener('focus', onFocus);
-                    document.removeEventListener('visibilitychange', pollIfActive);
-                };
+                return undefined;
             }, [user?.id]);
 
             /* Ширину сайдбара читают не только обычный контент, но и fixed-слои,
@@ -42134,9 +42122,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setTasksActionRequiredCount(Math.max(0, Number(count) || 0));
             }, []);
 
-            // 4 You: бейдж новых фото. Та же схема, что у «Ивентов»: опрос при
-            // загрузке пользователя, при возврате фокуса и фоном раз в 45 c
-            // (только пока вкладка активна); при заходе в раздел гасим
+            // 4 You: бейдж новых фото загружаем один раз при смене пользователя.
+            // Фоновый polling unread_count отключён; при заходе в раздел гасим
             // (плюс серверный seen — см. FourYouView).
             const fetchFourYouUnreadRef = useRef(null);
             fetchFourYouUnreadRef.current = fetchFourYouUnreadCount;
@@ -42146,18 +42133,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return undefined;
                 }
                 fetchFourYouUnreadRef.current?.();
-                const pollIfActive = () => {
-                    if (isPageActiveForBadges()) fetchFourYouUnreadRef.current?.();
-                };
-                const timer = setInterval(pollIfActive, 45000);
-                const onFocus = () => fetchFourYouUnreadRef.current?.();
-                window.addEventListener('focus', onFocus);
-                document.addEventListener('visibilitychange', pollIfActive);
-                return () => {
-                    clearInterval(timer);
-                    window.removeEventListener('focus', onFocus);
-                    document.removeEventListener('visibilitychange', pollIfActive);
-                };
+                return undefined;
             }, [user?.id, canAccessFourYouSection]);
 
             useEffect(() => {

@@ -155,6 +155,16 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertNotIn("activeIndex === index && image.annotations?.comments?.length > 0", self.lenta_source)
         self.assertIn("{!selectMode && image.annotations?.comments?.length > 0 && (", self.lenta_source)
 
+    def test_unread_badges_fetch_once_without_background_polling(self):
+        # После входа остаётся один bootstrap-запрос, но повторных запросов по
+        # таймеру, focus и visibilitychange для unread_count больше нет.
+        self.assertEqual(1, self.app_source.count("fetchEventsUnreadRef.current?.();"))
+        self.assertEqual(1, self.app_source.count("fetchFourYouUnreadRef.current?.();"))
+        self.assertNotIn("setInterval(pollIfActive, 45000)", self.app_source)
+        self.assertNotIn("const onFocus = () => fetchEventsUnreadRef.current?.();", self.app_source)
+        self.assertNotIn("const onFocus = () => fetchFourYouUnreadRef.current?.();", self.app_source)
+        self.assertNotIn("document.addEventListener('visibilitychange', pollIfActive);", self.app_source)
+
 
 if __name__ == "__main__":
     unittest.main()
