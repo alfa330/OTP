@@ -28506,7 +28506,7 @@ class Database:
     ) -> Tuple[str, bytes]:
         """
         Генерирует xlsx с листами: Отработанные часы, Перерыв, Звонки, Эффективность,
-        Штрафы, Тренинги, Тех. сбои, Офлайн активность, Без телефона.
+        Штрафы, Бонусы, Тренинги, Тех. сбои, Офлайн активность, Без телефона.
 
         Правила форматирования (по заданию пользователя):
         - Все числовые данные пишем без дополнительного округления.
@@ -28595,7 +28595,8 @@ class Database:
                 'total_calls',
                 'total_efficiency_hours',
                 'calls_per_hour',
-                'fines'
+                'fines',
+                'bonuses'
             ):
                 if _num_has_value(aggregates.get(key)):
                     return True
@@ -28620,6 +28621,8 @@ class Database:
                 if str(day_payload.get('fine_comment') or '').strip():
                     return True
                 if isinstance(day_payload.get('fines'), list) and len(day_payload.get('fines')) > 0:
+                    return True
+                if isinstance(day_payload.get('bonuses'), list) and len(day_payload.get('bonuses')) > 0:
                     return True
 
             op_id_int = None
@@ -28777,12 +28780,12 @@ class Database:
                     own += span
             return round(base * own / total, 2) if total > 0 else base
 
-        def _make_header(ws, headers: List[str]):
+        def _make_header(ws, headers: List[str], row_idx: int = 1):
             thin = Side(style='thin')
             border = Border(left=thin, right=thin, top=thin, bottom=thin)
             bold = Font(bold=True)
             for i, h in enumerate(headers, start=1):
-                cell = ws.cell(1, i)
+                cell = ws.cell(row_idx, i)
                 cell.value = h
                 cell.font = bold
                 cell.alignment = Alignment(horizontal='center', vertical='center')
@@ -29217,6 +29220,7 @@ class Database:
             used_reasons = set()
             calculations_by_reason = defaultdict(set)
             totals_by_day = defaultdict(float)
+            operator_summaries = []
 
             rich_separator_font = InlineFont(color='6B7280')
             rate_col = 2 + (1 if include_supervisor else 0)
@@ -29243,6 +29247,20 @@ class Database:
                 if not isinstance(fine, dict):
                     return 'Другое'
                 return str(fine.get('reason') or fine.get('fine_reason') or 'Другое').strip() or 'Другое'
+
+            def fine_minutes(fine, amount):
+                if not isinstance(fine, dict):
+                    return 0.0
+                minutes = fine.get('minutes')
+                try:
+                    if minutes not in (None, ''):
+                        return max(0.0, float(minutes))
+                except Exception:
+                    pass
+                try:
+                    return max(0.0, float(amount or 0.0) / 50.0)
+                except Exception:
+                    return 0.0
 
             def reason_color(reason):
                 if reason in reason_colors:
@@ -29376,6 +29394,24 @@ class Database:
                 seg = _op_seg(op)
                 row_total = 0.0
                 row_has_fines = False
+                summary = {
+                    'name': name,
+                    'supervisor_name': op.get('supervisor_name') or "",
+                    'rate': float(rate),
+                    'late_count': 0,
+                    'late_minutes': 0.0,
+                    'late_amount': 0.0,
+                    'taxi_count': 0,
+                    'taxi_amount': 0.0,
+                    'no_show_count': 0,
+                    'no_show_amount': 0.0,
+                    'proxy_count': 0,
+                    'proxy_amount': 0.0,
+                    'other_count': 0,
+                    'other_amount': 0.0,
+                    'fine_count': 0,
+                    'total_amount': 0.0,
+                }
 
                 for day_idx, day in enumerate(days, start=day_start_col):
                     if seg is not None:
@@ -29397,6 +29433,28 @@ class Database:
                     row_total += day_total
                     totals_by_day[day] += day_total
                     row_has_fines = True
+                    for fine in fines_list:
+                        amount = fine_amount(fine)
+                        reason_lc = fine_reason(fine).lower()
+                        summary['fine_count'] += 1
+                        summary['total_amount'] += amount
+                        if reason_lc == 'опоздание':
+                            summary['late_count'] += 1
+                            summary['late_minutes'] += fine_minutes(fine, amount)
+                            summary['late_amount'] += amount
+                        elif 'корп' in reason_lc and 'такси' in reason_lc:
+                            summary['taxi_count'] += 1
+                            summary['taxi_amount'] += amount
+                        elif reason_lc == 'не выход' or 'не выход' in reason_lc:
+                            summary['no_show_count'] += 1
+                            summary['no_show_amount'] += amount
+                        elif 'прокси' in reason_lc:
+                            summary['proxy_count'] += 1
+                            summary['proxy_amount'] += amount
+                        else:
+                            # «Другое» и любые новые причины не теряются в сводке.
+                            summary['other_count'] += 1
+                            summary['other_amount'] += amount
                     set_fines_cell(ws_f, row, day_idx, fines_list)
 
                 total_col = day_start_col + len(days)
@@ -29407,6 +29465,7 @@ class Database:
                 if row_has_fines:
                     ws_f.row_dimensions[row].height = 42
 
+                operator_summaries.append(summary)
                 row += 1
 
             total_row = row
@@ -29445,6 +29504,83 @@ class Database:
                 reason_cell.font = Font(color=reason_color(reason), bold=True)
                 set_cell(ws_f, legend_row, 2, legend_calculation_text(reason), align_center=False)
 
+            summary_title_row = legend_header_row + len(legend_reasons) + 2
+            summary_title = ws_f.cell(summary_title_row, 1)
+            summary_title.value = "Сводка по операторам"
+            summary_title.font = Font(bold=True, size=12)
+
+            summary_headers = ["ФИО"]
+            if include_supervisor:
+                summary_headers.append("Супервайзер")
+            summary_headers += [
+                "Ставка",
+                "Опоздание, кол-во",
+                "Опоздание, минуты",
+                "Опоздание, сумма",
+                "Корп такси, кол-во",
+                "Корп такси, сумма",
+                "Не выход, кол-во",
+                "Не выход, сумма",
+                "Прокси карта, кол-во",
+                "Прокси карта, сумма",
+                "Другое, кол-во",
+                "Другое, сумма",
+                "Всего штрафов",
+                "Итого",
+            ]
+            summary_header_row = summary_title_row + 1
+            _make_header(ws_f, summary_headers, row_idx=summary_header_row)
+            for header_col in range(1, len(summary_headers) + 1):
+                ws_f.cell(summary_header_row, header_col).alignment = Alignment(
+                    horizontal='center', vertical='center', wrapText=True
+                )
+            ws_f.row_dimensions[summary_header_row].height = 42
+
+            summary_keys = [
+                'late_count', 'late_minutes', 'late_amount',
+                'taxi_count', 'taxi_amount',
+                'no_show_count', 'no_show_amount',
+                'proxy_count', 'proxy_amount',
+                'other_count', 'other_amount',
+                'fine_count', 'total_amount',
+            ]
+            summary_row = summary_header_row + 1
+            for summary in operator_summaries:
+                values = [summary['name']]
+                if include_supervisor:
+                    values.append(summary['supervisor_name'])
+                values.append(summary['rate'])
+                values.extend(summary[key] for key in summary_keys)
+                for col_idx, value in enumerate(values, start=1):
+                    cell = set_cell(
+                        ws_f,
+                        summary_row,
+                        col_idx,
+                        value,
+                        align_center=(col_idx > (2 if include_supervisor else 1)),
+                    )
+                    if col_idx == 1:
+                        cell.font = Font(bold=True)
+                total_cell = ws_f.cell(summary_row, len(summary_headers))
+                total_cell.font = Font(bold=True)
+                if summary['total_amount']:
+                    total_cell.fill = FILL_POS
+                summary_row += 1
+
+            summary_total_values = ["Итого"]
+            if include_supervisor:
+                summary_total_values.append("")
+            summary_total_values.append("")
+            summary_total_values.extend(
+                sum(float(summary[key] or 0.0) for summary in operator_summaries)
+                for key in summary_keys
+            )
+            for col_idx, value in enumerate(summary_total_values, start=1):
+                cell = set_cell(ws_f, summary_row, col_idx, value, align_center=(col_idx > 1))
+                cell.font = Font(bold=True)
+            if grand_total:
+                ws_f.cell(summary_row, len(summary_headers)).fill = FILL_POS
+
             ws_f.column_dimensions['A'].width = 28
             if include_supervisor:
                 ws_f.column_dimensions['B'].width = 22
@@ -29457,6 +29593,355 @@ class Database:
                 else:
                     ws_f.column_dimensions[col].width = 14
             ws_f.freeze_panes = f"{get_column_letter(day_start_col)}2"
+
+        def build_bonuses_sheet():
+            ws_b = wb.create_sheet(title='Бонусы'[:31])
+            headers = ["ФИО"]
+            if include_supervisor:
+                headers.append("Супервайзер")
+            headers += ["Ставка"] + [f"{d:02d}.{mon:02d}" for d in days] + ["Итого"]
+            _make_header(ws_b, headers)
+
+            type_colors = {
+                'Приведи друга': '16A34A',
+                'Обучение': '0891B2',
+                'Съемки': '7C3AED',
+                'Другое': 'B45309',
+            }
+            dynamic_type_colors = {}
+            dynamic_palette = ['0F766E', 'BE123C', '4338CA', 'A16207', '0369A1', '86198F', 'B45309']
+            known_type_order = ['Приведи друга', 'Обучение', 'Съемки', 'Другое']
+            used_types = set()
+            calculations_by_type = defaultdict(set)
+            totals_by_day = defaultdict(float)
+            operator_summaries = []
+
+            rich_separator_font = InlineFont(color='6B7280')
+            rate_col = 2 + (1 if include_supervisor else 0)
+            day_start_col = rate_col + 1
+
+            def fmt_amt(value):
+                try:
+                    amount = float(value or 0.0)
+                except Exception:
+                    amount = 0.0
+                if abs(amount - round(amount)) < 1e-9:
+                    return f"{int(round(amount)):,}".replace(",", " ")
+                return f"{amount:,.2f}".rstrip('0').rstrip('.').replace(",", " ").replace(".", ",")
+
+            def fmt_calc_number(value):
+                try:
+                    number = float(value)
+                except Exception:
+                    return None
+                if abs(number - round(number)) < 1e-9:
+                    return str(int(round(number)))
+                return f"{number:.2f}".rstrip('0').rstrip('.').replace(".", ",")
+
+            def bonus_amount(bonus):
+                if not isinstance(bonus, dict):
+                    return 0.0
+                try:
+                    return float(bonus.get('amount') or 0.0)
+                except Exception:
+                    return 0.0
+
+            def bonus_type(bonus):
+                if not isinstance(bonus, dict):
+                    return 'Другое'
+                return str(bonus.get('type') or bonus.get('bonus_type') or 'Другое').strip() or 'Другое'
+
+            def bonus_quantity(bonus):
+                if not isinstance(bonus, dict):
+                    return 1
+                try:
+                    return max(1, int(float(bonus.get('quantity') or 1)))
+                except Exception:
+                    return 1
+
+            def bonus_training_hours(bonus):
+                if not isinstance(bonus, dict):
+                    return 0.0
+                raw_value = bonus.get('training_hours')
+                if raw_value in (None, ''):
+                    raw_value = bonus.get('hours')
+                try:
+                    return max(0.0, float(raw_value or 0.0))
+                except Exception:
+                    return 0.0
+
+            def type_color(type_name):
+                if type_name in type_colors:
+                    return type_colors[type_name]
+                if type_name not in dynamic_type_colors:
+                    dynamic_type_colors[type_name] = dynamic_palette[len(dynamic_type_colors) % len(dynamic_palette)]
+                return dynamic_type_colors[type_name]
+
+            def bonus_calculation_text(bonus, type_name):
+                if isinstance(bonus, dict):
+                    explicit_calc = (
+                        bonus.get('calculation')
+                        or bonus.get('calculation_text')
+                        or bonus.get('calculationText')
+                        or bonus.get('calc')
+                        or bonus.get('formula')
+                    )
+                    if explicit_calc:
+                        return str(explicit_calc).strip()
+
+                type_key = type_name.lower().replace('ё', 'е')
+                if type_key == 'приведи друга':
+                    return f"{bonus_quantity(bonus)} x 5 000"
+                if type_key == 'обучение':
+                    hours_text = fmt_calc_number(bonus_training_hours(bonus))
+                    return f"{hours_text} ч x 500" if hours_text is not None else "часы x 500"
+                if type_key == 'съемки':
+                    return f"{bonus_quantity(bonus)} x 5 000"
+                return ""
+
+            def legend_calculation_text(type_name):
+                type_key = type_name.lower().replace('ё', 'е')
+                if type_key == 'приведи друга':
+                    return "количество x 5 000"
+                if type_key == 'обучение':
+                    return "часы x 500"
+                if type_key == 'съемки':
+                    return "количество x 5 000"
+                custom_calculations = calculations_by_type.get(type_name) or set()
+                return "; ".join(sorted(custom_calculations))
+
+            def extract_day_bonuses(day_entry):
+                if not isinstance(day_entry, dict) or not isinstance(day_entry.get('bonuses'), list):
+                    return []
+                return [bonus for bonus in day_entry.get('bonuses') if isinstance(bonus, dict)]
+
+            def bonus_item_text(bonus):
+                type_name = bonus_type(bonus)
+                calculation = bonus_calculation_text(bonus, type_name)
+                if calculation:
+                    calculations_by_type[type_name].add(calculation)
+                return fmt_amt(bonus_amount(bonus))
+
+            def set_bonuses_cell(row_idx, col_idx, bonuses_list):
+                parts = []
+                for idx, bonus in enumerate(bonuses_list):
+                    type_name = bonus_type(bonus)
+                    used_types.add(type_name)
+                    if idx > 0:
+                        parts.append(TextBlock(rich_separator_font, ", "))
+                    parts.append(TextBlock(InlineFont(color=type_color(type_name), b=True), bonus_item_text(bonus)))
+                cell = ws_b.cell(row_idx, col_idx)
+                cell.value = CellRichText(parts)
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrapText=True)
+                cell.border = BORDER_ALL
+                return cell
+
+            row = 2
+            for op in operators:
+                name = op.get('name') or f"op_{op.get('operator_id')}"
+                name_cell = set_cell(ws_b, row, 1, name, align_center=False)
+                name_cell.font = Font(bold=True)
+
+                col_idx = 2
+                if include_supervisor:
+                    set_cell(ws_b, row, col_idx, op.get('supervisor_name') or "", align_center=False)
+                    col_idx += 1
+
+                rate = float(op.get('rate') or 0)
+                rate_cell = set_cell(ws_b, row, col_idx, rate, align_center=False)
+                rate_cell.font = Font(bold=True)
+
+                bonuses_map = op.get('daily', {})
+                seg = _op_seg(op)
+                row_total = 0.0
+                row_has_bonuses = False
+                summary = {
+                    'name': name,
+                    'supervisor_name': op.get('supervisor_name') or "",
+                    'rate': rate,
+                    'friend_count': 0,
+                    'friend_amount': 0.0,
+                    'training_hours': 0.0,
+                    'training_amount': 0.0,
+                    'filming_count': 0,
+                    'filming_amount': 0.0,
+                    'other_count': 0,
+                    'other_amount': 0.0,
+                    'bonus_count': 0,
+                    'total_amount': 0.0,
+                }
+
+                for day_idx, day in enumerate(days, start=day_start_col):
+                    if seg is not None:
+                        try:
+                            if not _seg_has_day(seg, int(day)):
+                                set_cell(ws_b, row, day_idx, "др.", fill=FILL_FOREIGN)
+                                continue
+                        except Exception:
+                            pass
+                    day_entry = bonuses_map.get(str(day)) if isinstance(bonuses_map, dict) else None
+                    if day_entry is None and isinstance(bonuses_map, dict):
+                        day_entry = bonuses_map.get(day)
+                    bonuses_list = extract_day_bonuses(day_entry)
+                    if not bonuses_list:
+                        set_cell(ws_b, row, day_idx, "")
+                        continue
+
+                    day_total = sum(bonus_amount(bonus) for bonus in bonuses_list)
+                    row_total += day_total
+                    totals_by_day[day] += day_total
+                    row_has_bonuses = True
+                    for bonus in bonuses_list:
+                        amount = bonus_amount(bonus)
+                        type_key = bonus_type(bonus).lower().replace('ё', 'е')
+                        summary['bonus_count'] += 1
+                        summary['total_amount'] += amount
+                        if type_key == 'приведи друга':
+                            summary['friend_count'] += bonus_quantity(bonus)
+                            summary['friend_amount'] += amount
+                        elif type_key == 'обучение':
+                            summary['training_hours'] += bonus_training_hours(bonus)
+                            summary['training_amount'] += amount
+                        elif type_key == 'съемки':
+                            summary['filming_count'] += bonus_quantity(bonus)
+                            summary['filming_amount'] += amount
+                        else:
+                            summary['other_count'] += 1
+                            summary['other_amount'] += amount
+                    set_bonuses_cell(row, day_idx, bonuses_list)
+
+                total_col = day_start_col + len(days)
+                total_cell = set_cell(ws_b, row, total_col, row_total)
+                total_cell.font = Font(bold=True)
+                if row_total:
+                    total_cell.fill = FILL_POS
+                if row_has_bonuses:
+                    ws_b.row_dimensions[row].height = 42
+
+                operator_summaries.append(summary)
+                row += 1
+
+            total_row = row
+            total_label_cell = set_cell(ws_b, total_row, 1, "Итого", align_center=False)
+            total_label_cell.font = Font(bold=True)
+            for empty_col in range(2, day_start_col):
+                empty_cell = set_cell(ws_b, total_row, empty_col, "")
+                empty_cell.font = Font(bold=True)
+            grand_total = 0.0
+            for day_idx, day in enumerate(days, start=day_start_col):
+                day_total = totals_by_day.get(day, 0.0)
+                grand_total += day_total
+                cell = set_cell(ws_b, total_row, day_idx, day_total)
+                cell.font = Font(bold=True)
+                if day_total:
+                    cell.fill = FILL_POS
+            grand_cell = set_cell(ws_b, total_row, day_start_col + len(days), grand_total)
+            grand_cell.font = Font(bold=True)
+            if grand_total:
+                grand_cell.fill = FILL_POS
+
+            legend_start = total_row + 2
+            legend_title = ws_b.cell(legend_start, 1)
+            legend_title.value = "Легенда типов бонусов"
+            legend_title.font = Font(bold=True)
+
+            legend_header_row = legend_start + 1
+            set_cell(ws_b, legend_header_row, 1, "Тип бонуса", align_center=False).font = Font(bold=True)
+            set_cell(ws_b, legend_header_row, 2, "Расчет", align_center=False).font = Font(bold=True)
+
+            legend_types = [type_name for type_name in known_type_order if type_name in used_types or type_name in type_colors]
+            legend_types += sorted(type_name for type_name in used_types if type_name not in legend_types)
+            for offset, type_name in enumerate(legend_types, start=1):
+                legend_row = legend_header_row + offset
+                type_cell = set_cell(ws_b, legend_row, 1, type_name, align_center=False)
+                type_cell.font = Font(color=type_color(type_name), bold=True)
+                set_cell(ws_b, legend_row, 2, legend_calculation_text(type_name), align_center=False)
+
+            summary_title_row = legend_header_row + len(legend_types) + 2
+            summary_title = ws_b.cell(summary_title_row, 1)
+            summary_title.value = "Сводка по операторам"
+            summary_title.font = Font(bold=True, size=12)
+
+            summary_headers = ["ФИО"]
+            if include_supervisor:
+                summary_headers.append("Супервайзер")
+            summary_headers += [
+                "Ставка",
+                "Приведи друга, кол-во",
+                "Приведи друга, сумма",
+                "Обучение, часы",
+                "Обучение, сумма",
+                "Съемки, кол-во",
+                "Съемки, сумма",
+                "Прочие, кол-во",
+                "Прочие, сумма",
+                "Всего бонусов",
+                "Итого",
+            ]
+            summary_header_row = summary_title_row + 1
+            _make_header(ws_b, summary_headers, row_idx=summary_header_row)
+            for header_col in range(1, len(summary_headers) + 1):
+                ws_b.cell(summary_header_row, header_col).alignment = Alignment(
+                    horizontal='center', vertical='center', wrapText=True
+                )
+            ws_b.row_dimensions[summary_header_row].height = 42
+
+            summary_keys = [
+                'friend_count', 'friend_amount',
+                'training_hours', 'training_amount',
+                'filming_count', 'filming_amount',
+                'other_count', 'other_amount',
+                'bonus_count', 'total_amount',
+            ]
+            summary_row = summary_header_row + 1
+            for summary in operator_summaries:
+                values = [summary['name']]
+                if include_supervisor:
+                    values.append(summary['supervisor_name'])
+                values.append(summary['rate'])
+                values.extend(summary[key] for key in summary_keys)
+                for col_idx, value in enumerate(values, start=1):
+                    cell = set_cell(
+                        ws_b,
+                        summary_row,
+                        col_idx,
+                        value,
+                        align_center=(col_idx > (2 if include_supervisor else 1)),
+                    )
+                    if col_idx == 1:
+                        cell.font = Font(bold=True)
+                total_cell = ws_b.cell(summary_row, len(summary_headers))
+                total_cell.font = Font(bold=True)
+                if summary['total_amount']:
+                    total_cell.fill = FILL_POS
+                summary_row += 1
+
+            summary_total_values = ["Итого"]
+            if include_supervisor:
+                summary_total_values.append("")
+            summary_total_values.append("")
+            summary_total_values.extend(
+                sum(float(summary[key] or 0.0) for summary in operator_summaries)
+                for key in summary_keys
+            )
+            for col_idx, value in enumerate(summary_total_values, start=1):
+                cell = set_cell(ws_b, summary_row, col_idx, value, align_center=(col_idx > 1))
+                cell.font = Font(bold=True)
+            if grand_total:
+                ws_b.cell(summary_row, len(summary_headers)).fill = FILL_POS
+
+            ws_b.column_dimensions['A'].width = 28
+            if include_supervisor:
+                ws_b.column_dimensions['B'].width = 22
+            for i in range(2, len(headers) + 1):
+                col = ws_b.cell(1, i).column_letter
+                if i == rate_col:
+                    ws_b.column_dimensions[col].width = 12
+                elif day_start_col <= i < day_start_col + len(days):
+                    ws_b.column_dimensions[col].width = 24
+                else:
+                    ws_b.column_dimensions[col].width = 14
+            ws_b.freeze_panes = f"{get_column_letter(day_start_col)}2"
 
         # Модель отчёта: листы model-aware, только если ВСЯ выгрузка — чисто чат-модели
         # (per-group экспорт чат-группы). Смешанные/операторские — прежняя раскладка.
@@ -29479,6 +29964,7 @@ class Database:
             build_efficiency_sheet()
         build_generic_sheet('no_phone', 'Без телефона', 'no_phone_hours', is_hour=True)
         build_fines_sheet()
+        build_bonuses_sheet()
 
         ws_t = wb.create_sheet(title='Тренинги'[:31])
 
