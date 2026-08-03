@@ -28128,15 +28128,19 @@ class Database:
             # Fetch operators with all export fields
             with self._get_cursor() as cursor:
                 if period_start and period_end:
-                    # Keep operators whose employment interval [hire_date, dismissal_date]
-                    # overlaps the selected month: hired on/before month end AND not dismissed
-                    # before the month started.
-                    status_filter_sql = f"""
+                    # Keep operators whose employment interval overlaps the selected month.
+                    # A closed dismissal may be followed by a return, so an operator also belongs
+                    # in the report when that dismissal ended before the month itself ended.
+                    status_filter_sql = """
                         AND u.hire_date IS NOT NULL
-                        AND u.hire_date <= DATE '{period_end.strftime('%Y-%m-%d')}'
+                        AND u.hire_date <= %s::date
                         AND (
                             dismissal_info.dismissal_start_date IS NULL
-                            OR dismissal_info.dismissal_start_date >= DATE '{period_start.strftime('%Y-%m-%d')}'
+                            OR dismissal_info.dismissal_start_date >= %s::date
+                            OR (
+                                dismissal_info.dismissal_end_date IS NOT NULL
+                                AND dismissal_info.dismissal_end_date < %s::date
+                            )
                         )
                     """
                 else:
@@ -28152,6 +28156,8 @@ class Database:
                 if normalized_supervisor_ids is not None:
                     supervisor_filter_sql = "AND u.supervisor_id = ANY(%s)"
                     query_params.append(normalized_supervisor_ids)
+                if period_start and period_end:
+                    query_params.extend([period_end, period_start, period_end])
 
                 users_report_query = f"""
                     SELECT
