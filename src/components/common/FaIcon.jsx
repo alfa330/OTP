@@ -89,6 +89,7 @@ import {
     LogOut,
     MailOpen,
     Medal,
+    Maximize2,
     Menu,
     MessageCircle,
     MessageSquare,
@@ -410,7 +411,8 @@ const TOKEN_TO_ICON = {
     'fa-database': 'Database',
     'fa-headphones': 'Headphones',
     'fa-wand-magic-sparkles': 'WandSparkles',
-    'fa-wand-sparkles': 'WandSparkles'
+    'fa-wand-sparkles': 'WandSparkles',
+    'fa-expand': 'Maximize2'
 };
 
 const ICON_COMPONENTS = {
@@ -503,6 +505,7 @@ const ICON_COMPONENTS = {
     LogOut,
     MailOpen,
     Medal,
+    Maximize2,
     Menu,
     MessageCircle,
     MessageSquare,
