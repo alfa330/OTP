@@ -11042,9 +11042,9 @@ def upload_group_day():
                                                     bonuses=bonuses_arr,
                                                     group_id=selected_group_id)
 
-                    # Ручной ввод чат-метрик (если переданы): время ответа/переводы/средняя оценка.
-                    # Количество чатов приходит только из отдельных отчётов метрик чатов (A+B),
-                    # поэтому daily.calls больше не синхронизируем в chat_manager_daily_metrics.
+                    # Ручной ввод чат-метрик (если переданы): только время ответа и переводы.
+                    # Количество чатов и средняя оценка приходят только из отчётов/синка Chat2Desk,
+                    # поэтому daily.calls/avg_score здесь не синхронизируем в chat_manager_daily_metrics.
                     # preserve_missing=True: пустые значения НЕ затирают импортированные (COALESCE).
                     chat_metrics_obj = row.get('chat_metrics')
                     if isinstance(chat_metrics_obj, dict):
@@ -11080,14 +11080,6 @@ def upload_group_day():
                         if transfer_chat_count is not None:
                             metric_payload['transfer_chat_count'] = transfer_chat_count
                             metric_update_fields.append('transfer_chat_count')
-
-                        avg_score = _cm_float(chat_metrics_obj.get('avg_score'))
-                        if avg_score is not None:
-                            metric_payload['avg_score'] = avg_score
-                            # Ручной avg_score должен заменить импортную взвешенную оценку дня.
-                            metric_payload['score_sum'] = None
-                            metric_payload['score_count'] = None
-                            metric_update_fields.extend(['avg_score', 'score_sum', 'score_count'])
 
                         try:
                             if metric_update_fields:
@@ -15409,6 +15401,8 @@ def recompute_month_snapshot_endpoint():
         result = db.recompute_month_snapshot(month)
         logging.info("Snapshot recompute by user %s for %s: %s", requester_id, month, result)
         return jsonify({"status": "success", "result": result}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
     except Exception as e:
         logging.error(f"Error recomputing month snapshot: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
@@ -25802,7 +25796,12 @@ def _chat_metrics_import_parse_csv(csv_text, operator_lookup, default_date=None,
         'количествочатов', 'диалоги', 'колводиалогов'
     ])
     if chats_col is None:
-        chats_col = _first_non_none(_find_first_contains(['chat']), _find_first_contains(['чат']))
+        for idx, header_key in enumerate(normalized_header):
+            is_chat_count = 'chat' in header_key or 'чат' in header_key
+            is_transfer = 'transfer' in header_key or 'передач' in header_key
+            if is_chat_count and not is_transfer:
+                chats_col = idx
+                break
     avg_score_col = _find_col([
         'avgscore', 'averagescore', 'score', 'rating', 'avgrating',
         'средняяоценка', 'среднийбалл', 'оценка', 'рейтинг'
@@ -25843,8 +25842,20 @@ def _chat_metrics_import_parse_csv(csv_text, operator_lookup, default_date=None,
         raise ValueError("CSV должен содержать колонку оператора/менеджера")
     if date_col is None and not default_date:
         raise ValueError("CSV должен содержать колонку даты или параметр date=YYYY-MM-DD")
-    if chats_col is None and avg_score_col is None and avg_response_col is None and transfer_col is None:
-        raise ValueError("CSV должен содержать хотя бы одну метрику: чаты, оценка, время ответа или передачи")
+    allowed_update_fields = []
+    if chats_col is not None:
+        allowed_update_fields.append('chats_count')
+    if avg_response_col is not None:
+        allowed_update_fields.append('avg_response_time_seconds')
+    if transfer_col is not None:
+        allowed_update_fields.append('transfer_chat_count')
+    if not allowed_update_fields:
+        if avg_score_col is not None:
+            raise ValueError(
+                "Импорт готовой средней оценки запрещён. "
+                "Загрузите исходный отчёт Chat2Desk с колонкой rating_scale_score"
+            )
+        raise ValueError("CSV должен содержать хотя бы одну метрику: чаты, время ответа или передачи")
 
     max_rows_value = None
     if max_source_rows is not None:
@@ -25912,25 +25923,28 @@ def _chat_metrics_import_parse_csv(csv_text, operator_lookup, default_date=None,
 
         chats_value = _chat_metrics_parse_number(_cell(cols, chats_col))
         transfer_value = _chat_metrics_parse_number(_cell(cols, transfer_col))
-        avg_score_value = _chat_metrics_parse_number(_cell(cols, avg_score_col))
         avg_response_seconds = _chat_metrics_parse_duration_seconds(_cell(cols, avg_response_col), avg_response_unit)
 
-        metrics.append({
+        metric = {
             'operator_id': int(operator_matches[0]['id']),
             'operator_name': operator_matches[0].get('name') or operator_name,
             'day': day_obj.strftime('%Y-%m-%d'),
-            'chats_count': int(round(chats_value or 0)),
-            'avg_score': avg_score_value,
-            'avg_response_time_seconds': avg_response_seconds,
-            'transfer_chat_count': int(round(transfer_value or 0)),
             'source_row': int(row_num)
-        })
+        }
+        if chats_col is not None:
+            metric['chats_count'] = int(round(chats_value or 0))
+        if avg_response_col is not None:
+            metric['avg_response_time_seconds'] = avg_response_seconds
+        if transfer_col is not None:
+            metric['transfer_chat_count'] = int(round(transfer_value or 0))
+        metrics.append(metric)
 
     return {
         'source_rows': int(source_rows),
         'matched_rows': len(metrics),
         'invalid_rows_count': int(invalid_rows_count),
         'invalid_rows_preview': invalid_rows_preview,
+        'update_fields': allowed_update_fields,
         'metrics': metrics
     }
 
@@ -33964,7 +33978,8 @@ def import_chat_manager_metrics_csv():
                 "warnings": {"unmatched_operators": report.get('unmatched_preview') or []}
             }), 200
 
-        # 2) Фолбэк: универсальный CSV-парсер (прежнее поведение, только .csv).
+        # 2) Фолбэк: универсальный CSV-парсер (только .csv). Готовую среднюю оценку
+        # он не принимает: оценка обновляется только сырым отчётом/синком Chat2Desk.
         if not lower_name.endswith('.csv'):
             return jsonify({"error": "Не удалось распознать тип отчёта по колонкам файла"}), 400
         csv_text = None
@@ -34002,7 +34017,8 @@ def import_chat_manager_metrics_csv():
 
         save_summary = db.save_chat_manager_daily_metrics(
             metrics=parsed.get('metrics') or [],
-            imported_by=requester_id
+            imported_by=requester_id,
+            update_fields=parsed.get('update_fields')
         )
 
         return jsonify({

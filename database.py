@@ -14239,7 +14239,7 @@ class Database:
         )
 
         # Средняя оценка считается ВЗВЕШЕННО: суммируем score_sum и score_count по дням.
-        # Для дней без счётчика (ручной ввод в модалке — только avg_score) берём avg_score с весом 1.
+        # Для исторических дней без счётчика берём сохранённый avg_score с весом 1.
         score_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
         # Время ответа храним как готовое дневное среднее — период считаем как среднее дневных.
         response_acc = {op_id: {'sum': 0.0, 'count': 0} for op_id in op_ids}
@@ -14292,7 +14292,8 @@ class Database:
             score_count = score_acc[op_id]['count']
             response_count = response_acc[op_id]['count']
             if score_count > 0:
-                totals[op_id]['avg_score'] = round(score_acc[op_id]['sum'] / score_count, 2)
+                # Полная точность нужна потребителям KPI/зарплаты; до 2 знаков округляет только UI.
+                totals[op_id]['avg_score'] = score_acc[op_id]['sum'] / score_count
             if response_count > 0:
                 totals[op_id]['avg_response_time_seconds'] = round(response_acc[op_id]['sum'] / response_count, 2)
 
@@ -17264,8 +17265,8 @@ class Database:
                 )
         else:
             # Прежнее поведение: обновляем все метрики. preserve_missing защищает оценку/время
-            # ответа от затирания NULL-ом; score_sum/score_count сохраняем при отсутствии (модалка
-            # их не присылает), чтобы не терять взвешенную оценку из импорта.
+            # ответа от затирания NULL-ом; score_sum/score_count сохраняем при частичных
+            # импортах, чтобы не терять взвешенную оценку из отчёта Chat2Desk.
             avg_score_expr = (
                 "COALESCE(EXCLUDED.avg_score, chat_manager_daily_metrics.avg_score)"
                 if preserve_missing else "EXCLUDED.avg_score"
@@ -19823,7 +19824,11 @@ class Database:
                         "total_efficiency_hours": float(r[10] or 0.0),
                         "calls_per_hour": float(r[11] or 0.0),
                         "fines": float(r[12] or 0.0),
-                        "chat_avg_score": r[13],
+                        "chat_avg_score": (
+                            float(r[13])
+                            if r[13] is not None
+                            else _live_aggregates.get("chat_avg_score")
+                        ),
                         "chat_avg_response_time_seconds": r[14],
                         "chat_transfer_count": int(r[15] or 0),
                     }
@@ -28768,6 +28773,51 @@ class Database:
                         return True
             return True  # день без членства в группах — не помечаем
 
+        def _weighted_chat_average(op):
+            aggregates = op.get('aggregates') if isinstance(op, dict) else None
+            aggregate_value = aggregates.get('chat_avg_score') if isinstance(aggregates, dict) else None
+            if aggregate_value not in (None, ''):
+                try:
+                    aggregate_number = float(aggregate_value)
+                    if aggregate_number > 0:
+                        return aggregate_number
+                except (TypeError, ValueError):
+                    pass
+
+            daily = op.get('daily') if isinstance(op, dict) else None
+            daily = daily if isinstance(daily, dict) else {}
+            seg = _op_seg(op)
+            score_sum = 0.0
+            score_count = 0
+            for day_key, day_data in daily.items():
+                try:
+                    day_number = int(day_key)
+                except (TypeError, ValueError):
+                    continue
+                if not _seg_has_day(seg, day_number) or not isinstance(day_data, dict):
+                    continue
+                chat_metrics = day_data.get('chat_metrics')
+                if not isinstance(chat_metrics, dict):
+                    continue
+                try:
+                    raw_sum = float(chat_metrics.get('score_sum'))
+                    raw_count = int(chat_metrics.get('score_count'))
+                except (TypeError, ValueError):
+                    raw_sum = None
+                    raw_count = 0
+                if raw_sum is not None and raw_count > 0:
+                    score_sum += raw_sum
+                    score_count += raw_count
+                    continue
+                try:
+                    legacy_average = float(chat_metrics.get('avg_score'))
+                except (TypeError, ValueError):
+                    legacy_average = 0.0
+                if legacy_average > 0:
+                    score_sum += legacy_average
+                    score_count += 1
+            return (score_sum / score_count) if score_count > 0 else None
+
         def _op_norm(op):
             # Норма для строки. В отчёте по группе у перешедшего оператора норма
             # пропорциональна дням его сегмента в ЭТОЙ группе (как и раздельный расчёт ЗП),
@@ -28970,7 +29020,7 @@ class Database:
                 cell.fill = fill
             return cell
 
-        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None, value_getter=None, aggregate='sum'):
+        def build_generic_sheet(key: str, label: str, metric_key: str, is_hour=True, format_fn=None, extra_cols=None, value_getter=None, aggregate='sum', aggregate_value_getter=None):
             ws = wb.create_sheet(title=label[:31])
             # Build headers with optional supervisor column
             headers = ["Оператор"]
@@ -29050,7 +29100,13 @@ class Database:
                 # total cell
                 total_col = day_start_col + len(days)
                 if aggregate == 'avg':
-                    avg_total = (sum(avg_vals) / len(avg_vals)) if avg_vals else None
+                    if aggregate_value_getter:
+                        try:
+                            avg_total = aggregate_value_getter(op)
+                        except Exception:
+                            avg_total = None
+                    else:
+                        avg_total = (sum(avg_vals) / len(avg_vals)) if avg_vals else None
                     set_cell(ws, row, total_col, (fmt_total_value(metric_key, avg_total) if avg_total is not None else ""))
                 else:
                     set_cell(ws, row, total_col, fmt_total_value(metric_key, total))
@@ -29965,7 +30021,7 @@ class Database:
             build_generic_sheet('calls', 'Чаты', 'calls', is_hour=False)
             build_generic_sheet('avg_score', 'Средняя оценка', 'avg_score', is_hour=False,
                                 value_getter=lambda d: (d.get('chat_metrics') or {}).get('avg_score'),
-                                aggregate='avg')
+                                aggregate='avg', aggregate_value_getter=_weighted_chat_average)
             build_generic_sheet('response_time', 'Среднее время ответа', 'response_time', is_hour=False,
                                 value_getter=lambda d: (d.get('chat_metrics') or {}).get('avg_response_time_seconds'),
                                 aggregate='avg')
@@ -33728,6 +33784,8 @@ class Database:
         «Пересчитать месяц» и ленивой авто-заморозки закрытых месяцев."""
         if not re.match(r'^\d{4}-\d{2}$', str(month or '')):
             raise ValueError("month must be YYYY-MM")
+        if not self._is_month_closed(month):
+            raise ValueError("Month is still open; snapshot can be frozen only after the correction window closes")
         with self._get_cursor() as cursor:
             return self._freeze_month_to_snapshots_tx(cursor, month)
 
@@ -33756,7 +33814,58 @@ class Database:
                        s.total_break_time, s.total_talk_time, s.total_dial_time,
                        s.total_calls, s.total_chats, s.total_efficiency_hours,
                        s.calls_per_hour, s.fines, s.offline_activity_hours, s.no_phone_hours,
-                       s.chat_avg_score, s.chat_avg_response_time_seconds, s.chat_transfer_count, s.frozen_at,
+                       COALESCE(
+                           s.chat_avg_score,
+                           (
+                               SELECT
+                                   (
+                                       COALESCE(SUM(cmm.score_sum) FILTER (
+                                           WHERE cmm.score_count > 0 AND cmm.score_sum IS NOT NULL
+                                       ), 0)
+                                       + COALESCE(SUM(cmm.avg_score) FILTER (
+                                           WHERE NOT (
+                                               COALESCE(cmm.score_count, 0) > 0
+                                               AND cmm.score_sum IS NOT NULL
+                                           )
+                                             AND cmm.avg_score IS NOT NULL
+                                       ), 0)
+                                   ) / NULLIF(
+                                       COALESCE(SUM(cmm.score_count) FILTER (
+                                           WHERE cmm.score_count > 0 AND cmm.score_sum IS NOT NULL
+                                       ), 0)
+                                       + COALESCE(COUNT(cmm.avg_score) FILTER (
+                                           WHERE NOT (
+                                               COALESCE(cmm.score_count, 0) > 0
+                                               AND cmm.score_sum IS NOT NULL
+                                           )
+                                             AND cmm.avg_score IS NOT NULL
+                                       ), 0),
+                                       0
+                                   )
+                               FROM chat_manager_daily_metrics cmm
+                               WHERE cmm.operator_id = s.operator_id
+                                 AND cmm.day >= COALESCE(
+                                     s.first_day,
+                                     TO_DATE(s.month || '-01', 'YYYY-MM-DD')
+                                 )
+                                 AND cmm.day <= COALESCE(
+                                     s.last_day,
+                                     (
+                                         TO_DATE(s.month || '-01', 'YYYY-MM-DD')
+                                         + INTERVAL '1 month - 1 day'
+                                     )::date
+                                 )
+                                 AND EXISTS (
+                                     SELECT 1
+                                     FROM group_operator_memberships gom
+                                     WHERE gom.operator_id = cmm.operator_id
+                                       AND gom.group_id = s.group_id
+                                       AND gom.start_date <= cmm.day
+                                       AND (gom.end_date IS NULL OR gom.end_date >= cmm.day)
+                                 )
+                           )
+                       ) AS chat_avg_score,
+                       s.chat_avg_response_time_seconds, s.chat_transfer_count, s.frozen_at,
                        gms.name AS group_name
                 FROM group_operator_month_snapshots s
                 LEFT JOIN group_month_snapshots gms ON gms.group_id = s.group_id AND gms.month = s.month

@@ -163,6 +163,80 @@ class MonthlyHoursExcelReportTests(unittest.TestCase):
         self.assertTrue(content.startswith(b"PK"))
         return load_workbook(BytesIO(content), data_only=False, rich_text=True)
 
+    def test_chat_score_total_uses_weighted_month_average(self):
+        weighted_average = 501 / 101
+        operator = _operator(
+            99,
+            "Чат Оператор",
+            calculation_model_code="chat_manager",
+            aggregates={},
+            daily={
+                "1": {
+                    "chat_metrics": {
+                        "avg_score": 1.0,
+                        "score_sum": 1.0,
+                        "score_count": 1,
+                    },
+                },
+                "2": {
+                    "chat_metrics": {
+                        "avg_score": 5.0,
+                        "score_sum": 500.0,
+                        "score_count": 100,
+                    },
+                },
+            },
+        )
+
+        workbook = self._workbook([operator])
+        score_sheet = workbook["Средняя оценка"]
+        headers = _headers(score_sheet, 1)
+
+        self.assertEqual(score_sheet.cell(2, headers["01.02"]).value, 1.0)
+        self.assertEqual(score_sheet.cell(2, headers["02.02"]).value, 5.0)
+        self.assertAlmostEqual(
+            score_sheet.cell(2, headers["Итого"]).value,
+            weighted_average,
+            places=12,
+        )
+        self.assertNotEqual(score_sheet.cell(2, headers["Итого"]).value, 3.0)
+
+    def test_chat_score_fallback_excludes_days_from_another_group(self):
+        operator = _operator(
+            100,
+            "Переведённый чат-оператор",
+            calculation_model_code="chat_manager",
+            aggregates={},
+            group_segments=[
+                {"group_id": 10, "start_day": 1, "end_day": 1},
+                {"group_id": 20, "start_day": 2, "end_day": 28},
+            ],
+            daily={
+                "1": {
+                    "chat_metrics": {
+                        "avg_score": 1.0,
+                        "score_sum": 1.0,
+                        "score_count": 1,
+                    },
+                },
+                "2": {
+                    "chat_metrics": {
+                        "avg_score": 5.0,
+                        "score_sum": 45.0,
+                        "score_count": 9,
+                    },
+                },
+            },
+        )
+
+        workbook = self._workbook([operator], report_group_id=10)
+        score_sheet = workbook["Средняя оценка"]
+        headers = _headers(score_sheet, 1)
+
+        self.assertEqual(score_sheet.cell(2, headers["01.02"]).value, 1.0)
+        self.assertEqual(score_sheet.cell(2, headers["02.02"]).value, "др.")
+        self.assertEqual(score_sheet.cell(2, headers["Итого"]).value, 1.0)
+
     def test_summaries_aggregate_multiple_records_and_keep_supervisor_layout(self):
         operators = [
             _operator(

@@ -41,6 +41,7 @@ def _chat_report_namespace():
         "_chat_metrics_parse_date",
         "_chat_metrics_parse_number",
         "_chat_metrics_parse_duration_seconds",
+        "_chat_metrics_import_parse_csv",
         "_chat_report_name_tokens",
         "_chat_report_tokens_match",
         "_chat_report_resolve_operator",
@@ -138,6 +139,35 @@ class ChatReportImportTests(unittest.TestCase):
         ])
         self.assertEqual(detect(combined), "combined")
         self.assertEqual(detect_types(combined), ["score", "response_time"])
+
+    def test_legacy_csv_rejects_ready_average_score(self):
+        parse = self.ns["_chat_metrics_import_parse_csv"]
+        csv_text = (
+            "operator_name,date,avg_score\n"
+            "Рахимжанов Бехруз Дилмуродулы,2026-06-10,4.95\n"
+        )
+
+        with self.assertRaisesRegex(ValueError, "Импорт готовой средней оценки запрещён"):
+            parse(csv_text, self.lookup)
+
+    def test_legacy_csv_ignores_ready_average_when_other_metrics_exist(self):
+        parse = self.ns["_chat_metrics_import_parse_csv"]
+        csv_text = (
+            "operator_name,date,avg_score,avg_response_time_seconds,transfer_chat_count\n"
+            "Рахимжанов Бехруз Дилмуродулы,2026-06-10,1.00,42,3\n"
+        )
+
+        result = parse(csv_text, self.lookup)
+
+        self.assertEqual(
+            result["update_fields"],
+            ["avg_response_time_seconds", "transfer_chat_count"],
+        )
+        self.assertEqual(len(result["metrics"]), 1)
+        metric = result["metrics"][0]
+        self.assertNotIn("avg_score", metric)
+        self.assertEqual(metric["avg_response_time_seconds"], 42.0)
+        self.assertEqual(metric["transfer_chat_count"], 3)
 
     def test_resolve_operator_reordered_and_abbreviated(self):
         resolve = self.ns["_chat_report_resolve_operator"]
