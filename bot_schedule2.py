@@ -28946,6 +28946,10 @@ SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS = _env_int('SZOV_WALLBOARD_OKTELL_TIMEOUT_
 # Сколько ждать освободившийся лок обновления. Если другой поток уже тянет снимок, второму
 # нет смысла стоять в очереди — он отдаст текущий кэш, а не займёт поток waitress на минуту.
 SZOV_WALLBOARD_LOCK_WAIT_SECONDS = _env_int('SZOV_WALLBOARD_LOCK_WAIT_SECONDS', 3, minimum=1, maximum=60)
+# Пауза после неудачной попытки. Прокси Oktell бывает недоступен минутами; долбить его каждые
+# TTL секунд в это время бессмысленно и вредно — он и без нас захлёбывается. Пока пауза не
+# вышла, отдаём последний снимок сразу, не занимая поток ожиданием таймаута.
+SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS = _env_int('SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS', 60, minimum=5, maximum=900)
 # Сколько секунд отдавать последний удачный снимок, если Oktell перестал отвечать. Табло на стене
 # не должно гаснуть из-за одной сетевой ошибки — показываем данные с пометкой «устарели».
 SZOV_WALLBOARD_STALE_MAX_SECONDS = _env_int('SZOV_WALLBOARD_STALE_MAX_SECONDS', 600, minimum=60, maximum=3600)
@@ -28978,7 +28982,7 @@ _SZOV_WALLBOARD_RECALL_ICODE = 2
 
 _SZOV_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
 _SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL = 600  # отделы меняются раз в никогда
-_szov_wallboard_cache = {'ts': 0.0, 'payload': None}
+_szov_wallboard_cache = {'ts': 0.0, 'payload': None, 'failed_at': 0.0, 'error': None}
 _szov_wallboard_lock = threading.Lock()
 
 
@@ -29263,6 +29267,13 @@ def _szov_wallboard_snapshot():
     if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
         return _fresh(cached, cached_at)
 
+    # Прокси недавно не ответил — не идём к нему снова до конца паузы.
+    failed_at = _szov_wallboard_cache.get('failed_at') or 0.0
+    if (cached is not None
+            and time.time() - failed_at < SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS
+            and time.time() - cached_at < SZOV_WALLBOARD_STALE_MAX_SECONDS):
+        return _stale(cached, cached_at, _szov_wallboard_cache.get('error') or 'Oktell не отвечает')
+
     if not _szov_wallboard_lock.acquire(timeout=SZOV_WALLBOARD_LOCK_WAIT_SECONDS):
         # Обновление уже идёт. Ждать нечего: отдаём что есть, следующий опрос подхватит свежее.
         if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_STALE_MAX_SECONDS:
@@ -29277,13 +29288,14 @@ def _szov_wallboard_snapshot():
         try:
             payload = _szov_wallboard_fetch_snapshot()
         except Exception as exc:
+            _szov_wallboard_cache.update(failed_at=time.time(), error=str(exc)[:200])
             age = time.time() - cached_at if cached is not None else None
             if cached is not None and age is not None and age < SZOV_WALLBOARD_STALE_MAX_SECONDS:
                 logging.warning("Табло СЗоВ: Oktell недоступен, отдаём снимок %.0f с назад: %s", age, exc)
                 return _stale(cached, cached_at, str(exc)[:200])
             raise
         payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
-        _szov_wallboard_cache.update(ts=time.time(), payload=payload)
+        _szov_wallboard_cache.update(ts=time.time(), payload=payload, failed_at=0.0, error=None)
         return _fresh(payload, _szov_wallboard_cache['ts'])
     finally:
         _szov_wallboard_lock.release()
