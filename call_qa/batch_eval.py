@@ -546,7 +546,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 rec["asm"]["text"], info["direction"], info["t_crits"],
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
                 model=config.CLAUDE_MODEL_BULK, rag_text=prepared["rag_text"],
-                subject_kind=subject_kind,
+                subject_kind=subject_kind, cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
             )
             custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {

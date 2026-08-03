@@ -199,8 +199,12 @@ def _subset_rag_text(prepared_rag: dict | None, criteria: list[dict], fallback: 
 
 def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_rag=True, model,
                     rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
-                    subject_kind=config.SUBJECT_CALL) -> dict:
-    """Тело запроса оценки (для синхронного вызова и для Batch API)."""
+                    subject_kind=config.SUBJECT_CALL, cache_ttl=None) -> dict:
+    """Тело запроса оценки (для синхронного вызова и для Batch API).
+
+    cache_ttl прокидывается в prompt-cache системного блока. Интерактивная оценка
+    (открытие карточки) оставляет дефолт: одиночный вызов не окупает удвоенную
+    запись. Пакетный прогон передаёт config.CLAUDE_CACHE_TTL_BATCH."""
     if use_rag and rag_text is None:
         rag, trace, _ = _prepare_rag(direction["id"], criteria, transcript,
                                      knowledge_snapshot_id=knowledge_snapshot_id)
@@ -213,7 +217,8 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     user = (f"РАЗБОРЫ (согласованные прецеденты):\n{rag}\n\n"
             f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}\n\nОцени по всем перечисленным критериям.")
     return llm.build_body(model=model, system=build_system(criteria, subject_kind), user=user,
-                          schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True)
+                          schema=_OUTPUT_SCHEMA, max_tokens=8000, cache_system=True,
+                          cache_ttl=cache_ttl)
 
 
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model,
