@@ -340,9 +340,9 @@ const WallboardBody = ({ snapshot, scale }) => {
                         scale={scale}
                     />
                     <Cell
-                        label="Максимальное за день"
-                        value={formatDuration(today.max_wait_seconds)}
-                        hint="Самое долгое ожидание в очереди"
+                        label="Среднее время разговора"
+                        value={formatDuration(today.avg_talk_seconds)}
+                        hint="По принятым звонкам"
                         size="hero"
                         scale={scale}
                     />
@@ -354,7 +354,7 @@ const WallboardBody = ({ snapshot, scale }) => {
                 <Row cols="grid-cols-1 sm:grid-cols-3">
                     <Cell label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" icon="fa-user-check" size="hero" bg="bg-emerald-50" scale={scale} />
                     <Cell label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" icon="fa-headset" size="hero" bg="bg-amber-50" scale={scale} />
-                    <Cell label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" icon="fa-users" size="hero" scale={scale} />
+                    <Cell label="Онлайн" value={formatInt(now.operators_online)} hint="Свободны + в разговоре" icon="fa-users" size="hero" scale={scale} />
                 </Row>
                 <StatusStrip now={now} scale={scale} />
             </Panel>

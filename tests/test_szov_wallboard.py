@@ -268,8 +268,39 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
         self.assertEqual(result['on_training'], 1)
         self.assertEqual(result['on_tech'], 1)
         self.assertEqual(result['on_recall'], 1)
-        # Онлайн — сумма всех ведер, чтобы плитки на экране сходились
-        self.assertEqual(result['online'], 8)
+        # Онлайн — только свободные + в разговоре: перерывы и «нет на месте» не в счёт
+        self.assertEqual(result['online'], 2)
+
+    def test_online_excludes_every_break_reason(self):
+        """Решение владельца: перерыв, тренинг, тех.причина и перезвон — это НЕ онлайн."""
+        rows = [
+            {'operator_name': 'free', 'state': 1, 'icode': -1, 'in_state_seconds': 1},
+            {'operator_name': 'talk', 'state': 5, 'icode': -1, 'in_state_seconds': 1},
+            {'operator_name': 'brk', 'state': 2, 'icode': 4, 'in_state_seconds': 1},
+            {'operator_name': 'trn', 'state': 2, 'icode': 3, 'in_state_seconds': 1},
+            {'operator_name': 'tech', 'state': 2, 'icode': 1, 'in_state_seconds': 1},
+            {'operator_name': 'rec', 'state': 2, 'icode': 2, 'in_state_seconds': 1},
+            {'operator_name': 'away', 'state': 3, 'icode': -1, 'in_state_seconds': 1},
+            {'operator_name': 'resv', 'state': 6, 'icode': -1, 'in_state_seconds': 1},
+        ]
+        matched = {row['operator_name']: {'id': 10 + i, 'name': row['operator_name']}
+                   for i, row in enumerate(rows)}
+        result = self._build(rows, matched_names=matched)
+        # 8 операторов в системе, но онлайн держат линию только двое
+        self.assertEqual(result['online'], 2)
+        self.assertEqual(result['online'], result['free'] + result['talking'])
+
+    def test_online_is_zero_when_everyone_is_on_a_break(self):
+        rows = [
+            {'operator_name': f'op{i}', 'state': 2, 'icode': icode, 'in_state_seconds': 5}
+            for i, icode in enumerate([4, 3, 1, 2])
+        ]
+        matched = {row['operator_name']: {'id': 10 + i, 'name': row['operator_name']}
+                   for i, row in enumerate(rows)}
+        result = self._build(rows, matched_names=matched)
+        self.assertEqual(result['online'], 0)
+        self.assertEqual(result['on_break'] + result['on_training']
+                         + result['on_tech'] + result['on_recall'], 4)
 
     def test_each_break_reason_counted_separately(self):
         """Перерыв / тренинг / тех.причина больше не сваливаются в один счётчик."""
@@ -676,7 +707,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
             "Входящих / Принято",
             "Потеряно",
             "Среднее ожидание",
-            "Максимальное за день",
+            "Среднее время разговора",
             "Онлайн",
             "В разговоре",
             "Свободны",
@@ -715,7 +746,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertEqual(labels, [
             "Звонков в очереди", "SL", "AR на текущий момент",
             "Входящих / Принято", "Потеряно",
-            "Среднее ожидание", "Максимальное за день",
+            "Среднее ожидание", "Среднее время разговора",
             "Свободны", "В разговоре", "Онлайн",
         ])
 
@@ -751,7 +782,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
 
     def test_day_totals_split_into_two_rows_at_full_size(self):
         """Владелец: итоги дня — нужная инфа, поэтому два ряда и крупные цифры."""
-        day_labels = ["Входящих / Принято", "Потеряно", "Среднее ожидание", "Максимальное за день"]
+        day_labels = ["Входящих / Принято", "Потеряно", "Среднее ожидание", "Среднее время разговора"]
         for label in day_labels:
             cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
             self.assertIsNotNone(cell, label)

@@ -29112,7 +29112,8 @@ def _szov_wallboard_build_operators(raw_rows):
     """Сырые строки статусов Oktell -> счётчики по каждому статусу + именные списки.
 
     Каждая причина перерыва считается отдельно (перерыв / тренинг / тех.причина / перезвон):
-    на табло у них свои счётчики и свои цвета, а «Онлайн» остаётся суммой всех вёдер."""
+    на табло у них свои счётчики и свои цвета. «Онлайн» при этом НЕ сумма всех вёдер, а
+    только свободные + в разговоре — см. комментарий у расчёта online ниже."""
     lookup, department_id = _szov_wallboard_operator_lookup()
     counts = {
         'talking': 0, 'free': 0, 'away': 0, 'reserved': 0,
@@ -29156,7 +29157,10 @@ def _szov_wallboard_build_operators(raw_rows):
     # Самые «засидевшиеся» сверху: супервайзеру важно, кто висит в статусе дольше всех.
     break_list.sort(key=lambda item: -item['seconds'])
     recall_list.sort(key=lambda item: -item['seconds'])
-    online = sum(counts.values())
+    # «Онлайн» — только те, кто реально держит линию: готов принять звонок или уже говорит.
+    # Перерыв, тренинг, тех.причина, перезвон, резерв и «нет на месте» в онлайн НЕ входят
+    # (решение владельца). Поэтому на табло online == свободные + в разговоре, без остатка.
+    online = counts['free'] + counts['talking']
     return {
         'online': online,
         'talking': counts['talking'],
