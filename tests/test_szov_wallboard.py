@@ -683,6 +683,11 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("training: { label: 'Тренинг', dot: 'bg-emerald-500', value: 'text-emerald-600'", self.view)
         self.assertIn("tech: { label: 'Тех.причина', dot: 'bg-violet-500', value: 'text-violet-600'", self.view)
 
+    def test_section_order(self):
+        """Порядок блоков задан владельцем: итоги дня идут сразу после «Сейчас на линии»."""
+        titles = re.findall(r"\{SECTION_LABEL_CLASS\}>([^<]+)</div>", self.view)
+        self.assertEqual(titles, ["Сейчас на линии", "Звонки с начала дня", "Операторы"])
+
     def test_significant_numbers_outrank_the_status_breakdown(self):
         """Иерархия: очередь/ожидание/AR — hero, люди на линии — lg, причины перерыва — тонкая полоса."""
         hero = re.findall(r'size="hero"', self.view)
