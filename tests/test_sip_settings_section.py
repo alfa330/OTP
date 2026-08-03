@@ -153,12 +153,21 @@ class SaveUserSipSettingsTests(unittest.TestCase):
     def setUp(self):
         self.ns = _database_namespace({
             "save_user_sip_settings", "_mask_sip_secret", "_sip_operator_row",
+            "normalize_sip_domain",
         })
         self.db = _StubDb(self.ns)
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
         self.current = dict(OPERATOR_STATE)
         self.owners = {}
+        self.checked = []
         self.db.get_sip_operator = lambda user_id: dict(self.current)
-        self.db.find_sip_number_owners = lambda numbers, exclude_user_id=None: self.owners
+        self.db.get_sip_config = lambda: {"sip_server": "SIP.Local", "base_password": "pwd"}
+
+        def _find(entries, exclude_user_ids=None):
+            self.checked = list(entries)
+            self.excluded = exclude_user_ids
+            return self.owners
+        self.db.find_sip_number_owners = _find
 
     def _save(self, payload):
         return self.ns["save_user_sip_settings"](self.db, 41, payload, changed_by=7)
@@ -166,16 +175,35 @@ class SaveUserSipSettingsTests(unittest.TestCase):
     def _sql(self):
         return [sql for sql, _ in self.db.cursor.calls]
 
-    def test_duplicate_number_is_refused_with_owner_name(self):
-        self.owners = {"1088": {"user_id": 5, "name": "Пётр", "kind": "main"}}
+    def test_duplicate_number_is_refused_with_owner_and_domain(self):
+        self.owners = {("1088", "sip.local"): {"user_id": 5, "name": "Пётр", "kind": "main"}}
         with self.assertRaises(ValueError) as ctx:
             self._save({"sip_number": "1088"})
         self.assertIn("Пётр", str(ctx.exception))
+        self.assertIn("sip.local", str(ctx.exception))
         self.assertEqual([], self.db.cursor.calls)
 
-    def test_autodial_must_differ_from_main_number(self):
+    def test_occupancy_is_checked_per_domain_not_globally(self):
+        """Номер уникален в пределах домена: сверяем пару «номер + домен»."""
+        self._save({"sip_number": "1088"})
+        self.assertEqual([("1088", "sip.local")], self.checked)   # общий домен, нижний регистр
+        self.assertEqual([41], self.excluded)
+
+    def test_same_number_on_another_domain_is_rechecked(self):
+        """Номер тот же, а домен новый — на новой АТС он может быть занят."""
+        self._save({"sip_domain": "PBX.Other"})
+        self.assertEqual([("1024", "pbx.other")], self.checked)
+
+    def test_moving_to_another_domain_does_not_flag_the_old_pair(self):
+        self.current.update({"sip_domain": "pbx.other"})
+        self._save({"sip_password": "x"})
+        self.assertEqual([], self.checked)   # пара не менялась — проверять нечего
+
+    def test_autodial_may_repeat_the_main_number_on_another_domain(self):
         with self.assertRaises(ValueError):
-            self._save({"sip_number": "1024", "autodial_number": "1024"})
+            self._save({"autodial_number": "1024"})
+        self._save({"autodial_number": "1024", "autodial_domain": "pbx.other"})
+        self.assertTrue(any("INSERT INTO user_sip_settings" in s for s in self._sql()))
 
     def test_unchanged_payload_writes_nothing(self):
         result = self._save(dict(self.current))
@@ -221,16 +249,27 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def setUp(self):
         self.ns = _database_namespace({
-            "bulk_update_user_sip_overrides", "_mask_sip_secret",
+            "bulk_update_user_sip_overrides", "_mask_sip_secret", "normalize_sip_domain",
         })
-        # (user_id, sip_password, sip_domain, autodial_number, autodial_password, autodial_domain)
+        # (id, name, sip_password, sip_domain, autodial_number, autodial_password,
+        #  autodial_domain, sip_number)
         rows = [
-            (1, '', '', '2024', '', ''),          # есть номер автодозвона, персональных нет
-            (2, 'own', 'pbx.old', '', '', ''),    # были персональные значения
-            (3, '', 'pbx.new', '', '', ''),       # уже с нужным доменом — не трогаем
+            (1, 'Иван', '', '', '2024', '', '', '1024'),        # автодозвон есть, персональных нет
+            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088'),  # были персональные значения
+            (3, 'Мария', '', 'pbx.new', '', '', '', '1099'),    # уже с нужным доменом — не трогаем
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {"sip_server": "sip.local"}
         self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+        self.owners = {}
+        self.checked = []
+
+        def _find(entries, exclude_user_ids=None):
+            self.checked = list(entries)
+            self.excluded = exclude_user_ids
+            return self.owners
+        self.db.find_sip_number_owners = _find
 
     def _bulk(self, payload, ids=(1, 2, 3)):
         return self.ns["bulk_update_user_sip_overrides"](self.db, list(ids), payload, changed_by=7)
@@ -253,6 +292,36 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertEqual("pbx.new", by_id[1][2])
         self.assertEqual("2024", by_id[1][3])   # номер автодозвона не тронут
         self.assertEqual("own", by_id[2][1])    # персональный пароль не тронут
+
+    def test_domain_change_rechecks_numbers_on_the_new_pbx(self):
+        """Переезд на другой домен может столкнуть номера с уже занятыми там."""
+        self._bulk({"sip_domain": "pbx.new"})
+        self.assertIn(("1024", "pbx.new"), self.checked)
+        self.assertIn(("2024", "sip.local"), self.checked)   # автодозвон остался на общем
+        self.assertEqual([1, 2, 3], self.excluded)           # своих из проверки исключаем
+
+    def test_conflict_on_the_target_domain_blocks_the_whole_batch(self):
+        self.owners = {("1024", "pbx.new"): {"user_id": 9, "name": "Чужой", "kind": "main"}}
+        with self.assertRaises(ValueError) as ctx:
+            self._bulk({"sip_domain": "pbx.new"})
+        self.assertIn("Чужой", str(ctx.exception))
+        self.assertIn("pbx.new", str(ctx.exception))
+        self.assertEqual([], [c for c in self.db.cursor.calls if "INSERT" in c[0]])
+
+    def test_two_selected_landing_on_one_number_and_domain_are_refused(self):
+        rows = [
+            (1, 'Иван', '', '', '', '', '', '1024'),
+            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024'),   # тот же номер, но другая АТС
+        ]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {"sip_server": "sip.local"}
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+        with self.assertRaises(ValueError) as ctx:
+            self._bulk({"sip_domain": "pbx.new"}, ids=(1, 2))
+        self.assertIn("достанется двоим", str(ctx.exception))
+        self.assertIn("Иван", str(ctx.exception))
+        self.assertIn("Пётр", str(ctx.exception))
 
     def test_everything_runs_in_batches_not_per_user(self):
         self._bulk({"sip_domain": "pbx.new"})
@@ -282,6 +351,42 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertNotIn("supersecret", snapshot)
         self.assertTrue(json.loads(snapshot)["bulk"])
         self.assertIn("%s::jsonb", template)
+
+
+class FindSipNumberOwnersTests(unittest.TestCase):
+    """SQL занятости: сравниваем пару «номер + домен», пустой домен = общий."""
+
+    def setUp(self):
+        self.ns = _database_namespace({"find_sip_number_owners", "normalize_sip_domain"})
+        self.db = _StubDb(self.ns, _FakeCursor([]))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+
+    def _call(self, entries, exclude=None):
+        self.ns["find_sip_number_owners"](self.db, entries, exclude_user_ids=exclude)
+        return self.db.cursor.calls[0]
+
+    def test_nothing_to_check_makes_no_query(self):
+        self.assertEqual({}, self.ns["find_sip_number_owners"](self.db, [('', 'x')]))
+        self.assertEqual([], self.db.cursor.calls)
+
+    def test_pairs_are_matched_on_number_and_domain(self):
+        sql, params = self._call([('1024', 'PBX.Other'), ('2024', '')], exclude=[41])
+        self.assertIn("JOIN taken t ON t.num = w.num AND t.dom = w.dom", sql)
+        self.assertEqual(['1024', '2024'], params[0])
+        self.assertEqual(['pbx.other', ''], params[1])   # регистр снят, пустое = общий
+        self.assertEqual([41], params[2])
+
+    def test_empty_domain_falls_back_to_the_common_server(self):
+        sql, _ = self._call([('1024', '')])
+        self.assertIn("SELECT LOWER(TRIM(COALESCE(sip_server, ''))) FROM sip_config WHERE id = 1", sql)
+        self.assertIn("COALESCE(NULLIF(w.dom, ''), cfg.common)", sql)
+        self.assertIn("COALESCE(NULLIF(LOWER(TRIM(COALESCE(s.sip_domain, ''))), ''), cfg.common)", sql)
+        self.assertIn("COALESCE(NULLIF(LOWER(TRIM(COALESCE(s.autodial_domain, ''))), ''), cfg.common)", sql)
+
+    def test_both_accounts_are_scanned(self):
+        sql, _ = self._call([('1024', '')])
+        self.assertIn("'main'::text AS kind", sql)
+        self.assertIn("'autodial'::text", sql)
 
 
 class UserSipAccountTests(unittest.TestCase):
@@ -480,6 +585,19 @@ class SipSectionFrontendTests(unittest.TestCase):
         self.assertIn("setCommonForm({", view)
         self.assertEqual(5, view.count("await fetch("))
         self.assertIn("if (tab === 'history' && !historyLoadedRef.current) fetchHistory();", view)
+
+    def test_duplicates_and_conflicts_are_scoped_to_the_domain(self):
+        view = _read(VIEW_PATH)
+        self.assertIn("const numberKey = (number, domain) =>", view)
+        self.assertIn("const effectiveDomain = (personal, common) =>", view)
+        # Подсветка дублей и проверка конфликта считают пару, а не голый номер.
+        duplicates = view.split("const duplicateKeys = useMemo(", 1)[1].split("}, [", 1)[0]
+        self.assertIn("numberKey(number, domain)", duplicates)
+        self.assertIn("effectiveDomain(op.sip_domain, settings.sip_server)", duplicates)
+        conflicts = view.split("const conflicts = useMemo(", 1)[1].split("}, [", 1)[0]
+        self.assertIn("numberKey(form.sip_number, effective.domain)", conflicts)
+        self.assertIn("numberKey(form.autodial_number, effective.autodialDomain)", conflicts)
+        self.assertNotIn("duplicateNumbers", view)
 
     def test_ctrl_and_shift_selection_drives_the_bulk_editor(self):
         view = _read(VIEW_PATH)

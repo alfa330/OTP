@@ -21218,38 +21218,67 @@ class Database:
             rows = cur.fetchall()
         return [self._sip_operator_row(r) for r in rows]
 
-    def find_sip_number_owners(self, numbers, exclude_user_id=None) -> dict:
-        """{номер: {'user_id', 'name', 'kind'}} — кто уже занял эти номера.
+    @staticmethod
+    def normalize_sip_domain(value) -> str:
+        """Домен для сравнения: без пробелов и регистра. '' = общий из sip_config."""
+        return str(value or '').strip().lower()
 
-        Один SIP-номер на двоих ломает привязку звонков к оператору, поэтому
-        проверяем оба поля сразу: основной номер и номер автодозвона.
+    def find_sip_number_owners(self, entries, exclude_user_ids=None) -> dict:
+        """{(номер, домен): {'user_id', 'name', 'kind', 'domain'}} — кто уже занял пару.
+
+        Номер уникален В ПРЕДЕЛАХ ДОМЕНА: на разных АТС одинаковые внутренние
+        номера — норма, а вот два оператора на одном домене с одним номером
+        ломают привязку звонков. Поэтому сверяем пару «номер + эффективный
+        домен», где пустой персональный домен подставляется из общих настроек.
+        Проверяем оба аккаунта: основной и автодозвон.
         """
-        wanted = [str(n).strip() for n in (numbers or []) if str(n or '').strip()]
-        if not wanted:
+        numbers, domains = [], []
+        for number, domain in (entries or []):
+            number = str(number or '').strip()
+            if not number:
+                continue
+            numbers.append(number)
+            domains.append(self.normalize_sip_domain(domain))
+        if not numbers:
             return {}
-        exclude_clause = ""
-        params = [wanted]
-        if exclude_user_id:
-            exclude_clause = " AND u.id <> %s"
-            params.append(int(exclude_user_id))
-        params.append(wanted)
-        if exclude_user_id:
-            params.append(int(exclude_user_id))
+        exclude = sorted({int(u) for u in (exclude_user_ids or []) if u is not None})
         with self._get_cursor() as cur:
-            cur.execute(f"""
-                SELECT TRIM(u.sip_number), u.id, u.name, 'main'
-                FROM users u
-                WHERE TRIM(COALESCE(u.sip_number, '')) = ANY(%s){exclude_clause}
-                UNION ALL
-                SELECT TRIM(s.autodial_number), u.id, u.name, 'autodial'
-                FROM user_sip_settings s
-                JOIN users u ON u.id = s.user_id
-                WHERE TRIM(COALESCE(s.autodial_number, '')) = ANY(%s){exclude_clause}
-            """, tuple(params))
+            cur.execute("""
+                WITH cfg AS (
+                    SELECT COALESCE((
+                        SELECT LOWER(TRIM(COALESCE(sip_server, ''))) FROM sip_config WHERE id = 1
+                    ), '') AS common
+                ), wanted AS (
+                    SELECT w.num, COALESCE(NULLIF(w.dom, ''), cfg.common) AS dom
+                    FROM unnest(%s::text[], %s::text[]) AS w(num, dom) CROSS JOIN cfg
+                ), taken AS (
+                    SELECT TRIM(u.sip_number) AS num,
+                           COALESCE(NULLIF(LOWER(TRIM(COALESCE(s.sip_domain, ''))), ''), cfg.common) AS dom,
+                           u.id, u.name, 'main'::text AS kind
+                    FROM users u
+                    LEFT JOIN user_sip_settings s ON s.user_id = u.id
+                    CROSS JOIN cfg
+                    WHERE NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
+                    UNION ALL
+                    SELECT TRIM(s.autodial_number),
+                           COALESCE(NULLIF(LOWER(TRIM(COALESCE(s.autodial_domain, ''))), ''), cfg.common),
+                           u.id, u.name, 'autodial'::text
+                    FROM user_sip_settings s
+                    JOIN users u ON u.id = s.user_id
+                    CROSS JOIN cfg
+                    WHERE NULLIF(TRIM(COALESCE(s.autodial_number, '')), '') IS NOT NULL
+                )
+                SELECT w.num, w.dom, t.id, t.name, t.kind
+                FROM wanted w
+                JOIN taken t ON t.num = w.num AND t.dom = w.dom
+                WHERE t.id <> ALL(%s)
+            """, (numbers, domains, exclude))
             rows = cur.fetchall()
         owners = {}
-        for number, owner_id, owner_name, kind in rows:
-            owners.setdefault(number, {"user_id": owner_id, "name": owner_name or "", "kind": kind})
+        for number, domain, owner_id, owner_name, kind in rows:
+            owners.setdefault((number, domain), {
+                "user_id": owner_id, "name": owner_name or "", "kind": kind, "domain": domain,
+            })
         return owners
 
     def save_user_sip_settings(self, user_id: int, payload: dict, changed_by=None) -> dict:
@@ -21279,17 +21308,27 @@ class Database:
         autodial_password = _field('autodial_password', current['autodial_password'])
         autodial_domain = _field('autodial_domain', current['autodial_domain'])
 
-        if sip_number and autodial_number and sip_number == autodial_number:
-            raise ValueError("Номер автодозвона должен отличаться от основного")
+        # Занятость номера считается в пределах домена: одинаковые номера на
+        # разных АТС конфликтом не считаются.
+        common_domain = self.normalize_sip_domain(self.get_sip_config().get('sip_server'))
 
-        changed_numbers = [
-            n for n in (sip_number, autodial_number)
-            if n and n not in (current['sip_number'], current['autodial_number'])
-        ]
-        owners = self.find_sip_number_owners(changed_numbers, exclude_user_id=user_id)
+        def _effective(domain):
+            return self.normalize_sip_domain(domain) or common_domain
+
+        main_pair = (sip_number, _effective(sip_domain))
+        autodial_pair = (autodial_number, _effective(autodial_domain))
+        if sip_number and autodial_number and main_pair == autodial_pair:
+            raise ValueError("Номер автодозвона должен отличаться от основного (или быть на другом домене)")
+
+        was = {
+            (current['sip_number'], _effective(current['sip_domain'])),
+            (current['autodial_number'], _effective(current['autodial_domain'])),
+        }
+        changed_pairs = [p for p in (main_pair, autodial_pair) if p[0] and p not in was]
+        owners = self.find_sip_number_owners(changed_pairs, exclude_user_ids=[user_id])
         if owners:
-            number, owner = next(iter(owners.items()))
-            raise ValueError(f"Номер {number} уже занят: {owner['name']}")
+            (number, domain), owner = next(iter(owners.items()))
+            raise ValueError(f"Номер {number} на домене {domain or '—'} уже занят: {owner['name']}")
 
         has_overrides = any((sip_password, sip_domain, autodial_number, autodial_password, autodial_domain))
         changed = any((
@@ -21368,32 +21407,66 @@ class Database:
         if not fields:
             raise ValueError("Не выбрано ни одного поля для изменения")
 
+        common_domain = self.normalize_sip_domain(self.get_sip_config().get('sip_server'))
+
+        def _effective(domain):
+            return self.normalize_sip_domain(domain) or common_domain
+
         with self._get_cursor() as cur:
             cur.execute("""
-                SELECT u.id,
+                SELECT u.id, u.name,
                        COALESCE(s.sip_password, ''), COALESCE(s.sip_domain, ''),
                        COALESCE(s.autodial_number, ''), COALESCE(s.autodial_password, ''),
-                       COALESCE(s.autodial_domain, '')
+                       COALESCE(s.autodial_domain, ''), COALESCE(u.sip_number, '')
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
                 WHERE u.id = ANY(%s)
             """, (ids,))
-            current = {
-                r[0]: {
-                    "sip_password": r[1], "sip_domain": r[2], "autodial_number": r[3],
-                    "autodial_password": r[4], "autodial_domain": r[5],
+            current, names, numbers = {}, {}, {}
+            for r in cur.fetchall():
+                current[r[0]] = {
+                    "sip_password": r[2], "sip_domain": r[3], "autodial_number": r[4],
+                    "autodial_password": r[5], "autodial_domain": r[6],
                 }
-                for r in cur.fetchall()
-            }
+                names[r[0]] = r[1] or ""
+                numbers[r[0]] = r[7]
 
+        # Смена домена переносит номера на другую АТС — там они могут быть заняты.
+        # Считаем итоговые пары «номер + домен» и сверяем их и между выбранными,
+        # и с остальными сотрудниками. Делаем это до записи и вне курсора записи,
+        # чтобы не держать два коннекта пула разом.
+        targets, planned, seen_pairs = {}, [], {}
+        for user_id in ids:
+            before = current.get(user_id)
+            if before is None:
+                continue
+            after = {**before, **fields}
+            if after == before:
+                continue
+            targets[user_id] = after
+            pairs = (
+                (numbers.get(user_id, ''), _effective(after['sip_domain'])),
+                (after['autodial_number'], _effective(after['autodial_domain'])),
+            )
+            for pair in pairs:
+                if not pair[0]:
+                    continue
+                twin = seen_pairs.get(pair)
+                if twin is not None and twin != user_id:
+                    raise ValueError(
+                        f"Номер {pair[0]} на домене {pair[1] or '—'} достанется двоим: "
+                        f"{names.get(twin, '')} и {names.get(user_id, '')}")
+                seen_pairs[pair] = user_id
+                planned.append(pair)
+
+        owners = self.find_sip_number_owners(planned, exclude_user_ids=ids)
+        if owners:
+            (number, domain), owner = next(iter(owners.items()))
+            raise ValueError(f"Номер {number} на домене {domain or '—'} уже занят: {owner['name']}")
+
+        with self._get_cursor() as cur:
             upserts, deletes, history = [], [], []
-            for user_id in ids:
-                before = current.get(user_id)
-                if before is None:
-                    continue
-                after = {**before, **fields}
-                if after == before:
-                    continue
+            for user_id, after in targets.items():
                 if any(after.values()):
                     upserts.append((
                         user_id, after['sip_password'], after['sip_domain'],

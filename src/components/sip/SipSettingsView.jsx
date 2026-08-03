@@ -50,9 +50,17 @@ const formFromOperator = (op) => ({
     autodial_domain: op?.autodial_domain || '',
 });
 
+const hasPersonalPassword = (op) => Boolean(op?.sip_password || op?.autodial_password);
+
 const hasPersonalParams = (op) => Boolean(
     op?.sip_password || op?.sip_domain || op?.autodial_password || op?.autodial_domain
 );
+
+// Номер уникален в пределах домена: на разных АТС одинаковые внутренние номера —
+// норма. Поэтому и подсветка дублей, и проверка занятости идут по паре.
+const normDomain = (value) => String(value || '').trim().toLowerCase();
+const effectiveDomain = (personal, common) => normDomain(personal) || normDomain(common);
+const numberKey = (number, domain) => `${String(number || '').trim()}@${normDomain(domain)}`;
 
 const fmtDateTime = (iso) => {
     if (!iso) return '';
@@ -97,6 +105,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [departmentFilter, setDepartmentFilter] = useState('');
+    const [domainFilter, setDomainFilter] = useState('');
     const [showInactive, setShowInactive] = useState(false);
 
     const [editing, setEditing] = useState(null);   // строка сотрудника
@@ -190,29 +199,48 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         return [...seen.entries()].map(([value, label]) => ({ value, label }));
     }, [operators]);
 
-    // Один номер на двоих ломает привязку звонков — подсвечиваем такие строки.
-    const duplicateNumbers = useMemo(() => {
+    // Один номер на двоих В ОДНОМ ДОМЕНЕ ломает привязку звонков — подсвечиваем.
+    const duplicateKeys = useMemo(() => {
         const counts = new Map();
         operators.forEach((op) => {
-            [op.sip_number, op.autodial_number].forEach((n) => {
-                const key = String(n || '').trim();
-                if (key) counts.set(key, (counts.get(key) || 0) + 1);
+            [
+                [op.sip_number, effectiveDomain(op.sip_domain, settings.sip_server)],
+                [op.autodial_number, effectiveDomain(op.autodial_domain, settings.sip_server)],
+            ].forEach(([number, domain]) => {
+                if (!String(number || '').trim()) return;
+                const key = numberKey(number, domain);
+                counts.set(key, (counts.get(key) || 0) + 1);
             });
         });
-        return new Set([...counts.entries()].filter(([, c]) => c > 1).map(([n]) => n));
-    }, [operators]);
+        return new Set([...counts.entries()].filter(([, c]) => c > 1).map(([k]) => k));
+    }, [operators, settings.sip_server]);
+
+    // Фильтр по домену показываем, только когда АТС действительно несколько.
+    const domainOptions = useMemo(() => {
+        const seen = new Set();
+        operators.forEach((op) => {
+            seen.add(effectiveDomain(op.sip_domain, settings.sip_server));
+            if (op.autodial_number) seen.add(effectiveDomain(op.autodial_domain, settings.sip_server));
+        });
+        return [...seen].filter(Boolean).sort().map((d) => ({ value: d, label: d }));
+    }, [operators, settings.sip_server]);
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
         return operators.filter((op) => {
             if (departmentFilter && String(op.department_id ?? '') !== departmentFilter) return false;
+            if (domainFilter) {
+                const domains = [effectiveDomain(op.sip_domain, settings.sip_server)];
+                if (op.autodial_number) domains.push(effectiveDomain(op.autodial_domain, settings.sip_server));
+                if (!domains.includes(domainFilter)) return false;
+            }
             if (!q) return true;
             return (op.name || '').toLowerCase().includes(q)
                 || (op.sip_number || '').toLowerCase().includes(q)
                 || (op.autodial_number || '').toLowerCase().includes(q)
                 || (op.group_name || '').toLowerCase().includes(q);
         });
-    }, [operators, search, departmentFilter]);
+    }, [operators, search, departmentFilter, domainFilter, settings.sip_server]);
 
     const stats = useMemo(() => ({
         total: operators.length,
@@ -235,25 +263,33 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     }, [form, settings]);
 
     // Конфликт видно ещё до сохранения — бэкенд его тоже не пропустит.
+    // Считаем по паре «номер + домен»: тот же номер на другой АТС — не конфликт.
     const conflicts = useMemo(() => {
         if (!editing) return {};
         const taken = new Map();
         operators.forEach((op) => {
             if (op.id === editing.id) return;
-            [op.sip_number, op.autodial_number].forEach((n) => {
-                const key = String(n || '').trim();
-                if (key && !taken.has(key)) taken.set(key, op.name);
+            [
+                [op.sip_number, effectiveDomain(op.sip_domain, settings.sip_server)],
+                [op.autodial_number, effectiveDomain(op.autodial_domain, settings.sip_server)],
+            ].forEach(([number, domain]) => {
+                if (!String(number || '').trim()) return;
+                const key = numberKey(number, domain);
+                if (!taken.has(key)) taken.set(key, op.name);
             });
         });
+        const mainKey = numberKey(form.sip_number, effective.domain);
+        const autoKey = numberKey(form.autodial_number, effective.autodialDomain);
         const main = form.sip_number.trim();
         const auto = form.autodial_number.trim();
         return {
-            sip_number: main ? taken.get(main) : null,
+            sip_number: main ? taken.get(mainKey) : null,
             autodial_number: auto
-                ? (taken.get(auto) || (main && main === auto ? 'совпадает с основным' : null))
+                ? (taken.get(autoKey) || (main && mainKey === autoKey ? 'совпадает с основным' : null))
                 : null,
         };
-    }, [editing, operators, form.sip_number, form.autodial_number]);
+    }, [editing, operators, settings.sip_server, form.sip_number, form.autodial_number,
+        effective.domain, effective.autodialDomain]);
 
     const selectedOperators = useMemo(
         () => operators.filter((op) => selected.has(op.id)),
@@ -450,6 +486,16 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 options={[{ value: '', label: 'Все отделы' }, ...departmentOptions]}
                             />
                         )}
+                        {domainOptions.length > 1 && (
+                            <CustomSelect
+                                className="w-52"
+                                variant="ios"
+                                value={domainFilter}
+                                onChange={setDomainFilter}
+                                ariaLabel="Домен"
+                                options={[{ value: '', label: 'Все домены' }, ...domainOptions]}
+                            />
+                        )}
                         <button
                             type="button"
                             onClick={() => setShowInactive((v) => !v)}
@@ -480,13 +526,16 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 ) : filtered.length === 0 ? (
                     <div className={`${iosCard} flex flex-col items-center justify-center py-16 text-slate-400`}>
                         <FaIcon className="fas fa-headset mb-2" style={{ width: 28, height: 28 }} />
-                        <p className="text-[13px]">{search || departmentFilter ? 'Ничего не найдено' : 'Нет сотрудников'}</p>
+                        <p className="text-[13px]">{search || departmentFilter || domainFilter ? 'Ничего не найдено' : 'Нет сотрудников'}</p>
                     </div>
                 ) : (
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                         {filtered.map((op, index) => {
-                            const isDuplicate = op.sip_number && duplicateNumbers.has(op.sip_number.trim());
-                            const isAutodialDuplicate = op.autodial_number && duplicateNumbers.has(op.autodial_number.trim());
+                            const mainDomain = effectiveDomain(op.sip_domain, settings.sip_server);
+                            const autodialDomain = effectiveDomain(op.autodial_domain, settings.sip_server);
+                            const isDuplicate = op.sip_number && duplicateKeys.has(numberKey(op.sip_number, mainDomain));
+                            const isAutodialDuplicate = op.autodial_number
+                                && duplicateKeys.has(numberKey(op.autodial_number, autodialDomain));
                             const isSelected = selected.has(op.id);
                             return (
                                 <button
@@ -518,7 +567,12 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     </div>
                                     <div className="flex shrink-0 items-center gap-1.5">
                                         {op.sip_number ? (
-                                            <IosBadge tone={isDuplicate ? 'red' : 'blue'} title={isDuplicate ? 'Этот номер занят ещё кем-то' : 'SIP-номер'}>
+                                            <IosBadge
+                                                tone={isDuplicate ? 'red' : 'blue'}
+                                                title={isDuplicate
+                                                    ? `Номер занят ещё кем-то на домене ${mainDomain || '—'}`
+                                                    : `SIP-номер · домен ${mainDomain || '—'}`}
+                                            >
                                                 <FaIcon className="fas fa-phone" style={{ width: 11, height: 11 }} />
                                                 <span className="font-mono">{op.sip_number}</span>
                                             </IosBadge>
@@ -526,13 +580,21 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                             <span className="text-[11.5px] text-slate-300">номер не задан</span>
                                         )}
                                         {op.autodial_number && (
-                                            <IosBadge tone={isAutodialDuplicate ? 'red' : 'slate'} className="hidden sm:inline-flex" title="Номер автодозвона">
+                                            <IosBadge tone={isAutodialDuplicate ? 'red' : 'slate'} className="hidden sm:inline-flex" title={`Номер автодозвона · домен ${autodialDomain || '—'}`}>
                                                 <FaIcon className="fas fa-phone-volume" style={{ width: 11, height: 11 }} />
                                                 <span className="font-mono">{op.autodial_number}</span>
                                             </IosBadge>
                                         )}
-                                        {hasPersonalParams(op) && (
-                                            <span className="hidden h-6 w-6 place-items-center rounded-full bg-slate-100 text-slate-400 sm:grid" title="Персональный пароль или домен">
+                                        {/* Свой домен показываем текстом: именно он объясняет,
+                                            почему одинаковые номера у разных людей — не дубль. */}
+                                        {op.sip_domain && (
+                                            <IosBadge tone="slate" className="hidden max-w-[160px] md:inline-flex" title={`Персональный домен: ${op.sip_domain}`}>
+                                                <FaIcon className="fas fa-globe" style={{ width: 11, height: 11 }} />
+                                                <span className="truncate font-mono">{op.sip_domain}</span>
+                                            </IosBadge>
+                                        )}
+                                        {hasPersonalPassword(op) && (
+                                            <span className="hidden h-6 w-6 place-items-center rounded-full bg-slate-100 text-slate-400 sm:grid" title="Персональный пароль">
                                                 <FaIcon className="fas fa-key" style={{ width: 11, height: 11 }} />
                                             </span>
                                         )}
@@ -835,7 +897,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             {conflicts.sip_number && (
                                 <p className="flex items-center gap-1.5 px-1 text-[11.5px] text-rose-600">
                                     <FaIcon className="fas fa-triangle-exclamation" style={{ width: 11, height: 11 }} />
-                                    Номер уже занят: {conflicts.sip_number}
+                                    На домене {effective.domain || '—'} номер занят: {conflicts.sip_number}
                                 </p>
                             )}
                         </div>
@@ -856,8 +918,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 <p className="flex items-center gap-1.5 px-1 text-[11.5px] text-rose-600">
                                     <FaIcon className="fas fa-triangle-exclamation" style={{ width: 11, height: 11 }} />
                                     {conflicts.autodial_number === 'совпадает с основным'
-                                        ? 'Совпадает с основным номером'
-                                        : `Номер уже занят: ${conflicts.autodial_number}`}
+                                        ? 'Совпадает с основным номером на том же домене'
+                                        : `На домене ${effective.autodialDomain || '—'} номер занят: ${conflicts.autodial_number}`}
                                 </p>
                             )}
                             {form.autodial_number.trim() && (
