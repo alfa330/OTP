@@ -20876,6 +20876,94 @@ def sip_config_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _sip_department_scope(requester_id, role):
+    """Область видимости раздела «Настройки SIP».
+
+    Возвращает (department_ids, supervisor_id): None вместо списка отделов —
+    без ограничений (админ). Глава отдела видит свои отделы, СВ — свой отдел
+    плюс тех, кого ведёт лично.
+    """
+    if _is_admin_role(role) and not _headed_department_ids(requester_id):
+        return None, None
+    headed = _headed_department_ids(requester_id)
+    if headed:
+        return sorted(headed), None
+    dept_id = _department_scope_id_for_requester(requester_id)
+    return ([dept_id] if dept_id is not None else []), requester_id
+
+
+@app.route('/api/sip_config/operators', methods=['GET', 'OPTIONS'])
+@require_api_key
+def sip_config_operators_endpoint():
+    """Список сотрудников с их SIP-аккаунтами (основной + автодозвон).
+
+    Область видимости — как в «Учёте сотрудников»: админ видит всех, глава
+    отдела свой отдел, СВ — свой отдел и своих операторов."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
+        include_inactive = str(request.args.get('include_inactive', '')).strip().lower() in ('1', 'true', 'yes')
+        operators = db.get_sip_operators(
+            department_ids=department_ids,
+            supervisor_id=supervisor_id,
+            include_inactive=include_inactive,
+        )
+        return jsonify({
+            "status": "success",
+            "operators": operators,
+            "settings": db.get_sip_config(),
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in sip_config operators: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/sip_config/operators/<int:target_user_id>', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def sip_config_operator_update_endpoint(target_user_id):
+    """Сохранить SIP-аккаунты сотрудника: номер, персональные пароль/домен,
+    второй номер для автодозвона. Номер не должен дублировать чужой."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        target = db.get_sip_operator(target_user_id)
+        if not target:
+            return jsonify({"error": "Сотрудник не найден"}), 404
+        if target.get('role') not in ('operator', 'trainee'):
+            return jsonify({"error": "SIP-аккаунты ведём только операторам и стажёрам"}), 400
+        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
+        if department_ids is not None:
+            target_dept = target.get('department_id')
+            in_scope = target_dept is not None and int(target_dept) in set(department_ids)
+            if not in_scope and supervisor_id and target.get('supervisor_id') is not None:
+                in_scope = int(target['supervisor_id']) == int(supervisor_id)
+            if not in_scope:
+                return jsonify({"error": "Сотрудник не из вашего отдела"}), 403
+        payload = request.get_json(silent=True) or {}
+        operator = db.save_user_sip_settings(target_user_id, payload, changed_by=requester_id)
+        return jsonify({"status": "success", "operator": operator}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in sip_config operator update: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/sip_config/history', methods=['GET', 'OPTIONS'])
 @require_api_key
 def sip_config_history_endpoint():
@@ -20908,21 +20996,23 @@ def operator_sip_settings_endpoint():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
-        sip_number = db.get_user_sip_number(requester_id)
-        if not sip_number:
+        account = db.get_user_sip_account(requester_id)
+        main = account.get("main")
+        if not main:
             return jsonify({"error": "SIP-номер не назначен. Обратитесь к руководителю."}), 409
-        cfg = db.get_sip_config()
-        server = (cfg.get("sip_server") or "").strip()
-        base = cfg.get("base_password") or ""
-        if not server or not base:
+        if not main.get("server") or not main.get("password"):
             return jsonify({"error": "Настройки SIP ещё не сконфигурированы."}), 409
+        autodial = account.get("autodial")
+        if autodial and not (autodial.get("server") and autodial.get("password")):
+            autodial = None
         return jsonify({
             "status": "success",
+            # Плоские поля основного аккаунта — совместимость со старым iCORE Phone.
             "settings": {
-                "server": server,
-                "username": sip_number,
-                "password": f"{base}{sip_number}",
-                "transport": "UDP",
+                **main,
+                "autodial": autodial,
+                # Общий код: набрать один раз, чтобы включить режим автодозвона.
+                "autodial_code": account.get("autodial_code") or "",
             }
         }), 200
     except Exception as e:

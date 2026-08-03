@@ -115,7 +115,6 @@ const lazyWithRetry = (importer) =>
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
-const SipSettingsModal = lazyWithRetry(() => import('./components/modals/SipSettingsModal'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -123,6 +122,7 @@ const ResourceFteView = lazyWithRetry(() => import('./components/resources/Resou
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
+const SipSettingsView = lazyWithRetry(() => import('./components/sip/SipSettingsView'));
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
@@ -33664,7 +33664,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [revokingSessionId, setRevokingSessionId] = useState('');
             const adminSessionsRequestIdRef = useRef(0);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
-            const [showSipSettingsModal, setShowSipSettingsModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
@@ -41933,11 +41932,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if ((view === 'ai_qa' || view === 'wazzup_chats') && canAccessAiQaSection) return;
                 if (view === 'chatapp_chats' && canAccessChatAppSection) return;
+                // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
+                if (view === 'sip_settings' && canAccessSipSettings) return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSipSettings, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -42462,8 +42463,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {canAccessSipSettings && (
                                                 <li>
                                                     <button
-                                                        onClick={() => setShowSipSettingsModal(true)}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                     >
                                                         <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
                                                     </button>
@@ -42709,8 +42710,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             {canAccessSipSettings && (
                                             <li>
                                                 <button
-                                                    onClick={() => setShowSipSettingsModal(true)}
-                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3`}
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'sip_settings')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
                                                 </button>
@@ -45103,6 +45104,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        ))}
+                        {/* Настройки SIP: админ / глава отдела / СВ отдела продаж — общий раздел вне веток по ролям */}
+                        {( view === "sip_settings" && canAccessSipSettings && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <SipSettingsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    canEdit={canAccessSipSettings}
                                 />
                             </Suspense>
                         ))}
@@ -49076,17 +49089,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     groups={userModalGroups}
                                     user={user}
                                     onSave={saveUserChanges}
-                                />
-                            </Suspense>
-                        )}
-                        {showSipSettingsModal && (
-                            <Suspense fallback={null}>
-                                <SipSettingsModal
-                                    isOpen={showSipSettingsModal}
-                                    onClose={() => setShowSipSettingsModal(false)}
-                                    apiBase={API_BASE_URL}
-                                    getAuthHeaders={(extra = {}) => withAccessTokenHeader({ 'Content-Type': 'application/json', 'X-User-Id': user?.id, ...extra })}
-                                    canEdit={canAccessSipSettings}
                                 />
                             </Suspense>
                         )}
