@@ -7,7 +7,7 @@ import io
 import os
 import re
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -189,6 +189,7 @@ class TezLeadsExcelExportTests(unittest.TestCase):
             "call_at": "2026-07-18T10:15:00",
             "success_date": "2026-07-20",
             "rule_code": "same_month",
+            "month_first_order_at": "2026-07-20T12:00:00",
             "prev_month_first_order_at": None,
             "source_file_name": "Лиды Алматы июль.xlsx",
             "talk_duration_seconds": 3723,
@@ -247,6 +248,30 @@ class TezLeadsExcelExportTests(unittest.TestCase):
             '=HYPERLINK("https://example.invalid")',
         )
         self.assertEqual(sheet.cell(2, source_column).data_type, "s")
+
+    def test_active_prev_month_exports_previous_reason_without_hiding_current_trip(self):
+        _, sheet = self._export(
+            [
+                self._detail_row(
+                    status="already_working",
+                    status_rule="active_prev_month",
+                    rule_code=None,
+                    first_order_at="2026-07-03T22:47:00",
+                    month_first_order_at="2026-07-03T22:47:00",
+                    prev_month_first_order_at="2026-06-30T23:27:00",
+                    call_at="2026-07-02T13:58:00",
+                )
+            ]
+        )
+
+        headers = [cell.value for cell in sheet[1]]
+        previous_column = headers.index("Поездка в прошлом месяце") + 1
+        current_column = headers.index("Поездка в отчётном месяце") + 1
+        rule_column = headers.index("Правило") + 1
+
+        self.assertEqual(sheet.cell(2, previous_column).value, "2026-06-30 23:27:00")
+        self.assertEqual(sheet.cell(2, current_column).value, "2026-07-03 22:47:00")
+        self.assertIn("прошлом месяце", sheet.cell(2, rule_column).value)
 
 
 class TezLeadsDisplayFilenameTests(unittest.TestCase):
@@ -310,6 +335,39 @@ class TezLeadsDetailPayloadTests(unittest.TestCase):
         )
         self.assertIn("'source_file_name'", source)
         self.assertIn("'talk_duration_seconds'", source)
+
+    def test_detail_keeps_previous_reason_and_current_trip_as_separate_fields(self):
+        detail_method, source = _load_database_method("get_tez_leads_detail")
+        current_trip = datetime(2026, 7, 3, 22, 47)
+        previous_trip = datetime(2026, 6, 30, 23, 27)
+        db = _FakeDatabase(
+            (
+                "8d0c0346-9563-46c3-b757-696414b19bf2",
+                "77000000105",
+                "Тестовый водитель",
+                "already_working",
+                "active_prev_month",
+                1,
+                current_trip,
+                None,
+                "",
+                None,
+                None,
+                None,
+                previous_trip,
+                "Лиды ОП.xlsx",
+                None,
+            )
+        )
+
+        row = detail_method(db, 2026, 7)[0]
+
+        # first_order_at остаётся для старых клиентов, но новое явное
+        # поле не даёт спутать его с причиной active_prev_month.
+        self.assertEqual(row["first_order_at"], "2026-07-03T22:47:00")
+        self.assertEqual(row["month_first_order_at"], "2026-07-03T22:47:00")
+        self.assertEqual(row["prev_month_first_order_at"], "2026-06-30T23:27:00")
+        self.assertIn("'month_first_order_at'", source)
 
 
 if __name__ == "__main__":

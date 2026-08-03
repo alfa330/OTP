@@ -205,12 +205,19 @@ class PrevMonthWindowTests(unittest.TestCase):
     def test_active_prev_month_blocks_success(self):
         """Были заказы в прошлом месяце -> водитель уже работал, успешки нет,
         даже если в этом месяце есть заказ и хороший звонок до него."""
+        current_trip = dt(2026, 7, 3, 22, 47)
+        previous_trip = dt(2026, 6, 30, 23, 27)
         out = compute_lead_outcome(
-            dt(2026, 7, 20), dt(2026, 6, 15), [call(dt(2026, 7, 3), operator_id=5)]
+            current_trip,
+            previous_trip,
+            [call(dt(2026, 7, 2, 13, 58), operator_id=5)],
         )
         self.assertEqual(out["status"], STATUS_ALREADY_WORKING)
         self.assertEqual(out["rule"], REASON_ACTIVE_PREV_MONTH)
         self.assertIsNone(out["operator_id"])
+        # active_prev_month объясняется прошлой поездкой, но не
+        # должен стирать отдельную поездку отчётного месяца.
+        self.assertEqual(out["first_order_at"], current_trip)
 
     def test_clean_prev_month_allows_success(self):
         """Тот же случай, но в прошлом месяце заказов не было -> успешка."""
