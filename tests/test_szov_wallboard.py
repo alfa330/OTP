@@ -436,6 +436,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             'SZOV_WALLBOARD_STALE_MAX_SECONDS',
             'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS',
             'SZOV_WALLBOARD_LOCK_WAIT_SECONDS',
+            'SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS',
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE',
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL',
             '_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS',
@@ -573,6 +574,45 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
         self.assertIn('Обновление', result['error'])
         # Ждём не дольше настроенного лимита, а не таймаута прокси
         self.assertLess(waited, ns['SZOV_WALLBOARD_LOCK_WAIT_SECONDS'] + 2)
+
+    def test_failure_backoff_stops_hammering_a_dead_proxy(self):
+        """Прокси может лежать минутами — в это время к нему не ходим, отдаём кэш сразу."""
+        ns = self._namespace()
+        ns['_szov_wallboard_snapshot']()  # успешный снимок в кэше
+        calls_after_success = ns['_query_state']['calls']
+
+        attempts = {'n': 0}
+
+        def broken(sql, timeout=None):
+            attempts['n'] += 1
+            raise RuntimeError("Oktell proxy connect timeout")
+
+        ns['_oktell_query'] = broken
+        ns['_szov_wallboard_cache']['ts'] = time.time() - 60  # кэш просрочен
+        first = ns['_szov_wallboard_snapshot']()
+        self.assertTrue(first['stale'])
+        self.assertEqual(attempts['n'], 1, "первая попытка после просрочки должна состояться")
+
+        # Дальше — пауза: сколько бы ни спрашивали, к прокси не идём
+        for _ in range(5):
+            again = ns['_szov_wallboard_snapshot']()
+            self.assertTrue(again['stale'])
+        self.assertEqual(attempts['n'], 1, "во время паузы новых обращений к Oktell быть не должно")
+        self.assertEqual(ns['_query_state']['calls'], calls_after_success)
+
+    def test_backoff_expires_and_lets_the_snapshot_recover(self):
+        """После паузы попытка повторяется, и удачный ответ снимает признак сбоя."""
+        ns = self._namespace()
+        ns['_szov_wallboard_snapshot']()
+        ns['_szov_wallboard_cache']['ts'] = time.time() - 60
+        ns['_szov_wallboard_cache'].update(
+            failed_at=time.time() - (ns['SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS'] + 1),
+            error='Oktell не отвечает',
+        )
+        recovered = ns['_szov_wallboard_snapshot']()
+        self.assertFalse(recovered['stale'])
+        self.assertEqual(ns['_szov_wallboard_cache']['failed_at'], 0.0)
+        self.assertIsNone(ns['_szov_wallboard_cache']['error'])
 
     def test_lock_is_released_even_when_oktell_fails(self):
         """Иначе первая же ошибка навсегда заблокировала бы обновление снимка."""
