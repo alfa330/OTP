@@ -406,10 +406,11 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
 
     def _namespace(self, totals_row=None, state_rows=None, fail=False):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-        state = {'calls': 0}
+        state = {'calls': 0, 'timeouts': []}
 
-        def fake_query(sql):
+        def fake_query(sql, timeout=None):
             state['calls'] += 1
+            state['timeouts'].append(timeout)
             if fail:
                 raise RuntimeError("Oktell proxy HTTP 500")
             if 'A_UserStateHistory' in sql:
@@ -433,6 +434,8 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             'SZOV_WALLBOARD_DEPARTMENT_CODE',
             'SZOV_WALLBOARD_CACHE_TTL_SECONDS',
             'SZOV_WALLBOARD_STALE_MAX_SECONDS',
+            'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS',
+            'SZOV_WALLBOARD_LOCK_WAIT_SECONDS',
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE',
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL',
             '_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS',
@@ -520,7 +523,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
 
         broken_calls = {'n': 0}
 
-        def broken(sql):
+        def broken(sql, timeout=None):
             broken_calls['n'] += 1
             raise RuntimeError("Oktell proxy HTTP 500")
 
@@ -537,11 +540,53 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ns['_szov_wallboard_snapshot']()
 
+    def test_wallboard_uses_its_own_short_oktell_timeout(self):
+        """Прокси иногда висит на установке соединения десятки секунд; экрану ждать минуту нельзя."""
+        ns = self._namespace()
+        seen = []
+
+        def capturing(sql, timeout=None):
+            seen.append(timeout)
+            if 'A_UserStateHistory' in sql:
+                return []
+            return [dict(self.TOTALS_ROW)]
+
+        ns['_oktell_query'] = capturing
+        ns['_szov_wallboard_fetch_snapshot']()
+        self.assertEqual(seen, [ns['SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS']] * 2)
+        self.assertLess(ns['SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS'], 60)
+
+    def test_second_viewer_does_not_queue_behind_a_slow_refresh(self):
+        """Если снимок уже обновляется, второй зритель получает кэш, а не ждёт прокси."""
+        ns = self._namespace()
+        ns['_szov_wallboard_snapshot']()  # прогреваем кэш
+        ns['_szov_wallboard_cache']['ts'] = time.time() - 60  # кэш просрочен
+        ns['_szov_wallboard_lock'].acquire()  # имитируем «сосед уже тянет данные»
+        try:
+            started = time.time()
+            result = ns['_szov_wallboard_snapshot']()
+            waited = time.time() - started
+        finally:
+            ns['_szov_wallboard_lock'].release()
+        self.assertTrue(result['stale'])
+        self.assertEqual(result['today']['served'], 392)
+        self.assertIn('Обновление', result['error'])
+        # Ждём не дольше настроенного лимита, а не таймаута прокси
+        self.assertLess(waited, ns['SZOV_WALLBOARD_LOCK_WAIT_SECONDS'] + 2)
+
+    def test_lock_is_released_even_when_oktell_fails(self):
+        """Иначе первая же ошибка навсегда заблокировала бы обновление снимка."""
+        ns = self._namespace(fail=True)
+        with self.assertRaises(RuntimeError):
+            ns['_szov_wallboard_snapshot']()
+        self.assertTrue(ns['_szov_wallboard_lock'].acquire(blocking=False), "лок не отпущен")
+        ns['_szov_wallboard_lock'].release()
+
     def test_stale_window_expiry_raises_instead_of_showing_ancient_data(self):
         ns = self._namespace()
         ns['_szov_wallboard_snapshot']()
 
-        def broken(sql):
+        def broken(sql, timeout=None):
             raise RuntimeError("Oktell proxy HTTP 500")
 
         ns['_oktell_query'] = broken
@@ -693,7 +738,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
             self.assertIn(f"'{token}'", self.faicon, token)
 
     def test_view_polls_without_reloading_and_guards_overlap(self):
-        self.assertIn("const POLL_INTERVAL_MS = 10000;", self.view)
+        self.assertIn("const POLL_INTERVAL_MS = 15000;", self.view)
         self.assertIn("if (inFlightRef.current) return;", self.view)
         self.assertIn("new AbortController()", self.view)
         # Скрытую вкладку не опрашиваем

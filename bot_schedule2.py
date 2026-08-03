@@ -27382,15 +27382,19 @@ def _oktell_operator_model_gate(range_from, range_to, operator_ids):
     return operator_model_op_ids, _is_operator_model_day
 
 
-def _oktell_query(sql):
-    """Один read-only SELECT к прокси Oktell. Возвращает список dict (rows)."""
+def _oktell_query(sql, timeout=None):
+    """Один read-only SELECT к прокси Oktell. Возвращает список dict (rows).
+
+    timeout — переопределение общего OKTELL_API_TIMEOUT_SECONDS. Нужно интерактивным
+    потребителям (табло): прокси иногда держит установку соединения десятки секунд, и
+    для экрана лучше быстро сдаться и показать предыдущий снимок, чем ждать минуту."""
     if not _oktell_api_ready():
         raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
     resp = requests.post(
         OKTELL_API_URL,
         json={"sql": sql},
         headers={"X-API-Key": OKTELL_API_TOKEN},
-        timeout=OKTELL_API_TIMEOUT_SECONDS,
+        timeout=timeout or OKTELL_API_TIMEOUT_SECONDS,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Oktell proxy HTTP {resp.status_code}: {resp.text[:300]}")
@@ -28934,7 +28938,14 @@ def _oktell_billing_efficiency_workbook(params, report):
 SZOV_WALLBOARD_DEPARTMENT_CODE = 'szov'
 # Прокси Oktell низкоконкурентный: держим общий кэш на процесс, чтобы N открытых табло давали
 # не N запросов, а один. TTL чуть меньше клиентского интервала опроса.
-SZOV_WALLBOARD_CACHE_TTL_SECONDS = _env_int('SZOV_WALLBOARD_CACHE_TTL_SECONDS', 8, minimum=3, maximum=120)
+SZOV_WALLBOARD_CACHE_TTL_SECONDS = _env_int('SZOV_WALLBOARD_CACHE_TTL_SECONDS', 13, minimum=3, maximum=120)
+# Своё, короткое ожидание ответа прокси. Наблюдалось (2026-08-03), что с Render установка
+# соединения к прокси иногда тянется 37-60 с, хотя обычно это 0,1 с. Для экрана на стене
+# бессмысленно ждать минуту: быстрее сдаться и показать предыдущий снимок с пометкой.
+SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS = _env_int('SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS', 20, minimum=5, maximum=120)
+# Сколько ждать освободившийся лок обновления. Если другой поток уже тянет снимок, второму
+# нет смысла стоять в очереди — он отдаст текущий кэш, а не займёт поток waitress на минуту.
+SZOV_WALLBOARD_LOCK_WAIT_SECONDS = _env_int('SZOV_WALLBOARD_LOCK_WAIT_SECONDS', 3, minimum=1, maximum=60)
 # Сколько секунд отдавать последний удачный снимок, если Oktell перестал отвечать. Табло на стене
 # не должно гаснуть из-за одной сетевой ошибки — показываем данные с пометкой «устарели».
 SZOV_WALLBOARD_STALE_MAX_SECONDS = _env_int('SZOV_WALLBOARD_STALE_MAX_SECONDS', 600, minimum=60, maximum=3600)
@@ -29180,9 +29191,10 @@ def _szov_wallboard_build_operators(raw_rows):
 def _szov_wallboard_fetch_snapshot():
     """Свежий снимок табло. Два последовательных запроса к Oktell, без параллелизма."""
     sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
-    totals_rows = _oktell_query(_oktell_wallboard_totals_sql(sl_seconds))
+    timeout = SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS
+    totals_rows = _oktell_query(_oktell_wallboard_totals_sql(sl_seconds), timeout=timeout)
     totals = (totals_rows or [{}])[0] or {}
-    state_rows = _oktell_query(_oktell_wallboard_operator_states_sql())
+    state_rows = _oktell_query(_oktell_wallboard_operator_states_sql(), timeout=timeout)
     operators = _szov_wallboard_build_operators(state_rows)
 
     arrived = _szov_wallboard_int(totals.get('arrived'))
@@ -29236,29 +29248,45 @@ def _szov_wallboard_snapshot():
     """Снимок с общим TTL-кэшем на процесс.
 
     Табло опрашивают несколько человек одновременно (и оно висит на экране весь день), поэтому
-    к Oktell ходит только один запрос на TTL, под локом. Если Oktell отвалился — отдаём последний
-    удачный снимок с stale=True, чтобы экран на стене не гас."""
-    now = time.time()
+    к Oktell ходит только один запрос на TTL, под локом. Если Oktell отвалился или уже обновляет
+    сосед — отдаём последний удачный снимок с stale=True, чтобы экран на стене не гас и чтобы
+    не держать поток waitress в ожидании медленного прокси."""
+
+    def _fresh(payload, at):
+        return dict(payload, stale=False, age_seconds=int(max(0, time.time() - at)))
+
+    def _stale(payload, at, reason):
+        return dict(payload, stale=True, age_seconds=int(max(0, time.time() - at)), error=reason)
+
     cached = _szov_wallboard_cache.get('payload')
-    if cached is not None and now - _szov_wallboard_cache['ts'] < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
-        return dict(cached, stale=False, age_seconds=int(now - _szov_wallboard_cache['ts']))
-    with _szov_wallboard_lock:
+    cached_at = _szov_wallboard_cache['ts']
+    if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
+        return _fresh(cached, cached_at)
+
+    if not _szov_wallboard_lock.acquire(timeout=SZOV_WALLBOARD_LOCK_WAIT_SECONDS):
+        # Обновление уже идёт. Ждать нечего: отдаём что есть, следующий опрос подхватит свежее.
+        if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_STALE_MAX_SECONDS:
+            return _stale(cached, cached_at, 'Обновление ещё идёт')
+        raise RuntimeError("Табло СЗоВ: снимок обновляется, данных пока нет")
+    try:
         # Пока ждали лок, соседний поток мог уже обновить кэш.
-        now = time.time()
         cached = _szov_wallboard_cache.get('payload')
-        if cached is not None and now - _szov_wallboard_cache['ts'] < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
-            return dict(cached, stale=False, age_seconds=int(now - _szov_wallboard_cache['ts']))
+        cached_at = _szov_wallboard_cache['ts']
+        if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
+            return _fresh(cached, cached_at)
         try:
             payload = _szov_wallboard_fetch_snapshot()
         except Exception as exc:
-            age = now - _szov_wallboard_cache['ts'] if cached is not None else None
+            age = time.time() - cached_at if cached is not None else None
             if cached is not None and age is not None and age < SZOV_WALLBOARD_STALE_MAX_SECONDS:
                 logging.warning("Табло СЗоВ: Oktell недоступен, отдаём снимок %.0f с назад: %s", age, exc)
-                return dict(cached, stale=True, age_seconds=int(age), error=str(exc)[:200])
+                return _stale(cached, cached_at, str(exc)[:200])
             raise
         payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
         _szov_wallboard_cache.update(ts=time.time(), payload=payload)
-        return dict(payload, stale=False, age_seconds=0)
+        return _fresh(payload, _szov_wallboard_cache['ts'])
+    finally:
+        _szov_wallboard_lock.release()
 
 
 @app.route('/api/szov_wallboard/snapshot', methods=['GET', 'OPTIONS'])

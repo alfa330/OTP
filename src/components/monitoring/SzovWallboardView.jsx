@@ -18,7 +18,9 @@ import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
  * чтобы табло и отчёт не расходились в цифрах.
  */
 
-const POLL_INTERVAL_MS = 10000;
+// Опрос под TTL серверного кэша (13 с). Прокси Oktell низкоконкурентный и иногда подвисает
+// на установке соединения, поэтому лишний раз его не дёргаем: 15 с для стены достаточно.
+const POLL_INTERVAL_MS = 15000;
 const FULLSCREEN_Z = 150;
 
 /*
