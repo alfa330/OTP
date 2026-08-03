@@ -21,9 +21,16 @@ def _headers() -> dict:
 
 
 def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=False,
-               effort=None, thinking=None) -> dict:
+               cache_ttl=None, effort=None, thinking=None) -> dict:
     """Тело запроса /v1/messages. cache_system=True вешает prompt-cache на системный блок
     (повторяющийся промпт: и в обычных вызовах, и в батче — скидки складываются).
+
+    cache_ttl задаёт время жизни записи кеша ('5m' по умолчанию у API, '1h' — дороже
+    на запись, 2x против 1.25x, но переживает длинный прогон). Для батча это решающе:
+    Batch API не гарантирует порядок обработки, поэтому сортировка заявок по
+    направлению не спасает — при 5 минутах запись протухает раньше, чем придёт
+    следующий звонок того же направления, и системный блок пишется заново почти
+    на каждом звонке (замер 2026-08: попаданий 25%, 27 записей на 9 чтений).
 
     user — строка или список content-блоков (для картинок: {"type":"image", ...}).
     effort/thinking переопределяют дефолты для дешёвых вспомогательных вызовов
@@ -32,6 +39,8 @@ def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=Fal
     sys_block = {"type": "text", "text": system}
     if cache_system:
         sys_block["cache_control"] = {"type": "ephemeral"}
+        if cache_ttl:
+            sys_block["cache_control"]["ttl"] = cache_ttl
     body = {
         "model": model,
         "max_tokens": max_tokens,
