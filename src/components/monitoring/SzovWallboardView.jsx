@@ -9,8 +9,8 @@ import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
  *
  * Экран рассчитан на вывод на стену, поэтому:
  *   - обновляется сам, без перезагрузки страницы (опрос раз в 10 с, один общий снапшот);
- *   - три уровня размера цифр (hero / md / sm) задают иерархию: что важно оперативно,
- *     видно с другого конца зала, итоги дня — спокойнее;
+ *   - показатели собраны в сплошные панели без зазоров: соседние ячейки делит волосяная
+ *     линия, поэтому цифрам достаётся вся ширина и подписи рядов не нужны;
  *   - цветом помечаем только то, что несёт смысл: AR вне целевого коридора и статусы
  *     операторов (у них цвет задан владельцем, чтобы различать причины с расстояния).
  *
@@ -91,17 +91,68 @@ const valueFontSize = (size, scale) => {
     return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
 };
 
-const LABEL_CLASS = 'text-[12px] font-semibold uppercase tracking-wide text-slate-500';
-const SECTION_LABEL_CLASS = 'mb-2.5 px-0.5 text-[13px] font-semibold uppercase tracking-wider text-slate-400';
+const LABEL_CLASS = 'text-[13px] font-semibold uppercase tracking-wide text-slate-500';
+const HAIRLINE = 'divide-slate-200/70';
+const HAIRLINE_TOP = 'border-t border-slate-200/70';
 
-const Tile = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1 }) => (
-    <div className={`${iosCard} flex flex-col gap-1.5 p-4`}>
-        <div className={LABEL_CLASS}>{label}</div>
+/*
+ * Показатели сгруппированы в сплошные панели: между соседними ячейками нет зазора,
+ * их делит волосяная линия. Так цифрам достаётся вся ширина, а группы читаются
+ * без подписей рядов — сама панель и есть группа.
+ */
+const Panel = ({ children }) => (
+    <div className={`${iosCard} overflow-hidden`}>{children}</div>
+);
+
+const Row = ({ cols, children, divided = false }) => (
+    <div className={`grid ${cols} divide-x ${HAIRLINE} ${divided ? HAIRLINE_TOP : ''}`}>
+        {children}
+    </div>
+);
+
+/*
+ * Полупрозрачная иконка-подложка. Нужна ряду операторов: он про людей, а не про звонки,
+ * и водяной знак отделяет его от остальных панелей, ничего не загораживая.
+ * strokeWidth крупнее обычного — тонкий контур на такой прозрачности просто пропадает.
+ */
+const CellWatermark = ({ icon, scale = 1 }) => (
+    <FaIcon
+        className={`fas ${icon} pointer-events-none absolute -bottom-3 -right-3 text-slate-900/[0.05]`}
+        strokeWidth={2.5}
+        aria-hidden="true"
+        style={{ fontSize: `clamp(${(4 * scale).toFixed(2)}rem, ${(7 * scale).toFixed(2)}vw, ${(7.5 * scale).toFixed(2)}rem)` }}
+    />
+);
+
+const Cell = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1, icon = null }) => (
+    <div className="relative flex min-w-0 flex-col gap-2 overflow-hidden px-5 py-5">
+        {icon ? <CellWatermark icon={icon} scale={scale} /> : null}
+        <div className={`relative ${LABEL_CLASS}`}>{label}</div>
         <div
-            className={`font-semibold tabular-nums leading-[1.05] ${VALUE_TONE[tone] || VALUE_TONE.neutral}`}
+            className={`relative font-semibold tabular-nums leading-[1.02] ${VALUE_TONE[tone] || VALUE_TONE.neutral}`}
             style={{ fontSize: valueFontSize(size, scale) }}
         >
             {value}
+        </div>
+        {hint ? <div className="relative text-[12px] leading-snug text-slate-400">{hint}</div> : null}
+    </div>
+);
+
+/*
+ * Пара «поступило / принято» в одной ячейке. Разрыв между этими числами и есть потери,
+ * поэтому принятые красим тоном AR: видно не только сколько взяли, но и укладывается ли
+ * доля потерь в норму.
+ */
+const PairCell = ({ label, first, second, secondTone = 'neutral', hint, size = 'hero', scale = 1 }) => (
+    <div className="flex min-w-0 flex-col gap-2 px-5 py-5">
+        <div className={LABEL_CLASS}>{label}</div>
+        <div
+            className="font-semibold tabular-nums leading-[1.02]"
+            style={{ fontSize: valueFontSize(size, scale) }}
+        >
+            <span className="text-slate-900">{first}</span>
+            <span className="mx-2 font-normal text-slate-300">/</span>
+            <span className={VALUE_TONE[secondTone] || VALUE_TONE.neutral}>{second}</span>
         </div>
         {hint ? <div className="text-[12px] leading-snug text-slate-400">{hint}</div> : null}
     </div>
@@ -135,7 +186,7 @@ const StatusStrip = ({ now, scale = 1 }) => {
         recall: now.operators_on_recall,
     };
     return (
-        <div className={`${iosCard} grid grid-cols-4 divide-x divide-slate-200/70`}>
+        <div className={`grid grid-cols-4 divide-x ${HAIRLINE} ${HAIRLINE_TOP}`}>
             {STATUS_ORDER.map((key) => {
                 const style = STATUS_STYLE[key];
                 const value = Number(valueOf[key]) || 0;
@@ -217,11 +268,11 @@ const WallboardBody = ({ snapshot, scale }) => {
     const freeTone = queueTone;
 
     return (
-        <div className="space-y-6" style={{ fontFamily: APPLE_FONT }}>
-            <section>
-                <div className={SECTION_LABEL_CLASS}>Сейчас на линии</div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                    <Tile
+        <div className="space-y-3" style={{ fontFamily: APPLE_FONT }}>
+            {/* Сейчас на линии — по этим трём цифрам принимают решение сию секунду. */}
+            <Panel>
+                <Row cols="grid-cols-1 sm:grid-cols-3">
+                    <Cell
                         label="Звонков в очереди"
                         value={formatInt(now.queue)}
                         hint="Ждут ответа оператора"
@@ -229,7 +280,7 @@ const WallboardBody = ({ snapshot, scale }) => {
                         size="hero"
                         scale={scale}
                     />
-                    <Tile
+                    <Cell
                         label="Максимальное ожидание"
                         value={formatDuration(waitNow)}
                         hint={`Самый долгий в очереди · порог ${slThreshold} с`}
@@ -237,7 +288,7 @@ const WallboardBody = ({ snapshot, scale }) => {
                         size="hero"
                         scale={scale}
                     />
-                    <Tile
+                    <Cell
                         label="AR на текущий момент"
                         value={formatPercent(today.ar_ratio)}
                         hint={`Норма ${String(AR_TARGET_MIN_PERCENT).replace('.', ',')}–${String(AR_TARGET_MAX_PERCENT).replace('.', ',')}%`}
@@ -245,59 +296,61 @@ const WallboardBody = ({ snapshot, scale }) => {
                         size="hero"
                         scale={scale}
                     />
-                </div>
-            </section>
+                </Row>
+            </Panel>
 
-            <section>
-                <div className={SECTION_LABEL_CLASS}>Звонки с начала дня</div>
-                <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-                    <Tile
-                        label="Всего входящих"
-                        value={formatInt(today.total)}
+            {/* Звонки с начала дня: первый ряд — сколько, второй — как долго ждали. */}
+            <Panel>
+                <Row cols="grid-cols-1 sm:grid-cols-2">
+                    <PairCell
+                        label="Входящих / Принято"
+                        first={formatInt(today.total)}
+                        second={formatInt(today.served)}
+                        secondTone={arTone(today.ar_ratio)}
                         hint={`Из них ${formatInt(today.greet_drop)} сброшено на приветствии`}
-                        size="sm"
+                        size="hero"
                         scale={scale}
                     />
-                    <Tile label="Принято" value={formatInt(today.served)} hint="Ответил оператор" size="sm" scale={scale} />
-                    <Tile label="Потеряно" value={formatInt(today.lost)} hint="Не дождались в очереди" size="sm" scale={scale} />
-                    <Tile
+                    <Cell label="Потеряно" value={formatInt(today.lost)} hint="Не дождались в очереди" size="hero" scale={scale} />
+                </Row>
+                <Row cols="grid-cols-1 sm:grid-cols-2" divided>
+                    <Cell
                         label="Среднее ожидание"
                         value={formatDuration(today.avg_wait_seconds)}
                         hint="В очереди, по всем дошедшим"
-                        size="sm"
+                        size="hero"
                         scale={scale}
                     />
-                    <Tile
+                    <Cell
                         label="Максимальное за день"
                         value={formatDuration(today.max_wait_seconds)}
-                        hint="Самое долгое ожидание"
-                        size="sm"
+                        hint="Самое долгое ожидание в очереди"
+                        size="hero"
                         scale={scale}
                     />
-                </div>
-            </section>
+                </Row>
+            </Panel>
 
-            <section>
-                <div className={SECTION_LABEL_CLASS}>Операторы</div>
-                <div className="grid grid-cols-3 gap-3">
-                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" tone={freeTone} size="lg" scale={scale} />
-                    <Tile label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" size="lg" scale={scale} />
-                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" size="lg" scale={scale} />
-                </div>
-                <div className="mt-2.5">
-                    <StatusStrip now={now} scale={scale} />
-                </div>
-                {Number(now.operators_other) > 0 ? (
-                    <div className="mt-2 px-1 text-[12px] text-slate-400">
-                        Прочие статусы (резерв, нет на месте): {formatInt(now.operators_other)}
-                    </div>
-                ) : null}
-            </section>
+            {/* Операторы: сколько людей и сколько из них могут взять звонок, ниже — причины. */}
+            <Panel>
+                <Row cols="grid-cols-1 sm:grid-cols-3">
+                    <Cell label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" tone={freeTone} icon="fa-user-check" scale={scale} />
+                    <Cell label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" icon="fa-headset" scale={scale} />
+                    <Cell label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" icon="fa-users" scale={scale} />
+                </Row>
+                <StatusStrip now={now} scale={scale} />
+            </Panel>
 
-            <section className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {Number(now.operators_other) > 0 ? (
+                <div className="px-1 text-[12px] text-slate-400">
+                    Прочие статусы (резерв, нет на месте): {formatInt(now.operators_other)}
+                </div>
+            ) : null}
+
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <OperatorList title="Перерывы" icon="fa-mug-hot" entries={now.break_list} scale={scale} showReason />
                 <OperatorList title="Перезвон" icon="fa-phone-volume" entries={now.recall_list} scale={scale} />
-            </section>
+            </div>
         </div>
     );
 };
