@@ -249,23 +249,6 @@ const WallboardBody = ({ snapshot, scale }) => {
             </section>
 
             <section>
-                <div className={SECTION_LABEL_CLASS}>Операторы</div>
-                <div className="grid grid-cols-3 gap-3">
-                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" tone={freeTone} size="lg" scale={scale} />
-                    <Tile label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" size="lg" scale={scale} />
-                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" size="lg" scale={scale} />
-                </div>
-                <div className="mt-2.5">
-                    <StatusStrip now={now} scale={scale} />
-                </div>
-                {Number(now.operators_other) > 0 ? (
-                    <div className="mt-2 px-1 text-[12px] text-slate-400">
-                        Прочие статусы (резерв, нет на месте): {formatInt(now.operators_other)}
-                    </div>
-                ) : null}
-            </section>
-
-            <section>
                 <div className={SECTION_LABEL_CLASS}>Звонки с начала дня</div>
                 <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
                     <Tile
@@ -292,6 +275,23 @@ const WallboardBody = ({ snapshot, scale }) => {
                         scale={scale}
                     />
                 </div>
+            </section>
+
+            <section>
+                <div className={SECTION_LABEL_CLASS}>Операторы</div>
+                <div className="grid grid-cols-3 gap-3">
+                    <Tile label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" tone={freeTone} size="lg" scale={scale} />
+                    <Tile label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" size="lg" scale={scale} />
+                    <Tile label="Онлайн" value={formatInt(now.operators_online)} hint="Всего на линии" size="lg" scale={scale} />
+                </div>
+                <div className="mt-2.5">
+                    <StatusStrip now={now} scale={scale} />
+                </div>
+                {Number(now.operators_other) > 0 ? (
+                    <div className="mt-2 px-1 text-[12px] text-slate-400">
+                        Прочие статусы (резерв, нет на месте): {formatInt(now.operators_other)}
+                    </div>
+                ) : null}
             </section>
 
             <section className="grid grid-cols-1 gap-3 lg:grid-cols-2">
