@@ -4,7 +4,7 @@ import CustomSelect from '../ui/CustomSelect';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
-    IosBadge, IosModal,
+    IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 
 /*
@@ -30,6 +30,16 @@ const EMPTY_FORM = {
     sip_number: '', sip_password: '', sip_domain: '',
     autodial_number: '', autodial_password: '', autodial_domain: '',
 };
+
+// Массово меняются только пароль и домен: номера у каждого свои.
+const BULK_FIELDS = [
+    { key: 'sip_domain', label: 'Домен основного номера', secret: false },
+    { key: 'sip_password', label: 'Пароль основного номера', secret: true },
+    { key: 'autodial_domain', label: 'Домен автодозвона', secret: false },
+    { key: 'autodial_password', label: 'Пароль автодозвона', secret: true },
+];
+
+const EMPTY_BULK = BULK_FIELDS.reduce((acc, f) => ({ ...acc, [f.key]: { on: false, value: '' } }), {});
 
 const formFromOperator = (op) => ({
     sip_number: op?.sip_number || '',
@@ -93,6 +103,13 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const [form, setForm] = useState({ ...EMPTY_FORM });
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [saving, setSaving] = useState(false);
+
+    // Множественный выбор: Ctrl/⌘ + клик — по одному, Shift + клик — диапазон.
+    const [selected, setSelected] = useState(() => new Set());
+    const [bulkOpen, setBulkOpen] = useState(false);
+    const [bulkForm, setBulkForm] = useState(EMPTY_BULK);
+    const [bulkSaving, setBulkSaving] = useState(false);
+    const anchorRef = useRef(null);
 
     const [commonForm, setCommonForm] = useState({ sip_server: '', base_password: '', autodial_code: '' });
     const [savingCommon, setSavingCommon] = useState(false);
@@ -238,6 +255,38 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         };
     }, [editing, operators, form.sip_number, form.autodial_number]);
 
+    const selectedOperators = useMemo(
+        () => operators.filter((op) => selected.has(op.id)),
+        [operators, selected]
+    );
+
+    /* ─── выбор строк ─── */
+    const toggleSelected = (id) => setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+    });
+
+    const handleRowClick = (event, op, index) => {
+        if (event.ctrlKey || event.metaKey) {
+            anchorRef.current = index;
+            toggleSelected(op.id);
+            return;
+        }
+        if (event.shiftKey) {
+            const from = anchorRef.current == null ? index : anchorRef.current;
+            const [start, end] = from <= index ? [from, index] : [index, from];
+            setSelected((prev) => {
+                const next = new Set(prev);
+                for (let i = start; i <= end; i += 1) next.add(filtered[i].id);
+                return next;
+            });
+            anchorRef.current = index;
+            return;
+        }
+        openEditor(op);
+    };
+
     /* ─── действия ─── */
     const openEditor = (op) => {
         setEditing(op);
@@ -267,6 +316,37 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             showToastRef.current?.(e.message, 'error');
         } finally {
             setSaving(false);
+        }
+    };
+
+    const openBulk = () => { setBulkForm(EMPTY_BULK); setBulkOpen(true); };
+
+    const bulkChanges = BULK_FIELDS.filter((f) => bulkForm[f.key].on);
+
+    const applyBulk = async () => {
+        if (!canEdit || !bulkChanges.length || !selected.size) return;
+        setBulkSaving(true);
+        try {
+            const body = { user_ids: [...selected] };
+            bulkChanges.forEach((f) => { body[f.key] = bulkForm[f.key].value.trim(); });
+            const resp = await fetch(`${apiBaseUrl}/api/sip_config/operators/bulk`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            const updated = new Map((data.operators || []).map((op) => [op.id, op]));
+            setOperators((prev) => prev.map((op) => (updated.has(op.id) ? { ...op, ...updated.get(op.id) } : op)));
+            historyLoadedRef.current = false;
+            showToastRef.current?.(`Изменено сотрудников: ${updated.size}`, 'success');
+            setBulkOpen(false);
+            setSelected(new Set());
+        } catch (e) {
+            showToastRef.current?.(e.message, 'error');
+        } finally {
+            setBulkSaving(false);
         }
     };
 
@@ -382,6 +462,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         <button onClick={fetchOperators} disabled={loading} className={iosBtnGhost} title="Обновить">
                             <FaIcon className={`fas fa-sync-alt ${loading ? 'animate-spin' : ''}`} />
                         </button>
+                        {!selected.size && filtered.length > 1 && (
+                            <span className="ml-auto hidden text-[11.5px] text-slate-400 lg:inline">
+                                Ctrl + клик — выбрать несколько, Shift + клик — диапазон
+                            </span>
+                        )}
                     </div>
                 )}
             </div>
@@ -399,18 +484,26 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     </div>
                 ) : (
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {filtered.map((op) => {
+                        {filtered.map((op, index) => {
                             const isDuplicate = op.sip_number && duplicateNumbers.has(op.sip_number.trim());
                             const isAutodialDuplicate = op.autodial_number && duplicateNumbers.has(op.autodial_number.trim());
+                            const isSelected = selected.has(op.id);
                             return (
                                 <button
                                     key={op.id}
                                     type="button"
-                                    onClick={() => openEditor(op)}
-                                    className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                                    onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
+                                    onClick={(e) => handleRowClick(e, op, index)}
+                                    className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${
+                                        isSelected ? 'bg-blue-50/70 hover:bg-blue-50' : 'hover:bg-slate-50'
+                                    }`}
                                 >
-                                    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-[12.5px] font-semibold text-slate-500">
-                                        {(op.name || '?').trim().charAt(0).toUpperCase()}
+                                    <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full text-[12.5px] font-semibold transition ${
+                                        isSelected ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'
+                                    }`}>
+                                        {isSelected
+                                            ? <FaIcon className="fas fa-check" style={{ width: 13, height: 13 }} />
+                                            : (op.name || '?').trim().charAt(0).toUpperCase()}
                                     </div>
                                     <div className="min-w-0 flex-1">
                                         <div className="flex items-center gap-2">
@@ -450,6 +543,39 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         })}
                     </div>
                 )
+            )}
+
+            {/* Панель выбранных: появляется, когда отметили хотя бы одного */}
+            {tab === 'operators' && selected.size > 0 && (
+                <div className="pointer-events-none fixed inset-x-0 bottom-6 z-30 flex justify-center px-4">
+                    <div className="pointer-events-auto flex items-center gap-1.5 rounded-2xl bg-slate-900/90 px-3 py-2 text-white shadow-2xl ring-1 ring-white/10 backdrop-blur-xl">
+                        <span className="px-1.5 text-[13px] font-medium">Выбрано: {selected.size}</span>
+                        {canEdit && (
+                            <button
+                                type="button"
+                                onClick={openBulk}
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-[13px] font-semibold transition hover:bg-blue-500 active:scale-[0.98]"
+                            >
+                                <FaIcon className="fas fa-key" style={{ width: 12, height: 12 }} />
+                                Пароль и домен
+                            </button>
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => setSelected(new Set(filtered.map((op) => op.id)))}
+                            className="rounded-xl px-3 py-1.5 text-[13px] font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
+                        >
+                            Все ({filtered.length})
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => { setSelected(new Set()); anchorRef.current = null; }}
+                            className="rounded-xl px-3 py-1.5 text-[13px] font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
+                        >
+                            Снять
+                        </button>
+                    </div>
+                </div>
             )}
 
             {/* Общие */}
@@ -587,6 +713,91 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     )}
                 </div>
             )}
+
+            {/* Массовое изменение пароля и домена */}
+            <IosModal
+                open={bulkOpen}
+                onClose={() => setBulkOpen(false)}
+                title="Пароль и домен для выбранных"
+                subtitle={`Сотрудников: ${selected.size}`}
+                footer={(
+                    <>
+                        <button type="button" onClick={() => setBulkOpen(false)} className={iosBtnSecondary}>Отмена</button>
+                        <button
+                            type="button"
+                            onClick={applyBulk}
+                            disabled={bulkSaving || !bulkChanges.length}
+                            className={iosBtnPrimary}
+                        >
+                            <FaIcon className={bulkSaving ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />
+                            Применить к {selected.size}
+                        </button>
+                    </>
+                )}
+            >
+                <div className="space-y-4">
+                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                        {BULK_FIELDS.map((field) => {
+                            const state = bulkForm[field.key];
+                            return (
+                                <div key={field.key} className="px-4 py-3">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <span className="text-[13.5px] font-medium text-slate-700">{field.label}</span>
+                                        <IosToggle
+                                            checked={state.on}
+                                            disabled={!canEdit}
+                                            onChange={(v) => setBulkForm((f) => ({ ...f, [field.key]: { ...f[field.key], on: v } }))}
+                                        />
+                                    </div>
+                                    {state.on && (
+                                        <div className="mt-2">
+                                            {field.secret ? (
+                                                <SecretInput
+                                                    value={state.value}
+                                                    onChange={(v) => setBulkForm((f) => ({ ...f, [field.key]: { ...f[field.key], value: v } }))}
+                                                    placeholder="пусто — вернуть общий"
+                                                    disabled={!canEdit}
+                                                />
+                                            ) : (
+                                                <input
+                                                    type="text"
+                                                    value={state.value}
+                                                    onChange={(e) => setBulkForm((f) => ({ ...f, [field.key]: { ...f[field.key], value: e.target.value } }))}
+                                                    placeholder="пусто — вернуть общий"
+                                                    disabled={!canEdit}
+                                                    className={iosInput}
+                                                />
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <p className="px-1 text-[11.5px] text-slate-500">
+                        Меняются только включённые поля, остальное у каждого остаётся своим.
+                        Пустое значение возвращает общие: домен {settings.sip_server || '—'} и пароль «база + номер».
+                        Номера массово не меняются — они у каждого свои.
+                    </p>
+
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Кого меняем</div>
+                        <div className="flex flex-wrap gap-1.5">
+                            {selectedOperators.slice(0, 12).map((op) => (
+                                <span key={op.id} className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[11.5px] text-slate-600">
+                                    {op.name}
+                                    {op.sip_number && <span className="font-mono text-slate-400">{op.sip_number}</span>}
+                                </span>
+                            ))}
+                            {selectedOperators.length > 12 && (
+                                <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-[11.5px] text-slate-500">
+                                    ещё {selectedOperators.length - 12}
+                                </span>
+                            )}
+                        </div>
+                    </section>
+                </div>
+            </IosModal>
 
             {/* Карточка сотрудника */}
             <IosModal

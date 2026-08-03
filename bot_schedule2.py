@@ -20926,6 +20926,62 @@ def sip_config_operators_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _sip_target_in_scope(target, department_ids, supervisor_id) -> bool:
+    """Попадает ли сотрудник в область видимости запросившего."""
+    if department_ids is None:
+        return True
+    dept = target.get('department_id')
+    if dept is not None and int(dept) in set(department_ids):
+        return True
+    if supervisor_id and target.get('supervisor_id') is not None:
+        return int(target['supervisor_id']) == int(supervisor_id)
+    return False
+
+
+@app.route('/api/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])
+@require_api_key
+def sip_config_operators_bulk_endpoint():
+    """Массово проставить персональные пароль/домен выбранным сотрудникам.
+
+    Номера остаются персональными — массово меняются только пароль и домен
+    (основного номера и номера автодозвона). Пустое значение возвращает общие."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        payload = request.get_json(silent=True) or {}
+        raw_ids = payload.get('user_ids') or []
+        try:
+            user_ids = sorted({int(uid) for uid in raw_ids})
+        except (TypeError, ValueError):
+            return jsonify({"error": "Некорректный список сотрудников"}), 400
+        if not user_ids:
+            return jsonify({"error": "Не выбран ни один сотрудник"}), 400
+
+        targets = db.get_sip_operators_by_ids(user_ids)
+        if len(targets) != len(user_ids):
+            return jsonify({"error": "Часть сотрудников не найдена"}), 404
+        if any(t.get('role') not in ('operator', 'trainee') for t in targets):
+            return jsonify({"error": "SIP-аккаунты ведём только операторам и стажёрам"}), 400
+        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
+        if any(not _sip_target_in_scope(t, department_ids, supervisor_id) for t in targets):
+            return jsonify({"error": "В выборке есть сотрудники не из вашего отдела"}), 403
+
+        operators = db.bulk_update_user_sip_overrides(user_ids, payload, changed_by=requester_id)
+        return jsonify({"status": "success", "operators": operators}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error in sip_config bulk update: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/sip_config/operators/<int:target_user_id>', methods=['PUT', 'OPTIONS'])
 @require_api_key
 def sip_config_operator_update_endpoint(target_user_id):
@@ -20947,13 +21003,8 @@ def sip_config_operator_update_endpoint(target_user_id):
         if target.get('role') not in ('operator', 'trainee'):
             return jsonify({"error": "SIP-аккаунты ведём только операторам и стажёрам"}), 400
         department_ids, supervisor_id = _sip_department_scope(requester_id, role)
-        if department_ids is not None:
-            target_dept = target.get('department_id')
-            in_scope = target_dept is not None and int(target_dept) in set(department_ids)
-            if not in_scope and supervisor_id and target.get('supervisor_id') is not None:
-                in_scope = int(target['supervisor_id']) == int(supervisor_id)
-            if not in_scope:
-                return jsonify({"error": "Сотрудник не из вашего отдела"}), 403
+        if not _sip_target_in_scope(target, department_ids, supervisor_id):
+            return jsonify({"error": "Сотрудник не из вашего отдела"}), 403
         payload = request.get_json(silent=True) or {}
         operator = db.save_user_sip_settings(target_user_id, payload, changed_by=requester_id)
         return jsonify({"status": "success", "operator": operator}), 200

@@ -21208,6 +21208,16 @@ class Database:
             row = cur.fetchone()
         return self._sip_operator_row(row) if row else None
 
+    def get_sip_operators_by_ids(self, user_ids) -> list:
+        """Карточки нескольких сотрудников одним запросом (массовые операции)."""
+        ids = sorted({int(u) for u in (user_ids or [])})
+        if not ids:
+            return []
+        with self._get_cursor() as cur:
+            cur.execute(f"{self._SIP_OPERATOR_SELECT} WHERE u.id = ANY(%s) ORDER BY u.name", (ids,))
+            rows = cur.fetchall()
+        return [self._sip_operator_row(r) for r in rows]
+
     def find_sip_number_owners(self, numbers, exclude_user_id=None) -> dict:
         """{номер: {'user_id', 'name', 'kind'}} — кто уже занял эти номера.
 
@@ -21335,6 +21345,97 @@ class Database:
                 "autodial_domain": autodial_domain,
             })))
         return self.get_sip_operator(user_id)
+
+    _SIP_OVERRIDE_FIELDS = ('sip_password', 'sip_domain', 'autodial_password', 'autodial_domain')
+
+    def bulk_update_user_sip_overrides(self, user_ids, payload: dict, changed_by=None) -> list:
+        """Массово проставить персональные пароль/домен выбранным сотрудникам.
+
+        Меняем только переданные поля — остальные (в том числе номера, они
+        уникальны у каждого) остаются как есть. Пустое значение = «вернуть
+        общие»; если персональных значений не осталось, строку удаляем.
+        Всё одной транзакцией и батчами, без запроса на каждого сотрудника.
+        """
+        ids = sorted({int(u) for u in (user_ids or [])})
+        if not ids:
+            raise ValueError("Не выбран ни один сотрудник")
+        payload = payload or {}
+        fields = {
+            key: str(payload[key]).strip()
+            for key in self._SIP_OVERRIDE_FIELDS
+            if payload.get(key) is not None
+        }
+        if not fields:
+            raise ValueError("Не выбрано ни одного поля для изменения")
+
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT u.id,
+                       COALESCE(s.sip_password, ''), COALESCE(s.sip_domain, ''),
+                       COALESCE(s.autodial_number, ''), COALESCE(s.autodial_password, ''),
+                       COALESCE(s.autodial_domain, '')
+                FROM users u
+                LEFT JOIN user_sip_settings s ON s.user_id = u.id
+                WHERE u.id = ANY(%s)
+            """, (ids,))
+            current = {
+                r[0]: {
+                    "sip_password": r[1], "sip_domain": r[2], "autodial_number": r[3],
+                    "autodial_password": r[4], "autodial_domain": r[5],
+                }
+                for r in cur.fetchall()
+            }
+
+            upserts, deletes, history = [], [], []
+            for user_id in ids:
+                before = current.get(user_id)
+                if before is None:
+                    continue
+                after = {**before, **fields}
+                if after == before:
+                    continue
+                if any(after.values()):
+                    upserts.append((
+                        user_id, after['sip_password'], after['sip_domain'],
+                        after['autodial_number'], after['autodial_password'],
+                        after['autodial_domain'], changed_by,
+                    ))
+                else:
+                    deletes.append(user_id)
+                history.append((changed_by, user_id, json.dumps({
+                    "sip_password": self._mask_sip_secret(after['sip_password']),
+                    "sip_domain": after['sip_domain'],
+                    "autodial_number": after['autodial_number'],
+                    "autodial_password": self._mask_sip_secret(after['autodial_password']),
+                    "autodial_domain": after['autodial_domain'],
+                    "bulk": True,
+                })))
+
+            if upserts:
+                execute_values(cur, """
+                    INSERT INTO user_sip_settings (
+                        user_id, sip_password, sip_domain,
+                        autodial_number, autodial_password, autodial_domain, updated_by, updated_at)
+                    VALUES %s
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        sip_password = EXCLUDED.sip_password,
+                        sip_domain = EXCLUDED.sip_domain,
+                        autodial_number = EXCLUDED.autodial_number,
+                        autodial_password = EXCLUDED.autodial_password,
+                        autodial_domain = EXCLUDED.autodial_domain,
+                        updated_by = EXCLUDED.updated_by,
+                        updated_at = EXCLUDED.updated_at
+                """, upserts,
+                    template="(%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))")
+            if deletes:
+                cur.execute("DELETE FROM user_sip_settings WHERE user_id = ANY(%s)", (deletes,))
+            if history:
+                execute_values(cur, """
+                    INSERT INTO sip_config_history (changed_by, target_user_id, settings)
+                    VALUES %s
+                """, history, template="(%s, %s, %s::jsonb)")
+
+        return self.get_sip_operators_by_ids(ids)
 
     def get_user_sip_account(self, user_id: int) -> dict:
         """Готовые данные регистрации для iCORE Phone: основной аккаунт + автодозвон."""

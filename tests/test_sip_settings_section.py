@@ -43,9 +43,13 @@ def _source_of(node, source):
     return "\n".join(line for line in text.splitlines() if not line.startswith("@"))
 
 
+def _fake_execute_values(cursor, sql, argslist, template=None):
+    cursor.calls.append((" ".join(str(sql).split()), list(argslist), template))
+
+
 def _database_namespace(method_names):
     """Исполняет методы Database без импорта модуля (он поднимает пул к БД)."""
-    ns = {"json": json, "re": re, "Optional": None}
+    ns = {"json": json, "re": re, "Optional": None, "execute_values": _fake_execute_values}
     for node in DATABASE_MODULE.body:
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "SIP_IDENTIFIER_RE" for t in node.targets
@@ -90,9 +94,9 @@ class _StubDb:
     def __init__(self, ns, cursor=None):
         self._ns = ns
         self.cursor = cursor or _FakeCursor()
-        for name in ("_SIP_OPERATOR_ROLES", "_SIP_INACTIVE_STATUSES", "_SIP_OPERATOR_SELECT"):
-            if name in ns:
-                setattr(self, name, ns[name])
+        for name, value in ns.items():
+            if name.startswith("_SIP_"):
+                setattr(self, name, value)
 
     def _get_cursor(self):
         return self.cursor
@@ -212,6 +216,74 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self.assertTrue(snapshot["sip_password"].endswith("et"))
 
 
+class BulkUpdateSipOverridesTests(unittest.TestCase):
+    """Массовое проставление пароля/домена выбранным (Ctrl-выбор в списке)."""
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "bulk_update_user_sip_overrides", "_mask_sip_secret",
+        })
+        # (user_id, sip_password, sip_domain, autodial_number, autodial_password, autodial_domain)
+        rows = [
+            (1, '', '', '2024', '', ''),          # есть номер автодозвона, персональных нет
+            (2, 'own', 'pbx.old', '', '', ''),    # были персональные значения
+            (3, '', 'pbx.new', '', '', ''),       # уже с нужным доменом — не трогаем
+        ]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+
+    def _bulk(self, payload, ids=(1, 2, 3)):
+        return self.ns["bulk_update_user_sip_overrides"](self.db, list(ids), payload, changed_by=7)
+
+    def _batched(self, marker):
+        return next((c for c in self.db.cursor.calls if marker in c[0]), None)
+
+    def test_empty_selection_or_fields_are_refused(self):
+        with self.assertRaises(ValueError):
+            self._bulk({"sip_domain": "pbx.new"}, ids=())
+        with self.assertRaises(ValueError):
+            self._bulk({"sip_number": "1024"})
+
+    def test_only_listed_fields_change_and_numbers_survive(self):
+        self._bulk({"sip_domain": "pbx.new"})
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        by_id = {row[0]: row for row in values}
+        # Домен применён обоим, у кого он отличался; сотрудник 3 уже такой — пропущен.
+        self.assertEqual({1, 2}, set(by_id))
+        self.assertEqual("pbx.new", by_id[1][2])
+        self.assertEqual("2024", by_id[1][3])   # номер автодозвона не тронут
+        self.assertEqual("own", by_id[2][1])    # персональный пароль не тронут
+
+    def test_everything_runs_in_batches_not_per_user(self):
+        self._bulk({"sip_domain": "pbx.new"})
+        inserts = [c for c in self.db.cursor.calls if "INSERT INTO user_sip_settings" in c[0]]
+        history = [c for c in self.db.cursor.calls if "INSERT INTO sip_config_history" in c[0]]
+        self.assertEqual(1, len(inserts))
+        self.assertEqual(1, len(history))
+        self.assertEqual(2, len(history[0][1]))
+
+    def test_clearing_the_last_override_removes_the_row(self):
+        self._bulk({"sip_password": "", "sip_domain": ""}, ids=(2,))
+        deletes = [c for c in self.db.cursor.calls if "DELETE FROM user_sip_settings" in c[0]]
+        self.assertEqual(1, len(deletes))
+        self.assertEqual(([2],), deletes[0][1])
+
+    def test_row_with_a_number_is_kept_even_with_empty_overrides(self):
+        # У сотрудника 1 есть номер автодозвона — строку удалять нельзя.
+        self._bulk({"sip_password": "", "sip_domain": ""}, ids=(1,))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        self.assertIsNone(self._batched("INSERT INTO user_sip_settings"))
+
+    def test_history_is_scoped_per_operator_and_masks_the_password(self):
+        self._bulk({"sip_password": "supersecret"}, ids=(1,))
+        _, values, template = self._batched("INSERT INTO sip_config_history")
+        changed_by, target_user_id, snapshot = values[0]
+        self.assertEqual((7, 1), (changed_by, target_user_id))
+        self.assertNotIn("supersecret", snapshot)
+        self.assertTrue(json.loads(snapshot)["bulk"])
+        self.assertIn("%s::jsonb", template)
+
+
 class UserSipAccountTests(unittest.TestCase):
     """Что уезжает в iCORE Phone: пароль «база + номер», домен общий, автодозвон опционален."""
 
@@ -318,9 +390,35 @@ class SipEndpointTests(unittest.TestCase):
             self.assertIn("_can_manage_sip_config(requester_id, role)", body)
             self.assertIn("@require_api_key", self.source.split(f"def {name}")[0].rsplit("@app.route", 1)[1])
 
+    def test_bulk_route_does_not_collide_with_the_single_one(self):
+        self.assertIn("@app.route('/api/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])", self.source)
+        # int-конвертер не матчит "bulk", поэтому маршруты не конфликтуют.
+        self.assertIn("<int:target_user_id>", self.source)
+
+    def test_bulk_endpoint_checks_gate_scope_role_and_existence(self):
+        body = self._function("sip_config_operators_bulk_endpoint")
+        self.assertIn("_can_manage_sip_config(requester_id, role)", body)
+        self.assertIn("_sip_department_scope(requester_id, role)", body)
+        self.assertIn("_sip_target_in_scope(t, department_ids, supervisor_id)", body)
+        self.assertIn("Часть сотрудников не найдена", body)
+        self.assertIn("В выборке есть сотрудники не из вашего отдела", body)
+        self.assertIn("операторам и стажёрам", body)
+
+    def test_scope_check_helper_covers_department_and_own_operators(self):
+        ns = {}
+        exec(self._function("_sip_target_in_scope"), ns)
+        check = ns["_sip_target_in_scope"]
+        target = {"department_id": 12, "supervisor_id": 9}
+        self.assertTrue(check(target, None, None))                    # админ — все
+        self.assertTrue(check(target, [12], None))                    # свой отдел
+        self.assertFalse(check(target, [367], None))                  # чужой отдел
+        self.assertTrue(check(target, [367], 9))                      # свой оператор у СВ
+        self.assertFalse(check(target, [367], 5))
+
     def test_update_endpoint_enforces_department_boundary(self):
         body = self._function("sip_config_operator_update_endpoint")
         self.assertIn("_sip_department_scope(requester_id, role)", body)
+        self.assertIn("_sip_target_in_scope(target, department_ids, supervisor_id)", body)
         self.assertIn("Сотрудник не из вашего отдела", body)
         self.assertIn("403", body)
 
@@ -380,8 +478,20 @@ class SipSectionFrontendTests(unittest.TestCase):
         # /api/sip_config нет. Всего четыре обращения — список, история
         # (лениво, при открытии вкладки) и два сохранения.
         self.assertIn("setCommonForm({", view)
-        self.assertEqual(4, view.count("await fetch("))
+        self.assertEqual(5, view.count("await fetch("))
         self.assertIn("if (tab === 'history' && !historyLoadedRef.current) fetchHistory();", view)
+
+    def test_ctrl_and_shift_selection_drives_the_bulk_editor(self):
+        view = _read(VIEW_PATH)
+        self.assertIn("if (event.ctrlKey || event.metaKey)", view)   # ⌘ на маке
+        self.assertIn("if (event.shiftKey)", view)                   # диапазон
+        self.assertIn("/api/sip_config/operators/bulk", view)
+        self.assertIn("Выбрано: {selected.size}", view)
+        # Массово меняются только пароль и домен — номера у каждого свои.
+        bulk_fields = view.split("const BULK_FIELDS = [", 1)[1].split("];", 1)[0]
+        self.assertIn("sip_domain", bulk_fields)
+        self.assertIn("autodial_password", bulk_fields)
+        self.assertNotIn("sip_number", bulk_fields)
 
 
 if __name__ == "__main__":
