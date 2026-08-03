@@ -28883,6 +28883,356 @@ def _oktell_billing_efficiency_workbook(params, report):
     return output
 
 
+# === «Табло СЗоВ»: онлайн-мониторинг входящей линии =============================================
+# Единственный раздел, который читает Oktell «на сейчас», а не закрытым историческим окном.
+# Два источника, оба проверены на живых данных:
+#   1) oktell.dbo.Call_Systems_hst — итоги дня. Строка появляется через ~6 с после конца звонка
+#      (dt_insert = момент завершения), поэтому суммы за день практически real-time.
+#      Формулы 1:1 повторяют «Биллинг Oktell» (_oktell_billing_sql), иначе табло и отчёт
+#      разошлись бы в цифрах: AR = lost/arrived, SL = served_sl/arrived, arrived — звонки,
+#      дошедшие до очереди, LenQueue — секунды ожидания в очереди.
+#   2) oktell.dbo.A_Stat_Connections_1x1 — состояние «прямо сейчас» по незакрытым легам
+#      (TimeStop IS NULL). Анатомия входящей цепочки: лег ct=4 c BLineNum='IVR' — абонент в
+#      IVR/очереди; следом лег ct=5 на внутреннюю линию оператора ('17eNNN') — разговор; после
+#      разговора возможен ещё один короткий ct=4 IVR (пост-обработка). Отсюда:
+#      «в очереди» = открытый лег ct=4/IVR у цепочки, в которой ВООБЩЕ нет лега ct=5
+#      (условие «нет ct=5» отсекает пост-обработку), «в разговоре» = открытые леги ct=5.
+#      Проверено на 2026-08-03: as-of 09:38 формула дала 5 ожидающих, независимый пересчёт по
+#      завершённым записям Call_Systems_hst — тоже 5; счётчик разговоров совпал со State=5.
+# Статусы операторов берём как последнюю запись A_UserStateHistory на пользователя. «Перезвон» —
+# это не State, а под-причина перерыва (State=2, ICode из A_TaskManager_CardLunchStates: 2 —
+# Перезвон, 4 — Перерыв, 3 — Тренинг, 1 — Тех.причина).
+SZOV_WALLBOARD_DEPARTMENT_CODE = 'szov'
+# Прокси Oktell низкоконкурентный: держим общий кэш на процесс, чтобы N открытых табло давали
+# не N запросов, а один. TTL чуть меньше клиентского интервала опроса.
+SZOV_WALLBOARD_CACHE_TTL_SECONDS = _env_int('SZOV_WALLBOARD_CACHE_TTL_SECONDS', 8, minimum=3, maximum=120)
+# Сколько секунд отдавать последний удачный снимок, если Oktell перестал отвечать. Табло на стене
+# не должно гаснуть из-за одной сетевой ошибки — показываем данные с пометкой «устарели».
+SZOV_WALLBOARD_STALE_MAX_SECONDS = _env_int('SZOV_WALLBOARD_STALE_MAX_SECONDS', 600, minimum=60, maximum=3600)
+# Окна поиска незакрытых легов: разговор длиннее 6 ч и ожидание длиннее 3 ч — это зависшие в БД
+# леги, а не живые звонки. Границы держат запрос по индексу и отсекают мусор.
+_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS = 3
+_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS = 6
+
+# State из A_UserStateHistory -> внутренний ключ ведра. 0/7 (Выключен/Без телефона) = не на линии.
+_SZOV_WALLBOARD_STATE_BUCKETS = {
+    1: 'free',      # Готов
+    2: 'break',     # Перерыв (под-причина в ICode)
+    3: 'away',      # Нет на месте
+    5: 'talking',   # Занят
+    6: 'reserved',  # Зарезервировано
+}
+# ICode перерыва -> подпись. Значения из oktell_settings.dbo.A_TaskManager_CardLunchStates.
+_SZOV_WALLBOARD_BREAK_REASONS = {
+    1: 'Тех.причина',
+    2: 'Перезвон',
+    3: 'Тренинг',
+    4: 'Перерыв',
+}
+_SZOV_WALLBOARD_RECALL_ICODE = 2
+
+_SZOV_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
+_SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL = 600  # отделы меняются раз в никогда
+_szov_wallboard_cache = {'ts': 0.0, 'payload': None}
+_szov_wallboard_lock = threading.Lock()
+
+
+def _szov_wallboard_department_id():
+    """id отдела СЗоВ (по коду, с кэшем). Хардкодить id нельзя — он засеян, а не задан."""
+    now = time.time()
+    if (_SZOV_WALLBOARD_DEPARTMENT_CACHE['id'] is not None
+            and now - _SZOV_WALLBOARD_DEPARTMENT_CACHE['ts'] < _SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL):
+        return _SZOV_WALLBOARD_DEPARTMENT_CACHE['id']
+    found = None
+    for dept in (db.get_departments() or []):
+        if str(dept.get('code') or '').strip().lower() == SZOV_WALLBOARD_DEPARTMENT_CODE:
+            found = int(dept['id'])
+            break
+    _SZOV_WALLBOARD_DEPARTMENT_CACHE.update(ts=now, id=found)
+    return found
+
+
+def _szov_wallboard_guard():
+    """(requester_id, err) для раздела «Табло СЗоВ».
+
+    Доступ: глобальные админы, глава отдела СЗоВ и СВ отдела СЗоВ. Границу отдела держим
+    строго, как в _chatapp_guard: главе/СВ чужого отдела нагрузка линии СЗоВ не нужна."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if _is_global_admin_requester(role, requester_id):
+        return requester_id, None
+    department_id = _szov_wallboard_department_id()
+    if department_id is not None:
+        if _headed_department_id(requester_id) == department_id:
+            return requester_id, None
+        if _is_supervisor_role(role) and db.get_user_department_id(requester_id) == department_id:
+            return requester_id, None
+    return requester_id, (jsonify({"error": "forbidden"}), 403)
+
+
+def _oktell_wallboard_totals_sql(sl_seconds):
+    """Один SELECT: итоги за текущий день Oktell + очередь и разговоры «на сейчас».
+
+    Один запрос вместо трёх — прокси Oktell просит не распараллеливать и не частить.
+    «Сегодня» считаем по часам самого Oktell (CONVERT(date, GETDATE())), чтобы граница суток
+    совпадала с источником, а не с нашим сервером."""
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    # Цепочки, которые прямо сейчас ждут ответа: открытый лег в IVR/очереди и ни одного лега
+    # на оператора за всю историю цепочки (иначе это пост-обработка после разговора).
+    waiting_chains = (
+        "SELECT a.IdChain, MIN(a.TimeStart) AS started "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 a "
+        "WHERE a.ConnectionType = 4 AND a.BLineNum = N'IVR' AND a.TimeStop IS NULL "
+        f"AND a.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS}, GETDATE()) "
+        "AND NOT EXISTS (SELECT 1 FROM oktell.dbo.A_Stat_Connections_1x1 d "
+        "WHERE d.IdChain = a.IdChain AND d.ConnectionType = 5) "
+        "GROUP BY a.IdChain"
+    )
+    return (
+        "SELECT CONVERT(varchar(19), GETDATE(), 120) AS oktell_now, "
+        "q.queue_now, q.queue_max_wait_seconds, k.talking_now, "
+        "t.arrived, t.served, t.lost, t.greet_drop, t.served_sl, "
+        "t.wait_seconds, t.max_wait_seconds, t.talk_seconds "
+        "FROM ("
+        "SELECT COUNT(*) AS queue_now, "
+        "ISNULL(MAX(DATEDIFF(second, w.started, GETDATE())), 0) AS queue_max_wait_seconds "
+        f"FROM ({waiting_chains}) w"
+        ") q CROSS JOIN ("
+        "SELECT COUNT(DISTINCT c.IdChain) AS talking_now "
+        "FROM oktell.dbo.A_Stat_Connections_1x1 c "
+        "WHERE c.ConnectionType = 5 AND c.TimeStop IS NULL "
+        f"AND c.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS}, GETDATE())"
+        ") k CROSS JOIN ("
+        "SELECT "
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN 1 ELSE 0 END), 0) AS served, "
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19) THEN 1 ELSE 0 END), 0) AS lost, "
+        f"ISNULL(SUM(CASE WHEN x.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) AND x.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END), 0) AS served_sl, "
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN x.LenQueue ELSE 0 END), 0) AS wait_seconds, "
+        f"MAX(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN x.LenQueue END) AS max_wait_seconds, "
+        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN x.total_length ELSE 0 END), 0) AS talk_seconds "
+        "FROM oktell.dbo.Call_Systems_hst x "
+        "WHERE x.route = 'incoming' AND x.taxi_park <> '' "
+        f"AND x.result_call <> N'{fail}' "
+        "AND x.dt_insert >= CONVERT(date, GETDATE()) "
+        "AND x.dt_insert < DATEADD(day, 1, CONVERT(date, GETDATE()))"
+        ") t"
+    )
+
+
+def _oktell_wallboard_operator_states_sql():
+    """Текущий статус каждого оператора: последняя запись A_UserStateHistory на пользователя.
+
+    State 0/7 (Выключен/Без телефона) отбрасываем — это «не на линии». Окно в 2 суток нужно,
+    чтобы поймать смену, начавшуюся вчера; Oktell пишет явный переход в 0 при отключении,
+    поэтому «залипших» готовых операторов из прошлых дней здесь не будет."""
+    return (
+        "SELECT oi.Name AS operator_name, x.State AS state, x.ICode AS icode, "
+        "CONVERT(varchar(19), x.TimeChange, 120) AS since, "
+        "DATEDIFF(second, x.TimeChange, GETDATE()) AS in_state_seconds "
+        "FROM (SELECT h.UserId, h.State, h.ICode, h.TimeChange, "
+        "ROW_NUMBER() OVER (PARTITION BY h.UserId ORDER BY h.Enumerator DESC) AS rn "
+        "FROM oktell.dbo.A_UserStateHistory h "
+        "WHERE h.TimeChange >= DATEADD(day, -2, GETDATE())) x "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = x.UserId "
+        "WHERE x.rn = 1 AND x.State NOT IN (0, 7) "
+        "ORDER BY oi.Name"
+    )
+
+
+def _szov_wallboard_int(value):
+    try:
+        return int(round(float(value or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _szov_wallboard_ratio(numerator, denominator):
+    """Доля 0..1 или None, если знаменатель пустой — как safeRatio на фронте биллинга."""
+    den = _szov_wallboard_int(denominator)
+    if den <= 0:
+        return None
+    return _szov_wallboard_int(numerator) / den
+
+
+def _szov_wallboard_operator_lookup():
+    """Lookup «имя -> оператор» ТОЛЬКО по сотрудникам отдела СЗоВ.
+
+    Ограничение отделом отсекает служебные учётки Oktell (admin/supervisor) и операторов
+    других отделов — иначе вечно «свободный» admin завышал бы счётчики."""
+    department_id = _szov_wallboard_department_id()
+    if department_id is None:
+        return {}, None
+    member_ids = db.get_department_member_ids(department_id) or set()
+    if not member_ids:
+        return {}, department_id
+    return _status_import_build_operator_lookup(restrict_to_ids=member_ids), department_id
+
+
+def _szov_wallboard_build_operators(raw_rows):
+    """Сырые строки статусов Oktell -> счётчики + именные списки перерыва/перезвона."""
+    lookup, department_id = _szov_wallboard_operator_lookup()
+    counts = {'talking': 0, 'free': 0, 'break': 0, 'recall': 0, 'away': 0, 'reserved': 0}
+    break_list = []
+    recall_list = []
+    unmatched = []
+    for row in (raw_rows or []):
+        oktell_name = str(row.get('operator_name') or '').strip()
+        if not oktell_name:
+            continue
+        matches = _status_import_resolve_operator_matches(oktell_name, lookup) if lookup else []
+        if len(matches) != 1:
+            # Не сотрудник СЗоВ (служебная учётка / другой отдел) либо имя неоднозначно.
+            unmatched.append(oktell_name)
+            continue
+        operator = matches[0]
+        state = _szov_wallboard_int(row.get('state'))
+        bucket = _SZOV_WALLBOARD_STATE_BUCKETS.get(state)
+        if not bucket:
+            unmatched.append(oktell_name)
+            continue
+        if bucket == 'break':
+            icode = _szov_wallboard_int(row.get('icode'))
+            is_recall = icode == _SZOV_WALLBOARD_RECALL_ICODE
+            reason = _SZOV_WALLBOARD_BREAK_REASONS.get(icode) or 'Перерыв'
+            entry = {
+                'operator_id': operator.get('id'),
+                'name': operator.get('name') or oktell_name,
+                'reason': reason,
+                'since': row.get('since'),
+                'seconds': max(0, _szov_wallboard_int(row.get('in_state_seconds'))),
+            }
+            if is_recall:
+                counts['recall'] += 1
+                recall_list.append(entry)
+            else:
+                counts['break'] += 1
+                break_list.append(entry)
+            continue
+        counts[bucket] += 1
+    # Самые «засидевшиеся» сверху: супервайзеру важно, кто висит в статусе дольше всех.
+    break_list.sort(key=lambda item: -item['seconds'])
+    recall_list.sort(key=lambda item: -item['seconds'])
+    online = sum(counts.values())
+    return {
+        'online': online,
+        'talking': counts['talking'],
+        'free': counts['free'],
+        'on_break': counts['break'],
+        'on_recall': counts['recall'],
+        'other': counts['away'] + counts['reserved'],
+        'break_list': break_list,
+        'recall_list': recall_list,
+        'department_id': department_id,
+        'unmatched_names': sorted(set(unmatched)),
+    }
+
+
+def _szov_wallboard_fetch_snapshot():
+    """Свежий снимок табло. Два последовательных запроса к Oktell, без параллелизма."""
+    sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
+    totals_rows = _oktell_query(_oktell_wallboard_totals_sql(sl_seconds))
+    totals = (totals_rows or [{}])[0] or {}
+    state_rows = _oktell_query(_oktell_wallboard_operator_states_sql())
+    operators = _szov_wallboard_build_operators(state_rows)
+
+    arrived = _szov_wallboard_int(totals.get('arrived'))
+    served = _szov_wallboard_int(totals.get('served'))
+    lost = _szov_wallboard_int(totals.get('lost'))
+    greet_drop = _szov_wallboard_int(totals.get('greet_drop'))
+    served_sl = _szov_wallboard_int(totals.get('served_sl'))
+    wait_seconds = _szov_wallboard_int(totals.get('wait_seconds'))
+    max_wait = totals.get('max_wait_seconds')
+    return {
+        'oktell_now': totals.get('oktell_now'),
+        'sl_threshold_seconds': sl_seconds,
+        'now': {
+            'queue': _szov_wallboard_int(totals.get('queue_now')),
+            'queue_max_wait_seconds': _szov_wallboard_int(totals.get('queue_max_wait_seconds')),
+            'talking_calls': _szov_wallboard_int(totals.get('talking_now')),
+            'operators_online': operators['online'],
+            'operators_talking': operators['talking'],
+            'operators_free': operators['free'],
+            'operators_on_break': operators['on_break'],
+            'operators_on_recall': operators['on_recall'],
+            'operators_other': operators['other'],
+            'break_list': operators['break_list'],
+            'recall_list': operators['recall_list'],
+        },
+        'today': {
+            # total = все входящие, включая сброшенные на приветствии: served + lost + greet_drop.
+            'total': arrived + greet_drop,
+            'arrived': arrived,
+            'served': served,
+            'lost': lost,
+            'greet_drop': greet_drop,
+            'served_sl': served_sl,
+            'ar_ratio': _szov_wallboard_ratio(lost, arrived),
+            'sl_ratio': _szov_wallboard_ratio(served_sl, arrived),
+            'avg_wait_seconds': (wait_seconds / arrived) if arrived > 0 else None,
+            'max_wait_seconds': None if max_wait is None else _szov_wallboard_int(max_wait),
+            'avg_talk_seconds': (_szov_wallboard_int(totals.get('talk_seconds')) / served) if served > 0 else None,
+        },
+        'diagnostics': {
+            # Не выводим на экран (это шум), но храним: если имя оператора в Oktell разошлось с
+            # OTP, счётчики занизятся, и разбираться придётся по этому списку.
+            'unmatched_oktell_names': operators['unmatched_names'],
+        },
+    }
+
+
+def _szov_wallboard_snapshot():
+    """Снимок с общим TTL-кэшем на процесс.
+
+    Табло опрашивают несколько человек одновременно (и оно висит на экране весь день), поэтому
+    к Oktell ходит только один запрос на TTL, под локом. Если Oktell отвалился — отдаём последний
+    удачный снимок с stale=True, чтобы экран на стене не гас."""
+    now = time.time()
+    cached = _szov_wallboard_cache.get('payload')
+    if cached is not None and now - _szov_wallboard_cache['ts'] < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
+        return dict(cached, stale=False, age_seconds=int(now - _szov_wallboard_cache['ts']))
+    with _szov_wallboard_lock:
+        # Пока ждали лок, соседний поток мог уже обновить кэш.
+        now = time.time()
+        cached = _szov_wallboard_cache.get('payload')
+        if cached is not None and now - _szov_wallboard_cache['ts'] < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
+            return dict(cached, stale=False, age_seconds=int(now - _szov_wallboard_cache['ts']))
+        try:
+            payload = _szov_wallboard_fetch_snapshot()
+        except Exception as exc:
+            age = now - _szov_wallboard_cache['ts'] if cached is not None else None
+            if cached is not None and age is not None and age < SZOV_WALLBOARD_STALE_MAX_SECONDS:
+                logging.warning("Табло СЗоВ: Oktell недоступен, отдаём снимок %.0f с назад: %s", age, exc)
+                return dict(cached, stale=True, age_seconds=int(age), error=str(exc)[:200])
+            raise
+        payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
+        _szov_wallboard_cache.update(ts=time.time(), payload=payload)
+        return dict(payload, stale=False, age_seconds=0)
+
+
+@app.route('/api/szov_wallboard/snapshot', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_szov_wallboard_snapshot():
+    """Онлайн-табло входящей линии СЗоВ: очередь и статусы «на сейчас» + итоги за день."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _szov_wallboard_guard()
+    if err:
+        return err
+    if not _oktell_api_ready():
+        return jsonify({"error": "Интеграция с Oktell недоступна: OKTELL_IP/OKTELL_API_TOKEN не задан"}), 503
+    try:
+        return jsonify(_szov_wallboard_snapshot())
+    except Exception as exc:
+        logging.error("Табло СЗоВ: не удалось получить данные Oktell: %s", exc)
+        return jsonify({"error": "Не удалось получить данные Oktell", "detail": str(exc)[:300]}), 502
+
+
 # === Oktell: распределение звонков на оценку («Деление звонков») ================================
 # Норма-ориентированный добор: на каждого оператора (операторская модель) держим в пуле
 # imported_calls ровно NORM(op, месяц-звонка) случайных ПОДХОДЯЩИХ (фильтр длительности из

@@ -128,6 +128,7 @@ const EventsView = lazyWithRetry(() => import('./components/events/EventsView'))
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
+const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
 
@@ -183,6 +184,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     manage_trainers: 'Manage trainers',
     manage_users: 'Manage users',
     monitoring_scale: 'Monitoring scale',
+    szov_wallboard: 'SZoV wallboard',
     operators: 'Operators',
     profile: 'Profile',
     qr_access: 'QR access',
@@ -1320,6 +1322,29 @@ const canAccessChatAppForUser = (userLike) => {
     if (isChatAppDepartmentHead(userLike)) return true;
     return isSupervisorRole(role)
         && Number(userLike?.department_id ?? userLike?.departmentId) === CHATAPP_DEPARTMENT_ID;
+};
+
+// Раздел «Табло СЗоВ» — онлайн-нагрузка входящей линии. Доступ: админы, глава отдела
+// СЗоВ и СВ этого же отдела. Сверяем по КОДУ отдела, а не по id: id СЗоВ засеян
+// миграцией и в разных окружениях разный, а /api/admin/departments СВ недоступен.
+// Ту же проверку делает _szov_wallboard_guard на бэкенде.
+const SZOV_WALLBOARD_DEPARTMENT_CODE = 'szov';
+
+const isSzovWallboardDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).includes(SZOV_WALLBOARD_DEPARTMENT_CODE)
+);
+
+const canAccessSzovWallboardForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
+    // отделов табло СЗоВ недоступно (глава СЗоВ проходит проверкой ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isSzovWallboardDepartmentHead(userLike)) return true;
+    return isSupervisorRole(role)
+        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+            === SZOV_WALLBOARD_DEPARTMENT_CODE;
 };
 
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
@@ -33525,6 +33550,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
             const canAccessChatAppSection = canAccessChatAppForUser(user);
+            const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
             const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
@@ -36854,6 +36880,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
+                    (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
@@ -36864,7 +36891,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessFourYouSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessFourYouSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -36911,6 +36938,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else setView('hours');
                 }
+                if (view === 'szov_wallboard' && !canAccessSzovWallboardSection) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else setView('hours');
+                }
                 if (view === 'four_you' && !canAccessFourYouSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
@@ -36918,7 +36950,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -41932,13 +41964,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 if ((view === 'ai_qa' || view === 'wazzup_chats') && canAccessAiQaSection) return;
                 if (view === 'chatapp_chats' && canAccessChatAppSection) return;
+                // «Табло СЗоВ» гейтится своим предикатом (глава/СВ СЗоВ), а не allowlist'ом отдела.
+                if (view === 'szov_wallboard' && canAccessSzovWallboardSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings' && canAccessSipSettings) return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSipSettings, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessSipSettings, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -42501,6 +42535,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </li>
                                             )}
 
+                                            {canAccessSzovWallboardSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'szov_wallboard')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
+                                                    </button>
+                                                </li>
+                                            )}
+
                                             {renderSidebarDividerInner()}
 
                                             <li>
@@ -42745,6 +42790,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'chatapp_chats' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты ChatApp</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessSzovWallboardSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'szov_wallboard')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'szov_wallboard' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-tachometer-alt"></FaIcon> <span className="sidebar-text">Табло СЗоВ</span>
                                                 </button>
                                             </li>
                                             )}
@@ -43107,6 +43162,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 canAccessLmsSection,
                 canAccessResourceFteSection,
                 canAccessAiQaSection,
+                canAccessSzovWallboardSection,
                 canAccessFourYouSection,
                 canManageFourYouSection,
                 canAccessDevLetterSection,
@@ -43460,6 +43516,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {view === "chatapp_chats" && canAccessChatAppSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка чатов…</div>}>
                                 <ChatAppChatsView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "szov_wallboard" && canAccessSzovWallboardSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
+                                <SzovWallboardView
                                     user={user}
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
