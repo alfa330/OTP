@@ -3732,6 +3732,12 @@ class Database:
                 ALTER TABLE sip_config
                 ADD COLUMN IF NOT EXISTS autodial_code VARCHAR(64) NOT NULL DEFAULT '';
             """)
+            # Автодозвон часто живёт на отдельной АТС — свой домен. Пусто =
+            # тот же домен, что и у основного номера.
+            cursor.execute("""
+                ALTER TABLE sip_config
+                ADD COLUMN IF NOT EXISTS autodial_server VARCHAR(255) NOT NULL DEFAULT '';
+            """)
             # История ведётся и по общим настройкам, и по персональным аккаунтам:
             # target_user_id пуст у глобальных изменений.
             cursor.execute("""
@@ -3748,9 +3754,14 @@ class Database:
                     sip_server VARCHAR(255) NOT NULL DEFAULT '',
                     base_password VARCHAR(255) NOT NULL DEFAULT '',
                     autodial_code VARCHAR(64) NOT NULL DEFAULT '',
+                    autodial_server VARCHAR(255) NOT NULL DEFAULT '',
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
+            """)
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS autodial_server VARCHAR(255) NOT NULL DEFAULT '';
             """)
             cursor.execute("""
                 ALTER TABLE sip_config_history
@@ -21045,22 +21056,24 @@ class Database:
         """Глобальные настройки SIP для iCORE Phone (singleton id=1)."""
         with self._get_cursor() as cur:
             cur.execute("""
-                SELECT s.sip_server, s.base_password, s.autodial_code, s.updated_by, s.updated_at, u.name
+                SELECT s.sip_server, s.base_password, s.autodial_code, s.autodial_server,
+                       s.updated_by, s.updated_at, u.name
                 FROM sip_config s
                 LEFT JOIN users u ON u.id = s.updated_by
                 WHERE s.id = 1
             """)
             r = cur.fetchone()
         if not r:
-            return {"sip_server": "", "base_password": "", "autodial_code": "",
+            return {"sip_server": "", "base_password": "", "autodial_code": "", "autodial_server": "",
                     "updated_by": None, "updated_by_name": None, "updated_at": None}
         return {
             "sip_server": r[0] or "",
             "base_password": r[1] or "",
             "autodial_code": r[2] or "",
-            "updated_by": r[3],
-            "updated_by_name": r[5],
-            "updated_at": r[4].isoformat() if r[4] else None,
+            "autodial_server": r[3] or "",
+            "updated_by": r[4],
+            "updated_by_name": r[6],
+            "updated_at": r[5].isoformat() if r[5] else None,
         }
 
     @staticmethod
@@ -21084,19 +21097,23 @@ class Database:
             base_password = str(payload['base_password'])
         if payload.get('autodial_code') is not None:
             autodial_code = normalize_sip_identifier(payload['autodial_code'], field="Код автодозвона")
+        autodial_server = current["autodial_server"]
+        if payload.get('autodial_server') is not None:
+            autodial_server = str(payload['autodial_server']).strip()
 
         snapshot = json.dumps({
             "sip_server": sip_server,
             "base_password": self._mask_sip_secret(base_password),
             "autodial_code": autodial_code,
+            "autodial_server": autodial_server,
         })
         with self._get_cursor() as cur:
             cur.execute("""
                 UPDATE sip_config
-                SET sip_server = %s, base_password = %s, autodial_code = %s,
+                SET sip_server = %s, base_password = %s, autodial_code = %s, autodial_server = %s,
                     updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = 1
-            """, (sip_server, base_password, autodial_code, user_id))
+            """, (sip_server, base_password, autodial_code, autodial_server, user_id))
             cur.execute("""
                 INSERT INTO sip_config_history (changed_by, settings)
                 VALUES (%s, %s::jsonb)
@@ -21148,7 +21165,7 @@ class Database:
             cur.execute(f"""
                 SELECT d.id, d.name, d.code,
                        COALESCE(c.sip_server, ''), COALESCE(c.base_password, ''),
-                       COALESCE(c.autodial_code, ''),
+                       COALESCE(c.autodial_code, ''), COALESCE(c.autodial_server, ''),
                        (c.department_id IS NOT NULL) AS configured,
                        c.updated_at, u.name,
                        COALESCE(ops.cnt, 0)
@@ -21173,10 +21190,11 @@ class Database:
             "sip_server": r[3],
             "base_password": r[4],
             "autodial_code": r[5],
-            "configured": bool(r[6]),
-            "updated_at": r[7].isoformat() if r[7] else None,
-            "updated_by_name": r[8],
-            "operators_count": int(r[9] or 0),
+            "autodial_server": r[6],
+            "configured": bool(r[7]),
+            "updated_at": r[8].isoformat() if r[8] else None,
+            "updated_by_name": r[9],
+            "operators_count": int(r[10] or 0),
         } for r in rows]
 
     def update_sip_department_config(self, department_id: int, payload: dict, user_id=None) -> dict:
@@ -21200,27 +21218,32 @@ class Database:
         sip_server = _field('sip_server')
         base_password = _field('base_password')
         autodial_code = normalize_sip_identifier(_field('autodial_code'), field="Код автодозвона")
+        autodial_server = _field('autodial_server')
+        filled = (sip_server, base_password, autodial_code, autodial_server)
         unchanged = (
             sip_server == current['sip_server']
             and base_password == current['base_password']
             and autodial_code == current['autodial_code']
+            and autodial_server == current['autodial_server']
         )
-        if unchanged and current['configured'] == any((sip_server, base_password, autodial_code)):
+        if unchanged and current['configured'] == any(filled):
             return current
 
         with self._get_cursor() as cur:
-            if any((sip_server, base_password, autodial_code)):
+            if any(filled):
                 cur.execute("""
                     INSERT INTO sip_department_config (
-                        department_id, sip_server, base_password, autodial_code, updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                        department_id, sip_server, base_password, autodial_code, autodial_server,
+                        updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (department_id) DO UPDATE SET
                         sip_server = EXCLUDED.sip_server,
                         base_password = EXCLUDED.base_password,
                         autodial_code = EXCLUDED.autodial_code,
+                        autodial_server = EXCLUDED.autodial_server,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
-                """, (department_id, sip_server, base_password, autodial_code, user_id))
+                """, (department_id, sip_server, base_password, autodial_code, autodial_server, user_id))
             else:
                 cur.execute("DELETE FROM sip_department_config WHERE department_id = %s", (department_id,))
             cur.execute("""
@@ -21230,6 +21253,7 @@ class Database:
                 "sip_server": sip_server,
                 "base_password": self._mask_sip_secret(base_password),
                 "autodial_code": autodial_code,
+                "autodial_server": autodial_server,
             })))
         return next(
             row for row in self.get_sip_department_configs([department_id])
@@ -21266,7 +21290,8 @@ class Database:
             upd.name AS updated_by_name,
             COALESCE(dc.sip_server, '') AS department_sip_server,
             COALESCE(dc.base_password, '') AS department_base_password,
-            COALESCE(dc.autodial_code, '') AS department_autodial_code
+            COALESCE(dc.autodial_code, '') AS department_autodial_code,
+            COALESCE(dc.autodial_server, '') AS department_autodial_server
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
@@ -21305,6 +21330,7 @@ class Database:
             "department_sip_server": row[16] or "",
             "department_base_password": row[17] or "",
             "department_autodial_code": row[18] or "",
+            "department_autodial_server": row[19] or "",
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -21380,7 +21406,10 @@ class Database:
                 WITH cfg AS (
                     SELECT COALESCE((
                         SELECT LOWER(TRIM(COALESCE(sip_server, ''))) FROM sip_config WHERE id = 1
-                    ), '') AS common
+                    ), '') AS common,
+                    COALESCE((
+                        SELECT LOWER(TRIM(COALESCE(autodial_server, ''))) FROM sip_config WHERE id = 1
+                    ), '') AS autodial_common
                 ), wanted AS (
                     SELECT w.num, COALESCE(NULLIF(w.dom, ''), cfg.common) AS dom
                     FROM unnest(%s::text[], %s::text[]) AS w(num, dom) CROSS JOIN cfg
@@ -21398,9 +21427,13 @@ class Database:
                     CROSS JOIN cfg
                     WHERE NULLIF(TRIM(COALESCE(u.sip_number, '')), '') IS NOT NULL
                     UNION ALL
+                    -- У автодозвона может быть своя АТС: домен отдела для
+                    -- автодозвона → общий для автодозвона → домен основного.
                     SELECT TRIM(s.autodial_number),
                            COALESCE(
                                NULLIF(LOWER(TRIM(COALESCE(s.autodial_domain, ''))), ''),
+                               NULLIF(LOWER(TRIM(COALESCE(dc.autodial_server, ''))), ''),
+                               NULLIF(cfg.autodial_common, ''),
                                NULLIF(LOWER(TRIM(COALESCE(dc.sip_server, ''))), ''),
                                cfg.common),
                            u.id, u.name, 'autodial'::text
@@ -21452,21 +21485,28 @@ class Database:
 
         # Занятость номера считается в пределах домена: одинаковые номера на
         # разных АТС конфликтом не считаются. Домен «по умолчанию» для этого
-        # сотрудника — его отдела, а если отдел не настроен — общий.
+        # сотрудника — его отдела, а если отдел не настроен — общий. У
+        # автодозвона своя цепочка: он часто живёт на отдельной АТС.
+        cfg = self.get_sip_config()
         common_domain = self.normalize_sip_domain(
-            current.get('department_sip_server') or self.get_sip_config().get('sip_server'))
+            current.get('department_sip_server') or cfg.get('sip_server'))
+        autodial_common = self.normalize_sip_domain(
+            current.get('department_autodial_server') or cfg.get('autodial_server')) or common_domain
 
         def _effective(domain):
             return self.normalize_sip_domain(domain) or common_domain
 
+        def _effective_autodial(domain):
+            return self.normalize_sip_domain(domain) or autodial_common
+
         main_pair = (sip_number, _effective(sip_domain))
-        autodial_pair = (autodial_number, _effective(autodial_domain))
+        autodial_pair = (autodial_number, _effective_autodial(autodial_domain))
         if sip_number and autodial_number and main_pair == autodial_pair:
             raise ValueError("Номер автодозвона должен отличаться от основного (или быть на другом домене)")
 
         was = {
             (current['sip_number'], _effective(current['sip_domain'])),
-            (current['autodial_number'], _effective(current['autodial_domain'])),
+            (current['autodial_number'], _effective_autodial(current['autodial_domain'])),
         }
         changed_pairs = [p for p in (main_pair, autodial_pair) if p[0] and p not in was]
         owners = self.find_sip_number_owners(changed_pairs, exclude_user_ids=[user_id])
@@ -21551,7 +21591,9 @@ class Database:
         if not fields:
             raise ValueError("Не выбрано ни одного поля для изменения")
 
-        global_domain = self.normalize_sip_domain(self.get_sip_config().get('sip_server'))
+        cfg = self.get_sip_config()
+        global_domain = self.normalize_sip_domain(cfg.get('sip_server'))
+        global_autodial = self.normalize_sip_domain(cfg.get('autodial_server')) or global_domain
 
         with self._get_cursor() as cur:
             cur.execute("""
@@ -21559,13 +21601,13 @@ class Database:
                        COALESCE(s.sip_password, ''), COALESCE(s.sip_domain, ''),
                        COALESCE(s.autodial_number, ''), COALESCE(s.autodial_password, ''),
                        COALESCE(s.autodial_domain, ''), COALESCE(u.sip_number, ''),
-                       COALESCE(dc.sip_server, '')
+                       COALESCE(dc.sip_server, ''), COALESCE(dc.autodial_server, '')
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
                 LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
                 WHERE u.id = ANY(%s)
             """, (ids,))
-            current, names, numbers, dept_domain = {}, {}, {}, {}
+            current, names, numbers, dept_domain, dept_autodial = {}, {}, {}, {}, {}
             for r in cur.fetchall():
                 current[r[0]] = {
                     "sip_password": r[2], "sip_domain": r[3], "autodial_number": r[4],
@@ -21574,10 +21616,16 @@ class Database:
                 names[r[0]] = r[1] or ""
                 numbers[r[0]] = r[7]
                 # Домен «по умолчанию» у каждого свой: отдела, иначе общий.
+                # У автодозвона — своя цепочка (может быть отдельная АТС).
                 dept_domain[r[0]] = self.normalize_sip_domain(r[8]) or global_domain
+                dept_autodial[r[0]] = (
+                    self.normalize_sip_domain(r[9]) or global_autodial or dept_domain[r[0]])
 
         def _effective(domain, user_id):
             return self.normalize_sip_domain(domain) or dept_domain.get(user_id, global_domain)
+
+        def _effective_autodial(domain, user_id):
+            return self.normalize_sip_domain(domain) or dept_autodial.get(user_id, global_autodial)
 
         # Смена домена переносит номера на другую АТС — там они могут быть заняты.
         # Считаем итоговые пары «номер + домен» и сверяем их и между выбранными,
@@ -21594,7 +21642,7 @@ class Database:
             targets[user_id] = after
             pairs = (
                 (numbers.get(user_id, ''), _effective(after['sip_domain'], user_id)),
-                (after['autodial_number'], _effective(after['autodial_domain'], user_id)),
+                (after['autodial_number'], _effective_autodial(after['autodial_domain'], user_id)),
             )
             for pair in pairs:
                 if not pair[0]:
@@ -21665,25 +21713,29 @@ class Database:
         cfg = self.get_sip_config()
         row = self.get_sip_operator(int(user_id)) or {}
         server = (row.get("department_sip_server") or cfg.get("sip_server") or "").strip()
+        # Автодозвон может стоять на отдельной АТС; если её не задали — тот же сервер.
+        autodial_server = (
+            row.get("department_autodial_server") or cfg.get("autodial_server") or "").strip() or server
         base = row.get("department_base_password") or cfg.get("base_password") or ""
         autodial_code = row.get("department_autodial_code") or cfg.get("autodial_code") or ""
         sip_number = (row.get("sip_number") or "").strip()
         autodial_number = (row.get("autodial_number") or "").strip()
 
-        def _account(number, password, domain):
+        def _account(number, password, domain, fallback_server):
             if not number:
                 return None
             return {
                 "username": number,
                 "password": password or (f"{base}{number}" if base else ""),
-                "server": (domain or server),
+                "server": (domain or fallback_server),
                 "transport": "UDP",
             }
 
         return {
             "config": cfg,
-            "main": _account(sip_number, row.get("sip_password"), row.get("sip_domain")),
-            "autodial": _account(autodial_number, row.get("autodial_password"), row.get("autodial_domain")),
+            "main": _account(sip_number, row.get("sip_password"), row.get("sip_domain"), server),
+            "autodial": _account(autodial_number, row.get("autodial_password"),
+                                 row.get("autodial_domain"), autodial_server),
             "autodial_code": autodial_code,
         }
 

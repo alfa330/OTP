@@ -101,7 +101,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const [tab, setTab] = useState('operators');
 
     const [operators, setOperators] = useState([]);
-    const [settings, setSettings] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [settings, setSettings] = useState({ sip_server: '', base_password: '', autodial_code: '', autodial_server: '' });
     const [departments, setDepartments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
@@ -121,11 +121,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const [bulkSaving, setBulkSaving] = useState(false);
     const anchorRef = useRef(null);
 
-    const [commonForm, setCommonForm] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [commonForm, setCommonForm] = useState({ sip_server: '', base_password: '', autodial_code: '', autodial_server: '' });
     const [savingCommon, setSavingCommon] = useState(false);
 
     const [deptEditing, setDeptEditing] = useState(null);
-    const [deptForm, setDeptForm] = useState({ sip_server: '', base_password: '', autodial_code: '' });
+    const [deptForm, setDeptForm] = useState({ sip_server: '', base_password: '', autodial_code: '', autodial_server: '' });
     const [deptSaving, setDeptSaving] = useState(false);
 
     const [history, setHistory] = useState([]);
@@ -162,6 +162,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 sip_server: s.sip_server || '',
                 base_password: s.base_password || '',
                 autodial_code: s.autodial_code || '',
+                autodial_server: s.autodial_server || '',
             });
         } catch (e) {
             showToastRef.current?.(`Не удалось загрузить настройки SIP: ${e.message}`, 'error');
@@ -198,11 +199,16 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     /* ─── производные данные ─── */
     // Значения по умолчанию для сотрудника: сначала настройки его отдела,
     // потом общие. Персональные поля перекрывают и то, и другое.
-    const commonFor = useCallback((op) => ({
-        server: op?.department_sip_server || settings.sip_server || '',
-        base: op?.department_base_password || settings.base_password || '',
-        code: op?.department_autodial_code || settings.autodial_code || '',
-    }), [settings.sip_server, settings.base_password, settings.autodial_code]);
+    // У автодозвона свой домен — часто это отдельная АТС; не задан — как основной.
+    const commonFor = useCallback((op) => {
+        const server = op?.department_sip_server || settings.sip_server || '';
+        return {
+            server,
+            autodialServer: op?.department_autodial_server || settings.autodial_server || server,
+            base: op?.department_base_password || settings.base_password || '',
+            code: op?.department_autodial_code || settings.autodial_code || '',
+        };
+    }, [settings.sip_server, settings.autodial_server, settings.base_password, settings.autodial_code]);
 
     const departmentOptions = useMemo(() => {
         const seen = new Map();
@@ -217,10 +223,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const duplicateKeys = useMemo(() => {
         const counts = new Map();
         operators.forEach((op) => {
-            const common = commonFor(op).server;
+            const common = commonFor(op);
             [
-                [op.sip_number, effectiveDomain(op.sip_domain, common)],
-                [op.autodial_number, effectiveDomain(op.autodial_domain, common)],
+                [op.sip_number, effectiveDomain(op.sip_domain, common.server)],
+                [op.autodial_number, effectiveDomain(op.autodial_domain, common.autodialServer)],
             ].forEach(([number, domain]) => {
                 if (!String(number || '').trim()) return;
                 const key = numberKey(number, domain);
@@ -234,9 +240,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const domainOptions = useMemo(() => {
         const seen = new Set();
         operators.forEach((op) => {
-            const common = commonFor(op).server;
-            seen.add(effectiveDomain(op.sip_domain, common));
-            if (op.autodial_number) seen.add(effectiveDomain(op.autodial_domain, common));
+            const common = commonFor(op);
+            seen.add(effectiveDomain(op.sip_domain, common.server));
+            if (op.autodial_number) seen.add(effectiveDomain(op.autodial_domain, common.autodialServer));
         });
         return [...seen].filter(Boolean).sort().map((d) => ({ value: d, label: d }));
     }, [operators, commonFor]);
@@ -246,9 +252,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         return operators.filter((op) => {
             if (departmentFilter && String(op.department_id ?? '') !== departmentFilter) return false;
             if (domainFilter) {
-                const common = commonFor(op).server;
-                const domains = [effectiveDomain(op.sip_domain, common)];
-                if (op.autodial_number) domains.push(effectiveDomain(op.autodial_domain, common));
+                const common = commonFor(op);
+                const domains = [effectiveDomain(op.sip_domain, common.server)];
+                if (op.autodial_number) domains.push(effectiveDomain(op.autodial_domain, common.autodialServer));
                 if (!domains.includes(domainFilter)) return false;
             }
             if (!q) return true;
@@ -275,7 +281,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         return {
             domain: (form.sip_domain || editingCommon.server || '').trim(),
             password: form.sip_password || (number && base ? `${base}${number}` : ''),
-            autodialDomain: (form.autodial_domain || editingCommon.server || '').trim(),
+            autodialDomain: (form.autodial_domain || editingCommon.autodialServer || '').trim(),
             autodialPassword: form.autodial_password || (autodial && base ? `${base}${autodial}` : ''),
         };
     }, [form, editingCommon]);
@@ -287,10 +293,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         const taken = new Map();
         operators.forEach((op) => {
             if (op.id === editing.id) return;
-            const common = commonFor(op).server;
+            const common = commonFor(op);
             [
-                [op.sip_number, effectiveDomain(op.sip_domain, common)],
-                [op.autodial_number, effectiveDomain(op.autodial_domain, common)],
+                [op.sip_number, effectiveDomain(op.sip_domain, common.server)],
+                [op.autodial_number, effectiveDomain(op.autodial_domain, common.autodialServer)],
             ].forEach(([number, domain]) => {
                 if (!String(number || '').trim()) return;
                 const key = numberKey(number, domain);
@@ -380,6 +386,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             sip_server: dept.sip_server || '',
             base_password: dept.base_password || '',
             autodial_code: dept.autodial_code || '',
+            autodial_server: dept.autodial_server || '',
         });
     };
 
@@ -388,11 +395,12 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         setDeptSaving(true);
         try {
             const body = reset
-                ? { sip_server: '', base_password: '', autodial_code: '' }
+                ? { sip_server: '', base_password: '', autodial_code: '', autodial_server: '' }
                 : {
                     sip_server: deptForm.sip_server.trim(),
                     base_password: deptForm.base_password,
                     autodial_code: deptForm.autodial_code.trim(),
+                    autodial_server: deptForm.autodial_server.trim(),
                 };
             const resp = await fetch(`${apiBaseUrl}/api/sip_config/departments/${deptEditing.department_id}`, {
                 method: 'PUT',
@@ -464,6 +472,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     sip_server: commonForm.sip_server.trim(),
                     base_password: commonForm.base_password,
                     autodial_code: commonForm.autodial_code.trim(),
+                    autodial_server: commonForm.autodial_server.trim(),
                 }),
             });
             const data = await resp.json().catch(() => ({}));
@@ -492,6 +501,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         commonForm.sip_server.trim() !== (settings.sip_server || '')
         || commonForm.base_password !== (settings.base_password || '')
         || commonForm.autodial_code.trim() !== (settings.autodial_code || '')
+        || commonForm.autodial_server.trim() !== (settings.autodial_server || '')
     );
 
     /* ─── разметка ─── */
@@ -597,9 +607,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 ) : (
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                         {filtered.map((op, index) => {
-                            const commonDomain = commonFor(op).server;
-                            const mainDomain = effectiveDomain(op.sip_domain, commonDomain);
-                            const autodialDomain = effectiveDomain(op.autodial_domain, commonDomain);
+                            const common = commonFor(op);
+                            const mainDomain = effectiveDomain(op.sip_domain, common.server);
+                            const autodialDomain = effectiveDomain(op.autodial_domain, common.autodialServer);
                             const isDuplicate = op.sip_number && duplicateKeys.has(numberKey(op.sip_number, mainDomain));
                             const isAutodialDuplicate = op.autodial_number
                                 && duplicateKeys.has(numberKey(op.autodial_number, autodialDomain));
@@ -743,6 +753,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                                 {dept.configured
                                                     ? [
                                                         dept.sip_server ? `домен ${dept.sip_server}` : 'домен общий',
+                                                        dept.autodial_server ? `автодозвон ${dept.autodial_server}` : null,
                                                         dept.base_password ? 'своя база пароля' : null,
                                                         dept.autodial_code ? `код ${dept.autodial_code}` : null,
                                                     ].filter(Boolean).join(' · ')
@@ -791,6 +802,17 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 </div>
                             </div>
                             <div>
+                                <label className="text-[12.5px] font-medium text-slate-600">Домен автодозвона</label>
+                                <input
+                                    type="text"
+                                    value={commonForm.autodial_server}
+                                    onChange={(e) => setCommonForm((f) => ({ ...f, autodial_server: e.target.value }))}
+                                    placeholder={commonForm.sip_server ? `пусто — как основной: ${commonForm.sip_server}` : 'пусто — как основной'}
+                                    disabled={!canEdit}
+                                    className={`${iosInput} mt-1`}
+                                />
+                            </div>
+                            <div>
                                 <label className="text-[12.5px] font-medium text-slate-600">Код подключения к автодозвону</label>
                                 <div className="mt-1 flex items-center gap-2">
                                     <input
@@ -813,9 +835,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 </div>
                             </div>
                             <p className="px-1 text-[11.5px] text-slate-500">
-                                Пароль сотрудника = база + его SIP-номер. На код автодозвона звонят один раз
-                                со второго номера, чтобы включить режим. Персональные пароль и домен —
-                                в карточке сотрудника на вкладке «Сотрудники».
+                                Пароль сотрудника = база + его SIP-номер. У автодозвона часто отдельная АТС —
+                                тогда задайте её домен, иначе он берётся из основного. На код автодозвона
+                                звонят один раз со второго номера, чтобы включить режим. Персональные
+                                пароль и домен — в карточке сотрудника на вкладке «Сотрудники».
                             </p>
                         </div>
                     </section>
@@ -861,6 +884,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     ]
                                     : [
                                         s.sip_server ? `сервер ${s.sip_server}` : 'сервер общий',
+                                        s.autodial_server ? `автодозвон ${s.autodial_server}` : null,
                                         s.base_password ? 'своя база пароля' : null,
                                         s.autodial_code ? `код ${s.autodial_code}` : null,
                                     ];
@@ -943,6 +967,21 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </div>
                         </div>
                         <div>
+                            <label className="text-[12.5px] font-medium text-slate-600">Домен автодозвона</label>
+                            <input
+                                type="text"
+                                value={deptForm.autodial_server}
+                                onChange={(e) => setDeptForm((f) => ({ ...f, autodial_server: e.target.value }))}
+                                placeholder={
+                                    settings.autodial_server
+                                        ? `общий: ${settings.autodial_server}`
+                                        : 'пусто — как основной домен'
+                                }
+                                disabled={!canEdit}
+                                className={`${iosInput} mt-1`}
+                            />
+                        </div>
+                        <div>
                             <label className="text-[12.5px] font-medium text-slate-600">Код подключения к автодозвону</label>
                             <input
                                 type="text"
@@ -955,7 +994,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         </div>
                     </div>
                     <p className="px-1 text-[11.5px] text-slate-500">
-                        Пустое поле берётся из общих настроек. Сотрудников с телефоном в отделе: {deptEditing?.operators_count ?? 0}.
+                        Пустое поле берётся из общих настроек, домен автодозвона — из основного домена отдела.
+                        Сотрудников с телефоном в отделе: {deptEditing?.operators_count ?? 0}.
                     </p>
                     {deptEditing?.updated_at && (
                         <p className="px-1 text-[11.5px] text-slate-400">
@@ -1147,6 +1187,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             <div className={`${iosCard} space-y-3 p-4`}>
                                 <p className="text-[11.5px] text-slate-500">
                                     Пусто — берётся домен {editingCommon.server || '—'} ({editing?.department_sip_server ? 'настройки отдела' : 'общие настройки'}) и пароль «база + номер».
+                                    {editingCommon.autodialServer !== editingCommon.server
+                                        && ` У автодозвона своя АТС: ${editingCommon.autodialServer || '—'}.`}
                                 </p>
                                 <div>
                                     <label className="text-[12.5px] font-medium text-slate-600">Пароль основного номера</label>
