@@ -533,16 +533,16 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
         if shutil.which("node") is None:
             raise unittest.SkipTest("node недоступен")
 
-    def _tone(self, percents):
-        """Вырезает константы порогов и функцию arTone из компонента и гоняет их в node."""
-        consts = re.findall(r"^const AR_[A-Z_]+ = [\d.]+;$", self.source, flags=re.MULTILINE)
-        self.assertEqual(len(consts), 4, "ожидались 4 константы порогов AR")
-        fn = re.search(r"^const arTone = \(ratio\) => \{.*?^\};$", self.source,
+    def _run_tone(self, fn_name, const_prefix, expected_consts, values, divisor):
+        """Вырезает пороги и функцию тона из компонента и гоняет их настоящим node."""
+        consts = re.findall(rf"^const {const_prefix}[A-Z_]+ = [\d.]+;$", self.source, flags=re.MULTILINE)
+        self.assertEqual(len(consts), expected_consts, f"ожидались {expected_consts} константы порогов {const_prefix}")
+        fn = re.search(rf"^const {fn_name} = \(ratio\) => \{{.*?^\}};$", self.source,
                        flags=re.MULTILINE | re.DOTALL)
-        self.assertIsNotNone(fn, "не нашли функцию arTone")
+        self.assertIsNotNone(fn, f"не нашли функцию {fn_name}")
         script = "\n".join(consts) + "\n" + fn.group(0) + "\n" + (
-            f"console.log(JSON.stringify({json.dumps(percents)}"
-            ".map((p) => arTone(p === null ? null : p / 100))));"
+            f"console.log(JSON.stringify({json.dumps(values)}"
+            f".map((p) => {fn_name}(p === null ? null : p / {divisor}))));"
         )
         with tempfile.NamedTemporaryFile("w", suffix=".mjs", delete=False, encoding="utf-8") as fh:
             fh.write(script)
@@ -554,6 +554,33 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
             return json.loads(out.stdout.strip())
         finally:
             os.unlink(path)
+
+    def _tone(self, percents):
+        return self._run_tone("arTone", "AR_", 4, percents, 100)
+
+    def _sl_tone(self, percents):
+        return self._run_tone("slTone", "SL_", 2, percents, 100)
+
+    def test_sl_thresholds(self):
+        """SL: от 80% зелёный, от 60% янтарный, ниже — красный (как в «Биллинге»)."""
+        cases = [
+            (100.0, 'good'), (85.0, 'good'), (80.0, 'good'),
+            (79.9, 'warn'), (70.0, 'warn'), (60.0, 'warn'),
+            (59.9, 'bad'), (30.0, 'bad'), (0.0, 'bad'),
+        ]
+        got = self._sl_tone([percent for percent, _ in cases])
+        for (percent, expected), actual in zip(cases, got):
+            self.assertEqual(actual, expected, f"SL {percent}% -> {actual}, ожидали {expected}")
+
+    def test_sl_is_neutral_before_any_calls(self):
+        self.assertEqual(self._sl_tone([None]), ['neutral'])
+
+    def test_sl_thresholds_match_the_billing_report(self):
+        """Одна цифра не должна гореть на табло и в отчёте разными цветами."""
+        billing = (ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("billingSlRatio >= 0.8 ? 'emerald'", billing.replace("\n", " ").replace("  ", " "))
+        self.assertIn("const SL_GOOD_RATIO = 0.8;", self.source)
+        self.assertIn("const SL_WARN_RATIO = 0.6;", self.source)
 
     def test_corridor_boundaries(self):
         cases = [
@@ -644,7 +671,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
     def test_view_renders_every_requested_metric(self):
         for label in (
             "Звонков в очереди",
-            "Максимальное ожидание",
+            "SL",
             "AR на текущий момент",
             "Входящих / Принято",
             "Потеряно",
@@ -686,7 +713,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
         """Порядок задан владельцем: очередь/ожидание/AR, затем итоги дня, затем операторы."""
         labels = re.findall(r'label="([^"]+)"', self.view)
         self.assertEqual(labels, [
-            "Звонков в очереди", "Максимальное ожидание", "AR на текущий момент",
+            "Звонков в очереди", "SL", "AR на текущий момент",
             "Входящих / Принято", "Потеряно",
             "Среднее ожидание", "Максимальное за день",
             "Свободны", "В разговоре", "Онлайн",

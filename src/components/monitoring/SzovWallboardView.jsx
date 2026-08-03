@@ -41,6 +41,22 @@ const arTone = (ratio) => {
     return 'warn';
 };
 
+/*
+ * SL — доля звонков, отвеченных в пределах порога ожидания, ко ВСЕМ попавшим в очередь.
+ * Пороги те же, что в отчёте «Расчёт ресурсов -> Биллинг» (ResourceFteView), иначе одна и та
+ * же цифра горела бы на табло и в отчёте разными цветами.
+ */
+const SL_GOOD_RATIO = 0.8;
+const SL_WARN_RATIO = 0.6;
+
+const slTone = (ratio) => {
+    if (ratio === null || ratio === undefined || !Number.isFinite(Number(ratio))) return 'neutral';
+    const value = Number(ratio);
+    if (value >= SL_GOOD_RATIO) return 'good';
+    if (value >= SL_WARN_RATIO) return 'warn';
+    return 'bad';
+};
+
 const formatInt = (value) => (Number.isFinite(Number(value)) ? Number(value).toLocaleString('ru-RU') : '—');
 
 const formatPercent = (ratio, digits = 1) => (
@@ -263,9 +279,6 @@ const WallboardBody = ({ snapshot, scale }) => {
     const today = snapshot?.today || {};
     const slThreshold = Number(snapshot?.sl_threshold_seconds) || 20;
 
-    // Красим ожидание «сейчас» только когда порог SL уже пробит — это настоящее отклонение.
-    const waitNow = Number(now.queue_max_wait_seconds) || 0;
-    const waitTone = waitNow > slThreshold ? 'bad' : 'neutral';
     // Настоящая тревога — люди ждут, а взять звонок некому. Сигналим только на очереди:
     // у «Свободны» теперь свой зелёный фон, и красное число на нём читалось бы как спор
     // цветов, а дублировать одну тревогу в двух местах незачем.
@@ -286,10 +299,10 @@ const WallboardBody = ({ snapshot, scale }) => {
                         scale={scale}
                     />
                     <Cell
-                        label="Максимальное ожидание"
-                        value={formatDuration(waitNow)}
-                        hint={`Самый долгий в очереди · порог ${slThreshold} с`}
-                        tone={waitTone}
+                        label="SL"
+                        value={formatPercent(today.sl_ratio)}
+                        hint={`Ответы за ≤ ${slThreshold} с · норма от ${Math.round(SL_GOOD_RATIO * 100)}%`}
+                        tone={slTone(today.sl_ratio)}
                         size="hero"
                         scale={scale}
                     />
