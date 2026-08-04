@@ -24,23 +24,17 @@ const POLL_INTERVAL_MS = 15000;
 const FULLSCREEN_Z = 150;
 
 /*
- * AR — не «чем меньше, тем лучше», а коридор (правило владельца):
- *   зелёный  — 4,0 … 4,9 %  (норма)
- *   красный  — ниже 3,9 % или выше 5,0 %
- *   янтарный — узкие зоны 3,9…4,0 и 4,9…5,0: ещё не нарушение, но уже у границы.
- * Слишком низкий AR — тоже сигнал (перезаложены операторы), поэтому он красный.
+ * AR — не «чем меньше, тем лучше», а коридор (правило владельца): норма 3…5 %.
+ * Ниже 3 % — тоже отклонение, а не успех: значит операторов на линии больше, чем нужно.
+ * Коридор сплошной, промежуточного цвета нет: либо в норме, либо нет.
  */
-const AR_RED_BELOW_PERCENT = 3.9;
-const AR_TARGET_MIN_PERCENT = 4.0;
-const AR_TARGET_MAX_PERCENT = 4.9;
-const AR_RED_ABOVE_PERCENT = 5.0;
+const AR_MIN_PERCENT = 3;
+const AR_MAX_PERCENT = 5;
 
 const arTone = (ratio) => {
     if (ratio === null || ratio === undefined || !Number.isFinite(Number(ratio))) return 'neutral';
     const percent = Number(ratio) * 100;
-    if (percent < AR_RED_BELOW_PERCENT || percent > AR_RED_ABOVE_PERCENT) return 'bad';
-    if (percent >= AR_TARGET_MIN_PERCENT && percent <= AR_TARGET_MAX_PERCENT) return 'good';
-    return 'warn';
+    return percent >= AR_MIN_PERCENT && percent <= AR_MAX_PERCENT ? 'good' : 'bad';
 };
 
 /*
@@ -446,7 +440,7 @@ const WallboardBody = ({ snapshot, scale }) => {
                     <KeyTile
                         label="AR"
                         value={formatPercent(today.ar_ratio)}
-                        hint={`Норма ${String(AR_TARGET_MIN_PERCENT).replace('.', ',')}–${String(AR_TARGET_MAX_PERCENT).replace('.', ',')}%`}
+                        hint={`Норма ${AR_MIN_PERCENT}–${AR_MAX_PERCENT}%`}
                         tone={arTone(today.ar_ratio)}
                         scale={scale}
                     />

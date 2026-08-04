@@ -673,7 +673,7 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
             os.unlink(path)
 
     def _tone(self, percents):
-        return self._run_tone("arTone", "AR_", 4, percents, 100)
+        return self._run_tone("arTone", "AR_", 2, percents, 100)
 
     def _sl_tone(self, percents):
         return self._run_tone("slTone", "SL_", 2, percents, 100)
@@ -700,24 +700,16 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
         self.assertIn("const SL_WARN_RATIO = 0.6;", self.source)
 
     def test_corridor_boundaries(self):
+        """Коридор владельца 3–5 %: внутри зелёный, снаружи красный, промежуточного нет."""
         cases = [
-            (0.0, 'bad'),      # совсем без потерь — тоже отклонение (перезаложены операторы)
-            (3.0, 'bad'),
-            (3.89, 'bad'),
-            (3.9, 'warn'),     # ровно на нижней границе красного — уже не красный
-            (3.95, 'warn'),
-            (4.0, 'good'),
-            (4.5, 'good'),
-            (4.9, 'good'),
-            (4.95, 'warn'),
-            (5.0, 'warn'),     # «больше 5» красный, ровно 5 — ещё нет
-            (5.01, 'bad'),
-            (7.0, 'bad'),
-            (12.0, 'bad'),
+            (0.0, 'bad'), (1.5, 'bad'), (2.99, 'bad'),
+            (3.0, 'good'), (3.5, 'good'), (4.11, 'good'), (5.0, 'good'),
+            (5.01, 'bad'), (7.0, 'bad'), (28.6, 'bad'),
         ]
         got = self._tone([percent for percent, _ in cases])
         for (percent, expected), actual in zip(cases, got):
             self.assertEqual(actual, expected, f"AR {percent}% -> {actual}, ожидали {expected}")
+        self.assertNotIn('warn', got, "у AR больше нет промежуточного тона")
 
     def test_missing_ar_is_neutral(self):
         """Ночью, когда звонков ещё не было, AR пустой — красить нечего."""
@@ -955,6 +947,7 @@ class SzovBroadcastTests(unittest.TestCase):
             '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
             'SZOV_BROADCAST_SEND_TIMES', 'SZOV_BROADCAST_TIMEZONE',
             'SZOV_BROADCAST_STALE_NOTICE_HOURS',
+            'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT',
             '_szov_wallboard_int',
             '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
             '_szov_broadcast_open_chats', '_szov_broadcast_collect',
@@ -1036,18 +1029,50 @@ class SzovBroadcastTests(unittest.TestCase):
                       '<b>Принято</b>', '<b>Пропущено</b>', '<b>Среднее время разговора</b>'):
             self.assertIn(label, text, label)
 
+    def test_header_says_now_without_an_argument(self):
+        ns = self._namespace()
+        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect']())
+        self.assertIn('<b>Показатели сейчас</b>', text)
+
+    def test_header_states_the_requested_hour(self):
+        """/tablo 14:00 не должен выглядеть как показатели на текущий момент."""
+        ns = self._namespace()
+        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect'](hour_to=14))
+        self.assertIn('<b>Показатели на 14:00</b>', text)
+        self.assertIn('не текущее состояние линии', text)
+        self.assertNotIn('<b>Показатели сейчас</b>', text)
+
+    def test_now_only_figures_are_dropped_for_a_past_hour(self):
+        """Кто был на перерыве в 14:00, восстановить нельзя — текущие за прошлые не выдаём."""
+        ns = self._namespace(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 2},
+                                       'stale': False, 'age_seconds': 0},
+                             chat_rows=[{'request_type': 'common', 'request_end': ''}])
+        past = ns['_szov_broadcast_collect'](hour_to=14)
+        self.assertIsNone(past['open_chats'])
+        notes = ' '.join(ns['_szov_broadcast_notes'](past))
+        self.assertNotIn('перезвон', notes)
+        self.assertNotIn('на перерыве', notes)
+        # а для «сейчас» они на месте
+        live_notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
+        self.assertIn('перезвон', live_notes)
+
+    def test_ar_corridor_is_three_to_five_percent(self):
+        ns = self._namespace()
+        self.assertEqual(ns['SZOV_AR_MIN_PERCENT'], 3)
+        self.assertEqual(ns['SZOV_AR_MAX_PERCENT'], 5)
+
     def test_notes_flag_ar_outside_the_corridor(self):
         ns = self._namespace()
         notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
-        self.assertIn('выше установленного диапазона', notes)
+        self.assertIn('AR выше установленного диапазона', notes)
         self.assertIn('потеряно 20 звонков', notes)
 
     def test_notes_flag_ar_below_the_corridor(self):
         ns = self._namespace(hourly_raw=[
-            {'hh': 9, 'served': 970, 'arrived': 1000, 'lost': 30, 'greet_drop': 0, 'talk_seconds': 260000},
+            {'hh': 9, 'served': 980, 'arrived': 1000, 'lost': 20, 'greet_drop': 0, 'talk_seconds': 260000},
         ])
         notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
-        self.assertIn('ниже установленного диапазона', notes)
+        self.assertIn('AR ниже установленного диапазона', notes)
 
     def test_notes_mention_operators_on_recall_and_break(self):
         ns = self._namespace(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 2},
