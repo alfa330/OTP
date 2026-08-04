@@ -1106,7 +1106,17 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])", self.api)
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
         # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
-        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 3)
+        self.assertIn("@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])", self.api)
+        # табло + настройка + предпросмотр + тестовая отправка закрыты одним гейтом
+        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 4)
+
+    def test_preview_never_sends_anything(self):
+        """Предпросмотр нужен, чтобы проверить шрифт и вид, не тревожа рабочий чат."""
+        pattern = "def api_szov_wallboard_broadcast_preview.*?(?=@app\.route)"
+        block = re.search(pattern, self.api, flags=re.DOTALL).group(0)
+        self.assertNotIn("send_media_group", block)
+        self.assertNotIn("send_message", block)
+        self.assertIn("font_path", block)
 
     def test_schedule_is_registered_from_the_configured_times(self):
         self.assertIn("for _hour, _minute in _szov_broadcast_send_times():", self.api)
