@@ -833,7 +833,9 @@ class SzovWallboardWiringTests(unittest.TestCase):
         """«Принято / входящих»: принятые — главное число, общий поток приглушён."""
         pair = re.search(r"<PairTile(.*?)/>", self.view, flags=re.DOTALL).group(0)
         self.assertIn("first={formatInt(today.served)}", pair)
-        self.assertIn("second={formatInt(today.total)}", pair)
+        # входящие = дошедшие до очереди, сброшенные на приветствии сюда не идут
+        self.assertIn("second={formatInt(today.arrived)}", pair)
+        self.assertNotIn("today.total", self.view)
         body = re.search(r"const PairTile = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
         self.assertIn("text-slate-400", body)
 
@@ -1134,6 +1136,12 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("@dp.message_handler(commands=['tablo'])", self.api)
         self.assertIn("async def szov_wallboard_command", self.api)
         self.assertIn("hour_to = int(match.group(1))", self.api)
+
+    def test_incoming_excludes_greeting_drops_everywhere(self):
+        """Входящие — только дошедшие до очереди, и на экране, и в картинке отбивки."""
+        self.assertIn("f\"{totals['served']}/{totals['arrived']}\"", self.api)
+        self.assertNotIn("totals['total']}\"", self.api)
+        self.assertIn("second={formatInt(today.arrived)}", self.view)
 
     def test_images_fail_loudly_without_a_cyrillic_font(self):
         """Встроенный шрифт Pillow не умеет кириллицу — молча рисовать квадратики нельзя."""
