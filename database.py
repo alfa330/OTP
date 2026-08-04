@@ -21445,6 +21445,10 @@ class Database:
             timeline = self._load_imported_status_segments_for_operators(
                 cursor, operator_ids, date_obj, date_obj) if operator_ids else {}
 
+        # Докуда вообще доехали статусы. Синк Oktell идёт несколько раз в сутки и отстаёт,
+        # поэтому за последним известным моментом «ноль на смене» означает не «никто не
+        # работал», а «данных ещё нет» — и такие часы отдаём как None, а не 0.
+        data_until_minute = 0
         for operator_id, days in (timeline or {}).items():
             segments = (days or {}).get(day_key) or []
             on_shift = []
@@ -21456,7 +21460,9 @@ class Database:
                 end_min = self._hourly_iso_to_minutes(segment.get('end'), date_obj)
                 if start_min is None or end_min is None or end_min <= start_min:
                     continue
-                on_shift.append((max(0, start_min), min(1440, end_min)))
+                clipped_start, clipped_end = max(0, start_min), min(1440, end_min)
+                on_shift.append((clipped_start, clipped_end))
+                data_until_minute = max(data_until_minute, clipped_end)
             if not on_shift:
                 continue
             for hour in range(24):
@@ -21465,11 +21471,17 @@ class Database:
                 if self._hourly_merge_minutes(clipped) >= self._HOURLY_FACT_MIN_MINUTES:
                     fact_by_hour[hour].add(int(operator_id))
 
-        return [{
-            'hour': hour,
-            'planned': len(planned_by_hour[hour]),
-            'fact': len(fact_by_hour[hour]),
-        } for hour in range(24)]
+        rows = []
+        for hour in range(24):
+            # Час считается «известным», если статусы доехали хотя бы до его половины —
+            # иначе засчитать 30 минут в нём всё равно было бы невозможно.
+            has_data = data_until_minute >= hour * 60 + self._HOURLY_FACT_MIN_MINUTES
+            rows.append({
+                'hour': hour,
+                'planned': len(planned_by_hour[hour]),
+                'fact': len(fact_by_hour[hour]) if has_data else None,
+            })
+        return rows
 
     @staticmethod
     def _hourly_iso_to_minutes(value, date_obj):
