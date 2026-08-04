@@ -851,14 +851,31 @@ class SzovWallboardWiringTests(unittest.TestCase):
         # строка появляется только когда есть кого показать
         self.assertIn("filter(([count]) => count > 0)", self.view)
 
-    def test_operator_lists_render_in_both_modes(self):
-        """Владелец: список операторов на статусах оставить и в полноэкранном режиме."""
-        self.assertEqual(self.view.count("<OperatorList"), 2)
-        # никаких условий по fullscreen вокруг списков
-        lists = re.search(r"<OperatorList title=\"Перерывы\".*?<OperatorList title=\"Перезвон\".*?/>",
-                          self.view, flags=re.DOTALL).group(0)
-        self.assertNotIn("fullscreen", lists)
-        self.assertIn("showReason", lists)
+    def test_statuses_live_in_a_right_hand_column(self):
+        """Макет владельца: показатели слева, статусы операторов узкой колонкой справа."""
+        self.assertIn("lg:grid-cols-[minmax(0,1fr)_19rem]", self.view)
+        self.assertEqual(self.view.count("<StatusColumn now={now}"), 1)
+        column = re.search(r"const StatusColumn = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        titles = re.findall(r'title="([^"]+)"', column)
+        self.assertEqual(titles, ["На перерыве", "Перезвон"])
+        # «Перезвон» прижат к низу карточки и отделён линией
+        self.assertIn("mt-auto border-t border-slate-200/70 pt-4", column)
+        # список показывается в обоих режимах — никаких условий по fullscreen
+        self.assertNotIn("fullscreen", column)
+
+    def test_status_entry_shows_name_with_time_underneath(self):
+        """В колонке имя сверху, время в статусе под ним — как на макете."""
+        block = re.search(r"const StatusBlock = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("{item.name}", block)
+        self.assertIn("formatDuration(item.seconds)", block)
+        self.assertIn("text-slate-400", block)
+        # счётчик в подписи не дублируем — он уже есть плиткой «Перерыв»
+        self.assertNotIn("items.length}</span>", block)
+
+    def test_reason_chip_only_for_non_break_reasons(self):
+        """Тренинг и тех.причина помечаются, обычный перерыв — без лишнего чипа."""
+        block = re.search(r"const StatusBlock = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("item.reason_key !== 'break'", block)
 
     def test_numbers_are_centred(self):
         for component in ("const KeyTile", "const StatTile", "const PairTile"):
