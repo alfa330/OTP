@@ -29981,15 +29981,41 @@ def _ws_make_direction_scope_resolver(break_direction_groups):
     return _resolver
 
 
-def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id, direction_scope, get_scope_key):
+def _ws_cross_operator_gap_for_direction(direction_value, break_gaps_map=None):
+    """
+    Минимальный промежуток между перерывами РАЗНЫХ операторов направления.
+    0 = требования нет.
+    """
+    gaps = break_gaps_map if isinstance(break_gaps_map, dict) else {}
+    if not gaps:
+        return 0
+    key = _ws_normalize_direction_key(direction_value)
+    if not key:
+        return 0
+    try:
+        return max(0, int(gaps.get(key) or 0))
+    except Exception:
+        return 0
+
+
+def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id, direction_scope, get_scope_key,
+                                          break_gaps_map=None):
     occupied = []
     prev_str = _ws_add_days_str(date_str, -1)
     next_str = _ws_add_days_str(date_str, 1)
     target_scope = str(get_scope_key(direction_scope))
+    target_gap = _ws_cross_operator_gap_for_direction(direction_scope, break_gaps_map)
+    padded_any = False
 
-    def clamp_push(s, e):
-        ns = max(0, min(2880, int(s)))
-        ne = max(0, min(2880, int(e)))
+    def clamp_push(s, e, gap):
+        # Перерыв чужого оператора расширяем на требуемый промежуток с двух сторон:
+        # тогда обычный поиск «без пересечений» сам держит дистанцию.
+        nonlocal padded_any
+        pad = max(0, int(gap or 0))
+        if pad > 0:
+            padded_any = True
+        ns = max(0, min(2880, int(s) - pad))
+        ne = max(0, min(2880, int(e) + pad))
         if ne > ns:
             occupied.append({'start': ns, 'end': ne})
 
@@ -29999,18 +30025,25 @@ def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id
         if str(get_scope_key(op.get('direction'))) != target_scope:
             continue
 
+        # В группе направлений у сторон могут быть разные настройки — берём строгую.
+        op_gap = max(target_gap, _ws_cross_operator_gap_for_direction(op.get('direction'), break_gaps_map))
+
         for seg in (op.get('shifts', {}).get(date_str) or []):
             for b in (seg.get('breaks') or []):
-                clamp_push(b.get('start', 0), b.get('end', 0))
+                clamp_push(b.get('start', 0), b.get('end', 0), op_gap)
 
         for seg in (op.get('shifts', {}).get(prev_str) or []):
             for b in (seg.get('breaks') or []):
-                clamp_push(int(b.get('start', 0)) - 1440, int(b.get('end', 0)) - 1440)
+                clamp_push(int(b.get('start', 0)) - 1440, int(b.get('end', 0)) - 1440, op_gap)
 
         for seg in (op.get('shifts', {}).get(next_str) or []):
             for b in (seg.get('breaks') or []):
-                clamp_push(int(b.get('start', 0)) + 1440, int(b.get('end', 0)) + 1440)
+                clamp_push(int(b.get('start', 0)) + 1440, int(b.get('end', 0)) + 1440, op_gap)
 
+    # Расширенные интервалы могут склеиваться — сливаем, чтобы штраф за
+    # пересечение не считался дважды. Без промежутка поведение не меняется.
+    if padded_any:
+        return _ws_merge_intervals(occupied)
     return sorted(occupied, key=lambda item: (int(item['start']), int(item['end'])))
 
 
@@ -30128,7 +30161,8 @@ def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, o
     return best
 
 
-def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None):
+def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None,
+                                           break_gaps_map=None):
     segs = (op or {}).get('shifts', {}).get(date_str) or []
     if not segs:
         return
@@ -30137,7 +30171,8 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         date_str=date_str,
         exclude_op_id=op.get('id'),
         direction_scope=op.get('direction'),
-        get_scope_key=get_direction_scope_key
+        get_scope_key=get_direction_scope_key,
+        break_gaps_map=break_gaps_map
     )
     for seg in segs:
         raw_seg_start = int(seg.get('__startMin', _ws_time_to_minutes(seg.get('start'))))
@@ -30204,7 +30239,7 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
 
 
 def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_map,
-                                    break_direction_groups=None):
+                                    break_direction_groups=None, break_gaps_map=None):
     """
     Вычисляет перерывы для списка entries (оператор + дата + смены).
     Мутирует entries in-place: каждый shift получает поле 'breaks'.
@@ -30222,6 +30257,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
     ]
     sim_source_operators: результат db.get_operators_with_shifts() за нужный период
     break_rules_map: результат db.get_work_schedule_break_rules_map()
+    break_gaps_map: результат db.get_work_schedule_break_cross_operator_gaps_map()
+        (минимальный промежуток между перерывами разных операторов направления)
     """
     sim_operators = _ws_clone_ops_for_break_simulation(sim_source_operators)
     sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
@@ -30322,7 +30359,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 date_str,
                 sim_operators,
                 scope_resolver,
-                break_rules_map=break_rules_map
+                break_rules_map=break_rules_map,
+                break_gaps_map=break_gaps_map
             )
 
         # Записываем финальные перерывы (после антиколлизии) обратно в entry
@@ -30787,6 +30825,8 @@ def get_operators_with_schedules():
 def get_work_schedule_break_rules():
     """
     Получить правила автоперерывов по направлениям.
+    Вместе с правилами отдаётся crossOperatorGapMinutes — минимальный
+    промежуток между перерывами разных операторов направления (0 = выключено).
     """
     try:
         requester_id, user_data, auth_error = _get_authenticated_requester()
@@ -30826,10 +30866,14 @@ def save_work_schedule_break_rules():
                 "direction": "Название направления",
                 "rules": [
                     {"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}
-                ]
+                ],
+                "crossOperatorGapMinutes": 10
             }
         ]
     }
+    crossOperatorGapMinutes — минимальный промежуток между перерывами РАЗНЫХ
+    операторов направления (0 = выключить). Ключ необязателен: без него текущее
+    значение сохраняется как есть.
     """
     try:
         requester_id, user_data, auth_error = _resolve_management_requester()
@@ -31944,11 +31988,13 @@ def import_work_schedules_excel():
         sim_end = (import_end_obj + timedelta(days=1)).strftime('%Y-%m-%d')
         sim_source_operators = db.get_operators_with_shifts(sim_start, sim_end) or []
         break_rules_map = db.get_work_schedule_break_rules_map() or {}
+        break_gaps_map = db.get_work_schedule_break_cross_operator_gaps_map() or {}
         _ws_compute_breaks_for_entries(
             parsed_entries,
             sim_source_operators,
             break_rules_map,
-            break_direction_groups=break_direction_groups
+            break_direction_groups=break_direction_groups,
+            break_gaps_map=break_gaps_map
         )
 
         result = db.import_work_schedule_excel_entries(parsed_entries)
