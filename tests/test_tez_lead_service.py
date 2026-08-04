@@ -134,13 +134,17 @@ class RecomputeOutcomesTests(unittest.TestCase):
         }
 
     def test_success_is_written_with_trip_month(self):
-        """Звонок в июне + поездка 3 июля (в первые 7 дней) -> успешка июля."""
+        """Звонок 25 июня (последние 7 дней) + поездка 23 июля -> успешка июля.
+
+        День поездки внутри отчётного месяца не ограничен (владелец, 2026-08-04),
+        но месяц успешки по-прежнему берётся от поездки, а не от звонка.
+        """
         call = {
             'general_call_id': 'g1',
             'started_at': datetime(2026, 6, 25, 10, 0, tzinfo=ALMATY_TZ),
             'call_type': 1, 'billsec': 60, 'operator_id': 7, 'employee_name': 'Оператор ОП',
         }
-        lead = self._lead('L1', datetime(2026, 7, 3, 9, 0, tzinfo=ALMATY_TZ), [call])
+        lead = self._lead('L1', datetime(2026, 7, 23, 9, 0, tzinfo=ALMATY_TZ), [call])
         db = FakeDb([lead])
 
         stats = tez_lead_service.recompute_outcomes(db, 2026, 7)
@@ -151,7 +155,7 @@ class RecomputeOutcomesTests(unittest.TestCase):
         self.assertEqual(item['operator_name'], 'Оператор ОП')
         self.assertEqual(item['success_year'], 2026)
         self.assertEqual(item['success_month'], 7)
-        self.assertEqual(item['success_date'], date(2026, 7, 3))
+        self.assertEqual(item['success_date'], date(2026, 7, 23))
 
     def test_active_prev_month_is_already_working(self):
         """Заказ в прошлом месяце -> «уже работающий», успешка не пишется."""

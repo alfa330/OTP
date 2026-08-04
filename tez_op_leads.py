@@ -14,9 +14,16 @@
      сделанный оператором отдела ОП (operator_id должен быть уже разрезолвен).
   4. Успешка достаётся ПОСЛЕДНЕМУ квалифицирующему звонку перед поездкой.
   5. Если месяц звонка совпадает с месяцем поездки — успешка.
-  6. Если звонок был в более раннем месяце — успешка только когда поездка
-     состоялась в первые 7 дней месяца включительно.
+  6. Если звонок был в ПРОШЛОМ месяце, засчитываем только звонки из его
+     последних 7 дней; поездка при этом может быть любым днём отчётного месяца.
+     Звонок раньше этого окна (или ещё более старый месяц) — «Не засчитана».
   7. Дата успешки = день поездки (Asia/Almaty), а не день обнаружения.
+
+Правило 6 переписано 2026-08-04 по решению владельца: окно из семи дней раньше
+висело на стороне ПОЕЗДКИ (успешка только если водитель выехал 1–7 числа), теперь
+оно на стороне ЗВОНКА (звонок в последние 7 дней прошлого месяца). Смысл тот же —
+привязать звонок к поездке «через границу месяца», но операторы больше не теряют
+успешку из-за того, что водитель собрался выехать во второй половине месяца.
 
 TEZ APP отдаёт даты ОКНОМ на два месяца: `month_first_order_at` (первый заказ в
 запрошенном месяце) и `previous_month_first_order_at` (первый заказ в предыдущем).
@@ -25,6 +32,7 @@ TEZ APP отдаёт даты ОКНОМ на два месяца: `month_first_
 """
 
 import re
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 
 try:
@@ -40,6 +48,11 @@ ALMATY_TZ = ZoneInfo("Asia/Almaty") if ZoneInfo is not None else timezone(timede
 # планируется померить 5/10/15 сек, пересчёт при этом локальный (Binotel не дёргаем).
 DEFAULT_MIN_BILLSEC = 10
 
+# Окно «звонок на стыке месяцев»: последние 7 дней прошлого месяца включительно.
+# Считается от КОНЦА месяца (в июне это 24–30, в июле 25–31, в феврале 22–28),
+# поэтому фиксированного «после 24-го» тут быть не может.
+PREV_MONTH_WINDOW_DAYS = 7
+
 # callType в ответе Binotel: 0 = входящий, 1 = исходящий.
 CALL_TYPE_INCOMING = 0
 CALL_TYPE_OUTGOING = 1
@@ -54,10 +67,16 @@ STATUS_NOT_COUNTED = "not_counted"          # звонок был, но прав
 # Причины, по которым сработало то или иное правило (пишем в детализацию,
 # чтобы оператору можно было объяснить решение, а не показывать «нет успешки»).
 RULE_SAME_MONTH = "same_month"                    # звонок в месяце поездки
-RULE_PREV_MONTH_FIRST_WEEK = "prev_month_week1"   # звонок раньше, поездка до 7-го
+RULE_PREV_MONTH_LAST_DAYS = "prev_month_last7"    # звонок в последние 7 дней прошлого месяца
 REASON_NO_CALL_BEFORE_TRIP = "no_call_before_trip"
-REASON_TRIP_TOO_LATE = "trip_after_day7"
+REASON_CALL_BEFORE_WINDOW = "call_before_last7"   # звонок раньше окна (или ещё старше)
 REASON_ACTIVE_PREV_MONTH = "active_prev_month"    # были заказы в прошлом месяце
+
+# Коды прежнего правила (окно висело на стороне поездки). Новый расчёт их не
+# выдаёт, но на закрытых месяцах они остались в БД — лейблы для них живут в
+# экспорте и на экране лидов, чтобы старые разборы читались.
+LEGACY_RULE_PREV_MONTH_FIRST_WEEK = "prev_month_week1"
+LEGACY_REASON_TRIP_TOO_LATE = "trip_after_day7"
 
 
 def normalize_kz_phone(raw):
@@ -129,6 +148,17 @@ def _month_key(value):
     return (value.year, value.month)
 
 
+def _prev_month_key(value):
+    """(год, месяц) месяца, предшествующего месяцу value — с переходом через год."""
+    return (value.year - 1, 12) if value.month == 1 else (value.year, value.month - 1)
+
+
+def _is_in_month_tail(value, days=PREV_MONTH_WINDOW_DAYS):
+    """Попадает ли дата в последние `days` дней своего месяца (включительно)."""
+    last_day = monthrange(value.year, value.month)[1]
+    return value.day > last_day - int(days)
+
+
 def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
                          min_billsec=DEFAULT_MIN_BILLSEC):
     """Считает статус лида по оконным датам заказов и списку его звонков.
@@ -192,16 +222,21 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
     result["call"] = last_call
     result["call_at"] = last_call["started_at"]
 
-    same_month = _month_key(last_call["started_at"]) == _month_key(trip_at)
-    if same_month:
+    # Окно проверяем по ПОСЛЕДНЕМУ звонку и только по нему: более ранние звонки
+    # не могут пройти окно, если не прошёл он (внутри месяца поездки успешка
+    # безусловна, а окно прошлого месяца упирается в его последний день —
+    # значит «позже» всегда не хуже).
+    call_month = _month_key(last_call["started_at"])
+    if call_month == _month_key(trip_at):
         rule = RULE_SAME_MONTH
-    elif trip_at.day <= 7:
-        rule = RULE_PREV_MONTH_FIRST_WEEK
+    elif call_month == _prev_month_key(trip_at) and _is_in_month_tail(last_call["started_at"]):
+        # Звонок на стыке месяцев: день поездки внутри отчётного месяца не важен.
+        rule = RULE_PREV_MONTH_LAST_DAYS
     else:
-        # Оператор работал, но не уложился в окно — это НЕ «уже работающий»,
+        # Оператор работал, но звонок вне окна — это НЕ «уже работающий»,
         # и смешивать их нельзя: именно такие случаи операторы оспаривают.
         result["status"] = STATUS_NOT_COUNTED
-        result["rule"] = REASON_TRIP_TOO_LATE
+        result["rule"] = REASON_CALL_BEFORE_WINDOW
         return result
 
     result["status"] = STATUS_SUCCESS

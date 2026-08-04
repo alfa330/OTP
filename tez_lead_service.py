@@ -251,8 +251,8 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
                 'call_at': outcome['call_at'],
                 'first_order_at': outcome['first_order_at'],
                 'success_date': success_date,
-                # Успешка живёт в месяце ПОЕЗДКИ: лид из июньской базы может дать
-                # успешку в июле (звонок в июне, поездка до 7-го числа).
+                # Успешка живёт в месяце ПОЕЗДКИ: звонок из последних 7 дней июня
+                # даёт успешку июля, если водитель выехал в июле (любым днём).
                 'success_year': success_date.year,
                 'success_month': success_date.month,
                 'is_late': bool(month_closed_before and success_date < month_closed_before),
@@ -265,8 +265,12 @@ def run_nightly(db, first_orders_client, binotel_client, resolve_operator,
                 today=None, min_billsec=DEFAULT_MIN_BILLSEC):
     """Полный ночной цикл для текущего месяца (и прошлого — в первую неделю).
 
-    Прошлый месяц добираем 1–7 числа: по правилам владельца звонок из прошлого
-    месяца ещё может дать успешку, если поездка состоялась в первую неделю.
+    Прошлый месяц добираем 1–7 числа из-за задержки данных на стыке месяцев:
+    поездка 30-го числа и звонки по ней доходят уже в новом месяце, а пересчёт
+    идемпотентен. Правило успешки при этом окна на день поездки не накладывает
+    (звонок из последних 7 дней прошлого месяца засчитывается при поездке любым
+    днём отчётного) — успешки отчётного месяца считаются каждую ночь в его
+    собственном периоде.
     """
     today = today or date.today()
     periods = [(today.year, today.month)]

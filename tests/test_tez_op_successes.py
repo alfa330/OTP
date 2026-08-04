@@ -16,7 +16,8 @@ if str(ROOT) not in sys.path:
 from tez_op_leads import (  # noqa: E402
     ALMATY_TZ,
     REASON_ACTIVE_PREV_MONTH,
-    RULE_PREV_MONTH_FIRST_WEEK,
+    REASON_CALL_BEFORE_WINDOW,
+    RULE_PREV_MONTH_LAST_DAYS,
     RULE_SAME_MONTH,
     STATUS_ALREADY_WORKING,
     STATUS_IN_PROGRESS,
@@ -116,17 +117,55 @@ class LeadOutcomeTests(unittest.TestCase):
         out = compute_lead_outcome(dt(2026, 6, 20, 23, 50), None, [call(dt(2026, 6, 3))])
         self.assertEqual(out["success_date"].isoformat(), "2026-06-20")
 
-    def test_prev_month_call_trip_within_first_week(self):
+    def test_prev_month_call_in_last_seven_days(self):
+        """Звонок 25 июня (последние 7 дней месяца) + поездка 7 июля -> успешка."""
         out = compute_lead_outcome(dt(2026, 7, 7, 23, 59), None, [call(dt(2026, 6, 25), operator_id=5)])
         self.assertEqual(out["status"], STATUS_SUCCESS)
-        self.assertEqual(out["rule"], RULE_PREV_MONTH_FIRST_WEEK)
+        self.assertEqual(out["rule"], RULE_PREV_MONTH_LAST_DAYS)
         self.assertEqual(out["operator_id"], 5)
 
-    def test_prev_month_call_trip_after_day7(self):
-        """Оператор работал, но не уложился в окно — отдельный статус, не «уже работающий»."""
-        out = compute_lead_outcome(dt(2026, 7, 8), None, [call(dt(2026, 6, 25))])
+    def test_prev_month_call_counts_for_any_trip_day(self):
+        """Главное в новом правиле (владелец, 2026-08-04): день поездки внутри
+        отчётного месяца больше не ограничен — важен только звонок."""
+        for trip in [dt(2026, 7, 8), dt(2026, 7, 17), dt(2026, 7, 31, 23, 59)]:
+            out = compute_lead_outcome(trip, None, [call(dt(2026, 6, 25), operator_id=5)])
+            self.assertEqual(out["status"], STATUS_SUCCESS, trip)
+            self.assertEqual(out["rule"], RULE_PREV_MONTH_LAST_DAYS, trip)
+            self.assertEqual(out["operator_id"], 5, trip)
+            self.assertEqual(out["success_date"], trip.date(), trip)
+
+    def test_prev_month_window_edges_follow_month_length(self):
+        """Окно считается от конца месяца: в июне (30 дней) это 24–30 число."""
+        inside = compute_lead_outcome(dt(2026, 7, 20), None, [call(dt(2026, 6, 24), operator_id=5)])
+        self.assertEqual(inside["status"], STATUS_SUCCESS)
+        self.assertEqual(inside["rule"], RULE_PREV_MONTH_LAST_DAYS)
+        outside = compute_lead_outcome(dt(2026, 7, 20), None, [call(dt(2026, 6, 23), operator_id=5)])
+        self.assertEqual(outside["status"], STATUS_NOT_COUNTED)
+        # Февраль короче: окно начинается 22-го, а не 24-го.
+        feb = compute_lead_outcome(dt(2026, 3, 20), None, [call(dt(2026, 2, 22), operator_id=5)])
+        self.assertEqual(feb["status"], STATUS_SUCCESS)
+        feb_early = compute_lead_outcome(dt(2026, 3, 20), None, [call(dt(2026, 2, 21), operator_id=5)])
+        self.assertEqual(feb_early["status"], STATUS_NOT_COUNTED)
+
+    def test_prev_month_window_across_year_boundary(self):
+        """Декабрь -> январь: «прошлый месяц» не должен потеряться на смене года."""
+        out = compute_lead_outcome(dt(2027, 1, 15), None, [call(dt(2026, 12, 28), operator_id=5)])
+        self.assertEqual(out["status"], STATUS_SUCCESS)
+        self.assertEqual(out["rule"], RULE_PREV_MONTH_LAST_DAYS)
+
+    def test_prev_month_call_before_window(self):
+        """Звонок в прошлом месяце, но раньше последних 7 дней — отдельный статус,
+        не «уже работающий»: именно такие случаи операторы оспаривают."""
+        out = compute_lead_outcome(dt(2026, 7, 3), None, [call(dt(2026, 6, 10))])
         self.assertEqual(out["status"], STATUS_NOT_COUNTED)
+        self.assertEqual(out["rule"], REASON_CALL_BEFORE_WINDOW)
         self.assertIsNone(out["operator_id"])
+
+    def test_call_two_months_before_trip_is_not_counted(self):
+        """Окно только на прошлый месяц: конец мая при поездке в июле не считается."""
+        out = compute_lead_outcome(dt(2026, 7, 3), None, [call(dt(2026, 5, 30))])
+        self.assertEqual(out["status"], STATUS_NOT_COUNTED)
+        self.assertEqual(out["rule"], REASON_CALL_BEFORE_WINDOW)
 
     def test_last_touch_attribution(self):
         """Из нескольких дозвонившихся успешка достаётся последнему перед поездкой."""
@@ -256,16 +295,30 @@ class PrevMonthWindowTests(unittest.TestCase):
             [call(datetime(2025, 1, 30, 20, 19, tzinfo=ALMATY_TZ), operator_id=101)],
         )
         self.assertEqual(out["status"], STATUS_SUCCESS)
-        self.assertEqual(out["rule"], RULE_PREV_MONTH_FIRST_WEEK)
+        self.assertEqual(out["rule"], RULE_PREV_MONTH_LAST_DAYS)
         self.assertEqual(out["success_date"].isoformat(), "2025-02-06")
 
-    def test_real_case_rejected_by_seven_day_rule(self):
-        """Боевой кейс: звонок в мае, поездка 17 июня -> не засчитано."""
+    def test_real_case_rejected_because_call_is_too_early(self):
+        """Боевой кейс: звонок 20 мая (не последние 7 дней), поездка 17 июня ->
+        не засчитано. Раньше этот кейс отклоняло правило «поездка после 7-го»."""
         out = compute_lead_outcome(
             parse_first_order_at("2026-06-17T22:02:40.243247+05:00"), None,
             [call(datetime(2026, 5, 20, 10, 0, tzinfo=ALMATY_TZ), operator_id=101)],
         )
         self.assertEqual(out["status"], STATUS_NOT_COUNTED)
+        self.assertEqual(out["rule"], REASON_CALL_BEFORE_WINDOW)
+
+    def test_last_call_decides_the_window(self):
+        """Успешку по-прежнему получает последний звонок ОП перед поездкой, и
+        именно он проверяется окном: ранний звонок коллеги окно не «спасает»."""
+        calls = [
+            call(dt(2026, 6, 26), operator_id=1, gid="early"),   # в окне, но не последний
+            call(dt(2026, 7, 2), operator_id=2, gid="late"),     # месяц поездки -> ему
+        ]
+        out = compute_lead_outcome(dt(2026, 7, 20), None, calls)
+        self.assertEqual(out["status"], STATUS_SUCCESS)
+        self.assertEqual(out["rule"], RULE_SAME_MONTH)
+        self.assertEqual(out["operator_id"], 2)
 
 
 class SchemaTests(unittest.TestCase):
