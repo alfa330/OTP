@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
-import { APPLE_FONT, iosCard, iosBtnGhost } from '../ui/ios';
+import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnPrimary, iosInput, IosToggle } from '../ui/ios';
 
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108).
@@ -242,7 +242,170 @@ const StatusColumn = ({ now, scale = 1 }) => (
     </div>
 );
 
-/** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
+/*
+ * Настройка отбивки показателей в Telegram. Свёрнута по умолчанию: табло смотрят, а не
+ * настраивают, и держать форму раскрытой — лишний шум. В свёрнутом виде видно главное:
+ * включена ли отбивка и куда уходит.
+ */
+const BroadcastPanel = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
+    const [state, setState] = useState(null);
+    const [open, setOpen] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const headersRef = useRef(withAccessTokenHeader);
+    headersRef.current = withAccessTokenHeader;
+
+    const request = useCallback(async (method, body) => {
+        const build = headersRef.current;
+        const headers = build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' };
+        if (body) headers['Content-Type'] = 'application/json';
+        const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/broadcast`, {
+            method,
+            headers,
+            credentials: 'include',
+            body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
+        return data;
+    }, [apiBaseUrl]);
+
+    useEffect(() => {
+        let cancelled = false;
+        request('GET').then((data) => { if (!cancelled) setState(data); }).catch(() => {});
+        return () => { cancelled = true; };
+    }, [request]);
+
+    const save = async (patch) => {
+        setBusy(true);
+        try {
+            setState(await request('POST', patch));
+            showToast?.('Настройка отбивки сохранена', 'success');
+        } catch (error) {
+            showToast?.(error.message || 'Не удалось сохранить', 'error');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const sendNow = async () => {
+        setBusy(true);
+        try {
+            const build = headersRef.current;
+            const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/broadcast_test`, {
+                method: 'POST',
+                headers: build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' },
+                credentials: 'include',
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
+            showToast?.('Отбивка отправлена', 'success');
+        } catch (error) {
+            showToast?.(error.message || 'Не удалось отправить', 'error');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    if (!state) return null;
+    const { config, history = [], chats = [], send_times: sendTimes = [] } = state;
+    const summary = config.is_enabled
+        ? `Включена · ${config.chat_title || config.chat_id || 'чат не выбран'}`
+        : 'Выключена';
+
+    return (
+        <div className={`${iosCard} p-4`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
+                    <FaIcon className="fas fa-paper-plane"></FaIcon>
+                    <span>Отбивка показателей</span>
+                    <span className="text-[14px] font-normal text-slate-400">· {summary}</span>
+                </div>
+                <button type="button" className={iosBtnGhost} onClick={() => setOpen((value) => !value)}>
+                    <FaIcon className={`fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}`}></FaIcon>
+                    {open ? 'Свернуть' : 'Настроить'}
+                </button>
+            </div>
+
+            {open ? (
+                <div className="mt-4 space-y-4 border-t border-slate-200/70 pt-4">
+                    <div className="flex flex-wrap items-center gap-4">
+                        <label className="flex items-center gap-2.5 text-[14px] text-slate-700">
+                            <IosToggle
+                                checked={Boolean(config.is_enabled)}
+                                disabled={busy}
+                                onChange={(next) => save({ is_enabled: next })}
+                            />
+                            Отправлять по расписанию
+                        </label>
+                        <div className="text-[14px] text-slate-500">
+                            Время отправки: <span className="tabular-nums">{sendTimes.join(', ') || '—'}</span>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-end gap-3">
+                        <label className="min-w-[16rem] flex-1">
+                            <div className="mb-1.5 text-[13px] font-medium text-slate-500">Чат для отбивки</div>
+                            <select
+                                className={iosInput}
+                                disabled={busy}
+                                value={config.chat_id ?? ''}
+                                onChange={(event) => {
+                                    const value = event.target.value;
+                                    const picked = chats.find((chat) => String(chat.chat_id) === value);
+                                    save({ chat_id: value || null, chat_title: picked?.title || '' });
+                                }}
+                            >
+                                <option value="">Не выбран</option>
+                                {chats.map((chat) => (
+                                    <option key={chat.chat_id} value={chat.chat_id}>
+                                        {chat.title || chat.username || chat.chat_id}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <button type="button" className={iosBtnPrimary} disabled={busy || !config.chat_id} onClick={sendNow}>
+                            <FaIcon className="fas fa-paper-plane"></FaIcon>
+                            Отправить сейчас
+                        </button>
+                    </div>
+                    {chats.length === 0 ? (
+                        <div className="text-[13px] text-amber-700">
+                            Список пуст: добавьте бота в нужную группу — он появится здесь сам.
+                        </div>
+                    ) : null}
+
+                    <div>
+                        <div className="mb-2 text-[13px] font-semibold uppercase tracking-wide text-slate-500">
+                            Кто менял
+                        </div>
+                        {history.length === 0 ? (
+                            <div className="text-[14px] text-slate-400">Изменений пока не было</div>
+                        ) : (
+                            <ul className="divide-y divide-slate-100 text-[14px]">
+                                {history.map((item) => (
+                                    <li key={`${item.changed_at}-${item.changed_by}`} className="flex flex-wrap justify-between gap-2 py-2">
+                                        <span className="text-slate-700">
+                                            {item.changed_by_name || 'Неизвестно'}
+                                            <span className="text-slate-400">
+                                                {' · '}
+                                                {item.settings?.is_enabled ? 'включил отправку' : 'выключил отправку'}
+                                                {item.settings?.chat_title ? `, чат «${item.settings.chat_title}»` : ''}
+                                            </span>
+                                        </span>
+                                        <span className="tabular-nums text-slate-400">
+                                            {String(item.changed_at || '').replace('T', ' ').slice(0, 16)}
+                                        </span>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                </div>
+            ) : null}
+        </div>
+    );
+};
+
 /** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
 const WallboardBody = ({ snapshot, scale }) => {
     const now = snapshot?.now || {};
@@ -337,7 +500,7 @@ const WallboardBody = ({ snapshot, scale }) => {
 };
 
 export default function SzovWallboardView(props) {
-    const { apiBaseUrl, withAccessTokenHeader } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
 
     const [snapshot, setSnapshot] = useState(null);
     const [error, setError] = useState(null);
@@ -476,6 +639,11 @@ export default function SzovWallboardView(props) {
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
+            <BroadcastPanel
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                showToast={showToast}
+            />
             <WallboardBody snapshot={snapshot} scale={1} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
