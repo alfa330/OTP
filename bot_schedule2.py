@@ -29393,6 +29393,41 @@ def _szov_broadcast_hourly_rows(hour_to=None):
     return rows
 
 
+def _szov_broadcast_shift_rows(day_iso):
+    """{час: {forecast, planned, fact}} за дату — прогноз, план и факт смен.
+
+    План и факт считает один серверный расчёт (db.get_hourly_shift_grouping), тот же,
+    что стоит за разделом «Графики работы → Группировка по операторам». Прогноз берём из
+    «Расчёта ресурсов» — там он и живёт. Любой сбой не роняет отбивку: колонки просто
+    останутся пустыми, звонковые показатели важнее."""
+    rows = {}
+    try:
+        grouping = db.get_hourly_shift_grouping(day_iso, _szov_wallboard_department_id())
+        for item in grouping or []:
+            rows[int(item['hour'])] = {
+                'planned': int(item.get('planned') or 0),
+                'fact': int(item.get('fact') or 0),
+                'forecast': None,
+            }
+    except Exception as exc:
+        logging.warning("Отбивка табло: план/факт смен недоступны: %s", exc)
+
+    try:
+        payload = get_resource_overview(
+            db, forecast_date_from_value=day_iso, forecast_date_to_value=day_iso)
+        days = ((payload or {}).get('next_week_forecast') or {}).get('days') or []
+        day_row = next((item for item in days
+                        if str(item.get('forecast_date') or '') == day_iso), days[0] if days else None)
+        for item in ((day_row or {}).get('hourly_forecast') or []):
+            hour = int(item.get('hour') or 0)
+            # Прогноз приходит дробным FTE; в таблице это «смены», поэтому целое.
+            forecast = int(round(float(item.get('forecast_fte') or 0)))
+            rows.setdefault(hour, {'planned': 0, 'fact': 0, 'forecast': None})['forecast'] = forecast
+    except Exception as exc:
+        logging.warning("Отбивка табло: прогноз смен недоступен: %s", exc)
+    return rows
+
+
 def _szov_broadcast_open_chats():
     """Сколько чатов Chat2Desk открыто прямо сейчас (обращения без времени завершения).
 
@@ -29426,6 +29461,11 @@ def _szov_broadcast_collect(hour_to=None, with_chats=None):
     if with_chats is None:
         with_chats = False
     hourly = _szov_broadcast_hourly_rows(hour_to)
+    # Смены (прогноз/план/факт) приклеиваем к часам звонков — так таблица остаётся одной.
+    day_iso = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
+    shifts = _szov_broadcast_shift_rows(day_iso)
+    for row in hourly:
+        row.update(shifts.get(row['hour']) or {'planned': None, 'fact': None, 'forecast': None})
     served = sum(r['served'] for r in hourly)
     arrived = sum(r['arrived'] for r in hourly)
     lost = sum(r['lost'] for r in hourly)
@@ -29617,12 +29657,16 @@ def _szov_font(size, bold=False):
 
 
 _SZOV_TABLE_COLUMNS = (
-    ('hour', 'Час', 90),
-    ('served', 'Кол-во\nпринятых', 150),
-    ('arrived', 'Общее кол-во\nпоступивших', 190),
-    ('ar', 'AR', 130),
-    ('talk', 'Среднее\nвремя\nразговора', 150),
-    ('lost', 'Кол-во\nпропущенных', 180),
+    ('hour', 'Час', 80),
+    ('served', 'Кол-во\nпринятых', 140),
+    ('arrived', 'Общее кол-во\nпоступивших', 175),
+    ('ar', 'AR', 120),
+    ('talk', 'Среднее\nвремя\nразговора', 140),
+    ('lost', 'Кол-во\nпропущенных', 165),
+    ('forecast', 'Прогноз\nсмен', 130),
+    ('planned', 'Запланировано\nсмен', 185),
+    ('fact', 'Факт\nсмен', 115),
+    ('delta', 'Разница факта\nот прогноза', 180),
 )
 
 
@@ -29658,6 +29702,10 @@ def _szov_render_hourly_table_png(rows):
     y = head_h
     for row in rows:
         ar = row.get('ar_ratio')
+        forecast = row.get('forecast')
+        fact = row.get('fact')
+        # «Разница» считается от ПРОГНОЗА, а не от плана — правило владельца.
+        delta = None if forecast is None or fact is None else fact - forecast
         values = {
             'hour': str(row['hour']),
             'served': str(row['served']),
@@ -29665,6 +29713,10 @@ def _szov_render_hourly_table_png(rows):
             'ar': _szov_format_percent(ar) if ar is not None else '0,0%',
             'talk': str(row['avg_talk_seconds']),
             'lost': str(row['lost']),
+            'forecast': '—' if forecast is None else str(forecast),
+            'planned': '—' if row.get('planned') is None else str(row['planned']),
+            'fact': '—' if fact is None else str(fact),
+            'delta': '—' if delta is None else (f"+{delta}" if delta > 0 else str(delta)),
         }
         x = 1
         for key, _title, col_w in _SZOV_TABLE_COLUMNS:
@@ -29676,8 +29728,10 @@ def _szov_render_hourly_table_png(rows):
                 draw.rectangle([x + 3, y + 4, x + 6, y + row_h - 4], fill=bar_edge)
             cell_font = font_bold if key == 'hour' else font
             text = values[key]
+            # Отставание от прогноза красим красным — как в исходной таблице владельца.
+            fill = '#c00000' if (key == 'delta' and delta is not None and delta < 0) else '#1a1a1a'
             tw = draw.textlength(text, font=cell_font)
-            draw.text((x + (col_w - tw) / 2, y + (row_h - 24) / 2), text, font=cell_font, fill='#1a1a1a')
+            draw.text((x + (col_w - tw) / 2, y + (row_h - 24) / 2), text, font=cell_font, fill=fill)
             x += col_w
         y += row_h
 
@@ -29883,6 +29937,20 @@ def api_szov_wallboard_broadcast_preview():
         return err
     hour_raw = (request.args.get('hour') or '').strip()
     hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
+
+    # Только смены: Oktell не трогаем. Нужно, чтобы сверить план/факт с разделом даже
+    # когда прокси Oktell недоступен (а он периодически отваливается с Render).
+    if (request.args.get('shifts_only') or '').strip() in ('1', 'true', 'yes'):
+        day_iso = (request.args.get('date') or '').strip() \
+            or datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
+        try:
+            rows = _szov_broadcast_shift_rows(day_iso)
+        except Exception as exc:
+            return jsonify({"error": "Не удалось посчитать смены", "detail": str(exc)[:300]}), 500
+        return jsonify({"date": day_iso, "shifts": [
+            {"hour": hour, **(rows.get(hour) or {})} for hour in sorted(rows)
+        ]})
+
     try:
         data = _szov_broadcast_collect(hour_to, with_chats=hour_to is None)
     except Exception as exc:
