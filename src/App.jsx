@@ -14254,8 +14254,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (!key) return;
                     if (!map.has(key)) map.set(key, directionName);
                 });
+                // Направление может иметь только промежуток между операторами, без правил
+                // по длительности — его тоже нужно показать и не потерять при сохранении.
+                Object.keys(plannerBreakCrossGapByDirection || {}).forEach(directionName => {
+                    const key = plannerNormalizeDirectionKey(directionName);
+                    if (!key) return;
+                    if (!map.has(key)) map.set(key, directionName);
+                });
                 return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
-            }, [uniqueDirections, plannerSystemDirections, plannerBreakRulesByDirection]);
+            }, [uniqueDirections, plannerSystemDirections, plannerBreakRulesByDirection, plannerBreakCrossGapByDirection]);
             const breakDirectionGroupMembership = useMemo(() => {
                 const map = new Map();
                 (breakDirectionGroups || []).forEach((group, groupIndex) => {
