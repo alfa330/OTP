@@ -186,41 +186,43 @@ const STATUS_STYLE = {
     recall: { label: 'Перезвон', chip: 'bg-blue-100 text-blue-700' },
 };
 
-/** Список операторов в статусе: кто, по какой причине и сколько уже в ней сидит. */
-const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) => {
+/*
+ * Блок статуса: подпись с иконкой и список «имя, под ним время в статусе».
+ * Счётчик в подписи не дублируем — он уже стоит крупной плиткой в ключевых показателях.
+ * Причину показываем чипом ТОЛЬКО когда это не обычный перерыв: иначе тренинг и
+ * тех.причина молча смешались бы с перерывом, а лишних чипов на экране не будет.
+ */
+const StatusBlock = ({ title, icon, entries, scale = 1 }) => {
     const items = Array.isArray(entries) ? entries : [];
+    const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
     return (
-        <div className={`${iosCard} flex min-h-0 flex-col p-5`}>
-            <div className="mb-3 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
-                    <FaIcon className={`fas ${icon}`}></FaIcon>
-                    <span>{title}</span>
-                </div>
-                <span className="text-[19px] font-semibold tabular-nums text-slate-900">{items.length}</span>
+        <div className="flex min-h-0 flex-col">
+            <div className="mb-2 flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
+                <FaIcon className={`fas ${icon}`}></FaIcon>
+                <span>{title}</span>
             </div>
             {items.length === 0 ? (
-                <div className="py-2.5 text-[16px] text-slate-400">Никого</div>
+                <div className="py-1.5 text-[15px] text-slate-400">Никого</div>
             ) : (
-                <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto">
+                <ul className="min-h-0 divide-y divide-slate-100 overflow-y-auto">
                     {items.map((item) => {
-                        const style = STATUS_STYLE[item.reason_key] || STATUS_STYLE.break;
+                        const style = STATUS_STYLE[item.reason_key];
+                        const showReason = Boolean(style) && item.reason_key !== 'break';
                         return (
-                            <li
-                                key={`${item.operator_id ?? item.name}-${item.since ?? ''}`}
-                                className="flex items-center justify-between gap-3 py-2.5"
-                                style={{ fontSize: `clamp(1rem, ${(1.3 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)` }}
-                            >
-                                <span className="flex min-w-0 items-center gap-2">
-                                    <span className="truncate text-slate-700">{item.name}</span>
+                            <li key={`${item.operator_id ?? item.name}-${item.since ?? ''}`} className="py-3">
+                                <div className="flex items-start gap-2">
+                                    <span className="min-w-0 leading-snug text-slate-800" style={{ fontSize: nameSize }}>
+                                        {item.name}
+                                    </span>
                                     {showReason ? (
-                                        <span className={`shrink-0 rounded-md px-2 py-0.5 text-[13px] font-medium ${style.chip}`}>
+                                        <span className={`mt-0.5 shrink-0 rounded-md px-2 py-0.5 text-[12px] font-medium ${style.chip}`}>
                                             {item.reason}
                                         </span>
                                     ) : null}
-                                </span>
-                                <span className="shrink-0 font-semibold tabular-nums text-slate-500">
+                                </div>
+                                <div className="mt-0.5 text-[14px] font-medium tabular-nums text-slate-400">
                                     {formatDuration(item.seconds)}
-                                </span>
+                                </div>
                             </li>
                         );
                     })}
@@ -229,6 +231,16 @@ const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) =
         </div>
     );
 };
+
+/** Правая колонка табло: перерывы сверху, перезвон прижат к низу карточки. */
+const StatusColumn = ({ now, scale = 1 }) => (
+    <div className={`${iosCard} flex flex-col p-5`}>
+        <StatusBlock title="На перерыве" icon="fa-list-ul" entries={now.break_list} scale={scale} />
+        <div className="mt-auto border-t border-slate-200/70 pt-4">
+            <StatusBlock title="Перезвон" icon="fa-phone-volume" entries={now.recall_list} scale={scale} />
+        </div>
+    </div>
+);
 
 /** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
 /** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
@@ -250,7 +262,13 @@ const WallboardBody = ({ snapshot, scale }) => {
     ].filter(([count]) => count > 0).map(([count, label]) => `${formatInt(count)} ${label}`);
 
     return (
-        <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
+        // Две колонки: показатели слева, статусы операторов узкой колонкой справа во всю высоту.
+        // На узком экране колонка уезжает вниз.
+        <div
+            className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]"
+            style={{ fontFamily: APPLE_FONT }}
+        >
+            <div className="space-y-4">
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
                 <Grid>
                     <KeyTile
@@ -311,11 +329,9 @@ const WallboardBody = ({ snapshot, scale }) => {
                     </div>
                 ) : null}
             </Section>
-
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <OperatorList title="Перерывы" icon="fa-mug-hot" entries={now.break_list} scale={scale} showReason />
-                <OperatorList title="Перезвон" icon="fa-phone-volume" entries={now.recall_list} scale={scale} />
             </div>
+
+            <StatusColumn now={now} scale={scale} />
         </div>
     );
 };
