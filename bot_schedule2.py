@@ -29341,6 +29341,9 @@ SZOV_BROADCAST_SEND_TIMES = (os.getenv('SZOV_BROADCAST_SEND_TIMES') or '10:00,14
 SZOV_BROADCAST_TIMEZONE = (os.getenv('SZOV_BROADCAST_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 # Сколько часов без свежих данных Oktell считать поводом для отдельного примечания.
 SZOV_BROADCAST_STALE_NOTICE_HOURS = _env_int('SZOV_BROADCAST_STALE_NOTICE_HOURS', 2, minimum=1, maximum=24)
+# Коридор AR (тот же, что на экране): норма 3…5 %. Ниже 3 % — тоже отклонение.
+SZOV_AR_MIN_PERCENT = float(os.getenv('SZOV_AR_MIN_PERCENT') or 3)
+SZOV_AR_MAX_PERCENT = float(os.getenv('SZOV_AR_MAX_PERCENT') or 5)
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None):
@@ -29414,8 +29417,13 @@ def _szov_broadcast_open_chats():
     return open_count
 
 
-def _szov_broadcast_collect(hour_to=None, with_chats=True):
-    """Всё, что нужно отбивке: почасовая таблица, итоги дня, статусы и открытые чаты."""
+def _szov_broadcast_collect(hour_to=None, with_chats=None):
+    """Всё, что нужно отбивке: почасовая таблица, итоги дня, статусы и открытые чаты.
+
+    Открытые чаты и статусы операторов существуют только «на сейчас», поэтому для среза
+    на прошедший час их не запрашиваем — иначе выдали бы текущие цифры за прошлые."""
+    if with_chats is None:
+        with_chats = hour_to is None
     hourly = _szov_broadcast_hourly_rows(hour_to)
     served = sum(r['served'] for r in hourly)
     arrived = sum(r['arrived'] for r in hourly)
@@ -29489,26 +29497,30 @@ def _szov_broadcast_notes(data):
     ar = totals['ar_ratio']
     if ar is not None:
         percent = ar * 100
-        if percent > 5.0:
+        direction = None
+        if percent > SZOV_AR_MAX_PERCENT:
+            direction = 'выше'
+        elif percent < SZOV_AR_MIN_PERCENT:
+            direction = 'ниже'
+        if direction:
             notes.append(
-                f"Обратите внимание: AR выше установленного диапазона — {_szov_format_percent(ar)}. "
-                f"За день потеряно {totals['lost']} {_szov_plural(totals['lost'], 'звонок', 'звонка', 'звонков')}."
-            )
-        elif percent < 3.9:
-            notes.append(
-                f"Обратите внимание: AR находится ниже установленного диапазона — {_szov_format_percent(ar)}. "
+                f"Обратите внимание: AR {direction} установленного диапазона "
+                f"({SZOV_AR_MIN_PERCENT:g}–{SZOV_AR_MAX_PERCENT:g}%) — {_szov_format_percent(ar)}. "
                 f"За день потеряно {totals['lost']} {_szov_plural(totals['lost'], 'звонок', 'звонка', 'звонков')}."
             )
 
-    recall = _szov_wallboard_int(ops.get('on_recall'))
-    breaks = _szov_wallboard_int(ops.get('on_break'))
-    parts = []
-    if recall:
-        parts.append(f"{recall} {_szov_plural(recall, 'оператор', 'оператора', 'операторов')} на статусе перезвон")
-    if breaks:
-        parts.append(f"{breaks} на перерыве")
-    if parts:
-        notes.append(', '.join(parts) + '.')
+    # Статусы операторов — только «на сейчас». Для запроса на прошедшее время их не показываем:
+    # восстановить, кто был на перерыве в 14:00, мы не можем, а выдавать текущие за прошлые нельзя.
+    if data.get('hour_to') is None:
+        recall = _szov_wallboard_int(ops.get('on_recall'))
+        breaks = _szov_wallboard_int(ops.get('on_break'))
+        parts = []
+        if recall:
+            parts.append(f"{recall} {_szov_plural(recall, 'оператор', 'оператора', 'операторов')} на статусе перезвон")
+        if breaks:
+            parts.append(f"{breaks} на перерыве")
+        if parts:
+            notes.append(', '.join(parts) + '.')
 
     notes.append(f"Среднее время разговора — {_szov_format_seconds_mmss(totals['avg_talk_seconds'])}")
 
@@ -29527,7 +29539,14 @@ def _szov_broadcast_notes(data):
 def _szov_broadcast_text(data):
     """Текст отбивки. HTML parse_mode: подписи показателей жирные."""
     totals = data['totals']
-    lines = [f"<b>Показатели сейчас</b> ({data['generated_at']}):", ""]
+    hour_to = data.get('hour_to')
+    if hour_to is None:
+        lines = [f"<b>Показатели сейчас</b> ({data['generated_at']}):", ""]
+    else:
+        # Явно говорим, что это срез на запрошенный час, а не текущее состояние линии.
+        day = str(data.get('generated_at') or '').split(' ')[0]
+        lines = [f"<b>Показатели на {hour_to:02d}:00</b> — срез за {day}, "
+                 f"а не текущее состояние линии:", ""]
     lines.append(f"<b>Общий AR:</b> {_szov_format_percent(totals['ar_ratio'], 2)}")
     if data.get('open_chats') is not None:
         lines.append(f"<b>Количество чатов:</b> {data['open_chats']}")
@@ -29668,12 +29687,10 @@ def _szov_render_wallboard_png(data):
     ar_percent = None if ar is None else ar * 100
     if ar_percent is None:
         ar_colors = ('#f1f5f9', '#334155')
-    elif ar_percent < 3.9 or ar_percent > 5.0:
-        ar_colors = ('#ffe4e6', '#be123c')
-    elif 4.0 <= ar_percent <= 4.9:
+    elif SZOV_AR_MIN_PERCENT <= ar_percent <= SZOV_AR_MAX_PERCENT:
         ar_colors = ('#d1fae5', '#047857')
     else:
-        ar_colors = ('#fef3c7', '#b45309')
+        ar_colors = ('#ffe4e6', '#be123c')
 
     queue = _szov_wallboard_int(ops.get('queue'))
     key_tiles = [
