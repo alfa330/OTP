@@ -29339,8 +29339,6 @@ def api_szov_wallboard_snapshot():
 # количество ОТКРЫТЫХ чатов Chat2Desk на момент отправки.
 SZOV_BROADCAST_SEND_TIMES = (os.getenv('SZOV_BROADCAST_SEND_TIMES') or '10:00,14:00,18:00,22:00,23:55').strip()
 SZOV_BROADCAST_TIMEZONE = (os.getenv('SZOV_BROADCAST_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
-# Сколько часов без свежих данных Oktell считать поводом для отдельного примечания.
-SZOV_BROADCAST_STALE_NOTICE_HOURS = _env_int('SZOV_BROADCAST_STALE_NOTICE_HOURS', 2, minimum=1, maximum=24)
 # Коридор AR (тот же, что на экране): норма 3…5 %. Ниже 3 % — тоже отклонение.
 SZOV_AR_MIN_PERCENT = float(os.getenv('SZOV_AR_MIN_PERCENT') or 3)
 SZOV_AR_MAX_PERCENT = float(os.getenv('SZOV_AR_MAX_PERCENT') or 5)
@@ -29420,10 +29418,13 @@ def _szov_broadcast_open_chats():
 def _szov_broadcast_collect(hour_to=None, with_chats=None):
     """Всё, что нужно отбивке: почасовая таблица, итоги дня, статусы и открытые чаты.
 
-    Открытые чаты и статусы операторов существуют только «на сейчас», поэтому для среза
-    на прошедший час их не запрашиваем — иначе выдали бы текущие цифры за прошлые."""
+    Открытые чаты в тексте отбивки больше не показываются, поэтому по умолчанию их НЕ
+    запрашиваем: это ~7 страниц к Chat2Desk ради числа, которое никто не увидит. Их всё ещё
+    может запросить предпросмотр (with_chats=True) — как диагностику.
+    Статусы операторов существуют только «на сейчас», поэтому для среза на прошедший час
+    они в примечания не попадают (см. _szov_broadcast_notes)."""
     if with_chats is None:
-        with_chats = hour_to is None
+        with_chats = False
     hourly = _szov_broadcast_hourly_rows(hour_to)
     served = sum(r['served'] for r in hourly)
     arrived = sum(r['arrived'] for r in hourly)
@@ -29483,6 +29484,21 @@ def _szov_format_seconds_mmss(seconds):
     return f"{total // 60}:{total % 60:02d}"
 
 
+def _szov_format_age_ru(seconds):
+    """Длительность словами: «12 минут», «2 часа 5 минут». Для примечания о простое."""
+    total = max(0, int(seconds or 0))
+    if total < 60:
+        return "меньше минуты"
+    minutes = total // 60
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} {_szov_plural(hours, 'час', 'часа', 'часов')}")
+    if minutes:
+        parts.append(f"{minutes} {_szov_plural(minutes, 'минуту', 'минуты', 'минут')}")
+    return ' '.join(parts)
+
+
 def _szov_format_percent(ratio, digits=1):
     if ratio is None:
         return '—'
@@ -29525,36 +29541,29 @@ def _szov_broadcast_notes(data):
     notes.append(f"Среднее время разговора — {_szov_format_seconds_mmss(totals['avg_talk_seconds'])}")
 
     if data.get('snapshot_stale'):
-        hours = data.get('snapshot_age_seconds', 0) / 3600
-        if hours >= SZOV_BROADCAST_STALE_NOTICE_HOURS:
-            notes.append(
-                f"Также данные на дашборде не обновлялись более {int(hours)} "
-                f"{_szov_plural(int(hours), 'часа', 'часов', 'часов')} из-за отсутствия ответа от Oktell."
-            )
-        else:
-            notes.append("Также данные на дашборде сейчас не обновляются из-за отсутствия ответа от Oktell.")
+        age = _szov_format_age_ru(data.get('snapshot_age_seconds'))
+        notes.append(
+            f"Также данные на дашборде не обновляются уже {age} "
+            f"из-за отсутствия ответа от Oktell."
+        )
     return notes
 
 
 def _szov_broadcast_text(data):
     """Текст отбивки. HTML parse_mode: подписи показателей жирные."""
-    totals = data['totals']
+    """Текст отбивки: заголовок и примечания.
+
+    Сами цифры (AR, поступило/принято/пропущено, среднее время) намеренно НЕ повторяем —
+    они уже есть на двух картинках, которые уходят этим же сообщением. Дублировать одно
+    и то же в двух местах на одном экране — лишний шум."""
     hour_to = data.get('hour_to')
     if hour_to is None:
-        lines = [f"<b>Показатели сейчас</b> ({data['generated_at']}):", ""]
+        lines = [f"<b>Показатели сейчас</b> ({data['generated_at']}):"]
     else:
         # Явно говорим, что это срез на запрошенный час, а не текущее состояние линии.
         day = str(data.get('generated_at') or '').split(' ')[0]
         lines = [f"<b>Показатели на {hour_to:02d}:00</b> — срез за {day}, "
-                 f"а не текущее состояние линии:", ""]
-    lines.append(f"<b>Общий AR:</b> {_szov_format_percent(totals['ar_ratio'], 2)}")
-    if data.get('open_chats') is not None:
-        lines.append(f"<b>Количество чатов:</b> {data['open_chats']}")
-    lines.append("<b>Звонки:</b>")
-    lines.append(f"  <b>Поступило</b> — {totals['arrived']}")
-    lines.append(f"  <b>Принято</b> — {totals['served']}")
-    lines.append(f"  <b>Пропущено</b> — {totals['lost']}")
-    lines.append(f"  <b>Среднее время разговора</b> — {totals['avg_talk_seconds']} сек")
+                 f"а не текущее состояние линии:"]
 
     notes = _szov_broadcast_notes(data)
     if notes:
@@ -29875,7 +29884,7 @@ def api_szov_wallboard_broadcast_preview():
     hour_raw = (request.args.get('hour') or '').strip()
     hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
     try:
-        data = _szov_broadcast_collect(hour_to)
+        data = _szov_broadcast_collect(hour_to, with_chats=hour_to is None)
     except Exception as exc:
         logging.error("Предпросмотр отбивки: данные не собрались: %s", exc)
         return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502

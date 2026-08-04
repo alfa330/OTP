@@ -946,12 +946,12 @@ class SzovBroadcastTests(unittest.TestCase):
         _load_names(source, {
             '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
             'SZOV_BROADCAST_SEND_TIMES', 'SZOV_BROADCAST_TIMEZONE',
-            'SZOV_BROADCAST_STALE_NOTICE_HOURS',
             'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT',
             '_szov_wallboard_int',
             '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
             '_szov_broadcast_open_chats', '_szov_broadcast_collect',
             '_szov_plural', '_szov_format_seconds_mmss', '_szov_format_percent',
+            '_szov_format_age_ru',
             '_szov_broadcast_notes', '_szov_broadcast_text',
             '_szov_broadcast_send_times',
         }, ns)
@@ -1002,13 +1002,18 @@ class SzovBroadcastTests(unittest.TestCase):
         ])
         self.assertEqual(ns['_szov_broadcast_open_chats'](), 2)
 
-    def test_chat2desk_failure_does_not_break_the_broadcast(self):
-        """Звонковые показатели важнее строки про чаты — при сбое её просто не будет."""
+    def test_chats_are_not_fetched_for_the_broadcast(self):
+        """Открытые чаты в тексте не показываются — значит и запрашивать их незачем."""
         ns = self._namespace(chat_fails=True)
-        self.assertIsNone(ns['_szov_broadcast_open_chats']())
         data = ns['_szov_broadcast_collect']()
         self.assertIsNone(data['open_chats'])
-        self.assertNotIn('Количество чатов', ns['_szov_broadcast_text'](data))
+        # но сама функция работает и её может дёрнуть предпросмотр
+        ns_ok = self._namespace(chat_rows=[{'request_type': 'common', 'request_end': ''}])
+        self.assertEqual(ns_ok['_szov_broadcast_collect'](with_chats=True)['open_chats'], 1)
+
+    def test_chat2desk_failure_does_not_break_the_preview(self):
+        ns = self._namespace(chat_fails=True)
+        self.assertIsNone(ns['_szov_broadcast_open_chats']())
 
     # --- итоги и текст ---
 
@@ -1021,13 +1026,13 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertEqual(totals['arrived'], totals['served'] + totals['lost'])
         self.assertEqual(totals['total'], 72)
 
-    def test_text_has_bold_labels(self):
-        """Владелец: названия показателей должны быть жирными."""
+    def test_text_does_not_repeat_the_numbers_from_the_images(self):
+        """Цифры уже есть на двух картинках сообщения — дублировать их текстом не надо."""
         ns = self._namespace()
-        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect'](with_chats=False))
-        for label in ('<b>Общий AR:</b>', '<b>Звонки:</b>', '<b>Поступило</b>',
-                      '<b>Принято</b>', '<b>Пропущено</b>', '<b>Среднее время разговора</b>'):
-            self.assertIn(label, text, label)
+        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect']())
+        for gone in ('Общий AR', 'Количество чатов', 'Звонки:', 'Поступило', 'Принято', 'Пропущено'):
+            self.assertNotIn(gone, text, gone)
+        self.assertIn('<b>Показатели сейчас</b>', text)
 
     def test_header_says_now_without_an_argument(self):
         ns = self._namespace()
@@ -1081,11 +1086,26 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertIn('2 оператора на статусе перезвон', notes)
         self.assertIn('2 на перерыве', notes)
 
-    def test_notes_mention_stale_oktell_data(self):
-        ns = self._namespace(snapshot={'now': {}, 'stale': True, 'age_seconds': 3 * 3600})
-        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
-        self.assertIn('не обновлялись более 3', notes)
+    def test_stale_note_says_how_long_data_is_frozen(self):
+        """Владелец просил указывать, сколько именно дашборд не обновляется."""
+        ns = self._namespace(snapshot={'now': {}, 'stale': True, 'age_seconds': 3 * 3600 + 5 * 60})
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
+        self.assertIn('не обновляются уже 3 часа 5 минут', notes)
         self.assertIn('Oktell', notes)
+
+    def test_stale_note_for_a_short_outage(self):
+        ns = self._namespace(snapshot={'now': {}, 'stale': True, 'age_seconds': 12 * 60})
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
+        self.assertIn('не обновляются уже 12 минут', notes)
+
+    def test_age_wording(self):
+        age = self._namespace()['_szov_format_age_ru']
+        self.assertEqual(age(30), 'меньше минуты')
+        self.assertEqual(age(60), '1 минуту')
+        self.assertEqual(age(2 * 60), '2 минуты')
+        self.assertEqual(age(5 * 60), '5 минут')
+        self.assertEqual(age(3600), '1 час')
+        self.assertEqual(age(2 * 3600 + 60), '2 часа 1 минуту')
 
     def test_russian_plurals(self):
         plural = self._namespace()['_szov_plural']
