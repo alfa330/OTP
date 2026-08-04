@@ -178,6 +178,69 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertIn("_load_phone_shift_training_offline_intervals_by_operator_day_tx", list_source)
         self.assertIn("'read_only': True", list_source)
 
+    def test_phone_shift_offline_activity_uses_day_number_key_in_hours_payload(self):
+        namespace = {
+            "WORK_SHIFT_PHONE_SHIFT_OFFLINE_COMMENT": "смена на телефонах",
+            "WORK_SHIFT_TYPE_PHONE_SHIFT": "phone_shift",
+        }
+        exec(
+            _function_source(
+                DATABASE_PATH,
+                "_load_offline_activities_by_operator_day_tx",
+                class_name="Database",
+            ),
+            namespace,
+        )
+        load_offline = namespace["_load_offline_activities_by_operator_day_tx"]
+
+        class EmptyCursor:
+            def execute(self, query, params=None):
+                return None
+
+            def fetchall(self):
+                return []
+
+        class OfflinePayloadDummy:
+            _load_offline_activities_by_operator_day_tx = load_offline
+
+            def _load_phone_shift_manual_training_offline_intervals_by_operator_day_tx(self, **kwargs):
+                return {}, {}
+
+            def _load_phone_shift_training_offline_intervals_by_operator_day_tx(self, **kwargs):
+                return {
+                    42: {
+                        "2026-08-01": [{
+                            "id": "phone-shift-42-2026-08-01",
+                            "date": "2026-08-01",
+                            "start_time": "00:00",
+                            "end_time": "02:00",
+                            "start_seconds": 0,
+                            "end_seconds": 7200,
+                            "source": "work_shift_training_status",
+                        }]
+                    }
+                }, {42: 2.0}
+
+            def _sum_phone_shift_offline_interval_maps(self, operator_ids, *interval_maps):
+                return {42: 2.0}
+
+            def _schedule_auto_seconds_to_display_minutes(self, seconds):
+                return int(seconds) // 60
+
+            def _schedule_interval_minutes(self, start_time, end_time):
+                return 0, 0
+
+        activities, totals = OfflinePayloadDummy()._load_offline_activities_by_operator_day_tx(
+            cursor=EmptyCursor(),
+            operator_ids=[42],
+            start_date="2026-08-01",
+            end_date="2026-08-31",
+        )
+
+        self.assertEqual(list(activities[42]), ["1"])
+        self.assertEqual(activities[42]["1"][0]["date"], "2026-08-01")
+        self.assertEqual(totals[42], 2.0)
+
     def test_database_custom_direction_rules_disable_default_fallback_for_gaps(self):
         namespace = {}
         exec(_function_source(DATABASE_PATH, "_pick_break_durations_for_shift", class_name="Database"), namespace)
