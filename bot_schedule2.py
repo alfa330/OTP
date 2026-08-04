@@ -29840,6 +29840,48 @@ def api_szov_wallboard_broadcast():
     })
 
 
+@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_szov_wallboard_broadcast_preview():
+    """Показать, как будет выглядеть отбивка, НИЧЕГО не отправляя.
+
+    ?image=table|board отдаёт картинку, без параметра — текст и диагностику шрифта.
+    Нужен и владельцу (посмотреть перед включением), и на проде — убедиться, что на
+    сервере вообще нашёлся шрифт с кириллицей."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _szov_wallboard_guard()
+    if err:
+        return err
+    hour_raw = (request.args.get('hour') or '').strip()
+    hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
+    try:
+        data = _szov_broadcast_collect(hour_to)
+    except Exception as exc:
+        logging.error("Предпросмотр отбивки: данные не собрались: %s", exc)
+        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
+
+    which = (request.args.get('image') or '').strip()
+    if which in ('table', 'board'):
+        try:
+            blob = (_szov_render_hourly_table_png(data['hourly']) if which == 'table'
+                    else _szov_render_wallboard_png(data))
+        except Exception as exc:
+            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
+        response = Response(blob, mimetype='image/png')
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    regular, _bold = _szov_font_paths()
+    return jsonify({
+        "text": _szov_broadcast_text(data),
+        "hours": len(data['hourly']),
+        "open_chats": data['open_chats'],
+        "font_path": regular,
+        "images_available": bool(regular),
+    })
+
+
 @app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_szov_wallboard_broadcast_test():
