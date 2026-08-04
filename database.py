@@ -14180,10 +14180,17 @@ class Database:
                         duration_hours = round(float(duration_seconds) / 3600.0, 2)
                         start_text = item.get('start_time')
                         end_text = item.get('end_time')
-                        result.setdefault(op_id_int, {}).setdefault(str(day_key), []).append({
+                        activity_date_value = item.get('date') or day_key
+                        try:
+                            payload_day_key = str(int(
+                                str(activity_date_value).split('T', 1)[0].rsplit('-', 1)[-1]
+                            ))
+                        except (TypeError, ValueError):
+                            payload_day_key = str(day_key)
+                        result.setdefault(op_id_int, {}).setdefault(payload_day_key, []).append({
                             "id": item.get('id'),
                             "operator_id": op_id_int,
-                            "date": item.get('date') or str(day_key),
+                            "date": activity_date_value,
                             "start_time": start_text,
                             "end_time": end_text,
                             "time_range": f"{start_text} - {end_text}" if start_text and end_text else None,
