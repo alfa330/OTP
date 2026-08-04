@@ -29683,7 +29683,9 @@ def _szov_render_wallboard_png(data):
         ('Перерыв', str(_szov_wallboard_int(ops.get('on_break'))), '#fef3c7', '#b45309'),
     ]
     stat_tiles = [
-        ('Принято / входящих', f"{totals['served']}/{totals['total']}"),
+        # Входящие — только дошедшие до очереди: сбросившие на приветствии до оператора
+        # не доходили. Тогда разрыв в паре равен ровно потерянным.
+        ('Принято / входящих', f"{totals['served']}/{totals['arrived']}"),
         ('Потеряно', str(totals['lost'])),
         ('Свободны', str(_szov_wallboard_int(ops.get('free')))),
         ('В разговоре', str(_szov_wallboard_int(ops.get('talking')))),

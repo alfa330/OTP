@@ -158,8 +158,10 @@ const StatTile = ({ label, value, tone = 'neutral', scale = 1 }) => (
 );
 
 /*
- * «Принято / входящих» одной плиткой: принятые — главное число, общий поток приглушён.
- * Разрыв между ними и есть потери, а насколько он допустим, показывает плитка AR.
+ * «Принято / входящих» одной плиткой: принятые — главное число, входящие приглушены.
+ * Входящими считаем только дошедших до очереди — сбросившие трубку на приветствии до
+ * оператора не доходили, и записывать их во входящие некорректно. За счёт этого разрыв
+ * между числами равен ровно потерянным, а плитка AR показывает, допустим ли он.
  */
 const PairTile = ({ label, first, second, scale = 1 }) => (
     <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
@@ -470,7 +472,7 @@ const WallboardBody = ({ snapshot, scale }) => {
                     <PairTile
                         label="Принято / входящих"
                         first={formatInt(today.served)}
-                        second={formatInt(today.total)}
+                        second={formatInt(today.arrived)}
                         scale={scale}
                     />
                     <StatTile label="Потеряно" value={formatInt(today.lost)} tone="bad" scale={scale} />
