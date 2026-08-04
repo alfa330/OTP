@@ -3759,6 +3759,37 @@ class Database:
                     settings JSONB NOT NULL DEFAULT '{}'::jsonb
                 );
             """)
+            # Отбивка показателей «Табло СЗоВ» в Telegram: в какой чат слать и включена ли.
+            # Singleton + аудит — как sip_config: чат меняют редко, но знать, кто и когда
+            # переключил, обязательно (отбивка уходит руководству).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    chat_id BIGINT,
+                    chat_title VARCHAR(255) NOT NULL DEFAULT '',
+                    is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    CONSTRAINT szov_wallboard_broadcast_config_singleton CHECK (id = 1)
+                );
+            """)
+            cursor.execute("""
+                INSERT INTO szov_wallboard_broadcast_config (id)
+                VALUES (1)
+                ON CONFLICT (id) DO NOTHING;
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_history (
+                    id SERIAL PRIMARY KEY,
+                    changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    settings JSONB NOT NULL DEFAULT '{}'::jsonb
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_szov_wallboard_broadcast_history_changed_at
+                ON szov_wallboard_broadcast_history(changed_at DESC);
+            """)
             # Общий код автодозвона: номер, на который оператор один раз звонит,
             # чтобы телефон подключился к режиму автодозвона. Один на всех.
             cursor.execute("""
@@ -21226,6 +21257,108 @@ class Database:
                 "scope": "operator" if r[4] else ("department" if r[6] else "global"),
             })
         return out
+
+    # --- Отбивка показателей «Табло СЗоВ» в Telegram ---------------------------------------
+
+    def get_szov_broadcast_config(self) -> dict:
+        """Куда слать отбивку табло (singleton id=1)."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT c.chat_id, c.chat_title, c.is_enabled, c.updated_by, c.updated_at, u.name
+                FROM szov_wallboard_broadcast_config c
+                LEFT JOIN users u ON u.id = c.updated_by
+                WHERE c.id = 1
+            """)
+            r = cur.fetchone()
+        if not r:
+            return {"chat_id": None, "chat_title": "", "is_enabled": False,
+                    "updated_by": None, "updated_by_name": None, "updated_at": None}
+        return {
+            "chat_id": r[0],
+            "chat_title": r[1] or "",
+            "is_enabled": bool(r[2]),
+            "updated_by": r[3],
+            "updated_by_name": r[5],
+            "updated_at": r[4].isoformat() if r[4] else None,
+        }
+
+    def update_szov_broadcast_config(self, payload: dict, user_id=None) -> dict:
+        """Сменить чат отбивки / включить-выключить + записать в историю.
+
+        В историю пишем снимок целиком, а не diff: строк мало, зато видно, что именно
+        стояло на момент каждого изменения."""
+        current = self.get_szov_broadcast_config()
+        payload = payload or {}
+        chat_id = current["chat_id"]
+        chat_title = current["chat_title"]
+        is_enabled = current["is_enabled"]
+        if 'chat_id' in payload:
+            raw = payload.get('chat_id')
+            chat_id = None if raw in (None, '', 'null') else int(raw)
+        if payload.get('chat_title') is not None:
+            chat_title = str(payload['chat_title']).strip()[:255]
+        if payload.get('is_enabled') is not None:
+            is_enabled = bool(payload['is_enabled'])
+        # Без чата включать нечего — иначе джоба будет молча падать каждый час.
+        if is_enabled and chat_id is None:
+            raise ValueError("Не выбран чат для отбивки")
+
+        snapshot = json.dumps({
+            "chat_id": chat_id,
+            "chat_title": chat_title,
+            "is_enabled": is_enabled,
+        })
+        with self._get_cursor() as cur:
+            cur.execute("""
+                UPDATE szov_wallboard_broadcast_config
+                SET chat_id = %s, chat_title = %s, is_enabled = %s,
+                    updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = 1
+            """, (chat_id, chat_title, is_enabled, user_id))
+            cur.execute("""
+                INSERT INTO szov_wallboard_broadcast_history (changed_by, settings)
+                VALUES (%s, %s::jsonb)
+            """, (user_id, snapshot))
+        return self.get_szov_broadcast_config()
+
+    def get_szov_broadcast_history(self, limit: int = 50) -> list:
+        """Кто и когда менял чат отбивки."""
+        limit = max(1, min(int(limit or 50), 200))
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT h.changed_at, h.changed_by, u.name, h.settings
+                FROM szov_wallboard_broadcast_history h
+                LEFT JOIN users u ON u.id = h.changed_by
+                ORDER BY h.changed_at DESC, h.id DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+        return [{
+            "changed_at": r[0].isoformat() if r[0] else None,
+            "changed_by": r[1],
+            "changed_by_name": r[2],
+            "settings": r[3] or {},
+        } for r in rows]
+
+    def list_bot_group_chats(self) -> list:
+        """Группы/каналы, в которых бот состоит (их же авто-находит IT-заявочный хук).
+
+        Отдельной таблицы под отбивку не заводим: список «где бот есть» один на бота,
+        а it_ticket_channels уже наполняется обработчиком my_chat_member."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT chat_id, title, chat_type, username, is_active
+                FROM it_ticket_channels
+                WHERE is_active
+                ORDER BY COALESCE(NULLIF(title, ''), username, chat_id::text)
+            """)
+            rows = cur.fetchall()
+        return [{
+            "chat_id": r[0],
+            "title": r[1] or "",
+            "chat_type": r[2] or "",
+            "username": r[3] or "",
+        } for r in rows]
 
     def get_sip_department_configs(self, department_ids=None) -> list:
         """Настройки SIP по отделам + сколько в отделе сотрудников с телефоном.

@@ -17,6 +17,7 @@ import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -911,6 +912,236 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertEqual(min(scales), 1.0, "встроенный режим — масштаб 1")
         self.assertGreater(max(scales), 1.0, "на полном экране цифры должны быть крупнее")
 
+
+
+
+class SzovBroadcastTests(unittest.TestCase):
+    """Отбивка показателей в Telegram: почасовая таблица, текст, примечания, расписание."""
+
+    HOURLY_RAW = [
+        {'hh': 0, 'served': 35, 'arrived': 35, 'lost': 0, 'greet_drop': 0, 'talk_seconds': 6370},
+        {'hh': 1, 'served': 6, 'arrived': 25, 'lost': 19, 'greet_drop': 2, 'talk_seconds': 3456},
+        {'hh': 2, 'served': 9, 'arrived': 10, 'lost': 1, 'greet_drop': 0, 'talk_seconds': 3609},
+    ]
+
+    def _namespace(self, hourly_raw=None, snapshot=None, chat_rows=None, chat_fails=False):
+        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+
+        def fake_oktell(sql, timeout=None):
+            return list(hourly_raw if hourly_raw is not None else self.HOURLY_RAW)
+
+        def fake_c2d(report, day, max_pages=None):
+            if chat_fails:
+                raise RuntimeError("Chat2Desk 500")
+            return list(chat_rows or [])
+
+        def no_snapshot():
+            raise RuntimeError("нет данных")
+
+        ns = {
+            'os': os, 'time': time, 'logging': logging, 're': re,
+            'datetime': datetime, 'ZoneInfo': ZoneInfo,
+            '_env_int': lambda name, default, minimum=None, maximum=None: default,
+            '_oktell_query': fake_oktell,
+            '_chat2desk_statistics_get': fake_c2d,
+            '_chat2desk_row_first': lambda row, *keys: next((row[k] for k in keys if k in row), None),
+            'CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS': 'request_stats',
+            'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS': 20,
+            '_szov_wallboard_snapshot': (lambda: snapshot) if snapshot is not None else no_snapshot,
+        }
+        _load_names(source, {
+            '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
+            'SZOV_BROADCAST_SEND_TIMES', 'SZOV_BROADCAST_TIMEZONE',
+            'SZOV_BROADCAST_STALE_NOTICE_HOURS',
+            '_szov_wallboard_int',
+            '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
+            '_szov_broadcast_open_chats', '_szov_broadcast_collect',
+            '_szov_plural', '_szov_format_seconds_mmss', '_szov_format_percent',
+            '_szov_broadcast_notes', '_szov_broadcast_text',
+            '_szov_broadcast_send_times',
+        }, ns)
+        return ns
+
+    # --- почасовая таблица ---
+
+    def test_hourly_rows_match_the_owner_report(self):
+        """Час 1 из отчёта владельца: 6 принято, 25 поступило, AR 76%."""
+        ns = self._namespace()
+        rows = ns['_szov_broadcast_hourly_rows']()
+        hour1 = next(r for r in rows if r['hour'] == 1)
+        self.assertEqual(hour1['served'], 6)
+        self.assertEqual(hour1['arrived'], 25)
+        self.assertEqual(hour1['lost'], 19)
+        self.assertAlmostEqual(hour1['ar_ratio'], 19 / 25)
+
+    def test_avg_talk_is_truncated_not_rounded(self):
+        """В отчёте владельца секунды усечены: 612,67 -> 612, а не 613."""
+        ns = self._namespace(hourly_raw=[
+            {'hh': 5, 'served': 3, 'arrived': 3, 'lost': 0, 'greet_drop': 0, 'talk_seconds': 1838},
+        ])
+        self.assertEqual(ns['_szov_broadcast_hourly_rows']()[0]['avg_talk_seconds'], 612)
+
+    def test_hour_cutoff_is_applied_to_sql(self):
+        """Команда «покажи на 14:00» ограничивает выборку часом."""
+        ns = self._namespace()
+        self.assertIn("DATEPART(HOUR, t.dt_insert) <= 14", ns['_oktell_wallboard_hourly_sql'](14))
+        self.assertNotIn("DATEPART(HOUR, t.dt_insert) <=", ns['_oktell_wallboard_hourly_sql'](None))
+
+    def test_hourly_sql_stays_single_readonly_statement(self):
+        sql = self._namespace()['_oktell_wallboard_hourly_sql'](None)
+        self.assertNotIn(';', sql)
+        lowered = sql.lower()
+        self.assertNotIn('update', lowered)
+        self.assertNotIn('delete', lowered)
+        self.assertEqual(lowered.count('insert'), lowered.count('dt_insert'))
+
+    # --- открытые чаты ---
+
+    def test_open_chats_counts_only_unfinished_common_requests(self):
+        """«Количество чатов» — открытые обращения, а не все за день."""
+        ns = self._namespace(chat_rows=[
+            {'request_type': 'common', 'request_end': ''},
+            {'request_type': 'common', 'request_end': None},
+            {'request_type': 'common', 'request_end': '2026-08-04 10:00:00'},
+            {'request_type': 'rating', 'request_end': ''},
+        ])
+        self.assertEqual(ns['_szov_broadcast_open_chats'](), 2)
+
+    def test_chat2desk_failure_does_not_break_the_broadcast(self):
+        """Звонковые показатели важнее строки про чаты — при сбое её просто не будет."""
+        ns = self._namespace(chat_fails=True)
+        self.assertIsNone(ns['_szov_broadcast_open_chats']())
+        data = ns['_szov_broadcast_collect']()
+        self.assertIsNone(data['open_chats'])
+        self.assertNotIn('Количество чатов', ns['_szov_broadcast_text'](data))
+
+    # --- итоги и текст ---
+
+    def test_totals_are_summed_from_hourly_rows(self):
+        ns = self._namespace()
+        totals = ns['_szov_broadcast_collect'](with_chats=False)['totals']
+        self.assertEqual(totals['served'], 50)
+        self.assertEqual(totals['arrived'], 70)
+        self.assertEqual(totals['lost'], 20)
+        self.assertEqual(totals['arrived'], totals['served'] + totals['lost'])
+        self.assertEqual(totals['total'], 72)
+
+    def test_text_has_bold_labels(self):
+        """Владелец: названия показателей должны быть жирными."""
+        ns = self._namespace()
+        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect'](with_chats=False))
+        for label in ('<b>Общий AR:</b>', '<b>Звонки:</b>', '<b>Поступило</b>',
+                      '<b>Принято</b>', '<b>Пропущено</b>', '<b>Среднее время разговора</b>'):
+            self.assertIn(label, text, label)
+
+    def test_notes_flag_ar_outside_the_corridor(self):
+        ns = self._namespace()
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        self.assertIn('выше установленного диапазона', notes)
+        self.assertIn('потеряно 20 звонков', notes)
+
+    def test_notes_flag_ar_below_the_corridor(self):
+        ns = self._namespace(hourly_raw=[
+            {'hh': 9, 'served': 970, 'arrived': 1000, 'lost': 30, 'greet_drop': 0, 'talk_seconds': 260000},
+        ])
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        self.assertIn('ниже установленного диапазона', notes)
+
+    def test_notes_mention_operators_on_recall_and_break(self):
+        ns = self._namespace(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 2},
+                                       'stale': False, 'age_seconds': 0})
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        self.assertIn('2 оператора на статусе перезвон', notes)
+        self.assertIn('2 на перерыве', notes)
+
+    def test_notes_mention_stale_oktell_data(self):
+        ns = self._namespace(snapshot={'now': {}, 'stale': True, 'age_seconds': 3 * 3600})
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        self.assertIn('не обновлялись более 3', notes)
+        self.assertIn('Oktell', notes)
+
+    def test_russian_plurals(self):
+        plural = self._namespace()['_szov_plural']
+        self.assertEqual(plural(1, 'звонок', 'звонка', 'звонков'), 'звонок')
+        self.assertEqual(plural(3, 'звонок', 'звонка', 'звонков'), 'звонка')
+        self.assertEqual(plural(11, 'звонок', 'звонка', 'звонков'), 'звонков')
+        self.assertEqual(plural(21, 'звонок', 'звонка', 'звонков'), 'звонок')
+
+    # --- расписание ---
+
+    def test_send_times_are_parsed(self):
+        """Владелец задал 10:00, 14:00, 18:00, 22:00 и 23:55."""
+        ns = self._namespace()
+        self.assertEqual(ns['_szov_broadcast_send_times'](),
+                         [(10, 0), (14, 0), (18, 0), (22, 0), (23, 55)])
+
+    def test_broken_send_time_is_skipped_not_fatal(self):
+        ns = self._namespace()
+        ns['SZOV_BROADCAST_SEND_TIMES'] = '10:00, ерунда, 25:00, 23:55'
+        self.assertEqual(ns['_szov_broadcast_send_times'](), [(10, 0), (23, 55)])
+
+
+class SzovBroadcastWiringTests(unittest.TestCase):
+    """Схема, эндпоинты, расписание, команда бота и панель настройки подключены."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.db = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.view = (ROOT / "src" / "components" / "monitoring"
+                    / "SzovWallboardView.jsx").read_text(encoding="utf-8-sig")
+
+    def test_config_and_history_tables_exist(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_config", self.db)
+        self.assertIn("CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_history", self.db)
+        self.assertIn("szov_wallboard_broadcast_config_singleton CHECK (id = 1)", self.db)
+        for method in ("def get_szov_broadcast_config", "def update_szov_broadcast_config",
+                       "def get_szov_broadcast_history", "def list_bot_group_chats"):
+            self.assertIn(method, self.db, method)
+
+    def test_enabling_without_a_chat_is_rejected(self):
+        self.assertIn('raise ValueError("Не выбран чат для отбивки")', self.db)
+
+    def test_endpoints_are_registered_and_guarded(self):
+        self.assertIn("@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])", self.api)
+        self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
+        # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
+        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 3)
+
+    def test_schedule_is_registered_from_the_configured_times(self):
+        self.assertIn("for _hour, _minute in _szov_broadcast_send_times():", self.api)
+        self.assertIn("szov_broadcast_job,", self.api)
+        self.assertIn("id=f'szov_wallboard_broadcast_{_hour:02d}{_minute:02d}'", self.api)
+        self.assertIn("timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)", self.api)
+
+    def test_bot_loop_is_captured_for_flask_triggered_sends(self):
+        """Из потока Flask нельзя слать через чужой цикл — ссылку берём на старте бота."""
+        self.assertIn("executor.start_polling(dp, skip_updates=True, on_startup=_capture_bot_loop)", self.api)
+        self.assertIn("async def _capture_bot_loop", self.api)
+        self.assertIn("asyncio.run_coroutine_threadsafe(_szov_broadcast_send(int(chat_id)), loop)", self.api)
+
+    def test_command_for_arbitrary_time_exists(self):
+        self.assertIn("@dp.message_handler(commands=['tablo'])", self.api)
+        self.assertIn("async def szov_wallboard_command", self.api)
+        self.assertIn("hour_to = int(match.group(1))", self.api)
+
+    def test_images_fail_loudly_without_a_cyrillic_font(self):
+        """Встроенный шрифт Pillow не умеет кириллицу — молча рисовать квадратики нельзя."""
+        self.assertIn("_SZOV_FONT_CANDIDATES", self.api)
+        self.assertIn("На сервере нет шрифта с кириллицей", self.api)
+
+    def test_broadcast_survives_image_failure(self):
+        """Цифры важнее картинок: без картинок текст всё равно уходит."""
+        self.assertIn("отправляю текстом", self.api)
+        self.assertIn("await bot.send_message(chat_id, text, parse_mode='HTML')", self.api)
+
+    def test_settings_panel_is_wired_above_the_wallboard(self):
+        self.assertIn("const BroadcastPanel = ", self.view)
+        self.assertIn("<BroadcastPanel", self.view)
+        self.assertIn("/api/szov_wallboard/broadcast", self.view)
+        self.assertIn("Кто менял", self.view)
+        # свёрнута по умолчанию — табло смотрят, а не настраивают
+        self.assertIn("const [open, setOpen] = useState(false);", self.view)
 
 if __name__ == "__main__":
     unittest.main()

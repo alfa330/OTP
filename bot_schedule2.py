@@ -29333,6 +29333,538 @@ def api_szov_wallboard_snapshot():
         return jsonify({"error": "Не удалось получить данные Oktell", "detail": str(exc)[:300]}), 502
 
 
+# === Отбивка показателей «Табло СЗоВ» в Telegram ================================================
+# Раз в несколько часов в выбранный чат уходит: картинка с почасовой таблицей, картинка табло,
+# текст с показателями и примечания об отклонениях. Данные — те же, что на экране, плюс
+# количество ОТКРЫТЫХ чатов Chat2Desk на момент отправки.
+SZOV_BROADCAST_SEND_TIMES = (os.getenv('SZOV_BROADCAST_SEND_TIMES') or '10:00,14:00,18:00,22:00,23:55').strip()
+SZOV_BROADCAST_TIMEZONE = (os.getenv('SZOV_BROADCAST_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
+# Сколько часов без свежих данных Oktell считать поводом для отдельного примечания.
+SZOV_BROADCAST_STALE_NOTICE_HOURS = _env_int('SZOV_BROADCAST_STALE_NOTICE_HOURS', 2, minimum=1, maximum=24)
+
+
+def _oktell_wallboard_hourly_sql(hour_to=None):
+    """Почасовая таблица за текущий день Oktell: принято / поступило / потеряно / разговор.
+
+    hour_to — включительная верхняя граница часа (для команды «покажи на 14:00»)."""
+    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    fail = _OKTELL_FAILED_CALL.replace("'", "''")
+    cutoff = ''
+    if hour_to is not None:
+        cutoff = f"AND DATEPART(HOUR, t.dt_insert) <= {int(hour_to)} "
+    return (
+        "SELECT DATEPART(HOUR, t.dt_insert) AS hh, "
+        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END), 0) AS served, "
+        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
+        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19) THEN 1 ELSE 0 END), 0) AS lost, "
+        f"ISNULL(SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
+        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END), 0) AS talk_seconds "
+        "FROM oktell.dbo.Call_Systems_hst t "
+        "WHERE t.route = 'incoming' AND t.taxi_park <> '' "
+        f"AND t.result_call <> N'{fail}' "
+        "AND t.dt_insert >= CONVERT(date, GETDATE()) "
+        "AND t.dt_insert < DATEADD(day, 1, CONVERT(date, GETDATE())) "
+        f"{cutoff}"
+        "GROUP BY DATEPART(HOUR, t.dt_insert) ORDER BY hh"
+    )
+
+
+def _szov_broadcast_hourly_rows(hour_to=None):
+    """Строки почасовой таблицы. Пустые часы Oktell не отдаёт — их в таблице и не будет."""
+    raw = _oktell_query(_oktell_wallboard_hourly_sql(hour_to),
+                        timeout=SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS)
+    rows = []
+    for item in raw or []:
+        served = _szov_wallboard_int(item.get('served'))
+        arrived = _szov_wallboard_int(item.get('arrived'))
+        lost = _szov_wallboard_int(item.get('lost'))
+        talk = float(item.get('talk_seconds') or 0)
+        rows.append({
+            'hour': _szov_wallboard_int(item.get('hh')),
+            'served': served,
+            'arrived': arrived,
+            'lost': lost,
+            'greet_drop': _szov_wallboard_int(item.get('greet_drop')),
+            # Секунды усечением, а не округлением — так же, как в исходном отчёте владельца.
+            'avg_talk_seconds': int(talk / served) if served > 0 else 0,
+            'ar_ratio': (lost / arrived) if arrived > 0 else None,
+        })
+    return rows
+
+
+def _szov_broadcast_open_chats():
+    """Сколько чатов Chat2Desk открыто прямо сейчас (обращения без времени завершения).
+
+    Именно это владелец называет «количеством чатов»: не все обращения за день, а те,
+    что висят на операторах на момент отчёта. Ошибку не поднимаем — строка про чаты
+    просто не попадёт в отбивку, звонковые показатели важнее."""
+    try:
+        day = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
+        rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day)
+    except Exception as exc:
+        logging.warning("Отбивка табло: не удалось получить чаты Chat2Desk: %s", exc)
+        return None
+    open_count = 0
+    for row in rows or []:
+        if str(_chat2desk_row_first(row, 'request_type') or '').strip() != 'common':
+            continue
+        ended = _chat2desk_row_first(row, 'request_end')
+        if ended is None or str(ended).strip() in ('', 'None', 'null'):
+            open_count += 1
+    return open_count
+
+
+def _szov_broadcast_collect(hour_to=None, with_chats=True):
+    """Всё, что нужно отбивке: почасовая таблица, итоги дня, статусы и открытые чаты."""
+    hourly = _szov_broadcast_hourly_rows(hour_to)
+    served = sum(r['served'] for r in hourly)
+    arrived = sum(r['arrived'] for r in hourly)
+    lost = sum(r['lost'] for r in hourly)
+    greet_drop = sum(r['greet_drop'] for r in hourly)
+    talk_total = sum(r['avg_talk_seconds'] * r['served'] for r in hourly)
+
+    snapshot = None
+    try:
+        snapshot = _szov_wallboard_snapshot()
+    except Exception as exc:
+        logging.warning("Отбивка табло: снимок недоступен: %s", exc)
+
+    now_block = (snapshot or {}).get('now') or {}
+    return {
+        'generated_at': datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%d.%m.%Y %H:%M'),
+        'hour_to': hour_to,
+        'hourly': hourly,
+        'totals': {
+            'served': served,
+            'arrived': arrived,
+            'lost': lost,
+            'greet_drop': greet_drop,
+            'total': arrived + greet_drop,
+            'ar_ratio': (lost / arrived) if arrived > 0 else None,
+            'avg_talk_seconds': int(talk_total / served) if served > 0 else 0,
+        },
+        'operators': {
+            'online': now_block.get('operators_online'),
+            'free': now_block.get('operators_free'),
+            'talking': now_block.get('operators_talking'),
+            'on_break': now_block.get('operators_on_break'),
+            'on_training': now_block.get('operators_on_training'),
+            'on_tech': now_block.get('operators_on_tech'),
+            'on_recall': now_block.get('operators_on_recall'),
+            'queue': now_block.get('queue'),
+        },
+        'open_chats': _szov_broadcast_open_chats() if with_chats else None,
+        'snapshot_stale': bool((snapshot or {}).get('stale')),
+        'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
+        'snapshot': snapshot,
+    }
+
+
+def _szov_plural(count, one, few, many):
+    """Русские окончания: 1 оператор, 2 оператора, 5 операторов."""
+    count = abs(int(count))
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return few
+    return many
+
+
+def _szov_format_seconds_mmss(seconds):
+    total = max(0, int(seconds or 0))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _szov_format_percent(ratio, digits=1):
+    if ratio is None:
+        return '—'
+    return f"{ratio * 100:.{digits}f}".replace('.', ',') + '%'
+
+
+def _szov_broadcast_notes(data):
+    """Примечания об отклонениях. Пустой список — значит всё в норме, и блока не будет."""
+    notes = []
+    totals = data['totals']
+    ops = data['operators']
+    ar = totals['ar_ratio']
+    if ar is not None:
+        percent = ar * 100
+        if percent > 5.0:
+            notes.append(
+                f"Обратите внимание: AR выше установленного диапазона — {_szov_format_percent(ar)}. "
+                f"За день потеряно {totals['lost']} {_szov_plural(totals['lost'], 'звонок', 'звонка', 'звонков')}."
+            )
+        elif percent < 3.9:
+            notes.append(
+                f"Обратите внимание: AR находится ниже установленного диапазона — {_szov_format_percent(ar)}. "
+                f"За день потеряно {totals['lost']} {_szov_plural(totals['lost'], 'звонок', 'звонка', 'звонков')}."
+            )
+
+    recall = _szov_wallboard_int(ops.get('on_recall'))
+    breaks = _szov_wallboard_int(ops.get('on_break'))
+    parts = []
+    if recall:
+        parts.append(f"{recall} {_szov_plural(recall, 'оператор', 'оператора', 'операторов')} на статусе перезвон")
+    if breaks:
+        parts.append(f"{breaks} на перерыве")
+    if parts:
+        notes.append(', '.join(parts) + '.')
+
+    notes.append(f"Среднее время разговора — {_szov_format_seconds_mmss(totals['avg_talk_seconds'])}")
+
+    if data.get('snapshot_stale'):
+        hours = data.get('snapshot_age_seconds', 0) / 3600
+        if hours >= SZOV_BROADCAST_STALE_NOTICE_HOURS:
+            notes.append(
+                f"Также данные на дашборде не обновлялись более {int(hours)} "
+                f"{_szov_plural(int(hours), 'часа', 'часов', 'часов')} из-за отсутствия ответа от Oktell."
+            )
+        else:
+            notes.append("Также данные на дашборде сейчас не обновляются из-за отсутствия ответа от Oktell.")
+    return notes
+
+
+def _szov_broadcast_text(data):
+    """Текст отбивки. HTML parse_mode: подписи показателей жирные."""
+    totals = data['totals']
+    lines = [f"<b>Показатели сейчас</b> ({data['generated_at']}):", ""]
+    lines.append(f"<b>Общий AR:</b> {_szov_format_percent(totals['ar_ratio'], 2)}")
+    if data.get('open_chats') is not None:
+        lines.append(f"<b>Количество чатов:</b> {data['open_chats']}")
+    lines.append("<b>Звонки:</b>")
+    lines.append(f"  <b>Поступило</b> — {totals['arrived']}")
+    lines.append(f"  <b>Принято</b> — {totals['served']}")
+    lines.append(f"  <b>Пропущено</b> — {totals['lost']}")
+    lines.append(f"  <b>Среднее время разговора</b> — {totals['avg_talk_seconds']} сек")
+
+    notes = _szov_broadcast_notes(data)
+    if notes:
+        lines.append("")
+        lines.extend(notes)
+    return "\n".join(lines)
+
+
+# --- Картинки отбивки -------------------------------------------------------------------------
+# Рисуем через Pillow (он уже в зависимостях). Готового скриншотера в проекте нет, а тащить
+# headless-браузер на инстанс 256 МБ ради двух картинок — плохой размен.
+# ГЛАВНАЯ ЛОВУШКА: встроенный шрифт Pillow не умеет кириллицу. Ищем системный TTF по списку
+# путей; если ни одного нет, отбивка честно падает с понятной ошибкой, а не рисует «квадратики».
+_SZOV_FONT_CANDIDATES = (
+    ('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'),
+    ('/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'),
+    ('/usr/share/fonts/truetype/freefont/FreeSans.ttf', '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf'),
+    ('/usr/share/fonts/TTF/DejaVuSans.ttf', '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf'),
+    ('C:/Windows/Fonts/segoeui.ttf', 'C:/Windows/Fonts/segoeuib.ttf'),
+    ('C:/Windows/Fonts/arial.ttf', 'C:/Windows/Fonts/arialbd.ttf'),
+)
+_szov_font_paths_cache = {'checked': False, 'regular': None, 'bold': None}
+
+
+def _szov_font_paths():
+    """(regular, bold) — первый найденный набор с кириллицей. Кэшируем: os.path.exists на каждый
+    вызов шрифта — лишняя работа при отрисовке сотен ячеек."""
+    if _szov_font_paths_cache['checked']:
+        return _szov_font_paths_cache['regular'], _szov_font_paths_cache['bold']
+    regular = bold = None
+    for regular_path, bold_path in _SZOV_FONT_CANDIDATES:
+        if os.path.exists(regular_path):
+            regular = regular_path
+            bold = bold_path if os.path.exists(bold_path) else regular_path
+            break
+    _szov_font_paths_cache.update(checked=True, regular=regular, bold=bold)
+    if not regular:
+        logging.error("Отбивка табло: не найден TTF с кириллицей, картинки собрать нельзя")
+    return regular, bold
+
+
+def _szov_font(size, bold=False):
+    from PIL import ImageFont
+    regular, bold_path = _szov_font_paths()
+    if not regular:
+        raise RuntimeError(
+            "На сервере нет шрифта с кириллицей — картинку отбивки собрать нельзя. "
+            "Нужен любой из: " + ", ".join(item[0] for item in _SZOV_FONT_CANDIDATES[:3])
+        )
+    return ImageFont.truetype(bold_path if bold else regular, size)
+
+
+_SZOV_TABLE_COLUMNS = (
+    ('hour', 'Час', 90),
+    ('served', 'Кол-во\nпринятых', 150),
+    ('arrived', 'Общее кол-во\nпоступивших', 190),
+    ('ar', 'AR', 130),
+    ('talk', 'Среднее\nвремя\nразговора', 150),
+    ('lost', 'Кол-во\nпропущенных', 180),
+)
+
+
+def _szov_render_hourly_table_png(rows):
+    """PNG почасовой таблицы: шапка с заливкой, тонкие рамки, красная шкала внутри колонки AR."""
+    from PIL import Image, ImageDraw
+
+    font = _szov_font(20)
+    font_bold = _szov_font(20, bold=True)
+
+    pad_x, row_h, head_h = 10, 34, 74
+    width = sum(col[2] for col in _SZOV_TABLE_COLUMNS)
+    height = head_h + row_h * max(1, len(rows))
+    image = Image.new('RGB', (width + 2, height + 2), '#ffffff')
+    draw = ImageDraw.Draw(image)
+
+    head_fill, border, bar_fill, bar_edge = '#b7c7e0', '#9aa7b8', '#f4a9a9', '#d33f3f'
+
+    # Шапка
+    x = 1
+    for _key, title, col_w in _SZOV_TABLE_COLUMNS:
+        draw.rectangle([x, 1, x + col_w, head_h], fill=head_fill, outline=border)
+        parts = title.split('\n')
+        total_h = len(parts) * 22
+        ty = 1 + (head_h - total_h) // 2
+        for part in parts:
+            tw = draw.textlength(part, font=font_bold)
+            draw.text((x + (col_w - tw) / 2, ty), part, font=font_bold, fill='#1a1a1a')
+            ty += 22
+        x += col_w
+
+    # Строки
+    y = head_h
+    for row in rows:
+        ar = row.get('ar_ratio')
+        values = {
+            'hour': str(row['hour']),
+            'served': str(row['served']),
+            'arrived': str(row['arrived']),
+            'ar': _szov_format_percent(ar) if ar is not None else '0,0%',
+            'talk': str(row['avg_talk_seconds']),
+            'lost': str(row['lost']),
+        }
+        x = 1
+        for key, _title, col_w in _SZOV_TABLE_COLUMNS:
+            draw.rectangle([x, y, x + col_w, y + row_h], fill='#ffffff', outline=border)
+            if key == 'ar' and ar:
+                # Шкала как в Excel: ширина пропорциональна AR, 100% = вся ячейка.
+                bar_w = max(4, int((col_w - 2 * pad_x) * min(1.0, ar)))
+                draw.rectangle([x + 3, y + 4, x + 3 + bar_w, y + row_h - 4], fill=bar_fill)
+                draw.rectangle([x + 3, y + 4, x + 6, y + row_h - 4], fill=bar_edge)
+            cell_font = font_bold if key == 'hour' else font
+            text = values[key]
+            tw = draw.textlength(text, font=cell_font)
+            draw.text((x + (col_w - tw) / 2, y + (row_h - 24) / 2), text, font=cell_font, fill='#1a1a1a')
+            x += col_w
+        y += row_h
+
+    buffer = BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _szov_render_wallboard_png(data):
+    """PNG самого табло: те же плитки, что на экране, нарисованные Pillow."""
+    from PIL import Image, ImageDraw
+
+    totals, ops = data['totals'], data['operators']
+    ar = totals['ar_ratio']
+    ar_percent = None if ar is None else ar * 100
+    if ar_percent is None:
+        ar_colors = ('#f1f5f9', '#334155')
+    elif ar_percent < 3.9 or ar_percent > 5.0:
+        ar_colors = ('#ffe4e6', '#be123c')
+    elif 4.0 <= ar_percent <= 4.9:
+        ar_colors = ('#d1fae5', '#047857')
+    else:
+        ar_colors = ('#fef3c7', '#b45309')
+
+    queue = _szov_wallboard_int(ops.get('queue'))
+    key_tiles = [
+        ('В очереди', str(queue), '#d1fae5' if queue == 0 else '#ffe4e6', '#047857' if queue == 0 else '#be123c'),
+        ('AR', _szov_format_percent(ar), ar_colors[0], ar_colors[1]),
+        ('Онлайн', str(_szov_wallboard_int(ops.get('online'))), '#dbeafe', '#1d4ed8'),
+        ('Перерыв', str(_szov_wallboard_int(ops.get('on_break'))), '#fef3c7', '#b45309'),
+    ]
+    stat_tiles = [
+        ('Принято / входящих', f"{totals['served']}/{totals['total']}"),
+        ('Потеряно', str(totals['lost'])),
+        ('Свободны', str(_szov_wallboard_int(ops.get('free')))),
+        ('В разговоре', str(_szov_wallboard_int(ops.get('talking')))),
+        ('Ср. разговор', _szov_format_seconds_mmss(totals['avg_talk_seconds'])),
+        ('Перезвон', str(_szov_wallboard_int(ops.get('on_recall')))),
+    ]
+
+    tile_w, tile_h, gap, margin = 250, 130, 16, 24
+    width = margin * 2 + tile_w * 4 + gap * 3
+    height = margin * 2 + 56 + tile_h * 2 + gap * 2 + 40
+    image = Image.new('RGB', (width, height), '#f8fafc')
+    draw = ImageDraw.Draw(image)
+
+    draw.text((margin, margin), 'Табло СЗоВ', font=_szov_font(30, bold=True), fill='#0f172a')
+    draw.text((margin, margin + 34), f"Входящая линия · {data['generated_at']}",
+              font=_szov_font(17), fill='#64748b')
+
+    def tile(x, y, label, value, bg, fg, w=tile_w):
+        draw.rounded_rectangle([x, y, x + w, y + tile_h], radius=16, fill=bg, outline='#e2e8f0')
+        label_font = _szov_font(17, bold=True)
+        lw = draw.textlength(label, font=label_font)
+        draw.text((x + (w - lw) / 2, y + 18), label, font=label_font, fill=fg)
+        # Подгоняем кегль под ширину плитки: «970/1091» длиннее, чем «0», и иначе вылезает за край.
+        value_font, vw = None, 0
+        for size in (46, 40, 34, 30, 26, 22):
+            value_font = _szov_font(size, bold=True)
+            vw = draw.textlength(value, font=value_font)
+            if vw <= w - 20:
+                break
+        draw.text((x + (w - vw) / 2, y + 52), value, font=value_font, fill=fg)
+
+    top = margin + 72
+    for index, (label, value, bg, fg) in enumerate(key_tiles):
+        tile(margin + index * (tile_w + gap), top, label, value, bg, fg)
+
+    second = top + tile_h + gap
+    small_w = (tile_w * 4 + gap * 3 - gap * 5) // 6
+    for index, (label, value) in enumerate(stat_tiles):
+        tile(margin + index * (small_w + gap), second, label, value, '#ffffff', '#0f172a', w=small_w)
+
+    buffer = BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# --- Отправка отбивки -------------------------------------------------------------------------
+# Ссылку на цикл бота держим явно: из потока Flask asyncio.get_event_loop() вернёт ЧУЖОЙ цикл,
+# а сессия aiohttp у aiogram привязана к своему — отправлять из другого нельзя.
+_SZOV_BOT_LOOP = {'loop': None}
+
+
+async def _capture_bot_loop(_dispatcher=None):
+    """on_startup: запоминаем цикл, в котором крутится бот."""
+    _SZOV_BOT_LOOP['loop'] = asyncio.get_event_loop()
+    logging.info("Цикл бота запомнен для отправки отбивки табло")
+
+
+def _bot_event_loop():
+    loop = _SZOV_BOT_LOOP.get('loop')
+    if loop is not None and loop.is_running():
+        return loop
+    return None
+
+
+async def _szov_broadcast_send(chat_id, hour_to=None):
+    """Собрать и отправить отбивку в чат: две картинки одним альбомом + текст.
+
+    Данные тянем в пуле потоков: Oktell и Chat2Desk — синхронные requests, и держать
+    на них event loop бота нельзя."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(executor_pool, _szov_broadcast_collect, hour_to)
+    text = _szov_broadcast_text(data)
+
+    media = []
+    try:
+        table_png = await loop.run_in_executor(
+            executor_pool, _szov_render_hourly_table_png, data['hourly'])
+        board_png = await loop.run_in_executor(
+            executor_pool, _szov_render_wallboard_png, data)
+        media = [('table.png', table_png), ('board.png', board_png)]
+    except Exception as exc:
+        # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинок.
+        logging.error("Отбивка табло: не удалось собрать картинки: %s", exc)
+
+    if media:
+        try:
+            group = types.MediaGroup()
+            for index, (name, blob) in enumerate(media):
+                group.attach_photo(types.InputFile(BytesIO(blob), filename=name),
+                                   caption=text if index == 0 else None,
+                                   parse_mode='HTML' if index == 0 else None)
+            await bot.send_media_group(chat_id, group)
+            return data
+        except Exception as exc:
+            logging.error("Отбивка табло: альбом не ушёл, отправляю текстом: %s", exc)
+    await bot.send_message(chat_id, text, parse_mode='HTML')
+    return data
+
+
+def _szov_broadcast_send_times():
+    """[(час, минута), ...] из SZOV_BROADCAST_SEND_TIMES."""
+    times = []
+    for chunk in (SZOV_BROADCAST_SEND_TIMES or '').split(','):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        match = re.fullmatch(r'([01]?\d|2[0-3]):([0-5]\d)', chunk)
+        if not match:
+            logging.warning("Отбивка табло: не понял время отправки %r", chunk)
+            continue
+        times.append((int(match.group(1)), int(match.group(2))))
+    return times
+
+
+async def szov_broadcast_job():
+    """Плановая отбивка. Молчит, если чат не выбран или отправка выключена."""
+    try:
+        config = await asyncio.get_event_loop().run_in_executor(
+            executor_pool, db.get_szov_broadcast_config)
+        if not config.get('is_enabled') or not config.get('chat_id'):
+            return
+        await _szov_broadcast_send(int(config['chat_id']))
+        logging.info("Отбивка табло отправлена в чат %s", config['chat_id'])
+    except Exception as exc:
+        logging.error("Отбивка табло: плановая отправка не удалась: %s", exc, exc_info=True)
+
+
+# --- Настройка отбивки: эндпоинты --------------------------------------------------------------
+
+@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_szov_wallboard_broadcast():
+    """Настройка отбивки: куда слать, включена ли, история изменений и список чатов бота."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _szov_wallboard_guard()
+    if err:
+        return err
+    if request.method == 'POST':
+        payload = request.get_json(silent=True) or {}
+        try:
+            db.update_szov_broadcast_config(payload, user_id=requester_id)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logging.error("Отбивка табло: не удалось сохранить настройку: %s", exc)
+            return jsonify({"error": "Не удалось сохранить настройку"}), 500
+    return jsonify({
+        "config": db.get_szov_broadcast_config(),
+        "history": db.get_szov_broadcast_history(),
+        "chats": db.list_bot_group_chats(),
+        "send_times": [f"{h:02d}:{m:02d}" for h, m in _szov_broadcast_send_times()],
+    })
+
+
+@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_szov_wallboard_broadcast_test():
+    """Отправить отбивку прямо сейчас — проверить, что чат и картинки настроены."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _szov_wallboard_guard()
+    if err:
+        return err
+    config = db.get_szov_broadcast_config()
+    chat_id = config.get('chat_id')
+    if not chat_id:
+        return jsonify({"error": "Сначала выберите чат"}), 400
+    try:
+        loop = _bot_event_loop()
+        if loop is None:
+            return jsonify({"error": "Бот не запущен"}), 503
+        future = asyncio.run_coroutine_threadsafe(_szov_broadcast_send(int(chat_id)), loop)
+        future.result(timeout=180)
+        return jsonify({"status": "success", "chat_id": chat_id})
+    except Exception as exc:
+        logging.error("Отбивка табло: тестовая отправка не удалась: %s", exc, exc_info=True)
+        return jsonify({"error": "Не удалось отправить", "detail": str(exc)[:300]}), 502
+
+
 # === Oktell: распределение звонков на оценку («Деление звонков») ================================
 # Норма-ориентированный добор: на каждого оператора (операторская модель) держим в пуле
 # imported_calls ровно NORM(op, месяц-звонка) случайных ПОДХОДЯЩИХ (фильтр длительности из
@@ -34278,6 +34810,49 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     await message.delete()
 
 # === Команды ====================================================================================================
+@dp.message_handler(commands=['tablo'])
+async def szov_wallboard_command(message: types.Message):
+    """/tablo [ЧЧ:ММ] — показатели табло на указанный час (по умолчанию — на сейчас).
+
+    Доступ тот же, что у раздела: глобальные админы, глава и СВ отдела СЗоВ."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not user:
+        await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
+        return
+
+    def _allowed():
+        role = _normalize_user_role(user[3])
+        if _is_admin_role(role):
+            return True
+        department_id = _szov_wallboard_department_id()
+        if department_id is None:
+            return False
+        if db.headed_department_id_for_user(user[0]) == department_id:
+            return True
+        return _is_supervisor_role(role) and db.get_user_department_id(user[0]) == department_id
+
+    if not await loop.run_in_executor(executor_pool, _allowed):
+        await message.reply("Табло СЗоВ доступно администраторам, главе и СВ отдела СЗоВ.")
+        return
+
+    argument = (message.get_args() or '').strip()
+    hour_to = None
+    if argument:
+        match = re.fullmatch(r'([01]?\d|2[0-3])(?::([0-5]\d))?', argument)
+        if not match:
+            await message.reply("Формат: /tablo 14:00 — показатели на указанный час.")
+            return
+        hour_to = int(match.group(1))
+
+    await message.reply("Собираю показатели…")
+    try:
+        await _szov_broadcast_send(message.chat.id, hour_to=hour_to)
+    except Exception as exc:
+        logging.error("Команда /tablo: не удалось собрать отбивку: %s", exc, exc_info=True)
+        await message.reply("Не удалось собрать показатели — Oktell не ответил.")
+
+
 @dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
     await message.delete()
@@ -45334,6 +45909,17 @@ if __name__ == '__main__':
         coalesce=True
     )
 
+    # Отбивка показателей «Табло СЗоВ»: по одной джобе на каждое время из настройки.
+    for _hour, _minute in _szov_broadcast_send_times():
+        scheduler.add_job(
+            szov_broadcast_job,
+            CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
+            id=f'szov_wallboard_broadcast_{_hour:02d}{_minute:02d}',
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+
     scheduler.start()
 
     # Стартовый прогон (не ждём первой минуты)
@@ -45345,8 +45931,9 @@ if __name__ == '__main__':
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")
     
-    # Запускаем бота
-    executor.start_polling(dp, skip_updates=True)
+    # Запускаем бота. on_startup нужен, чтобы запомнить цикл бота: из него потом уходит
+    # отбивка табло, которую инициирует поток Flask.
+    executor.start_polling(dp, skip_updates=True, on_startup=_capture_bot_loop)
 
 
 
