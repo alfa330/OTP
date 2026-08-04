@@ -12440,7 +12440,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             };
 
-            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey) {
+            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey, getCrossOperatorGapForDirection = null) {
             const occupied = [];
             const dateObj = parseDateStr(dateStr);
             const prevStr = todayDateStr(addDays(dateObj, -1));
@@ -12450,34 +12450,50 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (typeof getDirectionBreakScopeKey === 'function') return String(getDirectionBreakScopeKey(v) ?? '');
                 return `dir:${normDirection(v)}`;
             };
+            const getCrossGap = (v) => {
+                if (typeof getCrossOperatorGapForDirection !== 'function') return 0;
+                const gap = Number(getCrossOperatorGapForDirection(v));
+                return Number.isFinite(gap) && gap > 0 ? Math.round(gap) : 0;
+            };
             const scopeDirectionKey = getScopeKey(directionScope);
-            const clampRange = (s, e) => {
-                const ns = Math.max(0, Math.min(2880, s));
-                const ne = Math.max(0, Math.min(2880, e));
+            const targetGap = getCrossGap(directionScope);
+            let paddedAny = false;
+            // Перерыв чужого оператора расширяем на требуемый промежуток с двух сторон:
+            // тогда обычный поиск «без пересечений» сам держит дистанцию.
+            const clampRange = (s, e, pad) => {
+                const gap = Math.max(0, Number(pad) || 0);
+                if (gap > 0) paddedAny = true;
+                const ns = Math.max(0, Math.min(2880, s - gap));
+                const ne = Math.max(0, Math.min(2880, e + gap));
                 if (ne > ns) occupied.push({ start: ns, end: ne });
             };
             allOperators.forEach(op => {
                 if (op.id === excludeOpId) return;
                 if (getScopeKey(op?.direction) !== scopeDirectionKey) return;
+                // В группе направлений у сторон могут быть разные настройки — берём строгую.
+                const opGap = Math.max(targetGap, getCrossGap(op?.direction));
                 const segs = op.shifts?.[dateStr] ?? [];
                 segs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
-                    clampRange(b.start, b.end);
+                    clampRange(b.start, b.end, opGap);
                 });
                 });
                 const prevSegs = op.shifts?.[prevStr] ?? [];
                 prevSegs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
-                    clampRange(b.start - 1440, b.end - 1440);
+                    clampRange(b.start - 1440, b.end - 1440, opGap);
                 });
                 });
                 const nextSegs = op.shifts?.[nextStr] ?? [];
                 nextSegs.forEach(seg => {
                 (seg.breaks ?? []).forEach(b => {
-                    clampRange(b.start + 1440, b.end + 1440);
+                    clampRange(b.start + 1440, b.end + 1440, opGap);
                 });
                 });
             });
+            // Расширенные интервалы могут склеиваться — сливаем, чтобы штраф за
+            // пересечение не считался дважды. Без промежутка поведение не меняется.
+            if (paddedAny) return mergeIntervals(occupied);
             return occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
             }
 
@@ -12577,10 +12593,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return null;
             }
 
-            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null) {
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
-            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey);
+            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
             const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
                 ? getBreakRuleRangesForDirection(op?.direction)
                 : null;
@@ -13090,6 +13106,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerBreakRulesError, setPlannerBreakRulesError] = useState('');
             const [plannerBreakRulesByDirection, setPlannerBreakRulesByDirection] = useState({});
             const [plannerBreakRulesDraftByDirection, setPlannerBreakRulesDraftByDirection] = useState({});
+            // Минимальный промежуток между перерывами РАЗНЫХ операторов направления (мин).
+            const [plannerBreakCrossGapByDirection, setPlannerBreakCrossGapByDirection] = useState({});
+            const [plannerBreakCrossGapDraftByDirection, setPlannerBreakCrossGapDraftByDirection] = useState({});
             const [plannerSystemDirections, setPlannerSystemDirections] = useState([]);
             const [plannerSystemDirectionItems, setPlannerSystemDirectionItems] = useState([]);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
@@ -13945,6 +13964,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const breakRulesPayload = await breakRulesResp.json().catch(() => ({}));
                         if (breakRulesResp.ok) {
                             setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(breakRulesPayload));
+                            setPlannerBreakCrossGapByDirection(normalizePlannerBreakCrossGapPayload(breakRulesPayload));
                         }
 
                         const directionsPayload = await directionsResp.json().catch(() => ({}));
@@ -14055,18 +14075,39 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
                 return compact;
             };
-            const normalizePlannerBreakRulesPayload = (payload) => {
-                const rawList = Array.isArray(payload?.direction_rules)
+            const PLANNER_BREAK_CROSS_GAP_MAX = 240;
+            const normalizePlannerBreakCrossGapValue = (value) => {
+                const minutes = Number(value);
+                if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+                return Math.min(PLANNER_BREAK_CROSS_GAP_MAX, Math.round(minutes));
+            };
+            const plannerBreakRulesPayloadList = (payload) => (
+                Array.isArray(payload?.direction_rules)
                     ? payload.direction_rules
                     : (Array.isArray(payload?.directionRules)
                         ? payload.directionRules
-                        : (Array.isArray(payload) ? payload : []));
+                        : (Array.isArray(payload) ? payload : []))
+            );
+            const normalizePlannerBreakRulesPayload = (payload) => {
                 const map = {};
-                rawList.forEach(item => {
+                plannerBreakRulesPayloadList(payload).forEach(item => {
                     if (!item || typeof item !== 'object') return;
                     const direction = String(item.direction ?? item.direction_name ?? '').trim();
                     if (!direction) return;
                     map[direction] = normalizePlannerBreakRuleRanges(item.rules);
+                });
+                return map;
+            };
+            const normalizePlannerBreakCrossGapPayload = (payload) => {
+                const map = {};
+                plannerBreakRulesPayloadList(payload).forEach(item => {
+                    if (!item || typeof item !== 'object') return;
+                    const direction = String(item.direction ?? item.direction_name ?? '').trim();
+                    if (!direction) return;
+                    const gap = normalizePlannerBreakCrossGapValue(
+                        item.crossOperatorGapMinutes ?? item.cross_operator_gap_minutes
+                    );
+                    if (gap > 0) map[direction] = gap;
                 });
                 return map;
             };
@@ -14103,6 +14144,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }));
                 });
                 return map;
+            };
+            const buildPlannerBreakCrossGapDraftMap = (gapsByDirection, directionsList) => {
+                const map = {};
+                const source = gapsByDirection || {};
+                (Array.isArray(directionsList) ? directionsList : []).forEach(directionName => {
+                    const direction = String(directionName || '').trim();
+                    if (!direction) return;
+                    const gap = normalizePlannerBreakCrossGapValue(source[direction]);
+                    map[direction] = gap > 0 ? String(gap) : '';
+                });
+                return map;
+            };
+            const parsePlannerBreakCrossGapDraftMap = (draftMap, directionsList) => {
+                const output = {};
+                (Array.isArray(directionsList) ? directionsList : []).forEach(directionName => {
+                    const direction = String(directionName || '').trim();
+                    if (!direction) return;
+                    const raw = String(draftMap?.[direction] ?? '').trim();
+                    if (!raw) {
+                        output[direction] = 0;
+                        return;
+                    }
+                    const minutes = Number(raw);
+                    if (!Number.isFinite(minutes) || minutes < 0 || !Number.isInteger(minutes)) {
+                        throw new Error(`Некорректный промежуток между перерывами операторов для "${direction}"`);
+                    }
+                    if (minutes > PLANNER_BREAK_CROSS_GAP_MAX) {
+                        throw new Error(`Промежуток для "${direction}" не может быть больше ${PLANNER_BREAK_CROSS_GAP_MAX} мин`);
+                    }
+                    output[direction] = minutes;
+                });
+                return output;
             };
             const parsePlannerBreakRulesDraftMap = (draftMap, directionsList) => {
                 const output = {};
@@ -14148,6 +14221,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const key = plannerNormalizeDirectionKey(directionValue);
                 if (!key) return [];
                 return plannerBreakRulesLookup.get(key) || [];
+            };
+            const plannerBreakCrossGapLookup = useMemo(() => {
+                const map = new Map();
+                Object.entries(plannerBreakCrossGapByDirection || {}).forEach(([directionName, gapValue]) => {
+                    const key = plannerNormalizeDirectionKey(directionName);
+                    if (!key) return;
+                    const gap = normalizePlannerBreakCrossGapValue(gapValue);
+                    if (gap > 0) map.set(key, gap);
+                });
+                return map;
+            }, [plannerBreakCrossGapByDirection]);
+            const getPlannerBreakCrossGapForDirection = (directionValue) => {
+                const key = plannerNormalizeDirectionKey(directionValue);
+                if (!key) return 0;
+                return plannerBreakCrossGapLookup.get(key) || 0;
             };
             const plannerBreakRuleDirections = useMemo(() => {
                 const map = new Map();
@@ -15636,7 +15724,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
                 simOp.shifts[date] = merged;
 
-                try { adjustBreaksForOperatorOnDate(simOp, date, simulated, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection); } catch (e) { /* ignore */ }
+                try { adjustBreaksForOperatorOnDate(simOp, date, simulated, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection); } catch (e) { /* ignore */ }
 
                 const adjustedTarget = (simOp.shifts?.[date] ?? []).find(s => {
                   const sMin = s.__startMin ?? timeToMinutes(s.start);
@@ -15763,14 +15851,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     const normalized = normalizePlannerBreakRulesPayload(payload);
+                    const normalizedGaps = normalizePlannerBreakCrossGapPayload(payload);
                     setPlannerBreakRulesByDirection(normalized);
+                    setPlannerBreakCrossGapByDirection(normalizedGaps);
                     if (showBreakRulesSettingsModal) {
                         const mergedDirections = Array.from(new Set([
                             ...plannerBreakRuleDirections,
-                            ...Object.keys(normalized || {})
+                            ...Object.keys(normalized || {}),
+                            ...Object.keys(normalizedGaps || {})
                         ])).sort((a, b) => a.localeCompare(b));
                         setPlannerBreakRulesDraftByDirection(
                             buildPlannerBreakRulesDraftMap(normalized, mergedDirections)
+                        );
+                        setPlannerBreakCrossGapDraftByDirection(
+                            buildPlannerBreakCrossGapDraftMap(normalizedGaps, mergedDirections)
                         );
                     }
                     return payload;
@@ -15791,16 +15885,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setPlannerBreakRulesDraftByDirection(
                     buildPlannerBreakRulesDraftMap(plannerBreakRulesByDirection, plannerBreakRuleDirections)
                 );
+                setPlannerBreakCrossGapDraftByDirection(
+                    buildPlannerBreakCrossGapDraftMap(plannerBreakCrossGapByDirection, plannerBreakRuleDirections)
+                );
                 if (Object.keys(plannerBreakRulesByDirection || {}).length === 0 && !plannerBreakRulesLoading) {
                     try {
                         const payload = await loadPlannerBreakRulesFromServer();
                         const normalized = normalizePlannerBreakRulesPayload(payload || {});
+                        const normalizedGaps = normalizePlannerBreakCrossGapPayload(payload || {});
                         const mergedDirections = Array.from(new Set([
                             ...plannerBreakRuleDirections,
-                            ...Object.keys(normalized || {})
+                            ...Object.keys(normalized || {}),
+                            ...Object.keys(normalizedGaps || {})
                         ])).sort((a, b) => a.localeCompare(b));
                         setPlannerBreakRulesDraftByDirection(
                             buildPlannerBreakRulesDraftMap(normalized, mergedDirections)
+                        );
+                        setPlannerBreakCrossGapDraftByDirection(
+                            buildPlannerBreakCrossGapDraftMap(normalizedGaps, mergedDirections)
                         );
                     } catch (_) { /* error already set in state */ }
                 }
@@ -15870,11 +15972,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }));
             };
 
+            const updatePlannerBreakCrossGapDraft = (directionName, rawValue) => {
+                const direction = String(directionName || '').trim();
+                if (!direction) return;
+                const digitsOnly = String(rawValue ?? '').replace(/[^\d]/g, '');
+                setPlannerBreakCrossGapDraftByDirection(prev => ({
+                    ...(prev || {}),
+                    [direction]: digitsOnly
+                }));
+            };
+
             const savePlannerBreakRulesToServer = async () => {
                 let parsedRulesByDirection = {};
+                let parsedCrossGapByDirection = {};
                 try {
                     parsedRulesByDirection = parsePlannerBreakRulesDraftMap(
                         plannerBreakRulesDraftByDirection,
+                        plannerBreakRuleDirections
+                    );
+                    parsedCrossGapByDirection = parsePlannerBreakCrossGapDraftMap(
+                        plannerBreakCrossGapDraftByDirection,
                         plannerBreakRuleDirections
                     );
                 } catch (error) {
@@ -15884,7 +16001,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const directionPayload = plannerBreakRuleDirections.map(directionName => ({
                     direction: directionName,
-                    rules: normalizePlannerBreakRuleRanges(parsedRulesByDirection[directionName] || [])
+                    rules: normalizePlannerBreakRuleRanges(parsedRulesByDirection[directionName] || []),
+                    crossOperatorGapMinutes: normalizePlannerBreakCrossGapValue(parsedCrossGapByDirection[directionName])
                 }));
                 setPlannerBreakRulesSaving(true);
                 setPlannerBreakRulesError('');
@@ -15902,9 +16020,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         throw new Error(payload?.error || `HTTP ${response.status}`);
                     }
                     const normalized = normalizePlannerBreakRulesPayload(payload);
+                    const normalizedGaps = normalizePlannerBreakCrossGapPayload(payload);
                     setPlannerBreakRulesByDirection(normalized);
+                    setPlannerBreakCrossGapByDirection(normalizedGaps);
                     setPlannerBreakRulesDraftByDirection(
                         buildPlannerBreakRulesDraftMap(normalized, plannerBreakRuleDirections)
+                    );
+                    setPlannerBreakCrossGapDraftByDirection(
+                        buildPlannerBreakCrossGapDraftMap(normalizedGaps, plannerBreakRuleDirections)
                     );
                     setShowBreakRulesSettingsModal(false);
                 } catch (error) {
@@ -17728,7 +17851,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       if (!touchedPairs.has(pairKey)) return;
                       const op = copy.find(x => x.id === target.opId);
                       if (!op) return;
-                      try { adjustBreaksForOperatorOnDate(op, target.date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection); } catch (e) { /* ignore */ }
+                      try { adjustBreaksForOperatorOnDate(op, target.date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection); } catch (e) { /* ignore */ }
                       touchedPairs.delete(pairKey);
                     });
                     return copy;
@@ -19009,7 +19132,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
                     op.shifts[date] = merged;
-                    try { adjustBreaksForOperatorOnDate(op, date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection); } catch (e) { /* ignore */ }
+                    try { adjustBreaksForOperatorOnDate(op, date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection); } catch (e) { /* ignore */ }
                     return copy;
                   });
               
@@ -19204,6 +19327,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const detailsByIndex = new Map();
                 let overlapsWithDirection = 0;
                 let overlapsInsideShift = 0;
+                let gapViolationsWithDirection = 0;
+                const overlapIndexes = new Set();
+                const gapIndexes = new Set();
                 const formatMinuteForConflict = (minuteValue) => {
                     const val = Number(minuteValue);
                     if (!Number.isFinite(val)) return '—';
@@ -19241,18 +19367,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         detailsByIndex,
                         overlapsWithDirection,
                         overlapsInsideShift,
+                        gapViolationsWithDirection,
+                        gapOnlyIndexes: new Set(),
+                        crossOperatorGapMinutes: 0,
                         conflictsForDisplay: []
                     };
                 }
 
                 const op = operators.find(o => o.id === modalState?.opId);
                 const occupiedByDirectionDetailed = [];
+                // В группе направлений у сторон могут быть разные настройки — берём строгую.
+                let crossOperatorGapMinutes = getPlannerBreakCrossGapForDirection(op?.direction);
                 if (modalState?.opId && modalState?.date && op) {
                     const scopeKey = getBreakConflictDirectionScopeKey(op?.direction);
                     const seenDetailed = new Set();
                     (operators || []).forEach(otherOp => {
                         if (!otherOp || otherOp.id === modalState.opId) return;
                         if (getBreakConflictDirectionScopeKey(otherOp?.direction) !== scopeKey) return;
+                        crossOperatorGapMinutes = Math.max(
+                            crossOperatorGapMinutes,
+                            getPlannerBreakCrossGapForDirection(otherOp?.direction)
+                        );
                         const parts = getShiftPartsForDate(otherOp, modalState.date) || [];
                         parts.forEach((p) => {
                             const srcSeg = otherOp.shifts?.[p.sourceDate]?.[p.sourceIndex];
@@ -19283,6 +19418,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const overlapDetails = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
                     if (overlapDetails.length > 0) {
                         conflictIndexes.add(b.idx);
+                        overlapIndexes.add(b.idx);
                         overlapsWithDirection += 1;
                         const uniqueNames = Array.from(new Set(overlapDetails.map(item => item.operatorName))).filter(Boolean);
                         const namesPreview = uniqueNames.slice(0, 2).join(', ');
@@ -19294,7 +19430,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 text: `${item.operatorName} • ${formatMinuteForConflict(item.start)} — ${formatMinuteForConflict(item.end)} • смена ${item.shiftLabel}`
                             });
                         });
+                        return;
                     }
+                    if (crossOperatorGapMinutes <= 0) return;
+                    // Перерыв не пересекается, но стоит ближе требуемого промежутка к перерыву коллеги.
+                    const tooCloseDetails = occupiedByDirectionDetailed.filter(occ => {
+                        const distance = (b.start >= occ.end) ? (b.start - occ.end) : (occ.start - b.end);
+                        return distance >= 0 && distance < crossOperatorGapMinutes;
+                    });
+                    if (tooCloseDetails.length === 0) return;
+                    conflictIndexes.add(b.idx);
+                    gapIndexes.add(b.idx);
+                    gapViolationsWithDirection += 1;
+                    const uniqueNames = Array.from(new Set(tooCloseDetails.map(item => item.operatorName))).filter(Boolean);
+                    const namesPreview = uniqueNames.slice(0, 2).join(', ');
+                    const namesTail = uniqueNames.length > 2 ? ` +${uniqueNames.length - 2}` : '';
+                    putReason(b.idx, `ближе ${crossOperatorGapMinutes} мин к перерыву: ${namesPreview}${namesTail}`);
+                    tooCloseDetails.forEach(item => {
+                        putDetail(b.idx, {
+                            key: `gap:${item.key}`,
+                            text: `${item.operatorName} • ${formatMinuteForConflict(item.start)} — ${formatMinuteForConflict(item.end)} • нужен промежуток ${crossOperatorGapMinutes} мин`
+                        });
+                    });
                 });
 
                 for (let i = 0; i < breaksNormalized.length; i++) {
@@ -19304,6 +19461,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         if (!intervalsOverlap(a, b)) continue;
                         conflictIndexes.add(a.idx);
                         conflictIndexes.add(b.idx);
+                        overlapIndexes.add(a.idx);
+                        overlapIndexes.add(b.idx);
                         overlapsInsideShift += 1;
                         putReason(a.idx, `пересечение с вашим перерывом ${formatMinuteForConflict(b.start)} — ${formatMinuteForConflict(b.end)}`);
                         putReason(b.idx, `пересечение с вашим перерывом ${formatMinuteForConflict(a.start)} — ${formatMinuteForConflict(a.end)}`);
@@ -19327,6 +19486,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         details: detailsByIndex.get(item.idx) || []
                     }));
 
+                const gapOnlyIndexes = new Set(
+                    Array.from(gapIndexes).filter(idx => !overlapIndexes.has(idx))
+                );
+
                 return {
                     hasConflict: conflictIndexes.size > 0,
                     conflictIndexes,
@@ -19334,9 +19497,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     detailsByIndex,
                     overlapsWithDirection,
                     overlapsInsideShift,
+                    gapViolationsWithDirection,
+                    gapOnlyIndexes,
+                    crossOperatorGapMinutes,
                     conflictsForDisplay
                 };
-            }, [modalBreaksForEditor, operators, modalState?.opId, modalState?.date, getBreakConflictDirectionScopeKey]);
+            }, [
+                modalBreaksForEditor,
+                operators,
+                modalState?.opId,
+                modalState?.date,
+                getBreakConflictDirectionScopeKey,
+                plannerBreakCrossGapLookup
+            ]);
 
             const modalBulkTargets = Array.isArray(modalState?.multipleTargets) ? modalState.multipleTargets : [];
             const modalBulkCount = modalBulkTargets.length > 0
@@ -26727,7 +26900,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     className="text-[11px] text-rose-700"
                                     title={(modalBreakConflictState.detailsByIndex.get(i) || []).map(item => item.text).join('\n') || undefined}
                                 >
-                                    Пересечение
+                                    {modalBreakConflictState.gapOnlyIndexes?.has(i) ? 'Мало промежутка' : 'Пересечение'}
                                 </span>
                             )}
                             </div>
@@ -26747,10 +26920,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         })()}
                         {modalBreakConflictState.hasConflict && (
                             <div className="w-full mt-1 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-800">
-                                <div className="font-semibold">Есть пересечения перерывов</div>
+                                <div className="font-semibold">
+                                    {(modalBreakConflictState.overlapsInsideShift + modalBreakConflictState.overlapsWithDirection) > 0
+                                        ? 'Есть пересечения перерывов'
+                                        : 'Перерывы стоят слишком близко'}
+                                </div>
                                 <div>
                                     {modalBreakConflictState.overlapsInsideShift > 0 ? `Внутри смены: ${modalBreakConflictState.overlapsInsideShift}. ` : ''}
-                                    {modalBreakConflictState.overlapsWithDirection > 0 ? `С перерывами направления: ${modalBreakConflictState.overlapsWithDirection}.` : ''}
+                                    {modalBreakConflictState.overlapsWithDirection > 0 ? `С перерывами направления: ${modalBreakConflictState.overlapsWithDirection}. ` : ''}
+                                    {modalBreakConflictState.gapViolationsWithDirection > 0 ? `Ближе ${modalBreakConflictState.crossOperatorGapMinutes} мин к перерывам направления: ${modalBreakConflictState.gapViolationsWithDirection}.` : ''}
                                 </div>
                                 {modalBreakConflictState.conflictsForDisplay.length > 0 && (
                                     <div className="mt-1 space-y-1">
@@ -30486,7 +30664,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 Настройка перерывов
                             </h3>
                             <div className="text-sm text-slate-600 mt-1">
-                                Правила автогенерации перерывов по направлениям
+                                Правила автогенерации перерывов и промежуток между перерывами разных операторов. Пусто или 0 — промежуток не требуется.
                             </div>
                         </div>
                         <button
@@ -30534,6 +30712,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 <FaIcon className="fas fa-plus mr-1"></FaIcon>
                                                 Добавить правило
                                             </button>
+                                        </div>
+
+                                        <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
+                                            <div className="text-[12px] font-medium text-slate-700 min-w-0">
+                                                Промежуток между перерывами разных операторов
+                                            </div>
+                                            <div className="flex items-center gap-1.5 shrink-0">
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={plannerBreakCrossGapDraftByDirection?.[directionName] ?? ''}
+                                                    placeholder="0"
+                                                    onChange={(e) => updatePlannerBreakCrossGapDraft(directionName, e.target.value)}
+                                                    className="w-16 px-2 py-1.5 text-sm text-right tabular-nums rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                    aria-label={`Промежуток между перерывами разных операторов направления ${directionName}, минут`}
+                                                />
+                                                <span className="text-[11px] text-slate-500">мин</span>
+                                            </div>
                                         </div>
 
                                         {rules.length === 0 ? (

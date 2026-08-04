@@ -54,15 +54,45 @@ class _MergeDummy:
 
 
 class _BreakAdjustDummy(_MergeDummy):
-    def __init__(self, occupied=None):
+    def __init__(self, occupied=None, cross_gap=0):
         self.occupied = occupied or []
+        self.cross_gap = int(cross_gap or 0)
 
     def _load_occupied_break_intervals_for_operator_date_tx(self, cursor, operator_id, shift_date):
         return list(self.occupied)
 
+    def _get_operator_direction_name_tx(self, cursor, operator_id):
+        return "Направление"
+
+    def _get_break_cross_operator_gap_for_direction_tx(self, cursor, direction_name):
+        return self.cross_gap
+
 
 class _TechReasonDummy:
     pass
+
+
+BREAK_ADJUST_METHODS = (
+    "_break_intervals_overlap",
+    "_merge_break_intervals",
+    "_pad_break_intervals_for_cross_gap",
+    "_break_layout_spacing",
+    "_break_start_bounds_for_index",
+    "_break_total_overlap_minutes",
+    "_find_best_break_start",
+    "_adjust_shift_breaks_against_occupied_tx",
+)
+
+
+def _make_break_adjust_dummy(occupied=None):
+    namespace = {"math": math}
+    for function_name in BREAK_ADJUST_METHODS:
+        exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
+
+    dummy = _BreakAdjustDummy(occupied=occupied)
+    for function_name in BREAK_ADJUST_METHODS:
+        setattr(dummy, function_name, namespace[function_name].__get__(dummy, _BreakAdjustDummy))
+    return dummy
 
 
 class WorkScheduleBreakRuleTests(unittest.TestCase):
@@ -191,29 +221,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertEqual(pick(300, direction_value="Основа", break_rules_map={}), [15])
 
     def test_database_break_adjustment_keeps_breaks_away_from_shift_edges_and_each_other(self):
-        namespace = {"math": math}
-        for function_name in (
-            "_break_intervals_overlap",
-            "_merge_break_intervals",
-            "_break_layout_spacing",
-            "_break_start_bounds_for_index",
-            "_break_total_overlap_minutes",
-            "_find_best_break_start",
-            "_adjust_shift_breaks_against_occupied_tx",
-        ):
-            exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
-
-        dummy = _BreakAdjustDummy()
-        for function_name in (
-            "_break_intervals_overlap",
-            "_merge_break_intervals",
-            "_break_layout_spacing",
-            "_break_start_bounds_for_index",
-            "_break_total_overlap_minutes",
-            "_find_best_break_start",
-            "_adjust_shift_breaks_against_occupied_tx",
-        ):
-            setattr(dummy, function_name, namespace[function_name].__get__(dummy, _BreakAdjustDummy))
+        dummy = _make_break_adjust_dummy()
 
         result = dummy._adjust_shift_breaks_against_occupied_tx(
             cursor=None,
@@ -234,29 +242,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertTrue(all(b["start"] - a["end"] >= 45 for a, b in zip(result, result[1:])))
 
     def test_database_break_adjustment_prefers_good_overlap_slot_over_edge_violation(self):
-        namespace = {"math": math}
-        for function_name in (
-            "_break_intervals_overlap",
-            "_merge_break_intervals",
-            "_break_layout_spacing",
-            "_break_start_bounds_for_index",
-            "_break_total_overlap_minutes",
-            "_find_best_break_start",
-            "_adjust_shift_breaks_against_occupied_tx",
-        ):
-            exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
-
-        dummy = _BreakAdjustDummy(occupied=[{"start": 16 * 60 + 15, "end": 16 * 60 + 45}])
-        for function_name in (
-            "_break_intervals_overlap",
-            "_merge_break_intervals",
-            "_break_layout_spacing",
-            "_break_start_bounds_for_index",
-            "_break_total_overlap_minutes",
-            "_find_best_break_start",
-            "_adjust_shift_breaks_against_occupied_tx",
-        ):
-            setattr(dummy, function_name, namespace[function_name].__get__(dummy, _BreakAdjustDummy))
+        dummy = _make_break_adjust_dummy(occupied=[{"start": 16 * 60 + 15, "end": 16 * 60 + 45}])
 
         result = dummy._adjust_shift_breaks_against_occupied_tx(
             cursor=None,
@@ -275,6 +261,176 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertFalse(dummy._break_intervals_overlap(lunch, {"start": 16 * 60 + 15, "end": 16 * 60 + 45}))
         self.assertGreaterEqual(lunch["start"] - result[0]["end"], 45)
         self.assertGreaterEqual(result[2]["start"] - lunch["end"], 45)
+
+    def test_database_break_adjustment_keeps_cross_operator_gap_from_other_operators(self):
+        # Перерыв коллеги 16:15-16:45 и требование держать 10 минут между
+        # перерывами разных операторов: свой обед не должен встать вплотную.
+        colleague_break = {"start": 16 * 60 + 15, "end": 16 * 60 + 45}
+        dummy = _make_break_adjust_dummy(occupied=[colleague_break])
+
+        result = dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-08-04",
+            start_time="12:00",
+            end_time="21:00",
+            breaks=[
+                {"start": 14 * 60 + 10, "end": 14 * 60 + 25},
+                {"start": 16 * 60 + 15, "end": 16 * 60 + 45},
+                {"start": 18 * 60 + 40, "end": 18 * 60 + 55},
+            ],
+            cross_gap_minutes=10,
+        )
+
+        self.assertEqual([item["end"] - item["start"] for item in result], [15, 30, 15])
+        for item in result:
+            distance = (
+                item["start"] - colleague_break["end"]
+                if item["start"] >= colleague_break["end"]
+                else colleague_break["start"] - item["end"]
+            )
+            self.assertGreaterEqual(distance, 10)
+
+    def test_database_break_adjustment_without_gap_setting_keeps_previous_layout(self):
+        colleague_break = {"start": 16 * 60 + 15, "end": 16 * 60 + 45}
+        breaks = [
+            {"start": 14 * 60 + 10, "end": 14 * 60 + 25},
+            {"start": 16 * 60 + 15, "end": 16 * 60 + 45},
+            {"start": 18 * 60 + 40, "end": 18 * 60 + 55},
+        ]
+
+        without_gap = _make_break_adjust_dummy(occupied=[colleague_break])._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-08-04",
+            start_time="12:00",
+            end_time="21:00",
+            breaks=[dict(item) for item in breaks],
+            cross_gap_minutes=0,
+        )
+        legacy = _make_break_adjust_dummy(occupied=[colleague_break])._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-08-04",
+            start_time="12:00",
+            end_time="21:00",
+            breaks=[dict(item) for item in breaks],
+        )
+
+        self.assertEqual(without_gap, legacy)
+
+    def test_database_cross_gap_padding_merges_touching_intervals(self):
+        dummy = _make_break_adjust_dummy()
+        padded = dummy._pad_break_intervals_for_cross_gap(
+            [{"start": 600, "end": 630}, {"start": 645, "end": 675}],
+            10,
+        )
+        self.assertEqual(padded, [{"start": 590, "end": 685}])
+        self.assertEqual(
+            dummy._pad_break_intervals_for_cross_gap([{"start": 600, "end": 630}], 0),
+            [{"start": 600, "end": 630}],
+        )
+
+    def test_import_simulation_pads_other_operators_breaks_by_direction_gap(self):
+        namespace = {}
+        for function_name in (
+            "_ws_normalize_direction_key",
+            "_ws_merge_intervals",
+            "_ws_cross_operator_gap_for_direction",
+            "_ws_add_days_str",
+            "_ws_parse_date_str",
+            "_ws_build_occupied_intervals_for_date",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+        namespace["datetime"] = __import__("datetime").datetime
+        namespace["timedelta"] = __import__("datetime").timedelta
+        build = namespace["_ws_build_occupied_intervals_for_date"]
+
+        operators = [
+            {
+                "id": 1,
+                "direction": "Чат менеджер",
+                "shifts": {"2026-08-04": [{"breaks": [{"start": 600, "end": 630}]}]},
+            },
+            {
+                "id": 2,
+                "direction": "Чат менеджер",
+                "shifts": {"2026-08-04": [{"breaks": [{"start": 700, "end": 730}]}]},
+            },
+        ]
+
+        def scope_key(direction_value):
+            return f"dir:{str(direction_value or '').strip().lower()}"
+
+        without_gap = build(
+            all_operators=operators,
+            date_str="2026-08-04",
+            exclude_op_id=1,
+            direction_scope="Чат менеджер",
+            get_scope_key=scope_key,
+        )
+        self.assertEqual(without_gap, [{"start": 700, "end": 730}])
+
+        with_gap = build(
+            all_operators=operators,
+            date_str="2026-08-04",
+            exclude_op_id=1,
+            direction_scope="Чат менеджер",
+            get_scope_key=scope_key,
+            break_gaps_map={"чат менеджер": 10},
+        )
+        self.assertEqual(with_gap, [{"start": 690, "end": 740}])
+
+    def test_import_simulation_uses_strictest_gap_inside_direction_group(self):
+        namespace = {}
+        for function_name in (
+            "_ws_normalize_direction_key",
+            "_ws_merge_intervals",
+            "_ws_cross_operator_gap_for_direction",
+            "_ws_add_days_str",
+            "_ws_parse_date_str",
+            "_ws_build_occupied_intervals_for_date",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+        namespace["datetime"] = __import__("datetime").datetime
+        namespace["timedelta"] = __import__("datetime").timedelta
+        build = namespace["_ws_build_occupied_intervals_for_date"]
+
+        operators = [
+            {"id": 1, "direction": "Основа", "shifts": {}},
+            {
+                "id": 2,
+                "direction": "Чат менеджер",
+                "shifts": {"2026-08-04": [{"breaks": [{"start": 700, "end": 730}]}]},
+            },
+        ]
+
+        # Оба направления в одной группе перерывов.
+        def scope_key(_direction_value):
+            return "group:основа|чат менеджер"
+
+        occupied = build(
+            all_operators=operators,
+            date_str="2026-08-04",
+            exclude_op_id=1,
+            direction_scope="Основа",
+            get_scope_key=scope_key,
+            break_gaps_map={"чат менеджер": 15},
+        )
+        self.assertEqual(occupied, [{"start": 685, "end": 745}])
+
+    def test_frontend_break_simulation_receives_cross_operator_gap(self):
+        app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+
+        self.assertIn("getPlannerBreakCrossGapForDirection", app_source)
+        self.assertIn("crossOperatorGapMinutes", app_source)
+        # Все три места локальной симуляции перерывов должны знать про промежуток.
+        self.assertEqual(
+            app_source.count(
+                "getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection)"
+            ),
+            3,
+        )
 
     def test_auction_publish_merges_touching_claimed_shifts_before_saving(self):
         namespace = {}

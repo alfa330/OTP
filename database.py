@@ -2950,6 +2950,19 @@ class Database:
                     CHECK (max_shift_minutes > min_shift_minutes)
                 );
             """)
+            # Настройки перерывов уровня направления (не привязаны к диапазону смены):
+            # cross_operator_gap_minutes — минимальный промежуток между перерывами
+            # РАЗНЫХ операторов одного направления (0 = требования нет).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_schedule_break_direction_settings (
+                    id SERIAL PRIMARY KEY,
+                    direction_name VARCHAR(255) NOT NULL,
+                    cross_operator_gap_minutes INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (cross_operator_gap_minutes >= 0 AND cross_operator_gap_minutes <= 240)
+                );
+            """)
 
             # Days off table
             cursor.execute("""
@@ -3011,6 +3024,10 @@ class Database:
             cursor.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_work_schedule_break_rules_direction_range
                 ON work_schedule_break_rules(LOWER(direction_name), min_shift_minutes, max_shift_minutes);
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_work_schedule_break_dir_settings_direction
+                ON work_schedule_break_direction_settings(LOWER(TRIM(direction_name)));
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_start
@@ -9004,6 +9021,7 @@ class Database:
                 if op_id is not None
             }
             direction_rules_cache = {}
+            direction_cross_gap_cache = {}
 
             def _direction_rules_for_sort(direction_name):
                 direction_key = self._normalize_direction_key(direction_name)
@@ -9013,6 +9031,15 @@ class Database:
                         direction_name
                     )
                 return direction_rules_cache[direction_key]
+
+            def _direction_cross_gap(direction_name):
+                direction_key = self._normalize_direction_key(direction_name)
+                if direction_key not in direction_cross_gap_cache:
+                    direction_cross_gap_cache[direction_key] = self._get_break_cross_operator_gap_for_direction_tx(
+                        cursor,
+                        direction_name
+                    )
+                return direction_cross_gap_cache[direction_key]
 
             def _publish_shift_sort_key(item):
                 start_min, end_min = self._schedule_interval_minutes(item["start_time"], item["end_time"])
@@ -9079,6 +9106,7 @@ class Database:
                     start_time=item["start_time"],
                     end_time=item["end_time"],
                     breaks=None,
+                    cross_gap_minutes=_direction_cross_gap(item.get("direction")),
                 )
                 summary["shifts_saved"] += 1
 
@@ -30335,6 +30363,26 @@ class Database:
             prev = cur
         return normalized
 
+    def _normalize_break_cross_operator_gap(self, value):
+        """
+        Минимальный промежуток между перерывами РАЗНЫХ операторов одного
+        направления, в минутах. None/'' -> None (значение не передано),
+        иначе целое 0..240 (0 = требования нет).
+        """
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        try:
+            minutes = int(round(float(value)))
+        except Exception:
+            raise ValueError("cross_operator_gap_minutes must be an integer number of minutes")
+        if minutes < 0:
+            raise ValueError("cross_operator_gap_minutes must be >= 0")
+        if minutes > 240:
+            raise ValueError("cross_operator_gap_minutes must be <= 240")
+        return minutes
+
     def get_work_schedule_break_rules(self, department_id=None):
         """
         Возвращает правила автоперерывов по направлениям.
@@ -30347,9 +30395,12 @@ class Database:
             "direction": "Название",
             "rules": [
               {"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}
-            ]
+            ],
+            "crossOperatorGapMinutes": 10
           }
         ]
+        Направление попадает в ответ, если у него есть правила ИЛИ задан
+        промежуток между перерывами разных операторов.
         """
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -30363,21 +30414,90 @@ class Database:
             """, {'dept': department_id})
             rows = cursor.fetchall() or []
 
+            cursor.execute("""
+                SELECT direction_name, cross_operator_gap_minutes
+                FROM work_schedule_break_direction_settings
+                WHERE (%(dept)s IS NULL OR LOWER(TRIM(direction_name)) IN (
+                    SELECT LOWER(TRIM(d.name)) FROM directions d
+                    WHERE d.department_id = %(dept)s
+                ))
+                ORDER BY LOWER(direction_name), id
+            """, {'dept': department_id})
+            gap_rows = cursor.fetchall() or []
+
         by_direction = {}
         for direction_name, min_shift_minutes, max_shift_minutes, break_durations_json in rows:
             direction_label = str(direction_name or '').strip()
             if not direction_label:
                 continue
-            item = by_direction.setdefault(direction_label, {"direction": direction_label, "rules": []})
+            item = by_direction.setdefault(
+                direction_label,
+                {"direction": direction_label, "rules": [], "crossOperatorGapMinutes": 0}
+            )
             item["rules"].append({
                 "minMinutes": int(min_shift_minutes),
                 "maxMinutes": int(max_shift_minutes),
                 "breakDurations": self._normalize_break_durations_list(break_durations_json)
             })
 
+        for direction_name, cross_operator_gap_minutes in gap_rows:
+            direction_label = str(direction_name or '').strip()
+            if not direction_label:
+                continue
+            gap_minutes = max(0, int(cross_operator_gap_minutes or 0))
+            item = by_direction.get(direction_label)
+            if item is None:
+                if gap_minutes <= 0:
+                    continue
+                item = by_direction.setdefault(
+                    direction_label,
+                    {"direction": direction_label, "rules": [], "crossOperatorGapMinutes": 0}
+                )
+            item["crossOperatorGapMinutes"] = gap_minutes
+
         result = list(by_direction.values())
         result.sort(key=lambda x: str(x.get('direction') or '').lower())
         return result
+
+    def get_work_schedule_break_cross_operator_gaps_map(self):
+        """
+        Возвращает map normalized direction key -> минимальный промежуток
+        между перерывами разных операторов направления (минуты).
+        Направления без настройки в map не попадают.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT direction_name, cross_operator_gap_minutes
+                FROM work_schedule_break_direction_settings
+                WHERE cross_operator_gap_minutes > 0
+            """)
+            rows = cursor.fetchall() or []
+
+        result = {}
+        for direction_name, cross_operator_gap_minutes in rows:
+            key = self._normalize_direction_key(direction_name)
+            if not key:
+                continue
+            result[key] = max(0, int(cross_operator_gap_minutes or 0))
+        return result
+
+    def _get_break_cross_operator_gap_for_direction_tx(self, cursor, direction_name):
+        direction_label = str(direction_name or '').strip()
+        if not direction_label:
+            return 0
+        cursor.execute(
+            """
+            SELECT cross_operator_gap_minutes
+            FROM work_schedule_break_direction_settings
+            WHERE LOWER(TRIM(direction_name)) = LOWER(TRIM(%s))
+            LIMIT 1
+            """,
+            (direction_label,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return 0
+        return max(0, int(row[0] or 0))
 
     def get_work_schedule_break_rules_map(self):
         """
@@ -30417,9 +30537,16 @@ class Database:
         Сохранить правила автоперерывов по направлениям.
         direction_rules:
         [
-          {"direction": "Название", "rules": [{"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}]}
+          {
+            "direction": "Название",
+            "rules": [{"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}],
+            "crossOperatorGapMinutes": 10
+          }
         ]
         Для направления переданные rules полностью заменяют старые.
+        crossOperatorGapMinutes необязателен: если ключа нет — текущее значение
+        промежутка между перерывами разных операторов остаётся без изменений
+        (чтобы старый клиент не обнулял настройку молча), 0 — выключить.
         """
         if not isinstance(direction_rules, list):
             raise ValueError("direction_rules must be a list")
@@ -30439,14 +30566,35 @@ class Database:
                 raise ValueError("Duplicate direction in direction_rules")
             seen.add(direction_key)
             rules = self._normalize_break_rule_ranges(item.get('rules'))
+            cross_gap_raw = None
+            for gap_key in ('crossOperatorGapMinutes', 'cross_operator_gap_minutes', 'crossOperatorGap'):
+                if gap_key in item:
+                    cross_gap_raw = item.get(gap_key)
+                    break
             normalized_payload.append({
                 'direction': direction,
-                'rules': rules
+                'rules': rules,
+                'crossOperatorGapMinutes': self._normalize_break_cross_operator_gap(cross_gap_raw)
             })
 
         with self._get_cursor() as cursor:
             for item in normalized_payload:
                 direction = item['direction']
+                cross_gap_minutes = item['crossOperatorGapMinutes']
+                if cross_gap_minutes is not None:
+                    cursor.execute("""
+                        DELETE FROM work_schedule_break_direction_settings
+                        WHERE LOWER(TRIM(direction_name)) = LOWER(TRIM(%s))
+                    """, (direction,))
+                    if cross_gap_minutes > 0:
+                        cursor.execute("""
+                            INSERT INTO work_schedule_break_direction_settings (
+                                direction_name,
+                                cross_operator_gap_minutes,
+                                updated_at
+                            )
+                            VALUES (%s, %s, CURRENT_TIMESTAMP)
+                        """, (direction, int(cross_gap_minutes)))
                 cursor.execute("""
                     DELETE FROM work_schedule_break_rules
                     WHERE LOWER(direction_name) = LOWER(%s)
@@ -31997,7 +32145,32 @@ class Database:
 
         return sorted(occupied, key=lambda item: (int(item['start']), int(item['end'])))
 
-    def _adjust_shift_breaks_against_occupied_tx(self, cursor, operator_id, shift_date, start_time, end_time, breaks):
+    def _pad_break_intervals_for_cross_gap(self, intervals, gap_minutes):
+        """
+        Расширяет перерывы других операторов на требуемый промежуток с обеих
+        сторон: тогда обычный поиск «без пересечений» автоматически держит
+        дистанцию между перерывами разных операторов. gap<=0 — без изменений.
+        """
+        gap = max(0, int(gap_minutes or 0))
+        if gap <= 0:
+            return list(intervals or [])
+        padded = [
+            {'start': int(item['start']) - gap, 'end': int(item['end']) + gap}
+            for item in (intervals or [])
+            if int(item.get('end', 0)) > int(item.get('start', 0))
+        ]
+        return self._merge_break_intervals(padded)
+
+    def _adjust_shift_breaks_against_occupied_tx(
+        self,
+        cursor,
+        operator_id,
+        shift_date,
+        start_time,
+        end_time,
+        breaks,
+        cross_gap_minutes=None
+    ):
         if not isinstance(breaks, list) or not breaks:
             return []
 
@@ -32008,6 +32181,12 @@ class Database:
             return []
 
         occupied = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
+        if cross_gap_minutes is None:
+            cross_gap_minutes = self._get_break_cross_operator_gap_for_direction_tx(
+                cursor,
+                self._get_operator_direction_name_tx(cursor, operator_id)
+            )
+        occupied = self._pad_break_intervals_for_cross_gap(occupied, cross_gap_minutes)
         prepared_breaks = []
         for b in sorted((breaks or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
             b_start = int(b.get('start', 0))
@@ -32119,6 +32298,7 @@ class Database:
             breaks_deleted = int(cursor.rowcount or 0)
 
             direction_rules_cache = {}
+            direction_cross_gap_cache = {}
 
             def _rules_for_direction(direction_name):
                 direction_key = self._normalize_direction_key(direction_name)
@@ -32128,6 +32308,15 @@ class Database:
                         direction_name
                     )
                 return direction_rules_cache[direction_key]
+
+            def _cross_gap_for_direction(direction_name):
+                direction_key = self._normalize_direction_key(direction_name)
+                if direction_key not in direction_cross_gap_cache:
+                    direction_cross_gap_cache[direction_key] = self._get_break_cross_operator_gap_for_direction_tx(
+                        cursor,
+                        direction_name
+                    )
+                return direction_cross_gap_cache[direction_key]
 
             def _sort_key(row):
                 _, operator_id, shift_date, start_time_value, end_time_value, direction_name = row
@@ -32171,7 +32360,8 @@ class Database:
                     shift_date=shift_date,
                     start_time=start_time_value,
                     end_time=end_time_value,
-                    breaks=computed_breaks
+                    breaks=computed_breaks,
+                    cross_gap_minutes=_cross_gap_for_direction(direction_name)
                 )
                 self._insert_shift_breaks(cursor, shift_id, adjusted_breaks)
                 breaks_inserted += len(adjusted_breaks)
@@ -34779,7 +34969,8 @@ class Database:
         breaks=None,
         shift_type=None,
         previous_start_time=None,
-        previous_end_time=None
+        previous_end_time=None,
+        cross_gap_minutes=None
     ):
         shift_type_norm = self._normalize_work_shift_type(shift_type)
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
@@ -34848,14 +35039,20 @@ class Database:
                 else incoming_breaks_norm
             )
 
-        # Приводим перерывы к правилам анти-пересечения между операторами одного направления.
+        # Приводим перерывы к правилам анти-пересечения между операторами одного направления
+        # (включая минимальный промежуток между перерывами разных операторов).
         breaks_norm = self._adjust_shift_breaks_against_occupied_tx(
             cursor=cursor,
             operator_id=operator_id,
             shift_date=shift_date,
             start_time=start_time,
             end_time=end_time,
-            breaks=breaks_norm
+            breaks=breaks_norm,
+            cross_gap_minutes=(
+                cross_gap_minutes
+                if cross_gap_minutes is not None
+                else self._get_break_cross_operator_gap_for_direction_tx(cursor, direction_name)
+            )
         )
 
         # Если редактировали существующую смену по previous_* и время изменилось,
