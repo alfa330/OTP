@@ -107,7 +107,7 @@ const STAT_TONE = {
 };
 
 // Два размера цифр: ключевые показатели читаются через зал, показатели дня и операторов — рядом.
-const VALUE_SIZE = { key: [2.25, 3.6, 3.75], stat: [1.75, 2.6, 2.75] };
+const VALUE_SIZE = { key: [3, 4.7, 5], stat: [2.375, 3.5, 3.75] };
 
 const valueFontSize = (size, scale) => {
     const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.stat;
@@ -116,8 +116,8 @@ const valueFontSize = (size, scale) => {
 
 /** Секция с подписью и иконкой; внутри — сетка плиток с отступами. */
 const Section = ({ icon, title, children }) => (
-    <div className={`${iosCard} p-4`}>
-        <div className="mb-3 flex items-center gap-2 px-0.5 text-[13px] font-semibold text-slate-500">
+    <div className={`${iosCard} p-5`}>
+        <div className="mb-4 flex items-center gap-2.5 px-0.5 text-[15px] font-semibold text-slate-500">
             <FaIcon className={`fas ${icon}`}></FaIcon>
             <span>{title}</span>
         </div>
@@ -126,28 +126,28 @@ const Section = ({ icon, title, children }) => (
 );
 
 const Grid = ({ children }) => (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{children}</div>
+    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{children}</div>
 );
 
 const KeyTile = ({ label, value, hint, tone = 'slate', scale = 1 }) => {
     const palette = KEY_PALETTE[tone] || KEY_PALETTE.slate;
     return (
-        <div className={`flex flex-col items-center gap-1 rounded-2xl px-3 py-4 text-center ${palette.bg}`}>
-            <div className={`text-[13px] font-semibold ${palette.text}`}>{label}</div>
+        <div className={`flex flex-col items-center gap-2 rounded-2xl px-4 py-6 text-center ${palette.bg}`}>
+            <div className={`text-[15px] font-semibold ${palette.text}`}>{label}</div>
             <div
                 className={`font-semibold tabular-nums leading-none ${palette.text}`}
                 style={{ fontSize: valueFontSize('key', scale) }}
             >
                 {value}
             </div>
-            {hint ? <div className={`text-[11px] leading-tight ${palette.hint}`}>{hint}</div> : null}
+            {hint ? <div className={`text-[13px] leading-tight ${palette.hint}`}>{hint}</div> : null}
         </div>
     );
 };
 
 const StatTile = ({ label, value, tone = 'neutral', scale = 1 }) => (
-    <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-slate-200/80 px-3 py-3.5 text-center">
-        <div className="text-[12px] font-medium text-slate-500">{label}</div>
+    <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
+        <div className="text-[14px] font-medium text-slate-500">{label}</div>
         <div
             className={`font-semibold tabular-nums leading-none ${STAT_TONE[tone] || STAT_TONE.neutral}`}
             style={{ fontSize: valueFontSize('stat', scale) }}
@@ -162,14 +162,14 @@ const StatTile = ({ label, value, tone = 'neutral', scale = 1 }) => (
  * Разрыв между ними и есть потери, а насколько он допустим, показывает плитка AR.
  */
 const PairTile = ({ label, first, second, scale = 1 }) => (
-    <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-slate-200/80 px-3 py-3.5 text-center">
-        <div className="text-[12px] font-medium text-slate-500">{label}</div>
+    <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
+        <div className="text-[14px] font-medium text-slate-500">{label}</div>
         <div
             className="font-semibold tabular-nums leading-none text-slate-900"
             style={{ fontSize: valueFontSize('stat', scale) }}
         >
             {first}
-            <span className="font-normal text-slate-400" style={{ fontSize: '0.62em' }}>/{second}</span>
+            <span className="font-normal text-slate-400" style={{ fontSize: '0.6em' }}>/{second}</span>
         </div>
     </div>
 );
@@ -190,16 +190,16 @@ const STATUS_STYLE = {
 const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) => {
     const items = Array.isArray(entries) ? entries : [];
     return (
-        <div className={`${iosCard} flex min-h-0 flex-col p-4`}>
-            <div className="mb-2.5 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-[13px] font-semibold text-slate-500">
+        <div className={`${iosCard} flex min-h-0 flex-col p-5`}>
+            <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
                     <FaIcon className={`fas ${icon}`}></FaIcon>
                     <span>{title}</span>
                 </div>
-                <span className="text-[15px] font-semibold tabular-nums text-slate-900">{items.length}</span>
+                <span className="text-[19px] font-semibold tabular-nums text-slate-900">{items.length}</span>
             </div>
             {items.length === 0 ? (
-                <div className="py-2 text-[14px] text-slate-400">Никого</div>
+                <div className="py-2.5 text-[16px] text-slate-400">Никого</div>
             ) : (
                 <ul className="min-h-0 flex-1 divide-y divide-slate-100 overflow-y-auto">
                     {items.map((item) => {
@@ -207,13 +207,13 @@ const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) =
                         return (
                             <li
                                 key={`${item.operator_id ?? item.name}-${item.since ?? ''}`}
-                                className="flex items-center justify-between gap-3 py-2"
-                                style={{ fontSize: `clamp(0.875rem, ${(1.05 * scale).toFixed(2)}vw, ${(1.125 * scale).toFixed(3)}rem)` }}
+                                className="flex items-center justify-between gap-3 py-2.5"
+                                style={{ fontSize: `clamp(1rem, ${(1.3 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)` }}
                             >
                                 <span className="flex min-w-0 items-center gap-2">
                                     <span className="truncate text-slate-700">{item.name}</span>
                                     {showReason ? (
-                                        <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${style.chip}`}>
+                                        <span className={`shrink-0 rounded-md px-2 py-0.5 text-[13px] font-medium ${style.chip}`}>
                                             {item.reason}
                                         </span>
                                     ) : null}
@@ -250,7 +250,7 @@ const WallboardBody = ({ snapshot, scale }) => {
     ].filter(([count]) => count > 0).map(([count, label]) => `${formatInt(count)} ${label}`);
 
     return (
-        <div className="space-y-3" style={{ fontFamily: APPLE_FONT }}>
+        <div className="space-y-4" style={{ fontFamily: APPLE_FONT }}>
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
                 <Grid>
                     <KeyTile
@@ -306,13 +306,13 @@ const WallboardBody = ({ snapshot, scale }) => {
                     <StatTile label="Перезвон" value={formatInt(now.operators_on_recall)} scale={scale} />
                 </Grid>
                 {asideParts.length > 0 ? (
-                    <div className="mt-2.5 px-1 text-[12px] text-slate-400">
+                    <div className="mt-3 px-1 text-[14px] text-slate-400">
                         Ещё {asideParts.join(' · ')}
                     </div>
                 ) : null}
             </Section>
 
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <OperatorList title="Перерывы" icon="fa-mug-hot" entries={now.break_list} scale={scale} showReason />
                 <OperatorList title="Перезвон" icon="fa-phone-volume" entries={now.recall_list} scale={scale} />
             </div>
@@ -413,8 +413,8 @@ export default function SzovWallboardView(props) {
     const header = (
         <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-                <h1 className="text-[22px] font-semibold text-slate-900">Табло СЗоВ</h1>
-                <p className="mt-0.5 text-[13px] text-slate-500">
+                <h1 className="text-[26px] font-semibold text-slate-900">Табло СЗоВ</h1>
+                <p className="mt-1 text-[14px] text-slate-500">
                     Входящая линия в реальном времени
                     {snapshot?.oktell_now ? ` · данные Oktell на ${formatClock(snapshot.oktell_now)}` : ''}
                 </p>
