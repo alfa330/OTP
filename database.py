@@ -21360,6 +21360,181 @@ class Database:
             "username": r[3] or "",
         } for r in rows]
 
+    # Статусы, при которых оператор НЕ считается на смене. Список копирует
+    # PLANNER_IMPORTED_NOT_ON_SHIFT_STATUS_KEYS из src/App.jsx: правило «на смене» —
+    # это ВСЁ, кроме отключения и «нет на месте». Перерыв, перезвон, тренинг и
+    # тех.причина сменой считаются: человек на смене, просто не на линии.
+    _HOURLY_NOT_ON_SHIFT_STATUS_KEYS = {
+        'нет статуса', 'отключен', 'отключена', 'отключено',
+        'logout', 'выход', 'выход из системы', 'отключение',
+        'выключен', 'нет на месте',
+        'inactive', 'неактивен',
+    }
+    # Сколько минут часа оператор должен пробыть на смене, чтобы час ему зачёлся.
+    _HOURLY_FACT_MIN_MINUTES = 30
+
+    @staticmethod
+    def _hourly_merge_minutes(intervals):
+        """Суммарная длина объединённых интервалов (перекрытия не считаем дважды)."""
+        cleaned = sorted(
+            ((int(a), int(b)) for a, b in intervals if b > a),
+            key=lambda pair: pair[0],
+        )
+        total = 0
+        cur_start = cur_end = None
+        for start, end in cleaned:
+            if cur_end is None or start > cur_end:
+                if cur_end is not None:
+                    total += cur_end - cur_start
+                cur_start, cur_end = start, end
+            elif end > cur_end:
+                cur_end = end
+        if cur_end is not None:
+            total += cur_end - cur_start
+        return total
+
+    def get_hourly_shift_grouping(self, target_date, department_id=None):
+        """План и факт смен по часам за дату — тот же расчёт, что в «Группировке по операторам».
+
+        План — взятые (claimed) лоты аукциона смен: сколько операторов должно быть в часе.
+        Факт — операторы, у которых статусы «на смене» занимают не меньше 30 минут часа.
+        Чат-менеджеры не участвуют: они живут на статусах Chat2Desk, а не Oktell.
+
+        Возвращает [{hour, planned, fact}] на 24 часа."""
+        if hasattr(target_date, 'strftime'):
+            date_obj = target_date
+        else:
+            try:
+                date_obj = datetime.strptime(str(target_date), '%Y-%m-%d').date()
+            except Exception:
+                return [{'hour': hour, 'planned': 0, 'fact': 0} for hour in range(24)]
+        day_key = date_obj.strftime('%Y-%m-%d')
+
+        # Лоты тянем отдельным вызовом: у него свой курсор, вложенность тут ни к чему.
+        auction = self.get_shift_auction_lots_for_planner_date(date_obj) or {}
+
+        planned_by_hour = [set() for _ in range(24)]
+        for lot in (auction.get('lots') or []):
+            if str(lot.get('status') or '').strip().lower() != 'claimed':
+                continue
+            try:
+                operator_id = int(lot.get('claimed_by') or 0)
+            except (TypeError, ValueError):
+                continue
+            if operator_id <= 0:
+                continue
+            for start, end in self._hourly_lot_parts_for_date(lot, day_key):
+                for hour in range(24):
+                    if min(end, hour * 60 + 60) - max(start, hour * 60) > 0:
+                        planned_by_hour[hour].add(operator_id)
+
+        fact_by_hour = [set() for _ in range(24)]
+        with self._get_cursor() as cursor:
+            if department_id is not None:
+                cursor.execute(
+                    "SELECT id FROM users WHERE department_id = %s", (int(department_id),))
+            else:
+                cursor.execute("SELECT id FROM users")
+            operator_ids = [int(r[0]) for r in (cursor.fetchall() or [])]
+            if operator_ids:
+                models = self._load_operator_calculation_models_tx(cursor, operator_ids)
+                operator_ids = [
+                    op_id for op_id in operator_ids
+                    if str(models.get(op_id) or '').strip().lower() != CALCULATION_MODEL_CHAT_MANAGER
+                ]
+            timeline = self._load_imported_status_segments_for_operators(
+                cursor, operator_ids, date_obj, date_obj) if operator_ids else {}
+
+        for operator_id, days in (timeline or {}).items():
+            segments = (days or {}).get(day_key) or []
+            on_shift = []
+            for segment in segments:
+                key = str(segment.get('stateKey') or '').strip().lower()
+                if not key or key in self._HOURLY_NOT_ON_SHIFT_STATUS_KEYS:
+                    continue
+                start_min = self._hourly_iso_to_minutes(segment.get('start'), date_obj)
+                end_min = self._hourly_iso_to_minutes(segment.get('end'), date_obj)
+                if start_min is None or end_min is None or end_min <= start_min:
+                    continue
+                on_shift.append((max(0, start_min), min(1440, end_min)))
+            if not on_shift:
+                continue
+            for hour in range(24):
+                h_start, h_end = hour * 60, hour * 60 + 60
+                clipped = [(max(h_start, s), min(h_end, e)) for s, e in on_shift]
+                if self._hourly_merge_minutes(clipped) >= self._HOURLY_FACT_MIN_MINUTES:
+                    fact_by_hour[hour].add(int(operator_id))
+
+        return [{
+            'hour': hour,
+            'planned': len(planned_by_hour[hour]),
+            'fact': len(fact_by_hour[hour]),
+        } for hour in range(24)]
+
+    @staticmethod
+    def _hourly_iso_to_minutes(value, date_obj):
+        """ISO-время сегмента -> минуты от полуночи целевой даты (может выйти за сутки)."""
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if moment.tzinfo is not None:
+            moment = moment.replace(tzinfo=None)
+        delta = moment - datetime.combine(date_obj, datetime.min.time())
+        return int(delta.total_seconds() // 60)
+
+    @staticmethod
+    def _hourly_lot_parts_for_date(lot, day_key):
+        """Минутный отрезок лота внутри указанных суток. Повторяет auctionLotPartsForDate
+        из src/App.jsx: ночная смена приходит с датой начала, поэтому её хвост попадает
+        в следующие сутки со сдвигом на 1440 минут."""
+        lot_date = str(lot.get('shift_date') or '').strip()
+        if not lot_date or not day_key:
+            return []
+
+        def _day_number(value):
+            try:
+                year, month, day = (int(part) for part in str(value).split('-'))
+                return date(year, month, day).toordinal()
+            except Exception:
+                return None
+
+        lot_day = _day_number(lot_date)
+        target_day = _day_number(day_key)
+        if lot_day is None or target_day is None:
+            return []
+
+        def _to_minutes(text):
+            try:
+                hours, minutes = (int(part) for part in str(text).split(':')[:2])
+                return hours * 60 + minutes
+            except Exception:
+                return None
+
+        source_start = lot.get('source_start_minute')
+        source_end = lot.get('source_end_minute')
+        has_source = (source_start is not None and source_end is not None
+                      and int(source_end) > int(source_start))
+        if has_source:
+            start, end = int(source_start), int(source_end)
+        else:
+            start = _to_minutes(lot.get('start_time'))
+            end = _to_minutes(lot.get('end_time'))
+            if start is None or end is None:
+                return []
+            if end <= start:
+                end += 1440
+        if end <= start:
+            return []
+
+        offset = (lot_day - target_day) * 1440
+        part_start = max(0, offset + start)
+        part_end = min(1440, offset + end)
+        return [(part_start, part_end)] if part_end > part_start else []
+
     def get_sip_department_configs(self, department_ids=None) -> list:
         """Настройки SIP по отделам + сколько в отделе сотрудников с телефоном.
 

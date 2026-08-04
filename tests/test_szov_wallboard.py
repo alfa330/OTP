@@ -918,7 +918,7 @@ class SzovBroadcastTests(unittest.TestCase):
         {'hh': 2, 'served': 9, 'arrived': 10, 'lost': 1, 'greet_drop': 0, 'talk_seconds': 3609},
     ]
 
-    def _namespace(self, hourly_raw=None, snapshot=None, chat_rows=None, chat_fails=False):
+    def _namespace(self, hourly_raw=None, snapshot=None, chat_rows=None, chat_fails=False, shift_rows=None):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 
         def fake_oktell(sql, timeout=None):
@@ -942,6 +942,8 @@ class SzovBroadcastTests(unittest.TestCase):
             'CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS': 'request_stats',
             'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS': 20,
             '_szov_wallboard_snapshot': (lambda: snapshot) if snapshot is not None else no_snapshot,
+            # смены считает отдельный серверный расчёт — в этих тестах он не участвует
+            '_szov_broadcast_shift_rows': lambda day_iso: (shift_rows or {}),
         }
         _load_names(source, {
             '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
@@ -1205,6 +1207,133 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("Кто менял", self.view)
         # свёрнута по умолчанию — табло смотрят, а не настраивают
         self.assertIn("const [open, setOpen] = useState(false);", self.view)
+
+
+
+class SzovShiftGroupingTests(unittest.TestCase):
+    """Почасовые план/факт смен: тот же расчёт, что за разделом «Группировка по операторам»."""
+
+    @classmethod
+    def setUpClass(cls):
+        source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        cls.db_class = next(node for node in tree.body
+                            if isinstance(node, ast.ClassDef) and node.name == "Database")
+
+    def _fn(self, name):
+        """Достаёт статический метод Database и исполняет его отдельно."""
+        node = next(item for item in self.db_class.body
+                    if isinstance(item, ast.FunctionDef) and item.name == name)
+        node = ast.FunctionDef(
+            name=node.name, args=node.args, body=node.body,
+            decorator_list=[], returns=None, type_comment=None, type_params=[],
+        )
+        module = ast.Module(body=[node], type_ignores=[])
+        ast.fix_missing_locations(module)
+        ns = {'datetime': datetime, 'date': __import__('datetime').date}
+        exec(compile(module, "<shift>", "exec"), ns)
+        return ns[name]
+
+    # --- объединение интервалов ---
+
+    def test_merge_does_not_count_overlaps_twice(self):
+        merge = self._fn('_hourly_merge_minutes')
+        self.assertEqual(merge([(0, 30), (20, 40)]), 40)
+        self.assertEqual(merge([(0, 10), (20, 30)]), 20)
+        self.assertEqual(merge([]), 0)
+        self.assertEqual(merge([(10, 10)]), 0)
+
+    # --- раскладка лота по суткам ---
+
+    def test_day_shift_lands_in_its_own_day(self):
+        parts = self._fn('_hourly_lot_parts_for_date')
+        lot = {'shift_date': '2026-08-04', 'start_time': '09:00', 'end_time': '18:00'}
+        self.assertEqual(parts(lot, '2026-08-04'), [(540, 1080)])
+        self.assertEqual(parts(lot, '2026-08-05'), [])
+
+    def test_night_shift_tail_falls_into_the_next_day(self):
+        """Ночная смена приходит с датой начала — хвост должен попасть в следующие сутки."""
+        parts = self._fn('_hourly_lot_parts_for_date')
+        lot = {'shift_date': '2026-08-04', 'start_time': '22:00', 'end_time': '06:00'}
+        self.assertEqual(parts(lot, '2026-08-04'), [(1320, 1440)])
+        self.assertEqual(parts(lot, '2026-08-05'), [(0, 360)])
+
+    def test_source_minutes_win_over_times(self):
+        parts = self._fn('_hourly_lot_parts_for_date')
+        lot = {'shift_date': '2026-08-04', 'start_time': '09:00', 'end_time': '18:00',
+               'source_start_minute': 600, 'source_end_minute': 1200}
+        self.assertEqual(parts(lot, '2026-08-04'), [(600, 1200)])
+
+    def test_broken_lot_is_skipped(self):
+        parts = self._fn('_hourly_lot_parts_for_date')
+        self.assertEqual(parts({'shift_date': '', 'start_time': '09:00', 'end_time': '18:00'}, '2026-08-04'), [])
+        self.assertEqual(parts({'shift_date': '2026-08-04'}, '2026-08-04'), [])
+
+    # --- перевод времени сегмента в минуты суток ---
+
+    def test_segment_minutes_are_relative_to_the_target_day(self):
+        to_minutes = self._fn('_hourly_iso_to_minutes')
+        day = __import__('datetime').date(2026, 8, 4)
+        self.assertEqual(to_minutes('2026-08-04T09:30:00', day), 570)
+        self.assertEqual(to_minutes('2026-08-05T00:15:00', day), 1455)
+        self.assertIsNone(to_minutes('', day))
+        self.assertIsNone(to_minutes('не дата', day))
+
+
+class SzovShiftColumnsWiringTests(unittest.TestCase):
+    """Колонки смен в таблице отбивки и их источник."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.db = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+
+    def test_four_shift_columns_are_in_the_table(self):
+        titles = re.findall(r"\('(\w+)', '([^']+)', \d+\)", self.api)
+        keys = [key for key, _title in titles]
+        for key in ('forecast', 'planned', 'fact', 'delta'):
+            self.assertIn(key, keys, key)
+        self.assertIn("'Прогноз\\nсмен'", self.api)
+        self.assertIn("'Запланировано\\nсмен'", self.api)
+        self.assertIn("'Факт\\nсмен'", self.api)
+        self.assertIn("'Разница факта\\nот прогноза'", self.api)
+
+    def test_delta_is_fact_minus_forecast(self):
+        """Правило владельца: разница считается от прогноза, а не от плана."""
+        self.assertIn("delta = None if forecast is None or fact is None else fact - forecast", self.api)
+
+    def test_missing_shift_data_shows_a_dash_not_a_zero(self):
+        """Ноль смен и «нет данных» — разные вещи, путать их в отчёте нельзя."""
+        self.assertIn("'forecast': '—' if forecast is None else str(forecast)", self.api)
+        self.assertIn("'fact': '—' if fact is None else str(fact)", self.api)
+
+    def test_shortfall_is_red(self):
+        self.assertIn("key == 'delta' and delta is not None and delta < 0", self.api)
+
+    def test_plan_and_fact_come_from_one_backend_calculation(self):
+        self.assertIn("def get_hourly_shift_grouping", self.db)
+        self.assertIn("db.get_hourly_shift_grouping(day_iso, _szov_wallboard_department_id())", self.api)
+
+    def test_on_shift_rule_matches_the_section(self):
+        """«На смене» — всё, кроме отключения: перерыв и тренинг сменой считаются."""
+        self.assertIn("_HOURLY_NOT_ON_SHIFT_STATUS_KEYS", self.db)
+        for key in ("'выключен'", "'нет на месте'", "'нет статуса'"):
+            self.assertIn(key, self.db, key)
+        self.assertIn("_HOURLY_FACT_MIN_MINUTES = 30", self.db)
+        # перерыв/перезвон/тренинг в список исключений попасть НЕ должны
+        block = re.search(r"_HOURLY_NOT_ON_SHIFT_STATUS_KEYS = \{.*?\}", self.db, flags=re.DOTALL).group(0)
+        for present in ("перерыв", "перезвон", "тренинг"):
+            self.assertNotIn(present, block, present)
+
+    def test_chat_managers_are_excluded_from_fact(self):
+        self.assertIn("CALCULATION_MODEL_CHAT_MANAGER", self.db)
+
+    def test_shifts_only_diagnostic_does_not_touch_oktell(self):
+        """Сверять план/факт с разделом надо и когда прокси Oktell лежит."""
+        block = re.search(r"if \(request\.args\.get\('shifts_only'\).*?return jsonify\(\{\"date\".*?\]\}\)",
+                          self.api, flags=re.DOTALL).group(0)
+        self.assertNotIn("_szov_broadcast_collect", block)
+        self.assertNotIn("_oktell_query", block)
 
 if __name__ == "__main__":
     unittest.main()
