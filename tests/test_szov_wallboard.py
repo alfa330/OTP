@@ -1325,6 +1325,12 @@ class SzovShiftColumnsWiringTests(unittest.TestCase):
         for present in ("перерыв", "перезвон", "тренинг"):
             self.assertNotIn(present, block, present)
 
+    def test_hours_without_status_data_are_not_reported_as_zero(self):
+        """Синк статусов отстаёт; «0 на смене» и «данных ещё нет» путать нельзя."""
+        self.assertIn("data_until_minute", self.db)
+        self.assertIn("'fact': len(fact_by_hour[hour]) if has_data else None", self.db)
+        self.assertIn("has_data = data_until_minute >= hour * 60 + self._HOURLY_FACT_MIN_MINUTES", self.db)
+
     def test_chat_managers_are_excluded_from_fact(self):
         self.assertIn("CALCULATION_MODEL_CHAT_MANAGER", self.db)
 

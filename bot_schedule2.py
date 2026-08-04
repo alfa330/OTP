@@ -29404,9 +29404,11 @@ def _szov_broadcast_shift_rows(day_iso):
     try:
         grouping = db.get_hourly_shift_grouping(day_iso, _szov_wallboard_department_id())
         for item in grouping or []:
+            fact = item.get('fact')
             rows[int(item['hour'])] = {
                 'planned': int(item.get('planned') or 0),
-                'fact': int(item.get('fact') or 0),
+                # None = статусы за этот час ещё не приехали; в таблице это прочерк, не ноль.
+                'fact': None if fact is None else int(fact),
                 'forecast': None,
             }
     except Exception as exc:
