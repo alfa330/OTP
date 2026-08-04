@@ -784,169 +784,98 @@ class SzovWallboardWiringTests(unittest.TestCase):
         # Скрытую вкладку не опрашиваем
         self.assertIn("visibilitychange", self.view)
 
-    def test_view_renders_every_requested_metric(self):
+    def test_view_renders_every_metric_of_the_layout(self):
         for label in (
-            "Звонков в очереди",
-            "SL",
-            "AR на текущий момент",
-            "Входящих / Принято",
-            "Потеряно",
-            "Среднее ожидание",
-            "Среднее время разговора",
-            "Онлайн",
-            "В разговоре",
-            "Свободны",
-            "Перерыв",
-            "Тренинг",
-            "Тех.причина",
-            "Перезвон",
+            "В очереди", "AR", "Онлайн", "Перерыв",
+            "Принято / входящих", "Потеряно", "SL", "Ср. ожидание",
+            "Свободны", "В разговоре", "Ср. разговор", "Перезвон",
         ):
             self.assertIn(label, self.view, label)
 
-    def test_each_status_has_its_own_counter(self):
-        """Владелец просил отдельный счётчик на каждый статус, а не один общий «на перерыве»."""
-        self.assertIn("const STATUS_ORDER = ['break', 'training', 'tech', 'recall'];", self.view)
-        for field in ("operators_on_break", "operators_on_training",
-                      "operators_on_tech", "operators_on_recall"):
-            self.assertIn(field, self.view, field)
-
-    def test_statuses_are_one_thin_strip_not_four_cards(self):
-        """Владелец: «не огромные карточки по каждому статусу, а один блок через тонкий разделитель»."""
-        self.assertNotIn("StatusTile", self.view)
-        self.assertIn("<StatusStrip now={now}", self.view)
-        # Одна карточка, внутри — колонки, разделённые тонкой линией
-        self.assertIn("grid grid-cols-4 divide-x ${HAIRLINE}", self.view)
-        # И ровно один экземпляр полосы на разметку (полноэкранный режим переиспользует ту же)
-        self.assertEqual(self.view.count("<StatusStrip"), 1)
-
-    def test_status_colours_match_the_owners_choice(self):
-        """Перерыв оранжевый, тренинг зелёный, тех.причина фиолетовая."""
-        self.assertIn("break: { label: 'Перерыв', dot: 'bg-orange-500', value: 'text-orange-600'", self.view)
-        self.assertIn("training: { label: 'Тренинг', dot: 'bg-emerald-500', value: 'text-emerald-600'", self.view)
-        self.assertIn("tech: { label: 'Тех.причина', dot: 'bg-violet-500', value: 'text-violet-600'", self.view)
-
-    def test_metric_order(self):
-        """Порядок задан владельцем: очередь/ожидание/AR, затем итоги дня, затем операторы."""
-        labels = re.findall(r'label="([^"]+)"', self.view)
-        self.assertEqual(labels, [
-            "Звонков в очереди", "SL", "AR на текущий момент",
-            "Входящих / Принято", "Потеряно",
-            "Среднее ожидание", "Среднее время разговора",
-            "Свободны", "В разговоре", "Онлайн",
+    def test_three_captioned_sections_with_icons(self):
+        """Макет владельца: три секции с подписью и иконкой."""
+        sections = re.findall(r'<Section icon="(fa-[a-z-]+)" title="([^"]+)"', self.view)
+        self.assertEqual(sections, [
+            ("fa-bolt", "Ключевые показатели · сейчас"),
+            ("fa-chart-bar", "Показатели за день"),
+            ("fa-headset", "Операторы"),
         ])
 
-    def test_incoming_and_served_share_one_cell_with_ar_colour(self):
-        """Владелец: объединить входящие и принятые через слеш, принятые красить тоном AR."""
-        pair = re.search(r"<PairCell(.*?)/>", self.view, flags=re.DOTALL)
-        self.assertIsNotNone(pair, "пары «входящих / принято» нет")
-        self.assertIn("first={formatInt(today.total)}", pair.group(0))
-        self.assertIn("second={formatInt(today.served)}", pair.group(0))
-        self.assertIn("secondTone={arTone(today.ar_ratio)}", pair.group(0))
-        # Слеш — разделитель внутри одной ячейки, а не отдельная плитка
-        body = re.search(r"const PairCell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
-        self.assertIn(">/<", body.group(0).replace(" ", ""))
-        self.assertIn("VALUE_TONE[secondTone]", body.group(0))
+    def test_metric_order(self):
+        """Порядок плиток внутри секций — как на макете."""
+        labels = re.findall(r'label="([^"]+)"', self.view)
+        self.assertEqual(labels, [
+            "В очереди", "AR", "Онлайн", "Перерыв",
+            "Принято / входящих", "Потеряно", "SL", "Ср. ожидание",
+            "Свободны", "В разговоре", "Ср. разговор", "Перезвон",
+        ])
 
-    def test_no_row_captions(self):
-        """Владелец убрал подписи рядов — группу обозначает сама панель."""
-        self.assertNotIn("SECTION_LABEL_CLASS", self.view)
-        for caption in ("Сейчас на линии", "Звонки с начала дня"):
-            self.assertNotIn(f">{caption}<", self.view, caption)
+    def test_only_key_tiles_are_coloured(self):
+        """Цветные плитки — только в ключевых показателях; день и операторы белые."""
+        self.assertEqual(self.view.count("<KeyTile"), 4)
+        self.assertEqual(self.view.count("<StatTile"), 7)
+        self.assertEqual(self.view.count("<PairTile"), 1)
+        stat = re.search(r"const StatTile = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("border border-slate-200/80", stat)
+        self.assertNotIn("bg-emerald", stat)
 
-    def test_cells_sit_flush_inside_panels(self):
-        """Между карточками нет зазора: одна панель, ячейки делит волосяная линия."""
-        # Внутри рядов — divide-x, а не gap
-        self.assertIn("const Row = ({ cols, children, divided = false }) => (", self.view)
-        self.assertIn("divide-x", self.view)
-        row_block = re.search(r"const Row = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
-        self.assertNotIn("gap-", row_block.group(0))
-        # Ячейка не носит собственную карточку — рамку держит панель
-        cell_block = re.search(r"const Cell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
-        self.assertNotIn("iosCard", cell_block.group(0))
-        self.assertIn("const Panel = ({ children }) => (", self.view)
+    def test_key_tile_tones(self):
+        """Очередь и AR оцениваются, онлайн и перерыв носят опознавательный цвет."""
+        self.assertIn("tone={queueTone}", self.view)
+        self.assertIn("tone={arTone(today.ar_ratio)}", self.view)
+        self.assertIn('tone="info"', self.view)   # онлайн — синий
+        self.assertIn('tone="warn"', self.view)   # перерыв — оранжевый
+        # пустая очередь это хорошо, очередь без свободных — тревога
+        self.assertIn("queue === 0 ? 'good' : nobodyFree ? 'bad' : 'warn'", self.view)
 
-    def test_day_totals_split_into_two_rows_at_full_size(self):
-        """Владелец: итоги дня — нужная инфа, поэтому два ряда и крупные цифры."""
-        day_labels = ["Входящих / Принято", "Потеряно", "Среднее ожидание", "Среднее время разговора"]
-        for label in day_labels:
-            cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
-            self.assertIsNotNone(cell, label)
-            self.assertIn('size="hero"', cell.group(0), f"{label} должен быть крупным")
-        # Второй ряд отделён линией, а не отступом
-        self.assertIn('<Row cols="grid-cols-1 sm:grid-cols-2" divided>', self.view)
+    def test_accepted_is_the_main_number_of_the_pair(self):
+        """«Принято / входящих»: принятые — главное число, общий поток приглушён."""
+        pair = re.search(r"<PairTile(.*?)/>", self.view, flags=re.DOTALL).group(0)
+        self.assertIn("first={formatInt(today.served)}", pair)
+        self.assertIn("second={formatInt(today.total)}", pair)
+        body = re.search(r"const PairTile = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("text-slate-400", body)
 
-    def test_every_number_is_centred_in_its_card(self):
-        """Владелец: все цифры по центру своей карточки, а не по левому краю."""
-        self.assertIn("items-center", self.view)
-        cell_class = re.search(r"const CELL_CLASS = '([^']+)';", self.view)
-        self.assertIsNotNone(cell_class, "общий класс ячейки не найден")
-        self.assertIn("items-center", cell_class.group(1))
-        self.assertIn("text-center", cell_class.group(1))
-        # Обе разновидности ячеек используют его, иначе часть цифр останется слева
-        for component in ("const Cell = ", "const PairCell = "):
-            block = re.search(rf"{component}.*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
-            self.assertIn("CELL_CLASS", block.group(0), component)
+    def test_lost_is_red_and_sl_follows_its_thresholds(self):
+        lost = re.search(r'label="Потеряно"(.*?)/>', self.view, flags=re.DOTALL).group(0)
+        self.assertIn('tone="bad"', lost)
+        sl = re.search(r'label="SL"(.*?)/>', self.view, flags=re.DOTALL).group(0)
+        self.assertIn("tone={slTone(today.sl_ratio)}", sl)
 
-    def test_operator_cells_are_large_and_tinted(self):
-        """Свободны — зеленоватый фон, в разговоре — желтоватый, цифры крупные."""
-        expected = {
-            "Свободны": "bg-emerald-50",
-            "В разговоре": "bg-amber-50",
-        }
-        for label, bg in expected.items():
-            cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
-            self.assertIsNotNone(cell, label)
-            self.assertIn(f'bg="{bg}"', cell.group(0), label)
-            self.assertIn('size="hero"', cell.group(0), label)
-        # «Онлайн» владелец не подсвечивал — фон остаётся нейтральным
-        online = re.search(r'label="Онлайн"(.*?)/>', self.view, flags=re.DOTALL)
-        self.assertNotIn('bg="', online.group(0))
-        self.assertIn('size="hero"', online.group(0))
+    def test_training_and_tech_are_not_silently_dropped(self):
+        """Своих плиток у них нет, поэтому люди в этих статусах уходят в приглушённую строку."""
+        self.assertIn("operators_on_training", self.view)
+        self.assertIn("operators_on_tech", self.view)
+        self.assertIn("'на тренинге'", self.view)
+        self.assertIn("'по тех.причине'", self.view)
+        # строка появляется только когда есть кого показать
+        self.assertIn("filter(([count]) => count > 0)", self.view)
 
-    def test_free_operators_no_longer_duplicate_the_queue_alarm(self):
-        """Тревога «ждут, а взять некому» осталась только на очереди — цвет не спорит с фоном."""
-        free = re.search(r'label="Свободны"(.*?)/>', self.view, flags=re.DOTALL)
-        self.assertNotIn("tone=", free.group(0))
-        self.assertNotIn("freeTone", self.view)
-        queue = re.search(r'label="Звонков в очереди"(.*?)/>', self.view, flags=re.DOTALL)
-        self.assertIn("tone={queueTone}", queue.group(0))
+    def test_operator_lists_render_in_both_modes(self):
+        """Владелец: список операторов на статусах оставить и в полноэкранном режиме."""
+        self.assertEqual(self.view.count("<OperatorList"), 2)
+        # никаких условий по fullscreen вокруг списков
+        lists = re.search(r"<OperatorList title=\"Перерывы\".*?<OperatorList title=\"Перезвон\".*?/>",
+                          self.view, flags=re.DOTALL).group(0)
+        self.assertNotIn("fullscreen", lists)
+        self.assertIn("showReason", lists)
 
-    def test_operator_cells_have_transparent_icon_watermarks(self):
-        """Владелец: у операторов жирные полупрозрачные иконки на фоне, чтобы ряд отделялся."""
-        for label, icon in (("Свободны", "fa-user-check"),
-                            ("В разговоре", "fa-headset"),
-                            ("Онлайн", "fa-users")):
-            cell = re.search(rf'label="{re.escape(label)}"(.*?)/>', self.view, flags=re.DOTALL)
-            self.assertIsNotNone(cell, label)
-            self.assertIn(f'icon="{icon}"', cell.group(0), label)
-        watermark = re.search(r"const CellWatermark = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL)
-        self.assertIsNotNone(watermark)
-        block = watermark.group(0)
-        self.assertIn("strokeWidth={2.5}", block, "иконка должна быть жирной")
-        self.assertIn("text-slate-900/[0.05]", block, "иконка должна быть полупрозрачной")
-        self.assertIn("absolute", block)
-        self.assertIn("pointer-events-none", block)
-        # Подложка обрезается по ячейке и лежит под контентом
-        cell_class = re.search(r"const CELL_CLASS = '([^']+)';", self.view).group(1)
-        self.assertIn("overflow-hidden", cell_class)
-        self.assertIn("relative", cell_class)
-        cell_block = re.search(r"const Cell = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
-        self.assertEqual(cell_block.count("relative"), 3, "подпись, число и хинт должны быть поверх подложки")
+    def test_numbers_are_centred(self):
+        for component in ("const KeyTile", "const StatTile", "const PairTile"):
+            block = re.search(rf"{component} = .*?^\);?$", self.view, flags=re.MULTILINE | re.DOTALL)
+            self.assertIn("text-center", block.group(0), component)
+            self.assertIn("items-center", block.group(0), component)
 
-    def test_only_operator_row_carries_watermarks(self):
-        """Иконки — признак ряда операторов; на плитках звонков их быть не должно."""
-        self.assertEqual(self.view.count("<CellWatermark"), 1)
-        cells = re.findall(r"<Cell\s(.*?)/>", self.view, flags=re.DOTALL)
-        with_icon = [c for c in cells if "icon=" in c]
-        self.assertEqual(len(with_icon), 3, "подложка только у трёх ячеек операторов")
-        for cell in with_icon:
-            self.assertRegex(cell, r'label="(Свободны|В разговоре|Онлайн)"')
+    def test_status_chip_colours_match_the_owners_choice(self):
+        """Перерыв оранжевый, тренинг зелёный, тех.причина фиолетовая — в списке причин."""
+        self.assertIn("break: { label: 'Перерыв', chip: 'bg-orange-100", self.view)
+        self.assertIn("training: { label: 'Тренинг', chip: 'bg-emerald-100", self.view)
+        self.assertIn("tech: { label: 'Тех.причина', chip: 'bg-violet-100", self.view)
 
-    def test_status_breakdown_stays_small(self):
-        """Причины перерыва — вспомогательные, они не используют размеры плиток."""
-        strip = re.search(r"const StatusStrip = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL)
-        self.assertIsNotNone(strip)
-        self.assertNotIn("valueFontSize", strip.group(0))
+    def test_old_layout_primitives_are_gone(self):
+        """Панелей без зазоров, водяных знаков и полосы статусов в новом макете нет."""
+        for stale in ("CellWatermark", "StatusStrip", "StatusTile", "const Panel", "const Row", "const Cell "):
+            self.assertNotIn(stale, self.view, stale)
 
     def test_backend_exposes_every_status_counter(self):
         for field in ("'operators_on_break'", "'operators_on_training'",

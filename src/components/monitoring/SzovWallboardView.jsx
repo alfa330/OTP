@@ -86,97 +86,91 @@ const formatClock = (value) => {
     return match ? match[0] : '—';
 };
 
-const VALUE_TONE = {
+/*
+ * Ключевые плитки цветные: два «оценочных» цвета (очередь и AR — по ним видно, всё ли в норме)
+ * и два «опознавательных» (онлайн синий, перерыв оранжевый — это идентичность статуса, а не
+ * оценка). Плитки дня и операторов остаются белыми: цвет там только у смысловых величин.
+ */
+const KEY_PALETTE = {
+    good: { bg: 'bg-emerald-100/70', text: 'text-emerald-700', hint: 'text-emerald-600/80' },
+    warn: { bg: 'bg-amber-100/70', text: 'text-amber-700', hint: 'text-amber-600/80' },
+    bad: { bg: 'bg-rose-100/70', text: 'text-rose-700', hint: 'text-rose-600/80' },
+    info: { bg: 'bg-blue-100/70', text: 'text-blue-700', hint: 'text-blue-600/80' },
+    slate: { bg: 'bg-slate-100', text: 'text-slate-700', hint: 'text-slate-500' },
+};
+
+const STAT_TONE = {
     neutral: 'text-slate-900',
     good: 'text-emerald-600',
     warn: 'text-amber-600',
     bad: 'text-rose-600',
 };
 
-// Размеры цифр задают иерархию значимости:
-//   hero — то, по чему принимают решение сию секунду (очередь, ожидание, AR);
-//   lg   — сколько людей на линии и сколько из них могут взять звонок;
-//   sm   — итоги дня, их смотрят вблизи и без спешки.
-// Разбивка по причинам перерыва сюда не входит: она живёт в тонкой полосе StatusStrip.
-const VALUE_SIZE = {
-    hero: [2.75, 5, 5.25],
-    lg: [2, 3.2, 3.5],
-    sm: [1.625, 2.2, 2.375],
-};
+// Два размера цифр: ключевые показатели читаются через зал, показатели дня и операторов — рядом.
+const VALUE_SIZE = { key: [2.25, 3.6, 3.75], stat: [1.75, 2.6, 2.75] };
 
 const valueFontSize = (size, scale) => {
-    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.lg;
+    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.stat;
     return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
 };
 
-const LABEL_CLASS = 'text-[13px] font-semibold uppercase tracking-wide text-slate-500';
-const HAIRLINE = 'divide-slate-200/70';
-const HAIRLINE_TOP = 'border-t border-slate-200/70';
-
-/*
- * Показатели сгруппированы в сплошные панели: между соседними ячейками нет зазора,
- * их делит волосяная линия. Так цифрам достаётся вся ширина, а группы читаются
- * без подписей рядов — сама панель и есть группа.
- */
-const Panel = ({ children }) => (
-    <div className={`${iosCard} overflow-hidden`}>{children}</div>
-);
-
-const Row = ({ cols, children, divided = false }) => (
-    <div className={`grid ${cols} divide-x ${HAIRLINE} ${divided ? HAIRLINE_TOP : ''}`}>
+/** Секция с подписью и иконкой; внутри — сетка плиток с отступами. */
+const Section = ({ icon, title, children }) => (
+    <div className={`${iosCard} p-4`}>
+        <div className="mb-3 flex items-center gap-2 px-0.5 text-[13px] font-semibold text-slate-500">
+            <FaIcon className={`fas ${icon}`}></FaIcon>
+            <span>{title}</span>
+        </div>
         {children}
     </div>
 );
 
-/*
- * Полупрозрачная иконка-подложка. Нужна ряду операторов: он про людей, а не про звонки,
- * и водяной знак отделяет его от остальных панелей, ничего не загораживая.
- * strokeWidth крупнее обычного — тонкий контур на такой прозрачности просто пропадает.
- */
-const CellWatermark = ({ icon, scale = 1 }) => (
-    <FaIcon
-        className={`fas ${icon} pointer-events-none absolute -bottom-3 -right-3 text-slate-900/[0.05]`}
-        strokeWidth={2.5}
-        aria-hidden="true"
-        style={{ fontSize: `clamp(${(4 * scale).toFixed(2)}rem, ${(7 * scale).toFixed(2)}vw, ${(7.5 * scale).toFixed(2)}rem)` }}
-    />
+const Grid = ({ children }) => (
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{children}</div>
 );
 
-// Содержимое ячейки всегда по центру: на табло так цифры выравниваются между собой
-// по вертикальной оси карточки и не «липнут» к разделителям.
-const CELL_CLASS = 'relative flex min-w-0 flex-col items-center gap-2 overflow-hidden px-5 py-5 text-center';
+const KeyTile = ({ label, value, hint, tone = 'slate', scale = 1 }) => {
+    const palette = KEY_PALETTE[tone] || KEY_PALETTE.slate;
+    return (
+        <div className={`flex flex-col items-center gap-1 rounded-2xl px-3 py-4 text-center ${palette.bg}`}>
+            <div className={`text-[13px] font-semibold ${palette.text}`}>{label}</div>
+            <div
+                className={`font-semibold tabular-nums leading-none ${palette.text}`}
+                style={{ fontSize: valueFontSize('key', scale) }}
+            >
+                {value}
+            </div>
+            {hint ? <div className={`text-[11px] leading-tight ${palette.hint}`}>{hint}</div> : null}
+        </div>
+    );
+};
 
-const Cell = ({ label, value, hint, tone = 'neutral', size = 'lg', scale = 1, icon = null, bg = '' }) => (
-    <div className={`${CELL_CLASS} ${bg}`}>
-        {icon ? <CellWatermark icon={icon} scale={scale} /> : null}
-        <div className={`relative ${LABEL_CLASS}`}>{label}</div>
+const StatTile = ({ label, value, tone = 'neutral', scale = 1 }) => (
+    <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-slate-200/80 px-3 py-3.5 text-center">
+        <div className="text-[12px] font-medium text-slate-500">{label}</div>
         <div
-            className={`relative font-semibold tabular-nums leading-[1.02] ${VALUE_TONE[tone] || VALUE_TONE.neutral}`}
-            style={{ fontSize: valueFontSize(size, scale) }}
+            className={`font-semibold tabular-nums leading-none ${STAT_TONE[tone] || STAT_TONE.neutral}`}
+            style={{ fontSize: valueFontSize('stat', scale) }}
         >
             {value}
         </div>
-        {hint ? <div className="relative text-[12px] leading-snug text-slate-400">{hint}</div> : null}
     </div>
 );
 
 /*
- * Пара «поступило / принято» в одной ячейке. Разрыв между этими числами и есть потери,
- * поэтому принятые красим тоном AR: видно не только сколько взяли, но и укладывается ли
- * доля потерь в норму.
+ * «Принято / входящих» одной плиткой: принятые — главное число, общий поток приглушён.
+ * Разрыв между ними и есть потери, а насколько он допустим, показывает плитка AR.
  */
-const PairCell = ({ label, first, second, secondTone = 'neutral', hint, size = 'hero', scale = 1 }) => (
-    <div className={CELL_CLASS}>
-        <div className={LABEL_CLASS}>{label}</div>
+const PairTile = ({ label, first, second, scale = 1 }) => (
+    <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-slate-200/80 px-3 py-3.5 text-center">
+        <div className="text-[12px] font-medium text-slate-500">{label}</div>
         <div
-            className="font-semibold tabular-nums leading-[1.02]"
-            style={{ fontSize: valueFontSize(size, scale) }}
+            className="font-semibold tabular-nums leading-none text-slate-900"
+            style={{ fontSize: valueFontSize('stat', scale) }}
         >
-            <span className="text-slate-900">{first}</span>
-            <span className="mx-2 font-normal text-slate-300">/</span>
-            <span className={VALUE_TONE[secondTone] || VALUE_TONE.neutral}>{second}</span>
+            {first}
+            <span className="font-normal text-slate-400" style={{ fontSize: '0.62em' }}>/{second}</span>
         </div>
-        {hint ? <div className="text-[12px] leading-snug text-slate-400">{hint}</div> : null}
     </div>
 );
 
@@ -186,49 +180,10 @@ const PairCell = ({ label, first, second, secondTone = 'neutral', hint, size = '
  * чтобы он не сливался с тремя остальными.
  */
 const STATUS_STYLE = {
-    break: { label: 'Перерыв', dot: 'bg-orange-500', value: 'text-orange-600', chip: 'bg-orange-100 text-orange-700' },
-    training: { label: 'Тренинг', dot: 'bg-emerald-500', value: 'text-emerald-600', chip: 'bg-emerald-100 text-emerald-700' },
-    tech: { label: 'Тех.причина', dot: 'bg-violet-500', value: 'text-violet-600', chip: 'bg-violet-100 text-violet-700' },
-    recall: { label: 'Перезвон', dot: 'bg-blue-500', value: 'text-blue-600', chip: 'bg-blue-100 text-blue-700' },
-};
-
-const STATUS_ORDER = ['break', 'training', 'tech', 'recall'];
-
-/*
- * Разбивка по причинам — вспомогательная информация, а не главные цифры табло,
- * поэтому это одна тонкая полоса с разделителями, а не четыре крупные карточки.
- * Точка держит цвет статуса всегда, само число красим только когда оно не ноль:
- * ноль — это не сигнал, и подсвечивать его незачем.
- */
-const StatusStrip = ({ now, scale = 1 }) => {
-    const valueOf = {
-        break: now.operators_on_break,
-        training: now.operators_on_training,
-        tech: now.operators_on_tech,
-        recall: now.operators_on_recall,
-    };
-    return (
-        <div className={`grid grid-cols-4 divide-x ${HAIRLINE} ${HAIRLINE_TOP}`}>
-            {STATUS_ORDER.map((key) => {
-                const style = STATUS_STYLE[key];
-                const value = Number(valueOf[key]) || 0;
-                return (
-                    <div key={key} className="flex flex-col items-center gap-1 px-2 py-2.5">
-                        <span className="flex items-center gap-1.5 text-[12px] font-medium text-slate-500">
-                            <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} />
-                            <span className="truncate">{style.label}</span>
-                        </span>
-                        <span
-                            className={`font-semibold tabular-nums leading-none ${value > 0 ? style.value : 'text-slate-300'}`}
-                            style={{ fontSize: `clamp(${(1.125 * scale).toFixed(3)}rem, ${(1.4 * scale).toFixed(2)}vw, ${(1.5 * scale).toFixed(3)}rem)` }}
-                        >
-                            {formatInt(value)}
-                        </span>
-                    </div>
-                );
-            })}
-        </div>
-    );
+    break: { label: 'Перерыв', chip: 'bg-orange-100 text-orange-700' },
+    training: { label: 'Тренинг', chip: 'bg-emerald-100 text-emerald-700' },
+    tech: { label: 'Тех.причина', chip: 'bg-violet-100 text-violet-700' },
+    recall: { label: 'Перезвон', chip: 'bg-blue-100 text-blue-700' },
 };
 
 /** Список операторов в статусе: кто, по какой причине и сколько уже в ней сидит. */
@@ -237,7 +192,7 @@ const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) =
     return (
         <div className={`${iosCard} flex min-h-0 flex-col p-4`}>
             <div className="mb-2.5 flex items-center justify-between gap-2">
-                <div className={`flex items-center gap-2 ${LABEL_CLASS}`}>
+                <div className="flex items-center gap-2 text-[13px] font-semibold text-slate-500">
                     <FaIcon className={`fas ${icon}`}></FaIcon>
                     <span>{title}</span>
                 </div>
@@ -276,96 +231,86 @@ const OperatorList = ({ title, icon, entries, scale = 1, showReason = false }) =
 };
 
 /** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
+/** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
 const WallboardBody = ({ snapshot, scale }) => {
     const now = snapshot?.now || {};
     const today = snapshot?.today || {};
-    const slThreshold = Number(snapshot?.sl_threshold_seconds) || 20;
 
-    // Настоящая тревога — люди ждут, а взять звонок некому. Сигналим только на очереди:
-    // у «Свободны» теперь свой зелёный фон, и красное число на нём читалось бы как спор
-    // цветов, а дублировать одну тревогу в двух местах незачем.
+    // Очередь оцениваем: пусто — хорошо; есть очередь и никто не свободен — тревога.
+    const queue = Number(now.queue) || 0;
     const nobodyFree = Number(now.operators_free) === 0;
-    const queueTone = Number(now.queue) > 0 && nobodyFree ? 'bad' : 'neutral';
+    const queueTone = queue === 0 ? 'good' : nobodyFree ? 'bad' : 'warn';
+
+    // Тренинг и тех.причина отдельных плиток не имеют — чтобы люди в этих статусах не
+    // пропадали из виду, показываем их приглушённой строкой, но только когда они есть.
+    const asideParts = [
+        [Number(now.operators_on_training) || 0, 'на тренинге'],
+        [Number(now.operators_on_tech) || 0, 'по тех.причине'],
+        [Number(now.operators_other) || 0, 'в прочих статусах (резерв, нет на месте)'],
+    ].filter(([count]) => count > 0).map(([count, label]) => `${formatInt(count)} ${label}`);
 
     return (
         <div className="space-y-3" style={{ fontFamily: APPLE_FONT }}>
-            {/* Сейчас на линии — по этим трём цифрам принимают решение сию секунду. */}
-            <Panel>
-                <Row cols="grid-cols-1 sm:grid-cols-3">
-                    <Cell
-                        label="Звонков в очереди"
-                        value={formatInt(now.queue)}
-                        hint="Ждут ответа оператора"
+            <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
+                <Grid>
+                    <KeyTile
+                        label="В очереди"
+                        value={formatInt(queue)}
+                        hint="Ждут ответа"
                         tone={queueTone}
-                        size="hero"
                         scale={scale}
                     />
-                    <Cell
-                        label="SL"
-                        value={formatPercent(today.sl_ratio)}
-                        hint={`Ответы за ≤ ${slThreshold} с · норма от ${Math.round(SL_GOOD_RATIO * 100)}%`}
-                        tone={slTone(today.sl_ratio)}
-                        size="hero"
-                        scale={scale}
-                    />
-                    <Cell
-                        label="AR на текущий момент"
+                    <KeyTile
+                        label="AR"
                         value={formatPercent(today.ar_ratio)}
                         hint={`Норма ${String(AR_TARGET_MIN_PERCENT).replace('.', ',')}–${String(AR_TARGET_MAX_PERCENT).replace('.', ',')}%`}
                         tone={arTone(today.ar_ratio)}
-                        size="hero"
                         scale={scale}
                     />
-                </Row>
-            </Panel>
+                    <KeyTile
+                        label="Онлайн"
+                        value={formatInt(now.operators_online)}
+                        hint="Сотрудников"
+                        tone="info"
+                        scale={scale}
+                    />
+                    <KeyTile
+                        label="Перерыв"
+                        value={formatInt(now.operators_on_break)}
+                        hint="Сотрудников"
+                        tone="warn"
+                        scale={scale}
+                    />
+                </Grid>
+            </Section>
 
-            {/* Звонки с начала дня: первый ряд — сколько, второй — как долго ждали. */}
-            <Panel>
-                <Row cols="grid-cols-1 sm:grid-cols-2">
-                    <PairCell
-                        label="Входящих / Принято"
-                        first={formatInt(today.total)}
-                        second={formatInt(today.served)}
-                        secondTone={arTone(today.ar_ratio)}
-                        hint={`Из них ${formatInt(today.greet_drop)} сброшено на приветствии`}
-                        size="hero"
+            <Section icon="fa-chart-bar" title="Показатели за день">
+                <Grid>
+                    <PairTile
+                        label="Принято / входящих"
+                        first={formatInt(today.served)}
+                        second={formatInt(today.total)}
                         scale={scale}
                     />
-                    <Cell label="Потеряно" value={formatInt(today.lost)} hint="Не дождались в очереди" size="hero" scale={scale} />
-                </Row>
-                <Row cols="grid-cols-1 sm:grid-cols-2" divided>
-                    <Cell
-                        label="Среднее ожидание"
-                        value={formatDuration(today.avg_wait_seconds)}
-                        hint="В очереди, по всем дошедшим"
-                        size="hero"
-                        scale={scale}
-                    />
-                    <Cell
-                        label="Среднее время разговора"
-                        value={formatDuration(today.avg_talk_seconds)}
-                        hint="По принятым звонкам"
-                        size="hero"
-                        scale={scale}
-                    />
-                </Row>
-            </Panel>
+                    <StatTile label="Потеряно" value={formatInt(today.lost)} tone="bad" scale={scale} />
+                    <StatTile label="SL" value={formatPercent(today.sl_ratio)} tone={slTone(today.sl_ratio)} scale={scale} />
+                    <StatTile label="Ср. ожидание" value={formatDuration(today.avg_wait_seconds)} scale={scale} />
+                </Grid>
+            </Section>
 
-            {/* Операторы: сколько людей и сколько из них могут взять звонок, ниже — причины. */}
-            <Panel>
-                <Row cols="grid-cols-1 sm:grid-cols-3">
-                    <Cell label="Свободны" value={formatInt(now.operators_free)} hint="Готовы принять звонок" icon="fa-user-check" size="hero" bg="bg-emerald-50" scale={scale} />
-                    <Cell label="В разговоре" value={formatInt(now.operators_talking)} hint="Заняты звонком" icon="fa-headset" size="hero" bg="bg-amber-50" scale={scale} />
-                    <Cell label="Онлайн" value={formatInt(now.operators_online)} hint="Свободны + в разговоре" icon="fa-users" size="hero" scale={scale} />
-                </Row>
-                <StatusStrip now={now} scale={scale} />
-            </Panel>
-
-            {Number(now.operators_other) > 0 ? (
-                <div className="px-1 text-[12px] text-slate-400">
-                    Прочие статусы (резерв, нет на месте): {formatInt(now.operators_other)}
-                </div>
-            ) : null}
+            <Section icon="fa-headset" title="Операторы">
+                <Grid>
+                    <StatTile label="Свободны" value={formatInt(now.operators_free)} scale={scale} />
+                    <StatTile label="В разговоре" value={formatInt(now.operators_talking)} scale={scale} />
+                    <StatTile label="Ср. разговор" value={formatDuration(today.avg_talk_seconds)} scale={scale} />
+                    <StatTile label="Перезвон" value={formatInt(now.operators_on_recall)} scale={scale} />
+                </Grid>
+                {asideParts.length > 0 ? (
+                    <div className="mt-2.5 px-1 text-[12px] text-slate-400">
+                        Ещё {asideParts.join(' · ')}
+                    </div>
+                ) : null}
+            </Section>
 
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <OperatorList title="Перерывы" icon="fa-mug-hot" entries={now.break_list} scale={scale} showReason />
