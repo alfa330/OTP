@@ -10,27 +10,46 @@
 оператор ОП» передаётся снаружи колбэком (`resolve_operator`), иначе получился
 бы циклический импорт, а логику нельзя было бы прогнать в тестах.
 
-Почему пайплайн устроен именно так: успешка невозможна без звонка, но узнать
-«кто звонил» дёшево (Binotel умеет отдавать историю по номеру клиента пачкой),
-а вот выехал ли водитель — приходится спрашивать TEZ APP регулярно, пока он не
-выедет. Поэтому сначала спрашиваем про поездки по всей базе месяца, а звонки
-поднимаем только по тем, кто реально выехал: их за ночь единицы.
+Почему пайплайн устроен именно так: выехал ли водитель — приходится спрашивать
+TEZ APP регулярно, пока он не выедет, поэтому про поездки спрашиваем по всей
+базе месяца. Звонки поднимаем с двух сторон:
+
+  - зеркало по дням (`sync_calls_for_period`) — весь трафик компании за окно
+    месяца одним запросом на сутки. Нужно, чтобы «Обзвонено» показывало ВСЕ
+    попытки дозвона по базе, а не только по тем, кто в итоге выехал;
+  - история по номеру (`sync_calls_for_converted`) — только по выехавшим, зато
+    за всё время: звонок старше окна успешки не даёт, но отличает «Не засчитана»
+    от «Уже работающий».
 """
 
 import csv
 import io
 import logging
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timedelta
 
 from tez_op_leads import (
     DEFAULT_MIN_BILLSEC,
     STATUS_SUCCESS,
     as_almaty,
+    call_window_for_period,
     compute_lead_outcome,
     normalize_kz_phone,
 )
 
 log = logging.getLogger(__name__)
+
+# Сколько последних дней окна перекачиваем заново при каждом прогоне: день, за
+# который синхронизировались «сегодня», в тот момент ещё не закончился, а
+# вчерашний мог дописаться поздними звонками.
+CALL_MIRROR_REFRESH_DAYS = 2
+# Потолок времени на добор пропущенных дней в одном прогоне. Ручная «Сверка»
+# отвечает по HTTP, а полное окно месяца — это ~38 запросов к Binotel (~3 минуты
+# с учётом зазора между ними). Недобранное закроет следующий прогон: зеркало
+# идемпотентно и помнит, какие дни уже перекачаны.
+CALL_MIRROR_TIME_BUDGET = 60.0
+# Ночью спешить некуда — за один заход добираем хоть весь месяц.
+CALL_MIRROR_NIGHTLY_BUDGET = 900.0
 
 # Заголовки, которыми СВ подписывает колонки (файл приходит как fio/phone).
 FIO_HEADERS = {'fio', 'фио', 'имя', 'name', 'full_name', 'водитель', 'driver'}
@@ -158,24 +177,20 @@ def sync_first_orders(db, year, month, first_orders_client):
     return {'checked': len(phones), 'found': found}
 
 
-def sync_calls_for_converted(db, year, month, binotel_client, resolve_operator,
-                             min_billsec=DEFAULT_MIN_BILLSEC):
-    """Шаг 2: история звонков только по тем, кто уже выехал.
+def _prepare_calls(raw_calls, resolve_operator, min_billsec=DEFAULT_MIN_BILLSEC, wanted=None):
+    """Нормализованные звонки Binotel -> строки для tez_lead_calls.
 
     resolve_operator(employee_name, call_date) должен вернуть id оператора ОП
     либо None. Именно тут отсекаются звонки ТП/линии: по решению владельца они
-    не должны перехватывать успешку у отдела продаж.
-    """
-    phones = db.get_tez_phones_needing_calls(year, month)
-    if not phones:
-        return {'phones': 0, 'calls': 0}
+    не должны перехватывать успешку у отдела продаж (в базе они остаются, но
+    без operator_id, поэтому ни в «Обзвонено», ни в успешку не попадут).
 
-    raw_calls = binotel_client.list_calls_by_external_numbers(phones)
-    wanted = set(phones)
+    wanted — необязательный набор номеров-фильтр; None означает «берём всё».
+    """
     prepared = []
-    for call in raw_calls:
+    for call in raw_calls or []:
         phone_norm = normalize_kz_phone(call.get('external_number'))
-        if not phone_norm or phone_norm not in wanted:
+        if not phone_norm or (wanted is not None and phone_norm not in wanted):
             continue
         started_at = as_almaty(call.get('start_time'))
         if started_at is None:
@@ -199,6 +214,83 @@ def sync_calls_for_converted(db, year, month, binotel_client, resolve_operator,
                 and operator_id is not None
             ),
         })
+    return prepared
+
+
+def sync_calls_for_period(db, year, month, binotel_client, resolve_operator,
+                          today=None, min_billsec=DEFAULT_MIN_BILLSEC,
+                          time_budget=CALL_MIRROR_TIME_BUDGET,
+                          refresh_days=CALL_MIRROR_REFRESH_DAYS):
+    """Зеркало звонков за окно месяца: ВСЕ попытки дозвона, а не только по выехавшим.
+
+    Шаг 2 ниже поднимает историю лишь по тем, кто уже выехал, — этого хватает
+    для начисления успешки, но воронка из-за этого показывала «Обзвонено» лишь
+    по горстке номеров (на июльской базе: 464 из 7 195), хотя операторы звонили
+    почти всей базе. Здесь качаем весь трафик компании по дням окна и решаем
+    локально, к каким лидам он относится.
+
+    Почему по дням, а не по номерам: history-by-external-number пришлось бы
+    звать сотнями пачек на каждую базу, а list-of-calls-for-period закрывает
+    сутки одним запросом (500–1200 звонков) — на месяц выходит ~38 запросов
+    один раз и 2 запроса за ночь дальше.
+
+    Звонки сохраняются даже по номерам, которых сейчас нет ни в одной базе:
+    базы грузят в течение месяца, и лид, добавленный 20-го числа, должен сразу
+    видеть свои попытки с 1-го, а не ждать повторной выкачки из Binotel.
+
+    Прогон ограничен по времени (time_budget): недобранные дни закроет следующий
+    запуск, журнал перекачанных дней делает шаг идемпотентным.
+    """
+    window_start, window_end = call_window_for_period(year, month)
+    today = today or date.today()
+    last_day = min(window_end, today)
+    if last_day < window_start:
+        return {'days': 0, 'days_left': 0, 'calls': 0}
+
+    synced = db.get_tez_call_synced_days(window_start, last_day) or set()
+    # Заново перекачиваем только дни рядом с СЕГОДНЯ: сегодняшний на момент
+    # синка ещё не закончился, вчерашний мог дописаться поздними звонками.
+    # Порог считается от today, а не от конца окна, иначе закрытый месяц
+    # бесконечно перекачивал бы свои последние два дня.
+    refresh_from = today - timedelta(days=max(int(refresh_days), 1) - 1)
+
+    pending = []
+    day = last_day
+    while day >= window_start:
+        if day >= refresh_from or day not in synced:
+            pending.append(day)
+        day -= timedelta(days=1)
+
+    started_at = time.monotonic()
+    done = 0
+    saved = 0
+    for day in pending:
+        if done and time.monotonic() - started_at >= float(time_budget):
+            break
+        raw_calls = binotel_client.list_calls_for_day(day)
+        prepared = _prepare_calls(raw_calls, resolve_operator, min_billsec=min_billsec)
+        saved += db.save_tez_lead_calls(prepared)
+        db.mark_tez_call_day_synced(day, len(prepared))
+        done += 1
+    return {'days': done, 'days_left': len(pending) - done, 'calls': saved}
+
+
+def sync_calls_for_converted(db, year, month, binotel_client, resolve_operator,
+                             min_billsec=DEFAULT_MIN_BILLSEC):
+    """Шаг 2: полная история звонков по тем, кто уже выехал.
+
+    Зеркало выше знает только окно месяца, а тут нужна история целиком: звонок
+    раньше окна успешки не даёт, но именно он отличает «Не засчитана» (оператор
+    работал, но не попал в окно — такие случаи операторы оспаривают) от «Уже
+    работающий» (выехал сам). Номеров за ночь единицы, отсюда и один запрос.
+    """
+    phones = db.get_tez_phones_needing_calls(year, month)
+    if not phones:
+        return {'phones': 0, 'calls': 0}
+
+    raw_calls = binotel_client.list_calls_by_external_numbers(phones)
+    prepared = _prepare_calls(raw_calls, resolve_operator, min_billsec=min_billsec,
+                              wanted=set(phones))
     saved = db.save_tez_lead_calls(prepared)
     # Помечаем ВСЕ запрошенные номера, а не только те, по которым нашлись звонки:
     # «звонков нет» — это тоже результат, иначе такие лиды переспрашивались бы
@@ -283,12 +375,19 @@ def run_nightly(db, first_orders_client, binotel_client, resolve_operator,
         key = f"{year}-{month:02d}"
         try:
             orders = sync_first_orders(db, year, month, first_orders_client)
+            mirror = sync_calls_for_period(
+                db, year, month, binotel_client, resolve_operator, today=today,
+                min_billsec=min_billsec, time_budget=CALL_MIRROR_NIGHTLY_BUDGET,
+            )
             calls = sync_calls_for_converted(db, year, month, binotel_client,
                                              resolve_operator, min_billsec=min_billsec)
             outcomes = recompute_outcomes(db, year, month, min_billsec=min_billsec)
-            report[key] = {'first_orders': orders, 'calls': calls, 'outcomes': outcomes}
-            log.info('Успешки TEZ ОП %s: проверено %s, выехали %s, звонков %s, успешек %s',
+            report[key] = {'first_orders': orders, 'calls_mirror': mirror,
+                           'calls': calls, 'outcomes': outcomes}
+            log.info('Успешки TEZ ОП %s: проверено %s, выехали %s, дней зеркала %s '
+                     '(осталось %s), звонков %s, успешек %s',
                      key, orders.get('checked'), orders.get('found'),
+                     mirror.get('days'), mirror.get('days_left'),
                      calls.get('calls'), outcomes.get('success'))
         except Exception as exc:
             log.error('Ночная сверка успешек TEZ ОП за %s упала: %s', key, exc, exc_info=True)

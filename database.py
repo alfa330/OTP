@@ -4759,10 +4759,16 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
 
-                -- Звонки храним ТОЛЬКО по номерам из базы лидов (Binotel умеет
-                -- отдавать историю по номеру клиента — stats/history-by-external-number,
-                -- поэтому зеркалить весь трафик компании не нужно). is_qualifying —
-                -- вычисляемый флаг: смена порога длительности пересчитывается локально.
+                -- Звонки Binotel, из которых выводится и «Обзвонено», и успешка.
+                -- Наполняется с двух сторон: история по номеру клиента для тех,
+                -- кто выехал (stats/history-by-external-number, за всё время), и
+                -- зеркало по дням за окно месяца (stats/list-of-calls-for-period).
+                -- Зеркало кладёт сюда ВЕСЬ трафик компании за день, включая номера,
+                -- которых пока нет ни в одной базе: базы грузят весь месяц, и лид,
+                -- добавленный 20-го, должен сразу видеть свои попытки с 1-го, а не
+                -- ждать повторной выкачки. Связь с лидом — по phone_norm, лишние
+                -- строки в JOIN просто не участвуют. is_qualifying — вычисляемый
+                -- флаг: смена порога длительности пересчитывается локально.
                 CREATE TABLE IF NOT EXISTS tez_lead_calls (
                     general_call_id VARCHAR(32) PRIMARY KEY,
                     phone_norm VARCHAR(16) NOT NULL,
@@ -4777,6 +4783,16 @@ class Database:
                     operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     is_qualifying BOOLEAN NOT NULL DEFAULT FALSE,
                     fetched_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+
+                -- Журнал зеркала: какой день уже перекачан из Binotel целиком.
+                -- Без него добор пропущенных дней пришлось бы угадывать по
+                -- наличию звонков, а «в этот день никто не звонил» неотличимо от
+                -- «этот день ещё не качали».
+                CREATE TABLE IF NOT EXISTS tez_call_sync_days (
+                    day DATE PRIMARY KEY,
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    synced_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 -- Успешка: связка «кто звонил и когда -> кто вышел на линию и когда».
@@ -4830,6 +4846,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tez_lead_calls_phone_started ON tez_lead_calls(phone_norm, started_at);
                 CREATE INDEX IF NOT EXISTS idx_tez_lead_calls_qualifying
                     ON tez_lead_calls(phone_norm, started_at) WHERE is_qualifying;
+                -- «Обзвонено» = попытки оператора ОП: исходящий с разрезолвленным
+                -- оператором, длительность не важна. Зеркало кладёт в таблицу и
+                -- чужой трафик, поэтому фильтр вынесен в частичный индекс.
+                CREATE INDEX IF NOT EXISTS idx_tez_lead_calls_op_attempts
+                    ON tez_lead_calls(phone_norm, started_at)
+                    WHERE call_type = 1 AND operator_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_tez_successes_operator_period
                     ON tez_lead_successes(operator_id, year, month);
                 CREATE INDEX IF NOT EXISTS idx_tez_successes_date ON tez_lead_successes(success_date);
@@ -16772,41 +16794,85 @@ class Database:
             )
             return cursor.rowcount
 
-    def save_tez_lead_calls(self, calls):
-        """Upsert звонков по номерам из базы лидов (ключ — generalCallID)."""
-        saved = 0
+    def get_tez_call_synced_days(self, start_day, end_day):
+        """Дни, за которые зеркало звонков уже перекачано целиком (set из date)."""
         with self._get_cursor() as cursor:
-            for call in calls or []:
-                cursor.execute(
-                    """
-                    INSERT INTO tez_lead_calls
-                        (general_call_id, phone_norm, started_at, call_type, billsec, waitsec,
-                         disposition, internal_number, employee_name, employee_email,
-                         operator_id, is_qualifying)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (general_call_id) DO UPDATE SET
-                        operator_id = EXCLUDED.operator_id,
-                        is_qualifying = EXCLUDED.is_qualifying,
-                        employee_name = EXCLUDED.employee_name,
-                        fetched_at = CURRENT_TIMESTAMP
-                    """,
-                    (
-                        str(call.get('general_call_id'))[:32],
-                        call.get('phone_norm'),
-                        call.get('started_at'),
-                        int(call.get('call_type', -1)),
-                        int(call.get('billsec') or 0),
-                        int(call.get('waitsec') or 0),
-                        str(call.get('disposition') or '')[:32],
-                        str(call.get('internal_number') or '')[:64],
-                        str(call.get('employee_name') or '')[:255],
-                        str(call.get('employee_email') or '')[:255],
-                        int(call['operator_id']) if call.get('operator_id') else None,
-                        bool(call.get('is_qualifying')),
-                    )
-                )
-                saved += 1
-        return saved
+            cursor.execute(
+                "SELECT day FROM tez_call_sync_days WHERE day >= %s AND day <= %s",
+                (start_day, end_day)
+            )
+            return {r[0] for r in cursor.fetchall()}
+
+    def mark_tez_call_day_synced(self, day, calls):
+        """Отмечает день как перекачанный (повторная выкачка обновляет счётчик)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO tez_call_sync_days (day, calls, synced_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (day) DO UPDATE SET
+                    calls = EXCLUDED.calls,
+                    synced_at = EXCLUDED.synced_at
+                """,
+                (day, int(calls or 0))
+            )
+            return cursor.rowcount
+
+    def save_tez_lead_calls(self, calls):
+        """Upsert звонков Binotel (ключ — generalCallID).
+
+        Пишем пачкой: зеркало приносит по 500–1200 звонков за день, и построчный
+        INSERT превратил бы один день в тысячу round-trip'ов к базе.
+        """
+        rows = []
+        for call in calls or []:
+            rows.append((
+                str(call.get('general_call_id'))[:32],
+                call.get('phone_norm'),
+                call.get('started_at'),
+                int(call.get('call_type', -1)),
+                int(call.get('billsec') or 0),
+                int(call.get('waitsec') or 0),
+                str(call.get('disposition') or '')[:32],
+                str(call.get('internal_number') or '')[:64],
+                str(call.get('employee_name') or '')[:255],
+                str(call.get('employee_email') or '')[:255],
+                int(call['operator_id']) if call.get('operator_id') else None,
+                bool(call.get('is_qualifying')),
+            ))
+        if not rows:
+            return 0
+        # Дубли generalCallID внутри одной пачки уронили бы ON CONFLICT
+        # («cannot affect row a second time»), а Binotel отдаёт один и тот же
+        # звонок в разных ответах — оставляем последнее вхождение.
+        deduped = {row[0]: row for row in rows}
+        with self._get_cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO tez_lead_calls
+                    (general_call_id, phone_norm, started_at, call_type, billsec, waitsec,
+                     disposition, internal_number, employee_name, employee_email,
+                     operator_id, is_qualifying)
+                VALUES %s
+                ON CONFLICT (general_call_id) DO UPDATE SET
+                    operator_id = EXCLUDED.operator_id,
+                    is_qualifying = EXCLUDED.is_qualifying,
+                    employee_name = EXCLUDED.employee_name,
+                    -- Итог разговора тоже обновляем: зеркало перекачивает
+                    -- сегодня и вчера как раз потому, что звонок мог попасть в
+                    -- выдачу незавершённым. Оставь мы billsec от первой
+                    -- выкачки — «Дозвонились» и успешка потерялись бы молча.
+                    billsec = EXCLUDED.billsec,
+                    waitsec = EXCLUDED.waitsec,
+                    disposition = EXCLUDED.disposition,
+                    call_type = EXCLUDED.call_type,
+                    fetched_at = CURRENT_TIMESTAMP
+                """,
+                list(deduped.values()),
+                page_size=500,
+            )
+        return len(deduped)
 
     def get_tez_leads_for_recompute(self, year, month):
         """Лиды месяца вместе с первой поездкой и всеми их звонками.
@@ -16961,6 +17027,14 @@ class Database:
 
     def get_tez_lead_funnel(self, year, month):
         """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
+        from tez_op_leads import ALMATY_TZ, call_window_for_period
+        window_start, window_end = call_window_for_period(year, month)
+        # Границы считаем в Python готовыми aware-датами, а не приведением даты
+        # к зоне прямо в SQL: у Postgres тип date неявно приводится и к
+        # timestamp, и к timestamptz, и он выбирает вторую ветку — вместо
+        # полуночи по Алматы выходит сдвиг на 10 часов (проверено на проде).
+        window_from = datetime.combine(window_start, dt_time.min, tzinfo=ALMATY_TZ)
+        window_to = datetime.combine(window_end + timedelta(days=1), dt_time.min, tzinfo=ALMATY_TZ)
         with self._get_cursor() as cursor:
             cursor.execute(
                 """
@@ -16980,18 +17054,28 @@ class Database:
             )
             row = cursor.fetchone() or (0,) * 8
 
+            # «Обзвонено»/«Дозвонились» считаем в том же окне, в котором звонок
+            # вообще может дать успешку (последние 7 дней прошлого месяца +
+            # отчётный), и только по попыткам операторов ОП: звонки ТП/линии на
+            # тот же номер работой отдела продаж не являются.
             cursor.execute(
                 """
                 SELECT
                     COUNT(DISTINCT l.phone_norm) FILTER (WHERE c.general_call_id IS NOT NULL) AS dialed,
-                    COUNT(DISTINCT l.phone_norm) FILTER (WHERE c.is_qualifying) AS reached
+                    COUNT(DISTINCT l.phone_norm) FILTER (WHERE c.is_qualifying) AS reached,
+                    COUNT(c.general_call_id) AS attempts
                 FROM tez_leads l
-                LEFT JOIN tez_lead_calls c ON c.phone_norm = l.phone_norm
+                LEFT JOIN tez_lead_calls c
+                       ON c.phone_norm = l.phone_norm
+                      AND c.call_type = 1
+                      AND c.operator_id IS NOT NULL
+                      AND c.started_at >= %s
+                      AND c.started_at < %s
                 WHERE l.year = %s AND l.month = %s
                 """,
-                (int(year), int(month))
+                (window_from, window_to, int(year), int(month))
             )
-            calls_row = cursor.fetchone() or (0, 0)
+            calls_row = cursor.fetchone() or (0, 0, 0)
 
         leads_total = int(row[0] or 0)
         already_working = int(row[2] or 0)
@@ -17004,6 +17088,11 @@ class Database:
             'duplicates': int(row[6] or 0),
             'dialed': int(calls_row[0] or 0),
             'reached': int(calls_row[1] or 0),
+            'attempts': int(calls_row[2] or 0),
+            # Окно попыток отдаём наружу, чтобы подсказка на карточке называла
+            # конкретные даты, а не абстрактные «последние 7 дней».
+            'call_window_start': window_start.isoformat(),
+            'call_window_end': window_end.isoformat(),
             'went_online': int(row[1] or 0),
             'already_working': already_working,
             'in_progress': int(row[5] or 0),

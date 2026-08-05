@@ -29680,6 +29680,10 @@ _SZOV_TABLE_COLUMNS = (
     ('fact', 'Факт\nсмен', 115),
     ('delta', 'Разница факта\nот прогноза', 180),
 )
+# Правая половина таблицы — про смены, левая — про звонки. Разные вещи в одной сетке
+# читаются плохо, поэтому смены уводим на голубоватую подложку: граница видна без
+# лишней разделительной линии.
+_SZOV_SHIFT_COLUMN_KEYS = frozenset({'forecast', 'planned', 'fact', 'delta'})
 
 
 def _szov_render_hourly_table_png(rows):
@@ -29696,11 +29700,15 @@ def _szov_render_hourly_table_png(rows):
     draw = ImageDraw.Draw(image)
 
     head_fill, border, bar_fill, bar_edge = '#b7c7e0', '#9aa7b8', '#f4a9a9', '#d33f3f'
+    # Шапка у «сменных» колонок чуть насыщеннее, тело — светло-голубое: одна и та же
+    # подложка, просто разной глубины, чтобы блок читался целиком сверху донизу.
+    shift_head_fill, shift_cell_fill = '#a3b9d9', '#e8f0fb'
 
     # Шапка
     x = 1
-    for _key, title, col_w in _SZOV_TABLE_COLUMNS:
-        draw.rectangle([x, 1, x + col_w, head_h], fill=head_fill, outline=border)
+    for key, title, col_w in _SZOV_TABLE_COLUMNS:
+        fill = shift_head_fill if key in _SZOV_SHIFT_COLUMN_KEYS else head_fill
+        draw.rectangle([x, 1, x + col_w, head_h], fill=fill, outline=border)
         parts = title.split('\n')
         total_h = len(parts) * 22
         ty = 1 + (head_h - total_h) // 2
@@ -29732,7 +29740,8 @@ def _szov_render_hourly_table_png(rows):
         }
         x = 1
         for key, _title, col_w in _SZOV_TABLE_COLUMNS:
-            draw.rectangle([x, y, x + col_w, y + row_h], fill='#ffffff', outline=border)
+            cell_fill = shift_cell_fill if key in _SZOV_SHIFT_COLUMN_KEYS else '#ffffff'
+            draw.rectangle([x, y, x + col_w, y + row_h], fill=cell_fill, outline=border)
             if key == 'ar' and ar:
                 # Шкала как в Excel: ширина пропорциональна AR, 100% = вся ячейка.
                 bar_w = max(4, int((col_w - 2 * pad_x) * min(1.0, ar)))
@@ -33139,9 +33148,16 @@ def tez_leads_recompute():
         return jsonify({"error": str(exc)}), 503
 
     try:
+        resolve_operator = _tez_op_operator_resolver()
         orders = tez_lead_service.sync_first_orders(db, year, month, first_orders_client)
+        # Зеркало звонков ограничено по времени: за клик добираем сколько
+        # успеваем, остаток закроет ночная джоба (в ответе — сколько дней ещё
+        # не перекачано, чтобы это было видно, а не молча недосчитано).
+        mirror = tez_lead_service.sync_calls_for_period(
+            db, year, month, binotel_client, resolve_operator
+        )
         calls = tez_lead_service.sync_calls_for_converted(
-            db, year, month, binotel_client, _tez_op_operator_resolver()
+            db, year, month, binotel_client, resolve_operator
         )
         outcomes = tez_lead_service.recompute_outcomes(db, year, month)
     except RuntimeError as exc:
@@ -33152,7 +33168,12 @@ def tez_leads_recompute():
         logging.exception('tez_leads: ручной пересчёт не удался')
         return jsonify({"error": "Не удалось выполнить сверку"}), 502
 
-    return jsonify({"first_orders": orders, "calls": calls, "outcomes": outcomes})
+    return jsonify({
+        "first_orders": orders,
+        "calls_mirror": mirror,
+        "calls": calls,
+        "outcomes": outcomes,
+    })
 
 
 def _tez_leads_batch_uuid(batch_id):

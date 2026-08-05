@@ -33,7 +33,7 @@ TEZ APP отдаёт даты ОКНОМ на два месяца: `month_first_
 
 import re
 from calendar import monthrange
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 try:
     from zoneinfo import ZoneInfo
@@ -157,6 +157,24 @@ def _is_in_month_tail(value, days=PREV_MONTH_WINDOW_DAYS):
     """Попадает ли дата в последние `days` дней своего месяца (включительно)."""
     last_day = monthrange(value.year, value.month)[1]
     return value.day > last_day - int(days)
+
+
+def call_window_for_period(year, month, days=PREV_MONTH_WINDOW_DAYS):
+    """Окно дат, в котором звонок вообще может относиться к базе месяца.
+
+    От первого дня «хвоста» прошлого месяца (его последние `days` дней) до
+    последнего дня отчётного — ровно то же окно, что и в правиле успешки
+    (пункты 5–6 выше). Звонок раньше него успешку дать не может.
+
+    Единая точка правды: по этому окну и качается зеркало звонков, и считается
+    «Обзвонено» в воронке, иначе карточка и правило начисления разъедутся.
+    """
+    year, month = int(year), int(month)
+    prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+    prev_last_day = monthrange(prev_year, prev_month)[1]
+    start = date(prev_year, prev_month, prev_last_day - int(days) + 1)
+    end = date(year, month, monthrange(year, month)[1])
+    return start, end
 
 
 def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
