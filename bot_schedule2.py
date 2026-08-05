@@ -10530,7 +10530,17 @@ def get_department_plan():
                 'updated_by': None,
                 'updated_at': None,
             }
-        return jsonify({"status": "success", "plan": plan}), 200
+        # Общий план отдела считаем здесь же: оба экрана (учёт часов и окно базы
+        # лидов) и так дёргают этот эндпоинт, лишний запрос ради трёх чисел не нужен.
+        # Для отделов без групп ОП TEZ метод вернёт None — поле останется пустым.
+        try:
+            summary = db.get_tez_op_department_plan_summary(
+                dept_i, year_i, month_i, plan_per_fte=plan.get('plan_per_fte')
+            )
+        except Exception:
+            logging.exception("get_department_plan: сводка общего плана не посчиталась")
+            summary = None
+        return jsonify({"status": "success", "plan": plan, "summary": summary}), 200
     except Exception:
         logging.exception("get_department_plan error")
         return jsonify({"error": "Internal server error"}), 500

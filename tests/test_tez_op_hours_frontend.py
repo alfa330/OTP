@@ -99,14 +99,15 @@ class TezOpHoursFrontendTests(unittest.TestCase):
         self.assertIn("Object.values(daily).reduce", block)
         self.assertIn("Number(dayData[dailyKey])", block)
 
-    def test_success_rows_show_only_completion_and_footer_keeps_all_totals(self):
+    def test_success_rows_show_count_with_completion_and_footer_keeps_all_totals(self):
+        # Владелец (2026-08-05): в строке оператора нужно и само число успешек,
+        # и процент выполнения — раньше число пряталось в подсказке.
         header_anchor = self.src.index("{/* Right summary headers */}")
         header_start = self.src.index("{selectedTab === 'tez_successes' && (", header_anchor)
         header_end = self.src.index("{selectedTab === 'avg_score'", header_start)
         header = self.src[header_start:header_end]
-        self.assertIn("Выполнение нормы успешек (%)", header)
+        self.assertIn("Успешки и выполнение плана", header)
         self.assertEqual(header.count("hoursSummaryColClass"), 1)
-        self.assertNotIn("План / выполнение", header)
 
         rows_anchor = self.src.index("{/* Right summary values */}")
         rows_start = self.src.index("{selectedTab === 'tez_successes' && (() => {", rows_anchor)
@@ -114,8 +115,8 @@ class TezOpHoursFrontendTests(unittest.TestCase):
         rows = self.src[rows_start:rows_end]
         self.assertIn("const pct = plan > 0 ? (total / plan) * 100 : null;", rows)
         self.assertIn("{pct == null ? '—' : `${pct.toFixed(0)}%`}", rows)
+        self.assertIn("{total}", rows)
         self.assertEqual(rows.count("hoursSummaryColClass"), 1)
-        self.assertNotIn("`${formatNumber(plan, 1)} · ${pct.toFixed(0)}%`", rows)
 
         footer_totals_start = self.src.index("const footerTotals = useMemo(")
         footer_totals_end = self.src.index("// Red → amber → green gradient", footer_totals_start)
