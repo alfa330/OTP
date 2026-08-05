@@ -16876,7 +16876,10 @@ class Database:
         if not values:
             return 0
         with self._get_cursor() as cursor:
-            execute_values(
+            # RETURNING + fetch=True, а не cursor.rowcount: execute_values шлёт
+            # данные страницами, и rowcount после вызова знает только последнюю
+            # из них (1056 восстановленных звонков отчитались как 56).
+            restored = execute_values(
                 cursor,
                 """
                 UPDATE tez_lead_calls c SET
@@ -16885,12 +16888,14 @@ class Database:
                     is_qualifying = v.is_qualifying
                 FROM (VALUES %s) AS v(general_call_id, employee_name, operator_id, is_qualifying)
                 WHERE c.general_call_id = v.general_call_id
+                RETURNING 1
                 """,
                 values,
                 template="(%s, %s, %s::int, %s::boolean)",
                 page_size=500,
+                fetch=True,
             )
-            return cursor.rowcount
+            return len(restored or [])
 
     def get_tez_call_synced_days(self, start_day, end_day):
         """Дни, за которые зеркало звонков уже перекачано целиком (set из date)."""
