@@ -19,6 +19,7 @@ import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
 import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
 import FaIcon from './components/common/FaIcon';
+import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
@@ -2511,6 +2512,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Сам запрос вынесен ниже (после вычисления группы/модели), чтобы работал и
         // для админов: у них свой department_code не 'tez', и гейт по отделу скрывал план.
         const [tezPlanPerFte, setTezPlanPerFte] = useState(null);
+        // Общий план отдела и его закрытие приходят тем же запросом, что и план на
+        // 1 FTE: { fte_total, plan_total, successes_total, closure_pct, ... }.
+        const [tezPlanSummary, setTezPlanSummary] = useState(null);
         const [tezPlanReloadKey, setTezPlanReloadKey] = useState(0);
         // Успешки по оператору/дню для таба «Успешки» в учёте часов ОП:
         // { [operator_id]: { [деньМесяца]: количество } }.
@@ -4492,6 +4496,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return num.toFixed(decimals);
         }
 
+        // Числа в русской записи (5,5 вместо 5.5) и без хвостовых нулей.
+        function formatRu(n, maxDecimals = 1) {
+            const num = Number(n);
+            if (!Number.isFinite(num)) return '—';
+            return num.toLocaleString('ru-RU', { maximumFractionDigits: maxDecimals });
+        }
+
+        // Цвет процента выполнения плана успешек — один и тот же для строки
+        // оператора, итога и карточки общего плана отдела.
+        function planClosureClass(pct) {
+            if (pct == null || !Number.isFinite(Number(pct))) return 'text-gray-400';
+            if (pct >= 100) return 'text-emerald-700';
+            if (pct >= 60) return 'text-amber-600';
+            return 'text-rose-600';
+        }
+
         function formatMoney(n) {
             const num = Number(n || 0);
             if (!Number.isFinite(num)) return '0 ₸';
@@ -4738,11 +4758,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         useEffect(() => {
             if (!isTezOpContext || tezOpDeptId == null || !user?.id) {
                 setTezPlanPerFte(null);
+                setTezPlanSummary(null);
                 return;
             }
             const [py, pm] = String(month || '').split('-').map((v) => parseInt(v, 10));
             if (!Number.isFinite(py) || !Number.isFinite(pm)) {
                 setTezPlanPerFte(null);
+                setTezPlanSummary(null);
                 return;
             }
             let cancelled = false;
@@ -4755,15 +4777,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (cancelled) return;
                     const v = resp?.data?.plan?.plan_per_fte;
                     setTezPlanPerFte(v === undefined || v === null ? null : Number(v));
+                    setTezPlanSummary(resp?.data?.summary || null);
                 })
                 .catch(() => {
-                    if (!cancelled) setTezPlanPerFte(null);
+                    if (!cancelled) {
+                        setTezPlanPerFte(null);
+                        setTezPlanSummary(null);
+                    }
                 });
             return () => {
                 cancelled = true;
             };
+            // tezSuccessReloadKey — чтобы факт в общем плане обновлялся вместе с
+            // успешками после пересчёта базы лидов.
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isTezOpContext, tezOpDeptId, month, user?.id, tezPlanReloadKey]);
+        }, [isTezOpContext, tezOpDeptId, month, user?.id, tezPlanReloadKey, tezSuccessReloadKey]);
 
         // Карта успешек оператор→день для таба «Успешки». Тянем ту же статистику,
         // что и окно базы лидов (сужение по группе — на стороне сервера).
@@ -7365,6 +7393,43 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             )}
 
+            {/* Общий план отдела ОП: считается на бэке (сумма ставок не уволенных
+                × план на 1 FTE × 0,8) и приходит вместе с планом на 1 FTE. */}
+            {selectedTab === 'tez_successes' && tezPlanSummary && (
+            <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                    <FaIcon className="fas fa-bullseye text-teal-600" aria-hidden="true" />
+                    Общий план отдела
+                    <InfoHint side="right">
+                        Сумма ставок всех не уволенных операторов ОП
+                        ({formatRu(tezPlanSummary.fte_total, 2)} FTE, {tezPlanSummary.operators_count} чел.)
+                        × план на 1 FTE ({formatRu(tezPlanSummary.plan_per_fte, 1)})
+                        × {formatRu(tezPlanSummary.coefficient, 2)}.
+                        Приём или уход сотрудника внутри месяца ставку не дробит.
+                    </InfoHint>
+                </div>
+                <div>
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">План</div>
+                    <div className="text-xl font-bold tabular-nums text-slate-800">
+                        {tezPlanSummary.plan_total > 0 ? formatRu(tezPlanSummary.plan_total, 1) : '—'}
+                    </div>
+                </div>
+                <div>
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">Успешки</div>
+                    <div className="text-xl font-bold tabular-nums text-emerald-700">{tezPlanSummary.successes_total}</div>
+                </div>
+                <div>
+                    <div className="text-[11px] uppercase tracking-wide text-slate-500">Закрытие</div>
+                    <div className={`text-xl font-bold tabular-nums ${planClosureClass(tezPlanSummary.closure_pct)}`}>
+                        {tezPlanSummary.closure_pct == null ? '—' : `${formatRu(tezPlanSummary.closure_pct, 1)}%`}
+                    </div>
+                </div>
+                {!(tezPlanSummary.plan_total > 0) && (
+                    <div className="text-xs text-amber-700">План на 1 FTE за этот месяц не задан.</div>
+                )}
+            </div>
+            )}
+
             {/* Table */}
             <div className="overflow-auto border rounded-md">
                 <div className="min-w-max">
@@ -7417,8 +7482,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div className={`${hoursSummaryColClass} w-36 bg-gray-50 text-sm font-medium`}>Всего чатов</div>
                     )}
                     {selectedTab === 'tez_successes' && (
-                    <div className={`${hoursSummaryColClass} w-72 bg-gray-50 text-sm font-medium`}>
-                        Выполнение нормы успешек (%)
+                    <div className={`${hoursSummaryColClass} w-72 bg-gray-50 text-sm font-medium`}
+                         title="Успешки за месяц и выполнение индивидуального плана оператора">
+                        Успешки и выполнение плана
                     </div>
                     )}
                     {selectedTab === 'avg_score' && (
@@ -7699,15 +7765,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     });
                                     const plan = planRes?.plan;
                                     const pct = plan > 0 ? (total / plan) * 100 : null;
-                                    const pctClass = pct == null ? 'text-gray-400'
-                                        : pct >= 100 ? 'text-emerald-700'
-                                        : pct >= 60 ? 'text-amber-600' : 'text-rose-600';
                                     return (
                                         <div
-                                            className={`${hoursSummaryColClass} w-72 text-sm font-semibold ${pctClass}`}
+                                            className={`${hoursSummaryColClass} w-72 text-sm`}
                                             title={plan > 0 ? `Успешки: ${total}; индивидуальный план: ${formatNumber(plan, 1)}` : 'Индивидуальный план не задан'}
                                         >
-                                            {pct == null ? '—' : `${pct.toFixed(0)}%`}
+                                            <div className="grid w-full grid-cols-2 divide-x divide-gray-200">
+                                                <div className="px-1">
+                                                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Успешки</div>
+                                                    <div className="font-semibold tabular-nums text-emerald-700">{total}</div>
+                                                </div>
+                                                <div className="px-1">
+                                                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Выполнение</div>
+                                                    <div className={`font-semibold tabular-nums ${planClosureClass(pct)}`}>
+                                                        {pct == null ? '—' : `${pct.toFixed(0)}%`}
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
                                     );
                                 })()}
@@ -7846,13 +7920,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const total = footerTotals.sumTezSuccesses;
                             const plan = footerTotals.hasTezPlanRows ? footerTotals.sumTezPlan : null;
                             const pct = plan > 0 ? (total / plan) * 100 : null;
-                            const pctClass = pct == null ? 'text-gray-400'
-                                : pct >= 100 ? 'text-emerald-700'
-                                : pct >= 60 ? 'text-amber-600' : 'text-rose-600';
+                            const pctClass = planClosureClass(pct);
                             return (
                                 <div
                                     className={`${hoursSummaryColClass} w-72 text-sm`}
-                                    title={plan > 0 ? `${total} / ${formatNumber(plan, 1)} × 100%` : 'Общий план не задан'}
+                                    title={plan > 0
+                                        ? `${total} / ${formatNumber(plan, 1)} × 100% — по сумме индивидуальных планов. Общий план отдела считается отдельно (карточка над таблицей).`
+                                        : 'Индивидуальные планы не заданы'}
                                 >
                                     <div className="grid w-full grid-cols-2 divide-x divide-gray-200">
                                         <div className="px-1">

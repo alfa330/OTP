@@ -219,6 +219,10 @@ CALCULATION_MODEL_CHAT_MANAGER = 'chat_manager'
 CALCULATION_MODEL_TEZ_LINE = 'tez_line'
 CALCULATION_MODEL_TEZ_OP = 'tez_op'
 CALCULATION_MODEL_TEZ_CODES = {CALCULATION_MODEL_TEZ_LINE, CALCULATION_MODEL_TEZ_OP}
+# Коэффициент общего плана отдела ОП TEZ: сумма ставок × план на 1 FTE × 0,8.
+# Владелец задал скидку на отдел целиком, индивидуальные планы её не используют
+# (там свой ×0,8 только для новичков) — см. get_tez_op_department_plan_summary.
+TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT = 0.8
 # Модели отдела продаж (ОП): по одной модели на направление отдела
 # («Верификатор», «Яндекс Регистрация», «Основа ОП», «Поток»). Пока в них
 # только ручной учёт отработанных часов и штрафы (опоздания фиксируются
@@ -15497,6 +15501,85 @@ class Database:
             'plan_per_fte': float(row[3] or 0),
             'updated_by': int(row[4]) if row[4] is not None else None,
             'updated_at': row[5].isoformat() if hasattr(row[5], 'isoformat') else (str(row[5]) if row[5] else None),
+        }
+
+    def get_tez_op_department_plan_summary(self, department_id, year, month, plan_per_fte=None):
+        """Общий план отдела ОП TEZ на месяц и процент его закрытия.
+
+        Правило владельца (Алчинбаева Анель, 2026-08-05):
+            план отдела = сумма ставок НЕ УВОЛЕННЫХ операторов ОП × план на 1 FTE × 0,8.
+        Пропорций тут нет намеренно: приняли человека 20-го или он ушёл 3-го —
+        ставка всё равно идёт в сумму целиком (в отличие от индивидуального плана,
+        который пересчитывается по новичкам/увольнениям).
+
+        Состав берём по членству в группах отдела с моделью tez_op, пересекающему
+        месяц; уволенных отбрасываем по текущему статусу — даты увольнения в схеме
+        нет, поэтому «не уволенный» может смениться задним числом.
+
+        Факт — все успешки месяца (месяц берётся по дате поездки), то же число,
+        что показывает воронка базы лидов.
+
+        Возвращает None, если в отделе нет ни одной группы ОП TEZ.
+        """
+        dept_i, year_i, month_i = int(department_id), int(year), int(month)
+        month_start = date(year_i, month_i, 1)
+        month_end = date(year_i, month_i, calendar.monthrange(year_i, month_i)[1])
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM groups
+                WHERE department_id = %s
+                  AND LOWER(COALESCE(calculation_model_code, '')) = %s
+                """,
+                (dept_i, CALCULATION_MODEL_TEZ_OP),
+            )
+            if int((cursor.fetchone() or (0,))[0] or 0) <= 0:
+                return None
+
+            # DISTINCT ON: у оператора может быть несколько интервалов членства в
+            # месяце (перевод между группами ОП) — ставка должна попасть в сумму раз.
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(rate), 0), COUNT(*)
+                FROM (
+                    SELECT DISTINCT ON (u.id)
+                           u.id, COALESCE(op.rate, u.rate, 0) AS rate
+                    FROM group_operator_memberships gom
+                    JOIN groups g ON g.id = gom.group_id
+                    JOIN users u ON u.id = gom.operator_id
+                    LEFT JOIN operator_profiles op ON op.user_id = u.id
+                    WHERE g.department_id = %s
+                      AND LOWER(COALESCE(g.calculation_model_code, '')) = %s
+                      AND gom.start_date <= %s
+                      AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                      AND LOWER(COALESCE(u.status, '')) NOT IN ('fired', 'dismissal')
+                    ORDER BY u.id
+                ) staff
+                """,
+                (dept_i, CALCULATION_MODEL_TEZ_OP, month_end, month_start),
+            )
+            staff_row = cursor.fetchone() or (0, 0)
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM tez_lead_successes WHERE year = %s AND month = %s",
+                (year_i, month_i),
+            )
+            successes = int((cursor.fetchone() or (0,))[0] or 0)
+
+        if plan_per_fte is None:
+            plan = self.get_department_monthly_plan(dept_i, year_i, month_i)
+            plan_per_fte = (plan or {}).get('plan_per_fte') or 0
+
+        fte_total = round(float(staff_row[0] or 0), 2)
+        plan_total = round(fte_total * float(plan_per_fte or 0) * TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT, 2)
+        return {
+            'fte_total': fte_total,
+            'operators_count': int(staff_row[1] or 0),
+            'plan_per_fte': float(plan_per_fte or 0),
+            'coefficient': TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT,
+            'plan_total': plan_total,
+            'successes_total': successes,
+            'closure_pct': round(successes / plan_total * 100, 1) if plan_total > 0 else None,
         }
 
     # ─────────────────────── Успешки TEZ ОП: база лидов ───────────────────────

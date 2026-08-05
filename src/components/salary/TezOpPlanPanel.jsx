@@ -16,11 +16,28 @@ import InfoHint from '../common/InfoHint';
  *  - canEdit: можно ли редактировать (управленец своего отдела)
  *  - onSaved: колбэк после успешного сохранения (обновление колонки «План успешек»)
  */
+const closureClass = (pct) => {
+  if (pct == null || !Number.isFinite(Number(pct))) return 'text-slate-400';
+  if (pct >= 100) return 'text-emerald-700';
+  if (pct >= 60) return 'text-amber-600';
+  return 'text-rose-600';
+};
+
+// Русская запись чисел (5,5 вместо 5.5) без хвостовых нулей.
+const fmt = (value, maxDecimals = 1) => {
+  const num = Number(value);
+  return Number.isFinite(num) ? num.toLocaleString('ru-RU', { maximumFractionDigits: maxDecimals }) : '—';
+};
+
 const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit = false, onSaved = null }) => {
   const [planPerFte, setPlanPerFte] = useState('');
+  // Общий план отдела и его закрытие считает бэкенд и отдаёт тем же запросом.
+  const [summary, setSummary] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
+  // После сохранения плана общий план отдела надо пересчитать — перезапрашиваем.
+  const [reloadKey, setReloadKey] = useState(0);
 
   const [year, monthNum] = String(month || '').split('-').map((v) => parseInt(v, 10));
   const validPeriod = Number.isFinite(year) && Number.isFinite(monthNum);
@@ -38,15 +55,19 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
         if (cancelled) return;
         const value = resp?.data?.plan?.plan_per_fte;
         setPlanPerFte(value === undefined || value === null ? '' : String(value));
+        setSummary(resp?.data?.summary || null);
         setLoaded(true);
       })
       .catch(() => {
-        if (!cancelled) setLoaded(true);
+        if (!cancelled) {
+          setSummary(null);
+          setLoaded(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod]);
+  }, [apiBaseUrl, userId, departmentId, year, monthNum, validPeriod, reloadKey]);
 
   const save = useCallback(() => {
     if (!canEdit || !departmentId || !validPeriod) return;
@@ -61,6 +82,7 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
       .then(() => {
         setMsg('Сохранено');
         setTimeout(() => setMsg(''), 2000);
+        setReloadKey((k) => k + 1);
         if (typeof onSaved === 'function') onSaved();
       })
       .catch(() => {
@@ -109,6 +131,36 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
         {msg && <span className="text-sm font-medium text-teal-700">{msg}</span>}
       </div>
       <p className="mt-2 text-xs text-teal-700">Общий для всего отдела, одинаков для всех операторов.</p>
+
+      {summary && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-teal-200 bg-white/80 px-3 py-2.5">
+          <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800">
+            Общий план отдела
+            <InfoHint title="Как считается общий план" side="left">
+              Сумма ставок всех не уволенных операторов ОП ({fmt(summary.fte_total, 2)} FTE,
+              {' '}{summary.operators_count} чел.) × план на 1 FTE ({fmt(summary.plan_per_fte)})
+              × {fmt(summary.coefficient, 2)}. Приём или уход сотрудника
+              внутри месяца ставку не дробит. Закрытие = успешки отдела за месяц ÷ этот план.
+            </InfoHint>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">План</div>
+            <div className="text-lg font-bold tabular-nums text-slate-800">
+              {summary.plan_total > 0 ? fmt(summary.plan_total) : '—'}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">Успешки</div>
+            <div className="text-lg font-bold tabular-nums text-emerald-700">{summary.successes_total}</div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">Закрытие</div>
+            <div className={`text-lg font-bold tabular-nums ${closureClass(summary.closure_pct)}`}>
+              {summary.closure_pct == null ? '—' : `${fmt(summary.closure_pct)}%`}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
