@@ -26,9 +26,10 @@ import csv
 import io
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 
 from tez_op_leads import (
+    ALMATY_TZ,
     DEFAULT_MIN_BILLSEC,
     STATUS_SUCCESS,
     as_almaty,
@@ -217,6 +218,58 @@ def _prepare_calls(raw_calls, resolve_operator, min_billsec=DEFAULT_MIN_BILLSEC,
     return prepared
 
 
+def reattribute_calls_without_operator(db, year, month, resolve_operator,
+                                       min_billsec=DEFAULT_MIN_BILLSEC):
+    """Возвращает звонкам окна привязку к оператору по внутреннему номеру.
+
+    Зачем: Binotel удаляет сотрудника у себя (например, при увольнении) и
+    перестаёт отдавать `employeeData` по всем его прошлым звонкам. Матчинг у
+    нас идёт по имени, поэтому такие звонки становятся «ничьими» — и вместе с
+    ними пропадают уже начисленные успешки. На проде 05.08.2026 так исчезло 8
+    июльских успешек оператора с sip 927.
+
+    Имя восстанавливаем по нашим же данным: кто звонил с этого номера, видно по
+    звонкам, где имя ещё было. Номер берём только с однозначным владельцем.
+    Шаг локальный (Binotel не дёргаем) и идемпотентный: он лишь заполняет
+    пустое, поэтому его безопасно гонять каждую ночь — он же чинит и прошлое.
+    """
+    window_start, window_end = call_window_for_period(year, month)
+    window_from = datetime.combine(window_start, dt_time.min, tzinfo=ALMATY_TZ)
+    window_to = datetime.combine(window_end + timedelta(days=1), dt_time.min, tzinfo=ALMATY_TZ)
+
+    pending = db.get_tez_calls_without_operator(window_from, window_to)
+    if not pending:
+        return {'checked': 0, 'restored': 0}
+
+    owners = db.get_tez_call_internal_number_owners() or {}
+    restored = []
+    for call in pending:
+        name = owners.get(call.get('internal_number'))
+        if not name:
+            continue
+        started_at = as_almaty(call.get('started_at'))
+        # Модель оператора проверяется на дату ЗВОНКА: тот же принцип, что и
+        # при обычной привязке, иначе восстановленный звонок мог бы засчитаться
+        # за период, когда человек работал в другом отделе.
+        operator_id = resolve_operator(name, (started_at or window_from).date())
+        if operator_id is None:
+            continue
+        restored.append({
+            'general_call_id': call['general_call_id'],
+            'employee_name': name,
+            'operator_id': operator_id,
+            'is_qualifying': (
+                int(call.get('call_type', -1)) == 1
+                and int(call.get('billsec') or 0) >= int(min_billsec)
+            ),
+        })
+    saved = db.restore_tez_call_operators(restored)
+    if saved:
+        log.info('Успешки TEZ ОП %s-%02d: привязка по внутреннему номеру восстановлена '
+                 'у %s звонков', int(year), int(month), saved)
+    return {'checked': len(pending), 'restored': saved}
+
+
 def sync_calls_for_period(db, year, month, binotel_client, resolve_operator,
                           today=None, min_billsec=DEFAULT_MIN_BILLSEC,
                           time_budget=CALL_MIRROR_TIME_BUDGET,
@@ -310,6 +363,11 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
     if not leads:
         return {'success': 0, 'already_working': 0, 'not_counted': 0, 'in_progress': 0, 'new': 0}
 
+    # Успешки — это деньги оператора, поэтому их убыль не должна проходить
+    # молча: 05.08.2026 восемь июльских успешек исчезли из-за того, что Binotel
+    # забыл сотрудника, и заметили это только вручную.
+    successes_before = db.count_tez_successes(year, month)
+
     names_by_call = {}
     for lead in leads:
         for call in lead['calls']:
@@ -350,7 +408,13 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
                 'is_late': bool(month_closed_before and success_date < month_closed_before),
             })
         outcomes.append(item)
-    return db.apply_tez_lead_outcomes(year, month, outcomes)
+    stats = db.apply_tez_lead_outcomes(year, month, outcomes)
+    stats['successes_before'] = successes_before
+    if stats.get('success', 0) < successes_before:
+        log.warning('Успешки TEZ ОП %s-%02d УМЕНЬШИЛИСЬ: было %s, стало %s. '
+                    'Проверьте, не потеряли ли звонки привязку к оператору.',
+                    int(year), int(month), successes_before, stats.get('success'))
+    return stats
 
 
 def run_nightly(db, first_orders_client, binotel_client, resolve_operator,
@@ -381,9 +445,13 @@ def run_nightly(db, first_orders_client, binotel_client, resolve_operator,
             )
             calls = sync_calls_for_converted(db, year, month, binotel_client,
                                              resolve_operator, min_billsec=min_billsec)
+            restored = reattribute_calls_without_operator(
+                db, year, month, resolve_operator, min_billsec=min_billsec
+            )
             outcomes = recompute_outcomes(db, year, month, min_billsec=min_billsec)
             report[key] = {'first_orders': orders, 'calls_mirror': mirror,
-                           'calls': calls, 'outcomes': outcomes}
+                           'calls': calls, 'restored_calls': restored,
+                           'outcomes': outcomes}
             log.info('Успешки TEZ ОП %s: проверено %s, выехали %s, дней зеркала %s '
                      '(осталось %s), звонков %s, успешек %s',
                      key, orders.get('checked'), orders.get('found'),

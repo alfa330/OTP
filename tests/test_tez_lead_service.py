@@ -108,9 +108,13 @@ class ParseLeadsFileTests(unittest.TestCase):
 class FakeDb:
     """Минимальная замена Database для проверки пересчёта."""
 
-    def __init__(self, leads):
+    def __init__(self, leads, successes_before=0):
         self._leads = leads
+        self._successes_before = successes_before
         self.applied = None
+
+    def count_tez_successes(self, year, month):
+        return self._successes_before
 
     def get_tez_leads_for_recompute(self, year, month):
         return self._leads
@@ -393,6 +397,92 @@ class CallMirrorTests(unittest.TestCase):
         )
         self.assertEqual(res, {'days': 0, 'days_left': 0, 'calls': 0})
         self.assertEqual(client.days, [])
+
+
+class ReattributeCallsTests(unittest.TestCase):
+    """Binotel забывает уволенного сотрудника — привязку возвращаем по sip."""
+
+    class Db:
+        def __init__(self, calls, owners):
+            self._calls = calls
+            self._owners = owners
+            self.restored = []
+
+        def get_tez_calls_without_operator(self, window_from, window_to):
+            return [c for c in self._calls if window_from <= c['started_at'] < window_to]
+
+        def get_tez_call_internal_number_owners(self):
+            return self._owners
+
+        def restore_tez_call_operators(self, rows):
+            self.restored = rows
+            return len(rows)
+
+    @staticmethod
+    def _call(sip, billsec=60, call_type=1, day=(2026, 7, 10), gid='g1'):
+        return {'general_call_id': gid, 'internal_number': sip, 'call_type': call_type,
+                'billsec': billsec, 'started_at': datetime(*day, 12, 0, tzinfo=ALMATY_TZ)}
+
+    @staticmethod
+    def _resolve(name, call_date):
+        return 353 if name == 'Уволенный оператор ОП' else None
+
+    def test_restores_operator_by_unique_sip_owner(self):
+        db = self.Db([self._call('927')], {'927': 'Уволенный оператор ОП'})
+        res = tez_lead_service.reattribute_calls_without_operator(db, 2026, 7, self._resolve)
+        self.assertEqual(res, {'checked': 1, 'restored': 1})
+        self.assertEqual(db.restored[0]['operator_id'], 353)
+        self.assertEqual(db.restored[0]['employee_name'], 'Уволенный оператор ОП')
+        self.assertTrue(db.restored[0]['is_qualifying'])
+
+    def test_unknown_sip_is_left_alone(self):
+        """Номер без однозначного владельца не угадываем — sip передают другим."""
+        db = self.Db([self._call('908')], {'927': 'Уволенный оператор ОП'})
+        res = tez_lead_service.reattribute_calls_without_operator(db, 2026, 7, self._resolve)
+        self.assertEqual(res, {'checked': 1, 'restored': 0})
+        self.assertEqual(db.restored, [])
+
+    def test_foreign_department_is_not_restored(self):
+        """Владелец номера нашёлся, но он не из ОП — привязку не ставим."""
+        db = self.Db([self._call('905')], {'905': 'Оператор техподдержки'})
+        res = tez_lead_service.reattribute_calls_without_operator(db, 2026, 7, self._resolve)
+        self.assertEqual(res['restored'], 0)
+
+    def test_short_call_restored_but_not_qualifying(self):
+        """Короткий звонок — попытка дозвона, но не доказательство привлечения."""
+        db = self.Db([self._call('927', billsec=4)], {'927': 'Уволенный оператор ОП'})
+        tez_lead_service.reattribute_calls_without_operator(db, 2026, 7, self._resolve)
+        self.assertFalse(db.restored[0]['is_qualifying'])
+
+    def test_incoming_call_restored_but_not_qualifying(self):
+        db = self.Db([self._call('927', call_type=0)], {'927': 'Уволенный оператор ОП'})
+        tez_lead_service.reattribute_calls_without_operator(db, 2026, 7, self._resolve)
+        self.assertFalse(db.restored[0]['is_qualifying'])
+
+    def test_only_window_of_period_is_touched(self):
+        """Шаг работает по окну месяца, а не по всей истории."""
+        db = self.Db([self._call('927', day=(2026, 6, 1))], {'927': 'Уволенный оператор ОП'})
+        res = tez_lead_service.reattribute_calls_without_operator(db, 2026, 7, self._resolve)
+        self.assertEqual(res, {'checked': 0, 'restored': 0})
+
+
+class SuccessDropWarningTests(unittest.TestCase):
+    """Убыль успешек за период обязана быть заметна — это деньги оператора."""
+
+    def test_recompute_reports_previous_count(self):
+        lead = {'id': 'L1', 'phone_norm': '77000000000', 'full_name': 'Тест',
+                'month_first_order_at': None, 'prev_month_first_order_at': None, 'calls': []}
+        db = FakeDb([lead], successes_before=7)
+        stats = tez_lead_service.recompute_outcomes(db, 2026, 7)
+        self.assertEqual(stats['successes_before'], 7)
+
+    def test_drop_is_logged(self):
+        lead = {'id': 'L1', 'phone_norm': '77000000000', 'full_name': 'Тест',
+                'month_first_order_at': None, 'prev_month_first_order_at': None, 'calls': []}
+        db = FakeDb([lead], successes_before=7)
+        with self.assertLogs('tez_lead_service', level='WARNING') as logs:
+            tez_lead_service.recompute_outcomes(db, 2026, 7)
+        self.assertTrue(any('УМЕНЬШИЛИСЬ' in line for line in logs.output))
 
 
 class FirstOrdersContractTests(unittest.TestCase):

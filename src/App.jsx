@@ -7393,19 +7393,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             )}
 
-            {/* Общий план отдела ОП: считается на бэке (сумма ставок не уволенных
-                × план на 1 FTE × 0,8) и приходит вместе с планом на 1 FTE. */}
+            {/* Общий план отдела ОП: считается на бэке (сумма ставок работавших в
+                месяце × план на 1 FTE × 0,8) и приходит вместе с планом на 1 FTE. */}
             {selectedTab === 'tez_successes' && tezPlanSummary && (
             <div className="mb-3 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
                     <FaIcon className="fas fa-bullseye text-teal-600" aria-hidden="true" />
                     Общий план отдела
                     <InfoHint side="right">
-                        Сумма ставок всех не уволенных операторов ОП
+                        Сумма ставок операторов ОП, работавших в этом месяце
                         ({formatRu(tezPlanSummary.fte_total, 2)} FTE, {tezPlanSummary.operators_count} чел.)
                         × план на 1 FTE ({formatRu(tezPlanSummary.plan_per_fte, 1)})
                         × {formatRu(tezPlanSummary.coefficient, 2)}.
-                        Приём или уход сотрудника внутри месяца ставку не дробит.
+                        Приём или уход сотрудника внутри месяца ставку не дробит,
+                        и увольнение план не уменьшает: успешки ушедшего идут в факт.
                     </InfoHint>
                 </div>
                 <div>
