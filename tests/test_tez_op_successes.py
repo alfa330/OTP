@@ -442,6 +442,15 @@ class GroupFilterTests(unittest.TestCase):
                       "call_type = EXCLUDED.call_type"):
             self.assertIn(field, body)
 
+    def test_restore_counts_all_pages_not_just_the_last(self):
+        """execute_values шлёт данные страницами: cursor.rowcount знает только
+        последнюю, и 1056 восстановленных звонков отчитались бы как 56."""
+        start = self.src.index("def restore_tez_call_operators")
+        body = self.src[start:start + 2000]
+        self.assertIn("RETURNING 1", body)
+        self.assertIn("fetch=True", body)
+        self.assertNotIn("return cursor.rowcount", body)
+
     def test_call_upsert_never_erases_known_operator(self):
         """Повторная выкачка НЕ должна обнулять уже известного сотрудника.
 
