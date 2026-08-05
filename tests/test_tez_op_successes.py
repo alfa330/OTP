@@ -6,7 +6,7 @@
 
 import sys
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from tez_op_leads import (  # noqa: E402
     ALMATY_TZ,
+    call_window_for_period,
     REASON_ACTIVE_PREV_MONTH,
     REASON_CALL_BEFORE_WINDOW,
     RULE_PREV_MONTH_LAST_DAYS,
@@ -354,6 +355,34 @@ class SchemaTests(unittest.TestCase):
             self.assertIn(f"'{status}'", self.ddl, status)
 
 
+class CallWindowTests(unittest.TestCase):
+    """Окно звонков должно совпадать с правилом успешки, иначе воронка врёт."""
+
+    def test_window_starts_at_prev_month_tail(self):
+        """Июль 2026: с 24 июня (последние 7 дней июня) по 31 июля."""
+        self.assertEqual(call_window_for_period(2026, 7), (date(2026, 6, 24), date(2026, 7, 31)))
+
+    def test_window_counts_from_month_end_not_fixed_day(self):
+        """Хвост считается от конца месяца: у февраля это 22–28, а не «после 24-го»."""
+        start, end = call_window_for_period(2026, 3)
+        self.assertEqual(start, date(2026, 2, 22))
+        self.assertEqual(end, date(2026, 3, 31))
+
+    def test_window_crosses_year_boundary(self):
+        start, end = call_window_for_period(2026, 1)
+        self.assertEqual(start, date(2025, 12, 25))
+        self.assertEqual(end, date(2026, 1, 31))
+
+    def test_window_start_matches_success_rule(self):
+        """Первый день окна обязан давать успешку, а предыдущий — уже нет."""
+        trip = dt(2026, 7, 20)
+        start, _ = call_window_for_period(2026, 7)
+        inside = compute_lead_outcome(trip, None, [call(dt(start.year, start.month, start.day))])
+        outside = compute_lead_outcome(trip, None, [call(dt(start.year, start.month, start.day - 1))])
+        self.assertEqual(inside["status"], STATUS_SUCCESS)
+        self.assertEqual(outside["status"], STATUS_NOT_COUNTED)
+
+
 class GroupFilterTests(unittest.TestCase):
     """Сужение успешек по группе оператора привязано к дате поездки."""
 
@@ -388,6 +417,43 @@ class GroupFilterTests(unittest.TestCase):
         self.assertNotIn("l.status IN ('new', 'in_progress')", body)
         self.assertIn("def mark_tez_leads_calls_synced", src)
         self.assertIn("calls_synced_at TIMESTAMP WITH TIME ZONE", src)
+
+    def test_funnel_counts_attempts_in_call_window_only(self):
+        """«Обзвонено» = попытки оператора ОП в окне месяца, а не все звонки за всю историю.
+
+        До правки карточка считала лид обзвоненным только если по нему вообще
+        нашлись звонки, а качались они лишь по выехавшим — на июльской базе это
+        давало 464 из 7 195. Теперь фильтр обязан быть в самом SQL: исходящий,
+        с разрезолвленным оператором ОП и внутри окна успешки.
+        """
+        start = self.src.index("def get_tez_lead_funnel")
+        body = self.src[start:start + 3000]
+        self.assertIn("call_window_for_period", body)
+        self.assertIn("c.call_type = 1", body)
+        self.assertIn("c.operator_id IS NOT NULL", body)
+        self.assertIn("COUNT(c.general_call_id) AS attempts", body)
+
+    def test_call_upsert_refreshes_call_outcome(self):
+        """Повторная выкачка дня обязана обновлять итог звонка, а не только оператора:
+        звонок мог попасть в первую выдачу незавершённым (billsec = 0)."""
+        start = self.src.index("def save_tez_lead_calls")
+        body = self.src[start:start + 2600]
+        for field in ("billsec = EXCLUDED.billsec", "disposition = EXCLUDED.disposition",
+                      "call_type = EXCLUDED.call_type"):
+            self.assertIn(field, body)
+
+    def test_funnel_window_bounds_are_built_in_python(self):
+        """Границы окна — готовые aware-даты, а не `date AT TIME ZONE` в SQL.
+
+        У Postgres date неявно приводится и к timestamp, и к timestamptz, и он
+        выбирает вторую ветку: `'2026-06-24'::date AT TIME ZONE 'Asia/Almaty'`
+        даёт наивные 24.06 05:00 вместо полуночи по Алматы. Окно молча
+        сдвинулось бы на 10 часов (проверено на проде).
+        """
+        start = self.src.index("def get_tez_lead_funnel")
+        body = self.src[start:start + 3000]
+        self.assertIn("datetime.combine(window_start, dt_time.min, tzinfo=ALMATY_TZ)", body)
+        self.assertNotIn("::date AT TIME ZONE", body)
 
     def test_operator_day_view_exists_and_group_aware(self):
         """Таб «Успешки»: агрегат оператор→день, месяц по дате поездки, с группой.

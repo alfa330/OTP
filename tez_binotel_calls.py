@@ -9,6 +9,9 @@
   - звонки сотрудника за период:
         stats/list-of-calls-by-internal-number-for-period
         параметры: internalNumber, startTime, stopTime (unix), максимум 7 дней;
+  - все звонки компании за сутки:
+        stats/list-of-calls-for-period
+        параметры: startTime, stopTime (unix), окно строго в один день;
   - ссылка на запись разговора (живёт ~15 минут):
         stats/call-record   (параметр callID = generalCallID);
   - ответ: {status:'success', callDetails:{ "<generalCallID>": {...} }}.
@@ -52,6 +55,12 @@ DEFAULT_API_URL = "https://api.binotel.com/api/4.0"
 HTTP_TIMEOUT = 40
 # Binotel: list-of-calls-by-internal-number-for-period ограничен окном в 7 дней.
 MAX_WINDOW_DAYS = 7
+# list-of-calls-for-period отдаёт ВСЕ звонки компании, но окно строго в одни
+# сутки (два дня -> «Wrong data»), а limit/offset/callType/internalNumber метод
+# молча игнорирует. Обрезки нет: проверено на самом нагруженном дне базы
+# (08.07.2026, 1166 звонков) — выдача за день в точности равна сумме двух своих
+# половин, ни один звонок не потерялся и не задвоился.
+MAX_PERIOD_WINDOW_DAYS = 1
 # history-by-external-number принимает массив номеров, НО режет ответ по общему
 # числу ЗВОНКОВ (~500): при превышении часть номеров молча выпадает из ответа с
 # нулём звонков (проверено 2026-07-22: 95 номеров -> 504 звонка, выпало 45; 30
@@ -372,6 +381,33 @@ class BinotelApiClient:
 
         for start in range(0, len(numbers), MAX_EXTERNAL_NUMBERS_PER_REQUEST):
             _fetch(numbers[start:start + MAX_EXTERNAL_NUMBERS_PER_REQUEST])
+        return out
+
+    def list_calls_for_day(self, day):
+        """Все звонки компании за календарный день (Asia/Almaty), одним запросом.
+
+        В отличие от history-by-external-number список номеров тут не нужен:
+        метод отдаёт весь трафик дня, а мы уже локально решаем, какие номера нам
+        интересны. Для «сколько лидов реально обзвонили» это единственный дешёвый
+        путь — историю по 7 000 номеров пришлось бы тянуть сотнями запросов, а
+        день закрывается одним (500–1200 звонков, обрезки нет).
+
+        day — date либо строка 'YYYY-MM-DD'.
+        """
+        key = day.isoformat() if hasattr(day, 'isoformat') else str(day).strip()
+        start_ts, stop_ts = _day_bounds_unix(key, key, self.tz)
+        payload = self._post(
+            "stats/list-of-calls-for-period",
+            {"startTime": start_ts, "stopTime": stop_ts},
+        )
+        out = []
+        seen = set()
+        for raw in self._extract_call_details(payload):
+            call = self._normalize_call(raw)
+            if not call or call["general_call_id"] in seen:
+                continue
+            seen.add(call["general_call_id"])
+            out.append(call)
         return out
 
     def get_call_record_url(self, general_call_id):

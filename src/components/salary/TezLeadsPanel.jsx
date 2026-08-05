@@ -62,6 +62,17 @@ const ALMATY_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('en-CA', {
   hourCycle: 'h23',
 });
 
+// Числа воронки доросли до тысяч — без разделителя разрядов «7195» читается хуже,
+// чем «7 195». Формат один на все карточки, чтобы они не разъезжались стилями.
+const nfmt = (value) => new Intl.NumberFormat('ru-RU').format(Number(value) || 0);
+
+// '2026-06-24' -> '24.06'. Год в подсказке про окно звонков лишний: обе даты
+// всегда внутри текущего периода.
+const fmtDayMonth = (value) => {
+  const parts = String(value || '').split('-');
+  return parts.length === 3 ? `${parts[2]}.${parts[1]}` : '';
+};
+
 const fmtDateTime = (value) => {
   if (!value) return '—';
   const raw = String(value);
@@ -701,7 +712,14 @@ const TezLeadsPanel = ({
       .post(`${apiBaseUrl}/api/tez_leads/recompute`, null, { params: { year, month: monthNum }, headers })
       .then((resp) => {
         const o = resp?.data?.outcomes || {};
-        setMsg(`Сверка выполнена: успешек ${o.success || 0}, уже работающих ${o.already_working || 0}`);
+        // Звонки за окно месяца добираются порциями: если за клик успели не все
+        // дни, честно говорим об этом — иначе «Обзвонено» выглядит заниженным
+        // без объяснения, пока ночная джоба не докачает остаток.
+        const left = resp?.data?.calls_mirror?.days_left || 0;
+        setMsg(
+          `Сверка выполнена: успешек ${o.success || 0}, уже работающих ${o.already_working || 0}`
+          + (left ? `. Звонки за ${left} дн. ещё не выгружены — докачаются ночью или следующей сверкой` : '')
+        );
         loadStats();
         if (tab === 'leads') loadLeads();
       })
@@ -922,10 +940,40 @@ const TezLeadsPanel = ({
     Boolean(selectedActionBatch.is_deleted) !== (batchAction.mode === 'restore')
   );
 
+  // Окно, в котором звонок вообще относится к базе месяца: последние 7 дней
+  // прошлого месяца + отчётный. По нему считаются «Обзвонено» и «Дозвонились».
+  const callWindow = funnel.call_window_start && funnel.call_window_end
+    ? `${fmtDayMonth(funnel.call_window_start)} — ${fmtDayMonth(funnel.call_window_end)}`
+    : '';
+
   const funnelCards = [
     { label: 'Загружено лидов', value: funnel.leads_total, hint: `дублей при загрузке: ${funnel.duplicates ?? 0}` },
-    { label: 'Обзвонено', value: funnel.dialed, hint: 'есть хотя бы один звонок' },
-    { label: 'Дозвонились', value: funnel.reached, hint: 'разговор от 10 сек' },
+    {
+      label: 'Обзвонено',
+      value: funnel.dialed,
+      hint: `попыток: ${nfmt(funnel.attempts)}`,
+      info: (
+        <>
+          Лиды, которым оператор отдела продаж <b>хотя бы раз позвонил</b> — неважно,
+          взяли трубку или нет: сброс, занято и недозвон тоже считаются попыткой.
+          {callWindow && <> Учитываются исходящие звонки за <b>{callWindow}</b> — то же
+          окно, в котором звонок может дать успешку.</>} Звонки техподдержки и линии
+          на тот же номер сюда не входят.
+        </>
+      ),
+    },
+    {
+      label: 'Дозвонились',
+      value: funnel.reached,
+      hint: 'разговор от 10 сек',
+      info: (
+        <>
+          Из обзвоненных — те, с кем разговор состоялся: <b>от 10 секунд</b> в том же
+          окне и тоже только с оператором отдела продаж. Именно такой звонок правило
+          считает доказательством привлечения.
+        </>
+      ),
+    },
     {
       label: 'Заказ в этом месяце',
       value: funnel.went_online,
@@ -1176,8 +1224,8 @@ const TezLeadsPanel = ({
               {card.label}
               {card.info && <InfoHint side="left">{card.info}</InfoHint>}
             </div>
-            <div className={`text-xl font-bold ${card.accent ? 'text-emerald-700' : 'text-slate-800'}`}>
-              {card.value ?? 0}
+            <div className={`text-xl font-bold tabular-nums ${card.accent ? 'text-emerald-700' : 'text-slate-800'}`}>
+              {nfmt(card.value)}
             </div>
             <div className="text-[11px] text-slate-500">{card.hint}</div>
           </div>

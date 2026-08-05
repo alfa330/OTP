@@ -3,8 +3,9 @@
 
 import io
 import sys
+import time
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +222,177 @@ class RecomputeOutcomesTests(unittest.TestCase):
         db = FakeDb([])
         stats = tez_lead_service.recompute_outcomes(db, 2026, 6)
         self.assertEqual(stats['success'], 0)
+
+
+class FakeMirrorDb:
+    """БД для проверки зеркала звонков: помнит journal дней и сохранённые звонки."""
+
+    def __init__(self, synced_days=()):
+        self.synced = set(synced_days)
+        self.saved = []
+        self.marked = []
+
+    def get_tez_call_synced_days(self, start_day, end_day):
+        return {d for d in self.synced if start_day <= d <= end_day}
+
+    def mark_tez_call_day_synced(self, day, calls):
+        self.synced.add(day)
+        self.marked.append((day, calls))
+
+    def save_tez_lead_calls(self, calls):
+        self.saved.extend(calls)
+        return len(calls)
+
+
+class FakeBinotel:
+    """Отдаёт по одному звонку на день и считает, за какие дни его спрашивали."""
+
+    def __init__(self, per_day=1, sleep_seconds=0.0):
+        self.days = []
+        self.per_day = per_day
+        self.sleep_seconds = sleep_seconds
+
+    def list_calls_for_day(self, day):
+        self.days.append(day)
+        if self.sleep_seconds:
+            time.sleep(self.sleep_seconds)
+        return [{
+            'general_call_id': f'{day.isoformat()}-{i}',
+            'external_number': '77012345678',
+            'start_time': int(datetime(day.year, day.month, day.day, 10, 0,
+                                       tzinfo=ALMATY_TZ).timestamp()),
+            'call_type': 1,
+            'billsec': 30,
+            'waitsec': 3,
+            'disposition': 'ANSWER',
+            'internal_number': '925',
+            'employee_name': 'Оператор ОП',
+            'employee_email': 'op@example.com',
+        } for i in range(self.per_day)]
+
+
+class CallMirrorTests(unittest.TestCase):
+    """Зеркало звонков по дням: полнота окна, идемпотентность, бюджет времени."""
+
+    @staticmethod
+    def _resolve(name, call_date):
+        return 7 if name == 'Оператор ОП' else None
+
+    def test_covers_whole_window_up_to_today(self):
+        """Окно июля — с 24 июня; за сегодня 10 июля это 17 дней, ни днём меньше."""
+        db = FakeMirrorDb()
+        client = FakeBinotel()
+        res = tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 7, 10)
+        )
+        self.assertEqual(res['days'], 17)
+        self.assertEqual(res['days_left'], 0)
+        self.assertEqual(min(client.days), date(2026, 6, 24))
+        self.assertEqual(max(client.days), date(2026, 7, 10))
+
+    def test_future_days_are_not_requested(self):
+        """За дни, которые ещё не наступили, Binotel не спрашиваем."""
+        db = FakeMirrorDb()
+        client = FakeBinotel()
+        tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 7, 3)
+        )
+        self.assertTrue(all(d <= date(2026, 7, 3) for d in client.days))
+
+    def test_synced_days_are_skipped_but_tail_is_refreshed(self):
+        """Перекачанный день второй раз не тянем, а хвост окна обновляем всегда:
+        «сегодня» на момент прошлого прогона ещё не закончился."""
+        today = date(2026, 7, 10)
+        already = {date(2026, 6, 24) + timedelta(days=i) for i in range(17)}
+        db = FakeMirrorDb(already)
+        client = FakeBinotel()
+        res = tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=today
+        )
+        self.assertEqual(sorted(client.days), [date(2026, 7, 9), today])
+        self.assertEqual(res['days'], 2)
+
+    def test_closed_month_is_not_refetched(self):
+        """У закрытого месяца перекачивать нечего: порог обновления привязан к
+        сегодня, а не к концу окна, иначе июль каждую ночь тянул бы 30–31 число."""
+        db = FakeMirrorDb({date(2026, 6, 24) + timedelta(days=i) for i in range(38)})
+        client = FakeBinotel()
+        res = tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 8, 20)
+        )
+        self.assertEqual(client.days, [])
+        self.assertEqual(res['days'], 0)
+
+    def test_time_budget_leaves_rest_for_next_run(self):
+        """Бюджет времени не должен молча терять дни — остаток виден в ответе."""
+        db = FakeMirrorDb()
+        client = FakeBinotel(sleep_seconds=0.02)
+        res = tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 7, 10),
+            time_budget=0.0,
+        )
+        # Хотя бы один день делаем всегда, иначе нулевой бюджет заклинил бы добор.
+        self.assertEqual(res['days'], 1)
+        self.assertEqual(res['days_left'], 16)
+
+    def test_operator_is_resolved_and_qualifying_computed(self):
+        db = FakeMirrorDb()
+        client = FakeBinotel()
+        tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 6, 24)
+        )
+        saved = db.saved[0]
+        self.assertEqual(saved['phone_norm'], '77012345678')
+        self.assertEqual(saved['operator_id'], 7)
+        self.assertTrue(saved['is_qualifying'])
+
+    def test_foreign_calls_are_stored_without_operator(self):
+        """Звонки ТП/линии зеркало сохраняет, но без оператора — в «Обзвонено»
+        они не попадут, а в разборе спора видно, что номеру звонили."""
+        db = FakeMirrorDb()
+        client = FakeBinotel()
+
+        def resolve(name, call_date):
+            return None
+
+        tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, resolve, today=date(2026, 6, 24)
+        )
+        saved = db.saved[0]
+        self.assertIsNone(saved['operator_id'])
+        self.assertFalse(saved['is_qualifying'])
+
+    def test_short_call_is_attempt_but_not_qualifying(self):
+        """Сброс на первой секунде — это попытка дозвона, но не разговор."""
+        db = FakeMirrorDb()
+        client = FakeBinotel()
+        original = client.list_calls_for_day
+
+        def short(day):
+            calls = original(day)
+            for c in calls:
+                c['billsec'] = 3
+                c['disposition'] = 'CANCEL'
+            return calls
+
+        client.list_calls_for_day = short
+        tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 6, 24)
+        )
+        saved = db.saved[0]
+        self.assertEqual(saved['call_type'], 1)
+        self.assertEqual(saved['operator_id'], 7)
+        self.assertFalse(saved['is_qualifying'])
+
+    def test_window_before_today_returns_nothing(self):
+        """Период целиком в будущем — запросов нет вообще."""
+        db = FakeMirrorDb()
+        client = FakeBinotel()
+        res = tez_lead_service.sync_calls_for_period(
+            db, 2026, 7, client, self._resolve, today=date(2026, 6, 1)
+        )
+        self.assertEqual(res, {'days': 0, 'days_left': 0, 'calls': 0})
+        self.assertEqual(client.days, [])
 
 
 class FirstOrdersContractTests(unittest.TestCase):
