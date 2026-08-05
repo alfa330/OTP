@@ -119,17 +119,29 @@ class DepartmentPlanSummaryTests(unittest.TestCase):
         self.assertEqual(out["plan_total"], 0.0)
         self.assertIsNone(out["closure_pct"])
 
-    def test_staff_filter_covers_month_and_excludes_fired(self):
-        """Состав — членство, пересекающее месяц, минус уволенные."""
+    def test_staff_filter_covers_month_and_keeps_mid_month_dismissals(self):
+        """Состав — членство, пересекающее месяц.
+
+        Увольнение внутри месяца план НЕ уменьшает (владелец, 2026-08-05: «какой
+        план был в начале месяца, такой и остаётся»): успешки ушедшего идут в
+        факт, значит и его ставка обязана остаться в плане. Но «числится вечно»
+        отсекаем: у уволенного должен быть след работы именно в этом месяце —
+        смена в учёте часов либо успешка, иначе его ставка висела бы в плане
+        всех будущих месяцев (членство после ухода часто остаётся открытым).
+        """
         _, cursor = self._summary()
         sql, params = next(q for q in cursor.queries if "group_operator_memberships" in q[0])
-        self.assertIn("NOT IN ('fired', 'dismissal')", sql)
         self.assertIn("DISTINCT ON (u.id)", sql)
         self.assertIn("gom.start_date <= %s", sql)
         self.assertIn("gom.end_date IS NULL OR gom.end_date >= %s", sql)
+        self.assertIn("FROM daily_hours dh", sql)
+        self.assertIn("dh.day BETWEEN %s AND %s", sql)
+        self.assertIn("FROM tez_lead_successes s", sql)
         # Границы месяца: с 1-го по последнее число (июль — 31 день).
         self.assertEqual(params[2], date(2026, 7, 31))
         self.assertEqual(params[3], date(2026, 7, 1))
+        self.assertEqual((params[4], params[5]), (date(2026, 7, 1), date(2026, 7, 31)))
+        self.assertEqual((params[6], params[7]), (2026, 7))
 
     def test_plan_per_fte_from_caller_saves_a_query(self):
         """Если план уже прочитан эндпоинтом, второй раз в базу не ходим."""
@@ -147,7 +159,10 @@ class DepartmentPlanSummaryTests(unittest.TestCase):
     def test_coefficient_is_a_named_constant(self):
         """0,8 не должен быть магическим числом внутри метода."""
         self.assertEqual(NS["TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT"], 0.8)
-        body = DB_SOURCE[DB_SOURCE.index("def get_tez_op_department_plan_summary"):][:3600]
+        # Границу метода берём по следующему def, а не фиксированным срезом:
+        # иначе тест ломается от любого роста комментариев внутри метода.
+        start = DB_SOURCE.index("    def get_tez_op_department_plan_summary")
+        body = DB_SOURCE[start:DB_SOURCE.index("\n    def ", start + 1)]
         self.assertIn("TEZ_OP_DEPARTMENT_PLAN_COEFFICIENT", body)
         self.assertNotIn("* 0.8", body)
 

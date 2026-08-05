@@ -15529,14 +15529,21 @@ class Database:
         """Общий план отдела ОП TEZ на месяц и процент его закрытия.
 
         Правило владельца (Алчинбаева Анель, 2026-08-05):
-            план отдела = сумма ставок НЕ УВОЛЕННЫХ операторов ОП × план на 1 FTE × 0,8.
+            план отдела = сумма ставок операторов ОП × план на 1 FTE × 0,8.
         Пропорций тут нет намеренно: приняли человека 20-го или он ушёл 3-го —
         ставка всё равно идёт в сумму целиком (в отличие от индивидуального плана,
         который пересчитывается по новичкам/увольнениям).
 
         Состав берём по членству в группах отдела с моделью tez_op, пересекающему
-        месяц; уволенных отбрасываем по текущему статусу — даты увольнения в схеме
-        нет, поэтому «не уволенный» может смениться задним числом.
+        месяц. **Увольнение внутри месяца план НЕ уменьшает** (владелец, 2026-08-05:
+        «какой план был в начале месяца, такой и остаётся»): человек отработал часть
+        месяца, его успешки идут в факт — значит и ставка обязана остаться в плане,
+        иначе процент закрытия завышается на чужой работе.
+
+        Уволенного всё же приходится отличать от «числится вечно»: даты увольнения
+        в схеме нет, а членство в группе после ухода часто остаётся открытым, и его
+        ставка иначе висела бы в плане всех будущих месяцев. Поэтому для уволенных
+        требуем след работы именно в этом месяце — смена в учёте часов или успешка.
 
         Факт — все успешки месяца (месяц берётся по дате поездки), то же число,
         что показывает воронка базы лидов.
@@ -15574,11 +15581,24 @@ class Database:
                       AND LOWER(COALESCE(g.calculation_model_code, '')) = %s
                       AND gom.start_date <= %s
                       AND (gom.end_date IS NULL OR gom.end_date >= %s)
-                      AND LOWER(COALESCE(u.status, '')) NOT IN ('fired', 'dismissal')
+                      AND (
+                          LOWER(COALESCE(u.status, '')) NOT IN ('fired', 'dismissal')
+                          OR EXISTS (
+                              SELECT 1 FROM daily_hours dh
+                              WHERE dh.operator_id = u.id
+                                AND dh.day BETWEEN %s AND %s
+                          )
+                          OR EXISTS (
+                              SELECT 1 FROM tez_lead_successes s
+                              WHERE s.operator_id = u.id
+                                AND s.year = %s AND s.month = %s
+                          )
+                      )
                     ORDER BY u.id
                 ) staff
                 """,
-                (dept_i, CALCULATION_MODEL_TEZ_OP, month_end, month_start),
+                (dept_i, CALCULATION_MODEL_TEZ_OP, month_end, month_start,
+                 month_start, month_end, year_i, month_i),
             )
             staff_row = cursor.fetchone() or (0, 0)
 
@@ -16794,6 +16814,84 @@ class Database:
             )
             return cursor.rowcount
 
+    def get_tez_call_internal_number_owners(self):
+        """Внутренний номер -> имя сотрудника, выведенное из наших же звонков.
+
+        Запасной ключ привязки. Binotel перестаёт отдавать employeeData по
+        старым звонкам уволенного сотрудника (его удаляют на их стороне), и
+        звонок становится «ничьим»: матчинг у нас идёт по имени. Внутренний
+        номер при этом остаётся, а кто с него звонил — видно по тем звонкам,
+        где имя ещё было.
+
+        Отдаём номер только при ОДНОЗНАЧНОМ владельце: sip со временем передают
+        другому оператору, и угадывать в таком случае нельзя (на проде на
+        2026-08-05 у всех 23 номеров владелец ровно один).
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT internal_number, MIN(employee_name)
+                FROM tez_lead_calls
+                WHERE internal_number <> '' AND employee_name <> ''
+                GROUP BY internal_number
+                HAVING COUNT(DISTINCT employee_name) = 1
+                """
+            )
+            return {r[0]: r[1] for r in cursor.fetchall()}
+
+    def get_tez_calls_without_operator(self, window_from, window_to):
+        """Звонки окна, оставшиеся без оператора, но с внутренним номером.
+
+        Кандидаты на восстановление привязки по номеру. Входящие и короткие
+        тоже берём: они не дают успешку, но участвуют в счётчике попыток.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT general_call_id, internal_number, call_type, billsec, started_at
+                FROM tez_lead_calls
+                WHERE operator_id IS NULL
+                  AND internal_number <> ''
+                  AND employee_name = ''
+                  AND started_at >= %s AND started_at < %s
+                """,
+                (window_from, window_to)
+            )
+            return [{'general_call_id': r[0], 'internal_number': r[1],
+                     'call_type': r[2], 'billsec': r[3], 'started_at': r[4]}
+                    for r in cursor.fetchall()]
+
+    def restore_tez_call_operators(self, rows):
+        """Проставляет восстановленную привязку звонкам (ключ — generalCallID).
+
+        rows — список dict'ов general_call_id / employee_name / operator_id /
+        is_qualifying. Имя пишем тоже: иначе в разборе спора у звонка так и
+        останется пустой сотрудник, хотя успешка ему засчитана.
+        """
+        values = [
+            (str(r['general_call_id'])[:32], str(r.get('employee_name') or '')[:255],
+             int(r['operator_id']), bool(r.get('is_qualifying')))
+            for r in (rows or []) if r.get('operator_id')
+        ]
+        if not values:
+            return 0
+        with self._get_cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                UPDATE tez_lead_calls c SET
+                    employee_name = v.employee_name,
+                    operator_id = v.operator_id,
+                    is_qualifying = v.is_qualifying
+                FROM (VALUES %s) AS v(general_call_id, employee_name, operator_id, is_qualifying)
+                WHERE c.general_call_id = v.general_call_id
+                """,
+                values,
+                template="(%s, %s, %s::int, %s::boolean)",
+                page_size=500,
+            )
+            return cursor.rowcount
+
     def get_tez_call_synced_days(self, start_day, end_day):
         """Дни, за которые зеркало звонков уже перекачано целиком (set из date)."""
         with self._get_cursor() as cursor:
@@ -16856,9 +16954,24 @@ class Database:
                      operator_id, is_qualifying)
                 VALUES %s
                 ON CONFLICT (general_call_id) DO UPDATE SET
-                    operator_id = EXCLUDED.operator_id,
-                    is_qualifying = EXCLUDED.is_qualifying,
-                    employee_name = EXCLUDED.employee_name,
+                    -- Повторная выкачка НЕ имеет права стереть уже известного
+                    -- сотрудника. Binotel перестаёт отдавать employeeData по
+                    -- старым звонкам, если сотрудника удалили у себя (так на
+                    -- проде 05.08.2026 обнулилась привязка звонков с sip 927 —
+                    -- уволенного оператора ОП — и 19 успешек июля исчезли).
+                    -- Пустое имя в ответе означает «нечем уточнить», а не
+                    -- «звонок ничей»: новое значение принимаем, только если оно
+                    -- содержательное.
+                    operator_id = COALESCE(EXCLUDED.operator_id, tez_lead_calls.operator_id),
+                    is_qualifying = CASE
+                        WHEN EXCLUDED.operator_id IS NULL AND tez_lead_calls.operator_id IS NOT NULL
+                            THEN tez_lead_calls.is_qualifying
+                        ELSE EXCLUDED.is_qualifying
+                    END,
+                    employee_name = CASE
+                        WHEN EXCLUDED.employee_name <> '' THEN EXCLUDED.employee_name
+                        ELSE tez_lead_calls.employee_name
+                    END,
                     -- Итог разговора тоже обновляем: зеркало перекачивает
                     -- сегодня и вчера как раз потому, что звонок мог попасть в
                     -- выдачу незавершённым. Оставь мы billsec от первой
@@ -17025,6 +17138,15 @@ class Database:
                 )
         return stats
 
+    def count_tez_successes(self, year, month):
+        """Сколько успешек сейчас засчитано за период (для контроля убыли)."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM tez_lead_successes WHERE year = %s AND month = %s",
+                (int(year), int(month))
+            )
+            return int((cursor.fetchone() or [0])[0] or 0)
+
     def get_tez_lead_funnel(self, year, month):
         """Воронка по базе месяца: загружено -> обзвонено -> дозвонились -> выехали -> успешки."""
         from tez_op_leads import ALMATY_TZ, call_window_for_period
@@ -17169,6 +17291,51 @@ class Database:
                 tuple(params)
             )
             return [{'date': r[0].isoformat(), 'successes': int(r[1] or 0)} for r in cursor.fetchall()]
+
+    def get_tez_successes_for_day(self, year, month, success_date, group_id=None):
+        """Успешки одного дня со всей раскладкой «кто позвонил -> кто выехал».
+
+        Для карточки дня в разбивке «По дням»: там нужно не число, а сами
+        контакты, дошедшие до заказа. Отдельный метод вместо фильтра в общей
+        детализации лидов: тут выборка идёт от успешки, поэтому и группа, и день
+        применяются без риска молча отрезать лиды без успешки.
+        """
+        params = [int(year), int(month), success_date]
+        group_sql = ''
+        if group_id:
+            group_sql = self._TEZ_GROUP_FILTER_SQL
+            params.append(int(group_id))
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT s.phone_norm, l.full_name,
+                       s.operator_id, COALESCE(u.name, s.operator_name),
+                       s.call_at AT TIME ZONE 'Asia/Almaty',
+                       s.first_order_at AT TIME ZONE 'Asia/Almaty',
+                       s.rule_code, s.is_late, c.billsec, batch.file_name
+                FROM tez_lead_successes s
+                JOIN tez_leads l ON l.id = s.lead_id
+                LEFT JOIN users u ON u.id = s.operator_id
+                LEFT JOIN tez_lead_calls c ON c.general_call_id = s.call_general_id
+                LEFT JOIN tez_lead_batches batch ON batch.id = l.first_batch_id
+                WHERE s.year = %s AND s.month = %s AND s.success_date = %s
+                {group_sql}
+                ORDER BY s.call_at
+                """,
+                tuple(params)
+            )
+            return [{
+                'phone': r[0],
+                'full_name': r[1] or '',
+                'operator_id': int(r[2]) if r[2] is not None else None,
+                'operator_name': r[3] or '',
+                'call_at': r[4].isoformat() if r[4] else None,
+                'first_order_at': r[5].isoformat() if r[5] else None,
+                'rule_code': r[6],
+                'is_late': bool(r[7]),
+                'talk_duration_seconds': int(r[8]) if r[8] is not None else None,
+                'source_file_name': r[9] or '',
+            } for r in cursor.fetchall()]
 
     def get_tez_successes_operator_day(self, year, month, group_id=None, operator_id=None):
         """Успешки по оператору и дню — для таба «Успешки» в учёте часов.

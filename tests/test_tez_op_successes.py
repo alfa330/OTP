@@ -437,10 +437,24 @@ class GroupFilterTests(unittest.TestCase):
         """Повторная выкачка дня обязана обновлять итог звонка, а не только оператора:
         звонок мог попасть в первую выдачу незавершённым (billsec = 0)."""
         start = self.src.index("def save_tez_lead_calls")
-        body = self.src[start:start + 2600]
+        body = self.src[start:start + 3600]
         for field in ("billsec = EXCLUDED.billsec", "disposition = EXCLUDED.disposition",
                       "call_type = EXCLUDED.call_type"):
             self.assertIn(field, body)
+
+    def test_call_upsert_never_erases_known_operator(self):
+        """Повторная выкачка НЕ должна обнулять уже известного сотрудника.
+
+        Binotel перестаёт отдавать employeeData по старым звонкам удалённого у
+        себя сотрудника. Слепой перезаписью это стирало привязку и убивало уже
+        начисленные успешки (прод, 05.08.2026: sip 927, 19 успешек июля).
+        """
+        start = self.src.index("def save_tez_lead_calls")
+        body = self.src[start:start + 3600]
+        self.assertIn("operator_id = COALESCE(EXCLUDED.operator_id, tez_lead_calls.operator_id)", body)
+        self.assertIn("WHEN EXCLUDED.employee_name <> '' THEN EXCLUDED.employee_name", body)
+        # Оператор сохранён -> сохраняется и признак квалифицирующего звонка.
+        self.assertIn("THEN tez_lead_calls.is_qualifying", body)
 
     def test_funnel_window_bounds_are_built_in_python(self):
         """Границы окна — готовые aware-даты, а не `date AT TIME ZONE` в SQL.
@@ -454,6 +468,22 @@ class GroupFilterTests(unittest.TestCase):
         body = self.src[start:start + 3000]
         self.assertIn("datetime.combine(window_start, dt_time.min, tzinfo=ALMATY_TZ)", body)
         self.assertNotIn("::date AT TIME ZONE", body)
+
+    def test_day_drilldown_returns_successes_with_call_details(self):
+        """Карточка дня в календаре: не число, а сами контакты, дошедшие до заказа."""
+        self.assertIn(
+            "def get_tez_successes_for_day(self, year, month, success_date, group_id=None)",
+            self.src,
+        )
+        start = self.src.index("def get_tez_successes_for_day")
+        body = self.src[start:start + 2600]
+        self.assertIn("s.success_date = %s", body)
+        self.assertIn("_TEZ_GROUP_FILTER_SQL", body)
+        # Длительность разговора берём у того самого звонка, что дал успешку.
+        self.assertIn("c.general_call_id = s.call_general_id", body)
+        for field in ("'phone'", "'operator_name'", "'call_at'", "'first_order_at'",
+                      "'rule_code'", "'talk_duration_seconds'"):
+            self.assertIn(field, body)
 
     def test_operator_day_view_exists_and_group_aware(self):
         """Таб «Успешки»: агрегат оператор→день, месяц по дате поездки, с группой.

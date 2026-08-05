@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import InfoHint from '../common/InfoHint';
+import { IosModal } from '../ui/ios';
 
 /**
  * База лидов TEZ ОП и статистика успешек.
@@ -314,6 +315,150 @@ const BatchActionDialog = ({
   );
 };
 
+const WEEKDAY_LABELS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+// Длительность разговора везде в секундах — голым числом, тем же, что в
+// выгрузке и в правиле успешки (порог 10), чтобы одну метрику не приходилось
+// переводить из одного вида в другой. Единица подписана в заголовке колонки.
+const fmtSeconds = (value) => (value == null ? '—' : `${Math.max(0, Math.round(Number(value) || 0))}`);
+
+// 'YYYY-MM-DDTHH:MM' -> 'HH:MM'. Дата у поездки всегда равна дню карточки,
+// поэтому в карточке дня показываем только время — иначе дублируем заголовок.
+const fmtTimeOnly = (value) => {
+  const text = fmtDateTime(value);
+  return text === '—' ? text : text.slice(11, 16) || text;
+};
+
+const dayTitle = (iso) => {
+  if (!iso) return '';
+  const [y, m, d] = String(iso).split('-').map((v) => parseInt(v, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const month = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'][m - 1] || '';
+  const weekday = WEEKDAY_LABELS[(dt.getUTCDay() + 6) % 7];
+  return `${d} ${month}, ${weekday}`;
+};
+
+/**
+ * Календарь месяца вместо списка дат: где густо, а где пусто, видно одним
+ * взглядом, а день с успешками раскрывается в карточку с самими контактами.
+ * Заливка — не украшение: она кодирует относительную нагрузку дня, поэтому
+ * пустые дни не красим вообще.
+ */
+const SuccessCalendar = ({ year, month, byDay, activeDate, onPick }) => {
+  const cells = useMemo(() => {
+    const counts = new Map((byDay || []).map((row) => [row.date, Number(row.successes) || 0]));
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    // Неделя начинается с понедельника, как во всех наших графиках.
+    const lead = (new Date(Date.UTC(year, month - 1, 1)).getUTCDay() + 6) % 7;
+    const out = new Array(lead).fill(null);
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const date = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      out.push({ day, date, successes: counts.get(date) || 0 });
+    }
+    return out;
+  }, [year, month, byDay]);
+
+  const peak = useMemo(
+    () => cells.reduce((max, cell) => Math.max(max, cell?.successes || 0), 0),
+    [cells]
+  );
+  const today = new Date();
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+  const tone = (count) => {
+    if (!count) return 'bg-white border-slate-200 text-slate-300';
+    const share = peak ? count / peak : 0;
+    if (share <= 0.34) return 'bg-emerald-50/80 border-emerald-100 text-emerald-800';
+    if (share <= 0.67) return 'bg-emerald-100/80 border-emerald-200 text-emerald-900';
+    return 'bg-emerald-200/80 border-emerald-300 text-emerald-950';
+  };
+
+  return (
+    <div className="p-3">
+      <div className="mb-1.5 grid grid-cols-7 gap-1.5 sm:gap-2">
+        {WEEKDAY_LABELS.map((label) => (
+          <div key={label} className="text-center text-[11px] font-medium uppercase tracking-wide text-slate-400">
+            {label}
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
+        {cells.map((cell, idx) => {
+          if (!cell) return <div key={`pad-${idx}`} aria-hidden="true" />;
+          const empty = !cell.successes;
+          const isActive = activeDate === cell.date;
+          return (
+            <button
+              key={cell.date}
+              type="button"
+              disabled={empty}
+              onClick={() => onPick?.(cell.date)}
+              aria-label={`${cell.day} число, успешек ${cell.successes}`}
+              className={`flex aspect-square flex-col items-center justify-center rounded-2xl border shadow-sm transition ${tone(cell.successes)} ${
+                empty ? 'cursor-default' : 'hover:-translate-y-0.5 hover:shadow active:scale-[0.97]'
+              } ${isActive ? 'ring-2 ring-emerald-500 ring-offset-1' : ''} ${
+                cell.date === todayIso && !isActive ? 'ring-1 ring-slate-300' : ''
+              }`}
+            >
+              <span className={`text-[11px] tabular-nums ${empty ? 'text-slate-300' : 'text-slate-500'}`}>
+                {cell.day}
+              </span>
+              <span className={`text-base sm:text-lg font-bold tabular-nums leading-none ${empty ? 'text-slate-200' : ''}`}>
+                {cell.successes || '·'}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+/** Одна успешка в карточке дня: кто позвонил -> кто выехал. */
+const DaySuccessRow = ({ row }) => (
+  <div className="rounded-2xl border border-slate-200 bg-white px-3.5 py-3 shadow-sm">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <div className="min-w-0">
+        <div className="truncate text-sm font-semibold text-slate-900">{row.full_name || 'Без имени'}</div>
+        <div className="font-mono text-xs text-slate-500">{row.phone}</div>
+      </div>
+      <div className="text-right">
+        <div className="text-[11px] uppercase tracking-wide text-slate-400">Оператор</div>
+        <div className="truncate text-sm font-medium text-slate-800">{row.operator_name || '—'}</div>
+      </div>
+    </div>
+    <div className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-slate-100 pt-2.5 sm:grid-cols-4">
+      <div>
+        <div className="text-[11px] uppercase tracking-wide text-slate-400">Звонок</div>
+        <div className="text-xs tabular-nums text-slate-700">{fmtDateTime(row.call_at)}</div>
+      </div>
+      <div>
+        <div className="text-[11px] uppercase tracking-wide text-slate-400">Разговор, сек</div>
+        <div className="text-xs tabular-nums text-slate-700">{fmtSeconds(row.talk_duration_seconds)}</div>
+      </div>
+      <div>
+        <div className="text-[11px] uppercase tracking-wide text-slate-400">Первый заказ</div>
+        <div className="text-xs tabular-nums text-slate-700">{fmtTimeOnly(row.first_order_at)}</div>
+      </div>
+      <div>
+        <div className="text-[11px] uppercase tracking-wide text-slate-400">Засчитано</div>
+        <div className="text-xs text-slate-700">{RULE_LABELS[row.rule_code] || row.rule_code || '—'}</div>
+      </div>
+    </div>
+    {(row.is_late || row.source_file_name) && (
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+        {row.is_late && (
+          <span className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">
+            найдена после закрытия месяца
+          </span>
+        )}
+        {row.source_file_name && <span className="truncate">из базы «{row.source_file_name}»</span>}
+      </div>
+    )}
+  </div>
+);
+
 const TezLeadsPanel = ({
   apiBaseUrl = '',
   userId,
@@ -348,6 +493,10 @@ const TezLeadsPanel = ({
   const [batchActionError, setBatchActionError] = useState('');
   const [batchBusy, setBatchBusy] = useState(false);
   const [showDeleted, setShowDeleted] = useState(true);
+  // Раскрытый день календаря: {date, loading, rows, error}. Данные тянем по
+  // клику, а не вместе со статистикой: успешек за месяц сотни, и грузить их все
+  // ради одного дня незачем.
+  const [dayView, setDayView] = useState(null);
   const [historyState, setHistoryState] = useState({
     batchId: null,
     status: 'idle',
@@ -727,6 +876,28 @@ const TezLeadsPanel = ({
       .finally(() => setBusy(false));
   }, [apiBaseUrl, headers, year, monthNum, validPeriod, loadStats, loadLeads, tab]);
 
+  const openDay = useCallback((date) => {
+    if (!validPeriod || !date) return;
+    setDayView({ date, loading: true, rows: [], error: '' });
+    axios
+      .get(`${apiBaseUrl}/api/tez_leads/day`, {
+        params: { year, month: monthNum, date, group_id: groupId || undefined },
+        headers,
+      })
+      .then((resp) => setDayView({
+        date, loading: false, rows: resp?.data?.successes || [], error: '',
+      }))
+      .catch((err) => setDayView({
+        date,
+        loading: false,
+        rows: [],
+        error: err?.response?.data?.error || 'Не удалось загрузить успешки дня',
+      }));
+  }, [apiBaseUrl, headers, year, monthNum, groupId, validPeriod]);
+
+  // Смена месяца или группы делает открытый день чужим — закрываем.
+  useEffect(() => { setDayView(null); }, [statsScopeKey]);
+
   const statsIsCurrent = Boolean(stats && statsLoadedScope === statsScopeKey);
   const currentStats = statsIsCurrent ? stats : null;
   const batches = currentStats?.batches || [];
@@ -1005,6 +1176,39 @@ const TezLeadsPanel = ({
 
   return (
     <div className="space-y-4">
+      <IosModal
+        open={Boolean(dayView)}
+        onClose={() => setDayView(null)}
+        title={dayTitle(dayView?.date)}
+        subtitle={
+          dayView?.loading
+            ? 'Загружаем…'
+            : `Успешек: ${dayView?.rows?.length || 0}${groupId ? ' · по выбранной группе' : ''}`
+        }
+        maxWidth="max-w-2xl"
+      >
+        {dayView?.loading && (
+          <div className="py-10 text-center text-sm text-slate-400">
+            <FaIcon className="fas fa-spinner fa-spin mr-2" />
+            Загружаем успешки дня
+          </div>
+        )}
+        {!dayView?.loading && dayView?.error && (
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-sm text-rose-700">
+            {dayView.error}
+          </div>
+        )}
+        {!dayView?.loading && !dayView?.error && (
+          <div className="space-y-2">
+            {(dayView?.rows || []).map((row) => (
+              <DaySuccessRow key={`${row.phone}-${row.call_at || ''}`} row={row} />
+            ))}
+            {!(dayView?.rows || []).length && (
+              <div className="py-10 text-center text-sm text-slate-400">За этот день успешек нет</div>
+            )}
+          </div>
+        )}
+      </IosModal>
       <BatchActionDialog
         mode={batchAction?.mode}
         batch={batchAction?.batch}
@@ -1286,25 +1490,28 @@ const TezLeadsPanel = ({
         )}
 
         {tab === 'days' && (
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 text-gray-600">
-              <tr>
-                <th className="text-left px-3 py-2">Дата поездки</th>
-                <th className="text-right px-3 py-2">Успешки</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(currentStats?.by_day || []).map((row) => (
-                <tr key={row.date} className="border-t">
-                  <td className="px-3 py-2">{row.date}</td>
-                  <td className="px-3 py-2 text-right font-semibold">{row.successes}</td>
-                </tr>
-              ))}
-              {!(currentStats?.by_day || []).length && (
-                <tr><td colSpan={2} className="px-3 py-6 text-center text-gray-400">Нет данных</td></tr>
-              )}
-            </tbody>
-          </table>
+          validPeriod ? (
+            <>
+              <div className="flex items-center gap-1.5 px-3 pt-3 text-xs text-slate-500">
+                День = дата первой поездки водителя
+                <InfoHint title="Что показывает календарь" side="right">
+                  Успешка датируется днём, когда водитель выполнил первый заказ, — поэтому
+                  звонок мог быть и в прошлом месяце. Заливка показывает загрузку дня
+                  относительно самого результативного. Нажмите на день, чтобы увидеть,
+                  какие именно контакты дошли до заказа.
+                </InfoHint>
+              </div>
+              <SuccessCalendar
+                year={year}
+                month={monthNum}
+                byDay={currentStats?.by_day || []}
+                activeDate={dayView?.date || null}
+                onPick={openDay}
+              />
+            </>
+          ) : (
+            <div className="px-3 py-6 text-center text-gray-400">Нет данных</div>
+          )
         )}
 
         {tab === 'batches' && (

@@ -212,11 +212,10 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         source_column = headers.index("Источник") + 1
         duration_column = headers.index("Время разговора") + 1
         self.assertEqual(sheet.cell(2, source_column).value, "Лиды Алматы июль.xlsx")
-        self.assertEqual(
-            sheet.cell(2, duration_column).value,
-            timedelta(hours=1, minutes=2, seconds=3),
-        )
-        self.assertEqual(sheet.cell(2, duration_column).number_format, "[h]:mm:ss")
+        # Длительность — число секунд, а не формат времени: отчёт считают и
+        # фильтруют в секундах, в них же задан порог успешки.
+        self.assertEqual(sheet.cell(2, duration_column).value, 3723)
+        self.assertEqual(sheet.cell(2, duration_column).number_format, "0")
 
     def test_missing_talk_duration_is_an_empty_excel_cell(self):
         _, sheet = self._export(
@@ -248,6 +247,23 @@ class TezLeadsExcelExportTests(unittest.TestCase):
             '=HYPERLINK("https://example.invalid")',
         )
         self.assertEqual(sheet.cell(2, source_column).data_type, "s")
+
+    def test_phone_column_is_text_formatted(self):
+        """«Телефон» должен быть текстом и по типу, и по формату ячейки.
+
+        С форматом «Общий» Excel при первой же правке превращает 77012345678 в
+        число (длинные номера — в экспоненту), и номер перестаёт совпадать при
+        поиске и сверке с базой.
+        """
+        _, sheet = self._export([self._detail_row()])
+        headers = [cell.value for cell in sheet[1]]
+        phone_column = headers.index("Телефон") + 1
+        cell = sheet.cell(2, phone_column)
+        self.assertEqual(cell.data_type, "s")
+        self.assertEqual(cell.number_format, "@")
+        # Длительность разговора — по-прежнему число, а не текст.
+        duration_column = headers.index("Время разговора") + 1
+        self.assertEqual(sheet.cell(2, duration_column).number_format, "0")
 
     def test_active_prev_month_exports_previous_reason_without_hiding_current_trip(self):
         _, sheet = self._export(

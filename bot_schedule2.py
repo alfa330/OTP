@@ -32751,6 +32751,10 @@ def _tez_leads_excel_text_cell(ws, row, column, value):
     # openpyxl автоматически помечает строки с "=" как formula. Источник и
     # ФИО приходят из загруженного пользователем файла, поэтому тип задаём явно.
     cell.data_type = 's'
+    # Формат ячейки — «Текстовый». Без него у колонки остаётся «Общий», и Excel
+    # при любой правке или пересохранении превращает телефон 77012345678 в число
+    # (а длинные номера — в экспоненту), теряя ведущие нули и ломая поиск.
+    cell.number_format = '@'
     return cell
 
 
@@ -32973,6 +32977,39 @@ def tez_leads_stats():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/tez_leads/day', methods=['GET'])
+@require_api_key
+def tez_leads_day():
+    """Успешки одного дня — раскрытие карточки в разбивке «По дням»."""
+    requester_id, error = _tez_leads_require_manager()
+    if error:
+        return error
+    year, month = _tez_leads_period_from_request()
+    if not year:
+        return jsonify({"error": "Некорректный период (year/month)"}), 400
+
+    raw_date = (request.args.get('date') or '').strip()
+    try:
+        success_date = datetime.strptime(raw_date, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({"error": "Некорректная дата (ожидается YYYY-MM-DD)"}), 400
+    if (success_date.year, success_date.month) != (year, month):
+        return jsonify({"error": "Дата вне выбранного месяца"}), 400
+
+    group_raw = request.args.get('group_id')
+    try:
+        group_id = int(group_raw) if group_raw else None
+    except (TypeError, ValueError):
+        group_id = None
+
+    try:
+        rows = db.get_tez_successes_for_day(year, month, success_date, group_id=group_id)
+    except Exception:
+        logging.exception('tez_leads: не удалось собрать успешки дня')
+        return jsonify({"error": "Internal server error"}), 500
+    return jsonify({"date": success_date.isoformat(), "group_id": group_id, "successes": rows})
+
+
 @app.route('/api/tez_leads/detail', methods=['GET'])
 @require_api_key
 def tez_leads_detail():
@@ -33098,18 +33135,21 @@ def tez_leads_export():
         _tez_leads_excel_text_cell(
             ws, idx, 10, (row['call_at'] or '').replace('T', ' ')[:19]
         )
+        # Длительность — обычное число секунд, а не формат времени: по решению
+        # владельца отчёт считают и фильтруют в секундах (порог успешки тоже
+        # задан в секундах), а «00:44» для этого пришлось бы конвертировать.
         duration_seconds = row.get('talk_duration_seconds')
         duration_cell = ws.cell(
             row=idx,
             column=11,
             value=(
-                timedelta(seconds=max(int(duration_seconds), 0))
+                max(int(duration_seconds), 0)
                 if duration_seconds is not None
                 else ''
             ),
         )
         if duration_seconds is not None:
-            duration_cell.number_format = '[h]:mm:ss'
+            duration_cell.number_format = '0'
         _tez_leads_excel_text_cell(ws, idx, 12, row['success_date'] or '')
 
     for col, width in enumerate(
@@ -33159,6 +33199,11 @@ def tez_leads_recompute():
         calls = tez_lead_service.sync_calls_for_converted(
             db, year, month, binotel_client, resolve_operator
         )
+        # Локальный шаг без запросов в Binotel: возвращает привязку звонкам,
+        # у которых провайдер забыл сотрудника (удалён при увольнении).
+        restored = tez_lead_service.reattribute_calls_without_operator(
+            db, year, month, resolve_operator
+        )
         outcomes = tez_lead_service.recompute_outcomes(db, year, month)
     except RuntimeError as exc:
         # Понятные причины (Cloudflare-блок, нет токена и т.п.) показываем как есть.
@@ -33172,6 +33217,7 @@ def tez_leads_recompute():
         "first_orders": orders,
         "calls_mirror": mirror,
         "calls": calls,
+        "restored_calls": restored,
         "outcomes": outcomes,
     })
 

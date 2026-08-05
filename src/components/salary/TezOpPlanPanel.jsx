@@ -137,10 +137,12 @@ const TezOpPlanPanel = ({ apiBaseUrl = '', userId, departmentId, month, canEdit 
           <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-800">
             Общий план отдела
             <InfoHint title="Как считается общий план" side="left">
-              Сумма ставок всех не уволенных операторов ОП ({fmt(summary.fte_total, 2)} FTE,
+              Сумма ставок операторов ОП, работавших в этом месяце ({fmt(summary.fte_total, 2)} FTE,
               {' '}{summary.operators_count} чел.) × план на 1 FTE ({fmt(summary.plan_per_fte)})
               × {fmt(summary.coefficient, 2)}. Приём или уход сотрудника
-              внутри месяца ставку не дробит. Закрытие = успешки отдела за месяц ÷ этот план.
+              внутри месяца ставку не дробит, и увольнение план не уменьшает: успешки
+              ушедшего идут в факт, значит и его ставка остаётся в плане.
+              Закрытие = успешки отдела за месяц ÷ этот план.
             </InfoHint>
           </div>
           <div>
