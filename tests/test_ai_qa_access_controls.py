@@ -45,7 +45,10 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertIn('view === "ai_qa" && canAccessAiQaSection', self.app_source)
 
     def test_frontend_allows_szov_department_head_for_ai_qa_and_verifier_chats(self):
-        self.assertIn("const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);", self.app_source)
+        self.assertIn(
+            "const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);",
+            self.app_source,
+        )
         self.assertIn("const isAiQaDepartmentHead = (userLike) => (", self.app_source)
         self.assertIn("userLike?.headed_department_codes ?? userLike?.headedDepartmentCodes", self.app_source)
         self.assertIn("isAiQaDepartmentHead(userLike) ||", self.app_source)
@@ -58,14 +61,15 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertIn("int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS", self.api_source)
         self.assertIn("if _is_super_admin_role(role):", self.api_source)
 
-    def test_backend_recognizes_op_and_szov_department_heads(self):
+    def test_backend_recognizes_op_szov_and_marketing_department_heads(self):
         departments = {
             367: {"id": 367, "code": "op"},
             501: {"id": 501, "code": "SZoV"},
             777: {"id": 777, "code": "tez"},
+            888: {"id": 888, "code": "marketing"},
         }
-        headed_by_user = {10: 367, 20: 501, 30: 777, 50: 777}
-        all_headed_by_user = {10: {367}, 20: {501}, 30: {777}, 50: {777, 501}}
+        headed_by_user = {10: 367, 20: 501, 30: 777, 50: 777, 60: 888}
+        all_headed_by_user = {10: {367}, 20: {501}, 30: {777}, 50: {777, 501}, 60: {888}}
         fn = _load_function(
             self.api_source,
             "_is_ai_qa_department_head",
@@ -74,7 +78,7 @@ class AiQaAccessControlTests(unittest.TestCase):
                 "_headed_department_id": lambda user_id: headed_by_user.get(user_id),
                 "_headed_department_ids": lambda user_id: frozenset(all_headed_by_user.get(user_id, set())),
                 "AI_QA_OP_DEPARTMENT_ID": 367,
-                "AI_QA_HEAD_DEPARTMENT_CODES": frozenset({"op", "szov"}),
+                "AI_QA_HEAD_DEPARTMENT_CODES": frozenset({"op", "szov", "marketing"}),
             },
         )
 
@@ -83,6 +87,13 @@ class AiQaAccessControlTests(unittest.TestCase):
         self.assertFalse(fn(30))
         self.assertFalse(fn(40))
         self.assertTrue(fn(50), "Access must consider every formally headed department")
+        self.assertTrue(fn(60), "Глава маркетинга допущен наравне с главами ОП и СЗоВ")
+
+    def test_backend_head_department_codes_include_marketing(self):
+        self.assertIn(
+            "AI_QA_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov', 'marketing'})",
+            self.api_source,
+        )
 
     def test_user_payload_exposes_formal_head_department_codes(self):
         self.assertIn('"headed_department_code": headed_department_code', self.api_source)
