@@ -1,5 +1,7 @@
 import ast
 import math
+from functools import lru_cache
+from datetime import datetime
 import re
 import textwrap
 import unittest
@@ -12,9 +14,15 @@ DATABASE_PATH = ROOT / "database.py"
 BOT_PATH = ROOT / "bot_schedule2.py"
 
 
-def _function_source(path, function_name, class_name=None):
+@lru_cache(maxsize=None)
+def _parsed_module(path):
     source = path.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    return source, ast.parse(source)
+
+
+@lru_cache(maxsize=None)
+def _function_source(path, function_name, class_name=None):
+    source, module = _parsed_module(path)
     body = module.body
     if class_name:
         class_node = next(
@@ -58,6 +66,14 @@ class _BreakAdjustDummy(_MergeDummy):
         self.occupied = occupied or []
         self.cross_gap = int(cross_gap or 0)
 
+    def _normalize_schedule_date(self, value):
+        if hasattr(value, "year") and not isinstance(value, str):
+            return value
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+
+    def _almaty_now(self):
+        return datetime(2026, 8, 6, 12, 0)
+
     def _load_occupied_break_intervals_for_operator_date_tx(self, cursor, operator_id, shift_date):
         return list(self.occupied)
 
@@ -75,17 +91,30 @@ class _TechReasonDummy:
 BREAK_ADJUST_METHODS = (
     "_break_intervals_overlap",
     "_merge_break_intervals",
+    "_normalize_break_intervals_soft",
     "_pad_break_intervals_for_cross_gap",
     "_break_layout_spacing",
     "_break_start_bounds_for_index",
     "_break_total_overlap_minutes",
     "_find_best_break_start",
+    "_place_break_durations_centered_minutes",
+    "_fit_break_durations_to_window",
+    "_seed_break_positions_from_existing",
+    "_split_breaks_by_freeze_boundary",
+    "_remaining_break_durations_after_used",
+    "_break_freeze_boundary_minutes",
     "_adjust_shift_breaks_against_occupied_tx",
 )
 
 
 def _make_break_adjust_dummy(occupied=None):
-    namespace = {"math": math}
+    namespace = {
+        "math": math,
+        "datetime": datetime,
+        "SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES": 30,
+        "SHIFT_BREAK_MIN_GAP_MINUTES": 15,
+        "SHIFT_BREAK_PLANNING_BUFFER_MINUTES": 15,
+    }
     for function_name in BREAK_ADJUST_METHODS:
         exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
 
@@ -488,10 +517,11 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertIn("getPlannerBreakCrossGapForDirection", app_source)
         self.assertIn("crossOperatorGapMinutes", app_source)
         # Все три места локальной симуляции перерывов должны знать про промежуток.
+        # Все места локальной симуляции перерывов должны знать про промежуток:
+        # часть вызовов многострочная (туда добавлены замороженные перерывы).
         self.assertEqual(
-            app_source.count(
-                "getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection)"
-            ),
+            app_source.count("getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection)")
+            + app_source.count("getPlannerBreakCrossGapForDirection,\n"),
             3,
         )
 
@@ -567,6 +597,292 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "SHIFT_OVERLAPS_EXISTING"):
             resolve(_MergeDummy(), [(1, "18:30", "21:00")], 19 * 60, 23 * 60)
+
+
+class BreakFreezePastTests(unittest.TestCase):
+    """Прошедшие перерывы не переставляются и не удаляются автоматикой."""
+
+    OSNOVA_RULES = None  # используем дефолтные правила: 8-11 ч → [15, 30, 15]
+
+    def _dummy(self, occupied=None):
+        return _make_break_adjust_dummy(occupied=occupied)
+
+    def _plan(self, dummy, seg_start, seg_end, durations, day_breaks, now, shift_date="2026-08-06",
+              occupied_extra=None):
+        """Повторяет серверный сценарий: граница → сплит → норма минус отсиженное → раскладка."""
+        boundary = dummy._break_freeze_boundary_minutes(shift_date, seg_start=seg_start, now=now)
+        planning_from = boundary + 15
+        frozen, upcoming, used = dummy._split_breaks_by_freeze_boundary(
+            day_breaks, planning_from, seg_start=seg_start, seg_end=seg_end
+        )
+        nothing_to_protect = not frozen and not used and not upcoming
+        if (planning_from <= seg_start and not used) or (nothing_to_protect and planning_from >= seg_end):
+            window_start = seg_start
+            planned = dummy._place_break_durations_centered_minutes(seg_start, seg_end, durations)
+        else:
+            window_start = min(max(seg_start, planning_from), seg_end)
+            planned = dummy._place_break_durations_centered_minutes(
+                window_start,
+                seg_end,
+                dummy._fit_break_durations_to_window(
+                    window_start,
+                    seg_end,
+                    dummy._remaining_break_durations_after_used(durations, used),
+                ),
+            )
+        planned = dummy._seed_break_positions_from_existing(planned, upcoming)
+        return dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date=shift_date,
+            start_time="%02d:%02d" % (seg_start // 60, seg_start % 60),
+            end_time="%02d:%02d" % ((seg_end // 60) % 24, seg_end % 60),
+            breaks=planned,
+            cross_gap_minutes=0,
+            frozen_breaks=frozen,
+            planning_from_minutes=window_start,
+            extra_occupied=occupied_extra,
+        )
+
+    def test_extending_shift_midway_keeps_used_break_and_adds_only_missing(self):
+        # Смена 12:00-18:30, перерыв 13:00-13:15 уже отсижен, в 13:30 продлили до 21:00.
+        dummy = self._dummy()
+        result = self._plan(
+            dummy,
+            seg_start=12 * 60,
+            seg_end=21 * 60,
+            durations=[15, 30, 15],
+            day_breaks=[{"start": 13 * 60, "end": 13 * 60 + 15}],
+            now=datetime(2026, 8, 6, 13, 30),
+        )
+        self.assertIn({"start": 13 * 60, "end": 13 * 60 + 15}, result)
+        self.assertEqual(sum(b["end"] - b["start"] for b in result), 60)
+        for item in result[1:]:
+            self.assertGreaterEqual(item["start"], 13 * 60 + 45)
+
+    def test_no_break_is_planned_in_already_passed_time(self):
+        # Перерывов ещё не было, «сейчас» 12:20 — ни один перерыв не встаёт раньше 12:35.
+        dummy = self._dummy()
+        result = self._plan(
+            dummy,
+            seg_start=12 * 60,
+            seg_end=21 * 60,
+            durations=[15, 30, 15],
+            day_breaks=[],
+            now=datetime(2026, 8, 6, 12, 20),
+        )
+        self.assertTrue(result)
+        for item in result:
+            self.assertGreaterEqual(item["start"], 12 * 60 + 35)
+
+    def test_break_in_progress_is_not_moved(self):
+        # Перерыв 13:05-13:20 идёт прямо сейчас (13:10) — остаётся на месте.
+        dummy = self._dummy()
+        result = self._plan(
+            dummy,
+            seg_start=12 * 60,
+            seg_end=21 * 60,
+            durations=[15, 30, 15],
+            day_breaks=[{"start": 13 * 60 + 5, "end": 13 * 60 + 20}],
+            now=datetime(2026, 8, 6, 13, 10),
+        )
+        self.assertEqual(result[0], {"start": 13 * 60 + 5, "end": 13 * 60 + 20})
+
+    def test_shortened_shift_keeps_clipped_past_break(self):
+        # Смену подрезали до 16:45, перерыв 16:30-17:00 уже начался — остаётся обрезанным.
+        dummy = self._dummy()
+        result = self._plan(
+            dummy,
+            seg_start=12 * 60,
+            seg_end=16 * 60 + 45,
+            durations=[15, 15],
+            day_breaks=[{"start": 16 * 60 + 30, "end": 17 * 60}],
+            now=datetime(2026, 8, 6, 16, 40),
+        )
+        self.assertEqual(result, [{"start": 16 * 60 + 30, "end": 16 * 60 + 45}])
+
+    def test_used_break_outside_new_interval_is_not_reissued(self):
+        # Начало смены сдвинули на 14:00; отсиженный в 13:00 перерыв хранить негде,
+        # но и полный набор заново выдавать нельзя.
+        dummy = self._dummy()
+        frozen, upcoming, used = dummy._split_breaks_by_freeze_boundary(
+            [{"start": 13 * 60, "end": 13 * 60 + 15}],
+            15 * 60,
+            seg_start=14 * 60,
+            seg_end=18 * 60 + 30,
+        )
+        self.assertEqual(frozen, [])
+        self.assertEqual(upcoming, [])
+        self.assertEqual(used, [])
+
+    def test_remaining_norm_counts_minutes_not_slots(self):
+        dummy = self._dummy()
+        # Отсидел обед — остаются два коротких, а не второй обед.
+        self.assertEqual(
+            dummy._remaining_break_durations_after_used([15, 30, 15], [{"start": 0, "end": 30}]),
+            [15, 15],
+        )
+        # Отсидел короткий — остаются обед и второй короткий.
+        self.assertEqual(
+            dummy._remaining_break_durations_after_used([15, 30, 15], [{"start": 0, "end": 15}]),
+            [30, 15],
+        )
+        self.assertEqual(
+            dummy._remaining_break_durations_after_used(
+                [15, 30, 15],
+                [{"start": 0, "end": 30}, {"start": 100, "end": 130}],
+            ),
+            [],
+        )
+        self.assertEqual(dummy._remaining_break_durations_after_used([15, 30, 15], []), [15, 30, 15])
+
+    def test_narrow_remaining_window_gets_no_break_instead_of_cramming(self):
+        # Смену продлили в 20:00 до 21:00 — в остаток перерыв не влезает.
+        dummy = self._dummy()
+        result = self._plan(
+            dummy,
+            seg_start=12 * 60,
+            seg_end=21 * 60,
+            durations=[15, 30, 15],
+            day_breaks=[],
+            now=datetime(2026, 8, 6, 20, 0),
+        )
+        self.assertEqual(result, [])
+
+    def test_night_claim_on_lot_date_is_not_treated_as_past(self):
+        # Ночной кусок 00:00-08:00 хранится на дате лота: граница обязана выравниваться,
+        # иначе смена целиком считается прошедшей и остаётся без перерывов.
+        dummy = self._dummy()
+        result = self._plan(
+            dummy,
+            seg_start=0,
+            seg_end=8 * 60,
+            durations=[15, 30, 15],
+            day_breaks=[],
+            now=datetime(2026, 8, 5, 21, 0),
+            shift_date="2026-08-05",
+        )
+        self.assertEqual(len(result), 3)
+
+    def test_future_date_layout_is_bit_identical_to_legacy(self):
+        # Для будущих дат заморозка обязана схлопываться в прежнее поведение.
+        cases = [
+            (12 * 60, 21 * 60, [15, 30, 15]),
+            (9 * 60, 15 * 60, [15, 15]),
+            (8 * 60, 20 * 60, [15, 30, 15, 15]),
+            (10 * 60, 15 * 60 + 30, [15]),
+            (22 * 60, 30 * 60, [15, 30, 15]),
+        ]
+        colleague_sets = [
+            [],
+            [{"start": 16 * 60 + 15, "end": 16 * 60 + 45}],
+            [{"start": 13 * 60, "end": 13 * 60 + 15}, {"start": 18 * 60, "end": 18 * 60 + 30}],
+        ]
+        for seg_start, seg_end, durations in cases:
+            for occupied in colleague_sets:
+                for cross_gap in (0, 15, 45):
+                    legacy_dummy = self._dummy(occupied=[dict(x) for x in occupied])
+                    planned = legacy_dummy._place_break_durations_centered_minutes(
+                        seg_start, seg_end, durations
+                    )
+                    legacy = legacy_dummy._adjust_shift_breaks_against_occupied_tx(
+                        cursor=None,
+                        operator_id=1,
+                        shift_date="2026-08-20",
+                        start_time="%02d:%02d" % (seg_start // 60, seg_start % 60),
+                        end_time="%02d:%02d" % ((seg_end // 60) % 24, seg_end % 60),
+                        breaks=[dict(x) for x in planned],
+                        cross_gap_minutes=cross_gap,
+                    )
+                    frozen_dummy = self._dummy(occupied=[dict(x) for x in occupied])
+                    with_freeze = frozen_dummy._adjust_shift_breaks_against_occupied_tx(
+                        cursor=None,
+                        operator_id=1,
+                        shift_date="2026-08-20",
+                        start_time="%02d:%02d" % (seg_start // 60, seg_start % 60),
+                        end_time="%02d:%02d" % ((seg_end // 60) % 24, seg_end % 60),
+                        breaks=[dict(x) for x in planned],
+                        cross_gap_minutes=cross_gap,
+                        frozen_breaks=[],
+                        planning_from_minutes=seg_start,
+                    )
+                    self.assertEqual(legacy, with_freeze, f"{seg_start}-{seg_end} gap={cross_gap}")
+
+    def test_split_tolerates_broken_input(self):
+        dummy = self._dummy()
+        frozen, upcoming, used = dummy._split_breaks_by_freeze_boundary(
+            [None, "мусор", {"start": 10, "end": 5}, {"start": "x", "end": 3}, {"start": 600, "end": 615}],
+            700,
+            seg_start=0,
+            seg_end=1440,
+        )
+        self.assertEqual(frozen, [{"start": 600, "end": 615}])
+        self.assertEqual(upcoming, [])
+        self.assertEqual(used, [{"start": 600, "end": 615}])
+
+    def test_upcoming_break_keeps_its_place_when_shift_changes(self):
+        # Перерыв, который уже стоит в графике и ещё не начался, не должен уезжать.
+        dummy = self._dummy()
+        seeded = dummy._seed_break_positions_from_existing(
+            [{"start": 15 * 60, "end": 15 * 60 + 15}, {"start": 18 * 60, "end": 18 * 60 + 30}],
+            [{"start": 16 * 60 + 20, "end": 16 * 60 + 35}],
+        )
+        self.assertIn({"start": 16 * 60 + 20, "end": 16 * 60 + 35}, seeded)
+        self.assertIn({"start": 18 * 60, "end": 18 * 60 + 30}, seeded)
+
+
+class BreakFreezeWiringTests(unittest.TestCase):
+    """Правило заморозки продублировано во всех трёх реализациях алгоритма."""
+
+    def test_save_shift_takes_day_snapshot_before_deleting(self):
+        source = _function_source(DATABASE_PATH, "_save_shift_tx", class_name="Database")
+        self.assertIn("_load_day_shift_breaks_tx", source)
+        self.assertIn("_split_breaks_by_freeze_boundary", source)
+        self.assertIn("planning_from_minutes=planning_window_start", source)
+        snapshot_pos = source.index("day_breaks_snapshot = self._load_day_shift_breaks_tx")
+        delete_pos = source.index("DELETE FROM work_shifts")
+        self.assertLess(snapshot_pos, delete_pos, "снимок обязан сниматься до удаления смен")
+
+    def test_paths_that_clear_the_day_pass_snapshot(self):
+        for method_name in (
+            "respond_shift_swap_request",
+            "publish_shift_auction_test_to_work_schedules",
+            "apply_work_schedule_bulk_actions",
+            "import_work_schedule_excel_entries",
+            "post_auction_claim_lot",
+            "post_auction_claim_saved_shift",
+            "_split_post_auction_shift_slice_tx",
+        ):
+            source = _function_source(DATABASE_PATH, method_name, class_name="Database")
+            self.assertIn("_load_day_shift_breaks_tx", source, method_name)
+            self.assertIn("day_breaks_snapshot", source, method_name)
+
+    def test_recalculate_never_touches_past_days(self):
+        source = _function_source(DATABASE_PATH, "recalculate_work_schedule_breaks", class_name="Database")
+        self.assertIn("start_date_obj = today_obj", source)
+        self.assertIn("skipped_past_days", source)
+        clamp_pos = source.index("start_date_obj = today_obj")
+        delete_pos = source.index("DELETE FROM shift_breaks")
+        self.assertLess(clamp_pos, delete_pos, "прошлое отсекается до массового удаления")
+
+    def test_import_simulation_mirrors_freeze_rules(self):
+        source = _function_source(BOT_PATH, "_ws_compute_breaks_for_entries")
+        self.assertIn("_ws_break_freeze_boundary_minutes", source)
+        self.assertIn("_ws_remaining_break_durations_after_used", source)
+        self.assertIn("frozen_breaks_by_index", source)
+        adjust_source = _function_source(BOT_PATH, "_ws_adjust_breaks_for_operator_on_date")
+        self.assertIn("planning_from_minutes", adjust_source)
+        self.assertIn("protected", adjust_source)
+
+    def test_frontend_mirrors_freeze_rules(self):
+        app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8")
+        self.assertIn("breakFreezeBoundaryMinutes", app_source)
+        self.assertIn("planBreaksForShiftWithFrozen", app_source)
+        self.assertIn("frozenBreaksBySegIndex", app_source)
+        self.assertIn("Asia/Almaty", app_source)
+        # прошедший перерыв в редакторе не перетаскивается
+        self.assertIn("перерыв уже прошёл, изменить нельзя", app_source)
+        self.assertIn("modalFrozenBreakIndexes", app_source)
 
 
 if __name__ == "__main__":
