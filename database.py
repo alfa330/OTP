@@ -46842,6 +46842,32 @@ class Database:
             cursor.execute("UPDATE glb_chats SET updated_at = NOW() WHERE chat_id = %s", (chat_id,))
         return {'chat_id': chat_id, 'departments': department_names}
 
+    def get_group_late_available_chats(self):
+        """Группы, в которых бот уже есть, но которых нет в рассылке.
+
+        Telegram не даёт боту список своих чатов, поэтому берём из того, что мы
+        сами записали при добавлении бота: общий реестр обнаруженных чатов
+        (it_ticket_channels, туда пишет тот же обработчик my_chat_member).
+        Так админ выбирает чат из списка, а не выясняет chat_id руками."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c.chat_id::text, c.title, c.chat_type, c.last_seen_at
+                FROM it_ticket_channels c
+                WHERE c.is_active
+                  AND c.chat_type IN ('group', 'supergroup')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM glb_chats g WHERE g.chat_id = c.chat_id::text
+                  )
+                ORDER BY COALESCE(c.title, c.chat_id::text)
+            """)
+            items = [{
+                'chat_id': row[0],
+                'title': row[1],
+                'chat_type': row[2],
+                'seen_at': row[3].isoformat() if row[3] else None,
+            } for row in cursor.fetchall()]
+        return {'items': items}
+
     def get_group_late_departments(self):
         """Справочник отделов Workpace + к скольким чатам привязан каждый отдел."""
         with self._get_cursor() as cursor:

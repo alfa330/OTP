@@ -4,12 +4,13 @@ import {
     Activity, AlertCircle, AlertTriangle, Bell, BellOff, Building2, CalendarClock,
     CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet, Loader2, LogOut,
     MessageSquare, Moon, Plus, RefreshCw, Search, Send, ShieldAlert, Trash2,
-    UserX, Zap,
+    UserX, X, Zap,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 
 /* Раздел «Бот опозданий» — управление Telegram-ботом group_late_bot, который
@@ -104,6 +105,33 @@ const SegButton = ({ active, onClick, icon: Icon, children }) => (
                        : 'text-slate-500 hover:text-slate-700'}`}>
         <Icon size={13} /> {children}
     </button>
+);
+
+/* Сегментированный переключатель на 2–3 значения: там, где вариантов мало,
+ * он читается быстрее выпадающего списка. */
+const SegmentedFilter = ({ value, options, onChange }) => (
+    <div className="flex rounded-xl bg-slate-100 p-1">
+        {options.map((option) => (
+            <button key={option.value} type="button" onClick={() => onChange(option.value)}
+                    className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
+                        value === option.value
+                            ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                            : 'text-slate-500 hover:text-slate-700'}`}>
+                {option.label}
+            </button>
+        ))}
+    </div>
+);
+
+/* Поле фильтра с подписью: подписи держат строку фильтров ровной, а без них
+ * непонятно, что означает выбранное значение. */
+const FilterField = ({ label, children, className = '' }) => (
+    <label className={`flex flex-col gap-1 ${className}`}>
+        <span className="px-1 text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+            {label}
+        </span>
+        {children}
+    </label>
 );
 
 /* Плитка показателя. Число — главный элемент, подпись под ним; цвет берём
@@ -272,6 +300,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const [chats, setChats] = useState(null);
     const [chatsError, setChatsError] = useState(null);
+    const [availableChats, setAvailableChats] = useState([]);
     const [departments, setDepartments] = useState(null);
     const [mutes, setMutes] = useState(null);
     const [pollRuns, setPollRuns] = useState(null);
@@ -317,6 +346,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         axios.get(`${base}/chats`, { headers: headers(), params: { days: 7 } })
             .then((r) => setChats(r.data.items || []))
             .catch((e) => { setChats([]); setChatsError(errText(e, 'Не удалось загрузить чаты')); });
+        // Группы, где бот уже есть, но рассылка не подключена — их предлагаем
+        // в «Подключить чат», чтобы не искать chat_id руками.
+        axios.get(`${base}/available_chats`, { headers: headers() })
+            .then((r) => setAvailableChats(r.data.items || []))
+            .catch(() => setAvailableChats([]));
     }, [base, headers]);
 
     const loadDepartments = useCallback(() => {
@@ -496,6 +530,18 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         searchDebounce.current = setTimeout(() => applyEventFilters({ q: value.trim() }), 350);
     };
 
+    // Период — не «фильтр», который сбрасывают: он всегда выбран.
+    const activeEventFilters = [
+        eventFilters.type, eventFilters.department, eventFilters.chatId, eventFilters.q,
+        eventFilters.ack !== 'all' ? eventFilters.ack : '',
+    ].filter(Boolean).length;
+
+    const resetEventFilters = () => {
+        setEventSearch('');
+        clearTimeout(searchDebounce.current);
+        applyEventFilters({ type: '', department: '', chatId: '', q: '', ack: 'all' });
+    };
+
     /* ─── вкладки ──────────────────────────────────────────────────────── */
 
     const totals = overview?.totals || {};
@@ -512,6 +558,22 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         if (!overview) return <LoadingBlock />;
         return (
             <div className="space-y-3">
+                {totals.chats_enabled === 0 && (
+                    <div className={`${iosCard} flex items-start gap-2.5 border-l-4 border-l-amber-400 px-4 py-3`}>
+                        <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-500" />
+                        <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-slate-600">
+                            Опрос смен идёт, но в рассылку не включён ни один чат — поэтому нарушения
+                            не фиксируются и никуда не уходят. Так и задумано: иначе при подключении
+                            первого чата туда посыпалась бы вся накопленная история.
+                            {totals.chats_total > 0
+                                ? ' Включите нужный чат тумблером на вкладке «Чаты».'
+                                : ' Добавьте бота в рабочую группу — она появится на вкладке «Чаты».'}
+                        </div>
+                        <button onClick={() => setTab('chats')} className={`${iosBtnSecondary} shrink-0 py-1.5 text-[12.5px]`}>
+                            <MessageSquare size={12} /> К чатам
+                        </button>
+                    </div>
+                )}
                 <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 px-4 py-3.5`}>
                     <div className="flex items-center gap-3">
                         <span className={`grid h-10 w-10 place-items-center rounded-full ${
@@ -670,49 +732,93 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     const renderEvents = () => (
         <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-                <IosDateRangePicker from={eventFilters.from} to={eventFilters.to} max={isoDate(new Date())}
-                                    onChange={({ from, to }) => applyEventFilters({ from, to })} />
-                <select value={eventFilters.type} onChange={(e) => applyEventFilters({ type: e.target.value })}
-                        className={`${iosInput} w-auto py-2 text-[13px]`}>
-                    <option value="">Все типы</option>
-                    {Object.entries(EVENT_TYPES).map(([key, meta]) => (
-                        <option key={key} value={key}>{meta.label}</option>
-                    ))}
-                </select>
-                <select value={eventFilters.ack} onChange={(e) => applyEventFilters({ ack: e.target.value })}
-                        className={`${iosInput} w-auto py-2 text-[13px]`}>
-                    <option value="all">Отбитые и нет</option>
-                    <option value="pending">Только неотбитые</option>
-                    <option value="acked">Только отбитые</option>
-                </select>
-                <select value={eventFilters.chatId} onChange={(e) => applyEventFilters({ chatId: e.target.value })}
-                        className={`${iosInput} w-auto py-2 text-[13px]`}>
-                    <option value="">Любой чат</option>
-                    {(chats || []).map((chat) => (
-                        <option key={chat.chat_id} value={chat.chat_id}>{chat.title || chat.chat_id}</option>
-                    ))}
-                </select>
-                <div className="relative">
-                    <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input value={eventSearch} onChange={(e) => onEventSearch(e.target.value)}
-                           placeholder="Сотрудник или отдел…" className={`${iosInput} w-56 py-2 pl-8 text-[13px]`} />
+            <div className={`${iosCard} p-3`}>
+                <div className="flex flex-wrap items-end gap-2.5">
+                    <FilterField label="Период">
+                        <IosDateRangePicker from={eventFilters.from} to={eventFilters.to} max={isoDate(new Date())}
+                                            onChange={({ from, to }) => applyEventFilters({ from, to })} />
+                    </FilterField>
+                    <FilterField label="Статус">
+                        <SegmentedFilter
+                            value={eventFilters.ack}
+                            onChange={(ack) => applyEventFilters({ ack })}
+                            options={[
+                                { value: 'all', label: 'Все' },
+                                { value: 'pending', label: 'Ждут' },
+                                { value: 'acked', label: 'Отбитые' },
+                            ]}
+                        />
+                    </FilterField>
+                    <FilterField label="Тип нарушения" className="w-[190px]">
+                        <CustomSelect
+                            variant="ios"
+                            value={eventFilters.type}
+                            onChange={(type) => applyEventFilters({ type })}
+                            options={[
+                                { value: '', label: 'Все типы' },
+                                ...Object.entries(EVENT_TYPES).map(([key, meta]) => ({
+                                    value: key, label: meta.label,
+                                })),
+                            ]}
+                            ariaLabel="Тип нарушения"
+                        />
+                    </FilterField>
+                    <FilterField label="Отдел" className="w-[190px]">
+                        <CustomSelect
+                            variant="ios"
+                            searchable
+                            value={eventFilters.department}
+                            onChange={(department) => applyEventFilters({ department })}
+                            options={[
+                                { value: '', label: 'Все отделы' },
+                                ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                // Отдел из истории, которого уже нет в Workpace, иначе исчез бы
+                                // из фильтра вместе с самим справочником.
+                                ...(eventFilters.department
+                                    && !departmentNames.some((dept) => dept.name === eventFilters.department)
+                                    ? [{ value: eventFilters.department, label: eventFilters.department }]
+                                    : []),
+                            ]}
+                            searchPlaceholder="Поиск отдела…"
+                            ariaLabel="Отдел"
+                        />
+                    </FilterField>
+                    <FilterField label="Чат" className="w-[190px]">
+                        <CustomSelect
+                            variant="ios"
+                            searchable={(chats || []).length > 7}
+                            value={eventFilters.chatId}
+                            onChange={(chatId) => applyEventFilters({ chatId })}
+                            options={[
+                                { value: '', label: 'Любой чат' },
+                                ...(chats || []).map((chat) => ({
+                                    value: chat.chat_id, label: chat.title || chat.chat_id,
+                                })),
+                            ]}
+                            searchPlaceholder="Поиск чата…"
+                            ariaLabel="Чат"
+                        />
+                    </FilterField>
+                    <FilterField label="Поиск" className="min-w-[200px] flex-1">
+                        <div className="relative">
+                            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                            <input value={eventSearch} onChange={(e) => onEventSearch(e.target.value)}
+                                   placeholder="Сотрудник или отдел…"
+                                   className={`${iosInput} py-2 pl-8 text-[13px]`} />
+                        </div>
+                    </FilterField>
+                    <div className="flex items-center gap-1 pb-0.5">
+                        {activeEventFilters > 0 && (
+                            <button onClick={resetEventFilters} className={iosBtnGhost}>
+                                <X size={13} /> Сбросить{activeEventFilters > 1 ? ` (${activeEventFilters})` : ''}
+                            </button>
+                        )}
+                        <button onClick={() => loadEvents(eventFilters)} className={iosBtnGhost}>
+                            <RefreshCw size={13} /> Обновить
+                        </button>
+                    </div>
                 </div>
-                {(eventFilters.department || eventFilters.type) && (
-                    <button onClick={() => applyEventFilters({ department: '', type: '' })} className={iosBtnGhost}>
-                        Сбросить фильтры
-                    </button>
-                )}
-                <button onClick={() => loadEvents(eventFilters)} className={`${iosBtnGhost} ml-auto`}>
-                    <RefreshCw size={13} /> Обновить
-                </button>
             </div>
-
-            {eventFilters.department && (
-                <div className="px-1 text-[12px] text-slate-500">
-                    Отдел: <span className="font-medium text-slate-700">{eventFilters.department}</span>
-                </div>
-            )}
 
             <div className={`${iosCard} overflow-hidden`}>
                 {eventsError ? <ErrorBlock>{eventsError}</ErrorBlock>
@@ -920,12 +1026,57 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         <RefreshCw size={13} /> Обновить
                     </button>
                     <button onClick={() => setChatModal({
-                        mode: 'create', chat_id: '', title: '', note: '', departments: [], welcome: true,
+                        mode: 'create', chat_id: '', title: '', note: '', departments: [],
+                        welcome: true, manual: availableChats.length === 0,
                     })} className={iosBtnPrimary}>
-                        <Plus size={13} /> Добавить чат
+                        <Plus size={13} /> Подключить чат
+                        {availableChats.length > 0 && (
+                            <span className="rounded-full bg-white/25 px-1.5 text-[11px] font-semibold">
+                                {availableChats.length}
+                            </span>
+                        )}
                     </button>
                 </div>
             </div>
+
+            {availableChats.length > 0 && (
+                <section className={`${iosCard} border-l-4 border-l-blue-400 p-4`}>
+                    <div className="flex items-start gap-2.5">
+                        <MessageSquare size={16} className="mt-0.5 shrink-0 text-blue-500" />
+                        <div className="min-w-0 flex-1">
+                            <div className="text-[13px] font-semibold text-slate-900">
+                                Бот уже в этих группах, но рассылка не подключена
+                            </div>
+                            <div className="mt-0.5 text-[12px] text-slate-500">
+                                Нажмите «Подключить», чтобы выбрать отделы и включить чат в рассылку.
+                            </div>
+                            <div className="mt-2 max-h-52 space-y-1 overflow-y-auto pr-1">
+                                {availableChats.map((candidate) => (
+                                    <div key={candidate.chat_id}
+                                         className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                                        <div className="min-w-0">
+                                            <div className="truncate text-[13px] font-medium text-slate-800">
+                                                {candidate.title || candidate.chat_id}
+                                            </div>
+                                            <div className="text-[11px] text-slate-400">
+                                                <code>{candidate.chat_id}</code>
+                                                {candidate.chat_type === 'supergroup' ? ' · супергруппа' : ' · группа'}
+                                            </div>
+                                        </div>
+                                        <button onClick={() => setChatModal({
+                                            mode: 'create', chat_id: candidate.chat_id,
+                                            title: candidate.title || '', note: '', departments: [],
+                                            welcome: true, manual: false,
+                                        })} className={`${iosBtnSecondary} shrink-0 py-1.5 text-[12.5px]`}>
+                                            <Plus size={12} /> Подключить
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            )}
 
             <div className={`${iosCard} overflow-hidden`}>
                 {chatsError ? <ErrorBlock>{chatsError}</ErrorBlock>
@@ -1341,14 +1492,68 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             >
                 {chatModal && (
                     <div className="space-y-4">
-                        {chatModal.mode === 'create' && (
+                        {chatModal.mode === 'create' && !chatModal.manual && (
+                            <div>
+                                <div className={`${iosGroupLabel} mb-1.5`}>Группы, где бот уже есть</div>
+                                {availableChats.length === 0 ? (
+                                    <div className="rounded-xl bg-slate-50 px-3.5 py-3 text-[12.5px] text-slate-500">
+                                        Свободных групп нет — все, где есть бот, уже в списке рассылки.
+                                    </div>
+                                ) : (
+                                    <div className="max-h-60 overflow-y-auto rounded-xl bg-slate-50 ring-1 ring-slate-200/70">
+                                        {availableChats.map((candidate) => {
+                                            const picked = chatModal.chat_id === candidate.chat_id;
+                                            return (
+                                                <button key={candidate.chat_id} type="button"
+                                                        onClick={() => setChatModal({
+                                                            ...chatModal,
+                                                            chat_id: candidate.chat_id,
+                                                            title: candidate.title || '',
+                                                        })}
+                                                        className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition hover:bg-white">
+                                                    <span className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full transition ${
+                                                        picked ? 'bg-blue-600 text-white' : 'bg-white ring-1 ring-slate-300'}`}>
+                                                        {picked && <CheckCircle2 size={12} />}
+                                                    </span>
+                                                    <span className="min-w-0">
+                                                        <span className={`block truncate text-[13px] ${
+                                                            picked ? 'font-semibold text-slate-900' : 'text-slate-700'}`}>
+                                                            {candidate.title || candidate.chat_id}
+                                                        </span>
+                                                        <span className="block text-[11px] text-slate-400">
+                                                            <code>{candidate.chat_id}</code>
+                                                            {candidate.chat_type === 'supergroup' ? ' · супергруппа' : ' · группа'}
+                                                        </span>
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                                <button type="button"
+                                        onClick={() => setChatModal({ ...chatModal, manual: true, chat_id: '' })}
+                                        className="mt-1.5 px-1 text-[11.5px] font-medium text-blue-600 hover:underline">
+                                    Ввести Chat ID вручную
+                                </button>
+                            </div>
+                        )}
+                        {chatModal.mode === 'create' && chatModal.manual && (
                             <div>
                                 <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Chat ID</label>
                                 <input value={chatModal.chat_id} autoFocus
                                        onChange={(e) => setChatModal({ ...chatModal, chat_id: e.target.value })}
                                        placeholder="-1001234567890" className={iosInput} />
-                                <div className="mt-1 px-1 text-[11px] text-slate-500">
-                                    Обычно вручную не нужно: добавьте бота в группу — и чат появится в списке сам
+                                <div className="mt-1 flex items-center justify-between gap-2 px-1">
+                                    <span className="text-[11px] text-slate-500">
+                                        Нужен, только если бота добавили давно и группа не попала в список
+                                    </span>
+                                    {availableChats.length > 0 && (
+                                        <button type="button"
+                                                onClick={() => setChatModal({ ...chatModal, manual: false, chat_id: '' })}
+                                                className="shrink-0 text-[11.5px] font-medium text-blue-600 hover:underline">
+                                            Выбрать из списка
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -1416,14 +1621,18 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         {muteModal.kind === 'dept' ? (
                             <div>
                                 <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Отдел</label>
-                                <select value={muteModal.value}
-                                        onChange={(e) => setMuteModal({ ...muteModal, value: e.target.value })}
-                                        className={iosInput}>
-                                    <option value="">Выберите отдел…</option>
-                                    {departmentNames.map((dept) => (
-                                        <option key={dept.name} value={dept.name}>{dept.name}</option>
-                                    ))}
-                                </select>
+                                <CustomSelect
+                                    variant="ios"
+                                    searchable
+                                    value={muteModal.value}
+                                    onChange={(value) => setMuteModal({ ...muteModal, value })}
+                                    options={[
+                                        { value: '', label: 'Выберите отдел…' },
+                                        ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                    ]}
+                                    searchPlaceholder="Поиск отдела…"
+                                    ariaLabel="Отдел"
+                                />
                             </div>
                         ) : muteModal.kind === 'user' ? (
                             <div>
@@ -1439,16 +1648,21 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         )}
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Область</label>
-                            <select value={muteModal.chatId}
-                                    onChange={(e) => setMuteModal({ ...muteModal, chatId: e.target.value })}
-                                    className={iosInput}>
-                                <option value="">Глобально — во всех чатах</option>
-                                {(chats || []).map((chat) => (
-                                    <option key={chat.chat_id} value={chat.chat_id}>
-                                        Только в «{chat.title || chat.chat_id}»
-                                    </option>
-                                ))}
-                            </select>
+                            <CustomSelect
+                                variant="ios"
+                                searchable={(chats || []).length > 7}
+                                value={muteModal.chatId}
+                                onChange={(chatId) => setMuteModal({ ...muteModal, chatId })}
+                                options={[
+                                    { value: '', label: 'Глобально — во всех чатах' },
+                                    ...(chats || []).map((chat) => ({
+                                        value: chat.chat_id,
+                                        label: `Только в «${chat.title || chat.chat_id}»`,
+                                    })),
+                                ]}
+                                searchPlaceholder="Поиск чата…"
+                                ariaLabel="Область правила"
+                            />
                         </div>
                     </div>
                 )}
@@ -1481,27 +1695,37 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         </div>
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Отдел</label>
-                            <select value={reportModal.department}
-                                    onChange={(e) => setReportModal({ ...reportModal, department: e.target.value })}
-                                    className={iosInput}>
-                                <option value="">Все отделы</option>
-                                {departmentNames.map((dept) => (
-                                    <option key={dept.name} value={dept.name}>{dept.name}</option>
-                                ))}
-                            </select>
+                            <CustomSelect
+                                variant="ios"
+                                searchable
+                                value={reportModal.department}
+                                onChange={(department) => setReportModal({ ...reportModal, department })}
+                                options={[
+                                    { value: '', label: 'Все отделы' },
+                                    ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                ]}
+                                searchPlaceholder="Поиск отдела…"
+                                ariaLabel="Отдел отчёта"
+                            />
                         </div>
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
                                 Отправить в чат <span className="text-slate-400">(необязательно)</span>
                             </label>
-                            <select value={reportModal.chatId}
-                                    onChange={(e) => setReportModal({ ...reportModal, chatId: e.target.value })}
-                                    className={iosInput}>
-                                <option value="">Не отправлять — только сохранить здесь</option>
-                                {(chats || []).map((chat) => (
-                                    <option key={chat.chat_id} value={chat.chat_id}>{chat.title || chat.chat_id}</option>
-                                ))}
-                            </select>
+                            <CustomSelect
+                                variant="ios"
+                                searchable={(chats || []).length > 7}
+                                value={reportModal.chatId}
+                                onChange={(chatId) => setReportModal({ ...reportModal, chatId })}
+                                options={[
+                                    { value: '', label: 'Не отправлять — только сохранить здесь' },
+                                    ...(chats || []).map((chat) => ({
+                                        value: chat.chat_id, label: chat.title || chat.chat_id,
+                                    })),
+                                ]}
+                                searchPlaceholder="Поиск чата…"
+                                ariaLabel="Чат для отправки"
+                            />
                         </div>
                         <div className="flex items-start gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 text-[12px] text-slate-500">
                             <CalendarClock size={14} className="mt-0.5 shrink-0 text-slate-400" />
