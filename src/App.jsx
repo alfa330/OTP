@@ -11488,6 +11488,124 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             const parseDateStr = (s) => { const [y, m, day] = String(s).split('-').map(Number); return new Date(y, m - 1, day); };
             const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+            // Прошедшие перерывы не пересчитываются: планируем только остаток смены,
+            // не раньше чем через BREAK_PLANNING_BUFFER_MIN минут (зеркало сервера).
+            const BREAK_PLANNING_BUFFER_MIN = 15;
+            const BREAK_MIN_EDGE_MARGIN_MIN = 30;
+            const BREAK_MIN_GAP_MIN = 15;
+            // Время рабочего часового пояса, а не браузера: СВ может сидеть в другом городе,
+            // и «прошедшим» перерыв должен считаться одинаково у него и на сервере.
+            const almatyNowParts = () => {
+                try {
+                    const parts = new Intl.DateTimeFormat('en-GB', {
+                        timeZone: 'Asia/Almaty',
+                        year: 'numeric', month: '2-digit', day: '2-digit',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit',
+                        hour12: false
+                    }).formatToParts(new Date()).reduce((acc, part) => {
+                        if (part.type !== 'literal') acc[part.type] = Number(part.value);
+                        return acc;
+                    }, {});
+                    if (!Number.isFinite(parts.year)) throw new Error('no parts');
+                    return parts;
+                } catch (_) {
+                    const now = new Date();
+                    return {
+                        year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate(),
+                        hour: now.getHours(), minute: now.getMinutes(), second: now.getSeconds()
+                    };
+                }
+            };
+            // Граница прошлого для даты в минутах от её полуночи. Для будущих дат
+            // отрицательна (замораживать нечего), segStart выравнивает шкалу ночных смен.
+            const breakFreezeBoundaryMinutes = (dateStr, segStart = null) => {
+                const parts = almatyNowParts();
+                const nowDate = new Date(parts.year, parts.month - 1, parts.day);
+                const target = parseDateStr(dateStr);
+                if (!(target instanceof Date) || Number.isNaN(target.getTime())) return Number.NEGATIVE_INFINITY;
+                const dayDelta = Math.round((nowDate.getTime() - target.getTime()) / 86400000);
+                let boundary = (dayDelta * 1440) + (parts.hour * 60) + parts.minute + (parts.second ? 1 : 0);
+                if (segStart !== null && Number.isFinite(Number(segStart))) {
+                    while (boundary - Number(segStart) >= 1440) boundary -= 1440;
+                }
+                return boundary;
+            };
+            // Делит перерывы на прошедшие (в этой смене), будущие и «зачтённые в норму».
+            const splitBreaksByFreezeBoundary = (breaks, boundaryMin, segStart = null, segEnd = null) => {
+                const frozen = [];
+                const upcoming = [];
+                const used = [];
+                const prepared = (Array.isArray(breaks) ? breaks : [])
+                    .map(b => ({ start: Number(b?.start), end: Number(b?.end) }))
+                    .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start)
+                    .sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                prepared.forEach(item => {
+                    const clippedStart = segStart === null ? item.start : Math.max(item.start, Number(segStart));
+                    const clippedEnd = segEnd === null ? item.end : Math.min(item.end, Number(segEnd));
+                    const inside = clippedEnd - clippedStart;
+                    if (item.start < boundaryMin) {
+                        if (inside <= 0) return;
+                        used.push({ ...item });
+                        if (inside >= 5) frozen.push({ start: clippedStart, end: clippedEnd });
+                        return;
+                    }
+                    if (segStart !== null && item.start < Number(segStart)) return;
+                    if (segEnd !== null && item.end > Number(segEnd)) return;
+                    upcoming.push({ ...item });
+                });
+                return { frozen, upcoming, used };
+            };
+            // Норма минус уже отсиженные минуты: доплановываем только недостающее.
+            const remainingBreakDurationsAfterUsed = (durations, usedBreaks) => {
+                const list = (Array.isArray(durations) ? durations : []).map(Number).filter(v => Number.isFinite(v) && v > 0);
+                if (list.length === 0) return [];
+                const usedMinutes = (Array.isArray(usedBreaks) ? usedBreaks : []).reduce((sum, b) => {
+                    const value = Number(b?.end) - Number(b?.start);
+                    return sum + (Number.isFinite(value) && value > 0 ? value : 0);
+                }, 0);
+                if (usedMinutes <= 0) return list.slice();
+                // Сперва списываем слот такой же длительности: отсидел обед — остаются короткие.
+                const remaining = list.slice();
+                (Array.isArray(usedBreaks) ? usedBreaks : []).forEach(b => {
+                    const length = Number(b?.end) - Number(b?.start);
+                    const idx = remaining.indexOf(length);
+                    if (idx >= 0) remaining.splice(idx, 1);
+                });
+                // Затем общий лимит: суммарно перерывов не больше нормы смены.
+                const budget = Math.max(0, list.reduce((a, b) => a + b, 0) - usedMinutes);
+                while (remaining.length > 0 && remaining.reduce((a, b) => a + b, 0) > budget) {
+                    remaining.splice(remaining.indexOf(Math.max(...remaining)), 1);
+                }
+                return remaining;
+            };
+            // Оставляем только те перерывы, что помещаются в окно с приличными отступами.
+            const fitBreakDurationsToWindow = (windowStart, windowEnd, durations) => {
+                const windowMinutes = Math.max(0, Number(windowEnd) - Number(windowStart));
+                const list = (Array.isArray(durations) ? durations : []).map(Number).filter(v => Number.isFinite(v) && v > 0);
+                while (list.length > 0) {
+                    const required = list.reduce((a, b) => a + b, 0)
+                        + (2 * BREAK_MIN_EDGE_MARGIN_MIN)
+                        + (BREAK_MIN_GAP_MIN * (list.length - 1));
+                    if (required <= windowMinutes) return list;
+                    list.pop();
+                }
+                return [];
+            };
+            // Перерыв той же длительности, который уже стоит в графике, остаётся на месте.
+            const seedBreakPositionsFromExisting = (plannedBreaks, existingBreaks) => {
+                const available = (Array.isArray(existingBreaks) ? existingBreaks : []).map(b => ({ ...b }));
+                const result = (Array.isArray(plannedBreaks) ? plannedBreaks : []).map(item => {
+                    const length = Number(item.end) - Number(item.start);
+                    const matchIndex = available.findIndex(x => (Number(x.end) - Number(x.start)) === length);
+                    if (matchIndex >= 0) {
+                        const match = available.splice(matchIndex, 1)[0];
+                        return { start: Number(match.start), end: Number(match.end) };
+                    }
+                    return { start: Number(item.start), end: Number(item.end) };
+                });
+                result.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                return result;
+            };
             const isSameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
             const plannerNormalizeDirectionKey = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
             const isChatManagerDirection = (directionValue) => {
@@ -11536,7 +11654,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return [];
             };
 
-            function computeBreaksForShiftMinutes(startMin, endMin, directionValue = null, breakRuleRanges = null) {
+            // Раскладывает заданные длительности по центрам равных долей отрезка.
+            // Используется и для целой смены, и для остатка смены после заморозки.
+            function placeBreakDurationsCentered(startMin, endMin, breakDurations) {
             const dur = endMin - startMin;
             const breaks = [];
             const snap5 = (x) => Math.round(x / 5) * 5;
@@ -11545,10 +11665,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const s = snap5(center - size / 2);
                 breaks.push({ start: s, end: s + size });
             };
-            const breakDurations = plannerPickBreakDurationsForShift(dur, directionValue, breakRuleRanges);
-            if (breakDurations.length > 0) {
-                const count = breakDurations.length;
-                breakDurations.forEach((size, idx) => {
+            const durations = (Array.isArray(breakDurations) ? breakDurations : [])
+                .map(Number)
+                .filter(v => Number.isFinite(v) && v > 0);
+            if (durations.length > 0) {
+                const count = durations.length;
+                durations.forEach((size, idx) => {
                     const center = startMin + (dur * ((idx + 1) / (count + 1)));
                     pushCentered(center, Number(size) || 0);
                 });
@@ -11556,6 +11678,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return breaks
                 .map(b => ({ start: Math.max(startMin, Math.min(endMin, snap5(b.start))), end: Math.max(startMin, Math.min(endMin, snap5(b.end))) }))
                 .filter(b => b.end > b.start);
+            }
+
+            function computeBreaksForShiftMinutes(startMin, endMin, directionValue = null, breakRuleRanges = null) {
+            const dur = endMin - startMin;
+            const breakDurations = plannerPickBreakDurationsForShift(dur, directionValue, breakRuleRanges);
+            return placeBreakDurationsCentered(startMin, endMin, breakDurations);
+            }
+
+            // Перерывы смены с учётом уже прошедших: норма по длительности смены минус
+            // отсиженное, разложенная только по остатку смены. Прошедшие не двигаются.
+            function planBreaksForShiftWithFrozen(startMin, endMin, directionValue, breakRuleRanges, dayBreaks, dateStr) {
+            const boundary = breakFreezeBoundaryMinutes(dateStr, startMin);
+            const planningFrom = boundary + BREAK_PLANNING_BUFFER_MIN;
+            const { frozen, upcoming, used } = splitBreaksByFreezeBoundary(dayBreaks, planningFrom, startMin, endMin);
+            const fullDurations = plannerPickBreakDurationsForShift(endMin - startMin, directionValue, breakRuleRanges);
+            if (planningFrom <= startMin && used.length === 0) {
+                return {
+                    frozen,
+                    planningFrom: startMin,
+                    breaks: seedBreakPositionsFromExisting(
+                        placeBreakDurationsCentered(startMin, endMin, fullDurations),
+                        upcoming
+                    )
+                };
+            }
+            const windowStart = Math.min(Math.max(startMin, planningFrom), endMin);
+            const planned = placeBreakDurationsCentered(
+                windowStart,
+                endMin,
+                fitBreakDurationsToWindow(windowStart, endMin, remainingBreakDurationsAfterUsed(fullDurations, used))
+            );
+            return { frozen, planningFrom: windowStart, breaks: seedBreakPositionsFromExisting(planned, upcoming) };
             }
 
             const intervalsOverlap = (a, b) => a.start < b.end && b.start < a.end;
@@ -12691,24 +12845,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return null;
             }
 
-            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null) {
+            // frozenBreaksBySegIndex — уже прошедшие перерывы сегмента: их не двигаем,
+            // они лишь занимают время. planningFromMinutes — минута, раньше которой
+            // новый перерыв ставить нельзя. Без них поведение прежнее.
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null, frozenBreaksBySegIndex = null, planningFromMinutes = null) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
             let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
             const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
                 ? getBreakRuleRangesForDirection(op?.direction)
                 : null;
-            for (const seg of segs) {
+            const frozenMap = (frozenBreaksBySegIndex && typeof frozenBreaksBySegIndex === 'object') ? frozenBreaksBySegIndex : {};
+            for (let segIndex = 0; segIndex < segs.length; segIndex += 1) {
+                const seg = segs[segIndex];
                 const rawSegStart = seg.__startMin ?? timeToMinutes(seg.start);
                 const rawSegEnd = seg.__endMin ?? (timeToMinutes(seg.end) + (timeToMinutes(seg.end) <= timeToMinutes(seg.start) ? 1440 : 0));
-                seg.breaks = seg.breaks ?? computeBreaksForShiftMinutes(
-                    rawSegStart,
-                    rawSegEnd,
-                    op?.direction,
-                    breakRuleRanges
-                );
                 const segStart = Math.max(0, rawSegStart);
                 const segEnd = Math.max(segStart, Math.min(2880, rawSegEnd));
+                const protectedBreaks = (frozenMap[segIndex] || [])
+                    .map(b => ({ start: Number(b?.start), end: Number(b?.end) }))
+                    .filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start && b.start >= segStart && b.end <= segEnd)
+                    .sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                if (!Array.isArray(seg.breaks) && protectedBreaks.length === 0) {
+                    seg.breaks = computeBreaksForShiftMinutes(
+                        rawSegStart,
+                        rawSegEnd,
+                        op?.direction,
+                        breakRuleRanges
+                    );
+                }
                 const preparedBreaks = (seg.breaks || [])
                     .map(b => ({
                         start: Number(b?.start || 0),
@@ -12718,20 +12883,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .sort((a, b) => (a.start - b.start) || (a.end - b.end))
                     .map(b => ({ ...b, length: b.end - b.start }));
 
+                protectedBreaks.forEach(item => occupied.push({ ...item }));
+                occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
+
                 if (preparedBreaks.length === 0) {
-                    seg.breaks = [];
+                    seg.breaks = protectedBreaks;
                     continue;
                 }
 
+                const protectedEnd = protectedBreaks.length > 0
+                    ? Math.max(...protectedBreaks.map(b => b.end))
+                    : null;
+                let winStart = segStart;
+                if (planningFromMinutes !== null && Number.isFinite(Number(planningFromMinutes))) {
+                    winStart = Math.max(winStart, Number(planningFromMinutes));
+                }
+                if (protectedEnd !== null) winStart = Math.max(winStart, protectedEnd);
+                winStart = Math.min(winStart, segEnd);
+
                 const breakDurations = preparedBreaks.map(b => b.length);
-                const { edgeMargin, minGap } = getBreakLayoutSpacing(segStart, segEnd, breakDurations);
+                const { edgeMargin, minGap } = getBreakLayoutSpacing(winStart, segEnd, breakDurations);
                 const newBreaks = [];
                 for (let idx = 0; idx < preparedBreaks.length; idx += 1) {
                 const b = preparedBreaks[idx];
                 const length = b.length;
-                let { lower, upper } = getBreakStartBoundsForIndex(segStart, segEnd, breakDurations, idx, edgeMargin, minGap);
+                let { lower, upper } = getBreakStartBoundsForIndex(winStart, segEnd, breakDurations, idx, edgeMargin, minGap);
                 if (newBreaks.length > 0 && minGap > 0) {
                     lower = Math.max(lower, newBreaks[newBreaks.length - 1].end + minGap);
+                } else if (protectedEnd !== null && minGap > 0) {
+                    lower = Math.max(lower, protectedEnd + minGap);
                 }
                 let desiredStart = upper >= lower ? Math.max(lower, Math.min(upper, b.start)) : b.start;
                 const found = findBestBreakStart(desiredStart, length, lower, upper, occupied);
@@ -12740,18 +12920,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     newBreaks.push(nb);
                     occupied.push(nb);
                 } else {
-                    let clampedStart = Math.max(segStart, Math.min(segEnd - length, b.start));
+                    let clampedStart = Math.max(winStart, Math.min(segEnd - length, b.start));
                     if (newBreaks.length > 0 && minGap > 0) {
                         clampedStart = Math.max(clampedStart, newBreaks[newBreaks.length - 1].end + minGap);
                     }
                     clampedStart = Math.min(clampedStart, segEnd - length);
+                    if (clampedStart < winStart) {
+                        occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                        continue;
+                    }
                     const clamped = { start: clampedStart, end: clampedStart + length };
                     newBreaks.push(clamped);
                     occupied.push(clamped);
                 }
                 occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
                 }
-                seg.breaks = newBreaks;
+                seg.breaks = protectedBreaks.concat(newBreaks).sort((a, b) => (a.start - b.start) || (a.end - b.end));
             }
             }
 
@@ -15781,6 +15965,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                   existing[editIndex] = { start, end, shift_type: normalizedShiftType };
                 }
 
+                // Снимок перерывов дня ДО слияния сегментов: дальше mergeSegments
+                // пересобирает смены и старые перерывы теряются.
+                const dayBreaksSnapshot = ((simOp.shifts?.[date] ?? []).flatMap(s => (
+                  Array.isArray(s.breaks) ? s.breaks.map(b => ({ start: Number(b.start), end: Number(b.end) })) : []
+                ))).filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
+
                 const merged = mergeSegments(existing, simOp?.direction, getPlannerBreakRuleRangesForDirection);
                 const inputStartMin = timeToMinutes(start);
                 const inputEndMin = timeToMinutes(end);
@@ -15800,36 +15990,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                   };
                 }
 
-                let seedBreaks = hasExplicitBreaks
-                  ? breaks.map(b => ({ start: b.start, end: b.end }))
-                  : (Array.isArray(targetSeg.breaks) ? targetSeg.breaks.map(b => ({ start: b.start, end: b.end })) : []);
+                const targetSegStartMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
+                const targetSegEndMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
+                const freezePlan = planBreaksForShiftWithFrozen(
+                  targetSegStartMin,
+                  targetSegEndMin,
+                  simOp?.direction,
+                  getPlannerBreakRuleRangesForDirection(simOp?.direction),
+                  dayBreaksSnapshot,
+                  date
+                );
+                const frozenForTarget = freezePlan.frozen;
+                const planningFromForTarget = freezePlan.planningFrom;
 
-                if (shouldRegenerateBreaksByShortening && !hasExplicitBreaks) {
-                  const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
-                  const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
-                  seedBreaks = computeBreaksForShiftMinutes(
-                    sMin,
-                    eMin,
-                    simOp?.direction,
-                    getPlannerBreakRuleRangesForDirection(simOp?.direction)
-                  );
+                let seedBreaks = hasExplicitBreaks
+                  ? breaks
+                      .map(b => ({ start: Number(b.start), end: Number(b.end) }))
+                      .filter(b => b.start >= planningFromForTarget)
+                  : (Array.isArray(targetSeg.breaks)
+                      ? targetSeg.breaks
+                          .map(b => ({ start: Number(b.start), end: Number(b.end) }))
+                          .filter(b => b.start >= planningFromForTarget)
+                      : []);
+
+                if ((shouldRegenerateBreaksByShortening && !hasExplicitBreaks) || (!hasExplicitBreaks && frozenForTarget.length > 0)) {
+                  seedBreaks = freezePlan.breaks;
                 }
 
-                if ((!seedBreaks || seedBreaks.length === 0) && !hasExplicitBreaks) {
-                  const sMin = targetSeg.__startMin ?? timeToMinutes(targetSeg.start);
-                  const eMin = targetSeg.__endMin ?? (timeToMinutes(targetSeg.end) + (timeToMinutes(targetSeg.end) <= timeToMinutes(targetSeg.start) ? 1440 : 0));
-                  seedBreaks = computeBreaksForShiftMinutes(
-                    sMin,
-                    eMin,
-                    simOp?.direction,
-                    getPlannerBreakRuleRangesForDirection(simOp?.direction)
-                  );
+                if ((!seedBreaks || seedBreaks.length === 0) && !hasExplicitBreaks && frozenForTarget.length === 0) {
+                  seedBreaks = freezePlan.breaks;
                 }
 
                 targetSeg.breaks = seedBreaks.map(b => ({ start: b.start, end: b.end }));
                 simOp.shifts[date] = merged;
 
-                try { adjustBreaksForOperatorOnDate(simOp, date, simulated, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection); } catch (e) { /* ignore */ }
+                const frozenBySegIndex = {};
+                merged.forEach((segItem, segIdx) => {
+                  const segStartValue = segItem.__startMin ?? timeToMinutes(segItem.start);
+                  const segEndValue = segItem.__endMin ?? (timeToMinutes(segItem.end) + (timeToMinutes(segItem.end) <= timeToMinutes(segItem.start) ? 1440 : 0));
+                  const segPlan = splitBreaksByFreezeBoundary(
+                    dayBreaksSnapshot,
+                    breakFreezeBoundaryMinutes(date, segStartValue) + BREAK_PLANNING_BUFFER_MIN,
+                    segStartValue,
+                    segEndValue
+                  );
+                  if (segPlan.frozen.length > 0) frozenBySegIndex[segIdx] = segPlan.frozen;
+                });
+
+                try {
+                  adjustBreaksForOperatorOnDate(
+                    simOp,
+                    date,
+                    simulated,
+                    getBreakConflictDirectionScopeKey,
+                    getPlannerBreakRuleRangesForDirection,
+                    getPlannerBreakCrossGapForDirection,
+                    frozenBySegIndex,
+                    planningFromForTarget
+                  );
+                } catch (e) { /* ignore */ }
 
                 const adjustedTarget = (simOp.shifts?.[date] ?? []).find(s => {
                   const sMin = s.__startMin ?? timeToMinutes(s.start);
@@ -15906,7 +16125,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const endDate = sortedDates[sortedDates.length - 1];
                 const rangeLabel = startDate === endDate ? startDate : `${startDate} - ${endDate}`;
                 const confirmed = window.confirm(
-                    `Пересчитать перерывы за ${rangeLabel} для ${operatorIds.length} операторов? Смены и выходные не изменятся, будут перезаписаны только перерывы.`
+                    `Пересчитать перерывы за ${rangeLabel} для ${operatorIds.length} операторов? Смены и выходные не изменятся. Прошедшие дни и уже начавшиеся перерывы останутся как есть — пересчёт применится с сегодняшнего дня.`
                 );
                 if (!confirmed) return;
 
@@ -15931,10 +16150,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                     await reloadPlannerSchedulesFromServer();
                     const result = payload?.result || {};
-                    emitAppToast(
-                        `Перерывы пересчитаны: смен ${Number(result.shifts_processed || 0)}, перерывов ${Number(result.breaks_inserted || 0)}`,
-                        'success'
-                    );
+                    const skippedPastDays = Number(result.skipped_past_days || 0);
+                    const frozenBreaks = Number(result.breaks_frozen || 0);
+                    const toastParts = [
+                        `Перерывы пересчитаны: смен ${Number(result.shifts_processed || 0)}, перерывов ${Number(result.breaks_inserted || 0)}`
+                    ];
+                    if (skippedPastDays > 0) toastParts.push(`прошедших дней пропущено: ${skippedPastDays}`);
+                    if (frozenBreaks > 0) toastParts.push(`сохранено уже прошедших: ${frozenBreaks}`);
+                    emitAppToast(toastParts.join(', '), 'success');
                 } catch (error) {
                     console.error('Error recalculating breaks:', error);
                     emitAppToast(`Ошибка пересчета перерывов: ${error?.message || error}`, 'error');
@@ -19237,7 +19460,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       if (seg) seg.breaks = breaksToSend.map(b => ({ start: b.start, end: b.end }));
                     }
                     op.shifts[date] = merged;
-                    try { adjustBreaksForOperatorOnDate(op, date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection); } catch (e) { /* ignore */ }
+                    // Уже прошедшие перерывы не перекладываем и в локальном состоянии,
+                    // иначе до ответа сервера в карточке мигает «новая» раскладка.
+                    const localFrozenBySegIndex = {};
+                    merged.forEach((segItem, segIdx) => {
+                      const segStartValue = segItem.__startMin ?? timeToMinutes(segItem.start);
+                      const segEndValue = segItem.__endMin ?? (timeToMinutes(segItem.end) + (timeToMinutes(segItem.end) <= timeToMinutes(segItem.start) ? 1440 : 0));
+                      const segFrozen = splitBreaksByFreezeBoundary(
+                        segItem.breaks,
+                        breakFreezeBoundaryMinutes(date, segStartValue) + BREAK_PLANNING_BUFFER_MIN,
+                        segStartValue,
+                        segEndValue
+                      ).frozen;
+                      if (segFrozen.length > 0) localFrozenBySegIndex[segIdx] = segFrozen;
+                    });
+                    try {
+                      adjustBreaksForOperatorOnDate(
+                        op,
+                        date,
+                        copy,
+                        getBreakConflictDirectionScopeKey,
+                        getPlannerBreakRuleRangesForDirection,
+                        getPlannerBreakCrossGapForDirection,
+                        localFrozenBySegIndex,
+                        null
+                      );
+                    } catch (e) { /* ignore */ }
                     return copy;
                   });
               
@@ -19414,18 +19662,51 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const segDur = segEndMin - segStartMin;
                 if (segDur <= 0) return null;
 
+                const dayBreaksSnapshot = ((op?.shifts?.[modalState.date] ?? []).flatMap(s => (
+                    Array.isArray(s.breaks) ? s.breaks.map(b => ({ start: Number(b.start), end: Number(b.end) })) : []
+                ))).filter(b => Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
+                const freezePlan = planBreaksForShiftWithFrozen(
+                    segStartMin,
+                    segEndMin,
+                    op?.direction,
+                    getPlannerBreakRuleRangesForDirection(op?.direction),
+                    dayBreaksSnapshot,
+                    modalState.date
+                );
                 const generatedBreaks = seg
-                    ? (seg.breaks ?? computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction, getPlannerBreakRuleRangesForDirection(op?.direction)))
-                    : computeBreaksForShiftMinutes(segStartMin, segEndMin, op?.direction, getPlannerBreakRuleRangesForDirection(op?.direction));
+                    ? (seg.breaks ?? freezePlan.frozen.concat(freezePlan.breaks))
+                    : freezePlan.frozen.concat(freezePlan.breaks);
                 const breaksLocal = (modalState.breaks && modalState.breaks.length ? modalState.breaks : generatedBreaks)
                     .map(b => ({ start: b.start, end: b.end }));
+                // Прошедший перерыв редактировать нельзя: он уже случился.
+                const planningFromMin = freezePlan.planningFrom;
+                const frozenBreakIndexes = new Set(
+                    breaksLocal
+                        .map((b, i) => ((Number(b.start) < planningFromMin) ? i : -1))
+                        .filter(i => i >= 0)
+                );
 
-                return { seg, segStartMin, segEndMin, segDur, breaksLocal };
+                return {
+                    seg,
+                    segStartMin,
+                    segEndMin,
+                    segDur,
+                    breaksLocal,
+                    frozenBreakIndexes,
+                    planningFromMin,
+                    suggestedBreaks: freezePlan.frozen.concat(freezePlan.breaks)
+                };
             };
             const modalBreakEditorContext = getModalBreakEditorContext();
             const modalBreaksForEditor = Array.isArray(modalBreakEditorContext?.breaksLocal)
                 ? modalBreakEditorContext.breaksLocal
                 : [];
+            const modalFrozenBreakIndexes = modalBreakEditorContext?.frozenBreakIndexes instanceof Set
+                ? modalBreakEditorContext.frozenBreakIndexes
+                : new Set();
+            const modalBreakPlanningFromMin = Number.isFinite(Number(modalBreakEditorContext?.planningFromMin))
+                ? Number(modalBreakEditorContext.planningFromMin)
+                : Number.NEGATIVE_INFINITY;
             const modalBreakConflictState = useMemo(() => {
                 const conflictIndexes = new Set();
                 const reasonByIndex = new Map();
@@ -26938,10 +27219,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             const leftPercent = (bStart / segDur) * 100;
                             const widthPercent = ((bEnd - bStart) / segDur) * 100;
                             const hasConflict = modalBreakConflictState.conflictIndexes.has(i);
+                            const isFrozenBreak = modalFrozenBreakIndexes.has(i);
                             const conflictReason = modalBreakConflictState.reasonByIndex.get(i);
                             const conflictDetails = modalBreakConflictState.detailsByIndex.get(i) || [];
                             const conflictDetailsPreview = conflictDetails.slice(0, 2).map(item => item.text).join(' | ');
                             const conflictDetailsTail = conflictDetails.length > 2 ? ` | +${conflictDetails.length - 2}` : '';
+                            if (isFrozenBreak) {
+                                return (
+                                    <div key={i}
+                                    className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded cursor-default bg-slate-200 border border-slate-300"
+                                    style={{ left: `calc(${leftPercent}% + 16px)`, width: `calc(${widthPercent}% - 0px)` }}
+                                    title={`${getBreakTimelineTitle(b)} • перерыв уже прошёл, изменить нельзя`}
+                                    />
+                                );
+                            }
                             return (
                                 <div key={i}
                                 className={`absolute top-1/2 transform -translate-y-1/2 h-4 rounded cursor-grab ${hasConflict ? 'bg-rose-300 border border-rose-600' : 'bg-amber-300 border border-amber-500'}`}
@@ -26964,7 +27255,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     const source = (m.breaks && m.breaks.length) ? m.breaks : breaksLocal;
                                     const nb = source.map(x => ({ ...x }));
                                     const size = nb[idx].end - nb[idx].start;
-                                    nb[idx].start = Math.max(segStartMin, Math.min(segEndMin - size, minutes - Math.round(size/2)));
+                                    // В уже прошедшее время перерыв не ставим — сервер такую правку не примет.
+                                    const earliestStart = Math.max(segStartMin, modalBreakPlanningFromMin);
+                                    nb[idx].start = Math.max(earliestStart, Math.min(segEndMin - size, minutes - Math.round(size/2)));
                                     nb[idx].end = nb[idx].start + size;
                                     return { ...m, breaks: nb };
                                     });
@@ -26978,6 +27271,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                         <div className="mt-2 flex gap-2 flex-wrap">
                         {modalBreaksForEditor.map((b, i) => (
+                            modalFrozenBreakIndexes.has(i) ? (
+                            <div key={i} className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-100 text-slate-500 text-sm tabular-nums">
+                                <span>{minutesToTime(b.start % 1440)} — {minutesToTime(b.end % 1440)}</span>
+                                <span className="text-[11px]">· прошёл</span>
+                            </div>
+                            ) : (
                             <div key={i} className={`flex items-center gap-2 ${modalBreakConflictState.conflictIndexes.has(i) ? 'px-2 py-1 rounded-md border border-rose-200 bg-rose-50' : ''}`}>
                             <input type="time" step="300" value={minutesToTime(b.start % 1440)} onChange={(e) => {
                                 const raw = timeToMinutes(e.target.value); const val = Math.round(raw/5)*5;
@@ -26985,7 +27284,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     const source = (m.breaks && m.breaks.length) ? m.breaks : modalBreaksForEditor;
                                     const nb = source.map(x => ({ ...x }));
                                     if (!nb[i]) return m;
-                                    nb[i] = { start: val + Math.floor((b.start/1440))*1440, end: val + Math.floor((b.end/1440))*1440 + (b.end - b.start) };
+                                    const dayOffset = Math.floor((b.start/1440))*1440;
+                                    // Начало перерыва не может уехать в уже прошедшее время.
+                                    const nextStart = Math.max(val + dayOffset, modalBreakPlanningFromMin);
+                                    nb[i] = { start: nextStart, end: nextStart + (b.end - b.start) };
                                     return { ...m, breaks: nb };
                                 });
                             }} className="p-1 border rounded text-sm" />
@@ -27009,6 +27311,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </span>
                             )}
                             </div>
+                            )
                         ))}
 
                         {(modalBreaksForEditor.length === 0) && (() => {
@@ -27017,7 +27320,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             return (
                                 <button
                                     className="px-2 py-1 rounded bg-sky-600 text-white text-sm"
-                                    onClick={() => setModalState(m => ({ ...m, breaks: ctx.breaksLocal.map(b => ({ start: b.start, end: b.end })) }))}
+                                    onClick={() => setModalState(m => ({
+                                        ...m,
+                                        breaks: (ctx.suggestedBreaks || ctx.breaksLocal).map(b => ({ start: b.start, end: b.end }))
+                                    }))}
                                 >
                                     Сгенерировать перерывы
                                 </button>

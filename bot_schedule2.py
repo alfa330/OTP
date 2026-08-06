@@ -40,6 +40,9 @@ import group_late
 import amo_leads
 from database import (
     db,
+    SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
+    SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES,
+    SHIFT_BREAK_MIN_GAP_MINUTES,
     TECHNICAL_ISSUE_REASONS,
     IT_TICKET_CATALOG,
     IT_TICKET_DEFAULT_PROFILE,
@@ -31203,7 +31206,8 @@ def _ws_pick_break_durations_for_shift(duration_minutes, direction_value=None, b
     return []
 
 
-def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None, break_rules_map=None):
+def _ws_place_break_durations_centered(start_min, end_min, break_durations):
+    """Раскладывает заданные длительности по центрам равных долей отрезка."""
     dur = int(end_min) - int(start_min)
     if dur <= 0:
         return []
@@ -31221,14 +31225,10 @@ def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=Non
         if e > s:
             breaks.append({'start': s, 'end': e})
 
-    break_durations = _ws_pick_break_durations_for_shift(
-        duration_minutes=dur,
-        direction_value=direction_value,
-        break_rules_map=break_rules_map
-    )
-    if break_durations:
-        count = len(break_durations)
-        for idx, size in enumerate(break_durations):
+    durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+    if durations:
+        count = len(durations)
+        for idx, size in enumerate(durations):
             center = int(start_min) + (dur * ((idx + 1) / (count + 1)))
             push_centered(center, int(size))
 
@@ -31245,6 +31245,136 @@ def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=Non
         seen.add(key)
         normalized.append({'start': s, 'end': e})
     return normalized
+
+
+def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None, break_rules_map=None):
+    dur = int(end_min) - int(start_min)
+    if dur <= 0:
+        return []
+    break_durations = _ws_pick_break_durations_for_shift(
+        duration_minutes=dur,
+        direction_value=direction_value,
+        break_rules_map=break_rules_map
+    )
+    return _ws_place_break_durations_centered(start_min, end_min, break_durations)
+
+
+def _ws_break_freeze_boundary_minutes(date_str, seg_start=None, now=None):
+    """
+    «Граница прошлого» для даты в минутах от её полуночи — зеркало серверной
+    _break_freeze_boundary_minutes. Для будущих дат отрицательна.
+    """
+    now_dt = now or _current_almaty_datetime()
+    date_obj = _ws_parse_date_str(date_str)
+    day_delta = (now_dt.date() - date_obj).days
+    boundary = int(day_delta * 1440 + now_dt.hour * 60 + now_dt.minute)
+    if now_dt.second:
+        boundary += 1
+    if seg_start is not None:
+        while boundary - int(seg_start) >= 1440:
+            boundary -= 1440
+    return boundary
+
+
+def _ws_split_breaks_by_freeze_boundary(breaks, boundary_minutes, seg_start=None, seg_end=None):
+    """Зеркало серверного сплиттера: (замороженные, будущие, использованные)."""
+    boundary = int(boundary_minutes)
+    seg_start_value = None if seg_start is None else int(seg_start)
+    seg_end_value = None if seg_end is None else int(seg_end)
+    frozen = []
+    upcoming = []
+    used = []
+    prepared = []
+    for item in (breaks or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = int(item.get('start'))
+            end = int(item.get('end'))
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            prepared.append({'start': start, 'end': end})
+    for item in sorted(prepared, key=lambda x: (x['start'], x['end'])):
+        start = item['start']
+        end = item['end']
+        clipped_start = start if seg_start_value is None else max(start, seg_start_value)
+        clipped_end = end if seg_end_value is None else min(end, seg_end_value)
+        inside = clipped_end - clipped_start
+        if start < boundary:
+            if inside <= 0:
+                continue
+            used.append({'start': start, 'end': end})
+            if inside >= 5:
+                frozen.append({'start': clipped_start, 'end': clipped_end})
+            continue
+        if seg_start_value is not None and start < seg_start_value:
+            continue
+        if seg_end_value is not None and end > seg_end_value:
+            continue
+        upcoming.append({'start': start, 'end': end})
+    return frozen, upcoming, used
+
+
+def _ws_remaining_break_durations_after_used(break_durations, used_breaks):
+    """Норма минус уже отсиженные минуты (зеркало серверной логики)."""
+    durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+    if not durations:
+        return []
+    used_lengths = []
+    for used in (used_breaks or []):
+        try:
+            length = max(0, int(used.get('end', 0)) - int(used.get('start', 0)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if length > 0:
+            used_lengths.append(length)
+    if not used_lengths:
+        return list(durations)
+    remaining = list(durations)
+    for length in used_lengths:
+        if length in remaining:
+            remaining.remove(length)
+    budget = max(0, sum(durations) - sum(used_lengths))
+    while remaining and sum(remaining) > budget:
+        remaining.remove(max(remaining))
+    return remaining
+
+
+def _ws_fit_break_durations_to_window(window_start, window_end, break_durations):
+    """Оставляет только те перерывы, что помещаются в окно планирования."""
+    window = max(0, int(window_end) - int(window_start))
+    durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+    while durations:
+        required = (
+            sum(durations)
+            + (2 * SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES)
+            + (SHIFT_BREAK_MIN_GAP_MINUTES * (len(durations) - 1))
+        )
+        if required <= window:
+            return durations
+        durations.pop()
+    return []
+
+
+def _ws_seed_break_positions_from_existing(planned_breaks, existing_breaks):
+    """Перерыв той же длительности, который уже стоит в графике, остаётся на месте."""
+    available = [dict(item) for item in (existing_breaks or [])]
+    result = []
+    for item in (planned_breaks or []):
+        length = int(item['end']) - int(item['start'])
+        match = None
+        for candidate in available:
+            if (int(candidate['end']) - int(candidate['start'])) == length:
+                match = candidate
+                break
+        if match is not None:
+            available.remove(match)
+            result.append({'start': int(match['start']), 'end': int(match['end'])})
+        else:
+            result.append({'start': int(item['start']), 'end': int(item['end'])})
+    result.sort(key=lambda b: (b['start'], b['end']))
+    return result
 
 
 def _ws_intervals_overlap(a, b):
@@ -31545,7 +31675,15 @@ def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, o
 
 
 def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None,
-                                           break_gaps_map=None):
+                                           break_gaps_map=None, frozen_breaks_by_index=None,
+                                           planning_from_minutes=None):
+    """
+    Раскладка перерывов без пересечений с коллегами направления.
+
+    frozen_breaks_by_index — уже прошедшие перерывы сегмента (по его индексу): их
+    нельзя двигать, они лишь занимают время. planning_from_minutes — минута, раньше
+    которой нельзя ставить новый перерыв. Без этих аргументов поведение прежнее.
+    """
     segs = (op or {}).get('shifts', {}).get(date_str) or []
     if not segs:
         return
@@ -31557,14 +31695,25 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         get_scope_key=get_direction_scope_key,
         break_gaps_map=break_gaps_map
     )
-    for seg in segs:
+    frozen_map = frozen_breaks_by_index if isinstance(frozen_breaks_by_index, dict) else {}
+    for seg_index, seg in enumerate(segs):
         raw_seg_start = int(seg.get('__startMin', _ws_time_to_minutes(seg.get('start'))))
         seg_start_base = _ws_time_to_minutes(seg.get('start'))
         seg_end_base = _ws_time_to_minutes(seg.get('end'))
         raw_seg_end = int(seg.get('__endMin', seg_end_base + (1440 if seg_end_base <= seg_start_base else 0)))
+        seg_start = max(0, raw_seg_start)
+        seg_end = max(seg_start, min(2880, raw_seg_end))
+
+        protected = []
+        for item in sorted((frozen_map.get(seg_index) or []), key=lambda x: (int(x['start']), int(x['end']))):
+            p_start = int(item['start'])
+            p_end = int(item['end'])
+            if p_end > p_start and p_start >= seg_start and p_end <= seg_end:
+                protected.append({'start': p_start, 'end': p_end})
+
         if not isinstance(seg.get('breaks'), list):
             seg['breaks'] = []
-        if len(seg['breaks']) == 0:
+        if len(seg['breaks']) == 0 and not protected:
             seg['breaks'] = _ws_compute_breaks_for_shift_minutes(
                 raw_seg_start,
                 raw_seg_end,
@@ -31572,8 +31721,6 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
                 break_rules_map=break_rules_map
             )
 
-        seg_start = max(0, raw_seg_start)
-        seg_end = max(seg_start, min(2880, raw_seg_end))
         prepared_breaks = []
         for b in sorted((seg.get('breaks') or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
             b_start = int(b.get('start', 0))
@@ -31583,16 +31730,31 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
                 prepared_breaks.append({'start': b_start, 'end': b_end, 'length': length})
 
         if not prepared_breaks:
-            seg['breaks'] = []
+            seg['breaks'] = protected
+            for item in protected:
+                occupied.append(dict(item))
+            occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
             continue
 
+        for item in protected:
+            occupied.append(dict(item))
+        occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+
+        protected_end = max((int(p['end']) for p in protected), default=None)
+        win_start = seg_start
+        if planning_from_minutes is not None:
+            win_start = max(win_start, int(planning_from_minutes))
+        if protected_end is not None:
+            win_start = max(win_start, protected_end)
+        win_start = min(win_start, seg_end)
+
         break_durations = [int(b['length']) for b in prepared_breaks]
-        edge_margin, min_gap = _ws_break_layout_spacing(seg_start, seg_end, break_durations)
+        edge_margin, min_gap = _ws_break_layout_spacing(win_start, seg_end, break_durations)
         new_breaks = []
         for idx, b in enumerate(prepared_breaks):
             length = int(b['length'])
             lower, upper = _ws_break_start_bounds_for_index(
-                seg_start,
+                win_start,
                 seg_end,
                 break_durations,
                 idx,
@@ -31601,24 +31763,29 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
             )
             if new_breaks and min_gap > 0:
                 lower = max(lower, int(new_breaks[-1]['end']) + int(min_gap))
+            elif protected_end is not None and min_gap > 0:
+                lower = max(lower, protected_end + int(min_gap))
 
             desired_start = max(lower, min(upper, int(b['start']))) if upper >= lower else int(b['start'])
             found = _ws_find_best_break_start(desired_start, length, lower, upper, occupied)
             if found is not None:
                 nb = {'start': int(found), 'end': int(found) + int(length)}
             else:
-                clamped_start = max(seg_start, min(seg_end - length, int(b['start'])))
+                clamped_start = max(win_start, min(seg_end - length, int(b['start'])))
                 if new_breaks and min_gap > 0:
                     clamped_start = max(clamped_start, int(new_breaks[-1]['end']) + int(min_gap))
                 clamped_start = min(clamped_start, seg_end - length)
                 clamped_end = clamped_start + length
-                if clamped_end <= clamped_start:
+                if clamped_end <= clamped_start or clamped_start < win_start:
                     continue
                 nb = {'start': clamped_start, 'end': clamped_end}
             new_breaks.append(nb)
             occupied.append(nb)
             occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
-        seg['breaks'] = new_breaks
+        seg['breaks'] = sorted(
+            protected + new_breaks,
+            key=lambda item: (int(item['start']), int(item['end']))
+        )
 
 
 def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_map,
@@ -31705,6 +31872,18 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
 
         sim_op['daysOff'] = [d for d in (sim_op.get('daysOff') or []) if str(d) != date_str]
         sim_op.setdefault('shifts', {})
+        # Снимок перерывов дня до замены: импорт заменяет день целиком, а уже
+        # прошедшие перерывы переписывать нельзя.
+        day_breaks_snapshot = []
+        for existing_seg in (sim_op['shifts'].get(date_str) or []):
+            for existing_break in (existing_seg.get('breaks') or []):
+                try:
+                    day_breaks_snapshot.append({
+                        'start': int(existing_break.get('start')),
+                        'end': int(existing_break.get('end'))
+                    })
+                except (TypeError, ValueError):
+                    continue
         sim_op['shifts'].pop(date_str, None)
 
         if entry.get('is_day_off'):
@@ -31714,6 +31893,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
             continue
 
         prepared_shifts = []
+        frozen_by_index = {}
+        planning_from_minutes = None
         for raw_shift in (entry.get('shifts') or []):
             start_str = str(raw_shift.get('start') or raw_shift.get('start_time') or '').strip()
             end_str = str(raw_shift.get('end') or raw_shift.get('end_time') or '').strip()
@@ -31723,16 +31904,43 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
             emin = _ws_time_to_minutes(end_str)
             if emin <= smin:
                 emin += 1440
+            boundary = _ws_break_freeze_boundary_minutes(date_str, seg_start=smin)
+            seg_planning_from = boundary + SHIFT_BREAK_PLANNING_BUFFER_MINUTES
+            frozen, upcoming, used = _ws_split_breaks_by_freeze_boundary(
+                day_breaks_snapshot,
+                seg_planning_from,
+                seg_start=smin,
+                seg_end=emin
+            )
+            full_durations = _ws_pick_break_durations_for_shift(
+                duration_minutes=emin - smin,
+                direction_value=sim_op.get('direction'),
+                break_rules_map=break_rules_map
+            )
+            if seg_planning_from <= smin and not used:
+                window_start = smin
+                seg_breaks = _ws_place_break_durations_centered(smin, emin, full_durations)
+            else:
+                window_start = min(max(smin, seg_planning_from), emin)
+                seg_breaks = _ws_place_break_durations_centered(
+                    window_start,
+                    emin,
+                    _ws_fit_break_durations_to_window(
+                        window_start,
+                        emin,
+                        _ws_remaining_break_durations_after_used(full_durations, used)
+                    )
+                )
+            seg_breaks = _ws_seed_break_positions_from_existing(seg_breaks, upcoming)
+            frozen_by_index[len(prepared_shifts)] = frozen
+            if planning_from_minutes is None or window_start > planning_from_minutes:
+                planning_from_minutes = window_start
             prepared_shifts.append({
                 'start': _ws_minutes_to_time(smin),
                 'end': _ws_minutes_to_time(emin),
                 '__startMin': smin,
                 '__endMin': emin,
-                'breaks': _ws_compute_breaks_for_shift_minutes(
-                    smin, emin,
-                    sim_op.get('direction'),
-                    break_rules_map=break_rules_map
-                )
+                'breaks': seg_breaks
             })
 
         sim_op['shifts'][date_str] = prepared_shifts
@@ -31743,7 +31951,9 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 sim_operators,
                 scope_resolver,
                 break_rules_map=break_rules_map,
-                break_gaps_map=break_gaps_map
+                break_gaps_map=break_gaps_map,
+                frozen_breaks_by_index=frozen_by_index,
+                planning_from_minutes=planning_from_minutes
             )
 
         # Записываем финальные перерывы (после антиколлизии) обратно в entry

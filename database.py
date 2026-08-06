@@ -487,6 +487,15 @@ WORK_SHIFT_TYPE_PRIORITY = {
     WORK_SHIFT_TYPE_PHONE_SHIFT: 2
 }
 
+# Прошедшие перерывы не пересчитываются: автоматика планирует только остаток
+# смены, начиная не раньше чем через SHIFT_BREAK_PLANNING_BUFFER_MINUTES минут,
+# чтобы перерыв не появлялся у оператора «через пару минут».
+SHIFT_BREAK_PLANNING_BUFFER_MINUTES = 15
+# Минимальные отступы, при которых перерыв ещё имеет смысл ставить в остаток смены.
+# Не влезло — перерыв не ставится вовсе: это лучше, чем перерыв впритык к концу смены.
+SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES = 30
+SHIFT_BREAK_MIN_GAP_MINUTES = 15
+
 
 def _normalize_work_shift_type_value(value: Optional[str]) -> str:
     raw = str(value or '').strip().lower()
@@ -9029,6 +9038,8 @@ class Database:
             if s_start < ws_start_min or s_end > ws_end_min:
                 continue
 
+            # Снимок до удаления: иначе прошедшие перерывы уедут каскадом вместе со сменой.
+            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_date)
             cursor.execute("DELETE FROM work_shifts WHERE id = %s", (sh_id,))
             remaining = []
             if s_start > ws_start_min:
@@ -9046,6 +9057,7 @@ class Database:
                     end_time=end_obj,
                     breaks=None,
                     shift_type=None,
+                    day_breaks_snapshot=day_breaks_snapshot,
                 )
             return True
         return False
@@ -9458,6 +9470,9 @@ class Database:
                 )
 
             shifts_to_save = []
+            day_breaks_snapshots = {}
+            publish_now = self._almaty_now()
+            publish_direction_keys = {}
             for operator_id in operator_ids:
                 blocked_date_map = self._get_shift_auction_operator_blocked_date_map_tx(
                     cursor,
@@ -9465,6 +9480,11 @@ class Database:
                     lot_dates=lot_dates
                 )
                 for lot_date in lot_dates:
+                    # Снимок перерывов дня до очистки: прошедшие переписывать нельзя,
+                    # а очистка уносит их вместе со сменой.
+                    day_breaks_snapshots[(int(operator_id), lot_date.strftime('%Y-%m-%d'))] = (
+                        self._load_day_shift_breaks_tx(cursor, operator_id, lot_date)
+                    )
                     self._clear_day_schedule_tx(cursor, operator_id, lot_date)
                     summary["cleared_days"] += 1
                     lot_date_key = lot_date.strftime('%Y-%m-%d')
@@ -9490,6 +9510,7 @@ class Database:
                         })
 
             for item in sorted(shifts_to_save, key=_publish_shift_sort_key):
+                item_date_key = item["shift_date"].strftime('%Y-%m-%d')
                 self._save_shift_tx(
                     cursor=cursor,
                     operator_id=item["operator_id"],
@@ -9498,6 +9519,18 @@ class Database:
                     end_time=item["end_time"],
                     breaks=None,
                     cross_gap_minutes=_direction_cross_gap(item.get("direction")),
+                    now=publish_now,
+                    day_breaks_snapshot=day_breaks_snapshots.get(
+                        (int(item["operator_id"]), item_date_key)
+                    ),
+                    extra_occupied=self._extra_occupied_from_day_snapshots(
+                        cursor=cursor,
+                        day_breaks_snapshots=day_breaks_snapshots,
+                        operator_id=item["operator_id"],
+                        shift_date=item["shift_date"],
+                        now=publish_now,
+                        direction_key_cache=publish_direction_keys
+                    ),
                 )
                 summary["shifts_saved"] += 1
 
@@ -11835,6 +11868,9 @@ class Database:
                     (operator_id, shift_date)
                 )
 
+            # Снимок до слияния смен: добор к идущей смене не должен переставлять
+            # уже отсиженные перерывы (они уедут каскадом вместе со старой строкой).
+            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_date)
             if merge_ids:
                 cursor.execute("DELETE FROM work_shifts WHERE id = ANY(%s)", (merge_ids,))
                 merged_start_obj = self._normalize_schedule_time(
@@ -11852,6 +11888,7 @@ class Database:
                     end_time=merged_end_obj,
                     breaks=None,
                     shift_type=None,
+                    day_breaks_snapshot=day_breaks_snapshot,
                 )
             else:
                 self._save_shift_tx(
@@ -11862,6 +11899,7 @@ class Database:
                     end_time=selected_end_time,
                     breaks=None,
                     shift_type=None,
+                    day_breaks_snapshot=day_breaks_snapshot,
                 )
 
             self._recalculate_auto_daily_hours_tx(
@@ -12078,6 +12116,9 @@ class Database:
                     (operator_id, shift_date)
                 )
 
+            # Снимок до слияния смен: добор к идущей смене не должен переставлять
+            # уже отсиженные перерывы (они уедут каскадом вместе со старой строкой).
+            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_date)
             if merge_ids:
                 cursor.execute("DELETE FROM work_shifts WHERE id = ANY(%s)", (merge_ids,))
                 merged_start_obj = self._normalize_schedule_time(
@@ -12095,6 +12136,7 @@ class Database:
                     end_time=merged_end_obj,
                     breaks=None,
                     shift_type=None,
+                    day_breaks_snapshot=day_breaks_snapshot,
                 )
             else:
                 self._save_shift_tx(
@@ -12105,6 +12147,7 @@ class Database:
                     end_time=selected_end_time,
                     breaks=None,
                     shift_type=None,
+                    day_breaks_snapshot=day_breaks_snapshot,
                 )
 
             self._recalculate_auto_daily_hours_tx(
@@ -32876,10 +32919,11 @@ class Database:
             return [15, 30, 15, 15]
         return []
 
-    def _compute_auto_shift_breaks_minutes(self, start_min, end_min, direction_name=None, direction_rules=None):
+    def _place_break_durations_centered_minutes(self, start_min, end_min, break_durations):
         """
-        Серверная автогенерация перерывов (зеркалит фронтенд-базовую логику по длительности смены).
-        Возвращает список интервалов в минутах от начала дня; для ночных смен end_min может быть > 1440.
+        Раскладывает заданные длительности перерывов по центрам равных долей отрезка.
+        Используется и для целой смены, и для остатка смены (когда прошедшие перерывы
+        уже зафиксированы и планировать можно только будущее).
         """
         start_min = int(start_min)
         end_min = int(end_min)
@@ -32901,14 +32945,10 @@ class Database:
             if e > s:
                 breaks.append({'start': s, 'end': e})
 
-        break_durations = self._pick_break_durations_for_shift(
-            duration_minutes=dur,
-            direction_name=direction_name,
-            direction_rules=direction_rules
-        )
-        if break_durations:
-            count = len(break_durations)
-            for idx, size in enumerate(break_durations):
+        durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+        if durations:
+            count = len(durations)
+            for idx, size in enumerate(durations):
                 center = start_min + (dur * ((idx + 1) / (count + 1)))
                 push_centered(center, int(size))
 
@@ -32921,6 +32961,198 @@ class Database:
             seen.add(key)
             normalized.append({'start': key[0], 'end': key[1]})
         return normalized
+
+    def _compute_auto_shift_breaks_minutes(self, start_min, end_min, direction_name=None, direction_rules=None):
+        """
+        Серверная автогенерация перерывов (зеркалит фронтенд-базовую логику по длительности смены).
+        Возвращает список интервалов в минутах от начала дня; для ночных смен end_min может быть > 1440.
+        """
+        start_min = int(start_min)
+        end_min = int(end_min)
+        dur = end_min - start_min
+        if dur <= 0:
+            return []
+
+        break_durations = self._pick_break_durations_for_shift(
+            duration_minutes=dur,
+            direction_name=direction_name,
+            direction_rules=direction_rules
+        )
+        return self._place_break_durations_centered_minutes(start_min, end_min, break_durations)
+
+    def _almaty_now(self):
+        """
+        «Сейчас» в рабочем часовом поясе. ZoneInfo без пакета tzdata кидает исключение,
+        а эта функция стоит на пути каждого сохранения смены — поэтому есть запасной
+        вариант: процесс и так живёт в Asia/Almaty (os.environ['TZ'] в начале модуля).
+        """
+        try:
+            return datetime.now(ZoneInfo('Asia/Almaty'))
+        except Exception:
+            return datetime.now()
+
+    def _break_freeze_boundary_minutes(self, shift_date, seg_start=None, now=None):
+        """
+        «Граница прошлого» для даты смены в минутах от её полуночи: перерыв, начавшийся
+        раньше границы, уже случился и автоматикой не переставляется.
+
+        Для будущих дат граница отрицательна (замораживать нечего — поведение прежнее),
+        для прошедших больше суток (весь день неизменен).
+
+        seg_start нужен для ночных смен: кусок 00:00-08:00 может храниться на дате лота
+        (то есть на «вчера» в системе координат минут). Без выравнивания шкалы такая
+        смена целиком объявляется прошедшей и остаётся без перерывов.
+        """
+        date_obj = self._normalize_schedule_date(shift_date)
+        now_dt = now if isinstance(now, datetime) else self._almaty_now()
+        day_delta = (now_dt.date() - date_obj).days
+        boundary = int(day_delta * 1440 + now_dt.hour * 60 + now_dt.minute)
+        if now_dt.second:
+            boundary += 1
+        if seg_start is not None:
+            while boundary - int(seg_start) >= 1440:
+                boundary -= 1440
+        return boundary
+
+    def _normalize_break_intervals_soft(self, breaks):
+        """
+        Мягкая нормализация списка перерывов: сортировка, отсев мусора и дублей.
+        В отличие от _normalize_shift_breaks не кидает ошибку — применяется в том числе
+        к данным, пришедшим от клиента, и сохранение смены не должно падать из-за одного
+        битого интервала.
+        """
+        normalized = []
+        seen = set()
+        for item in (breaks or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get('start'))
+                end = int(item.get('end'))
+            except (TypeError, ValueError):
+                continue
+            if end <= start or (start, end) in seen:
+                continue
+            seen.add((start, end))
+            normalized.append({'start': start, 'end': end})
+        normalized.sort(key=lambda b: (b['start'], b['end']))
+        return normalized
+
+    def _split_breaks_by_freeze_boundary(self, breaks, boundary_minutes, seg_start=None, seg_end=None):
+        """
+        Делит перерывы на три группы относительно границы прошлого:
+        - frozen: прошедшие, попадающие в новый интервал смены (обрезаются по нему) —
+          их нельзя двигать и удалять;
+        - upcoming: будущие внутри интервала — их можно переставлять;
+        - used: ВСЕ прошедшие, включая те, что в новый интервал не попали (смену
+          подрезали или сдвинули начало). Они уже отсижены, поэтому обязаны
+          вычитаться из нормы, даже если хранить их больше негде.
+        """
+        boundary = int(boundary_minutes)
+        seg_start_value = None if seg_start is None else int(seg_start)
+        seg_end_value = None if seg_end is None else int(seg_end)
+        frozen = []
+        upcoming = []
+        used = []
+        for item in self._normalize_break_intervals_soft(breaks):
+            start = int(item['start'])
+            end = int(item['end'])
+            clipped_start = start if seg_start_value is None else max(start, seg_start_value)
+            clipped_end = end if seg_end_value is None else min(end, seg_end_value)
+            inside_segment_minutes = clipped_end - clipped_start
+            if start < boundary:
+                # В зачёт нормы идут перерывы этой смены. Перерывы соседних смен дня
+                # (у дня бывает несколько отдельных кусков) считаются отдельно.
+                if inside_segment_minutes <= 0:
+                    continue
+                used.append({'start': start, 'end': end})
+                if inside_segment_minutes >= 5:
+                    frozen.append({'start': clipped_start, 'end': clipped_end})
+                continue
+            if seg_start_value is not None and start < seg_start_value:
+                continue
+            if seg_end_value is not None and end > seg_end_value:
+                continue
+            upcoming.append({'start': start, 'end': end})
+        return frozen, upcoming, used
+
+    def _fit_break_durations_to_window(self, window_start, window_end, break_durations):
+        """
+        Оставляет из нормы только те перерывы, которые физически помещаются в окно
+        планирования с приличными отступами от краёв и друг от друга. Лишние
+        отбрасываются с конца: лучше меньше перерывов, чем перерыв впритык к концу
+        смены или внахлёст с соседним.
+        """
+        window = max(0, int(window_end) - int(window_start))
+        durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+        while durations:
+            required = (
+                sum(durations)
+                + (2 * SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES)
+                + (SHIFT_BREAK_MIN_GAP_MINUTES * (len(durations) - 1))
+            )
+            if required <= window:
+                return durations
+            durations.pop()
+        return []
+
+    def _seed_break_positions_from_existing(self, planned_breaks, existing_breaks):
+        """
+        Если перерыв такой же длительности уже стоит в графике и ещё не начался —
+        оставляем его на прежнем месте. Правка смены не должна двигать то, что
+        оператор уже видит у себя в расписании.
+        """
+        available = [dict(item) for item in (existing_breaks or [])]
+        result = []
+        for item in (planned_breaks or []):
+            length = int(item['end']) - int(item['start'])
+            match = next(
+                (x for x in available if (int(x['end']) - int(x['start'])) == length),
+                None
+            )
+            if match is not None:
+                available.remove(match)
+                result.append({'start': int(match['start']), 'end': int(match['end'])})
+            else:
+                result.append({'start': int(item['start']), 'end': int(item['end'])})
+        result.sort(key=lambda b: (b['start'], b['end']))
+        return result
+
+    def _remaining_break_durations_after_used(self, break_durations, used_breaks):
+        """
+        Вычитает уже использованные перерывы из нормы смены по минутному бюджету:
+        сколько минут перерыва положено минус сколько уже отсижено. Оставшиеся минуты
+        набираются слотами нормы от больших к меньшим.
+
+        Минуты, а не «слот за слот»: у направлений бывают нестандартные перерывы, и
+        списание «первого попавшегося» слота выдавало бы больше нормы.
+        """
+        durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+        if not durations:
+            return []
+
+        used_lengths = []
+        for used in (used_breaks or []):
+            try:
+                length = max(0, int(used.get('end', 0)) - int(used.get('start', 0)))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if length > 0:
+                used_lengths.append(length)
+        if not used_lengths:
+            return list(durations)
+
+        # 1) Списываем слот такой же длительности: отсидел обед — остаются короткие.
+        remaining = list(durations)
+        for length in used_lengths:
+            if length in remaining:
+                remaining.remove(length)
+
+        # 2) Общий минутный лимит: суммарно перерывов не больше нормы смены.
+        budget = max(0, sum(durations) - sum(used_lengths))
+        while remaining and sum(remaining) > budget:
+            remaining.remove(max(remaining))
+        return remaining
 
     def _insert_shift_breaks(self, cursor, shift_id, breaks):
         cursor.execute("DELETE FROM shift_breaks WHERE shift_id = %s", (shift_id,))
@@ -32950,6 +33182,76 @@ class Database:
                 'end': int(end_minutes)
             })
         return result
+
+    def _load_day_shift_breaks_tx(self, cursor, operator_id, shift_date):
+        """
+        Все перерывы оператора на дату (по всем сменам дня) в минутах от её полуночи.
+
+        Снимок нужно брать ДО удаления/пересборки смен дня: перерывы уезжают вместе
+        со сменой, а уже прошедшие переписывать нельзя.
+        """
+        cursor.execute(
+            """
+            SELECT sb.start_minutes, sb.end_minutes
+            FROM work_shifts ws
+            JOIN shift_breaks sb ON sb.shift_id = ws.id
+            WHERE ws.operator_id = %s AND ws.shift_date = %s
+            ORDER BY sb.start_minutes, sb.end_minutes
+            """,
+            (int(operator_id), self._normalize_schedule_date(shift_date))
+        )
+        result = []
+        for start_minutes, end_minutes in cursor.fetchall() or []:
+            start_value = int(start_minutes)
+            end_value = int(end_minutes)
+            if end_value > start_value:
+                result.append({'start': start_value, 'end': end_value})
+        return result
+
+    def _extra_occupied_from_day_snapshots(self, cursor, day_breaks_snapshots, operator_id, shift_date,
+                                           now=None, direction_key_cache=None):
+        """
+        Прошедшие перерывы коллег того же направления, которых в этот момент нет в базе.
+
+        Пути, которые чистят день заранее (публикация аукциона, пакетные действия,
+        импорт, обмен сменами), удаляют смены до планирования — замороженные перерывы
+        коллег уезжают каскадом и перестают быть «занятым временем». Без этого коллеге
+        поставят перерыв на то же время, а замороженный вернётся на своё место.
+
+        day_breaks_snapshots: {(operator_id, 'YYYY-MM-DD'): [перерывы]}
+        """
+        if not day_breaks_snapshots:
+            return []
+
+        date_obj = self._normalize_schedule_date(shift_date)
+        cache = direction_key_cache if direction_key_cache is not None else {}
+
+        def _direction_key(op_id):
+            op_id = int(op_id)
+            if op_id not in cache:
+                cache[op_id] = self._normalize_direction_key(
+                    self._get_operator_direction_name_tx(cursor, op_id)
+                )
+            return cache[op_id]
+
+        own_direction_key = _direction_key(operator_id)
+        boundary = self._break_freeze_boundary_minutes(date_obj, now=now)
+        result = []
+        for key, snapshot_breaks in day_breaks_snapshots.items():
+            try:
+                snapshot_operator_id, snapshot_date = key
+            except (TypeError, ValueError):
+                continue
+            if int(snapshot_operator_id) == int(operator_id):
+                continue
+            if self._normalize_schedule_date(snapshot_date) != date_obj:
+                continue
+            if _direction_key(snapshot_operator_id) != own_direction_key:
+                continue
+            for item in self._normalize_break_intervals_soft(snapshot_breaks):
+                if int(item['start']) < boundary:
+                    result.append(item)
+        return self._merge_break_intervals(result)
 
     def _break_intervals_overlap(self, a, b):
         return int(a['start']) < int(b['end']) and int(b['start']) < int(a['end'])
@@ -33174,16 +33476,38 @@ class Database:
         start_time,
         end_time,
         breaks,
-        cross_gap_minutes=None
+        cross_gap_minutes=None,
+        frozen_breaks=None,
+        planning_from_minutes=None,
+        extra_occupied=None
     ):
-        if not isinstance(breaks, list) or not breaks:
-            return []
+        """
+        Раскладывает перерывы смены без пересечений с перерывами коллег направления.
 
+        frozen_breaks — уже прошедшие перерывы: они не двигаются и не удаляются,
+        а лишь занимают время. planning_from_minutes — минута, раньше которой нельзя
+        ставить новый перерыв (для смены «на ходу» это «сейчас» плюс буфер).
+        extra_occupied — перерывы коллег, которых в этот момент нет в базе: пути с
+        предварительной очисткой дня удаляют смены до планирования, и замороженные
+        перерывы коллег иначе не были бы видны.
+        Без этих аргументов поведение прежнее.
+        """
         seg_start, seg_end = self._schedule_interval_minutes(start_time, end_time)
         seg_start = max(0, seg_start)
         seg_end = max(seg_start, min(2880, seg_end))
         if seg_end <= seg_start:
             return []
+
+        protected = []
+        for item in sorted((frozen_breaks or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
+            p_start = int(item.get('start', 0))
+            p_end = int(item.get('end', 0))
+            if p_end <= p_start or p_start < seg_start or p_end > seg_end:
+                continue
+            protected.append({'start': p_start, 'end': p_end})
+
+        if not isinstance(breaks, list) or not breaks:
+            return protected
 
         occupied = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
         if cross_gap_minutes is None:
@@ -33191,7 +33515,11 @@ class Database:
                 cursor,
                 self._get_operator_direction_name_tx(cursor, operator_id)
             )
+        occupied.extend(self._normalize_break_intervals_soft(extra_occupied))
         occupied = self._pad_break_intervals_for_cross_gap(occupied, cross_gap_minutes)
+        occupied.extend({'start': int(p['start']), 'end': int(p['end'])} for p in protected)
+        occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+
         prepared_breaks = []
         for b in sorted((breaks or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
             b_start = int(b.get('start', 0))
@@ -33201,15 +33529,24 @@ class Database:
                 prepared_breaks.append({'start': b_start, 'end': b_end, 'length': length})
 
         if not prepared_breaks:
-            return []
+            return protected
+
+        # Планировать можно только «незамороженный» хвост смены.
+        protected_end = max((int(p['end']) for p in protected), default=None)
+        win_start = seg_start
+        if planning_from_minutes is not None:
+            win_start = max(win_start, int(planning_from_minutes))
+        if protected_end is not None:
+            win_start = max(win_start, protected_end)
+        win_start = min(win_start, seg_end)
 
         break_durations = [int(b['length']) for b in prepared_breaks]
-        edge_margin, min_gap = self._break_layout_spacing(seg_start, seg_end, break_durations)
+        edge_margin, min_gap = self._break_layout_spacing(win_start, seg_end, break_durations)
         new_breaks = []
         for idx, b in enumerate(prepared_breaks):
             length = int(b['length'])
             lower, upper = self._break_start_bounds_for_index(
-                seg_start,
+                win_start,
                 seg_end,
                 break_durations,
                 idx,
@@ -33218,6 +33555,8 @@ class Database:
             )
             if new_breaks and min_gap > 0:
                 lower = max(lower, int(new_breaks[-1]['end']) + int(min_gap))
+            elif protected_end is not None and min_gap > 0:
+                lower = max(lower, protected_end + int(min_gap))
 
             desired_start = max(lower, min(upper, int(b['start']))) if upper >= lower else int(b['start'])
             found = self._find_best_break_start(
@@ -33230,12 +33569,12 @@ class Database:
             if found is not None:
                 nb = {'start': int(found), 'end': int(found) + int(length)}
             else:
-                clamped_start = max(seg_start, min(seg_end - length, int(b['start'])))
+                clamped_start = max(win_start, min(seg_end - length, int(b['start'])))
                 if new_breaks and min_gap > 0:
                     clamped_start = max(clamped_start, int(new_breaks[-1]['end']) + int(min_gap))
                 clamped_start = min(clamped_start, seg_end - length)
                 clamped_end = clamped_start + length
-                if clamped_end <= clamped_start:
+                if clamped_end <= clamped_start or clamped_start < win_start:
                     continue
                 nb = {'start': int(clamped_start), 'end': int(clamped_end)}
 
@@ -33243,13 +33582,47 @@ class Database:
             occupied.append(nb)
             occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
 
-        return new_breaks
+        if not protected:
+            return new_breaks
+        return sorted(
+            protected + new_breaks,
+            key=lambda item: (int(item['start']), int(item['end']))
+        )
 
-    def recalculate_work_schedule_breaks(self, start_date, end_date, operator_ids=None):
+    def recalculate_work_schedule_breaks(self, start_date, end_date, operator_ids=None, now=None):
+        """
+        Пересчёт перерывов по текущим правилам направлений.
+
+        Прошедшие дни не трогаются вовсе, а у идущей смены сохраняются уже начавшиеся
+        перерывы: пересчёт не должен переписывать то, что оператор уже отсидел.
+        """
         start_date_obj = self._normalize_schedule_date(start_date)
         end_date_obj = self._normalize_schedule_date(end_date)
         if end_date_obj < start_date_obj:
             raise ValueError("end_date must be >= start_date")
+
+        recalc_now = now if isinstance(now, datetime) else self._almaty_now()
+        today_obj = recalc_now.date()
+        skipped_past_days = max(
+            0,
+            (min(today_obj, end_date_obj + timedelta(days=1)) - start_date_obj).days
+        )
+        requested_start_date_obj = start_date_obj
+        if start_date_obj < today_obj:
+            start_date_obj = today_obj
+        if start_date_obj > end_date_obj:
+            return {
+                "start_date": start_date_obj.strftime('%Y-%m-%d'),
+                "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                "requested_start_date": requested_start_date_obj.strftime('%Y-%m-%d'),
+                "operators_requested": 0,
+                "operators_affected": 0,
+                "shifts_processed": 0,
+                "breaks_deleted": 0,
+                "breaks_inserted": 0,
+                "breaks_frozen": 0,
+                "skipped_past_days": skipped_past_days
+            }
 
         normalized_operator_ids = None
         if operator_ids is not None:
@@ -33262,11 +33635,14 @@ class Database:
                 return {
                     "start_date": start_date_obj.strftime('%Y-%m-%d'),
                     "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                    "requested_start_date": requested_start_date_obj.strftime('%Y-%m-%d'),
                     "operators_requested": 0,
                     "operators_affected": 0,
                     "shifts_processed": 0,
                     "breaks_deleted": 0,
-                    "breaks_inserted": 0
+                    "breaks_inserted": 0,
+                    "breaks_frozen": 0,
+                    "skipped_past_days": skipped_past_days
                 }
 
         with self._get_cursor() as cursor:
@@ -33291,12 +33667,27 @@ class Database:
                 return {
                     "start_date": start_date_obj.strftime('%Y-%m-%d'),
                     "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                    "requested_start_date": requested_start_date_obj.strftime('%Y-%m-%d'),
                     "operators_requested": len(normalized_operator_ids or []),
                     "operators_affected": 0,
                     "shifts_processed": 0,
                     "breaks_deleted": 0,
-                    "breaks_inserted": 0
+                    "breaks_inserted": 0,
+                    "breaks_frozen": 0,
+                    "skipped_past_days": skipped_past_days
                 }
+
+            # Снимки перерывов дня снимаем ДО удаления: у идущей смены прошедшие
+            # перерывы возвращаются на свои места, а не планируются заново.
+            day_breaks_snapshots = {}
+            for row in rows:
+                snapshot_key = (int(row[1]), row[2].strftime('%Y-%m-%d'))
+                if snapshot_key not in day_breaks_snapshots:
+                    day_breaks_snapshots[snapshot_key] = self._load_day_shift_breaks_tx(
+                        cursor,
+                        row[1],
+                        row[2]
+                    )
 
             shift_ids = [int(row[0]) for row in rows]
             cursor.execute("DELETE FROM shift_breaks WHERE shift_id = ANY(%s)", (shift_ids,))
@@ -33326,13 +33717,21 @@ class Database:
             def _sort_key(row):
                 _, operator_id, shift_date, start_time_value, end_time_value, direction_name = row
                 start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
-                duration = max(0, end_min - start_min)
                 break_durations = self._pick_break_durations_for_shift(
-                    duration,
+                    max(0, end_min - start_min),
                     direction_name=direction_name,
                     direction_rules=_rules_for_direction(direction_name)
                 )
-                edge_margin, min_gap = self._break_layout_spacing(start_min, end_min, break_durations)
+                # «Жёсткость» считаем по окну планирования: у идущей смены свободен
+                # только хвост, и она должна получить слоты раньше свободных смен.
+                window_start = max(
+                    start_min,
+                    self._break_freeze_boundary_minutes(shift_date, seg_start=start_min, now=recalc_now)
+                    + SHIFT_BREAK_PLANNING_BUFFER_MINUTES
+                )
+                window_start = min(window_start, end_min)
+                duration = max(0, end_min - window_start)
+                edge_margin, min_gap = self._break_layout_spacing(window_start, end_min, break_durations)
                 required_minutes = (
                     sum(max(0, int(x)) for x in (break_durations or []))
                     + (2 * int(edge_margin))
@@ -33349,16 +33748,48 @@ class Database:
                 )
 
             breaks_inserted = 0
+            breaks_frozen = 0
             affected_operator_ids = set()
+            recalc_direction_keys = {}
             for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in sorted(rows, key=_sort_key):
                 start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
                 direction_rules = _rules_for_direction(direction_name)
-                computed_breaks = self._compute_auto_shift_breaks_minutes(
-                    start_min,
-                    end_min,
+                boundary_min = self._break_freeze_boundary_minutes(
+                    shift_date,
+                    seg_start=start_min,
+                    now=recalc_now
+                )
+                planning_from_min = boundary_min + SHIFT_BREAK_PLANNING_BUFFER_MINUTES
+                snapshot = day_breaks_snapshots.get((int(operator_id), shift_date.strftime('%Y-%m-%d'))) or []
+                frozen_breaks, _, used_breaks = self._split_breaks_by_freeze_boundary(
+                    snapshot,
+                    planning_from_min,
+                    seg_start=start_min,
+                    seg_end=end_min
+                )
+                full_durations = self._pick_break_durations_for_shift(
+                    duration_minutes=max(0, end_min - start_min),
                     direction_name=direction_name,
                     direction_rules=direction_rules
                 )
+                if planning_from_min <= start_min and not used_breaks:
+                    window_start = start_min
+                    computed_breaks = self._place_break_durations_centered_minutes(
+                        start_min,
+                        end_min,
+                        full_durations
+                    )
+                else:
+                    window_start = max(start_min, planning_from_min)
+                    computed_breaks = self._place_break_durations_centered_minutes(
+                        window_start,
+                        end_min,
+                        self._fit_break_durations_to_window(
+                            window_start,
+                            end_min,
+                            self._remaining_break_durations_after_used(full_durations, used_breaks)
+                        )
+                    )
                 adjusted_breaks = self._adjust_shift_breaks_against_occupied_tx(
                     cursor=cursor,
                     operator_id=operator_id,
@@ -33366,20 +33797,34 @@ class Database:
                     start_time=start_time_value,
                     end_time=end_time_value,
                     breaks=computed_breaks,
-                    cross_gap_minutes=_cross_gap_for_direction(direction_name)
+                    cross_gap_minutes=_cross_gap_for_direction(direction_name),
+                    frozen_breaks=frozen_breaks,
+                    planning_from_minutes=window_start,
+                    extra_occupied=self._extra_occupied_from_day_snapshots(
+                        cursor=cursor,
+                        day_breaks_snapshots=day_breaks_snapshots,
+                        operator_id=operator_id,
+                        shift_date=shift_date,
+                        now=recalc_now,
+                        direction_key_cache=recalc_direction_keys
+                    )
                 )
                 self._insert_shift_breaks(cursor, shift_id, adjusted_breaks)
                 breaks_inserted += len(adjusted_breaks)
+                breaks_frozen += len(frozen_breaks)
                 affected_operator_ids.add(int(operator_id))
 
             return {
                 "start_date": start_date_obj.strftime('%Y-%m-%d'),
                 "end_date": end_date_obj.strftime('%Y-%m-%d'),
+                "requested_start_date": requested_start_date_obj.strftime('%Y-%m-%d'),
                 "operators_requested": len(normalized_operator_ids or []),
                 "operators_affected": len(affected_operator_ids),
                 "shifts_processed": len(rows),
                 "breaks_deleted": breaks_deleted,
-                "breaks_inserted": breaks_inserted
+                "breaks_inserted": breaks_inserted,
+                "breaks_frozen": breaks_frozen,
+                "skipped_past_days": skipped_past_days
             }
 
     def _schedule_auto_normalize_flag_status(self, value):
@@ -35975,13 +36420,42 @@ class Database:
         shift_type=None,
         previous_start_time=None,
         previous_end_time=None,
-        cross_gap_minutes=None
+        cross_gap_minutes=None,
+        now=None,
+        day_breaks_snapshot=None,
+        extra_occupied=None
     ):
         shift_type_norm = self._normalize_work_shift_type(shift_type)
         new_start_min, new_end_min = self._schedule_interval_minutes(start_time, end_time)
         new_duration_min = max(0, new_end_min - new_start_min)
         direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
         direction_rules = self._get_work_schedule_break_rules_for_direction_tx(cursor, direction_name)
+
+        # Снимок перерывов дня снимаем ДО любых удалений: перерывы уезжают из базы
+        # каскадом вместе со строкой смены, а прошедшие переписывать нельзя.
+        # На путях, которые чистят день заранее, снимок приходит сверху.
+        if day_breaks_snapshot is None:
+            day_breaks_snapshot = self._load_day_shift_breaks_tx(cursor, operator_id, shift_date)
+        freeze_boundary_min = self._break_freeze_boundary_minutes(
+            shift_date,
+            seg_start=new_start_min,
+            now=now
+        )
+        planning_from_min = freeze_boundary_min + SHIFT_BREAK_PLANNING_BUFFER_MINUTES
+        frozen_breaks, stored_upcoming_breaks, used_breaks = self._split_breaks_by_freeze_boundary(
+            day_breaks_snapshot,
+            planning_from_min,
+            seg_start=new_start_min,
+            seg_end=new_end_min
+        )
+        # Смена целиком в прошлом и сохранять нечего (заводят задним числом) —
+        # раскладываем по всей смене, как раньше: переписывать нечего.
+        nothing_to_protect = not frozen_breaks and not used_breaks and not stored_upcoming_breaks
+        planning_window_start = (
+            new_start_min
+            if nothing_to_protect and planning_from_min >= new_end_min
+            else max(new_start_min, planning_from_min)
+        )
 
         prev_start_obj = None
         prev_end_obj = None
@@ -36018,13 +36492,42 @@ class Database:
             )
             previous_shift_breaks_were_auto = (previous_shift_breaks == previous_auto_breaks)
 
-        if breaks is None:
-            breaks_norm = self._compute_auto_shift_breaks_minutes(
-                new_start_min,
-                new_end_min,
+        def _auto_breaks_for_remaining_shift():
+            """
+            Автогенерация с учётом прошлого: норма по длительности смены минус уже
+            отсиженное, разложенная только по остатку смены. Перерывы, которые уже
+            стоят в графике и ещё не начались, остаются на своих местах.
+            """
+            full_durations = self._pick_break_durations_for_shift(
+                duration_minutes=new_duration_min,
                 direction_name=direction_name,
                 direction_rules=direction_rules
             )
+            if planning_window_start <= new_start_min and not used_breaks:
+                # Ничего не заморожено — прежняя раскладка по всей смене.
+                planned = self._place_break_durations_centered_minutes(
+                    new_start_min,
+                    new_end_min,
+                    full_durations
+                )
+            else:
+                remaining_durations = self._remaining_break_durations_after_used(
+                    full_durations,
+                    used_breaks
+                )
+                planned = self._place_break_durations_centered_minutes(
+                    planning_window_start,
+                    new_end_min,
+                    self._fit_break_durations_to_window(
+                        planning_window_start,
+                        new_end_min,
+                        remaining_durations
+                    )
+                )
+            return self._seed_break_positions_from_existing(planned, stored_upcoming_breaks)
+
+        if breaks is None:
+            breaks_norm = _auto_breaks_for_remaining_shift()
         else:
             incoming_breaks_norm = self._normalize_shift_breaks(breaks)
             should_regenerate_auto_breaks = (
@@ -36033,16 +36536,17 @@ class Database:
                 and incoming_breaks_norm == previous_shift_breaks
                 and new_duration_min < previous_duration_min
             )
-            breaks_norm = (
-                self._compute_auto_shift_breaks_minutes(
-                    new_start_min,
-                    new_end_min,
-                    direction_name=direction_name,
-                    direction_rules=direction_rules
-                )
-                if should_regenerate_auto_breaks
-                else incoming_breaks_norm
-            )
+            if should_regenerate_auto_breaks:
+                breaks_norm = _auto_breaks_for_remaining_shift()
+            else:
+                # Прошлое клиент менять не может: прошедшие перерывы берём из снимка,
+                # из присланного списка используем только ещё не наступившие.
+                # Границами смены присланное не режем — их, как и раньше,
+                # приводит в порядок анти-пересечение.
+                breaks_norm = [
+                    item for item in incoming_breaks_norm
+                    if int(item['start']) >= planning_from_min
+                ]
 
         # Приводим перерывы к правилам анти-пересечения между операторами одного направления
         # (включая минимальный промежуток между перерывами разных операторов).
@@ -36057,7 +36561,10 @@ class Database:
                 cross_gap_minutes
                 if cross_gap_minutes is not None
                 else self._get_break_cross_operator_gap_for_direction_tx(cursor, direction_name)
-            )
+            ),
+            frozen_breaks=frozen_breaks,
+            planning_from_minutes=planning_window_start,
+            extra_occupied=extra_occupied
         )
 
         # Если редактировали существующую смену по previous_* и время изменилось,
@@ -39059,42 +39566,56 @@ class Database:
                 if before_tgt != after_tgt:
                     target_affected_dates.append(day_obj)
 
+            # Снимки перерывов обеих сторон до очистки дней: перерывы, которые уже
+            # отсижены к моменту передачи часов, переносятся как есть — их нельзя
+            # ни подвинуть, ни списать со второй стороны.
+            swap_now = self._almaty_now()
+            swap_direction_keys = {}
+            swap_breaks_snapshots = {}
+            for day_obj in requester_affected_dates:
+                swap_breaks_snapshots[(int(requester_operator_id), day_obj.strftime('%Y-%m-%d'))] = (
+                    self._load_day_shift_breaks_tx(cursor, requester_operator_id, day_obj)
+                )
+            for day_obj in target_affected_dates:
+                swap_breaks_snapshots[(int(target_operator_id), day_obj.strftime('%Y-%m-%d'))] = (
+                    self._load_day_shift_breaks_tx(cursor, target_operator_id, day_obj)
+                )
+
             for day_obj in requester_affected_dates:
                 self._clear_day_schedule_tx(cursor, requester_operator_id, day_obj)
             for day_obj in target_affected_dates:
                 self._clear_day_schedule_tx(cursor, target_operator_id, day_obj)
 
-            for day_obj in requester_affected_dates:
-                day_key = day_obj.strftime('%Y-%m-%d')
-                for seg in (requester_save_day_map.get(day_key) or []):
-                    seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
-                    seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
-                    self._save_shift_tx(
-                        cursor=cursor,
-                        operator_id=requester_operator_id,
-                        shift_date=day_obj,
-                        start_time=seg_start_obj,
-                        end_time=seg_end_obj,
-                        shift_type=seg.get('shift_type'),
-                        # Перерывы пересчитываем по правилам после обмена, старые не переносим.
-                        breaks=None
-                    )
+            def _save_swap_segments(op_id, affected_dates, save_day_map):
+                for day_value in affected_dates:
+                    day_key_value = day_value.strftime('%Y-%m-%d')
+                    for seg in (save_day_map.get(day_key_value) or []):
+                        seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
+                        seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
+                        self._save_shift_tx(
+                            cursor=cursor,
+                            operator_id=op_id,
+                            shift_date=day_value,
+                            start_time=seg_start_obj,
+                            end_time=seg_end_obj,
+                            shift_type=seg.get('shift_type'),
+                            # Будущие перерывы раскладываем по правилам после обмена,
+                            # уже прошедшие остаются у того, кто их отсидел.
+                            breaks=None,
+                            now=swap_now,
+                            day_breaks_snapshot=swap_breaks_snapshots.get((int(op_id), day_key_value)),
+                            extra_occupied=self._extra_occupied_from_day_snapshots(
+                                cursor=cursor,
+                                day_breaks_snapshots=swap_breaks_snapshots,
+                                operator_id=op_id,
+                                shift_date=day_value,
+                                now=swap_now,
+                                direction_key_cache=swap_direction_keys
+                            )
+                        )
 
-            for day_obj in target_affected_dates:
-                day_key = day_obj.strftime('%Y-%m-%d')
-                for seg in (target_save_day_map.get(day_key) or []):
-                    seg_start_obj = self._normalize_schedule_time(seg.get('start'), 'start_time')
-                    seg_end_obj = self._normalize_schedule_time(seg.get('end'), 'end_time')
-                    self._save_shift_tx(
-                        cursor=cursor,
-                        operator_id=target_operator_id,
-                        shift_date=day_obj,
-                        start_time=seg_start_obj,
-                        end_time=seg_end_obj,
-                        shift_type=seg.get('shift_type'),
-                        # Перерывы пересчитываем по правилам после обмена, старые не переносим.
-                        breaks=None
-                    )
+            _save_swap_segments(requester_operator_id, requester_affected_dates, requester_save_day_map)
+            _save_swap_segments(target_operator_id, target_affected_dates, target_save_day_map)
 
             for day_obj in requester_day_off_dates:
                 self._set_day_off_tx(cursor, requester_operator_id, day_obj)
@@ -39373,6 +39894,9 @@ class Database:
         }
         affected_operator_ids = set()
         affected_range_by_operator = {}
+        bulk_now = self._almaty_now()
+        bulk_breaks_snapshots = {}
+        bulk_direction_keys = {}
 
         def register_affected_day(op_id, day_obj):
             op_id_int = int(op_id)
@@ -39432,6 +39956,13 @@ class Database:
                         end_time=end_time_obj,
                         breaks=item.get('breaks')
                     )
+                    # Снимок до очистки дня — прошедшие перерывы не переписываем.
+                    day_key = date_obj.strftime('%Y-%m-%d')
+                    bulk_breaks_snapshots[(operator_id, day_key)] = self._load_day_shift_breaks_tx(
+                        cursor,
+                        operator_id,
+                        date_obj
+                    )
                     deleted_count = self._delete_all_shifts_for_day_tx(cursor, operator_id, date_obj)
                     shift_id = self._save_shift_tx(
                         cursor=cursor,
@@ -39440,7 +39971,17 @@ class Database:
                         start_time=start_time_obj,
                         end_time=end_time_obj,
                         breaks=resolved_breaks,
-                        shift_type=item.get('shift_type')
+                        shift_type=item.get('shift_type'),
+                        now=bulk_now,
+                        day_breaks_snapshot=bulk_breaks_snapshots.get((operator_id, day_key)),
+                        extra_occupied=self._extra_occupied_from_day_snapshots(
+                            cursor=cursor,
+                            day_breaks_snapshots=bulk_breaks_snapshots,
+                            operator_id=operator_id,
+                            shift_date=date_obj,
+                            now=bulk_now,
+                            direction_key_cache=bulk_direction_keys
+                        )
                     )
                     summary['set_shift'] += 1
                     summary['deleted_shift_rows'] += deleted_count
@@ -39489,6 +40030,9 @@ class Database:
         }
         affected_operator_ids = set()
         affected_range_by_operator = {}
+        import_now = self._almaty_now()
+        import_breaks_snapshots = {}
+        import_direction_keys = {}
 
         def register_affected_day(op_id, day_obj):
             op_id_int = int(op_id)
@@ -39562,6 +40106,14 @@ class Database:
                     _append_blacklist_skipped_entry(operator_id, date_obj, operator_name)
                     continue
 
+                # Снимок до очистки дня: импорт заменяет день целиком, а уже
+                # прошедшие перерывы переписывать нельзя.
+                import_day_key = date_obj.strftime('%Y-%m-%d')
+                import_breaks_snapshots[(operator_id, import_day_key)] = self._load_day_shift_breaks_tx(
+                    cursor,
+                    operator_id,
+                    date_obj
+                )
                 cleared = self._clear_day_schedule_tx(cursor, operator_id, date_obj)
                 summary['deleted_shift_rows'] += int(cleared.get('deleted_shifts') or 0)
                 summary['deleted_day_off_rows'] += int(cleared.get('deleted_day_off_rows') or 0)
@@ -39596,7 +40148,17 @@ class Database:
                             start_time=start_time_obj,
                             end_time=end_time_obj,
                             breaks=shift.get('breaks') if ('breaks' in shift) else None,
-                            shift_type=shift.get('shift_type')
+                            shift_type=shift.get('shift_type'),
+                            now=import_now,
+                            day_breaks_snapshot=import_breaks_snapshots.get((operator_id, import_day_key)),
+                            extra_occupied=self._extra_occupied_from_day_snapshots(
+                                cursor=cursor,
+                                day_breaks_snapshots=import_breaks_snapshots,
+                                operator_id=operator_id,
+                                shift_date=date_obj,
+                                now=import_now,
+                                direction_key_cache=import_direction_keys
+                            )
                         )
                     except ValueError as e:
                         if _is_blacklist_shift_block_error(e):
