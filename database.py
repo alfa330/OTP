@@ -5150,19 +5150,23 @@ class Database:
                 minutes          INTEGER,
                 location         TEXT,
                 message_text     TEXT,
-                detected_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                ack_at           TIMESTAMPTZ,
-                ack_by           TEXT,
-                ack_chat_id      TEXT,
-                ack_source       TEXT
+                detected_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             CREATE INDEX IF NOT EXISTS idx_glb_events_date ON glb_events(event_date DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_glb_events_type ON glb_events(event_type);
             CREATE INDEX IF NOT EXISTS idx_glb_events_dept ON glb_events(lower(department_name));
-            CREATE INDEX IF NOT EXISTS idx_glb_events_pending ON glb_events(detected_at DESC) WHERE ack_at IS NULL;
 
-            -- В какие чаты ушло уведомление и каким сообщением: по message_id
-            -- «Отбито» правит текст во всех чатах сразу, а не только там, где нажали.
+            -- Отметка «Отбито» под уведомлением убрана по решению владельца: она
+            -- ничего не меняла ни в Workpace, ни в отчётах и не хранила причину.
+            -- Колонки и индекс подчищаем у баз, которые их успели создать.
+            DROP INDEX IF EXISTS idx_glb_events_pending;
+            ALTER TABLE glb_events
+                DROP COLUMN IF EXISTS ack_at,
+                DROP COLUMN IF EXISTS ack_by,
+                DROP COLUMN IF EXISTS ack_chat_id,
+                DROP COLUMN IF EXISTS ack_source;
+
+            -- В какие чаты ушло уведомление и каким сообщением.
             CREATE TABLE IF NOT EXISTS glb_event_deliveries (
                 id                  BIGSERIAL PRIMARY KEY,
                 event_id            BIGINT NOT NULL REFERENCES glb_events(id) ON DELETE CASCADE,
@@ -46614,13 +46618,10 @@ class Database:
                     (SELECT COUNT(*) FROM glb_mutes) AS mutes_total,
                     (SELECT COUNT(*) FROM glb_mutes WHERE chat_id IS NULL) AS mutes_global,
                     (SELECT COUNT(*) FROM glb_events WHERE detected_at >= NOW() - make_interval(days => %s)) AS events_period,
-                    (SELECT COUNT(*) FROM glb_events
-                      WHERE detected_at >= NOW() - make_interval(days => %s) AND ack_at IS NOT NULL) AS events_acked,
-                    (SELECT COUNT(*) FROM glb_events WHERE ack_at IS NULL) AS events_pending,
                     (SELECT COUNT(*) FROM glb_reports WHERE created_at >= NOW() - make_interval(days => %s)) AS reports_period,
                     (SELECT COUNT(*) FROM glb_reports
                       WHERE created_at >= NOW() - make_interval(days => %s) AND status <> 'ok') AS reports_failed
-            """, (days_int, days_int, days_int, days_int))
+            """, (days_int, days_int, days_int))
             row = cursor.fetchone()
             totals = {
                 'chats_total': int(row[0] or 0),
@@ -46631,27 +46632,23 @@ class Database:
                 'mutes_total': int(row[5] or 0),
                 'mutes_global': int(row[6] or 0),
                 'events_period': int(row[7] or 0),
-                'events_acked': int(row[8] or 0),
-                'events_pending': int(row[9] or 0),
-                'reports_period': int(row[10] or 0),
-                'reports_failed': int(row[11] or 0),
+                'reports_period': int(row[8] or 0),
+                'reports_failed': int(row[9] or 0),
             }
 
             cursor.execute("""
-                SELECT event_type, COUNT(*), COUNT(*) FILTER (WHERE ack_at IS NOT NULL)
+                SELECT event_type, COUNT(*)
                 FROM glb_events
                 WHERE detected_at >= NOW() - make_interval(days => %s)
                 GROUP BY event_type
             """, (days_int,))
             by_type = [
-                {'event_type': r[0], 'count': int(r[1] or 0), 'acked': int(r[2] or 0)}
+                {'event_type': r[0], 'count': int(r[1] or 0)}
                 for r in cursor.fetchall()
             ]
 
             cursor.execute("""
-                SELECT COALESCE(NULLIF(department_name, ''), 'Без отдела') AS dept,
-                       COUNT(*),
-                       COUNT(*) FILTER (WHERE ack_at IS NOT NULL)
+                SELECT COALESCE(NULLIF(department_name, ''), 'Без отдела') AS dept, COUNT(*)
                 FROM glb_events
                 WHERE detected_at >= NOW() - make_interval(days => %s)
                 GROUP BY dept
@@ -46659,21 +46656,19 @@ class Database:
                 LIMIT 12
             """, (days_int,))
             by_department = [
-                {'department_name': r[0], 'count': int(r[1] or 0), 'acked': int(r[2] or 0)}
+                {'department_name': r[0], 'count': int(r[1] or 0)}
                 for r in cursor.fetchall()
             ]
 
             cursor.execute("""
-                SELECT to_char(detected_at AT TIME ZONE 'Asia/Almaty', 'YYYY-MM-DD') AS day,
-                       COUNT(*),
-                       COUNT(*) FILTER (WHERE ack_at IS NOT NULL)
+                SELECT to_char(detected_at AT TIME ZONE 'Asia/Almaty', 'YYYY-MM-DD') AS day, COUNT(*)
                 FROM glb_events
                 WHERE detected_at >= NOW() - make_interval(days => %s)
                 GROUP BY day
                 ORDER BY day
             """, (days_int,))
             by_day = [
-                {'date': r[0], 'count': int(r[1] or 0), 'acked': int(r[2] or 0)}
+                {'date': r[0], 'count': int(r[1] or 0)}
                 for r in cursor.fetchall()
             ]
 
@@ -46972,12 +46967,11 @@ class Database:
         event_type=None,
         department=None,
         chat_id=None,
-        ack_state=None,
         search=None,
         limit=100,
         offset=0,
     ):
-        """Лента отбивок с доставками по чатам и отметкой «кто отбил»."""
+        """Лента найденных нарушений с доставками по чатам."""
         limit_int = max(1, min(int(limit or 100), 500))
         offset_int = max(0, int(offset or 0))
         where, params = [], []
@@ -47007,14 +47001,6 @@ class Database:
             where.append("EXISTS (SELECT 1 FROM glb_event_deliveries ed WHERE ed.event_id = e.id AND ed.chat_id = %s)")
             params.append(self._glb_chat_id(chat_id))
 
-        ack_text = str(ack_state or '').strip().lower()
-        if ack_text == 'acked':
-            where.append("e.ack_at IS NOT NULL")
-        elif ack_text == 'pending':
-            where.append("e.ack_at IS NULL")
-        elif ack_text and ack_text != 'all':
-            raise ValueError("Invalid ack_state")
-
         search_text = str(search or '').strip()
         if search_text:
             where.append("(e.employee_name ILIKE %s OR e.department_name ILIKE %s)")
@@ -47028,7 +47014,7 @@ class Database:
             cursor.execute(f"""
                 SELECT e.id, e.event_type, e.event_date, e.employee_name, e.department_name,
                        e.schedule_name, e.plan_at, e.fact_at, e.minutes, e.location,
-                       e.message_text, e.detected_at, e.ack_at, e.ack_by, e.ack_chat_id, e.ack_source,
+                       e.message_text, e.detected_at,
                        COALESCE(d.deliveries, '[]'::json) AS deliveries
                 FROM glb_events e
                 LEFT JOIN LATERAL (
@@ -47049,7 +47035,7 @@ class Database:
             """, params + [limit_int, offset_int])
             items = []
             for r in cursor.fetchall():
-                deliveries = r[16] or []
+                deliveries = r[12] or []
                 items.append({
                     'id': int(r[0]),
                     'event_type': r[1],
@@ -47063,10 +47049,6 @@ class Database:
                     'location': r[9],
                     'message_text': r[10],
                     'detected_at': r[11].isoformat() if r[11] else None,
-                    'ack_at': r[12].isoformat() if r[12] else None,
-                    'ack_by': r[13],
-                    'ack_chat_id': r[14],
-                    'ack_source': r[15],
                     'deliveries': deliveries,
                 })
         return {'total': total, 'items': items, 'limit': limit_int, 'offset': offset_int}
@@ -47241,56 +47223,6 @@ class Database:
                 cursor.execute(
                     "UPDATE glb_chats SET last_delivery_at = NOW() WHERE chat_id = %s", (str(chat_id),)
                 )
-
-    def glb_get_event(self, event_id):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id, event_type, employee_name, department_name, message_text, ack_at, ack_by
-                FROM glb_events WHERE id = %s
-            """, (int(event_id),))
-            row = cursor.fetchone()
-        if not row:
-            return None
-        return {'id': int(row[0]), 'event_type': row[1], 'employee_name': row[2],
-                'department_name': row[3], 'message_text': row[4],
-                'ack_at': row[5].isoformat() if row[5] else None, 'ack_by': row[6]}
-
-    def glb_find_event_by_message(self, chat_id, message_id):
-        """Событие по сообщению в чате — для уведомлений, у которых в кнопке нет id."""
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT e.id
-                FROM glb_events e
-                JOIN glb_event_deliveries d ON d.event_id = e.id
-                WHERE d.chat_id = %s AND d.telegram_message_id = %s
-                LIMIT 1
-            """, (str(chat_id), str(message_id)))
-            row = cursor.fetchone()
-        return self.glb_get_event(row[0]) if row else None
-
-    def glb_ack_event(self, event_id, ack_by, chat_id=None, source='telegram'):
-        """Отметить событие отбитым. None = кто-то отбил его раньше."""
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                UPDATE glb_events
-                SET ack_at = NOW(), ack_by = %s, ack_chat_id = %s, ack_source = %s
-                WHERE id = %s AND ack_at IS NULL
-                RETURNING ack_at, ack_by, message_text
-            """, (ack_by, chat_id, source, int(event_id)))
-            row = cursor.fetchone()
-        if not row:
-            return None
-        return {'ack_at': row[0].isoformat() if row[0] else None,
-                'ack_by': row[1], 'message_text': row[2]}
-
-    def glb_event_deliveries(self, event_id):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT chat_id, telegram_message_id
-                FROM glb_event_deliveries
-                WHERE event_id = %s AND telegram_message_id IS NOT NULL AND error IS NULL
-            """, (int(event_id),))
-            return [{'chat_id': row[0], 'message_id': row[1]} for row in cursor.fetchall()]
 
     def glb_sync_departments(self, counts):
         """Кэш справочника отделов Workpace: раздел на сайте в Workpace не ходит."""

@@ -6280,8 +6280,8 @@ def _group_late_bot_guard():
 
 
 def _group_late_bot_actor(requester_id):
-    """Кто выполнил действие — попадает в created_by/ack_by, чтобы в разделе было
-    видно, что правку сделали с сайта, а не командой в Telegram."""
+    """Кто выполнил действие — попадает в created_by, чтобы в разделе было видно,
+    что правку сделали с сайта, а не командой в Telegram."""
     try:
         requester = db.get_user(id=int(requester_id))
         name = str(requester[2] or '').strip() if requester else ''
@@ -6293,7 +6293,7 @@ def _group_late_bot_actor(requester_id):
 def _group_late_send_chat_message(chat_id, text):
     """Отправить сообщение нашим ботом из потока Flask. (message_id, error)."""
     async def _send():
-        return await _group_late_send_event(chat_id, text, None)
+        return await _group_late_send_event(chat_id, text)
 
     try:
         return _group_late_run_on_bot_loop(_send, timeout=30)
@@ -6558,7 +6558,6 @@ def api_group_late_bot_events():
             event_type=request.args.get('event_type'),
             department=request.args.get('department'),
             chat_id=request.args.get('chat_id'),
-            ack_state=request.args.get('ack_state'),
             search=request.args.get('q'),
             limit=request.args.get('limit', 100),
             offset=request.args.get('offset', 0),
@@ -6569,53 +6568,6 @@ def api_group_late_bot_events():
         return jsonify({"error": str(error)}), 400
     except Exception as error:
         logging.exception("group_late_bot events failed")
-        return jsonify({"error": str(error)}), 500
-
-
-@app.route('/api/group_late_bot/events/<int:event_id>/ack', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_event_ack(event_id):
-    """Отбить с сайта: пометить в базе и переписать сообщения во всех чатах —
-    иначе в Telegram осталось бы «ожидает отбивки» при отбитом событии."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        requester = db.get_user(id=int(requester_id))
-        reviewer_name = (str(requester[2]).strip() if requester and requester[2] else '') or f"Пользователь {requester_id}"
-    except Exception:
-        reviewer_name = f"Пользователь {requester_id}"
-
-    try:
-        if not db.glb_get_event(event_id):
-            return jsonify({"error": "Событие не найдено"}), 404
-        acked = db.glb_ack_event(
-            event_id, _group_late_bot_actor(requester_id), source='web')
-        if not acked:
-            return jsonify({"error": "Событие уже отбито"}), 409
-
-        updated = 0
-        try:
-            updated = _group_late_run_on_bot_loop(
-                lambda: _group_late_apply_ack(
-                    event_id, acked.get('message_text') or '', reviewer_name),
-                timeout=60,
-            )
-        except Exception as error:
-            # Отметка в базе уже стоит; сообщения в чатах поправит следующий, кто
-            # их откроет. Не отвечаем ложной ошибкой, но предупреждаем.
-            logging.warning("group_late: ack %s — не удалось обновить сообщения: %s", event_id, error)
-
-        return jsonify({
-            "status": "success",
-            "ack_at": acked.get('ack_at'),
-            "ack_by": acked.get('ack_by'),
-            "messages_updated": updated,
-        }), 200
-    except Exception as error:
-        logging.exception("group_late event ack failed")
         return jsonify({"error": str(error)}), 500
 
 
@@ -46212,46 +46164,15 @@ async def handle_reval_decision_comment(message: types.Message, state: FSMContex
 # Сеть Workpace и запросы в базу уносим в пул потоков: на event loop бота
 # остаётся только Telegram.
 
-GROUP_LATE_ACK_PREFIX = 'glb_ack:'
-
-
-def _group_late_ack_keyboard(event_id):
-    return InlineKeyboardMarkup().add(
-        InlineKeyboardButton('✅ Отбито', callback_data=f"{GROUP_LATE_ACK_PREFIX}{event_id}")
-    )
-
-
-async def _group_late_send_event(chat_id, text, keyboard):
+async def _group_late_send_event(chat_id, text):
     """(message_id, error). Ошибку не глотаем: она попадёт в историю доставок,
     и в разделе будет видно, что в чат уведомление не ушло."""
     try:
-        message = await bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=keyboard)
+        message = await bot.send_message(chat_id, text, parse_mode='HTML')
         return str(message.message_id), None
     except Exception as error:
         logging.warning("group_late: не удалось отправить в чат %s: %s", chat_id, error)
         return None, str(error)[:300]
-
-
-async def _group_late_apply_ack(event_id, message_text, reviewer_name):
-    """Переписать «ожидает отбивки» во ВСЕХ чатах, куда ушло уведомление.
-
-    В прежнем сервисе правилось только то сообщение, где нажали кнопку, и в
-    остальных чатах инцидент так и висел неотбитым."""
-    loop = asyncio.get_event_loop()
-    deliveries = await loop.run_in_executor(group_late_pool, db.glb_event_deliveries, int(event_id))
-    new_text = group_late.messages.acked_text(message_text, reviewer_name)
-    updated = 0
-    for delivery in deliveries:
-        try:
-            await bot.edit_message_text(
-                new_text, chat_id=delivery['chat_id'], message_id=int(delivery['message_id']),
-                parse_mode='HTML', reply_markup=None,
-            )
-            updated += 1
-        except Exception as error:
-            logging.debug("group_late: не удалось обновить сообщение %s: %s",
-                          delivery.get('message_id'), error)
-    return updated
 
 
 async def group_late_poll_job():
@@ -46276,9 +46197,8 @@ async def _group_late_poll_cycle():
 
     results = []
     for event in plan.get('events') or []:
-        keyboard = _group_late_ack_keyboard(event['event_id'])
         for chat_id in event['targets']:
-            message_id, error = await _group_late_send_event(chat_id, event['message_text'], keyboard)
+            message_id, error = await _group_late_send_event(chat_id, event['message_text'])
             results.append({
                 'event_id': event['event_id'], 'chat_id': chat_id,
                 'message_id': message_id, 'error': error,
@@ -46370,40 +46290,7 @@ def _group_late_parse_report_args(args):
 
 
 def _register_group_late_handlers():
-    """Кнопка «Отбито», команда /report и авто-обнаружение чатов."""
-
-    @dp.callback_query_handler(lambda c: (c.data or '').startswith(GROUP_LATE_ACK_PREFIX))
-    async def _on_group_late_ack(callback_query: types.CallbackQuery):
-        try:
-            event_id = int((callback_query.data or '').split(':', 1)[1])
-        except (IndexError, ValueError):
-            await callback_query.answer('Не понял, какое это событие')
-            return
-
-        reviewer = (callback_query.from_user.first_name
-                    or callback_query.from_user.username
-                    or 'Пользователь')
-        loop = asyncio.get_event_loop()
-        try:
-            event = await loop.run_in_executor(group_late_pool, db.glb_get_event, event_id)
-            if not event:
-                await callback_query.answer('Событие не найдено')
-                return
-            acked = await loop.run_in_executor(
-                group_late_pool, functools.partial(
-                    db.glb_ack_event, event_id,
-                    f"telegram:{callback_query.from_user.id}:{reviewer}",
-                    chat_id=str(callback_query.message.chat.id), source='telegram',
-                )
-            )
-            if not acked:
-                await callback_query.answer('ℹ️ Уже отбито')
-                return
-            await _group_late_apply_ack(event_id, acked.get('message_text') or '', reviewer)
-            await callback_query.answer('✅ Отбито!')
-        except Exception as error:
-            logging.exception("group_late: ошибка обработки отбивки: %s", error)
-            await callback_query.answer('Не удалось отбить, попробуйте ещё раз')
+    """Команда /report в подключённых чатах."""
 
     @dp.message_handler(commands=['report'])
     async def _on_group_late_report(message: types.Message):
