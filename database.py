@@ -5066,6 +5066,7 @@ class Database:
                 WHERE department_id IS NULL;
             """)
             self._init_group_late_bot_schema_tx(cursor)
+            self._init_amo_leads_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5087,6 +5088,135 @@ class Database:
             except Exception as exc:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_null_group_backfill")
                 logging.error("null group_id backfill skipped: %s", exc, exc_info=True)
+
+    def _init_amo_leads_schema_tx(self, cursor):
+        """Схема выгрузки сделок amoCRM (раздел «Лиды по источникам»).
+
+        Раньше это жило на вкладке «Импорт ДЕНЬ» Google-таблицы, куда Apps Script
+        раз в сутки перезаливал сделки. Здесь те же поля, но сделка хранится по
+        своему id: выгрузка идемпотентна и не оставляет лист пустым в момент
+        обновления, как это делал `sheet.clear()`.
+        """
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS amo_leads (
+                lead_id       BIGINT PRIMARY KEY,
+                name          TEXT,
+                created_at    TIMESTAMPTZ NOT NULL,
+                created_date  DATE NOT NULL,
+                stage         TEXT,
+                responsible   TEXT,
+                tags          TEXT,
+                utm_source    TEXT,
+                utm_medium    TEXT,
+                utm_campaign  TEXT,
+                utm_term      TEXT,
+                registered    SMALLINT NOT NULL DEFAULT 0,
+                trip_done     SMALLINT NOT NULL DEFAULT 0,
+                robot_closed  SMALLINT NOT NULL DEFAULT 0,
+                synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_amo_leads_created_date
+                ON amo_leads(created_date);
+
+            -- Журнал выгрузок. Нужен, чтобы отбивка могла показать возраст цифр:
+            -- в Apps Script ошибка API молча оставляла на листе прошлые данные.
+            CREATE TABLE IF NOT EXISTS amo_lead_syncs (
+                id            BIGSERIAL PRIMARY KEY,
+                started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at   TIMESTAMPTZ,
+                status        TEXT NOT NULL DEFAULT 'running',
+                leads_fetched INTEGER,
+                days          INTEGER,
+                error         TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_amo_lead_syncs_started
+                ON amo_lead_syncs(started_at DESC);
+        """)
+
+    def upsert_amo_leads(self, rows):
+        """Записать выгруженные сделки. Существующие обновляются по lead_id."""
+        if not rows:
+            return 0
+        payload = [(
+            r["lead_id"], r["name"], r["created_at"], r["created_date"], r["stage"],
+            r["responsible"], r["tags"], r["utm_source"], r["utm_medium"],
+            r["utm_campaign"], r["utm_term"], r["registered"], r["trip_done"],
+            r["robot_closed"],
+        ) for r in rows if r.get("lead_id")]
+        if not payload:
+            return 0
+        with self._get_cursor() as cursor:
+            execute_values(cursor, """
+                INSERT INTO amo_leads (
+                    lead_id, name, created_at, created_date, stage, responsible,
+                    tags, utm_source, utm_medium, utm_campaign, utm_term,
+                    registered, trip_done, robot_closed
+                ) VALUES %s
+                ON CONFLICT (lead_id) DO UPDATE SET
+                    name         = EXCLUDED.name,
+                    created_at   = EXCLUDED.created_at,
+                    created_date = EXCLUDED.created_date,
+                    stage        = EXCLUDED.stage,
+                    responsible  = EXCLUDED.responsible,
+                    tags         = EXCLUDED.tags,
+                    utm_source   = EXCLUDED.utm_source,
+                    utm_medium   = EXCLUDED.utm_medium,
+                    utm_campaign = EXCLUDED.utm_campaign,
+                    utm_term     = EXCLUDED.utm_term,
+                    registered   = EXCLUDED.registered,
+                    trip_done    = EXCLUDED.trip_done,
+                    robot_closed = EXCLUDED.robot_closed,
+                    synced_at    = NOW()
+            """, payload, page_size=500)
+        return len(payload)
+
+    def get_amo_leads_for_date(self, day):
+        """Сделки за календарный день — то, по чему считается отбивка."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT lead_id, name, stage, responsible, tags,
+                       utm_source, utm_medium, utm_campaign, utm_term,
+                       registered, trip_done, robot_closed
+                FROM amo_leads
+                WHERE created_date = %s
+            """, (day,))
+            columns = [c[0] for c in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def start_amo_lead_sync(self, days):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO amo_lead_syncs (days) VALUES (%s) RETURNING id", (days,))
+            return cursor.fetchone()[0]
+
+    def finish_amo_lead_sync(self, sync_id, leads_fetched=None, error=None):
+        if not sync_id:
+            return
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE amo_lead_syncs
+                SET finished_at = NOW(),
+                    status = %s,
+                    leads_fetched = %s,
+                    error = %s
+                WHERE id = %s
+            """, ("error" if error else "ok", leads_fetched, error, sync_id))
+
+    def get_last_amo_lead_sync(self):
+        """Последняя завершённая выгрузка — для отметки о свежести в отбивке."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, started_at, finished_at, status, leads_fetched, error
+                FROM amo_lead_syncs
+                WHERE finished_at IS NOT NULL
+                ORDER BY finished_at DESC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if not row:
+                return None
+            keys = ("id", "started_at", "finished_at", "status", "leads_fetched", "error")
+            return dict(zip(keys, row))
 
     def _init_group_late_bot_schema_tx(self, cursor):
         """Схема раздела «Бот опозданий» (group_late_bot, префикс glb_).
