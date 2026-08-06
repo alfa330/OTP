@@ -4216,7 +4216,11 @@ def _resource_fte_error_response(error):
 
 # ── ИИ-оценка звонков (раздел call_qa) ────────────────────────────────────────
 AI_QA_OP_DEPARTMENT_ID = 367  # Отдел продаж (call_qa.config.OP_DEPARTMENT_ID)
-AI_QA_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov'})
+# Коды отделов, чьим главам открыт раздел целиком (без среза по направлениям).
+# Оцениваются здесь только звонки/чаты ОП, поэтому список — не «свой отдел», а
+# явный allowlist наблюдателей: 'marketing' добавлен по решению владельца
+# (2026-08-06) — глава маркетинга смотрит те же разборы, что главы ОП и СЗоВ.
+AI_QA_HEAD_DEPARTMENT_CODES = frozenset({'op', 'szov', 'marketing'})
 
 
 def _is_ai_qa_department_head(requester_id):
@@ -4245,9 +4249,10 @@ def _is_ai_qa_department_head(requester_id):
 
 
 def _ai_qa_guard():
-    """Возвращает (requester_id, error_response|None). Доступ: супер-админ, главы ОП
-    и СЗоВ, whitelist, а также СВ отдела продаж (данные ему режет
-    _ai_qa_direction_scope — только собственные направления)."""
+    """Возвращает (requester_id, error_response|None). Доступ: супер-админ, главы
+    отделов из AI_QA_HEAD_DEPARTMENT_CODES (ОП, СЗоВ, маркетинг), whitelist,
+    а также СВ отдела продаж (данные ему режет _ai_qa_direction_scope —
+    только собственные направления)."""
     requester_id = getattr(g, 'user_id', None)
     if requester_id is not None and int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
         return requester_id, None
@@ -4267,8 +4272,9 @@ def _ai_qa_guard():
 
 def _ai_qa_direction_scope(requester_id):
     """Скоуп данных раздела ИИ-оценки. None — без ограничений (супер-админ / главы
-    ОП и СЗоВ / whitelist); список канонических id направлений — СВ ОП видит только их
-    (направления его активных групп + операторов). Пустой список — направлений нет."""
+    отделов из AI_QA_HEAD_DEPARTMENT_CODES / whitelist); список канонических id
+    направлений — СВ ОП видит только их (направления его активных групп +
+    операторов). Пустой список — направлений нет."""
     if requester_id is None:
         return None
     if int(requester_id) in AI_QA_EXTRA_ACCESS_USER_IDS:
@@ -30381,7 +30387,11 @@ def amo_leads_sync(days=None):
 def _amo_leads_report_text(day):
     """Текст отбивки за день. Если данных ещё нет — тянем amoCRM прямо сейчас."""
     rows = db.get_amo_leads_for_date(day)
-    if not rows:
+    today = datetime.now(amo_leads.TZ).date()
+    # Догружаем только то, что выгрузка вообще способна принести. Для дат старше
+    # окна синк бесполезен, а без этой проверки каждый запрос за старый день
+    # заново тянул бы amoCRM и всё равно возвращал нули.
+    if not rows and 0 <= (today - day).days < amo_leads.SYNC_DAYS:
         amo_leads_sync()
         rows = db.get_amo_leads_for_date(day)
     summary = amo_leads.summarize(rows)

@@ -73,3 +73,45 @@ def test_report_renders_every_source(sheet_rows):
     for source in amo_leads.SOURCE_ORDER:
         assert source in text
     assert "1240" in text
+
+
+def test_2gis_counts_a_mixed_tag_once():
+    """Тег с обеими формами написания — один лид, а не два.
+
+    Раньше здесь складывались два счётчика, и такая строка удваивалась.
+    """
+    rows = [{"tags": "call_itaxi_2gis_2ГИС_wb", "utm_source": ""}]
+    assert amo_leads.count_by_source(rows)["2GIS"] == 1
+
+
+def test_2gis_still_catches_both_spellings():
+    rows = [
+        {"tags": "call_itaxi_2gis_wb", "utm_source": ""},
+        {"tags": "WZ (2ГИС - не писать первыми )", "utm_source": ""},
+    ]
+    assert amo_leads.count_by_source(rows)["2GIS"] == 2
+
+
+def test_sync_error_is_html_escaped():
+    """Ошибка amoCRM попадает в сообщение с parse_mode=HTML."""
+    import datetime
+
+    summary = amo_leads.summarize([])
+    text = amo_leads.render_report(
+        datetime.date(2026, 8, 5), summary,
+        sync_error='401 <b>Unauthorized</b> & "token" expired')
+    assert "<b>Unauthorized</b>" not in text
+    assert "&lt;b&gt;Unauthorized&lt;/b&gt;" in text
+    assert "&amp;" in text
+
+
+def test_arenda_and_departament_are_excluded_everywhere():
+    """Общий фильтр формул — по колонке тегов, а не по utm."""
+    rows = [
+        {"tags": "forma_itaxi_arenda", "utm_source": "fb"},
+        {"tags": "departament_1", "utm_source": "google_ads"},
+    ]
+    counts = amo_leads.count_by_source(rows)
+    assert counts["FB"] == 0
+    assert counts["Google"] == 0
+    assert counts["Общее"] == 0
