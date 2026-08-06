@@ -223,6 +223,10 @@ class SqlBuilderTests(unittest.TestCase):
             self.assertIn(state_alias, states_sql)
         self.assertIn("DATEPART(HOUR, s.DateTimeStart)", states_sql)
         self.assertNotIn(";", states_sql)
+        # Справочник A_Cube_CC_Cat_OperatorStateTypes: 9 = «Перерыв», 10 = «Готов».
+        # Раньше эти два кода стояли наоборот, и UTZ засчитывал перерыв как занятость.
+        self.assertIn("SUM(CASE WHEN s.State = 10 THEN s.LenTime ELSE 0 END) AS wait_seconds", states_sql)
+        self.assertIn("SUM(CASE WHEN s.State = 9 THEN s.LenTime ELSE 0 END) AS pause_seconds", states_sql)
 
 
 class BillingDetailTests(unittest.TestCase):
