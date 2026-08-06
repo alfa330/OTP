@@ -6273,17 +6273,69 @@ def api_chatapp_authors_map():
 # _group_late_run_on_bot_loop.
 
 
+# Отделы Workpace с нашими `departments` не связаны, поэтому целиком раздел открыт
+# только глобальным админам — как и команды бота в Telegram. Отдельным главам отделов
+# он отдаётся в границах ОДНОГО отдела Workpace: ключ — departments.code у нас,
+# значение — название отдела в Workpace. Сопоставление ручное: связи справочников нет.
+GROUP_LATE_BOT_DEPARTMENT_SCOPES = {'front_office': 'Регионы'}
+# Коды резолвим в id: id отделов засеяны миграцией и в разных окружениях разные.
+_GROUP_LATE_BOT_SCOPE_CACHE = {'ts': 0.0, 'by_department_id': None}
+_GROUP_LATE_BOT_SCOPE_CACHE_TTL = 600  # отделы меняются раз в никогда
+
+
+def _group_late_bot_scope_by_department_id():
+    """{id нашего отдела: название отдела Workpace} по GROUP_LATE_BOT_DEPARTMENT_SCOPES."""
+    now = time.time()
+    cache = _GROUP_LATE_BOT_SCOPE_CACHE
+    if cache['by_department_id'] is not None and now - cache['ts'] < _GROUP_LATE_BOT_SCOPE_CACHE_TTL:
+        return cache['by_department_id']
+    try:
+        mapping = {}
+        for department in (db.get_departments() or []):
+            code = str(department.get('code') or '').strip().lower()
+            scope = GROUP_LATE_BOT_DEPARTMENT_SCOPES.get(code)
+            if scope and department.get('id') is not None:
+                mapping[int(department['id'])] = scope
+    except Exception:
+        logging.exception("group_late: не удалось сопоставить отделы")
+        return cache['by_department_id'] or {}
+    cache['ts'], cache['by_department_id'] = now, mapping
+    return mapping
+
+
+def _group_late_bot_department_scope(requester_id, role):
+    """Отдел Workpace, которым ограничен глава отдела. None — ограничений нет."""
+    if not _is_admin_role(role):
+        return None
+    headed_id = _headed_department_id(requester_id)
+    if headed_id is None:
+        return None
+    return _group_late_bot_scope_by_department_id().get(int(headed_id))
+
+
 def _group_late_bot_guard():
-    """(requester_id, err). Раздел общекорпоративный (все отделы Workpace),
-    поэтому доступ только у глобальных админов — как и команды бота в Telegram."""
+    """(requester_id, department_scope, err).
+
+    department_scope — название отдела Workpace, которым ограничен запрашивающий:
+    у глобального админа None (видит весь раздел), у главы отдела из
+    GROUP_LATE_BOT_DEPARTMENT_SCOPES — его отдел. Каждый эндпоинт обязан
+    протащить это значение в db-вызов: там на нём и держится граница."""
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
         message, status_code = auth_error
-        return None, (jsonify({"error": message}), status_code)
+        return None, None, (jsonify({"error": message}), status_code)
     role = _normalize_user_role(requester[3])
     if _is_global_admin_requester(role, requester_id):
-        return requester_id, None
-    return requester_id, (jsonify({"error": "forbidden"}), 403)
+        return requester_id, None, None
+    scope = _group_late_bot_department_scope(requester_id, role)
+    if scope:
+        return requester_id, scope, None
+    return requester_id, None, (jsonify({"error": "forbidden"}), 403)
+
+
+def _group_late_bot_scope_forbidden(action):
+    """Действие вне границы отдела: правится не свой чат, не своё правило и т. п."""
+    return jsonify({"error": f"{action} доступно только администраторам бота"}), 403
 
 
 def _group_late_bot_actor(requester_id):
@@ -6329,15 +6381,18 @@ def api_group_late_bot_overview():
     """Шапка раздела: состояние опроса Workpace, объёмы отбивок и отчётов."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
-        overview = db.get_group_late_overview(days=request.args.get('days', 7))
+        overview = db.get_group_late_overview(days=request.args.get('days', 7), department=scope)
         overview['status'] = 'success'
         # Без доступов к Workpace опрос не заводится и отчёты собрать нечем —
         # раздел должен сказать об этом прямо, а не показывать пустые графики.
         overview['workpace_configured'] = group_late.is_configured()
+        # Отдел, которым ограничен раздел: по нему фронт прячет общие для компании
+        # действия и не даёт выбрать чужой отдел в фильтрах.
+        overview['department_scope'] = scope
         return jsonify(overview), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -6351,25 +6406,34 @@ def api_group_late_bot_overview():
 def api_group_late_bot_chats():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _group_late_bot_guard()
+    requester_id, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
         if request.method == 'GET':
-            result = db.get_group_late_chats(days=request.args.get('days', 7))
+            result = db.get_group_late_chats(days=request.args.get('days', 7), department=scope)
             result['status'] = 'success'
             return jsonify(result), 200
 
         payload = request.get_json(silent=True) or {}
         chat_id = payload.get('chat_id')
         title = payload.get('title')
+        # В границах отдела фильтр у чата всегда один — свой: иначе чат отдела получал
+        # бы чужие нарушения, а уже подключённый чужой чат уехал бы под наш фильтр
+        # (add_group_late_chat пишет через ON CONFLICT DO UPDATE).
+        departments = payload.get('departments')
+        if scope:
+            if db.glb_chat_department_state(chat_id, scope) == 'foreign':
+                return _group_late_bot_scope_forbidden(
+                    'Чат закреплён за другим отделом, его настройка')
+            departments = [scope]
         # Название чата знает Telegram — берём оттуда, если его не указали руками.
         card = _group_late_fetch_chat_card(chat_id) if chat_id else {}
         result = db.add_group_late_chat(
             chat_id,
             title=title or card.get('title'),
             chat_type=card.get('chat_type'),
-            departments=payload.get('departments'),
+            departments=departments,
             note=payload.get('note'),
             created_by=_group_late_bot_actor(requester_id),
         )
@@ -6395,12 +6459,13 @@ def api_group_late_bot_chats():
 def api_group_late_bot_chat_item(chat_id):
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _group_late_bot_guard()
+    requester_id, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
         if request.method == 'DELETE':
-            return jsonify({"status": "success", **db.delete_group_late_chat(chat_id)}), 200
+            return jsonify({"status": "success",
+                            **db.delete_group_late_chat(chat_id, department=scope)}), 200
 
         payload = request.get_json(silent=True) or {}
         result = {}
@@ -6410,12 +6475,14 @@ def api_group_late_bot_chat_item(chat_id):
                 title=payload.get('title'),
                 note=payload.get('note'),
                 enabled=payload.get('enabled'),
+                department=scope,
             )
         if 'departments' in payload:
             result = db.set_group_late_chat_departments(
                 chat_id,
-                payload.get('departments'),
+                [scope] if scope else payload.get('departments'),
                 created_by=_group_late_bot_actor(requester_id),
+                department=scope,
             )
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
@@ -6431,7 +6498,9 @@ def api_group_late_bot_available_chats():
     """Группы, где бот уже есть, но рассылка ещё не подключена."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    # Список групп, где бот уже состоит, общий: без него чат не подключить, а об
+    # отделах он ничего не рассказывает.
+    _, _, err = _group_late_bot_guard()
     if err:
         return err
     try:
@@ -6449,9 +6518,18 @@ def api_group_late_bot_chat_test(chat_id):
     """Проверка связи: бот шлёт в чат тестовое сообщение и возвращает его название."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
+    # Тест пишет в чат от имени бота — в чужой чат писать нельзя.
+    if scope:
+        try:
+            own = db.glb_chat_department_state(chat_id, scope) == 'own'
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        if not own:
+            return _group_late_bot_scope_forbidden(
+                'Чат закреплён за другим отделом, отправка в него')
     now_text = datetime.now(group_late.TZ).strftime('%H:%M')
     message_id, send_error = _group_late_send_chat_message(
         chat_id, group_late.messages.build_test_message(now_text))
@@ -6468,11 +6546,11 @@ def api_group_late_bot_chat_test(chat_id):
 def api_group_late_bot_departments():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
-        result = db.get_group_late_departments()
+        result = db.get_group_late_departments(department=scope)
         result['status'] = 'success'
         return jsonify(result), 200
     except Exception as error:
@@ -6486,7 +6564,9 @@ def api_group_late_bot_departments_sync():
     """Перечитать справочник отделов из Workpace."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    # Пересчёт справочника из Workpace ничего не раскрывает (в ответе только счётчик)
+    # и главе отдела нужен так же, как админу, — поэтому доступен и в границах отдела.
+    _, _, err = _group_late_bot_guard()
     if err:
         return err
     if not group_late.is_configured():
@@ -6508,20 +6588,35 @@ def api_group_late_bot_departments_sync():
 def api_group_late_bot_mutes():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _group_late_bot_guard()
+    requester_id, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
         if request.method == 'GET':
-            result = db.get_group_late_mutes()
+            result = db.get_group_late_mutes(department=scope)
             result['status'] = 'success'
             return jsonify(result), 200
 
         payload = request.get_json(silent=True) or {}
+        mute_kind = str(payload.get('mute_kind') or '').strip().lower()
+        mute_value = payload.get('mute_value')
+        chat_id = payload.get('chat_id')
+        # В границах отдела правило либо действует в своём чате, либо глушит свой же
+        # отдел целиком. Глобальное правило по сотруднику или «выключить всё» замолчало
+        # бы и чужие чаты, поэтому оно остаётся за администраторами бота.
+        if scope:
+            if mute_kind == 'dept':
+                mute_value = scope
+            if chat_id:
+                if db.glb_chat_department_state(chat_id, scope) != 'own':
+                    return _group_late_bot_scope_forbidden(
+                        'Чат закреплён за другим отделом, правило тишины в нём')
+            elif mute_kind != 'dept':
+                return _group_late_bot_scope_forbidden('Правило тишины во всех чатах')
         result = db.add_group_late_mute(
-            payload.get('mute_kind'),
-            mute_value=payload.get('mute_value'),
-            chat_id=payload.get('chat_id'),
+            mute_kind,
+            mute_value=mute_value,
+            chat_id=chat_id,
             created_by=_group_late_bot_actor(requester_id),
         )
         return jsonify({"status": "success", **result}), 201
@@ -6537,11 +6632,12 @@ def api_group_late_bot_mutes():
 def api_group_late_bot_mute_item(mute_id):
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
-        return jsonify({"status": "success", **db.delete_group_late_mute(mute_id=mute_id)}), 200
+        return jsonify({"status": "success",
+                        **db.delete_group_late_mute(mute_id=mute_id, department=scope)}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 404
     except Exception as error:
@@ -6555,7 +6651,7 @@ def api_group_late_bot_events():
     """Лента отбивок: что нашли, куда отправили, кто отбил."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
@@ -6563,7 +6659,7 @@ def api_group_late_bot_events():
             date_from=request.args.get('date_from'),
             date_to=request.args.get('date_to'),
             event_type=request.args.get('event_type'),
-            department=request.args.get('department'),
+            department=scope or request.args.get('department'),
             chat_id=request.args.get('chat_id'),
             search=request.args.get('q'),
             limit=request.args.get('limit', 100),
@@ -6583,7 +6679,7 @@ def api_group_late_bot_events():
 def api_group_late_bot_reports():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _group_late_bot_guard()
+    requester_id, scope, err = _group_late_bot_guard()
     if err:
         return err
     if request.method == 'GET':
@@ -6595,6 +6691,7 @@ def api_group_late_bot_reports():
                 source=request.args.get('source'),
                 limit=request.args.get('limit', 50),
                 offset=request.args.get('offset', 0),
+                department=scope,
             )
             result['status'] = 'success'
             return jsonify(result), 200
@@ -6612,9 +6709,13 @@ def api_group_late_bot_reports():
     payload = request.get_json(silent=True) or {}
     date_from = str(payload.get('date_from') or '').strip()
     date_to = str(payload.get('date_to') or '').strip() or date_from
-    department = str(payload.get('department') or '').strip()
+    # Отчёт «по всем отделам» в границах отдела недоступен: собирается только свой.
+    department = scope or str(payload.get('department') or '').strip()
     send_to_chat_id = str(payload.get('send_to_chat_id') or '').strip()
     try:
+        if scope and send_to_chat_id and db.glb_chat_department_state(send_to_chat_id, scope) != 'own':
+            return _group_late_bot_scope_forbidden(
+                'Чат закреплён за другим отделом, отправка отчёта в него')
         report_id = db.glb_create_report(
             date_from, date_to, department=department or None, source='web',
             requested_chat_id=send_to_chat_id or None,
@@ -6637,11 +6738,11 @@ def api_group_late_bot_reports():
 def api_group_late_bot_report_file(report_id):
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
     try:
-        report_file = db.get_group_late_report_file(report_id)
+        report_file = db.get_group_late_report_file(report_id, department=scope)
         if not report_file:
             return jsonify({"error": "Файл отчёта не найден"}), 404
         return send_file(
@@ -6660,7 +6761,8 @@ def api_group_late_bot_report_file(report_id):
 def api_group_late_bot_poll_runs():
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    # Состояние опроса — здоровье общего источника данных, а не чьи-то цифры.
+    _, _, err = _group_late_bot_guard()
     if err:
         return err
     try:
@@ -6678,9 +6780,13 @@ def api_group_late_bot_poll():
     """Прогнать опрос Workpace прямо сейчас, не дожидаясь двухминутной джобы."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    _, err = _group_late_bot_guard()
+    _, scope, err = _group_late_bot_guard()
     if err:
         return err
+    # Опрос прогоняет ВСЮ компанию и рассылает найденное по всем чатам, поэтому
+    # запускать его вручную может только администратор бота: расписание общее.
+    if scope:
+        return _group_late_bot_scope_forbidden('Внеочередной опрос Workpace')
     if not group_late.is_configured():
         return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
                         "code": "WORKPACE_NOT_CONFIGURED"}), 503

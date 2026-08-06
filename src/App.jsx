@@ -1330,12 +1330,21 @@ const canAccessChatAppForUser = (userLike) => {
 };
 
 // Раздел «Бот опозданий» — управление Telegram-ботом контроля Workpace. Отделы там
-// свои, из Workpace, и с нашими не сопоставлены, поэтому режем не по отделу, а по
-// роли: только глобальные админы, как и админские команды бота. Ту же проверку
-// делает _group_late_bot_guard на бэкенде.
+// свои, из Workpace, и с нашими не сопоставлены, поэтому целиком раздел открыт только
+// глобальным админам, как и админские команды бота. Главам отделов из списка ниже он
+// тоже виден, но бэкенд режет его до одного отдела Workpace: и данные, и действия.
+// Ту же проверку делает _group_late_bot_guard (GROUP_LATE_BOT_DEPARTMENT_SCOPES).
+const GROUP_LATE_BOT_HEAD_DEPARTMENT_CODES = new Set(['front_office']);
+
+const isGroupLateBotDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => GROUP_LATE_BOT_HEAD_DEPARTMENT_CODES.has(code))
+);
+
 const canAccessGroupLateBotForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
+    if (isGroupLateBotDepartmentHead(userLike)) return true;
     // Глава отдела с базовой admin-ролью — не глобальный админ.
     return role === 'admin' && !isDepartmentHead(userLike);
 };
@@ -42286,13 +42295,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'chatapp_chats' && canAccessChatAppSection) return;
                 // «Табло СЗоВ» гейтится своим предикатом (глава/СВ СЗоВ), а не allowlist'ом отдела.
                 if (view === 'szov_wallboard' && canAccessSzovWallboardSection) return;
+                // «Бот опозданий» — тоже свой предикат: раздел общий, а не «раздел отдела».
+                if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings' && canAccessSipSettings) return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessSipSettings, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessSipSettings, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).

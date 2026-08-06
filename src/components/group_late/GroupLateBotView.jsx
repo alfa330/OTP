@@ -281,6 +281,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [overview, setOverview] = useState(null);
     const [overviewError, setOverviewError] = useState(null);
     const [periodDays, setPeriodDays] = useState(7);
+    /* Раздел бывает выдан главе отдела в границах одного отдела Workpace: бэкенд
+     * (_group_late_bot_guard) режет и данные, и действия, а здесь мы убираем то,
+     * чем в этих границах всё равно нельзя пользоваться, — общий опрос, выбор
+     * чужого отдела, глобальная тишина. Название приходит со сводкой. */
+    const [departmentScope, setDepartmentScope] = useState(null);
 
     const [chats, setChats] = useState(null);
     const [chatsError, setChatsError] = useState(null);
@@ -310,6 +315,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const searchDebounce = useRef(null);
     const reportPoll = useRef(null);
 
+    const scoped = Boolean(departmentScope);
     const departmentNames = departments?.items || [];
     const unknownDepartments = useMemo(
         () => (departments?.unknown || []).map((d) => d.name),
@@ -321,7 +327,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const loadOverview = useCallback((days = periodDays) => {
         setOverviewError(null);
         axios.get(`${base}/overview`, { headers: headers(), params: { days } })
-            .then((r) => setOverview(r.data))
+            .then((r) => {
+                setOverview(r.data);
+                setDepartmentScope(r.data?.department_scope || null);
+            })
             .catch((e) => { setOverview(null); setOverviewError(errText(e, 'Не удалось загрузить сводку')); });
     }, [base, headers, periodDays]);
 
@@ -574,10 +583,14 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             </IosBadge>
                         )}
                         <IosBadge tone="slate">опросов за сутки: {fmtInt(totals.poll_runs_24h)}</IosBadge>
-                        <button onClick={pollNow} disabled={busy === 'poll'} className={iosBtnSecondary}>
-                            {busy === 'poll' ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
-                            Опросить сейчас
-                        </button>
+                        {/* Опрос прогоняет всю компанию и рассылает найденное по всем чатам,
+                            поэтому в границах отдела его не запускают вручную. */}
+                        {!scoped && (
+                            <button onClick={pollNow} disabled={busy === 'poll'} className={iosBtnSecondary}>
+                                {busy === 'poll' ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
+                                Опросить сейчас
+                            </button>
+                        )}
                     </div>
                 </div>
 
@@ -715,26 +728,29 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             ariaLabel="Тип нарушения"
                         />
                     </FilterField>
-                    <FilterField label="Отдел" className="w-[190px]">
-                        <CustomSelect
-                            variant="ios"
-                            searchable
-                            value={eventFilters.department}
-                            onChange={(department) => applyEventFilters({ department })}
-                            options={[
-                                { value: '', label: 'Все отделы' },
-                                ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
-                                // Отдел из истории, которого уже нет в Workpace, иначе исчез бы
-                                // из фильтра вместе с самим справочником.
-                                ...(eventFilters.department
-                                    && !departmentNames.some((dept) => dept.name === eventFilters.department)
-                                    ? [{ value: eventFilters.department, label: eventFilters.department }]
-                                    : []),
-                            ]}
-                            searchPlaceholder="Поиск отдела…"
-                            ariaLabel="Отдел"
-                        />
-                    </FilterField>
+                    {/* В границах отдела фильтровать нечего: лента и так только своя. */}
+                    {!scoped && (
+                        <FilterField label="Отдел" className="w-[190px]">
+                            <CustomSelect
+                                variant="ios"
+                                searchable
+                                value={eventFilters.department}
+                                onChange={(department) => applyEventFilters({ department })}
+                                options={[
+                                    { value: '', label: 'Все отделы' },
+                                    ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                    // Отдел из истории, которого уже нет в Workpace, иначе исчез бы
+                                    // из фильтра вместе с самим справочником.
+                                    ...(eventFilters.department
+                                        && !departmentNames.some((dept) => dept.name === eventFilters.department)
+                                        ? [{ value: eventFilters.department, label: eventFilters.department }]
+                                        : []),
+                                ]}
+                                searchPlaceholder="Поиск отдела…"
+                                ariaLabel="Отдел"
+                            />
+                        </FilterField>
+                    )}
                     <FilterField label="Чат" className="w-[190px]">
                         <CustomSelect
                             variant="ios"
@@ -953,7 +969,9 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="text-[12.5px] text-slate-500">
-                    Куда бот шлёт отбивки. Пустой список отделов = чат получает нарушения по всей компании
+                    {scoped
+                        ? `Куда бот шлёт отбивки отдела «${departmentScope}». Здесь только чаты этого отдела`
+                        : 'Куда бот шлёт отбивки. Пустой список отделов = чат получает нарушения по всей компании'}
                 </div>
                 <div className="flex items-center gap-2">
                     <button onClick={loadChats} className={iosBtnGhost}>
@@ -1240,9 +1258,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-[12.5px] text-slate-500">
-                        Кого бот не трогает. Глобальные правила действуют на все чаты, правила чата — только на него
+                        {scoped
+                            ? `Кого бот не трогает в чатах отдела «${departmentScope}». Молчать во всех чатах компании может только администратор бота`
+                            : 'Кого бот не трогает. Глобальные правила действуют на все чаты, правила чата — только на него'}
                     </div>
-                    <button onClick={() => setMuteModal({ kind: 'user', value: '', chatId: '' })} className={iosBtnPrimary}>
+                    <button onClick={() => setMuteModal(newMuteDraft())} className={iosBtnPrimary}>
                         <Plus size={13} /> Добавить правило
                     </button>
                 </div>
@@ -1325,6 +1345,23 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         }
     };
 
+    /* В границах отдела правило либо действует в своём чате, либо глушит свой же отдел
+     * целиком: правило «во всех чатах» без привязки к отделу бэкенд не примет. Поэтому
+     * новое правило открываем сразу на первом своём чате, а «Отдел» подставляем свой. */
+    const newMuteDraft = () => (scoped
+        ? { kind: 'user', value: '', chatId: (chats || [])[0]?.chat_id || '' }
+        : { kind: 'user', value: '', chatId: '' });
+
+    const setMuteKind = (kind) => setMuteModal((prev) => ({
+        ...prev,
+        kind,
+        value: kind === 'dept' && scoped ? departmentScope : (kind === prev.kind ? prev.value : ''),
+        // «Глобально» в границах отдела осмысленно только для правила на свой отдел.
+        chatId: (scoped && kind !== 'dept' && !prev.chatId)
+            ? ((chats || [])[0]?.chat_id || '')
+            : prev.chatId,
+    }));
+
     const saveMuteModal = () => {
         if (!muteModal) return;
         if (muteModal.kind !== 'all' && !String(muteModal.value || '').trim()) {
@@ -1361,9 +1398,13 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
                 <div>
-                    <h2 className="text-lg font-semibold tracking-tight text-slate-900">Бот опозданий</h2>
+                    <h2 className="text-lg font-semibold tracking-tight text-slate-900">
+                        Бот опозданий{scoped ? ` · ${departmentScope}` : ''}
+                    </h2>
                     <p className="text-xs text-slate-500">
-                        Контроль отметок Workpace в Telegram: отбивки, отчёты и связки чатов с отделами
+                        {scoped
+                            ? `Контроль отметок Workpace в Telegram по отделу «${departmentScope}»: отбивки, отчёты и чаты отдела`
+                            : 'Контроль отметок Workpace в Telegram: отбивки, отчёты и связки чатов с отделами'}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1505,8 +1546,17 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         </div>
                         <div>
                             <div className={`${iosGroupLabel} mb-1.5`}>Отделы</div>
-                            <DepartmentPicker all={departmentNames} selected={chatModal.departments}
-                                              onChange={(departments) => setChatModal({ ...chatModal, departments })} />
+                            {scoped ? (
+                                // Отдел у чата один и не выбирается: бэкенд всё равно
+                                // перезапишет фильтр своим отделом.
+                                <div className="rounded-xl bg-slate-50 px-3.5 py-3 text-[12.5px] text-slate-600">
+                                    <IosBadge tone="blue">{departmentScope}</IosBadge>
+                                    <span className="ml-2">чат получает нарушения только этого отдела</span>
+                                </div>
+                            ) : (
+                                <DepartmentPicker all={departmentNames} selected={chatModal.departments}
+                                                  onChange={(departments) => setChatModal({ ...chatModal, departments })} />
+                            )}
                         </div>
                         {chatModal.mode === 'create' && (
                             <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3.5 py-2.5">
@@ -1543,7 +1593,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             <div className={`${iosGroupLabel} mb-1.5`}>Что отключаем</div>
                             <div className="flex rounded-xl bg-slate-100 p-1">
                                 {Object.entries(MUTE_KIND_LABELS).map(([key, label]) => (
-                                    <button key={key} onClick={() => setMuteModal({ ...muteModal, kind: key })}
+                                    <button key={key} onClick={() => setMuteKind(key)}
                                             className={`flex-1 rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
                                                 muteModal.kind === key ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                                                                        : 'text-slate-500 hover:text-slate-700'}`}>
@@ -1555,18 +1605,25 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         {muteModal.kind === 'dept' ? (
                             <div>
                                 <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Отдел</label>
-                                <CustomSelect
-                                    variant="ios"
-                                    searchable
-                                    value={muteModal.value}
-                                    onChange={(value) => setMuteModal({ ...muteModal, value })}
-                                    options={[
-                                        { value: '', label: 'Выберите отдел…' },
-                                        ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
-                                    ]}
-                                    searchPlaceholder="Поиск отдела…"
-                                    ariaLabel="Отдел"
-                                />
+                                {scoped ? (
+                                    <div className="rounded-xl bg-slate-50 px-3.5 py-3 text-[12.5px] text-slate-600">
+                                        <IosBadge tone="blue">{departmentScope}</IosBadge>
+                                        <span className="ml-2">чужой отдел заглушить нельзя</span>
+                                    </div>
+                                ) : (
+                                    <CustomSelect
+                                        variant="ios"
+                                        searchable
+                                        value={muteModal.value}
+                                        onChange={(value) => setMuteModal({ ...muteModal, value })}
+                                        options={[
+                                            { value: '', label: 'Выберите отдел…' },
+                                            ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                        ]}
+                                        searchPlaceholder="Поиск отдела…"
+                                        ariaLabel="Отдел"
+                                    />
+                                )}
                             </div>
                         ) : muteModal.kind === 'user' ? (
                             <div>
@@ -1588,7 +1645,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                 value={muteModal.chatId}
                                 onChange={(chatId) => setMuteModal({ ...muteModal, chatId })}
                                 options={[
-                                    { value: '', label: 'Глобально — во всех чатах' },
+                                    // Правило без чата бьёт по всем чатам компании: в границах
+                                    // отдела его оставляем только для «свой отдел целиком».
+                                    ...((!scoped || muteModal.kind === 'dept')
+                                        ? [{ value: '', label: 'Глобально — во всех чатах' }]
+                                        : []),
                                     ...(chats || []).map((chat) => ({
                                         value: chat.chat_id,
                                         label: `Только в «${chat.title || chat.chat_id}»`,
@@ -1629,18 +1690,25 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         </div>
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Отдел</label>
-                            <CustomSelect
-                                variant="ios"
-                                searchable
-                                value={reportModal.department}
-                                onChange={(department) => setReportModal({ ...reportModal, department })}
-                                options={[
-                                    { value: '', label: 'Все отделы' },
-                                    ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
-                                ]}
-                                searchPlaceholder="Поиск отдела…"
-                                ariaLabel="Отдел отчёта"
-                            />
+                            {scoped ? (
+                                <div className="rounded-xl bg-slate-50 px-3.5 py-3 text-[12.5px] text-slate-600">
+                                    <IosBadge tone="blue">{departmentScope}</IosBadge>
+                                    <span className="ml-2">отчёт собирается только по своему отделу</span>
+                                </div>
+                            ) : (
+                                <CustomSelect
+                                    variant="ios"
+                                    searchable
+                                    value={reportModal.department}
+                                    onChange={(department) => setReportModal({ ...reportModal, department })}
+                                    options={[
+                                        { value: '', label: 'Все отделы' },
+                                        ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                    ]}
+                                    searchPlaceholder="Поиск отдела…"
+                                    ariaLabel="Отдел отчёта"
+                                />
+                            )}
                         </div>
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
