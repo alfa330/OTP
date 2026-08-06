@@ -5065,6 +5065,7 @@ class Database:
                 SET department_id = (SELECT id FROM departments WHERE code = 'szov' LIMIT 1)
                 WHERE department_id IS NULL;
             """)
+            self._init_group_late_bot_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5086,6 +5087,143 @@ class Database:
             except Exception as exc:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_null_group_backfill")
                 logging.error("null group_id backfill skipped: %s", exc, exc_info=True)
+
+    def _init_group_late_bot_schema_tx(self, cursor):
+        """Схема раздела «Бот опозданий» (group_late_bot, префикс glb_).
+
+        Владелец схемы — OTP: бот на Render только читает и пишет строки, DDL не
+        выполняет. До этого его состояние лежало в chats.json/mutes.json на
+        эфемерном диске Render и терялось при каждом деплое, а истории отбивок и
+        отчётов не было вовсе — раздел без общей БД показывать было бы нечего.
+        """
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS glb_chats (
+                chat_id           TEXT PRIMARY KEY,
+                title             TEXT,
+                chat_type         TEXT,
+                is_admin_chat     BOOLEAN NOT NULL DEFAULT FALSE,
+                enabled           BOOLEAN NOT NULL DEFAULT TRUE,
+                note              TEXT,
+                created_by        TEXT,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_delivery_at  TIMESTAMPTZ
+            );
+
+            -- Связка «чат → отдел». Пусто = чат получает все отделы.
+            CREATE TABLE IF NOT EXISTS glb_chat_departments (
+                id              BIGSERIAL PRIMARY KEY,
+                chat_id         TEXT NOT NULL REFERENCES glb_chats(chat_id) ON DELETE CASCADE,
+                department_name TEXT NOT NULL,
+                created_by      TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_glb_chat_departments
+                ON glb_chat_departments(chat_id, lower(department_name));
+
+            -- Правила тишины. chat_id IS NULL = глобальное правило.
+            CREATE TABLE IF NOT EXISTS glb_mutes (
+                id          BIGSERIAL PRIMARY KEY,
+                chat_id     TEXT,
+                mute_kind   TEXT NOT NULL,
+                mute_value  TEXT NOT NULL DEFAULT '',
+                created_by  TEXT,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_glb_mutes
+                ON glb_mutes(COALESCE(chat_id, ''), mute_kind, lower(mute_value));
+
+            -- Нарушение, найденное опросом Workpace. event_key = ключ дедупликации
+            -- (сотрудник + дата + тип): раньше он жил в памяти процесса и после
+            -- рестарта бот слал повторы.
+            CREATE TABLE IF NOT EXISTS glb_events (
+                id               BIGSERIAL PRIMARY KEY,
+                event_key        TEXT NOT NULL UNIQUE,
+                event_type       TEXT NOT NULL,
+                event_date       DATE NOT NULL,
+                employee_name    TEXT,
+                employee_ext_id  TEXT,
+                department_name  TEXT,
+                schedule_name    TEXT,
+                plan_at          TIMESTAMPTZ,
+                fact_at          TIMESTAMPTZ,
+                minutes          INTEGER,
+                location         TEXT,
+                message_text     TEXT,
+                detected_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                ack_at           TIMESTAMPTZ,
+                ack_by           TEXT,
+                ack_chat_id      TEXT,
+                ack_source       TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_events_date ON glb_events(event_date DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_glb_events_type ON glb_events(event_type);
+            CREATE INDEX IF NOT EXISTS idx_glb_events_dept ON glb_events(lower(department_name));
+            CREATE INDEX IF NOT EXISTS idx_glb_events_pending ON glb_events(detected_at DESC) WHERE ack_at IS NULL;
+
+            -- В какие чаты ушло уведомление и каким сообщением: по message_id
+            -- «Отбито» правит текст во всех чатах сразу, а не только там, где нажали.
+            CREATE TABLE IF NOT EXISTS glb_event_deliveries (
+                id                  BIGSERIAL PRIMARY KEY,
+                event_id            BIGINT NOT NULL REFERENCES glb_events(id) ON DELETE CASCADE,
+                chat_id             TEXT NOT NULL,
+                telegram_message_id TEXT,
+                sent_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                error               TEXT
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_glb_event_deliveries
+                ON glb_event_deliveries(event_id, chat_id);
+            CREATE INDEX IF NOT EXISTS idx_glb_event_deliveries_chat
+                ON glb_event_deliveries(chat_id, sent_at DESC);
+
+            CREATE TABLE IF NOT EXISTS glb_reports (
+                id                BIGSERIAL PRIMARY KEY,
+                source            TEXT NOT NULL DEFAULT 'telegram',
+                requested_chat_id TEXT,
+                requested_by      TEXT,
+                date_from         DATE NOT NULL,
+                date_to           DATE NOT NULL,
+                department_filter TEXT,
+                status            TEXT NOT NULL DEFAULT 'ok',
+                error             TEXT,
+                file_name         TEXT,
+                file_size         INTEGER,
+                rows_count        INTEGER,
+                employees_count   INTEGER,
+                late_count        INTEGER,
+                absent_count      INTEGER,
+                duration_ms       INTEGER,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_reports_created ON glb_reports(created_at DESC);
+
+            -- Тело Excel-файла отдельно от карточки: список отчётов читается часто,
+            -- файл — только при скачивании.
+            CREATE TABLE IF NOT EXISTS glb_report_files (
+                report_id BIGINT PRIMARY KEY REFERENCES glb_reports(id) ON DELETE CASCADE,
+                content   BYTEA NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS glb_poll_runs (
+                id           BIGSERIAL PRIMARY KEY,
+                started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at  TIMESTAMPTZ,
+                ok           BOOLEAN,
+                fetched      INTEGER,
+                events_found INTEGER,
+                sent         INTEGER,
+                duration_ms  INTEGER,
+                error        TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_poll_runs_started ON glb_poll_runs(started_at DESC);
+
+            -- Кэш справочника отделов Workpace: сайт не ходит в Workpace сам.
+            CREATE TABLE IF NOT EXISTS glb_departments (
+                name            TEXT PRIMARY KEY,
+                employees_count INTEGER NOT NULL DEFAULT 0,
+                synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
 
     def _stamp_orphan_group_ids_tx(self, cursor, operator_id=None):
         """Проставляет group_id строкам daily_hours/work_hours, где он NULL: для daily —
@@ -46414,6 +46552,590 @@ class Database:
                     feedback_data = EXCLUDED.feedback_data,
                     updated_at = CURRENT_TIMESTAMP
             """, (operator_id, month, json.dumps(feedback_data, ensure_ascii=False)))
+
+    # ------------------------------------------------------------------
+    # Раздел «Бот опозданий» (group_late_bot). Пишет сюда сам бот на Render,
+    # сайт читает те же таблицы и правит настройки — бот перечитывает их на
+    # каждом опросе, поэтому изменения с сайта применяются без его рестарта.
+    # ------------------------------------------------------------------
+
+    GLB_EVENT_TYPES = ('late', 'missing', 'early_out', 'missing_out', 'late_out', 'suspicious')
+    GLB_MUTE_KINDS = ('all', 'user', 'dept')
+
+    @staticmethod
+    def _glb_chat_id(value):
+        chat_id = str(value or '').strip()
+        if not chat_id:
+            raise ValueError("chat_id is required")
+        if len(chat_id) > 64 or not re.fullmatch(r'-?\d+', chat_id):
+            raise ValueError("Invalid chat_id")
+        return chat_id
+
+    @staticmethod
+    def _glb_clean_departments(values):
+        """Список отделов без пустых строк и регистрозависимых дублей."""
+        if values is None:
+            return []
+        if isinstance(values, str):
+            values = re.split(r'\s*[;|]\s*', values)
+        cleaned, seen = [], set()
+        for raw in values:
+            name = str(raw or '').strip()
+            if not name:
+                continue
+            key = name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(name[:200])
+        return cleaned
+
+    @staticmethod
+    def _glb_parse_date(value, field_name='date'):
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, '%Y-%m-%d').date()
+        except ValueError:
+            raise ValueError(f"Invalid {field_name}, expected YYYY-MM-DD")
+
+    def get_group_late_overview(self, days=7):
+        """Сводка для вкладки «Обзор»: состояние опроса, объёмы за период, тишина."""
+        days_int = max(1, min(int(days or 7), 90))
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM glb_chats) AS chats_total,
+                    (SELECT COUNT(*) FROM glb_chats WHERE enabled) AS chats_enabled,
+                    (SELECT COUNT(DISTINCT chat_id) FROM glb_chat_departments) AS chats_with_filter,
+                    (SELECT COUNT(*) FROM glb_departments) AS departments_total,
+                    (SELECT MAX(synced_at) FROM glb_departments) AS departments_synced_at,
+                    (SELECT COUNT(*) FROM glb_mutes) AS mutes_total,
+                    (SELECT COUNT(*) FROM glb_mutes WHERE chat_id IS NULL) AS mutes_global,
+                    (SELECT COUNT(*) FROM glb_events WHERE detected_at >= NOW() - make_interval(days => %s)) AS events_period,
+                    (SELECT COUNT(*) FROM glb_events
+                      WHERE detected_at >= NOW() - make_interval(days => %s) AND ack_at IS NOT NULL) AS events_acked,
+                    (SELECT COUNT(*) FROM glb_events WHERE ack_at IS NULL) AS events_pending,
+                    (SELECT COUNT(*) FROM glb_reports WHERE created_at >= NOW() - make_interval(days => %s)) AS reports_period,
+                    (SELECT COUNT(*) FROM glb_reports
+                      WHERE created_at >= NOW() - make_interval(days => %s) AND status <> 'ok') AS reports_failed
+            """, (days_int, days_int, days_int, days_int))
+            row = cursor.fetchone()
+            totals = {
+                'chats_total': int(row[0] or 0),
+                'chats_enabled': int(row[1] or 0),
+                'chats_with_filter': int(row[2] or 0),
+                'departments_total': int(row[3] or 0),
+                'departments_synced_at': row[4].isoformat() if row[4] else None,
+                'mutes_total': int(row[5] or 0),
+                'mutes_global': int(row[6] or 0),
+                'events_period': int(row[7] or 0),
+                'events_acked': int(row[8] or 0),
+                'events_pending': int(row[9] or 0),
+                'reports_period': int(row[10] or 0),
+                'reports_failed': int(row[11] or 0),
+            }
+
+            cursor.execute("""
+                SELECT event_type, COUNT(*), COUNT(*) FILTER (WHERE ack_at IS NOT NULL)
+                FROM glb_events
+                WHERE detected_at >= NOW() - make_interval(days => %s)
+                GROUP BY event_type
+            """, (days_int,))
+            by_type = [
+                {'event_type': r[0], 'count': int(r[1] or 0), 'acked': int(r[2] or 0)}
+                for r in cursor.fetchall()
+            ]
+
+            cursor.execute("""
+                SELECT COALESCE(NULLIF(department_name, ''), 'Без отдела') AS dept,
+                       COUNT(*),
+                       COUNT(*) FILTER (WHERE ack_at IS NOT NULL)
+                FROM glb_events
+                WHERE detected_at >= NOW() - make_interval(days => %s)
+                GROUP BY dept
+                ORDER BY COUNT(*) DESC
+                LIMIT 12
+            """, (days_int,))
+            by_department = [
+                {'department_name': r[0], 'count': int(r[1] or 0), 'acked': int(r[2] or 0)}
+                for r in cursor.fetchall()
+            ]
+
+            cursor.execute("""
+                SELECT to_char(detected_at AT TIME ZONE 'Asia/Almaty', 'YYYY-MM-DD') AS day,
+                       COUNT(*),
+                       COUNT(*) FILTER (WHERE ack_at IS NOT NULL)
+                FROM glb_events
+                WHERE detected_at >= NOW() - make_interval(days => %s)
+                GROUP BY day
+                ORDER BY day
+            """, (days_int,))
+            by_day = [
+                {'date': r[0], 'count': int(r[1] or 0), 'acked': int(r[2] or 0)}
+                for r in cursor.fetchall()
+            ]
+
+            cursor.execute("""
+                SELECT id, started_at, finished_at, ok, fetched, events_found, sent, duration_ms, error
+                FROM glb_poll_runs
+                ORDER BY started_at DESC
+                LIMIT 1
+            """)
+            run_row = cursor.fetchone()
+            last_run = None
+            if run_row:
+                last_run = {
+                    'id': int(run_row[0]),
+                    'started_at': run_row[1].isoformat() if run_row[1] else None,
+                    'finished_at': run_row[2].isoformat() if run_row[2] else None,
+                    'ok': run_row[3],
+                    'fetched': run_row[4],
+                    'events_found': run_row[5],
+                    'sent': run_row[6],
+                    'duration_ms': run_row[7],
+                    'error': run_row[8],
+                }
+
+            cursor.execute("""
+                SELECT COUNT(*), COUNT(*) FILTER (WHERE ok IS NOT TRUE)
+                FROM glb_poll_runs
+                WHERE started_at >= NOW() - INTERVAL '24 hours'
+            """)
+            runs_row = cursor.fetchone()
+            totals['poll_runs_24h'] = int(runs_row[0] or 0)
+            totals['poll_failures_24h'] = int(runs_row[1] or 0)
+
+        return {
+            'days': days_int,
+            'totals': totals,
+            'by_type': by_type,
+            'by_department': by_department,
+            'by_day': by_day,
+            'last_poll_run': last_run,
+        }
+
+    def get_group_late_chats(self, days=7):
+        """Чаты рассылки со связкой отделов, правилами тишины и активностью."""
+        days_int = max(1, min(int(days or 7), 90))
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT c.chat_id, c.title, c.chat_type, c.is_admin_chat, c.enabled, c.note,
+                       c.created_by, c.created_at, c.updated_at, c.last_delivery_at,
+                       COALESCE(d.departments, '{}') AS departments,
+                       COALESCE(s.deliveries, 0) AS deliveries_period,
+                       COALESCE(m.mutes, '{}') AS mutes
+                FROM glb_chats c
+                LEFT JOIN LATERAL (
+                    SELECT array_agg(cd.department_name ORDER BY cd.department_name) AS departments
+                    FROM glb_chat_departments cd WHERE cd.chat_id = c.chat_id
+                ) d ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS deliveries
+                    FROM glb_event_deliveries ed
+                    WHERE ed.chat_id = c.chat_id
+                      AND ed.sent_at >= NOW() - make_interval(days => %s)
+                ) s ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT array_agg(mu.mute_kind || ':' || mu.mute_value ORDER BY mu.mute_kind, mu.mute_value) AS mutes
+                    FROM glb_mutes mu WHERE mu.chat_id = c.chat_id
+                ) m ON TRUE
+                ORDER BY c.is_admin_chat DESC, c.created_at
+            """, (days_int,))
+            items = []
+            for r in cursor.fetchall():
+                mutes = list(r[12] or [])
+                items.append({
+                    'chat_id': r[0],
+                    'title': r[1],
+                    'chat_type': r[2],
+                    'is_admin_chat': bool(r[3]),
+                    'enabled': bool(r[4]),
+                    'note': r[5],
+                    'created_by': r[6],
+                    'created_at': r[7].isoformat() if r[7] else None,
+                    'updated_at': r[8].isoformat() if r[8] else None,
+                    'last_delivery_at': r[9].isoformat() if r[9] else None,
+                    'departments': list(r[10] or []),
+                    'deliveries_period': int(r[11] or 0),
+                    'muted_all': any(m.startswith('all:') for m in mutes),
+                    'muted_users': [m.split(':', 1)[1] for m in mutes if m.startswith('user:')],
+                    'muted_departments': [m.split(':', 1)[1] for m in mutes if m.startswith('dept:')],
+                })
+        return {'days': days_int, 'items': items}
+
+    def add_group_late_chat(self, chat_id, title=None, departments=None, note=None, created_by=None):
+        chat_id = self._glb_chat_id(chat_id)
+        department_names = self._glb_clean_departments(departments)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO glb_chats (chat_id, title, note, created_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = COALESCE(NULLIF(EXCLUDED.title, ''), glb_chats.title),
+                    note = COALESCE(EXCLUDED.note, glb_chats.note),
+                    updated_at = NOW()
+                RETURNING (xmax = 0) AS inserted
+            """, (chat_id, (title or '').strip() or None, (note or '').strip() or None, created_by))
+            created = bool(cursor.fetchone()[0])
+            if department_names:
+                self._glb_replace_chat_departments_tx(cursor, chat_id, department_names, created_by)
+        return {'chat_id': chat_id, 'created': created, 'departments': department_names}
+
+    def update_group_late_chat(self, chat_id, title=None, note=None, enabled=None):
+        chat_id = self._glb_chat_id(chat_id)
+        sets, params = ['updated_at = NOW()'], []
+        if title is not None:
+            sets.append('title = %s')
+            params.append(str(title).strip()[:200] or None)
+        if note is not None:
+            sets.append('note = %s')
+            params.append(str(note).strip()[:500] or None)
+        if enabled is not None:
+            sets.append('enabled = %s')
+            params.append(bool(enabled))
+        params.append(chat_id)
+        with self._get_cursor() as cursor:
+            cursor.execute(f"UPDATE glb_chats SET {', '.join(sets)} WHERE chat_id = %s", params)
+            if cursor.rowcount == 0:
+                raise ValueError("Chat not found")
+        return {'chat_id': chat_id}
+
+    def delete_group_late_chat(self, chat_id):
+        """Убрать чат из рассылки. Историю доставок не трогаем — она нужна разделу."""
+        chat_id = self._glb_chat_id(chat_id)
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT is_admin_chat FROM glb_chats WHERE chat_id = %s", (chat_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Chat not found")
+            if bool(row[0]):
+                raise ValueError("Админский чат удалить нельзя")
+            cursor.execute("DELETE FROM glb_mutes WHERE chat_id = %s", (chat_id,))
+            cursor.execute("DELETE FROM glb_chats WHERE chat_id = %s", (chat_id,))
+        return {'chat_id': chat_id, 'deleted': True}
+
+    def _glb_replace_chat_departments_tx(self, cursor, chat_id, department_names, created_by=None):
+        cursor.execute("DELETE FROM glb_chat_departments WHERE chat_id = %s", (chat_id,))
+        for name in department_names:
+            cursor.execute("""
+                INSERT INTO glb_chat_departments (chat_id, department_name, created_by)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+            """, (chat_id, name, created_by))
+
+    def set_group_late_chat_departments(self, chat_id, departments, created_by=None):
+        """Полная перезапись связки чат→отделы. Пустой список = чат получает все отделы."""
+        chat_id = self._glb_chat_id(chat_id)
+        department_names = self._glb_clean_departments(departments)
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT 1 FROM glb_chats WHERE chat_id = %s", (chat_id,))
+            if not cursor.fetchone():
+                raise ValueError("Chat not found")
+            self._glb_replace_chat_departments_tx(cursor, chat_id, department_names, created_by)
+            cursor.execute("UPDATE glb_chats SET updated_at = NOW() WHERE chat_id = %s", (chat_id,))
+        return {'chat_id': chat_id, 'departments': department_names}
+
+    def get_group_late_departments(self):
+        """Справочник отделов Workpace + к скольким чатам привязан каждый отдел."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT d.name, d.employees_count, d.synced_at,
+                       COALESCE(l.chats, '{}') AS chats
+                FROM glb_departments d
+                LEFT JOIN LATERAL (
+                    SELECT array_agg(cd.chat_id ORDER BY cd.chat_id) AS chats
+                    FROM glb_chat_departments cd
+                    WHERE lower(cd.department_name) = lower(d.name)
+                ) l ON TRUE
+                ORDER BY d.name
+            """)
+            items = [{
+                'name': r[0],
+                'employees_count': int(r[1] or 0),
+                'synced_at': r[2].isoformat() if r[2] else None,
+                'chat_ids': list(r[3] or []),
+            } for r in cursor.fetchall()]
+
+            # Отделы, закреплённые за чатами, но исчезнувшие из Workpace: чат
+            # с таким фильтром молча не получает ничего — это видно в разделе.
+            cursor.execute("""
+                SELECT cd.department_name, array_agg(cd.chat_id ORDER BY cd.chat_id)
+                FROM glb_chat_departments cd
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM glb_departments d WHERE lower(d.name) = lower(cd.department_name)
+                )
+                GROUP BY cd.department_name
+                ORDER BY cd.department_name
+            """)
+            unknown = [{'name': r[0], 'chat_ids': list(r[1] or [])} for r in cursor.fetchall()]
+        return {'items': items, 'unknown': unknown}
+
+    def get_group_late_mutes(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT m.id, m.chat_id, m.mute_kind, m.mute_value, m.created_by, m.created_at, c.title
+                FROM glb_mutes m
+                LEFT JOIN glb_chats c ON c.chat_id = m.chat_id
+                ORDER BY (m.chat_id IS NOT NULL), m.chat_id, m.mute_kind, m.mute_value
+            """)
+            items = [{
+                'id': int(r[0]),
+                'chat_id': r[1],
+                'mute_kind': r[2],
+                'mute_value': r[3],
+                'created_by': r[4],
+                'created_at': r[5].isoformat() if r[5] else None,
+                'chat_title': r[6],
+            } for r in cursor.fetchall()]
+        return {'items': items}
+
+    def add_group_late_mute(self, mute_kind, mute_value=None, chat_id=None, created_by=None):
+        kind = str(mute_kind or '').strip().lower()
+        if kind not in self.GLB_MUTE_KINDS:
+            raise ValueError("Invalid mute_kind")
+        value = '' if kind == 'all' else str(mute_value or '').strip()[:200]
+        if kind != 'all' and not value:
+            raise ValueError("mute_value is required")
+        scope_chat_id = self._glb_chat_id(chat_id) if chat_id else None
+        with self._get_cursor() as cursor:
+            if scope_chat_id:
+                cursor.execute("SELECT 1 FROM glb_chats WHERE chat_id = %s", (scope_chat_id,))
+                if not cursor.fetchone():
+                    raise ValueError("Chat not found")
+            cursor.execute("""
+                INSERT INTO glb_mutes (chat_id, mute_kind, mute_value, created_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+            """, (scope_chat_id, kind, value, created_by))
+            row = cursor.fetchone()
+        return {'id': int(row[0]) if row else None, 'created': bool(row)}
+
+    def delete_group_late_mute(self, mute_id=None, mute_kind=None, mute_value=None, chat_id=None):
+        with self._get_cursor() as cursor:
+            if mute_id is not None:
+                cursor.execute("DELETE FROM glb_mutes WHERE id = %s", (int(mute_id),))
+            else:
+                kind = str(mute_kind or '').strip().lower()
+                if kind not in self.GLB_MUTE_KINDS:
+                    raise ValueError("Invalid mute_kind")
+                value = '' if kind == 'all' else str(mute_value or '').strip()
+                scope_chat_id = self._glb_chat_id(chat_id) if chat_id else None
+                cursor.execute("""
+                    DELETE FROM glb_mutes
+                    WHERE COALESCE(chat_id, '') = COALESCE(%s, '')
+                      AND mute_kind = %s
+                      AND lower(mute_value) = lower(%s)
+                """, (scope_chat_id, kind, value))
+            deleted = cursor.rowcount
+        if not deleted:
+            raise ValueError("Mute rule not found")
+        return {'deleted': deleted}
+
+    def get_group_late_events(
+        self,
+        date_from=None,
+        date_to=None,
+        event_type=None,
+        department=None,
+        chat_id=None,
+        ack_state=None,
+        search=None,
+        limit=100,
+        offset=0,
+    ):
+        """Лента отбивок с доставками по чатам и отметкой «кто отбил»."""
+        limit_int = max(1, min(int(limit or 100), 500))
+        offset_int = max(0, int(offset or 0))
+        where, params = [], []
+
+        from_date = self._glb_parse_date(date_from, 'date_from')
+        to_date = self._glb_parse_date(date_to, 'date_to')
+        if from_date:
+            where.append("e.event_date >= %s")
+            params.append(from_date)
+        if to_date:
+            where.append("e.event_date <= %s")
+            params.append(to_date)
+
+        type_text = str(event_type or '').strip().lower()
+        if type_text:
+            if type_text not in self.GLB_EVENT_TYPES:
+                raise ValueError("Invalid event_type")
+            where.append("e.event_type = %s")
+            params.append(type_text)
+
+        department_text = str(department or '').strip()
+        if department_text:
+            where.append("lower(e.department_name) = lower(%s)")
+            params.append(department_text)
+
+        if chat_id:
+            where.append("EXISTS (SELECT 1 FROM glb_event_deliveries ed WHERE ed.event_id = e.id AND ed.chat_id = %s)")
+            params.append(self._glb_chat_id(chat_id))
+
+        ack_text = str(ack_state or '').strip().lower()
+        if ack_text == 'acked':
+            where.append("e.ack_at IS NOT NULL")
+        elif ack_text == 'pending':
+            where.append("e.ack_at IS NULL")
+        elif ack_text and ack_text != 'all':
+            raise ValueError("Invalid ack_state")
+
+        search_text = str(search or '').strip()
+        if search_text:
+            where.append("(e.employee_name ILIKE %s OR e.department_name ILIKE %s)")
+            params.extend([f"%{search_text}%", f"%{search_text}%"])
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._get_cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM glb_events e {where_sql}", params)
+            total = int(cursor.fetchone()[0] or 0)
+
+            cursor.execute(f"""
+                SELECT e.id, e.event_type, e.event_date, e.employee_name, e.department_name,
+                       e.schedule_name, e.plan_at, e.fact_at, e.minutes, e.location,
+                       e.message_text, e.detected_at, e.ack_at, e.ack_by, e.ack_chat_id, e.ack_source,
+                       COALESCE(d.deliveries, '[]'::json) AS deliveries
+                FROM glb_events e
+                LEFT JOIN LATERAL (
+                    SELECT json_agg(json_build_object(
+                               'chat_id', ed.chat_id,
+                               'chat_title', c.title,
+                               'message_id', ed.telegram_message_id,
+                               'sent_at', ed.sent_at,
+                               'error', ed.error
+                           ) ORDER BY ed.sent_at) AS deliveries
+                    FROM glb_event_deliveries ed
+                    LEFT JOIN glb_chats c ON c.chat_id = ed.chat_id
+                    WHERE ed.event_id = e.id
+                ) d ON TRUE
+                {where_sql}
+                ORDER BY e.detected_at DESC, e.id DESC
+                LIMIT %s OFFSET %s
+            """, params + [limit_int, offset_int])
+            items = []
+            for r in cursor.fetchall():
+                deliveries = r[16] or []
+                items.append({
+                    'id': int(r[0]),
+                    'event_type': r[1],
+                    'event_date': r[2].isoformat() if r[2] else None,
+                    'employee_name': r[3],
+                    'department_name': r[4],
+                    'schedule_name': r[5],
+                    'plan_at': r[6].isoformat() if r[6] else None,
+                    'fact_at': r[7].isoformat() if r[7] else None,
+                    'minutes': r[8],
+                    'location': r[9],
+                    'message_text': r[10],
+                    'detected_at': r[11].isoformat() if r[11] else None,
+                    'ack_at': r[12].isoformat() if r[12] else None,
+                    'ack_by': r[13],
+                    'ack_chat_id': r[14],
+                    'ack_source': r[15],
+                    'deliveries': deliveries,
+                })
+        return {'total': total, 'items': items, 'limit': limit_int, 'offset': offset_int}
+
+    def get_group_late_reports(self, date_from=None, date_to=None, status=None, source=None, limit=50, offset=0):
+        limit_int = max(1, min(int(limit or 50), 300))
+        offset_int = max(0, int(offset or 0))
+        where, params = [], []
+
+        from_date = self._glb_parse_date(date_from, 'date_from')
+        to_date = self._glb_parse_date(date_to, 'date_to')
+        if from_date:
+            where.append("r.created_at >= %s")
+            params.append(datetime.combine(from_date, dt_time.min))
+        if to_date:
+            where.append("r.created_at < %s")
+            params.append(datetime.combine(to_date, dt_time.min) + timedelta(days=1))
+
+        status_text = str(status or '').strip().lower()
+        if status_text in ('ok', 'error', 'running'):
+            where.append("r.status = %s")
+            params.append(status_text)
+        source_text = str(source or '').strip().lower()
+        if source_text in ('web', 'telegram'):
+            where.append("r.source = %s")
+            params.append(source_text)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._get_cursor() as cursor:
+            cursor.execute(f"SELECT COUNT(*) FROM glb_reports r {where_sql}", params)
+            total = int(cursor.fetchone()[0] or 0)
+            cursor.execute(f"""
+                SELECT r.id, r.source, r.requested_chat_id, r.requested_by, r.date_from, r.date_to,
+                       r.department_filter, r.status, r.error, r.file_name, r.file_size,
+                       r.rows_count, r.employees_count, r.late_count, r.absent_count,
+                       r.duration_ms, r.created_at, c.title,
+                       EXISTS (SELECT 1 FROM glb_report_files f WHERE f.report_id = r.id) AS has_file
+                FROM glb_reports r
+                LEFT JOIN glb_chats c ON c.chat_id = r.requested_chat_id
+                {where_sql}
+                ORDER BY r.created_at DESC, r.id DESC
+                LIMIT %s OFFSET %s
+            """, params + [limit_int, offset_int])
+            items = [{
+                'id': int(r[0]),
+                'source': r[1],
+                'requested_chat_id': r[2],
+                'requested_by': r[3],
+                'date_from': r[4].isoformat() if r[4] else None,
+                'date_to': r[5].isoformat() if r[5] else None,
+                'department_filter': r[6],
+                'status': r[7],
+                'error': r[8],
+                'file_name': r[9],
+                'file_size': r[10],
+                'rows_count': r[11],
+                'employees_count': r[12],
+                'late_count': r[13],
+                'absent_count': r[14],
+                'duration_ms': r[15],
+                'created_at': r[16].isoformat() if r[16] else None,
+                'chat_title': r[17],
+                'has_file': bool(r[18]),
+            } for r in cursor.fetchall()]
+        return {'total': total, 'items': items, 'limit': limit_int, 'offset': offset_int}
+
+    def get_group_late_report_file(self, report_id):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT r.file_name, f.content
+                FROM glb_reports r
+                JOIN glb_report_files f ON f.report_id = r.id
+                WHERE r.id = %s
+            """, (int(report_id),))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {'file_name': row[0], 'content': bytes(row[1])}
+
+    def get_group_late_poll_runs(self, limit=30):
+        limit_int = max(1, min(int(limit or 30), 200))
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, started_at, finished_at, ok, fetched, events_found, sent, duration_ms, error
+                FROM glb_poll_runs
+                ORDER BY started_at DESC
+                LIMIT %s
+            """, (limit_int,))
+            items = [{
+                'id': int(r[0]),
+                'started_at': r[1].isoformat() if r[1] else None,
+                'finished_at': r[2].isoformat() if r[2] else None,
+                'ok': r[3],
+                'fetched': r[4],
+                'events_found': r[5],
+                'sent': r[6],
+                'duration_ms': r[7],
+                'error': r[8],
+            } for r in cursor.fetchall()]
+        return {'items': items}
 
     def save_ai_birthday_greeting_cache(self, user_id: int, date_key: str, greeting_data: dict):
         """Сохранить или обновить AI-поздравление с днем рождения"""
