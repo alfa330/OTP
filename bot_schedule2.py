@@ -6252,6 +6252,405 @@ def api_chatapp_authors_map():
         return jsonify({"error": str(error)}), 500
 
 
+# ─────────────────────────── Бот опозданий (group_late_bot) ───────────────────────────
+# Настройки, отбивки и отчёты бот держит в наших же таблицах glb_* — чтение и
+# правку настроек делаем прямо в БД, бот перечитывает их на каждом опросе.
+# Через HTTP к самому боту ходим только за действиями, которым нужен Telegram
+# или Workpace: тестовое сообщение, отчёт, «Отбито», синк отделов.
+
+GROUP_LATE_BOT_URL = (os.getenv('GROUP_LATE_BOT_URL') or '').strip().rstrip('/')
+GROUP_LATE_BOT_ADMIN_SECRET = (os.getenv('GROUP_LATE_BOT_ADMIN_SECRET') or '').strip()
+
+
+def _group_late_bot_guard():
+    """(requester_id, err). Раздел общекорпоративный (все отделы Workpace),
+    поэтому доступ только у глобальных админов — как и команды бота в Telegram."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if _is_global_admin_requester(role, requester_id):
+        return requester_id, None
+    return requester_id, (jsonify({"error": "forbidden"}), 403)
+
+
+def _group_late_bot_actor(requester_id):
+    """Кто выполнил действие — попадает в created_by/ack_by, чтобы в разделе было
+    видно, что правку сделали с сайта, а не командой в Telegram."""
+    try:
+        requester = db.get_user(id=int(requester_id))
+        name = str(requester[2] or '').strip() if requester else ''
+    except Exception:
+        name = ''
+    return f"web:{requester_id}:{name}" if name else f"web:{requester_id}"
+
+
+def _group_late_bot_call(method, path, payload=None, timeout=25):
+    """Запрос к сервису бота. Возвращает (data, err) — err уже готовый ответ Flask."""
+    if not GROUP_LATE_BOT_URL or not GROUP_LATE_BOT_ADMIN_SECRET:
+        return None, (jsonify({
+            "error": "Сервис бота не подключён: задайте GROUP_LATE_BOT_URL и GROUP_LATE_BOT_ADMIN_SECRET",
+            "code": "BOT_NOT_CONFIGURED",
+        }), 503)
+    url = f"{GROUP_LATE_BOT_URL}{path}"
+    try:
+        response = requests.request(
+            method,
+            url,
+            json=payload,
+            headers={"X-Admin-Secret": GROUP_LATE_BOT_ADMIN_SECRET},
+            timeout=timeout,
+        )
+    except requests.RequestException as error:
+        logging.warning("group_late_bot %s %s failed: %s", method, path, error)
+        return None, (jsonify({"error": f"Бот недоступен: {error}", "code": "BOT_UNREACHABLE"}), 502)
+    try:
+        data = response.json()
+    except ValueError:
+        data = {"error": (response.text or '')[:500]}
+    if response.status_code >= 400:
+        return None, (jsonify({"error": data.get('error') or 'Ошибка на стороне бота'}), response.status_code)
+    return data, None
+
+
+@app.route('/api/group_late_bot/overview', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_overview():
+    """Шапка раздела: состояние опроса Workpace, объёмы отбивок и отчётов."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        overview = db.get_group_late_overview(days=request.args.get('days', 7))
+        overview['status'] = 'success'
+        overview['bot_configured'] = bool(GROUP_LATE_BOT_URL and GROUP_LATE_BOT_ADMIN_SECRET)
+        return jsonify(overview), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot overview failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/chats', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_chats():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        if request.method == 'GET':
+            result = db.get_group_late_chats(days=request.args.get('days', 7))
+            result['status'] = 'success'
+            return jsonify(result), 200
+
+        payload = request.get_json(silent=True) or {}
+        chat_id = payload.get('chat_id')
+        result = db.add_group_late_chat(
+            chat_id,
+            title=payload.get('title'),
+            departments=payload.get('departments'),
+            note=payload.get('note'),
+            created_by=_group_late_bot_actor(requester_id),
+        )
+        # Приветствие сразу проверяет, что бот действительно состоит в чате.
+        # Чат в списке остаётся в любом случае — предупреждение показываем в UI.
+        if payload.get('send_welcome', True):
+            _, welcome_err = _group_late_bot_call('POST', f"/admin/chats/{result['chat_id']}/welcome")
+            result['welcome_sent'] = welcome_err is None
+            if welcome_err is not None:
+                result['warning'] = "Чат сохранён, но приветствие отправить не удалось — проверьте, что бот добавлен в чат"
+        return jsonify({"status": "success", **result}), 201
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot chats failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/chats/<chat_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_chat_item(chat_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        if request.method == 'DELETE':
+            return jsonify({"status": "success", **db.delete_group_late_chat(chat_id)}), 200
+
+        payload = request.get_json(silent=True) or {}
+        result = {}
+        if any(key in payload for key in ('title', 'note', 'enabled')):
+            result = db.update_group_late_chat(
+                chat_id,
+                title=payload.get('title'),
+                note=payload.get('note'),
+                enabled=payload.get('enabled'),
+            )
+        if 'departments' in payload:
+            result = db.set_group_late_chat_departments(
+                chat_id,
+                payload.get('departments'),
+                created_by=_group_late_bot_actor(requester_id),
+            )
+        return jsonify({"status": "success", **result}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot chat update failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/chats/<chat_id>/test', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_chat_test(chat_id):
+    """Проверка связи: бот шлёт в чат тестовое сообщение и возвращает его название."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    data, call_err = _group_late_bot_call('POST', f"/admin/chats/{chat_id}/test")
+    if call_err:
+        return call_err
+    return jsonify({"status": "success", **(data or {})}), 200
+
+
+@app.route('/api/group_late_bot/departments', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_departments():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        result = db.get_group_late_departments()
+        result['status'] = 'success'
+        return jsonify(result), 200
+    except Exception as error:
+        logging.exception("group_late_bot departments failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/departments/sync', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_departments_sync():
+    """Перечитать справочник отделов из Workpace (бот сам ходит в их API)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    data, call_err = _group_late_bot_call('POST', '/admin/departments/sync', timeout=90)
+    if call_err:
+        return call_err
+    return jsonify({"status": "success", **(data or {})}), 200
+
+
+@app.route('/api/group_late_bot/mutes', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_mutes():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        if request.method == 'GET':
+            result = db.get_group_late_mutes()
+            result['status'] = 'success'
+            return jsonify(result), 200
+
+        payload = request.get_json(silent=True) or {}
+        result = db.add_group_late_mute(
+            payload.get('mute_kind'),
+            mute_value=payload.get('mute_value'),
+            chat_id=payload.get('chat_id'),
+            created_by=_group_late_bot_actor(requester_id),
+        )
+        return jsonify({"status": "success", **result}), 201
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot mutes failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/mutes/<int:mute_id>', methods=['DELETE', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_mute_item(mute_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        return jsonify({"status": "success", **db.delete_group_late_mute(mute_id=mute_id)}), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 404
+    except Exception as error:
+        logging.exception("group_late_bot mute delete failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/events', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_events():
+    """Лента отбивок: что нашли, куда отправили, кто отбил."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        result = db.get_group_late_events(
+            date_from=request.args.get('date_from'),
+            date_to=request.args.get('date_to'),
+            event_type=request.args.get('event_type'),
+            department=request.args.get('department'),
+            chat_id=request.args.get('chat_id'),
+            ack_state=request.args.get('ack_state'),
+            search=request.args.get('q'),
+            limit=request.args.get('limit', 100),
+            offset=request.args.get('offset', 0),
+        )
+        result['status'] = 'success'
+        return jsonify(result), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot events failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/events/<int:event_id>/ack', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_event_ack(event_id):
+    """Отбить с сайта. Идёт через бота: он же правит текст сообщений в Telegram,
+    иначе в чатах осталось бы «ожидает отбивки» при отбитом событии в базе."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        requester = db.get_user(id=int(requester_id))
+        reviewer_name = (str(requester[2]).strip() if requester and requester[2] else '') or f"Пользователь {requester_id}"
+    except Exception:
+        reviewer_name = f"Пользователь {requester_id}"
+    data, call_err = _group_late_bot_call('POST', f"/admin/events/{event_id}/ack", payload={
+        "reviewer_name": reviewer_name,
+        "ack_by": _group_late_bot_actor(requester_id),
+    })
+    if call_err:
+        return call_err
+    return jsonify({"status": "success", **(data or {})}), 200
+
+
+@app.route('/api/group_late_bot/reports', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_reports():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _group_late_bot_guard()
+    if err:
+        return err
+    if request.method == 'GET':
+        try:
+            result = db.get_group_late_reports(
+                date_from=request.args.get('date_from'),
+                date_to=request.args.get('date_to'),
+                status=request.args.get('status'),
+                source=request.args.get('source'),
+                limit=request.args.get('limit', 50),
+                offset=request.args.get('offset', 0),
+            )
+            result['status'] = 'success'
+            return jsonify(result), 200
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        except Exception as error:
+            logging.exception("group_late_bot reports failed")
+            return jsonify({"error": str(error)}), 500
+
+    # Отчёт за период тянет постранично весь Workpace, поэтому бот считает его
+    # в фоне и сразу отдаёт id строки — раздел показывает её как «формируется».
+    payload = request.get_json(silent=True) or {}
+    data, call_err = _group_late_bot_call('POST', '/admin/reports', payload={
+        "date_from": payload.get('date_from'),
+        "date_to": payload.get('date_to'),
+        "department": payload.get('department'),
+        "send_to_chat_id": payload.get('send_to_chat_id'),
+        "requested_by": _group_late_bot_actor(requester_id),
+    })
+    if call_err:
+        return call_err
+    return jsonify({"status": "success", **(data or {})}), 202
+
+
+@app.route('/api/group_late_bot/reports/<int:report_id>/file', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_report_file(report_id):
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        report_file = db.get_group_late_report_file(report_id)
+        if not report_file:
+            return jsonify({"error": "Файл отчёта не найден"}), 404
+        return send_file(
+            BytesIO(report_file['content']),
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=report_file['file_name'] or f"report_{report_id}.xlsx",
+        )
+    except Exception as error:
+        logging.exception("group_late_bot report file failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/poll_runs', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_poll_runs():
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        result = db.get_group_late_poll_runs(limit=request.args.get('limit', 30))
+        result['status'] = 'success'
+        return jsonify(result), 200
+    except Exception as error:
+        logging.exception("group_late_bot poll runs failed")
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route('/api/group_late_bot/poll', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_poll():
+    """Прогнать опрос Workpace прямо сейчас, не дожидаясь двухминутного крона."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    data, call_err = _group_late_bot_call('POST', '/admin/poll', timeout=120)
+    if call_err:
+        return call_err
+    return jsonify({"status": "success", **(data or {})}), 200
+
+
 @app.route('/api/ca_eval/pick', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_ca_eval_pick():

@@ -130,6 +130,7 @@ const EventsView = lazyWithRetry(() => import('./components/events/EventsView'))
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
+const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
@@ -1324,6 +1325,17 @@ const canAccessChatAppForUser = (userLike) => {
     if (isChatAppDepartmentHead(userLike)) return true;
     return isSupervisorRole(role)
         && Number(userLike?.department_id ?? userLike?.departmentId) === CHATAPP_DEPARTMENT_ID;
+};
+
+// Раздел «Бот опозданий» — управление Telegram-ботом контроля Workpace. Отделы там
+// свои, из Workpace, и с нашими не сопоставлены, поэтому режем не по отделу, а по
+// роли: только глобальные админы, как и админские команды бота. Ту же проверку
+// делает _group_late_bot_guard на бэкенде.
+const canAccessGroupLateBotForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ.
+    return role === 'admin' && !isDepartmentHead(userLike);
 };
 
 // Раздел «Табло СЗоВ» — онлайн-нагрузка входящей линии. Доступ: админы, глава отдела
@@ -33849,6 +33861,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
             const canAccessChatAppSection = canAccessChatAppForUser(user);
+            const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
@@ -37179,6 +37192,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'ai_qa' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'wazzup_chats' || canAccessAiQaSection) &&
                     (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
+                    (requestedViewFromUrl !== 'group_late_bot' || canAccessGroupLateBotSection) &&
                     (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
                     (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
                 if (canOpenRequestedView) {
@@ -37190,7 +37204,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessFourYouSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -37237,6 +37251,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isSupervisorRole(user?.role)) setView('operators');
                     else setView('hours');
                 }
+                if (view === 'group_late_bot' && !canAccessGroupLateBotSection) {
+                    if (isAdminLikeRole) setView('sv_list');
+                    else if (isSupervisorRole(user?.role)) setView('operators');
+                    else setView('hours');
+                }
                 if (view === 'szov_wallboard' && !canAccessSzovWallboardSection) {
                     if (isAdminLikeRole) setView('sv_list');
                     else if (isSupervisorRole(user?.role)) setView('operators');
@@ -37249,7 +37268,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     else if (isPlainTrainer) setView('surveys');
                     else setView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -42809,6 +42828,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canAccessGroupLateBotSection && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Бот опозданий</span>
+                                                    </button>
+                                                </li>
+                                            )}
 
                                             {canAccessSzovWallboardSection && (
                                                 <li>
@@ -43795,6 +43824,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "group_late_bot" && canAccessGroupLateBotSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <GroupLateBotView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
                                 />
                             </Suspense>
                         )}
