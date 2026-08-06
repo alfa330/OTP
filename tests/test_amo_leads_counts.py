@@ -56,34 +56,32 @@ def test_total_is_sum_of_sources(sheet_rows):
     assert counts["Общее"] == sum(counts[name] for name in amo_leads.SOURCE_ORDER)
 
 
-def test_unattributed_deals_are_counted(sheet_rows):
-    """Потеря считается, но в текст отбивки не попадает — там только цифры таблицы."""
-    summary = amo_leads.summarize(sheet_rows)
-    assert summary["total_deals"] == 1654
-    assert summary["total_leads"] == 1240
-    assert summary["unattributed"] == 414
-
-
-def test_report_renders_every_source(sheet_rows):
+def test_leads_reach_the_report_unchanged(sheet_rows):
+    """Цифры источников доходят до текста отбивки ровно теми же."""
     import datetime
 
-    summary = amo_leads.summarize(sheet_rows)
-    text = amo_leads.render_report(datetime.date(2026, 8, 5), summary)
-    assert "05.08.2026" in text
+    counts = amo_leads.count_by_source(sheet_rows)
+    base = amo_leads.count_by_source([])
+    text = amo_leads.render_alert_report(
+        amo_leads.analyze(counts, base),
+        window_label="05.08 (сутки)",
+        base_label="29.07 (сутки, неделю назад)",
+    )
     for source in amo_leads.SOURCE_ORDER:
         assert source in text
     assert "1240" in text
+    assert "107" in text          # Google
+    assert "385" in text          # TikTok
 
 
-def test_report_has_nothing_beyond_the_sheet(sheet_rows):
-    """Отбивка повторяет таблицу: никаких лишних строк про сделки без источника."""
-    import datetime
-
-    summary = amo_leads.summarize(sheet_rows)
-    text = amo_leads.render_report(datetime.date(2026, 8, 5), summary)
+def test_report_shows_nothing_beyond_leads(sheet_rows):
+    """В отбивке нет ни CPL, ни строки про сделки без источника."""
+    counts = amo_leads.count_by_source(sheet_rows)
+    text = amo_leads.render_alert_report(
+        amo_leads.analyze(counts, counts), window_label="05.08 (сутки)")
+    assert "CPL" not in text
     assert "не попало" not in text
-    assert "Сделок в amoCRM" not in text
-    assert str(summary["total_deals"]) not in text
+    assert str(len(sheet_rows)) not in text     # 1654 — всего сделок, его не показываем
 
 
 def test_2gis_mixed_tag_is_double_counted_like_the_sheet():
@@ -106,19 +104,6 @@ def test_2gis_still_catches_both_spellings():
     assert amo_leads.count_by_source(rows)["2GIS"] == 2
 
 
-def test_sync_error_is_html_escaped():
-    """Ошибка amoCRM попадает в сообщение с parse_mode=HTML."""
-    import datetime
-
-    summary = amo_leads.summarize([])
-    text = amo_leads.render_report(
-        datetime.date(2026, 8, 5), summary,
-        sync_error='401 <b>Unauthorized</b> & "token" expired')
-    assert "<b>Unauthorized</b>" not in text
-    assert "&lt;b&gt;Unauthorized&lt;/b&gt;" in text
-    assert "&amp;" in text
-
-
 def test_arenda_and_departament_are_excluded_everywhere():
     """Общий фильтр формул — по колонке тегов, а не по utm."""
     rows = [
@@ -129,3 +114,14 @@ def test_arenda_and_departament_are_excluded_everywhere():
     assert counts["FB"] == 0
     assert counts["Google"] == 0
     assert counts["Общее"] == 0
+
+
+def test_sync_error_is_html_escaped():
+    """Ошибка amoCRM попадает в сообщение с parse_mode=HTML."""
+    rows = amo_leads.analyze({"FB": 1, "Общее": 1}, {"FB": 1, "Общее": 1})
+    text = amo_leads.render_alert_report(
+        rows, window_label="05.08 (сутки)",
+        sync_error='401 <b>Unauthorized</b> & "token" expired')
+    assert "<b>Unauthorized</b>" not in text
+    assert "&lt;b&gt;Unauthorized&lt;/b&gt;" in text
+    assert "&amp;" in text

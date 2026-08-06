@@ -38,10 +38,11 @@ AMO_CRM_PASSWORD = (os.getenv("AMO_CRM_PASSWORD") or "").strip()
 
 TZ = ZoneInfo(os.getenv("AMO_LEADS_TIMEZONE", "Asia/Almaty"))
 
-# Глубина выгрузки. В Apps Script стояло 21 день. Нам нужно минимум 9: алерты
-# сравнивают текущий период с тем же днём НЕДЕЛЮ назад (база — 7 суток назад),
-# плюс запас на границы суток и на пропущенный синк.
-SYNC_DAYS = max(9, int(os.getenv("AMO_LEADS_DAYS") or 9))
+# Глубина выгрузки. В Apps Script стояло 21 день. Нам нужно с запасом: алерты
+# сравнивают период с тем же отрезком НЕДЕЛЮ назад, и спросить можно за любой из
+# последних девяти дней — значит самая старая нужная база лежит на 9+7 суток
+# назад. Меньше 16 не берём, иначе у части дней базы просто не окажется.
+SYNC_DAYS = max(16, int(os.getenv("AMO_LEADS_DAYS") or 16))
 
 # ID кастомных полей сделки в amoCRM — те же, что были в скрипте.
 FIELD_UTM_SOURCE = int(os.getenv("AMO_FIELD_UTM_SOURCE") or 892237)
@@ -378,54 +379,6 @@ def count_by_source(rows):
     return counts
 
 
-def summarize(rows):
-    """Отбивка за день: цифры таблицы плюс сколько сделок осталось без источника."""
-    counts = count_by_source(rows)
-    return {
-        "counts": counts,
-        "total_leads": counts["Общее"],
-        "total_deals": len(rows),
-        # Сколько сделок за день не попало ни в один источник. В таблице этой
-        # строки нет, и потерю там не видно — а это около четверти сделок.
-        "unattributed": max(0, len(rows) - counts["Общее"]),
-    }
-
-
-# ==== Текст отбивки ===========================================================
-
-def render_report(day, summary, synced_at=None, sync_error=None):
-    """HTML-текст отбивки для Telegram."""
-    counts = summary["counts"]
-    width = max(len(name) for name in SOURCE_ORDER) + 1
-
-    lines = ["<b>Лиды за %s</b>" % day.strftime("%d.%m.%Y"), "", "<pre>"]
-    for name in SOURCE_ORDER:
-        lines.append("%-*s %6d" % (width, name, counts[name]))
-    lines.append("-" * (width + 7))
-    lines.append("%-*s %6d" % (width, "Общее", counts["Общее"]))
-    lines.append("</pre>")
-
-    # Строку про неатрибутированные сделки в отбивку не выводим: владелец просил
-    # текст, совпадающий с таблицей. Само число по-прежнему считается в summarize()
-    # — оно нужно, если решим показывать потерю отдельно.
-
-    if synced_at:
-        age = datetime.now(TZ) - synced_at
-        minutes = max(0, int(age.total_seconds() // 60))
-        if minutes < 60:
-            ago = "%d мин назад" % minutes
-        else:
-            ago = "%d ч %d мин назад" % (minutes // 60, minutes % 60)
-        lines.append("Данные обновлены %s (%s)."
-                     % (synced_at.astimezone(TZ).strftime("%H:%M"), ago))
-    if sync_error:
-        # Текст ошибки приходит от amoCRM и может содержать < или &, а сообщение
-        # уходит с parse_mode=HTML — без экранирования отбивка не отправится вовсе.
-        lines.append("⚠️ Последняя выгрузка не удалась: %s"
-                     % html.escape(str(sync_error)[:160]))
-    return "\n".join(lines)
-
-
 # ==== Алерты по отклонению от нормы ==========================================
 #
 # Перенос методики из файла «анализ_лидов_алерты.xlsx». База сравнения — тот же
@@ -554,6 +507,22 @@ def render_alert_report(rows, window_label="", base_label="",
         lines.append("⚠️ Последняя выгрузка не удалась: %s"
                      % html.escape(str(sync_error)[:160]))
     return "\n".join(lines)
+
+
+def day_windows(day):
+    """Окна для конкретных суток: сами сутки и те же сутки неделю назад.
+
+    Используется, когда день задан явно (/leads 05.08.2026): сравнивать половину
+    дня тут не с чем, поэтому берём полные сутки с обеих сторон.
+    """
+    start = datetime.combine(day, datetime.min.time(), TZ)
+    base_start = start - timedelta(days=7)
+    return {
+        "current_start": start, "current_end": start + timedelta(days=1),
+        "base_start": base_start, "base_end": base_start + timedelta(days=1),
+        "window_label": "%s (сутки)" % start.strftime("%d.%m"),
+        "base_label": "%s (сутки, неделю назад)" % base_start.strftime("%d.%m"),
+    }
 
 
 def alert_windows(now=None):
