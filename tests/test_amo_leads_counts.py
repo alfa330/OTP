@@ -56,8 +56,8 @@ def test_total_is_sum_of_sources(sheet_rows):
     assert counts["Общее"] == sum(counts[name] for name in amo_leads.SOURCE_ORDER)
 
 
-def test_unattributed_deals_are_visible(sheet_rows):
-    """В таблице потеря не видна — в отбивке она должна быть посчитана явно."""
+def test_unattributed_deals_are_counted(sheet_rows):
+    """Потеря считается, но в текст отбивки не попадает — там только цифры таблицы."""
     summary = amo_leads.summarize(sheet_rows)
     assert summary["total_deals"] == 1654
     assert summary["total_leads"] == 1240
@@ -73,6 +73,17 @@ def test_report_renders_every_source(sheet_rows):
     for source in amo_leads.SOURCE_ORDER:
         assert source in text
     assert "1240" in text
+
+
+def test_report_has_nothing_beyond_the_sheet(sheet_rows):
+    """Отбивка повторяет таблицу: никаких лишних строк про сделки без источника."""
+    import datetime
+
+    summary = amo_leads.summarize(sheet_rows)
+    text = amo_leads.render_report(datetime.date(2026, 8, 5), summary)
+    assert "не попало" not in text
+    assert "Сделок в amoCRM" not in text
+    assert str(summary["total_deals"]) not in text
 
 
 def test_2gis_mixed_tag_is_double_counted_like_the_sheet():
