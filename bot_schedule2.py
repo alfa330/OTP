@@ -28801,8 +28801,15 @@ def _oktell_fetch_billing_detail_export_rows(range_from, range_to, minute_from, 
 
 # --- «Биллинг Oktell»: разрез по операторам ------------------------------------------------------
 # Обслужено/время разговора — из Call_Systems_hst (как в парковых таблицах, оператор = id_operator);
-# постобработка/удержание/ожидание/пауза — из oktell_cc_temp.dbo.A_Cube_CC_OperatorStates
-# (коды: 3 распределение, 6 разговор, 7 постобработка, 9 ожидание, 10 пауза, 12 резерв, 33 удержание).
+# постобработка/удержание/готовность/перерыв — из oktell_cc_temp.dbo.A_Cube_CC_OperatorStates.
+# Коды состояний берём из справочника oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorStateTypes
+# (сверено с живой базой 2026-08-06): 3 обратный вызов, 6 разговор по задаче, 7 поствызывная
+# обработка, 9 ПЕРЕРЫВ, 10 ГОТОВ, 33 удержание. Кода 12 в справочнике нет — по объёму и по
+# сопутствующему ICode 10201 это техническое распределение, считаем его вместе с 3.
+# ⚠️ 9 и 10 легко перепутать местами (до 2026-08-06 так и было: колонки «Ожидание»/«Пауза»
+# показывались наоборот, а UTZ засчитывал перерыв как полезную занятость). Признак, по которому
+# это проверяется на данных: подпричины перерыва (ICode 1-4 из A_TaskManager_CardLunchStates)
+# стоят именно у State=9, а у State=10 — коды входа в систему (10201/10203).
 _OKTELL_BILLING_OPERATOR_METRICS = (
     'served', 'talk_seconds', 'talk_in_seconds', 'talk_out_seconds', 'postproc_seconds',
     'hold_seconds', 'wait_seconds', 'pause_seconds', 'dial_seconds',
@@ -28837,8 +28844,10 @@ def _oktell_billing_operator_states_sql(date_from_compact, date_to_excl_compact,
         "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS talk_out_seconds, "
         "SUM(CASE WHEN s.State = 7 THEN s.LenTime ELSE 0 END) AS postproc_seconds, "
         "SUM(CASE WHEN s.State = 33 THEN s.LenTime ELSE 0 END) AS hold_seconds, "
-        "SUM(CASE WHEN s.State = 9 THEN s.LenTime ELSE 0 END) AS wait_seconds, "
-        "SUM(CASE WHEN s.State = 10 THEN s.LenTime ELSE 0 END) AS pause_seconds, "
+        # «Ожидание» — это State=10 «Готов»: оператор на линии и ждёт звонка.
+        "SUM(CASE WHEN s.State = 10 THEN s.LenTime ELSE 0 END) AS wait_seconds, "
+        # «Пауза» — State=9 «Перерыв» (в нём же лежат подпричины перерыва в ICode).
+        "SUM(CASE WHEN s.State = 9 THEN s.LenTime ELSE 0 END) AS pause_seconds, "
         "SUM(CASE WHEN s.State IN (3,12) THEN s.LenTime ELSE 0 END) AS dial_seconds "
         "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates s "
         "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.IdOperator "
