@@ -43,17 +43,21 @@ def test_deltas_match_the_spec():
 
 
 def test_olx_drop_stays_normal_just_above_the_threshold():
-    """-13% ещё не «Внимание»: порог -15%."""
+    """-13% ещё не «Внимание»: порог -20%."""
     assert _rows()["OLX"]["leads_status"] == "Норма"
 
 
 def test_twelve_hour_thresholds():
-    assert _rows({"FB": 84, "Общее": 84}, {"FB": 100, "Общее": 100})["FB"]["leads_status"] \
-        == "Внимание: лиды ниже нормы"
-    assert _rows({"FB": 55, "Общее": 55}, {"FB": 100, "Общее": 100})["FB"]["leads_status"] \
-        == "Критично: лиды упали"
-    assert _rows({"FB": 86, "Общее": 86}, {"FB": 100, "Общее": 100})["FB"]["leads_status"] \
-        == "Норма"
+    """Границы проверяем с обеих сторон: -20% «Внимание», -40% «Критично»."""
+    def status(leads):
+        return _rows({"FB": leads, "Общее": leads},
+                     {"FB": 100, "Общее": 100})["FB"]["leads_status"]
+
+    assert status(81) == "Норма"                        # -19% — ещё норма
+    assert status(80) == "Внимание: лиды ниже нормы"     # -20% ровно
+    assert status(61) == "Внимание: лиды ниже нормы"     # -39%
+    assert status(60) == "Критично: лиды упали"          # -40% ровно
+    assert status(55) == "Критично: лиды упали"
 
 
 def test_six_hour_check_uses_only_the_hard_threshold():
@@ -81,7 +85,7 @@ def test_verdicts_map_to_advice():
     critical = _rows({"FB": 10, "Общее": 10}, {"FB": 100, "Общее": 100})["FB"]
     assert critical["verdict"] == "АЛЕРТ"
     assert "паузу расхода" in critical["advice"]
-    warning = _rows({"FB": 80, "Общее": 80}, {"FB": 100, "Общее": 100})["FB"]
+    warning = _rows({"FB": 75, "Общее": 75}, {"FB": 100, "Общее": 100})["FB"]
     assert warning["verdict"] == "Проверить"
     assert "следующем чекпоинте" in warning["advice"]
 
@@ -166,3 +170,11 @@ def test_explicit_day_compares_whole_days():
 def test_sync_window_covers_every_day_the_command_can_ask_for():
     """Глубина выгрузки должна покрывать и запрошенный день, и его базу."""
     assert amo_leads.SYNC_DAYS >= 16
+
+
+def test_warning_threshold_is_twenty_percent():
+    """Порог «Внимания» — решение владельца, а не значение из исходного файла.
+
+    В «анализ_лидов_алерты.xlsx» стояло -15%, владелец попросил -20%.
+    """
+    assert amo_leads.THRESHOLDS["leads_warning_12h"] == -0.20
