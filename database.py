@@ -5131,6 +5131,17 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_amo_lead_syncs_started
                 ON amo_lead_syncs(started_at DESC);
+
+            -- Подписки на отбивку. Чат подписывает себя сам командой, поэтому
+            -- отдельного реестра чатов и раздела в интерфейсе не нужно.
+            CREATE TABLE IF NOT EXISTS amo_lead_subscriptions (
+                chat_id       TEXT PRIMARY KEY,
+                title         TEXT,
+                chat_type     TEXT,
+                subscribed_by BIGINT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_sent_at  TIMESTAMPTZ
+            );
         """)
 
     def upsert_amo_leads(self, rows):
@@ -5183,6 +5194,20 @@ class Database:
             columns = [c[0] for c in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    def get_amo_leads_between(self, start, end):
+        """Сделки, созданные в интервале [start, end). Нужно для окон 6ч/12ч.
+
+        Границы — по created_at, а не по created_date: дневная проверка в 12:00
+        сравнивает половину суток с той же половиной суток неделю назад.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT tags, utm_source
+                FROM amo_leads
+                WHERE created_at >= %s AND created_at < %s
+            """, (start, end))
+            return [{"tags": r[0], "utm_source": r[1]} for r in cursor.fetchall()]
+
     def start_amo_lead_sync(self, days):
         with self._get_cursor() as cursor:
             cursor.execute(
@@ -5201,6 +5226,43 @@ class Database:
                     error = %s
                 WHERE id = %s
             """, ("error" if error else "ok", leads_fetched, error, sync_id))
+
+    def add_amo_lead_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
+        """Подписать чат на отбивку. Повторная подписка просто обновляет данные чата."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO amo_lead_subscriptions (chat_id, title, chat_type, subscribed_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    subscribed_by = EXCLUDED.subscribed_by
+                RETURNING (xmax = 0) AS is_new
+            """, (str(chat_id), title, chat_type, user_id))
+            return bool(cursor.fetchone()[0])
+
+    def remove_amo_lead_subscription(self, chat_id):
+        """Отписать чат. Возвращает True, если подписка была."""
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM amo_lead_subscriptions WHERE chat_id = %s",
+                           (str(chat_id),))
+            return cursor.rowcount > 0
+
+    def get_amo_lead_subscriptions(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT chat_id, title, chat_type
+                FROM amo_lead_subscriptions
+                ORDER BY created_at
+            """)
+            return [{"chat_id": r[0], "title": r[1], "chat_type": r[2]}
+                    for r in cursor.fetchall()]
+
+    def mark_amo_lead_subscription_sent(self, chat_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE amo_lead_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
+                (str(chat_id),))
 
     def get_last_amo_lead_sync(self):
         """Последняя завершённая выгрузка — для отметки о свежести в отбивке."""

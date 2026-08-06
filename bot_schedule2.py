@@ -30413,6 +30413,96 @@ async def amo_leads_sync_job():
         logging.error("amoCRM: плановая выгрузка лидов не удалась: %s", exc, exc_info=True)
 
 
+AMO_LEADS_BROADCAST_TIMES = (os.getenv('AMO_LEADS_BROADCAST_TIMES') or '00:00,12:00').strip()
+
+
+def _amo_leads_broadcast_times():
+    """[(час, минута), ...] из AMO_LEADS_BROADCAST_TIMES."""
+    times = []
+    for chunk in (AMO_LEADS_BROADCAST_TIMES or '').split(','):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        match = re.fullmatch(r'([01]?\d|2[0-3]):([0-5]\d)', chunk)
+        if not match:
+            logging.warning("Отбивка по лидам: не понял время отправки %r", chunk)
+            continue
+        times.append((int(match.group(1)), int(match.group(2))))
+    return times
+
+
+def _amo_leads_alert_text(now=None):
+    """Текст отбивки с анализом отклонений — по методике из «анализ_лидов_алерты».
+
+    Сравниваем текущее окно с тем же окном неделю назад. Расходы в amoCRM не
+    хранятся, поэтому CPL-часть считается только если расходы придут снаружи;
+    пока их источника нет, отбивка честно говорит об этом.
+    """
+    windows = amo_leads.alert_windows(now)
+    current = db.get_amo_leads_between(windows["current_start"], windows["current_end"])
+    base = db.get_amo_leads_between(windows["base_start"], windows["base_end"])
+    rows = amo_leads.analyze(
+        amo_leads.count_by_source(current),
+        amo_leads.count_by_source(base),
+        period=amo_leads.PERIOD_12H,
+    )
+    last = db.get_last_amo_lead_sync() or {}
+    return amo_leads.render_alert_report(
+        rows,
+        window_label=windows["window_label"],
+        base_label=windows["base_label"],
+        synced_at=last.get('finished_at'),
+        sync_error=last.get('error') if last.get('status') == 'error' else None,
+    )
+
+
+def _amo_leads_access_allowed(user):
+    """Отбивка по лидам — администраторам и главам отделов."""
+    if not user:
+        return False
+    if _is_admin_role(_normalize_user_role(user[3])):
+        return True
+    return db.headed_department_id_for_user(user[0]) is not None
+
+
+async def amo_leads_broadcast_job():
+    """Рассылка отбивки подписанным чатам.
+
+    Перед отправкой обновляем данные: плановая выгрузка идёт раз в 3 часа, и к
+    полуночи цифры были бы почти трёхчасовой давности — для итога за сутки это
+    заметно.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        subscriptions = await loop.run_in_executor(executor_pool, db.get_amo_lead_subscriptions)
+    except Exception as exc:
+        logging.error("Отбивка по лидам: не удалось получить подписки: %s", exc, exc_info=True)
+        return
+    if not subscriptions:
+        return
+
+    try:
+        await loop.run_in_executor(executor_pool, amo_leads_sync)
+    except Exception as exc:
+        # Отправляем то, что есть: в тексте видно возраст данных и ошибку выгрузки.
+        logging.error("Отбивка по лидам: выгрузка перед отправкой не удалась: %s", exc)
+
+    try:
+        text = await loop.run_in_executor(executor_pool, _amo_leads_alert_text)
+    except Exception as exc:
+        logging.error("Отбивка по лидам: не удалось собрать текст: %s", exc, exc_info=True)
+        return
+
+    for subscription in subscriptions:
+        chat_id = subscription['chat_id']
+        try:
+            await bot.send_message(chat_id, text, parse_mode='HTML')
+            await loop.run_in_executor(
+                executor_pool, db.mark_amo_lead_subscription_sent, chat_id)
+        except Exception as exc:
+            logging.error("Отбивка по лидам: чат %s не получил сообщение: %s", chat_id, exc)
+
+
 # --- Настройка отбивки: эндпоинты --------------------------------------------------------------
 
 @app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])
@@ -35580,12 +35670,7 @@ async def amo_leads_command(message: types.Message):
         await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
         return
 
-    def _allowed():
-        if _is_admin_role(_normalize_user_role(user[3])):
-            return True
-        return db.headed_department_id_for_user(user[0]) is not None
-
-    if not await loop.run_in_executor(executor_pool, _allowed):
+    if not await loop.run_in_executor(executor_pool, _amo_leads_access_allowed, user):
         await message.reply("Лиды по источникам доступны администраторам и главам отделов.")
         return
 
@@ -35606,6 +35691,54 @@ async def amo_leads_command(message: types.Message):
         await message.reply("Не удалось собрать лиды — amoCRM не ответил.")
         return
     await message.reply(text, parse_mode='HTML')
+
+
+@dp.message_handler(commands=['leads_subscribe'])
+async def amo_leads_subscribe_command(message: types.Message):
+    """/leads_subscribe — присылать отбивку по лидам в этот чат.
+
+    Подписывается ЧАТ, а не человек: команда работает и в личке, и в группе."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not await loop.run_in_executor(executor_pool, _amo_leads_access_allowed, user):
+        await message.reply("Подписка на лиды доступна администраторам и главам отделов.")
+        return
+
+    def _subscribe():
+        return db.add_amo_lead_subscription(
+            message.chat.id,
+            title=(message.chat.title or message.chat.full_name or None),
+            chat_type=message.chat.type,
+            user_id=user[0],
+        )
+
+    try:
+        is_new = await loop.run_in_executor(executor_pool, _subscribe)
+    except Exception as exc:
+        logging.error("Подписка на лиды: не удалось сохранить: %s", exc, exc_info=True)
+        await message.reply("Не удалось оформить подписку, попробуйте ещё раз.")
+        return
+
+    times = ", ".join("%02d:%02d" % t for t in _amo_leads_broadcast_times()) or "по расписанию"
+    await message.reply(
+        ("Подписал этот чат на отбивку по лидам.\nПрисылаю в %s."
+         if is_new else "Этот чат уже подписан. Присылаю в %s.") % times)
+
+
+@dp.message_handler(commands=['leads_unsubscribe'])
+async def amo_leads_unsubscribe_command(message: types.Message):
+    """/leads_unsubscribe — перестать присылать отбивку в этот чат."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not await loop.run_in_executor(executor_pool, _amo_leads_access_allowed, user):
+        await message.reply("Подписка на лиды доступна администраторам и главам отделов.")
+        return
+    removed = await loop.run_in_executor(
+        executor_pool, db.remove_amo_lead_subscription, message.chat.id)
+    await message.reply("Отписал этот чат от отбивки по лидам."
+                        if removed else "Этот чат и не был подписан.")
 
 
 @dp.message_handler(commands=['start'])
@@ -46911,6 +47044,18 @@ if __name__ == '__main__':
             coalesce=True
         )
         logging.info("⏰ Лиды amoCRM: выгрузка каждые 3 часа")
+
+        # Отбивка подписанным чатам: по джобе на каждое время из настройки.
+        for _hour, _minute in _amo_leads_broadcast_times():
+            scheduler.add_job(
+                amo_leads_broadcast_job,
+                CronTrigger(hour=_hour, minute=_minute, timezone=amo_leads.TZ),
+                id=f'amo_leads_broadcast_{_hour:02d}{_minute:02d}',
+                misfire_grace_time=1800,
+                max_instances=1,
+                coalesce=True
+            )
+        logging.info("⏰ Лиды amoCRM: отбивка в %s", AMO_LEADS_BROADCAST_TIMES)
     else:
         logging.warning(
             "⏰ Лиды amoCRM выключены: не заданы AMO_ACCESS_TOKEN "
