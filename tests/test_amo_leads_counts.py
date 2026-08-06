@@ -75,13 +75,16 @@ def test_report_renders_every_source(sheet_rows):
     assert "1240" in text
 
 
-def test_2gis_counts_a_mixed_tag_once():
-    """Тег с обеими формами написания — один лид, а не два.
+def test_2gis_mixed_tag_is_double_counted_like_the_sheet():
+    """Тег с обеими формами написания даёт 2 — так считает исходная таблица.
 
-    Раньше здесь складывались два счётчика, и такая строка удваивалась.
+    Это не описка, а зафиксированное поведение «Сводки по Дням»: 2GIS там
+    складывается из двух счётчиков. Чинить нельзя — цифры бота должны совпадать
+    с таблицей, а не расходиться с ней «в лучшую сторону». На реальных данных
+    таких тегов нет, поэтому расхождения не возникает.
     """
     rows = [{"tags": "call_itaxi_2gis_2ГИС_wb", "utm_source": ""}]
-    assert amo_leads.count_by_source(rows)["2GIS"] == 1
+    assert amo_leads.count_by_source(rows)["2GIS"] == 2
 
 
 def test_2gis_still_catches_both_spellings():
