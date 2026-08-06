@@ -13,13 +13,13 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 
-/* Раздел «Бот опозданий» — управление Telegram-ботом group_late_bot, который
- * следит за отметками сотрудников в Workpace и шлёт отбивки в рабочие чаты.
+/* Раздел «Бот опозданий» — контроль отметок Workpace: наш бот следит за
+ * нарушениями графика и шлёт их в рабочие чаты Telegram.
  *
- * Бот живёт отдельным сервисом на Render, но настройки, отбивки и отчёты пишет
- * в наши таблицы glb_*, поэтому раздел читает их напрямую. Через сам сервис
- * идут только действия, которым нужен Telegram или Workpace: приветствие в чат,
- * тест связи, «Отбито», генерация отчёта, синк отделов, внеочередной опрос. */
+ * Всё живёт внутри приложения: опрос — джобой планировщика, настройки, найденные
+ * нарушения и отчёты — в таблицах glb_*, поэтому раздел читает их напрямую.
+ * Подтверждения «Отбито» под уведомлением нет: отметка ничего не меняла ни в
+ * Workpace, ни в отчётах и не хранила причину, поэтому механику убрали. */
 
 const EVENT_TYPES = {
     late: { label: 'Опоздание', tone: 'red', icon: Clock },
@@ -78,7 +78,7 @@ const fmtSize = (bytes) => {
 
 const fmtPeriod = (from, to) => (from === to ? fmtDay(from) : `${fmtDay(from)} — ${fmtDay(to)}`);
 
-// created_by/ack_by приходят как 'web:12:Имя' либо 'telegram:<id>'
+// created_by приходит как 'web:12:Имя' либо 'telegram:<id>'
 const actorLabel = (raw) => {
     const value = String(raw || '').trim();
     if (!value) return '—';
@@ -105,22 +105,6 @@ const SegButton = ({ active, onClick, icon: Icon, children }) => (
                        : 'text-slate-500 hover:text-slate-700'}`}>
         <Icon size={13} /> {children}
     </button>
-);
-
-/* Сегментированный переключатель на 2–3 значения: там, где вариантов мало,
- * он читается быстрее выпадающего списка. */
-const SegmentedFilter = ({ value, options, onChange }) => (
-    <div className="flex rounded-xl bg-slate-100 p-1">
-        {options.map((option) => (
-            <button key={option.value} type="button" onClick={() => onChange(option.value)}
-                    className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
-                        value === option.value
-                            ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
-                            : 'text-slate-500 hover:text-slate-700'}`}>
-                {option.label}
-            </button>
-        ))}
-    </div>
 );
 
 /* Поле фильтра с подписью: подписи держат строку фильтров ровной, а без них
@@ -181,7 +165,7 @@ const DailyBars = ({ data }) => {
         <div className="relative">
             {hover && (
                 <div className="pointer-events-none absolute -top-1 left-1/2 z-10 -translate-x-1/2 rounded-lg bg-slate-900/90 px-2.5 py-1.5 text-[11.5px] font-medium text-white shadow-lg backdrop-blur">
-                    {fmtDay(hover.date)} · {fmtInt(hover.count)} отбивок · отбито {fmtInt(hover.acked)}
+                    {fmtDay(hover.date)} · {fmtInt(hover.count)} нарушений
                 </div>
             )}
             <div className="flex h-28 items-end gap-[3px] pt-6">
@@ -193,7 +177,7 @@ const DailyBars = ({ data }) => {
                              onMouseEnter={() => setHover(day)}
                              onMouseLeave={() => setHover(null)}
                              className="group relative flex flex-1 cursor-default flex-col items-center justify-end"
-                             aria-label={`${day.date}: ${day.count} отбивок, отбито ${day.acked}`}>
+                             aria-label={`${day.date}: нарушений ${day.count}`}>
                             {isPeak && (
                                 <div className="mb-1 text-[10.5px] font-semibold tabular-nums text-slate-500">
                                     {fmtInt(day.count)}
@@ -310,7 +294,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [eventsError, setEventsError] = useState(null);
     const [eventFilters, setEventFilters] = useState({
         from: daysAgo(6), to: isoDate(new Date()),
-        type: '', ack: 'all', chatId: '', department: '', q: '',
+        type: '', chatId: '', department: '', q: '',
     });
     const [eventSearch, setEventSearch] = useState('');
 
@@ -383,7 +367,6 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 date_from: filters.from || undefined,
                 date_to: filters.to || undefined,
                 event_type: filters.type || undefined,
-                ack_state: filters.ack !== 'all' ? filters.ack : undefined,
                 chat_id: filters.chatId || undefined,
                 department: filters.department || undefined,
                 q: filters.q || undefined,
@@ -491,17 +474,6 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         }, 'Чат убран из рассылки');
     };
 
-    const ackEvent = (event) => run(`ack:${event.id}`, async () => {
-        const r = await axios.post(`${base}/events/${event.id}/ack`, {}, { headers: headers() });
-        setEvents((prev) => (prev || []).map((item) => (
-            item.id === event.id
-                ? { ...item, ack_at: r.data.ack_at || new Date().toISOString(), ack_by: r.data.ack_by, ack_source: 'web' }
-                : item
-        )));
-        loadOverview();
-        return r.data;
-    }, 'Отбито — в чатах сообщение обновлено');
-
     const downloadReport = (report) => {
         run(`file:${report.id}`, async () => {
             const response = await axios.get(`${base}/reports/${report.id}/file`, {
@@ -533,22 +505,18 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     // Период — не «фильтр», который сбрасывают: он всегда выбран.
     const activeEventFilters = [
         eventFilters.type, eventFilters.department, eventFilters.chatId, eventFilters.q,
-        eventFilters.ack !== 'all' ? eventFilters.ack : '',
     ].filter(Boolean).length;
 
     const resetEventFilters = () => {
         setEventSearch('');
         clearTimeout(searchDebounce.current);
-        applyEventFilters({ type: '', department: '', chatId: '', q: '', ack: 'all' });
+        applyEventFilters({ type: '', department: '', chatId: '', q: '' });
     };
 
     /* ─── вкладки ──────────────────────────────────────────────────────── */
 
     const totals = overview?.totals || {};
     const lastRun = overview?.last_poll_run || null;
-    const ackShare = totals.events_period
-        ? Math.round((totals.events_acked / totals.events_period) * 100)
-        : null;
     const pollStale = lastRun?.started_at
         ? (Date.now() - new Date(lastRun.started_at).getTime()) > 15 * 60 * 1000
         : true;
@@ -613,14 +581,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                     </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-5">
+                <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
                     <StatTile label="Чатов в рассылке" value={fmtInt(totals.chats_total)} icon={MessageSquare}
                               hint={`${fmtInt(totals.chats_with_filter)} с фильтром по отделам`} />
-                    <StatTile label={`Отбивок за ${overview.days} дн.`} value={fmtInt(totals.events_period)} icon={Bell}
-                              hint={ackShare === null ? 'нарушений не было' : `отбито ${ackShare}%`} />
-                    <StatTile label="Ждут отбивки" value={fmtInt(totals.events_pending)} icon={AlertTriangle}
-                              tone={totals.events_pending > 0 ? 'amber' : 'green'}
-                              hint="за всё время, включая прошлые дни" />
+                    <StatTile label={`Нарушений за ${overview.days} дн.`} value={fmtInt(totals.events_period)} icon={Bell}
+                              hint={`отделов в справочнике: ${fmtInt(totals.departments_total)}`} />
                     <StatTile label="Отчётов" value={fmtInt(totals.reports_period)} icon={FileSpreadsheet}
                               tone={totals.reports_failed > 0 ? 'amber' : 'slate'}
                               hint={totals.reports_failed > 0 ? `${fmtInt(totals.reports_failed)} с ошибкой` : 'все сформированы'} />
@@ -631,7 +596,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 <div className="grid gap-3 lg:grid-cols-5">
                     <section className={`${iosCard} p-4 lg:col-span-3`}>
                         <div className="mb-1 flex items-center justify-between">
-                            <div className={iosGroupLabel}>Отбивки по дням</div>
+                            <div className={iosGroupLabel}>Нарушения по дням</div>
                             <div className="text-[11px] text-slate-400">за {overview.days} дн.</div>
                         </div>
                         <DailyBars data={overview.by_day || []} />
@@ -656,9 +621,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                             <span className="flex items-center gap-2 text-[13px] text-slate-700">
                                                 <Icon size={13} className="text-slate-400" /> {meta.label}
                                             </span>
-                                            <span className="flex items-center gap-2 text-[12.5px] tabular-nums">
-                                                <span className="text-slate-400">отбито {fmtInt(row.acked)}</span>
-                                                <span className="font-semibold text-slate-900">{fmtInt(row.count)}</span>
+                                            <span className="text-[12.5px] font-semibold tabular-nums text-slate-900">
+                                                {fmtInt(row.count)}
                                             </span>
                                         </button>
                                     );
@@ -679,9 +643,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                             onClick={() => { setTab('events'); applyEventFilters({ department: row.department_name }); }}
                                             className="flex w-full items-center justify-between gap-3 rounded-xl px-2 py-1.5 text-left transition hover:bg-slate-50">
                                         <span className="truncate text-[13px] text-slate-700">{row.department_name}</span>
-                                        <span className="shrink-0 text-[12.5px] tabular-nums">
-                                            <span className="mr-2 text-slate-400">отбито {fmtInt(row.acked)}</span>
-                                            <span className="font-semibold text-slate-900">{fmtInt(row.count)}</span>
+                                        <span className="shrink-0 text-[12.5px] font-semibold tabular-nums text-slate-900">
+                                            {fmtInt(row.count)}
                                         </span>
                                     </button>
                                 ))}
@@ -737,17 +700,6 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                     <FilterField label="Период">
                         <IosDateRangePicker from={eventFilters.from} to={eventFilters.to} max={isoDate(new Date())}
                                             onChange={({ from, to }) => applyEventFilters({ from, to })} />
-                    </FilterField>
-                    <FilterField label="Статус">
-                        <SegmentedFilter
-                            value={eventFilters.ack}
-                            onChange={(ack) => applyEventFilters({ ack })}
-                            options={[
-                                { value: 'all', label: 'Все' },
-                                { value: 'pending', label: 'Ждут' },
-                                { value: 'acked', label: 'Отбитые' },
-                            ]}
-                        />
                     </FilterField>
                     <FilterField label="Тип нарушения" className="w-[190px]">
                         <CustomSelect
@@ -870,26 +822,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                         ))}
                                                     </div>
                                                 </div>
-                                                <div className="w-[190px] shrink-0 text-right">
-                                                    <div className="text-[11.5px] text-slate-400">{fmtDateTime(event.detected_at)}</div>
-                                                    {event.ack_at ? (
-                                                        <div className="mt-1">
-                                                            <IosBadge tone="green">
-                                                                <CheckCircle2 size={11} /> отбито
-                                                            </IosBadge>
-                                                            <div className="mt-1 text-[11.5px] text-slate-500">
-                                                                {actorLabel(event.ack_by)} · {fmtDateTime(event.ack_at)}
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        <button onClick={() => ackEvent(event)} disabled={busy === `ack:${event.id}`}
-                                                                className={`${iosBtnSecondary} mt-1 py-1.5 text-[12.5px]`}>
-                                                            {busy === `ack:${event.id}`
-                                                                ? <Loader2 size={12} className="animate-spin" />
-                                                                : <CheckCircle2 size={12} />}
-                                                            Отбить
-                                                        </button>
-                                                    )}
+                                                <div className="shrink-0 text-right text-[11.5px] text-slate-400">
+                                                    найдено {fmtDateTime(event.detected_at)}
                                                 </div>
                                             </div>
                                         );
@@ -907,8 +841,8 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             )}
             {events && events.length > 0 && (
                 <div className="px-1 text-[11px] text-slate-500">
-                    Показано {fmtInt(events.length)} из {fmtInt(eventsTotal)}. «Отбить» с сайта правит текст сообщения
-                    во всех чатах, куда ушло уведомление, — так же, как кнопка в Telegram.
+                    Показано {fmtInt(events.length)} из {fmtInt(eventsTotal)}. Каждое нарушение попадает в чаты
+                    один раз: повторных уведомлений по тому же сотруднику и типу за день не будет.
                 </div>
             )}
         </div>
