@@ -148,3 +148,21 @@ def test_daytime_base_never_spans_a_whole_day():
         assert (w["base_end"] - w["base_start"]) == (w["current_end"] - w["current_start"])
         assert (w["base_end"] - w["base_start"]) < datetime.timedelta(days=1)
         assert w["base_end"] - w["current_end"] == -datetime.timedelta(days=7)
+
+
+def test_explicit_day_compares_whole_days():
+    """/leads с датой: сутки против тех же суток неделю назад."""
+    import datetime
+
+    w = amo_leads.day_windows(datetime.date(2026, 8, 5))
+    assert w["current_start"] == datetime.datetime(2026, 8, 5, 0, 0, tzinfo=amo_leads.TZ)
+    assert w["current_end"] == datetime.datetime(2026, 8, 6, 0, 0, tzinfo=amo_leads.TZ)
+    assert w["base_start"] == datetime.datetime(2026, 7, 29, 0, 0, tzinfo=amo_leads.TZ)
+    assert w["base_end"] == datetime.datetime(2026, 7, 30, 0, 0, tzinfo=amo_leads.TZ)
+    assert w["window_label"] == "05.08 (сутки)"
+    assert w["base_label"] == "29.07 (сутки, неделю назад)"
+
+
+def test_sync_window_covers_every_day_the_command_can_ask_for():
+    """Глубина выгрузки должна покрывать и запрошенный день, и его базу."""
+    assert amo_leads.SYNC_DAYS >= 16

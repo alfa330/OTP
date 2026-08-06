@@ -30384,26 +30384,6 @@ def amo_leads_sync(days=None):
         raise
 
 
-def _amo_leads_report_text(day):
-    """Текст отбивки за день. Если данных ещё нет — тянем amoCRM прямо сейчас."""
-    rows = db.get_amo_leads_for_date(day)
-    today = datetime.now(amo_leads.TZ).date()
-    # Догружаем только то, что выгрузка вообще способна принести. Для дат старше
-    # окна синк бесполезен, а без этой проверки каждый запрос за старый день
-    # заново тянул бы amoCRM и всё равно возвращал нули.
-    if not rows and 0 <= (today - day).days < amo_leads.SYNC_DAYS:
-        amo_leads_sync()
-        rows = db.get_amo_leads_for_date(day)
-    summary = amo_leads.summarize(rows)
-    last = db.get_last_amo_lead_sync() or {}
-    return amo_leads.render_report(
-        day,
-        summary,
-        synced_at=last.get('finished_at'),
-        sync_error=last.get('error') if last.get('status') == 'error' else None,
-    )
-
-
 async def amo_leads_sync_job():
     """Плановая выгрузка лидов amoCRM — раз в 3 часа."""
     try:
@@ -30431,15 +30411,24 @@ def _amo_leads_broadcast_times():
     return times
 
 
-def _amo_leads_alert_text(now=None):
+def _amo_leads_alert_text(now=None, day=None):
     """Текст отбивки с анализом отклонений — по методике из «анализ_лидов_алерты».
 
-    Сравниваем текущее окно с тем же окном неделю назад. Расходы в amoCRM не
-    хранятся, поэтому CPL-часть считается только если расходы придут снаружи;
-    пока их источника нет, отбивка честно говорит об этом.
+    Без даты берём текущее окно: в полночь это прошедшие сутки, в остальные часы
+    — время с начала суток до сейчас. С датой — полные указанные сутки. База в
+    обоих случаях одна и та же: тот же отрезок ровно неделю назад.
     """
-    windows = amo_leads.alert_windows(now)
+    windows = amo_leads.day_windows(day) if day else amo_leads.alert_windows(now)
     current = db.get_amo_leads_between(windows["current_start"], windows["current_end"])
+    if not current:
+        # Данных за окно ещё нет (первый запуск или рестарт) — тянем amoCRM
+        # сейчас. Но только если окно вообще попадает в глубину выгрузки: для
+        # более старых дат синк ничего не принесёт, и дёргать его бессмысленно.
+        horizon = datetime.now(amo_leads.TZ) - timedelta(days=amo_leads.SYNC_DAYS)
+        if windows["current_start"] >= horizon:
+            amo_leads_sync()
+            current = db.get_amo_leads_between(
+                windows["current_start"], windows["current_end"])
     base = db.get_amo_leads_between(windows["base_start"], windows["base_end"])
     rows = amo_leads.analyze(
         amo_leads.count_by_source(current),
@@ -35660,9 +35649,11 @@ async def szov_wallboard_command(message: types.Message):
 
 @dp.message_handler(commands=['leads'])
 async def amo_leads_command(message: types.Message):
-    """/leads [ДД.ММ.ГГГГ] — лиды по источникам из amoCRM (по умолчанию за сегодня).
+    """/leads [ДД.ММ.ГГГГ] — лиды по источникам в том же виде, что и отбивка.
 
-    Пока доступно администраторам и главам отделов."""
+    Без даты — текущий период, с датой — указанные сутки. В обоих случаях рядом
+    стоит тот же отрезок неделю назад и отметки, где просадка.
+    Доступно администраторам и главам отделов."""
     loop = asyncio.get_event_loop()
     user = await loop.run_in_executor(
         executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
@@ -35675,7 +35666,7 @@ async def amo_leads_command(message: types.Message):
         return
 
     argument = (message.get_args() or '').strip()
-    day = datetime.now(amo_leads.TZ).date()
+    day = None
     if argument:
         try:
             day = datetime.strptime(argument, "%d.%m.%Y").date()
@@ -35685,7 +35676,8 @@ async def amo_leads_command(message: types.Message):
 
     await message.reply("Считаю лиды…")
     try:
-        text = await loop.run_in_executor(executor_pool, _amo_leads_report_text, day)
+        text = await loop.run_in_executor(
+            executor_pool, functools.partial(_amo_leads_alert_text, day=day))
     except Exception as exc:
         logging.error("Команда /leads: не удалось собрать лиды: %s", exc, exc_info=True)
         await message.reply("Не удалось собрать лиды — amoCRM не ответил.")
