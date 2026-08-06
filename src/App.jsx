@@ -156,7 +156,9 @@ const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const FOUR_YOU_ADMIN_USER_ID = 2;
 const FOUR_YOU_VIEWER_USER_ID = 241;
 const AI_QA_OP_DEPARTMENT_ID = 367;
-const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov']);
+// Главы этих отделов видят раздел «ИИ-оценка» и «Чаты Верификаторов» целиком.
+// Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES в bot_schedule2.py).
+const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
 const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
