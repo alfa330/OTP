@@ -19,11 +19,12 @@ Google (C3) и Звонков (C11) перенесены дословно, ос�
   * дата сделки считается в Asia/Almaty явно, а не в часовом поясе книги.
 """
 
+import html
 import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, date as date_cls
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -355,7 +356,10 @@ def count_by_source(rows):
         "TikTok": by_utm("tiktok"),
         # Здесь наоборот — размечено только тегами.
         "OLX": by_tag("olx"),
-        "2GIS": by_tag("2gis") + by_tag("2гис"),
+        # Обе формы написания — одно условие, а не два счётчика: тег, где
+        # встречаются сразу «2gis» и «2ГИС», иначе посчитался бы дважды.
+        "2GIS": sum(1 for r in rows
+                    if ("2gis" in _tags(r) or "2гис" in _tags(r)) and _not_excluded(r)),
         # SEO: свой utm, плюс заявки с сайта без utm, плюс переходы из ChatGPT.
         "SEO": (by_utm("seo")
                 + sum(1 for r in rows if "sait" in _tags(r) and not _utm(r) and _not_excluded(r))
@@ -402,12 +406,12 @@ def render_report(day, summary, synced_at=None, sync_error=None):
 
     if summary["unattributed"]:
         share = 100.0 * summary["unattributed"] / max(1, summary["total_deals"])
-        lines.append("Сделок в amoCRM за день: %d, без источника: %d (%.0f%%)."
+        lines.append("Сделок в amoCRM за день: %d, не попало в таблицу: %d (%.0f%%)."
                      % (summary["total_deals"], summary["unattributed"], share))
 
     if synced_at:
         age = datetime.now(TZ) - synced_at
-        minutes = int(age.total_seconds() // 60)
+        minutes = max(0, int(age.total_seconds() // 60))
         if minutes < 60:
             ago = "%d мин назад" % minutes
         else:
@@ -415,5 +419,8 @@ def render_report(day, summary, synced_at=None, sync_error=None):
         lines.append("Данные обновлены %s (%s)."
                      % (synced_at.astimezone(TZ).strftime("%H:%M"), ago))
     if sync_error:
-        lines.append("⚠️ Последняя выгрузка не удалась: %s" % sync_error[:160])
+        # Текст ошибки приходит от amoCRM и может содержать < или &, а сообщение
+        # уходит с parse_mode=HTML — без экранирования отбивка не отправится вовсе.
+        lines.append("⚠️ Последняя выгрузка не удалась: %s"
+                     % html.escape(str(sync_error)[:160]))
     return "\n".join(lines)
