@@ -31,10 +31,12 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import re
+import functools
 import xlsxwriter
 import json
 import html
 from concurrent.futures import ThreadPoolExecutor
+import group_late
 from database import (
     db,
     TECHNICAL_ISSUE_REASONS,
@@ -326,6 +328,10 @@ report_lock = threading.Lock()
 recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
 auth_maintenance_executor = ThreadPoolExecutor(max_workers=1)
+# Контроль опозданий держит свой пул: опрос Workpace идёт каждые 2 минуты, а
+# отчёт за месяц собирается минутами — в общем пуле из 4 воркеров они бы
+# отбирали место у остальной работы приложения.
+group_late_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='group-late')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -6252,14 +6258,12 @@ def api_chatapp_authors_map():
         return jsonify({"error": str(error)}), 500
 
 
-# ─────────────────────────── Бот опозданий (group_late_bot) ───────────────────────────
-# Настройки, отбивки и отчёты бот держит в наших же таблицах glb_* — чтение и
-# правку настроек делаем прямо в БД, бот перечитывает их на каждом опросе.
-# Через HTTP к самому боту ходим только за действиями, которым нужен Telegram
-# или Workpace: тестовое сообщение, отчёт, «Отбито», синк отделов.
-
-GROUP_LATE_BOT_URL = (os.getenv('GROUP_LATE_BOT_URL') or '').strip().rstrip('/')
-GROUP_LATE_BOT_ADMIN_SECRET = (os.getenv('GROUP_LATE_BOT_ADMIN_SECRET') or '').strip()
+# ─────────────────────────── Бот опозданий (Workpace) ───────────────────────────
+# Раздел управляет контролем опозданий, который живёт здесь же: настройки,
+# отбивки и отчёты — в таблицах glb_*, опрос Workpace — джобой планировщика,
+# уведомления — нашим ботом. Отдельного сервиса и походов по HTTP больше нет;
+# действия, которым нужен Telegram, уходят в цикл бота через
+# _group_late_run_on_bot_loop.
 
 
 def _group_late_bot_guard():
@@ -6286,32 +6290,30 @@ def _group_late_bot_actor(requester_id):
     return f"web:{requester_id}:{name}" if name else f"web:{requester_id}"
 
 
-def _group_late_bot_call(method, path, payload=None, timeout=25):
-    """Запрос к сервису бота. Возвращает (data, err) — err уже готовый ответ Flask."""
-    if not GROUP_LATE_BOT_URL or not GROUP_LATE_BOT_ADMIN_SECRET:
-        return None, (jsonify({
-            "error": "Сервис бота не подключён: задайте GROUP_LATE_BOT_URL и GROUP_LATE_BOT_ADMIN_SECRET",
-            "code": "BOT_NOT_CONFIGURED",
-        }), 503)
-    url = f"{GROUP_LATE_BOT_URL}{path}"
+def _group_late_send_chat_message(chat_id, text):
+    """Отправить сообщение нашим ботом из потока Flask. (message_id, error)."""
+    async def _send():
+        return await _group_late_send_event(chat_id, text, None)
+
     try:
-        response = requests.request(
-            method,
-            url,
-            json=payload,
-            headers={"X-Admin-Secret": GROUP_LATE_BOT_ADMIN_SECRET},
-            timeout=timeout,
-        )
-    except requests.RequestException as error:
-        logging.warning("group_late_bot %s %s failed: %s", method, path, error)
-        return None, (jsonify({"error": f"Бот недоступен: {error}", "code": "BOT_UNREACHABLE"}), 502)
+        return _group_late_run_on_bot_loop(_send, timeout=30)
+    except Exception as error:
+        return None, str(error)[:300]
+
+
+def _group_late_fetch_chat_card(chat_id):
+    """Название и тип чата из Telegram: по одному chat_id в разделе не понять,
+    что это за чат."""
+    async def _get_chat():
+        return await bot.get_chat(chat_id)
+
     try:
-        data = response.json()
-    except ValueError:
-        data = {"error": (response.text or '')[:500]}
-    if response.status_code >= 400:
-        return None, (jsonify({"error": data.get('error') or 'Ошибка на стороне бота'}), response.status_code)
-    return data, None
+        chat = _group_late_run_on_bot_loop(_get_chat, timeout=20)
+        return {'title': getattr(chat, 'title', None) or getattr(chat, 'username', None),
+                'chat_type': getattr(chat, 'type', None)}
+    except Exception as error:
+        logging.debug("group_late: getChat(%s) не удался: %s", chat_id, error)
+        return {'title': None, 'chat_type': None}
 
 
 @app.route('/api/group_late_bot/overview', methods=['GET', 'OPTIONS'])
@@ -6326,7 +6328,9 @@ def api_group_late_bot_overview():
     try:
         overview = db.get_group_late_overview(days=request.args.get('days', 7))
         overview['status'] = 'success'
-        overview['bot_configured'] = bool(GROUP_LATE_BOT_URL and GROUP_LATE_BOT_ADMIN_SECRET)
+        # Без доступов к Workpace опрос не заводится и отчёты собрать нечем —
+        # раздел должен сказать об этом прямо, а не показывать пустые графики.
+        overview['workpace_configured'] = group_late.is_configured()
         return jsonify(overview), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -6351,9 +6355,13 @@ def api_group_late_bot_chats():
 
         payload = request.get_json(silent=True) or {}
         chat_id = payload.get('chat_id')
+        title = payload.get('title')
+        # Название чата знает Telegram — берём оттуда, если его не указали руками.
+        card = _group_late_fetch_chat_card(chat_id) if chat_id else {}
         result = db.add_group_late_chat(
             chat_id,
-            title=payload.get('title'),
+            title=title or card.get('title'),
+            chat_type=card.get('chat_type'),
             departments=payload.get('departments'),
             note=payload.get('note'),
             created_by=_group_late_bot_actor(requester_id),
@@ -6361,10 +6369,12 @@ def api_group_late_bot_chats():
         # Приветствие сразу проверяет, что бот действительно состоит в чате.
         # Чат в списке остаётся в любом случае — предупреждение показываем в UI.
         if payload.get('send_welcome', True):
-            _, welcome_err = _group_late_bot_call('POST', f"/admin/chats/{result['chat_id']}/welcome")
-            result['welcome_sent'] = welcome_err is None
-            if welcome_err is not None:
-                result['warning'] = "Чат сохранён, но приветствие отправить не удалось — проверьте, что бот добавлен в чат"
+            message_id, send_error = _group_late_send_chat_message(
+                result['chat_id'], group_late.messages.build_welcome_message())
+            result['welcome_sent'] = bool(message_id)
+            if not message_id:
+                result['warning'] = ("Чат сохранён, но приветствие отправить не удалось — "
+                                     f"проверьте, что бот добавлен в чат ({send_error})")
         return jsonify({"status": "success", **result}), 201
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -6417,10 +6427,15 @@ def api_group_late_bot_chat_test(chat_id):
     _, err = _group_late_bot_guard()
     if err:
         return err
-    data, call_err = _group_late_bot_call('POST', f"/admin/chats/{chat_id}/test")
-    if call_err:
-        return call_err
-    return jsonify({"status": "success", **(data or {})}), 200
+    now_text = datetime.now(group_late.TZ).strftime('%H:%M')
+    message_id, send_error = _group_late_send_chat_message(
+        chat_id, group_late.messages.build_test_message(now_text))
+    if not message_id:
+        return jsonify({"error": f"Бот не смог написать в этот чат: {send_error}"}), 502
+    card = _group_late_fetch_chat_card(chat_id)
+    if card.get('title'):
+        db.glb_update_chat_title(chat_id, card['title'])
+    return jsonify({"status": "success", "message_id": message_id, **card}), 200
 
 
 @app.route('/api/group_late_bot/departments', methods=['GET', 'OPTIONS'])
@@ -6443,16 +6458,24 @@ def api_group_late_bot_departments():
 @app.route('/api/group_late_bot/departments/sync', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_departments_sync():
-    """Перечитать справочник отделов из Workpace (бот сам ходит в их API)."""
+    """Перечитать справочник отделов из Workpace."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     _, err = _group_late_bot_guard()
     if err:
         return err
-    data, call_err = _group_late_bot_call('POST', '/admin/departments/sync', timeout=90)
-    if call_err:
-        return call_err
-    return jsonify({"status": "success", **(data or {})}), 200
+    if not group_late.is_configured():
+        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
+                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
+    try:
+        employees = group_late.workpace_client.get_employees()
+        count = db.glb_sync_departments(group_late.count_departments(employees))
+        return jsonify({"status": "success", "departments": count}), 200
+    except group_late.WorkpaceError as error:
+        return jsonify({"error": f"Workpace недоступен: {error}"}), 502
+    except Exception as error:
+        logging.exception("group_late departments sync failed")
+        return jsonify({"error": str(error)}), 500
 
 
 @app.route('/api/group_late_bot/mutes', methods=['GET', 'POST', 'OPTIONS'])
@@ -6534,8 +6557,8 @@ def api_group_late_bot_events():
 @app.route('/api/group_late_bot/events/<int:event_id>/ack', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_event_ack(event_id):
-    """Отбить с сайта. Идёт через бота: он же правит текст сообщений в Telegram,
-    иначе в чатах осталось бы «ожидает отбивки» при отбитом событии в базе."""
+    """Отбить с сайта: пометить в базе и переписать сообщения во всех чатах —
+    иначе в Telegram осталось бы «ожидает отбивки» при отбитом событии."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _group_late_bot_guard()
@@ -6546,13 +6569,36 @@ def api_group_late_bot_event_ack(event_id):
         reviewer_name = (str(requester[2]).strip() if requester and requester[2] else '') or f"Пользователь {requester_id}"
     except Exception:
         reviewer_name = f"Пользователь {requester_id}"
-    data, call_err = _group_late_bot_call('POST', f"/admin/events/{event_id}/ack", payload={
-        "reviewer_name": reviewer_name,
-        "ack_by": _group_late_bot_actor(requester_id),
-    })
-    if call_err:
-        return call_err
-    return jsonify({"status": "success", **(data or {})}), 200
+
+    try:
+        if not db.glb_get_event(event_id):
+            return jsonify({"error": "Событие не найдено"}), 404
+        acked = db.glb_ack_event(
+            event_id, _group_late_bot_actor(requester_id), source='web')
+        if not acked:
+            return jsonify({"error": "Событие уже отбито"}), 409
+
+        updated = 0
+        try:
+            updated = _group_late_run_on_bot_loop(
+                lambda: _group_late_apply_ack(
+                    event_id, acked.get('message_text') or '', reviewer_name),
+                timeout=60,
+            )
+        except Exception as error:
+            # Отметка в базе уже стоит; сообщения в чатах поправит следующий, кто
+            # их откроет. Не отвечаем ложной ошибкой, но предупреждаем.
+            logging.warning("group_late: ack %s — не удалось обновить сообщения: %s", event_id, error)
+
+        return jsonify({
+            "status": "success",
+            "ack_at": acked.get('ack_at'),
+            "ack_by": acked.get('ack_by'),
+            "messages_updated": updated,
+        }), 200
+    except Exception as error:
+        logging.exception("group_late event ack failed")
+        return jsonify({"error": str(error)}), 500
 
 
 @app.route('/api/group_late_bot/reports', methods=['GET', 'POST', 'OPTIONS'])
@@ -6581,19 +6627,32 @@ def api_group_late_bot_reports():
             logging.exception("group_late_bot reports failed")
             return jsonify({"error": str(error)}), 500
 
-    # Отчёт за период тянет постранично весь Workpace, поэтому бот считает его
-    # в фоне и сразу отдаёт id строки — раздел показывает её как «формируется».
+    # Отчёт за период тянет из Workpace каждый день диапазона, поэтому считаем в
+    # фоне и сразу отдаём id карточки — раздел показывает её как «формируется».
+    if not group_late.is_configured():
+        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
+                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
     payload = request.get_json(silent=True) or {}
-    data, call_err = _group_late_bot_call('POST', '/admin/reports', payload={
-        "date_from": payload.get('date_from'),
-        "date_to": payload.get('date_to'),
-        "department": payload.get('department'),
-        "send_to_chat_id": payload.get('send_to_chat_id'),
-        "requested_by": _group_late_bot_actor(requester_id),
-    })
-    if call_err:
-        return call_err
-    return jsonify({"status": "success", **(data or {})}), 202
+    date_from = str(payload.get('date_from') or '').strip()
+    date_to = str(payload.get('date_to') or '').strip() or date_from
+    department = str(payload.get('department') or '').strip()
+    send_to_chat_id = str(payload.get('send_to_chat_id') or '').strip()
+    try:
+        report_id = db.glb_create_report(
+            date_from, date_to, department=department or None, source='web',
+            requested_chat_id=send_to_chat_id or None,
+            requested_by=_group_late_bot_actor(requester_id),
+        )
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late report create failed")
+        return jsonify({"error": str(error)}), 500
+
+    group_late_pool.submit(
+        _group_late_generate_report, report_id, date_from, date_to, department, send_to_chat_id,
+    )
+    return jsonify({"status": "success", "report_id": report_id, "report_status": "running"}), 202
 
 
 @app.route('/api/group_late_bot/reports/<int:report_id>/file', methods=['GET', 'OPTIONS'])
@@ -6639,16 +6698,27 @@ def api_group_late_bot_poll_runs():
 @app.route('/api/group_late_bot/poll', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_poll():
-    """Прогнать опрос Workpace прямо сейчас, не дожидаясь двухминутного крона."""
+    """Прогнать опрос Workpace прямо сейчас, не дожидаясь двухминутной джобы."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     _, err = _group_late_bot_guard()
     if err:
         return err
-    data, call_err = _group_late_bot_call('POST', '/admin/poll', timeout=120)
-    if call_err:
-        return call_err
-    return jsonify({"status": "success", **(data or {})}), 200
+    if not group_late.is_configured():
+        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
+                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
+    try:
+        # Цикл целиком уходит в event loop бота: сеть и база внутри него сами
+        # уезжают в пул потоков, а отправка идёт из «родного» цикла aiogram.
+        result = _group_late_run_on_bot_loop(_group_late_poll_cycle, timeout=180)
+    except RuntimeError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception as error:
+        logging.exception("group_late manual poll failed")
+        return jsonify({"error": str(error)}), 500
+    if not result.get('ok'):
+        return jsonify({"error": result.get('error') or 'Опрос не удался'}), 502
+    return jsonify({"status": "success", **result}), 200
 
 
 @app.route('/api/ca_eval/pick', methods=['POST', 'OPTIONS'])
@@ -46115,6 +46185,295 @@ async def handle_reval_decision_comment(message: types.Message, state: FSMContex
         logging.debug("Не удалось подтвердить сохранение комментария: %s", e)
 
 
+# ─────────────────────── Контроль опозданий (Workpace) ───────────────────────
+# Раньше это был отдельный сервис group_late_bot со своим ботом и состоянием в
+# JSON. Теперь опрос идёт джобой планировщика, уведомления шлёт наш бот, а
+# настройки и история живут в таблицах glb_*, которыми управляет раздел
+# «Бот опозданий» на сайте.
+#
+# Сеть Workpace и запросы в базу уносим в пул потоков: на event loop бота
+# остаётся только Telegram.
+
+GROUP_LATE_ACK_PREFIX = 'glb_ack:'
+
+
+def _group_late_ack_keyboard(event_id):
+    return InlineKeyboardMarkup().add(
+        InlineKeyboardButton('✅ Отбито', callback_data=f"{GROUP_LATE_ACK_PREFIX}{event_id}")
+    )
+
+
+async def _group_late_send_event(chat_id, text, keyboard):
+    """(message_id, error). Ошибку не глотаем: она попадёт в историю доставок,
+    и в разделе будет видно, что в чат уведомление не ушло."""
+    try:
+        message = await bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=keyboard)
+        return str(message.message_id), None
+    except Exception as error:
+        logging.warning("group_late: не удалось отправить в чат %s: %s", chat_id, error)
+        return None, str(error)[:300]
+
+
+async def _group_late_apply_ack(event_id, message_text, reviewer_name):
+    """Переписать «ожидает отбивки» во ВСЕХ чатах, куда ушло уведомление.
+
+    В прежнем сервисе правилось только то сообщение, где нажали кнопку, и в
+    остальных чатах инцидент так и висел неотбитым."""
+    loop = asyncio.get_event_loop()
+    deliveries = await loop.run_in_executor(group_late_pool, db.glb_event_deliveries, int(event_id))
+    new_text = group_late.messages.acked_text(message_text, reviewer_name)
+    updated = 0
+    for delivery in deliveries:
+        try:
+            await bot.edit_message_text(
+                new_text, chat_id=delivery['chat_id'], message_id=int(delivery['message_id']),
+                parse_mode='HTML', reply_markup=None,
+            )
+            updated += 1
+        except Exception as error:
+            logging.debug("group_late: не удалось обновить сообщение %s: %s",
+                          delivery.get('message_id'), error)
+    return updated
+
+
+async def group_late_poll_job():
+    """Джоба планировщика: опрос Workpace каждые 2 минуты."""
+    try:
+        result = await _group_late_poll_cycle()
+        if not result.get('ok'):
+            logging.warning("group_late: опрос не удался: %s", result.get('error'))
+        elif result.get('events_found'):
+            logging.info("group_late: найдено %s, отправлено %s",
+                         result.get('events_found'), result.get('sent'))
+    except Exception as error:
+        logging.exception("group_late: ошибка джобы опроса: %s", error)
+
+
+async def _group_late_poll_cycle():
+    """Полный цикл опроса: найти нарушения → разослать → записать результат."""
+    loop = asyncio.get_event_loop()
+    plan = await loop.run_in_executor(group_late_pool, group_late.collect_events, db)
+    if not plan.get('ok'):
+        return plan
+
+    results = []
+    for event in plan.get('events') or []:
+        keyboard = _group_late_ack_keyboard(event['event_id'])
+        for chat_id in event['targets']:
+            message_id, error = await _group_late_send_event(chat_id, event['message_text'], keyboard)
+            results.append({
+                'event_id': event['event_id'], 'chat_id': chat_id,
+                'message_id': message_id, 'error': error,
+            })
+
+    return await loop.run_in_executor(
+        group_late_pool, group_late.finalize_deliveries, db, plan, results
+    )
+
+
+def _group_late_run_on_bot_loop(coro_factory, timeout=60):
+    """Выполнить корутину в цикле бота из потока Flask.
+
+    Сессия aiohttp у aiogram привязана к своему циклу — отправлять из чужого
+    нельзя (та же причина, что у отбивки табло СЗоВ)."""
+    loop = _bot_event_loop()
+    if loop is None:
+        raise RuntimeError('Бот ещё не запущен — попробуйте через несколько секунд')
+    future = asyncio.run_coroutine_threadsafe(coro_factory(), loop)
+    return future.result(timeout=timeout)
+
+
+def _group_late_generate_report(report_id, date_from, date_to, department, send_to_chat_id=None):
+    """Собрать отчёт и, если попросили, отправить его в чат. Синхронно — вызывается
+    в пуле потоков, потому что Workpace тянет каждый день периода отдельно."""
+    started_at = time.time()
+    stats = {}
+    try:
+        file_bytes, filename, text = group_late.generate_report(
+            date_from, date_to if date_to != date_from else None, department or None,
+            stats_out=stats,
+        )
+    except Exception as error:
+        logging.exception("group_late: отчёт %s не собрался", report_id)
+        db.glb_finish_report(report_id, error=str(error)[:500],
+                             duration_ms=int((time.time() - started_at) * 1000))
+        # Текст уходит в Telegram с parse_mode=HTML — экранируем, иначе '<' из
+        # текста ошибки уронит отправку следом за самим отчётом.
+        return None, '', f"❌ Не удалось собрать отчёт: {html.escape(str(error))}"
+
+    db.glb_finish_report(
+        report_id, file_bytes=file_bytes, file_name=filename, stats=stats,
+        error=None if file_bytes else re.sub(r'<[^>]+>', '', text or '').strip()[:500],
+        duration_ms=int((time.time() - started_at) * 1000),
+    )
+
+    if send_to_chat_id:
+        try:
+            _group_late_run_on_bot_loop(
+                lambda: _group_late_send_report(send_to_chat_id, file_bytes, filename, text),
+                timeout=120,
+            )
+        except Exception as error:
+            logging.error("group_late: отчёт %s не ушёл в чат %s: %s", report_id, send_to_chat_id, error)
+    return file_bytes, filename, text
+
+
+async def _group_late_send_report(chat_id, file_bytes, filename, text):
+    if file_bytes:
+        await bot.send_document(
+            chat_id, types.InputFile(BytesIO(file_bytes), filename=filename),
+            caption=text, parse_mode='HTML',
+        )
+    else:
+        await bot.send_message(chat_id, text, parse_mode='HTML')
+
+
+def _group_late_parse_report_args(args):
+    """`/report [дата] [дата] [отдел]` — как в прежнем боте."""
+    today = datetime.now(group_late.TZ).strftime('%Y-%m-%d')
+    is_date = lambda value: bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}', value))
+
+    date_from, date_to, department = today, None, None
+    if len(args) == 1:
+        if is_date(args[0]):
+            date_from = args[0]
+        else:
+            department = args[0]
+    elif len(args) >= 2:
+        if is_date(args[0]) and is_date(args[1]):
+            date_from, date_to = args[0], args[1]
+            department = ' '.join(args[2:]) or None
+        elif is_date(args[0]):
+            date_from = args[0]
+            department = ' '.join(args[1:]) or None
+        else:
+            department = ' '.join(args)
+    return date_from, date_to, department
+
+
+def _register_group_late_handlers():
+    """Кнопка «Отбито», команда /report и авто-обнаружение чатов."""
+
+    @dp.callback_query_handler(lambda c: (c.data or '').startswith(GROUP_LATE_ACK_PREFIX))
+    async def _on_group_late_ack(callback_query: types.CallbackQuery):
+        try:
+            event_id = int((callback_query.data or '').split(':', 1)[1])
+        except (IndexError, ValueError):
+            await callback_query.answer('Не понял, какое это событие')
+            return
+
+        reviewer = (callback_query.from_user.first_name
+                    or callback_query.from_user.username
+                    or 'Пользователь')
+        loop = asyncio.get_event_loop()
+        try:
+            event = await loop.run_in_executor(group_late_pool, db.glb_get_event, event_id)
+            if not event:
+                await callback_query.answer('Событие не найдено')
+                return
+            acked = await loop.run_in_executor(
+                group_late_pool, functools.partial(
+                    db.glb_ack_event, event_id,
+                    f"telegram:{callback_query.from_user.id}:{reviewer}",
+                    chat_id=str(callback_query.message.chat.id), source='telegram',
+                )
+            )
+            if not acked:
+                await callback_query.answer('ℹ️ Уже отбито')
+                return
+            await _group_late_apply_ack(event_id, acked.get('message_text') or '', reviewer)
+            await callback_query.answer('✅ Отбито!')
+        except Exception as error:
+            logging.exception("group_late: ошибка обработки отбивки: %s", error)
+            await callback_query.answer('Не удалось отбить, попробуйте ещё раз')
+
+    @dp.message_handler(commands=['report'])
+    async def _on_group_late_report(message: types.Message):
+        chat_id = str(message.chat.id)
+        loop = asyncio.get_event_loop()
+        chat = await loop.run_in_executor(group_late_pool, db.glb_get_chat, chat_id)
+        if not chat:
+            # Чат не в контуре контроля опозданий — команда не наша, молчим,
+            # чтобы не отвечать в случайных чатах, куда добавили бота.
+            return
+        if not group_late.is_configured():
+            await message.reply('❌ Доступы к Workpace не настроены — отчёт собрать нечем.')
+            return
+
+        if message.chat.title:
+            await loop.run_in_executor(
+                group_late_pool, db.glb_update_chat_title, chat_id, message.chat.title)
+
+        args = (message.get_args() or '').split()
+        date_from, date_to, department = _group_late_parse_report_args(args)
+
+        # Чат, закреплённый за отделами, получает отчёты только по ним.
+        chat_departments = chat.get('departments') or []
+        if chat_departments:
+            if department and not group_late.departments_allow(chat_departments, department):
+                await message.reply(
+                    '❌ Этот чат закреплён за отделами: '
+                    + ', '.join(f'<b>{name}</b>' for name in chat_departments)
+                    + '. Отчёт можно получить только по ним.',
+                    parse_mode='HTML')
+                return
+            department = department or chat_departments
+
+        await message.reply('⏳ <i>Собираю Excel-отчёт, это займёт несколько секунд…</i>',
+                            parse_mode='HTML')
+        try:
+            report_id = await loop.run_in_executor(
+                group_late_pool, functools.partial(
+                    db.glb_create_report, date_from, date_to or date_from,
+                    department=', '.join(department) if isinstance(department, list) else department,
+                    source='telegram', requested_chat_id=chat_id,
+                    requested_by=f"telegram:{message.from_user.id}",
+                )
+            )
+            file_bytes, filename, text = await loop.run_in_executor(
+                group_late_pool, functools.partial(
+                    _group_late_generate_report, report_id, date_from, date_to or date_from,
+                    department,
+                )
+            )
+            await _group_late_send_report(chat_id, file_bytes, filename, text)
+        except Exception as error:
+            logging.exception("group_late: /report не удался: %s", error)
+            await message.reply(f'❌ Не удалось собрать отчёт: <code>{error}</code>', parse_mode='HTML')
+
+    handler_decorator = getattr(dp, 'my_chat_member_handler', None)
+    if not callable(handler_decorator):
+        logging.warning("aiogram my_chat_member_handler недоступен — авто-обнаружение чатов "
+                        "для контроля опозданий отключено")
+        return
+
+    @handler_decorator()
+    async def _on_group_late_chat_member(update):
+        """Бота добавили в группу — запоминаем чат выключенным, чтобы его можно
+        было включить в разделе, не выясняя chat_id руками."""
+        try:
+            chat = getattr(update, 'chat', None)
+            new_member = getattr(update, 'new_chat_member', None)
+            new_status = getattr(new_member, 'status', None) if new_member else None
+            if chat is None or getattr(chat, 'type', None) not in ('group', 'supergroup'):
+                return
+            loop = asyncio.get_event_loop()
+            if new_status in ('member', 'administrator', 'creator'):
+                await loop.run_in_executor(
+                    group_late_pool, db.glb_discover_chat,
+                    chat.id, getattr(chat, 'title', None), getattr(chat, 'type', None))
+                logging.info("group_late: бот добавлен в чат %s (%s)",
+                             chat.id, getattr(chat, 'title', ''))
+            elif new_status in ('left', 'kicked'):
+                await loop.run_in_executor(group_late_pool, db.glb_forget_chat, chat.id)
+                logging.info("group_late: бот удалён из чата %s", chat.id)
+        except Exception as error:
+            logging.error("group_late: ошибка обработки my_chat_member: %s", error, exc_info=True)
+
+
+_register_group_late_handlers()
+
+
 def _register_it_ticket_chat_discovery():
     """Авто-обнаружение чатов/каналов для IT-заявок.
 
@@ -46524,6 +46883,22 @@ if __name__ == '__main__':
         max_instances=1,
         coalesce=True
     )
+
+    # Контроль опозданий: опрос Workpace каждые 2 минуты — тот же интервал, что
+    # был у прежнего сервиса. Без доступов к Workpace джобу не заводим, иначе она
+    # каждые две минуты писала бы в журнал опросов одну и ту же ошибку.
+    if group_late.is_configured():
+        scheduler.add_job(
+            group_late_poll_job,
+            CronTrigger(minute='*/2'),
+            id='group_late_poll',
+            misfire_grace_time=60,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Контроль опозданий: опрос Workpace каждые 2 минуты")
+    else:
+        logging.warning("⏰ Контроль опозданий выключен: не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD")
 
     # Отбивка показателей «Табло СЗоВ»: по одной джобе на каждое время из настройки.
     for _hour, _minute in _szov_broadcast_send_times():

@@ -533,7 +533,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                         найдено {fmtInt(lastRun.events_found)} · отправлено {fmtInt(lastRun.sent)}
                                         {lastRun.error ? ` · ${lastRun.error}` : ''}
                                     </>
-                                ) : 'Бот опрашивает Workpace раз в 2 минуты по внешнему крону'}
+                                ) : 'Смены и отметки Workpace проверяются раз в 2 минуты'}
                             </div>
                         </div>
                     </div>
@@ -954,6 +954,9 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                                                 {chat.title || chat.chat_id}
                                                             </span>
                                                             {chat.is_admin_chat && <IosBadge tone="blue">админ</IosBadge>}
+                                                            {chat.created_by === 'discovered' && !chat.enabled && (
+                                                                <IosBadge tone="amber">обнаружен, не включён</IosBadge>
+                                                            )}
                                                         </div>
                                                         <div className="text-[11.5px] text-slate-400">
                                                             <code>{chat.chat_id}</code>
@@ -1018,8 +1021,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                             )}
             </div>
             <p className="px-1 text-[11px] leading-relaxed text-slate-500">
-                Chat ID группы бот показывает по команде <code className="rounded bg-slate-100 px-1">/start</code> в самом чате.
-                Админские чаты из рассылки не убираются — это контур владельца бота.
+                Достаточно добавить бота в группу — чат появится в этом списке выключенным,
+                останется включить его тумблером и выбрать отделы. Вручную чат нужен только тогда,
+                когда бота добавили до появления этого раздела: тогда возьмите Chat ID из адреса
+                группы. Админские чаты из рассылки не убираются — это контур владельца бота.
             </p>
         </div>
     );
@@ -1301,14 +1306,13 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                 </div>
             </div>
 
-            {overview && overview.bot_configured === false && (
+            {overview && overview.workpace_configured === false && (
                 <div className={`${iosCard} mb-3 flex items-start gap-2.5 border-l-4 border-l-amber-400 px-4 py-3`}>
                     <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-500" />
                     <div className="text-[12.5px] leading-relaxed text-slate-600">
-                        Сервис бота не подключён к сайту: не заданы <code className="rounded bg-slate-100 px-1">GROUP_LATE_BOT_URL</code> и
-                        <code className="ml-1 rounded bg-slate-100 px-1">GROUP_LATE_BOT_ADMIN_SECRET</code>.
-                        Настройки, отбивки и отчёты видны, но действия «Отбить», «Сформировать отчёт»,
-                        «Опросить сейчас» и синк отделов работать не будут.
+                        Не заданы доступы к Workpace (<code className="rounded bg-slate-100 px-1">WORKPACE_LOGIN</code> и
+                        <code className="ml-1 rounded bg-slate-100 px-1">WORKPACE_PASSWORD</code>), поэтому опрос смен
+                        не запускается и отчёты собрать нечем. Настройки чатов и история при этом доступны.
                     </div>
                 </div>
             )}
@@ -1344,7 +1348,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                        onChange={(e) => setChatModal({ ...chatModal, chat_id: e.target.value })}
                                        placeholder="-1001234567890" className={iosInput} />
                                 <div className="mt-1 px-1 text-[11px] text-slate-500">
-                                    Узнать ID: отправьте <code className="rounded bg-slate-100 px-1">/start</code> в нужном чате
+                                    Обычно вручную не нужно: добавьте бота в группу — и чат появится в списке сам
                                 </div>
                             </div>
                         )}

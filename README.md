@@ -38,6 +38,38 @@ CHAT2DESK_SYNC_DAYS_BACK=1
 CHAT2DESK_API_MAX_PAGES=100
 ```
 
+## Контроль опозданий (Workpace)
+
+Раздел «Бот опозданий» следит за отметками сотрудников в Workpace и шлёт нарушения
+в рабочие чаты Telegram нашим же ботом. Раньше это был отдельный сервис
+`group_late_bot` на Render со своим ботом и состоянием в JSON-файлах — теперь всё
+внутри приложения: опрос Workpace раз в 2 минуты идёт джобой планировщика, код
+лежит в пакете `group_late/`, а настройки чатов, отбивки, отчёты и журнал опросов —
+в таблицах `glb_*`.
+
+Обязательные переменные (без них джоба не заводится, а отчёты собрать нечем):
+
+```env
+WORKPACE_LOGIN=your-workpace-login
+WORKPACE_PASSWORD=your-workpace-password
+```
+
+Необязательные:
+
+```env
+WORKPACE_BASE_URL=https://api.workpace.kz
+LATE_THRESHOLD_MINUTES=1                    # с какой минуты опоздание — нарушение
+GROUP_LATE_MISSING_IN_MINUTES=10            # «отсутствует на месте» после начала смены
+GROUP_LATE_MISSING_OUT_MINUTES=60           # «нет отметки об уходе» / «поздний уход»
+GROUP_LATE_MAX_REPORT_DAYS=31               # максимальный период одного отчёта
+GROUP_LATE_RETENTION_EVENTS_DAYS=180        # сколько хранить отбивки
+GROUP_LATE_RETENTION_REPORT_FILES_DAYS=60   # сколько хранить Excel-файлы отчётов
+GROUP_LATE_RETENTION_POLL_RUNS_DAYS=7       # сколько хранить журнал опросов
+```
+
+Чтобы подключить чат: добавьте бота в группу — она появится в разделе выключенной,
+останется включить её тумблером и выбрать отделы.
+
 ## GitHub Pages
 
 1. Push repository to GitHub (branch `main` or `master`).
