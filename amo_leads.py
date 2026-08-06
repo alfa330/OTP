@@ -406,10 +406,9 @@ def render_report(day, summary, synced_at=None, sync_error=None):
     lines.append("%-*s %6d" % (width, "Общее", counts["Общее"]))
     lines.append("</pre>")
 
-    if summary["unattributed"]:
-        share = 100.0 * summary["unattributed"] / max(1, summary["total_deals"])
-        lines.append("Сделок в amoCRM за день: %d, не попало в таблицу: %d (%.0f%%)."
-                     % (summary["total_deals"], summary["unattributed"], share))
+    # Строку про неатрибутированные сделки в отбивку не выводим: владелец просил
+    # текст, совпадающий с таблицей. Само число по-прежнему считается в summarize()
+    # — оно нужно, если решим показывать потерю отдельно.
 
     if synced_at:
         age = datetime.now(TZ) - synced_at
