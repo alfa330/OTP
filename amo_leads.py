@@ -38,11 +38,10 @@ AMO_CRM_PASSWORD = (os.getenv("AMO_CRM_PASSWORD") or "").strip()
 
 TZ = ZoneInfo(os.getenv("AMO_LEADS_TIMEZONE", "Asia/Almaty"))
 
-# Глубина выгрузки. В Apps Script стояло 21 день, потому что таблице нужна была
-# история; отбивке хватает сегодняшнего дня, поэтому по умолчанию берём короткое
-# окно — синк укладывается в секунды вместо минут. Для перезаливки истории
-# значение поднимается переменной окружения.
-SYNC_DAYS = max(1, int(os.getenv("AMO_LEADS_DAYS") or 3))
+# Глубина выгрузки. В Apps Script стояло 21 день. Нам нужно минимум 9: алерты
+# сравнивают текущий период с тем же днём НЕДЕЛЮ назад (база — 7 суток назад),
+# плюс запас на границы суток и на пропущенный синк.
+SYNC_DAYS = max(9, int(os.getenv("AMO_LEADS_DAYS") or 9))
 
 # ID кастомных полей сделки в amoCRM — те же, что были в скрипте.
 FIELD_UTM_SOURCE = int(os.getenv("AMO_FIELD_UTM_SOURCE") or 892237)
@@ -425,3 +424,216 @@ def render_report(day, summary, synced_at=None, sync_error=None):
         lines.append("⚠️ Последняя выгрузка не удалась: %s"
                      % html.escape(str(sync_error)[:160]))
     return "\n".join(lines)
+
+
+# ==== Алерты по отклонению от нормы ==========================================
+#
+# Перенос методики из файла «анализ_лидов_алерты.xlsx». База сравнения — тот же
+# день НЕДЕЛЮ назад в том же временном окне (12:00 сравнивается с 00:00-12:00
+# прошлой недели, полночь — с полными сутками того же дня неделю назад).
+#
+# ВАЖНО: расходы в amoCRM отсутствуют — их вносят руками. Поэтому всё, что
+# считается от денег (CPL, Δ CPL, статус CPL, правило «расход без лидов»),
+# работает ТОЛЬКО если расходы переданы снаружи. Без них эти колонки честно
+# показывают «нет данных о расходах», а не выдуманный ноль.
+
+
+def _env_float(name, default):
+    try:
+        return float(str(os.getenv(name, "")).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+# Пороги. Значения — из листа «Пороги алертов», меняются переменными окружения.
+THRESHOLDS = {
+    "leads_critical_12h": _env_float("AMO_ALERT_LEADS_CRIT_12H", -0.40),
+    "leads_warning_12h": _env_float("AMO_ALERT_LEADS_WARN_12H", -0.15),
+    "cpl_critical_12h": _env_float("AMO_ALERT_CPL_CRIT_12H", 0.50),
+    "cpl_warning_12h": _env_float("AMO_ALERT_CPL_WARN_12H", 0.30),
+    "leads_critical_6h": _env_float("AMO_ALERT_LEADS_CRIT_6H", -0.60),
+    "min_base_leads": _env_float("AMO_ALERT_MIN_BASE_LEADS", 10),
+    "min_spend_no_leads": _env_float("AMO_ALERT_MIN_SPEND", 5000),
+}
+
+PERIOD_12H = "12ч"
+PERIOD_6H = "6ч"
+
+
+def _leads_status(period, delta_leads, enough_sample, spend, leads):
+    """Колонка «Статус: Лиды» из шаблона."""
+    if spend is not None and spend > THRESHOLDS["min_spend_no_leads"] and leads == 0:
+        return "Критично: расход без лидов"
+    if not enough_sample:
+        return "Недостаточно данных"
+    if delta_leads is None:
+        return "Недостаточно данных"
+    if period == PERIOD_6H:
+        return ("Критично: лиды упали" if delta_leads <= THRESHOLDS["leads_critical_6h"]
+                else "Норма")
+    if delta_leads <= THRESHOLDS["leads_critical_12h"]:
+        return "Критично: лиды упали"
+    if delta_leads <= THRESHOLDS["leads_warning_12h"]:
+        return "Внимание: лиды ниже нормы"
+    return "Норма"
+
+
+def _cpl_status(period, delta_cpl, enough_sample, cpl, base_cpl):
+    """Колонка «Статус: CPL». На шестичасовой проверке CPL не считается вовсе."""
+    if period == PERIOD_6H:
+        return "—"
+    if cpl is None or base_cpl is None:
+        return "Нет данных о расходах"
+    if not base_cpl or not cpl:
+        return "Не применимо (нет CPL)"
+    if not enough_sample:
+        return "Недостаточно данных"
+    if delta_cpl >= THRESHOLDS["cpl_critical_12h"]:
+        return "Критично: CPL вырос"
+    if delta_cpl >= THRESHOLDS["cpl_warning_12h"]:
+        return "Внимание: CPL растёт"
+    return "Норма"
+
+
+def _verdict(leads_status, cpl_status):
+    """Колонки «Итог» и «Рекомендация»."""
+    both = (leads_status, cpl_status)
+    if any("Критично" in s for s in both):
+        return "АЛЕРТ", ("Немедленно проверить канал (форма/оплата/таргетинг) "
+                         "и рассмотреть паузу расхода")
+    if any("Внимание" in s for s in both):
+        return "Проверить", ("Не менять бюджет сразу — подтвердить тренд "
+                             "на следующем чекпоинте")
+    if any(s == "Недостаточно данных" for s in both):
+        return "Мало данных", ("Не делать выводов по %, ориентироваться "
+                               "на правило «расход без лидов»")
+    return "Норма", "Без действий"
+
+
+def analyze(current_counts, base_counts, period=PERIOD_12H, spend=None, base_spend=None):
+    """Строки анализа по каждому источнику.
+
+    `spend` / `base_spend` — словари «источник -> расход». None означает, что
+    расходы неизвестны: тогда CPL-часть не считается.
+    """
+    spend = dict(spend or {})
+    base_spend = dict(base_spend or {})
+    # Строка «Общее»: расход по ней — сумма источников, как SUM в шаблоне.
+    for bucket in (spend, base_spend):
+        if bucket and "Общее" not in bucket:
+            bucket["Общее"] = sum(v for k, v in bucket.items()
+                                  if k in SOURCE_ORDER and v is not None)
+    rows = []
+    for name in SOURCE_ORDER + ["Общее"]:
+        leads = current_counts.get(name, 0)
+        base_leads = base_counts.get(name, 0)
+        money = spend.get(name)
+        base_money = base_spend.get(name)
+
+        cpl = (money / leads) if (money is not None and leads) else (0 if money is not None else None)
+        base_cpl = ((base_money / base_leads) if (base_money is not None and base_leads)
+                    else (0 if base_money is not None else None))
+
+        delta_leads = ((leads - base_leads) / base_leads) if base_leads else None
+        delta_cpl = ((cpl - base_cpl) / base_cpl) if (cpl and base_cpl) else None
+        enough = base_leads >= THRESHOLDS["min_base_leads"]
+
+        leads_status = _leads_status(period, delta_leads, enough, money, leads)
+        cpl_status = _cpl_status(period, delta_cpl, enough, cpl, base_cpl)
+        verdict, advice = _verdict(leads_status, cpl_status)
+
+        rows.append({
+            "source": name, "leads": leads, "base_leads": base_leads,
+            "spend": money, "cpl": cpl, "base_cpl": base_cpl,
+            "delta_leads": delta_leads, "delta_cpl": delta_cpl,
+            "enough_sample": enough, "leads_status": leads_status,
+            "cpl_status": cpl_status, "verdict": verdict, "advice": advice,
+        })
+    return rows
+
+
+_VERDICT_MARK = {"АЛЕРТ": "🔴", "Проверить": "🟡", "Мало данных": "⚪", "Норма": "🟢"}
+
+
+def _pct(value):
+    if value is None:
+        return "—"
+    return "%+.0f%%" % (value * 100)
+
+
+def render_alert_report(rows, period=PERIOD_12H, window_label="", base_label="",
+                        synced_at=None, sync_error=None):
+    """Текст отбивки с анализом отклонений."""
+    lines = ["<b>Лиды: проверка за %s</b>" % (window_label or period)]
+    if base_label:
+        lines.append("Сравнение с %s" % base_label)
+    lines.append("")
+
+    body = rows[:-1] if rows and rows[-1]["source"] == "Общее" else rows
+    total = rows[-1] if rows and rows[-1]["source"] == "Общее" else None
+
+    width = max(len(r["source"]) for r in body) + 1
+    lines.append("<pre>")
+    lines.append("%-*s %6s %6s %8s" % (width, "Источник", "лиды", "база", "Δ"))
+    for r in body:
+        lines.append("%-*s %6d %6d %8s" % (width, r["source"], r["leads"],
+                                           r["base_leads"], _pct(r["delta_leads"])))
+    if total:
+        lines.append("-" * (width + 23))
+        lines.append("%-*s %6d %6d %8s" % (width, "Общее", total["leads"],
+                                           total["base_leads"], _pct(total["delta_leads"])))
+    lines.append("</pre>")
+
+    problems = [r for r in rows if r["verdict"] in ("АЛЕРТ", "Проверить")]
+    if problems:
+        lines.append("")
+        for r in problems:
+            mark = _VERDICT_MARK.get(r["verdict"], "")
+            details = [s for s in (r["leads_status"], r["cpl_status"])
+                       if s not in ("Норма", "—", "Нет данных о расходах")]
+            lines.append("%s <b>%s</b> — %s" % (mark, r["source"], "; ".join(details)))
+        lines.append("")
+        lines.append(problems[0]["advice"])
+    else:
+        lines.append("")
+        lines.append("🟢 Отклонений нет.")
+
+    if any(r["cpl_status"] == "Нет данных о расходах" for r in rows):
+        lines.append("")
+        lines.append("<i>CPL не считается: расходы в amoCRM не хранятся.</i>")
+
+    if synced_at:
+        lines.append("Данные обновлены %s." % synced_at.astimezone(TZ).strftime("%H:%M"))
+    if sync_error:
+        lines.append("⚠️ Последняя выгрузка не удалась: %s"
+                     % html.escape(str(sync_error)[:160]))
+    return "\n".join(lines)
+
+
+def alert_windows(now=None):
+    """Окна сравнения для проверки: текущее и то же окно неделю назад.
+
+    В полночь сутки только что закончились — подводим итог прошедшего дня и
+    сравниваем с теми же полными сутками неделю назад. В остальные часы берём
+    день с начала суток до текущего момента и сравниваем с тем же отрезком того
+    же дня недели неделей ранее (методика «то же временное окно»).
+    """
+    now = now or datetime.now(TZ)
+    midnight = datetime.combine(now.date(), datetime.min.time(), TZ)
+    if now.hour == 0:
+        current_end = midnight
+        current_start = midnight - timedelta(days=1)
+        label = "%s (сутки)" % current_start.strftime("%d.%m")
+    else:
+        current_start = midnight
+        current_end = now
+        label = "%s, %s–%s" % (now.strftime("%d.%m"),
+                               current_start.strftime("%H:%M"), now.strftime("%H:%M"))
+    base_start = current_start - timedelta(days=7)
+    base_end = current_end - timedelta(days=7)
+    base_label = "%s (тот же день неделю назад)" % base_start.strftime("%d.%m")
+    return {
+        "current_start": current_start, "current_end": current_end,
+        "base_start": base_start, "base_end": base_end,
+        "window_label": label, "base_label": base_label,
+    }
