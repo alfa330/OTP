@@ -401,7 +401,8 @@ def _env_float(name, default):
 # Пороги — из листа «Пороги алертов», меняются переменными окружения.
 THRESHOLDS = {
     "leads_critical_12h": _env_float("AMO_ALERT_LEADS_CRIT_12H", -0.40),
-    "leads_warning_12h": _env_float("AMO_ALERT_LEADS_WARN_12H", -0.15),
+    # -20% (решение владельца 06.08.2026; в исходном файле стояло -15%).
+    "leads_warning_12h": _env_float("AMO_ALERT_LEADS_WARN_12H", -0.20),
     "leads_critical_6h": _env_float("AMO_ALERT_LEADS_CRIT_6H", -0.60),
     "min_base_leads": _env_float("AMO_ALERT_MIN_BASE_LEADS", 10),
 }
