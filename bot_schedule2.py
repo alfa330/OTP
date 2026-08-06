@@ -6418,6 +6418,24 @@ def api_group_late_bot_chat_item(chat_id):
         return jsonify({"error": str(error)}), 500
 
 
+@app.route('/api/group_late_bot/available_chats', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_available_chats():
+    """Группы, где бот уже есть, но рассылка ещё не подключена."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        result = db.get_group_late_available_chats()
+        result['status'] = 'success'
+        return jsonify(result), 200
+    except Exception as error:
+        logging.exception("group_late available chats failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/group_late_bot/chats/<chat_id>/test', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_chat_test(chat_id):
@@ -46441,49 +46459,23 @@ def _register_group_late_handlers():
             logging.exception("group_late: /report не удался: %s", error)
             await message.reply(f'❌ Не удалось собрать отчёт: <code>{error}</code>', parse_mode='HTML')
 
-    handler_decorator = getattr(dp, 'my_chat_member_handler', None)
-    if not callable(handler_decorator):
-        logging.warning("aiogram my_chat_member_handler недоступен — авто-обнаружение чатов "
-                        "для контроля опозданий отключено")
-        return
-
-    @handler_decorator()
-    async def _on_group_late_chat_member(update):
-        """Бота добавили в группу — запоминаем чат выключенным, чтобы его можно
-        было включить в разделе, не выясняя chat_id руками."""
-        try:
-            chat = getattr(update, 'chat', None)
-            new_member = getattr(update, 'new_chat_member', None)
-            new_status = getattr(new_member, 'status', None) if new_member else None
-            if chat is None or getattr(chat, 'type', None) not in ('group', 'supergroup'):
-                return
-            loop = asyncio.get_event_loop()
-            if new_status in ('member', 'administrator', 'creator'):
-                await loop.run_in_executor(
-                    group_late_pool, db.glb_discover_chat,
-                    chat.id, getattr(chat, 'title', None), getattr(chat, 'type', None))
-                logging.info("group_late: бот добавлен в чат %s (%s)",
-                             chat.id, getattr(chat, 'title', ''))
-            elif new_status in ('left', 'kicked'):
-                await loop.run_in_executor(group_late_pool, db.glb_forget_chat, chat.id)
-                logging.info("group_late: бот удалён из чата %s", chat.id)
-        except Exception as error:
-            logging.error("group_late: ошибка обработки my_chat_member: %s", error, exc_info=True)
-
 
 _register_group_late_handlers()
 
 
-def _register_it_ticket_chat_discovery():
-    """Авто-обнаружение чатов/каналов для IT-заявок.
+def _register_bot_chat_discovery():
+    """Авто-обнаружение чатов, куда добавили бота.
 
-    Когда бота добавляют в группу/канал, мы запоминаем чат, чтобы супервайзер
-    мог выбрать его в интерфейсе. Регистрация защищена на случай отсутствия
-    обработчика my_chat_member в установленной версии aiogram.
+    Обработчик ОДИН на всё приложение: aiogram останавливается на первом
+    подходящем, поэтому второй my_chat_member_handler просто не вызывался бы.
+    Отсюда пишем и каналы IT-заявок, и чаты контроля опозданий.
+
+    Регистрация защищена на случай отсутствия обработчика my_chat_member в
+    установленной версии aiogram.
     """
     handler_decorator = getattr(dp, 'my_chat_member_handler', None)
     if not callable(handler_decorator):
-        logging.warning("aiogram my_chat_member_handler недоступен — авто-обнаружение IT-каналов отключено")
+        logging.warning("aiogram my_chat_member_handler недоступен — авто-обнаружение чатов отключено")
         return
 
     @handler_decorator()
@@ -46495,22 +46487,32 @@ def _register_it_ticket_chat_discovery():
             if chat is None or getattr(chat, 'type', None) not in ('group', 'supergroup', 'channel'):
                 return
             loop = asyncio.get_event_loop()
+            is_group = getattr(chat, 'type', None) in ('group', 'supergroup')
             if new_status in ('member', 'administrator', 'creator'):
                 await loop.run_in_executor(
                     executor_pool, db.record_discovered_chat,
                     chat.id, getattr(chat, 'title', None), getattr(chat, 'type', None), getattr(chat, 'username', None),
                 )
-                logging.info(f"IT-ticket: бот добавлен в чат {chat.id} ({getattr(chat, 'title', '')})")
+                # Контроль опозданий шлёт только в группы: чат запоминаем
+                # выключенным, включают его в разделе «Бот опозданий».
+                if is_group:
+                    await loop.run_in_executor(
+                        group_late_pool, db.glb_discover_chat,
+                        chat.id, getattr(chat, 'title', None), getattr(chat, 'type', None),
+                    )
+                logging.info(f"Бот добавлен в чат {chat.id} ({getattr(chat, 'title', '')})")
             elif new_status in ('left', 'kicked'):
                 await loop.run_in_executor(
                     executor_pool, db.deactivate_it_ticket_channel_by_chat_id, chat.id,
                 )
-                logging.info(f"IT-ticket: бот удалён из чата {chat.id}")
+                if is_group:
+                    await loop.run_in_executor(group_late_pool, db.glb_forget_chat, chat.id)
+                logging.info(f"Бот удалён из чата {chat.id}")
         except Exception as e:
-            logging.error(f"Ошибка обработки my_chat_member для IT-заявок: {e}", exc_info=True)
+            logging.error(f"Ошибка обработки my_chat_member: {e}", exc_info=True)
 
 
-_register_it_ticket_chat_discovery()
+_register_bot_chat_discovery()
 
 
 if __name__ == '__main__':
