@@ -576,9 +576,16 @@ def alert_windows(now=None):
                                current_start.strftime("%H:%M"), now.strftime("%H:%M"))
     base_start = current_start - timedelta(days=7)
     base_end = current_end - timedelta(days=7)
+    # В подписи базы показываем и её отрезок: иначе непонятно, сравнили с целыми
+    # сутками или с той же половиной дня.
+    if now.hour == 0:
+        base_label = "%s (сутки, неделю назад)" % base_start.strftime("%d.%m")
+    else:
+        base_label = "%s, %s–%s (неделю назад)" % (base_start.strftime("%d.%m"),
+                                                   base_start.strftime("%H:%M"),
+                                                   base_end.strftime("%H:%M"))
     return {
         "current_start": current_start, "current_end": current_end,
         "base_start": base_start, "base_end": base_end,
-        "window_label": label,
-        "base_label": "%s (тот же день неделю назад)" % base_start.strftime("%d.%m"),
+        "window_label": label, "base_label": base_label,
     }
