@@ -123,3 +123,28 @@ def test_midnight_window_is_the_whole_previous_day():
     assert w["current_end"] == midnight
     assert w["base_start"] == datetime.datetime(2026, 7, 29, 0, 0, tzinfo=amo_leads.TZ)
     assert "05.08" in w["window_label"]
+
+
+def test_base_label_shows_that_it_is_the_same_half_of_the_day():
+    """Получатель должен видеть, что сравнили с половиной дня, а не с сутками."""
+    import datetime
+
+    noon = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 6, 12, 0, tzinfo=amo_leads.TZ))
+    assert noon["base_label"] == "30.07, 00:00–12:00 (неделю назад)"
+
+    midnight = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 6, 0, 0, tzinfo=amo_leads.TZ))
+    assert midnight["base_label"] == "29.07 (сутки, неделю назад)"
+
+
+def test_daytime_base_never_spans_a_whole_day():
+    """Дневная база всегда короче суток — иначе сравнивали бы несравнимое."""
+    import datetime
+
+    for hour in (6, 12, 18, 23):
+        w = amo_leads.alert_windows(
+            datetime.datetime(2026, 8, 6, hour, 0, tzinfo=amo_leads.TZ))
+        assert (w["base_end"] - w["base_start"]) == (w["current_end"] - w["current_start"])
+        assert (w["base_end"] - w["base_start"]) < datetime.timedelta(days=1)
+        assert w["base_end"] - w["current_end"] == -datetime.timedelta(days=7)
