@@ -46626,6 +46626,60 @@ def _register_bot_chat_discovery():
 _register_bot_chat_discovery()
 
 
+# === Меню команд ================================================================================
+# Список для синего меню Telegram. Проверка прав остаётся в самих обработчиках:
+# Telegram показывает команды всем, кто видит бота, скрыть их по роли нельзя.
+_BOT_COMMANDS_PRIVATE = [
+    ('start', 'Вход и меню бота'),
+    ('tablo', 'Табло СЗоВ: /tablo или /tablo 14:00'),
+    ('leads', 'Лиды amoCRM по источникам: /leads или /leads 05.08.2026'),
+    ('leads_subscribe', 'Присылать отбивку по лидам в этот чат'),
+    ('leads_unsubscribe', 'Не присылать отбивку по лидам в этот чат'),
+]
+
+# В группах /start бесполезен (бот отвечает в личку), зато нужен /report опозданий.
+_BOT_COMMANDS_GROUP = [
+    ('report', 'Отчёт по опозданиям: /report или /report 2026-08-05 отдел'),
+    ('tablo', 'Табло СЗоВ: /tablo или /tablo 14:00'),
+    ('leads', 'Лиды amoCRM по источникам: /leads или /leads 05.08.2026'),
+    ('leads_subscribe', 'Присылать отбивку по лидам в этот чат'),
+    ('leads_unsubscribe', 'Не присылать отбивку по лидам в этот чат'),
+]
+
+
+async def _setup_bot_commands():
+    """Заливаем меню команд в Telegram при старте.
+
+    Раскладка по scope: в личке одно меню, в группах другое. Ошибку глотаем —
+    недоступный на старте Telegram не должен мешать боту подняться, меню
+    доедет при следующем перезапуске.
+    """
+    def _commands(pairs):
+        return [types.BotCommand(command=name, description=text) for name, text in pairs]
+
+    scopes = [
+        (getattr(types, 'BotCommandScopeAllPrivateChats', None), _BOT_COMMANDS_PRIVATE),
+        (getattr(types, 'BotCommandScopeAllGroupChats', None), _BOT_COMMANDS_GROUP),
+    ]
+    try:
+        # Default — на случай чатов, не попавших ни в один scope выше.
+        await bot.set_my_commands(_commands(_BOT_COMMANDS_PRIVATE))
+        for scope_cls, pairs in scopes:
+            if scope_cls is None:
+                logging.warning("aiogram без BotCommandScope — меню одно на все чаты")
+                continue
+            await bot.set_my_commands(_commands(pairs), scope=scope_cls())
+        logging.info("🧾 Меню команд бота обновлено")
+    except Exception as error:
+        logging.warning("Не удалось обновить меню команд бота: %s", error)
+
+
+async def _on_bot_startup(_dispatcher=None):
+    """on_startup: запомнить цикл бота и залить меню команд."""
+    await _capture_bot_loop(_dispatcher)
+    await _setup_bot_commands()
+
+
 if __name__ == '__main__':
 
     # Запускаем Flask в отдельном потоке
@@ -47064,9 +47118,9 @@ if __name__ == '__main__':
     logging.info("🔄 Планировщик запущен")
     logging.info("🤖 Бот запущен")
     
-    # Запускаем бота. on_startup нужен, чтобы запомнить цикл бота: из него потом уходит
-    # отбивка табло, которую инициирует поток Flask.
-    executor.start_polling(dp, skip_updates=True, on_startup=_capture_bot_loop)
+    # Запускаем бота. on_startup нужен, чтобы запомнить цикл бота (из него потом уходит
+    # отбивка табло, которую инициирует поток Flask) и залить меню команд.
+    executor.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)
 
 
 
