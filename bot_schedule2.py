@@ -37,6 +37,7 @@ import json
 import html
 from concurrent.futures import ThreadPoolExecutor
 import group_late
+import amo_leads
 from database import (
     db,
     TECHNICAL_ISSUE_REASONS,
@@ -30354,6 +30355,54 @@ async def szov_broadcast_job():
         logging.error("Отбивка табло: плановая отправка не удалась: %s", exc, exc_info=True)
 
 
+# --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
+
+def amo_leads_sync(days=None):
+    """Выгрузить сделки amoCRM в БД и вернуть число записанных строк.
+
+    Раньше это делал Apps Script в Google-таблице. Там ошибка API молча оставляла
+    на листе прошлые данные, поэтому здесь каждая выгрузка пишется в журнал:
+    отбивка показывает возраст цифр и предупреждает, если синк упал.
+    """
+    if not amo_leads.is_configured():
+        raise RuntimeError("amoCRM: не заданы доступы")
+    days = days or amo_leads.SYNC_DAYS
+    sync_id = db.start_amo_lead_sync(days)
+    try:
+        rows = amo_leads.fetch_leads(days)
+        written = db.upsert_amo_leads(rows)
+        db.finish_amo_lead_sync(sync_id, leads_fetched=written)
+        return written
+    except Exception as exc:
+        db.finish_amo_lead_sync(sync_id, error=str(exc)[:500])
+        raise
+
+
+def _amo_leads_report_text(day):
+    """Текст отбивки за день. Если данных ещё нет — тянем amoCRM прямо сейчас."""
+    rows = db.get_amo_leads_for_date(day)
+    if not rows:
+        amo_leads_sync()
+        rows = db.get_amo_leads_for_date(day)
+    summary = amo_leads.summarize(rows)
+    last = db.get_last_amo_lead_sync() or {}
+    return amo_leads.render_report(
+        day,
+        summary,
+        synced_at=last.get('finished_at'),
+        sync_error=last.get('error') if last.get('status') == 'error' else None,
+    )
+
+
+async def amo_leads_sync_job():
+    """Плановая выгрузка лидов amoCRM — раз в 3 часа."""
+    try:
+        written = await asyncio.get_event_loop().run_in_executor(executor_pool, amo_leads_sync)
+        logging.info("amoCRM: выгрузка лидов завершена, записано сделок: %s", written)
+    except Exception as exc:
+        logging.error("amoCRM: плановая выгрузка лидов не удалась: %s", exc, exc_info=True)
+
+
 # --- Настройка отбивки: эндпоинты --------------------------------------------------------------
 
 @app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])
@@ -35507,6 +35556,46 @@ async def szov_wallboard_command(message: types.Message):
     except Exception as exc:
         logging.error("Команда /tablo: не удалось собрать отбивку: %s", exc, exc_info=True)
         await message.reply("Не удалось собрать показатели — Oktell не ответил.")
+
+
+@dp.message_handler(commands=['leads'])
+async def amo_leads_command(message: types.Message):
+    """/leads [ДД.ММ.ГГГГ] — лиды по источникам из amoCRM (по умолчанию за сегодня).
+
+    Пока доступно администраторам и главам отделов."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not user:
+        await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
+        return
+
+    def _allowed():
+        if _is_admin_role(_normalize_user_role(user[3])):
+            return True
+        return db.headed_department_id_for_user(user[0]) is not None
+
+    if not await loop.run_in_executor(executor_pool, _allowed):
+        await message.reply("Лиды по источникам доступны администраторам и главам отделов.")
+        return
+
+    argument = (message.get_args() or '').strip()
+    day = datetime.now(amo_leads.TZ).date()
+    if argument:
+        try:
+            day = datetime.strptime(argument, "%d.%m.%Y").date()
+        except ValueError:
+            await message.reply("Формат: /leads 05.08.2026 — лиды за указанный день.")
+            return
+
+    await message.reply("Считаю лиды…")
+    try:
+        text = await loop.run_in_executor(executor_pool, _amo_leads_report_text, day)
+    except Exception as exc:
+        logging.error("Команда /leads: не удалось собрать лиды: %s", exc, exc_info=True)
+        await message.reply("Не удалось собрать лиды — amoCRM не ответил.")
+        return
+    await message.reply(text, parse_mode='HTML')
 
 
 @dp.message_handler(commands=['start'])
@@ -46799,6 +46888,23 @@ if __name__ == '__main__':
             max_instances=1,
             coalesce=True
         )
+
+    # Лиды amoCRM: выгрузка раз в 3 часа. Заменила Apps Script, который заливал
+    # сделки на вкладку «Импорт ДЕНЬ» Google-таблицы.
+    if amo_leads.is_configured():
+        scheduler.add_job(
+            amo_leads_sync_job,
+            CronTrigger(hour='*/3', minute=10, timezone=amo_leads.TZ),
+            id='amo_leads_sync',
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Лиды amoCRM: выгрузка каждые 3 часа")
+    else:
+        logging.warning(
+            "⏰ Лиды amoCRM выключены: не заданы AMO_ACCESS_TOKEN "
+            "или AMO_CRM_LOGIN / AMO_CRM_PASSWORD")
 
     scheduler.start()
 
