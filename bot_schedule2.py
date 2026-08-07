@@ -29909,8 +29909,8 @@ def api_szov_wallboard_snapshot():
 
 # === Отбивка показателей «Табло СЗоВ» в Telegram ================================================
 # Раз в несколько часов в выбранный чат уходит: картинка с почасовой таблицей, картинка табло,
-# текст с показателями и примечания об отклонениях. Данные — те же, что на экране, плюс
-# количество ОТКРЫТЫХ чатов Chat2Desk на момент отправки.
+# текст с показателями и примечания об отклонениях. Данные — те же, что на экране.
+# Чаты сюда больше не входят: у них свой почасовой отчёт (см. «Отчёт по чатам»).
 SZOV_BROADCAST_SEND_TIMES = (os.getenv('SZOV_BROADCAST_SEND_TIMES') or '10:00,14:00,18:00,22:00,23:55').strip()
 SZOV_BROADCAST_TIMEZONE = (os.getenv('SZOV_BROADCAST_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 # Коридор AR (тот же, что на экране): норма 3…5 %. Ниже 3 % — тоже отклонение.
@@ -30004,38 +30004,13 @@ def _szov_broadcast_shift_rows(day_iso):
     return rows
 
 
-def _szov_broadcast_open_chats():
-    """Сколько чатов Chat2Desk открыто прямо сейчас (обращения без времени завершения).
+def _szov_broadcast_collect(hour_to=None):
+    """Всё, что нужно отбивке: почасовая таблица, итоги дня и статусы операторов.
 
-    Именно это владелец называет «количеством чатов»: не все обращения за день, а те,
-    что висят на операторах на момент отчёта. Ошибку не поднимаем — строка про чаты
-    просто не попадёт в отбивку, звонковые показатели важнее."""
-    try:
-        day = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
-        rows = _chat2desk_statistics_get(CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day)
-    except Exception as exc:
-        logging.warning("Отбивка табло: не удалось получить чаты Chat2Desk: %s", exc)
-        return None
-    open_count = 0
-    for row in rows or []:
-        if str(_chat2desk_row_first(row, 'request_type') or '').strip() != 'common':
-            continue
-        ended = _chat2desk_row_first(row, 'request_end')
-        if ended is None or str(ended).strip() in ('', 'None', 'null'):
-            open_count += 1
-    return open_count
-
-
-def _szov_broadcast_collect(hour_to=None, with_chats=None):
-    """Всё, что нужно отбивке: почасовая таблица, итоги дня, статусы и открытые чаты.
-
-    Открытые чаты в тексте отбивки больше не показываются, поэтому по умолчанию их НЕ
-    запрашиваем: это ~7 страниц к Chat2Desk ради числа, которое никто не увидит. Их всё ещё
-    может запросить предпросмотр (with_chats=True) — как диагностику.
+    Чаты Chat2Desk сюда не входят — они уехали в отдельный почасовой отчёт
+    (`_chat_hourly_*`), где показываются целиком, а не одним числом.
     Статусы операторов существуют только «на сейчас», поэтому для среза на прошедший час
     они в примечания не попадают (см. _szov_broadcast_notes)."""
-    if with_chats is None:
-        with_chats = False
     hourly = _szov_broadcast_hourly_rows(hour_to)
     # Смены (прогноз/план/факт) приклеиваем к часам звонков — так таблица остаётся одной.
     day_iso = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
@@ -30078,7 +30053,6 @@ def _szov_broadcast_collect(hour_to=None, with_chats=None):
             'on_recall': now_block.get('operators_on_recall'),
             'queue': now_block.get('queue'),
         },
-        'open_chats': _szov_broadcast_open_chats() if with_chats else None,
         'snapshot_stale': bool((snapshot or {}).get('stale')),
         'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
         'snapshot': snapshot,
@@ -30668,7 +30642,7 @@ def api_szov_wallboard_broadcast_preview():
         ]})
 
     try:
-        data = _szov_broadcast_collect(hour_to, with_chats=hour_to is None)
+        data = _szov_broadcast_collect(hour_to)
     except Exception as exc:
         logging.error("Предпросмотр отбивки: данные не собрались: %s", exc)
         return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
@@ -30688,7 +30662,6 @@ def api_szov_wallboard_broadcast_preview():
     return jsonify({
         "text": _szov_broadcast_text(data),
         "hours": len(data['hourly']),
-        "open_chats": data['open_chats'],
         "font_path": regular,
         "images_available": bool(regular),
     })
@@ -46952,57 +46925,39 @@ _register_bot_chat_discovery()
 
 
 # === Меню команд ================================================================================
-# Список для синего меню Telegram. Проверка прав остаётся в самих обработчиках:
-# Telegram показывает команды всем, кто видит бота, скрыть их по роли нельзя.
-_BOT_COMMANDS_PRIVATE = [
-    ('start', 'Вход и меню бота'),
-    ('tablo', 'Табло СЗоВ: /tablo или /tablo 14:00'),
-    ('leads', 'Лиды amoCRM по источникам: /leads или /leads 05.08.2026'),
-    ('leads_subscribe', 'Присылать отбивку по лидам в этот чат'),
-    ('leads_unsubscribe', 'Не присылать отбивку по лидам в этот чат'),
-]
-
-# В группах /start бесполезен (бот отвечает в личку), зато нужен /report опозданий.
-_BOT_COMMANDS_GROUP = [
-    ('report', 'Отчёт по опозданиям: /report или /report 2026-08-05 отдел'),
-    ('tablo', 'Табло СЗоВ: /tablo или /tablo 14:00'),
-    ('leads', 'Лиды amoCRM по источникам: /leads или /leads 05.08.2026'),
-    ('leads_subscribe', 'Присылать отбивку по лидам в этот чат'),
-    ('leads_unsubscribe', 'Не присылать отбивку по лидам в этот чат'),
-]
+# Синего меню у бота нет намеренно. Telegram показывает список команд всем, кто
+# видит бота, скрыть пункт по роли нельзя — а /tablo, /leads и /report доступны
+# только части сотрудников, рекламировать их всем подряд незачем. Сами команды
+# работают, если набрать их руками: права по-прежнему проверяют обработчики.
+# Живой список: /start, /tablo, /leads, /leads_subscribe, /leads_unsubscribe,
+# /report (в чатах контроля опозданий).
 
 
-async def _setup_bot_commands():
-    """Заливаем меню команд в Telegram при старте.
+async def _clear_bot_commands():
+    """Гасим меню команд в Telegram при старте.
 
-    Раскладка по scope: в личке одно меню, в группах другое. Ошибку глотаем —
+    Меню живёт на стороне Telegram: убрать код со списком мало, нужно явно
+    очистить каждый scope, куда мы когда-то заливали команды. Ошибку глотаем —
     недоступный на старте Telegram не должен мешать боту подняться, меню
-    доедет при следующем перезапуске.
+    погаснет при следующем перезапуске.
     """
-    def _commands(pairs):
-        return [types.BotCommand(command=name, description=text) for name, text in pairs]
-
-    scopes = [
-        (getattr(types, 'BotCommandScopeAllPrivateChats', None), _BOT_COMMANDS_PRIVATE),
-        (getattr(types, 'BotCommandScopeAllGroupChats', None), _BOT_COMMANDS_GROUP),
-    ]
     try:
-        # Default — на случай чатов, не попавших ни в один scope выше.
-        await bot.set_my_commands(_commands(_BOT_COMMANDS_PRIVATE))
-        for scope_cls, pairs in scopes:
-            if scope_cls is None:
-                logging.warning("aiogram без BotCommandScope — меню одно на все чаты")
-                continue
-            await bot.set_my_commands(_commands(pairs), scope=scope_cls())
-        logging.info("🧾 Меню команд бота обновлено")
+        scopes = [
+            None,  # default — чаты, не попавшие ни в один scope ниже
+            types.BotCommandScopeAllPrivateChats(),
+            types.BotCommandScopeAllGroupChats(),
+        ]
+        for scope in scopes:
+            await bot.delete_my_commands(scope=scope)
+        logging.info("🧾 Меню команд бота убрано")
     except Exception as error:
-        logging.warning("Не удалось обновить меню команд бота: %s", error)
+        logging.warning("Не удалось убрать меню команд бота: %s", error)
 
 
 async def _on_bot_startup(_dispatcher=None):
-    """on_startup: запомнить цикл бота и залить меню команд."""
+    """on_startup: запомнить цикл бота и погасить меню команд."""
     await _capture_bot_loop(_dispatcher)
-    await _setup_bot_commands()
+    await _clear_bot_commands()
 
 
 if __name__ == '__main__':
