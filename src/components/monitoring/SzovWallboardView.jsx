@@ -624,7 +624,7 @@ const WallboardBody = ({ snapshot, scale }) => {
 };
 
 export default function SzovWallboardView(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast } = props;
 
     const [snapshot, setSnapshot] = useState(null);
     const [error, setError] = useState(null);
@@ -733,10 +733,12 @@ export default function SzovWallboardView(props) {
                     <FaIcon className="fas fa-rotate"></FaIcon>
                     Обновить
                 </button>
-                <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
-                    <FaIcon className="fas fa-paper-plane"></FaIcon>
-                    Отбивка
-                </button>
+                {canManageBroadcast ? (
+                    <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
+                        <FaIcon className="fas fa-paper-plane"></FaIcon>
+                        Отбивка
+                    </button>
+                ) : null}
                 <button type="button" className={iosBtnGhost} onClick={() => setFullscreen(true)}>
                     <FaIcon className="fas fa-expand"></FaIcon>
                     На весь экран
@@ -744,7 +746,7 @@ export default function SzovWallboardView(props) {
             </div>
             {/* Через портал, как и полноэкранный режим: модалка не должна зависеть от
                 вертикальных отступов шапки, а шапка рисуется во всех трёх состояниях экрана. */}
-            {createPortal(
+            {canManageBroadcast ? createPortal(
                 <BroadcastModal
                     open={broadcastOpen}
                     onClose={() => setBroadcastOpen(false)}
@@ -753,7 +755,7 @@ export default function SzovWallboardView(props) {
                     showToast={showToast}
                 />,
                 document.body,
-            )}
+            ) : null}
         </div>
     );
 
