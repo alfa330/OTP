@@ -86,7 +86,7 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
         chatRequestRef.current = key;
         const cached = chatCacheRef.current[key];
         if (cached && !force) {
-            setChat({ id: key, snapshot: cached, loading: false, error: '' });
+            setChat({ id: key, snapshot: cached.snapshot, loading: false, error: cached.error });
             return;
         }
         setChat({ id: key, snapshot: null, loading: true, error: '' });
@@ -97,18 +97,20 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
                 { headers, withCredentials: true }
             );
             const snapshot = response.data?.snapshot || null;
-            if (snapshot) chatCacheRef.current[key] = snapshot;
+            const error = snapshot ? '' : 'Переписка не найдена';
+            chatCacheRef.current[key] = { snapshot, error };
             // Пока грузили — могли переключиться на другую строку.
             if (chatRequestRef.current !== key) return;
-            setChat({ id: key, snapshot, loading: false, error: snapshot ? '' : 'Переписка не найдена' });
+            setChat({ id: key, snapshot, loading: false, error });
         } catch (e) {
+            const error = e?.response?.data?.error || 'Не удалось загрузить переписку';
+            // Ответ сервера («переписки нет») запоминаем: у чата без снапшота
+            // каждый повторный клик — это 2-3 живых запроса в Chat2Desk, а
+            // месячная квота там почти выедена синком. Обрыв сети не кэшируем:
+            // это не приговор чату, при следующем открытии пробуем снова.
+            if (e?.response) chatCacheRef.current[key] = { snapshot: null, error };
             if (chatRequestRef.current !== key) return;
-            setChat({
-                id: key,
-                snapshot: null,
-                loading: false,
-                error: e?.response?.data?.error || 'Не удалось загрузить переписку',
-            });
+            setChat({ id: key, snapshot: null, loading: false, error });
         }
     }, [apiBaseUrl, withAccessTokenHeader, userId]);
 

@@ -35929,6 +35929,17 @@ def update_chat_manager_low_rating_review(review_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _is_low_rating_review_id(review_id):
+    """id низкой оценки — UUID. Без проверки нечисловой id улетает в запрос и
+    роняет его 500-й ошибкой с трейсом в логах (эндпоинт переписки открыт
+    операторам, а не только проверяющим)."""
+    try:
+        uuid.UUID(str(review_id))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _low_rating_chat_request_id(raw_payload):
     """id заявки с самим разговором. Оценка приезжает отдельной «заявкой»-опросом
     (request_id — 3 служебных сообщения: вопрос, цифра, спасибо), а оцениваемый
@@ -35965,6 +35976,9 @@ def chat_manager_low_rating_review_chat(review_id):
             or _is_supervisor_role(requester_role)
             or headed_dept_id is not None
         )
+
+        if not _is_low_rating_review_id(review_id):
+            return jsonify({"error": "Review not found"}), 404
 
         current = db.get_chat_manager_low_rating_review(review_id)
         if not current:

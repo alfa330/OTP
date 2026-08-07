@@ -197,6 +197,22 @@ class LowRatingChatAccessTests(unittest.TestCase):
         self.assertIn("_is_sensitive_access_unlocked", ast.unparse(guard))
         self.assertIn("role == 'operator'", ast.unparse(guard))
 
+    def test_bad_review_id_never_reaches_the_query(self):
+        """Нечисловой id раньше падал 500-й с трейсом — теперь это 404 до похода в БД."""
+        guard = next(
+            node for node in ast.walk(self.function)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "not _is_low_rating_review_id(review_id)"
+        )
+        self.assertIn("404", ast.unparse(guard))
+        guard_line = guard.lineno
+        fetch_line = next(
+            node.lineno for node in ast.walk(self.function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get_chat_manager_low_rating_review"
+        )
+        self.assertLess(guard_line, fetch_line)
+
     def test_reviewer_department_scope_is_preserved(self):
         self.assertIn("_department_scope_id_for_requester(requester_id)", self.source)
         self.assertIn("_is_global_admin_requester(requester_role, requester_id)", self.source)
