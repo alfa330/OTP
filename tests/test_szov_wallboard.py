@@ -918,16 +918,11 @@ class SzovBroadcastTests(unittest.TestCase):
         {'hh': 2, 'served': 9, 'arrived': 10, 'lost': 1, 'greet_drop': 0, 'talk_seconds': 3609},
     ]
 
-    def _namespace(self, hourly_raw=None, snapshot=None, chat_rows=None, chat_fails=False, shift_rows=None):
+    def _namespace(self, hourly_raw=None, snapshot=None, shift_rows=None):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 
         def fake_oktell(sql, timeout=None):
             return list(hourly_raw if hourly_raw is not None else self.HOURLY_RAW)
-
-        def fake_c2d(report, day, max_pages=None):
-            if chat_fails:
-                raise RuntimeError("Chat2Desk 500")
-            return list(chat_rows or [])
 
         def no_snapshot():
             raise RuntimeError("нет данных")
@@ -937,9 +932,6 @@ class SzovBroadcastTests(unittest.TestCase):
             'datetime': datetime, 'ZoneInfo': ZoneInfo,
             '_env_int': lambda name, default, minimum=None, maximum=None: default,
             '_oktell_query': fake_oktell,
-            '_chat2desk_statistics_get': fake_c2d,
-            '_chat2desk_row_first': lambda row, *keys: next((row[k] for k in keys if k in row), None),
-            'CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS': 'request_stats',
             'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS': 20,
             '_szov_wallboard_snapshot': (lambda: snapshot) if snapshot is not None else no_snapshot,
             # смены считает отдельный серверный расчёт — в этих тестах он не участвует
@@ -951,7 +943,7 @@ class SzovBroadcastTests(unittest.TestCase):
             'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT',
             '_szov_wallboard_int',
             '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
-            '_szov_broadcast_open_chats', '_szov_broadcast_collect',
+            '_szov_broadcast_collect',
             '_szov_plural', '_szov_format_seconds_mmss', '_szov_format_percent',
             '_szov_format_age_ru',
             '_szov_broadcast_notes', '_szov_broadcast_text',
@@ -992,36 +984,17 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertNotIn('delete', lowered)
         self.assertEqual(lowered.count('insert'), lowered.count('dt_insert'))
 
-    # --- открытые чаты ---
-
-    def test_open_chats_counts_only_unfinished_common_requests(self):
-        """«Количество чатов» — открытые обращения, а не все за день."""
-        ns = self._namespace(chat_rows=[
-            {'request_type': 'common', 'request_end': ''},
-            {'request_type': 'common', 'request_end': None},
-            {'request_type': 'common', 'request_end': '2026-08-04 10:00:00'},
-            {'request_type': 'rating', 'request_end': ''},
-        ])
-        self.assertEqual(ns['_szov_broadcast_open_chats'](), 2)
-
-    def test_chats_are_not_fetched_for_the_broadcast(self):
-        """Открытые чаты в тексте не показываются — значит и запрашивать их незачем."""
-        ns = self._namespace(chat_fails=True)
-        data = ns['_szov_broadcast_collect']()
-        self.assertIsNone(data['open_chats'])
-        # но сама функция работает и её может дёрнуть предпросмотр
-        ns_ok = self._namespace(chat_rows=[{'request_type': 'common', 'request_end': ''}])
-        self.assertEqual(ns_ok['_szov_broadcast_collect'](with_chats=True)['open_chats'], 1)
-
-    def test_chat2desk_failure_does_not_break_the_preview(self):
-        ns = self._namespace(chat_fails=True)
-        self.assertIsNone(ns['_szov_broadcast_open_chats']())
-
     # --- итоги и текст ---
+
+    def test_broadcast_never_touches_chat2desk(self):
+        """Чаты уехали в отдельный почасовой отчёт — отбивка табло за ними не ходит."""
+        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        section = source[source.index("def _szov_broadcast_collect("):source.index("def _szov_plural(")]
+        self.assertNotIn("_chat2desk_", section)
 
     def test_totals_are_summed_from_hourly_rows(self):
         ns = self._namespace()
-        totals = ns['_szov_broadcast_collect'](with_chats=False)['totals']
+        totals = ns['_szov_broadcast_collect']()['totals']
         self.assertEqual(totals['served'], 50)
         self.assertEqual(totals['arrived'], 70)
         self.assertEqual(totals['lost'], 20)
@@ -1052,10 +1025,8 @@ class SzovBroadcastTests(unittest.TestCase):
     def test_now_only_figures_are_dropped_for_a_past_hour(self):
         """Кто был на перерыве в 14:00, восстановить нельзя — текущие за прошлые не выдаём."""
         ns = self._namespace(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 2},
-                                       'stale': False, 'age_seconds': 0},
-                             chat_rows=[{'request_type': 'common', 'request_end': ''}])
+                                       'stale': False, 'age_seconds': 0})
         past = ns['_szov_broadcast_collect'](hour_to=14)
-        self.assertIsNone(past['open_chats'])
         notes = ' '.join(ns['_szov_broadcast_notes'](past))
         self.assertNotIn('перезвон', notes)
         self.assertNotIn('на перерыве', notes)
@@ -1070,7 +1041,7 @@ class SzovBroadcastTests(unittest.TestCase):
 
     def test_notes_flag_ar_outside_the_corridor(self):
         ns = self._namespace()
-        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
         self.assertIn('AR выше установленного диапазона', notes)
         self.assertIn('потеряно 20 звонков', notes)
 
@@ -1078,13 +1049,13 @@ class SzovBroadcastTests(unittest.TestCase):
         ns = self._namespace(hourly_raw=[
             {'hh': 9, 'served': 980, 'arrived': 1000, 'lost': 20, 'greet_drop': 0, 'talk_seconds': 260000},
         ])
-        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
         self.assertIn('AR ниже установленного диапазона', notes)
 
     def test_notes_mention_operators_on_recall_and_break(self):
         ns = self._namespace(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 2},
                                        'stale': False, 'age_seconds': 0})
-        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect'](with_chats=False)))
+        notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
         self.assertIn('2 оператора на статусе перезвон', notes)
         self.assertIn('2 на перерыве', notes)
 
@@ -1175,7 +1146,9 @@ class SzovBroadcastWiringTests(unittest.TestCase):
 
     def test_bot_loop_is_captured_for_flask_triggered_sends(self):
         """Из потока Flask нельзя слать через чужой цикл — ссылку берём на старте бота."""
-        self.assertIn("executor.start_polling(dp, skip_updates=True, on_startup=_capture_bot_loop)", self.api)
+        # on_startup сейчас делает две вещи (цикл + меню), но цикл обязан запоминаться.
+        self.assertIn("executor.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)", self.api)
+        self.assertIn("await _capture_bot_loop(_dispatcher)", self.api)
         self.assertIn("async def _capture_bot_loop", self.api)
         self.assertIn("asyncio.run_coroutine_threadsafe(_szov_broadcast_send(int(chat_id)), loop)", self.api)
 
