@@ -1372,6 +1372,16 @@ const canAccessSzovWallboardForUser = (userLike) => {
             === SZOV_WALLBOARD_DEPARTMENT_CODE;
 };
 
+// Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
+// уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
+const canManageSzovBroadcastForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ.
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    return isSzovWallboardDepartmentHead(userLike);
+};
+
 const DEV_LETTER_ACCESS_OPERATOR_NAME = '\u041d\u0443\u0440\u0448\u043e\u0432\u0430 \u0410\u0439\u0448\u0430 \u041a\u0430\u043d\u0430\u0433\u0430\u0442\u043a\u044b\u0437\u044b';
 const normalizeDevLetterAccessName = (value) =>
     String(value || '')
@@ -44159,6 +44169,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
                                 <SzovWallboardView
                                     user={user}
+                                    canManageBroadcast={canManageSzovBroadcastForUser(user)}
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}

@@ -29610,6 +29610,25 @@ def _szov_wallboard_guard():
     return requester_id, (jsonify({"error": "forbidden"}), 403)
 
 
+def _szov_broadcast_guard():
+    """(requester_id, err) для НАСТРОЙКИ отбивки табло — она строже, чем само табло.
+
+    Табло СВ отдела видит, а вот кому и когда уходят уведомления руководству, решает
+    только руководитель: глобальные админы и глава отдела СЗоВ. Ту же границу держит
+    canManageSzovBroadcastForUser на фронте."""
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    if _is_global_admin_requester(role, requester_id):
+        return requester_id, None
+    department_id = _szov_wallboard_department_id()
+    if department_id is not None and _headed_department_id(requester_id) == department_id:
+        return requester_id, None
+    return requester_id, (jsonify({"error": "forbidden"}), 403)
+
+
 def _oktell_wallboard_totals_sql(sl_seconds):
     """Один SELECT: итоги за текущий день Oktell + очередь и разговоры «на сейчас».
 
@@ -31275,7 +31294,7 @@ def api_szov_wallboard_broadcast():
     заводим), DELETE убирает из списка."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
+    requester_id, err = _szov_broadcast_guard()
     if err:
         return err
     if request.method in ('POST', 'DELETE'):
@@ -31309,7 +31328,7 @@ def api_szov_wallboard_broadcast_preview():
     сервере вообще нашёлся шрифт с кириллицей."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
+    requester_id, err = _szov_broadcast_guard()
     if err:
         return err
     hour_raw = (request.args.get('hour') or '').strip()
@@ -31364,7 +31383,7 @@ def api_szov_wallboard_broadcast_test():
     Режим «только при отклонениях» здесь не действует — проверяют вид сообщения."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
+    requester_id, err = _szov_broadcast_guard()
     if err:
         return err
     payload = request.get_json(silent=True) or {}

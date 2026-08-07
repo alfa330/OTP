@@ -67,7 +67,7 @@ class SzovWallboardBackendGuardTests(unittest.TestCase):
     """Доступ: глобальные админы, глава СЗоВ, СВ СЗоВ. Чужие отделы — 403."""
 
     def _guard(self, *, role, requester_id, headed_department_id=None, user_department_id=None,
-               departments=None, global_admin=None):
+               departments=None, global_admin=None, guard='_szov_wallboard_guard'):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
         calls = {}
 
@@ -96,11 +96,12 @@ class SzovWallboardBackendGuardTests(unittest.TestCase):
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL',
             '_szov_wallboard_department_id',
             '_szov_wallboard_guard',
+            '_szov_broadcast_guard',
         }, ns)
         # Кэш отдела статический на модуль — сбрасываем, чтобы тесты не влияли друг на друга.
         ns['_SZOV_WALLBOARD_DEPARTMENT_CACHE'].update(ts=0.0, id=None)
         ns['_calls'] = calls
-        return ns['_szov_wallboard_guard']()
+        return ns[guard]()
 
     def test_global_admin_allowed(self):
         requester_id, err = self._guard(role='admin', requester_id=7)
@@ -143,6 +144,24 @@ class SzovWallboardBackendGuardTests(unittest.TestCase):
                              departments=[{'id': 367, 'code': 'op'}])
         self.assertIsNotNone(err)
         self.assertEqual(err[1], 403)
+
+
+class SzovBroadcastGuardTests(SzovWallboardBackendGuardTests):
+    """Настройка отбивки строже табло: СВ табло видит, а получателей не меняет."""
+
+    def _guard(self, **kwargs):
+        kwargs.setdefault('guard', '_szov_broadcast_guard')
+        return super()._guard(**kwargs)
+
+    def test_szov_supervisor_allowed(self):
+        """Перекрывает родительский тест: СВ настройку отбивки как раз НЕ получает."""
+        _, err = self._guard(role='sv', requester_id=21, user_department_id=1)
+        self.assertIsNotNone(err)
+        self.assertEqual(err[1], 403)
+
+    def test_department_head_still_manages_the_broadcast(self):
+        _, err = self._guard(role='admin', requester_id=9, headed_department_id=1)
+        self.assertIsNone(err)
 
 
 class SzovWallboardSqlTests(unittest.TestCase):
@@ -1232,8 +1251,9 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
         # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])", self.api)
-        # табло + настройка + предпросмотр + тестовая отправка закрыты одним гейтом
-        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 4)
+        # само табло — на своём гейте, вся отбивка (настройка, предпросмотр, отправка) — на строгом
+        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 1)
+        self.assertEqual(self.api.count("requester_id, err = _szov_broadcast_guard()"), 3)
 
     def test_preview_never_sends_anything(self):
         """Предпросмотр нужен, чтобы проверить шрифт и вид, не тревожа рабочий чат."""
@@ -1324,6 +1344,18 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("{ key: 'deviations'", self.view)
         self.assertIn("<ModeSwitch", self.view)
         self.assertIn("save('DELETE', { chat_id: item.chat_id }", self.view)
+
+    def test_broadcast_is_hidden_from_everyone_but_the_head(self):
+        """СВ отдела табло видит, но настройку отбивки — нет; та же граница, что на бэкенде."""
+        app = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("const canManageSzovBroadcastForUser = ", app)
+        self.assertIn("canManageBroadcast={canManageSzovBroadcastForUser(user)}", app)
+        # СВ проходит в canAccessSzovWallboardForUser, но не в canManageSzovBroadcastForUser
+        manage = app[app.index("const canManageSzovBroadcastForUser = "):]
+        manage = manage[:manage.index("};")]
+        self.assertNotIn("isSupervisorRole", manage)
+        self.assertIn("{canManageBroadcast ? (", self.view)
+        self.assertIn("{canManageBroadcast ? createPortal(", self.view)
 
     def test_a_chat_cannot_be_added_twice(self):
         """Дубль в списке — две одинаковые отбивки в одну группу."""
