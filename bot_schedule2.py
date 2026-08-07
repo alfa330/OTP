@@ -48228,9 +48228,10 @@ if __name__ == '__main__':
             logging.exception(f"Error running tez_op_successes_job: {e}")
 
     async def reg_contest_sync_job():
-        # Конкурс «Топ по регистрациям»: ночной срез засчитанных водителей из
-        # CRM. После дедлайна поездок (+2 дня на поздние правки CRM — снятие
-        # фрода и т.п.) джоба замолкает, рейтинг остаётся замороженным в БД.
+        # Конкурс «Топ по регистрациям»: срез засчитанных водителей из CRM
+        # каждые полчаса — рейтинг живёт сам, без кнопки. После дедлайна
+        # поездок (+2 дня на поздние правки CRM — снятие фрода и т.п.) джоба
+        # замолкает, рейтинг остаётся замороженным в БД.
         try:
             today = datetime.now(ZoneInfo('Asia/Almaty')).date()
             contest = reg_contest.CONTEST
@@ -48324,14 +48325,15 @@ if __name__ == '__main__':
         coalesce=True
     )
 
-    # Конкурс «Топ по регистрациям» — срез из CRM в 02:30 (Asia/Almaty),
-    # в стороне от TEZ-джобов 01:00–01:30. Вне периода конкурса и без
+    # Конкурс «Топ по регистрациям» — срез из CRM каждые полчаса (:05/:35,
+    # в стороне от почасовых джобов и TEZ 01:00–01:30). Объём крошечный
+    # (одна-две страницы), CRM это переживает. Вне периода конкурса и без
     # CRM_API_URL/токена джоба — no-op (см. reg_contest_sync_job).
     scheduler.add_job(
         reg_contest_sync_job,
-        CronTrigger(hour=2, minute=30, timezone=ZoneInfo('Asia/Almaty')),
-        id='reg_contest_sync_daily',
-        misfire_grace_time=3600,
+        CronTrigger(minute='5,35', timezone=ZoneInfo('Asia/Almaty')),
+        id='reg_contest_sync_half_hourly',
+        misfire_grace_time=600,
         max_instances=1,
         coalesce=True
     )
