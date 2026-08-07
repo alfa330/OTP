@@ -133,6 +133,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
+const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
 
 
@@ -47975,6 +47976,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             </div>
                                         </div>
                                         )}
+
+                                        {/* Решения ОКК по своим низким оценкам — только у чат-менеджеров
+                                            и только после QR-подтверждения (компонент решает сам). */}
+                                        <Suspense fallback={null}>
+                                            <MyLowRatings
+                                                apiBaseUrl={API_BASE_URL}
+                                                withAccessTokenHeader={withAccessTokenHeader}
+                                                userId={user.id}
+                                                month={selectedMonth}
+                                                granted={!!sensitiveAccess.granted}
+                                            />
+                                        </Suspense>
 
                                         {isLoading ? (
                                         <EvaluationPageSkeleton />

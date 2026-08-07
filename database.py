@@ -15508,6 +15508,116 @@ class Database:
             },
         }
 
+    @staticmethod
+    def _low_rating_operator_item(item):
+        """Строка низкой оценки в том виде, в каком её видит сам оператор.
+
+        Отдаём только итог проверки: пока вердикта нет — «на проверке» без
+        промежуточных голосов проверяющих (разногласие ОКК — их внутренняя
+        кухня). Когда решение принято, показываем и обоснование каждого
+        проверяющего: именно оно объясняет, почему оценка осталась или снята."""
+        resolved = bool(item.get('final_status'))
+        public_item = {
+            'id': item.get('id'),
+            'rated_at': item.get('rated_at'),
+            'day': item.get('day'),
+            'score': item.get('score'),
+            'taxi_park': item.get('taxi_park') or '',
+            'phone_number': item.get('phone_number') or item.get('phone_normalized') or '',
+            'final_status': item.get('final_status'),
+            'final_source': item.get('final_source'),
+            'final_comment': item.get('final_comment') or '',
+            'final_decided_at': item.get('final_decided_at'),
+            'state': 'resolved' if resolved else 'pending',
+            'decisions': [
+                {
+                    'reviewer_name': entry.get('reviewer_name') or 'Проверяющий',
+                    'status': entry.get('status'),
+                    'comment': entry.get('comment') or '',
+                    'updated_at': entry.get('updated_at'),
+                }
+                for entry in (item.get('review_entries') or [])
+            ] if resolved else [],
+        }
+        source = Database._low_rating_extract_source_details(item)
+        public_item['client_comment'] = source.get('client_comment') or ''
+        public_item['rating_text'] = source.get('rating_text') or ''
+        public_item['channel_name'] = source.get('channel_name') or ''
+        return public_item
+
+    def list_operator_low_rating_reviews(self, operator_id, month=None, start=None, end=None):
+        """Низкие оценки одного оператора с итогами проверки — для раздела «Мои оценки».
+
+        Отдельный метод, а не list_chat_manager_low_rating_reviews с фильтром:
+        оператору не положены поля проверяющей стороны (личный вердикт зрителя,
+        флаги финализации, отдел), а выборка идёт по индексу (operator_id, day)."""
+        def _coerce_day(value):
+            text = str(value or '').strip()
+            if not text:
+                return None
+            try:
+                return date.fromisoformat(text[:10])
+            except Exception:
+                return None
+
+        period_start = _coerce_day(start)
+        period_end = _coerce_day(end)
+        if period_start and period_end:
+            if period_start > period_end:
+                period_start, period_end = period_end, period_start
+        else:
+            try:
+                year, mon = map(int, str(month or '').split('-'))
+                period_start = date(year, mon, 1)
+                period_end = date(year, mon, calendar.monthrange(year, mon)[1])
+            except Exception as exc:
+                raise ValueError("month must be in YYYY-MM format") from exc
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    lr.id, lr.source, lr.source_key, lr.operator_id,
+                    COALESCE(NULLIF(lr.operator_name, ''), u.name, '') AS operator_name,
+                    lr.phone_number, lr.phone_normalized, lr.taxi_park,
+                    lr.rated_at, lr.day, lr.score, lr.raw_payload,
+                    lr.imported_by, lr.source_batch_id,
+                    lr.arai_status, lr.arai_comment, lr.arai_updated_by, NULL, lr.arai_updated_at,
+                    lr.zhanna_status, lr.zhanna_comment, lr.zhanna_updated_by, NULL, lr.zhanna_updated_at,
+                    lr.head_status, lr.head_comment, lr.head_updated_by, NULL, lr.head_updated_at,
+                    lr.final_status, lr.final_source, lr.final_comment, lr.final_decided_by, NULL, lr.final_decided_at,
+                    lr.created_at, lr.updated_at,
+                    NULL AS direction_name,
+                    u.department_id AS department_id,
+                    NULL AS department_name
+                FROM chat_manager_low_rating_reviews lr
+                JOIN users u ON u.id = lr.operator_id
+                WHERE lr.operator_id = %s
+                  AND lr.day >= %s
+                  AND lr.day <= %s
+                ORDER BY lr.rated_at DESC NULLS LAST, lr.day DESC, lr.created_at DESC
+                """,
+                (int(operator_id), period_start, period_end)
+            )
+            rows = [self._low_rating_row_to_dict(row) for row in cursor.fetchall() or []]
+            self._attach_low_rating_review_entries_tx(cursor, rows)
+
+        summary = {'total': len(rows), 'pending': 0, 'valid': 0, 'invalid': 0}
+        for item in rows:
+            final_status = item.get('final_status')
+            if final_status in ('valid', 'invalid'):
+                summary[final_status] += 1
+            else:
+                summary['pending'] += 1
+
+        return {
+            'month': period_start.strftime('%Y-%m'),
+            'start': period_start.isoformat(),
+            'end': period_end.isoformat(),
+            'rows': [self._low_rating_operator_item(item) for item in rows],
+            'summary': summary,
+        }
+
     def get_chat_manager_low_rating_review(self, review_id, viewer_id=None, public=False, can_finalize=False):
         with self._get_cursor() as cursor:
             cursor.execute(
