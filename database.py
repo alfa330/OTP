@@ -5126,6 +5126,8 @@ class Database:
             self._init_group_late_bot_schema_tx(cursor)
             self._init_amo_leads_schema_tx(cursor)
             self._init_chat_hourly_schema_tx(cursor)
+            self._init_szov_ops_schema_tx(cursor)
+            self._init_reg_contest_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5340,6 +5342,60 @@ class Database:
             );
         """)
 
+    def _init_szov_ops_schema_tx(self, cursor):
+        """Подписки на почасовой отчёт по операторам СЗоВ.
+
+        Своя таблица, а не общая с чатами: у отчётов разные права и разное расписание, а один
+        реестр заставил бы держать колонку «на что подписан» и фильтровать по ней в каждом
+        запросе."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS szov_ops_subscriptions (
+                chat_id       TEXT PRIMARY KEY,
+                title         TEXT,
+                chat_type     TEXT,
+                subscribed_by BIGINT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_sent_at  TIMESTAMPTZ
+            );
+        """)
+
+    def add_szov_ops_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
+        """Подписать чат на отчёт по операторам. Повторная подписка обновляет данные чата."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO szov_ops_subscriptions (chat_id, title, chat_type, subscribed_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    subscribed_by = EXCLUDED.subscribed_by
+                RETURNING (xmax = 0) AS is_new
+            """, (str(chat_id), title, chat_type, user_id))
+            return bool(cursor.fetchone()[0])
+
+    def remove_szov_ops_subscription(self, chat_id):
+        """Отписать чат. Возвращает True, если подписка была."""
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM szov_ops_subscriptions WHERE chat_id = %s",
+                           (str(chat_id),))
+            return cursor.rowcount > 0
+
+    def get_szov_ops_subscriptions(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT chat_id, title, chat_type
+                FROM szov_ops_subscriptions
+                ORDER BY created_at
+            """)
+            return [{"chat_id": r[0], "title": r[1], "chat_type": r[2]}
+                    for r in cursor.fetchall()]
+
+    def mark_szov_ops_subscription_sent(self, chat_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE szov_ops_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
+                (str(chat_id),))
+
     def add_chat_hourly_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
         """Подписать чат на почасовой отчёт по чатам. Повторная подписка обновляет данные чата."""
         with self._get_cursor() as cursor:
@@ -5376,6 +5432,130 @@ class Database:
             cursor.execute(
                 "UPDATE chat_hourly_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
                 (str(chat_id),))
+
+    def _init_reg_contest_schema_tx(self, cursor):
+        """Конкурс «Топ по регистрациям» (данные из CRM yataxi).
+
+        Строка reg_contest_entries = один засчитанный водитель (дедуп делает
+        CRM, driver_id уникален в рамках конкурса). Каждый синк полностью
+        заменяет строки конкурса: CRM отдаёт актуальный срез целиком, а
+        задним числом состав засчитанных водителей может меняться (поездка
+        появилась/фрод сняли) — инкремент тут только навредил бы."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reg_contest_entries (
+                id            SERIAL PRIMARY KEY,
+                contest_code  VARCHAR(64) NOT NULL,
+                crm_operator_id VARCHAR(64) NOT NULL,
+                operator_login  VARCHAR(255),
+                operator_name   VARCHAR(255),
+                user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                user_name     VARCHAR(255),
+                contest_group VARCHAR(10) NOT NULL DEFAULT 'off'
+                    CHECK (contest_group IN ('chat', 'line', 'off')),
+                match_method  VARCHAR(20),
+                driver_id     VARCHAR(128) NOT NULL,
+                driver_phone  VARCHAR(50),
+                driver_name   VARCHAR(255),
+                registered_at TIMESTAMPTZ,
+                first_trip_at TIMESTAMPTZ,
+                trips_count   INTEGER,
+                UNIQUE (contest_code, driver_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reg_contest_entries_group
+                ON reg_contest_entries(contest_code, contest_group);
+
+            CREATE TABLE IF NOT EXISTS reg_contest_syncs (
+                contest_code  VARCHAR(64) PRIMARY KEY,
+                synced_at     TIMESTAMPTZ,
+                status        VARCHAR(20) NOT NULL DEFAULT 'ok',
+                total_rows    INTEGER NOT NULL DEFAULT 0,
+                error         TEXT
+            );
+        """)
+
+    def get_reg_contest_operator_directory(self):
+        """Справочник для матчинга операторов CRM: все пользователи с их
+        направлением и отделом. Уволенных не отсекаем — регистрации остаются
+        за оператором и после увольнения."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.email, u.status, u.role,
+                       d.name AS direction_name, dep.name AS department_name
+                FROM users u
+                LEFT JOIN directions d ON d.id = u.direction_id
+                LEFT JOIN departments dep ON dep.id = d.department_id
+                WHERE u.role IN ('operator', 'trainee', 'sv')
+            """)
+            keys = ("id", "name", "email", "status", "role",
+                    "direction_name", "department_name")
+            return [dict(zip(keys, row)) for row in cursor.fetchall()]
+
+    def replace_reg_contest_entries(self, contest_code, entries):
+        """Полная замена строк конкурса свежим срезом CRM (одна транзакция:
+        читатели либо видят старый срез, либо новый — не пустоту)."""
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM reg_contest_entries WHERE contest_code = %s",
+                           (contest_code,))
+            if entries:
+                args = [(contest_code, e["crm_operator_id"], e["operator_login"],
+                         e["operator_name"], e["user_id"], e["user_name"],
+                         e["contest_group"], e["match_method"], e["driver_id"],
+                         e["driver_phone"], e["driver_name"], e["registered_at"],
+                         e["first_trip_at"], e["trips_count"]) for e in entries]
+                execute_values(cursor, """
+                    INSERT INTO reg_contest_entries (
+                        contest_code, crm_operator_id, operator_login, operator_name,
+                        user_id, user_name, contest_group, match_method,
+                        driver_id, driver_phone, driver_name,
+                        registered_at, first_trip_at, trips_count)
+                    VALUES %s
+                """, args)
+            cursor.execute("""
+                INSERT INTO reg_contest_syncs (contest_code, synced_at, status, total_rows, error)
+                VALUES (%s, NOW(), 'ok', %s, NULL)
+                ON CONFLICT (contest_code) DO UPDATE SET
+                    synced_at = NOW(), status = 'ok',
+                    total_rows = EXCLUDED.total_rows, error = NULL
+            """, (contest_code, len(entries)))
+        return len(entries)
+
+    def mark_reg_contest_sync_error(self, contest_code, error):
+        """Фиксируем неудачный синк, не трогая последний удачный срез."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO reg_contest_syncs (contest_code, status, error)
+                VALUES (%s, 'error', %s)
+                ON CONFLICT (contest_code) DO UPDATE SET
+                    status = 'error', error = EXCLUDED.error
+            """, (contest_code, str(error)[:2000]))
+
+    def get_reg_contest_entries(self, contest_code):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT crm_operator_id, operator_login, operator_name,
+                       user_id, user_name, contest_group, match_method,
+                       driver_id, driver_phone, driver_name,
+                       registered_at, first_trip_at, trips_count
+                FROM reg_contest_entries
+                WHERE contest_code = %s
+            """, (contest_code,))
+            keys = ("crm_operator_id", "operator_login", "operator_name",
+                    "user_id", "user_name", "contest_group", "match_method",
+                    "driver_id", "driver_phone", "driver_name",
+                    "registered_at", "first_trip_at", "trips_count")
+            return [dict(zip(keys, row)) for row in cursor.fetchall()]
+
+    def get_reg_contest_sync_state(self, contest_code):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT synced_at, status, total_rows, error
+                FROM reg_contest_syncs
+                WHERE contest_code = %s
+            """, (contest_code,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return dict(zip(("synced_at", "status", "total_rows", "error"), row))
 
     def get_last_amo_lead_sync(self):
         """Последняя завершённая выгрузка — для отметки о свежести в отбивке."""

@@ -32316,10 +32316,310 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         );
         }
 
+        // Конкурс «Топ по регистрациям»: живой рейтинг из CRM (/api/reg_contest/*).
+        // Отдельным компонентом вне ContestsApp: у вкладки свой fetch-цикл, а
+        // определение внутри пересоздавало бы компонент (и запрос) на каждый рендер.
+        const RegContestPanel = ({ currentUser, isAdmin, addToast }) => {
+            const { useState, useEffect } = React;
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [syncing, setSyncing] = useState(false);
+            const [expandedKey, setExpandedKey] = useState(null);
+            const [showOff, setShowOff] = useState(false);
+
+            const fetchResults = async () => {
+                try {
+                    setLoading(true);
+                    const resp = await axios.get(`${API_BASE_URL}/api/reg_contest/results`, { headers: { 'X-User-Id': currentUser?.id } });
+                    setData(resp?.data || null);
+                } catch (err) {
+                    console.error('Error fetching reg contest results', err);
+                    addToast && addToast('Не удалось загрузить рейтинг конкурса', 'error');
+                } finally {
+                    setLoading(false);
+                }
+            };
+            useEffect(() => { fetchResults(); }, []);
+
+            const handleSync = async () => {
+                if (syncing) return;
+                try {
+                    setSyncing(true);
+                    await axios.post(`${API_BASE_URL}/api/reg_contest/sync`, {}, { headers: { 'X-User-Id': currentUser?.id } });
+                    await fetchResults();
+                    addToast && addToast('Данные конкурса обновлены из CRM');
+                } catch (err) {
+                    addToast && addToast(err?.response?.data?.error || 'Не удалось обновить данные из CRM', 'error');
+                } finally {
+                    setSyncing(false);
+                }
+            };
+
+            const MONTHS_GEN = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+            const fmtDay = (iso) => {
+                if (!iso) return '';
+                const d = new Date(`${iso}T00:00:00`);
+                return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`;
+            };
+            const fmtDateTime = (iso) => iso
+                ? new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+                : '—';
+            const fmtTenge = (n) => (n == null ? null : `${Number(n).toLocaleString('ru-RU')} ₸`);
+            const pluralDrivers = (n) => {
+                const abs = Math.abs(n) % 100; const d = abs % 10;
+                if (abs > 10 && abs < 20) return 'водителей';
+                if (d === 1) return 'водитель';
+                if (d >= 2 && d <= 4) return 'водителя';
+                return 'водителей';
+            };
+
+            const contest = data?.contest;
+            const groups = data?.groups || {};
+            const sync = data?.sync || {};
+            const groupLabels = contest?.group_labels || { chat: 'Чаты', line: 'Линия' };
+            const prizeEmoji = ['🥇', '🥈', '🥉'];
+
+            // Сколько дней осталось регистрировать (по Алматы; конкурс включительно).
+            const daysLeft = (() => {
+                if (!contest?.registered_to) return null;
+                const end = new Date(`${contest.registered_to}T23:59:59+05:00`);
+                const diff = Math.ceil((end - Date.now()) / 86400000);
+                return diff >= 0 ? diff : null;
+            })();
+
+            const myEntry = (() => {
+                for (const g of ['chat', 'line']) {
+                    const found = (groups[g] || []).find(item => item.user_id === currentUser?.id);
+                    if (found) return { ...found, group: g };
+                }
+                return null;
+            })();
+
+            const RankBadge = ({ place }) => {
+                const medal = { 1: 'medal-gold', 2: 'medal-silver', 3: 'medal-bronze' }[place];
+                if (medal) return <div className={`${medal} w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold shadow flex-shrink-0`}>{place}</div>;
+                return <div className="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center text-sm font-semibold flex-shrink-0">{place}</div>;
+            };
+
+            const DriversDetail = ({ rows }) => (
+                <div className="mt-3 border-t border-gray-100 pt-2 space-y-1">
+                    <div className="hidden md:grid md:grid-cols-12 gap-2 px-2 py-1 text-[11px] uppercase tracking-wide text-gray-400">
+                        <span className="col-span-4">Водитель</span>
+                        <span className="col-span-3">Телефон</span>
+                        <span className="col-span-2">Регистрация</span>
+                        <span className="col-span-2">Первая поездка</span>
+                        <span className="col-span-1 text-right">Поездок</span>
+                    </div>
+                    {rows.map((r, i) => (
+                        <div key={i} className="grid grid-cols-2 md:grid-cols-12 gap-x-2 gap-y-0.5 px-2 py-1.5 rounded-lg hover:bg-gray-50 text-sm">
+                            <span className="col-span-2 md:col-span-4 font-medium text-gray-800 truncate">{r.driver_name || '—'}</span>
+                            <span className="md:col-span-3 text-gray-500 tabular-nums">{r.driver_phone || '—'}</span>
+                            <span className="md:col-span-2 text-gray-500 tabular-nums">{fmtDateTime(r.registered_at)}</span>
+                            <span className="md:col-span-2 text-gray-500 tabular-nums">{fmtDateTime(r.first_trip_at)}</span>
+                            <span className="hidden md:block md:col-span-1 text-right text-gray-700 tabular-nums">{r.trips_count ?? '—'}</span>
+                        </div>
+                    ))}
+                </div>
+            );
+
+            const LeaderboardCard = ({ groupKey }) => {
+                const items = groups[groupKey] || [];
+                const prizes = contest?.prizes?.[groupKey] || [];
+                const leaderMax = items.length ? Math.max(...items.map(i => i.drivers || 0)) : 0;
+                return (
+                    <div className="bg-white rounded-2xl shadow-lg p-5 md:p-6">
+                        <div className="flex items-start justify-between gap-3 mb-4">
+                            <div>
+                                <h3 className="text-xl font-bold text-gray-800">{groupLabels[groupKey]}</h3>
+                                <p className="text-xs text-gray-400 mt-0.5">{items.length > 0 ? `Участников: ${items.length}` : 'Рейтинг появится после первых засчитанных водителей'}</p>
+                            </div>
+                            <div className="flex flex-wrap justify-end gap-1.5">
+                                {prizes.map((amount, i) => (
+                                    <span key={i} className="text-xs font-semibold bg-amber-50 text-amber-700 rounded-full px-2.5 py-1 whitespace-nowrap">{prizeEmoji[i]} {fmtTenge(amount)}</span>
+                                ))}
+                            </div>
+                        </div>
+                        {items.length === 0 ? (
+                            <div className="border-2 border-dashed border-gray-100 rounded-xl py-10 text-center text-sm text-gray-400">Пока никто не засчитан</div>
+                        ) : (
+                            <div className="space-y-1.5">
+                                {items.map((item, idx) => {
+                                    const isMe = item.user_id != null && item.user_id === currentUser?.id;
+                                    const key = `${groupKey}:${idx}`;
+                                    const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
+                                    const isOpen = expandedKey === key;
+                                    return (
+                                        <div key={key} className={`rounded-xl px-3 py-2.5 transition-all ${isMe ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-gray-50'} ${canExpand ? 'cursor-pointer' : ''}`}
+                                             onClick={() => canExpand && setExpandedKey(isOpen ? null : key)}>
+                                            <div className="flex items-center gap-3">
+                                                <RankBadge place={item.place} />
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <span className="font-semibold text-gray-800 truncate">{item.name}</span>
+                                                        {isMe && <span className="text-[10px] font-bold uppercase tracking-wide bg-blue-600 text-white rounded-full px-2 py-0.5 flex-shrink-0">Вы</span>}
+                                                        {item.prize != null && <span className="text-[11px] font-semibold bg-emerald-50 text-emerald-700 rounded-full px-2 py-0.5 flex-shrink-0">{fmtTenge(item.prize)}</span>}
+                                                    </div>
+                                                    <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                                        <div className="h-full rounded-full bg-gradient-to-r from-teal-400 to-emerald-500 transition-all" style={{ width: `${leaderMax ? Math.max(4, Math.round((item.drivers / leaderMax) * 100)) : 0}%` }}></div>
+                                                    </div>
+                                                </div>
+                                                <div className="text-right flex-shrink-0">
+                                                    <div className="text-xl font-bold text-gray-800 tabular-nums leading-none">{item.drivers}</div>
+                                                    <div className="text-[11px] text-gray-400 mt-0.5">{pluralDrivers(item.drivers)}</div>
+                                                </div>
+                                                {canExpand && <FaIcon className={`fas fa-chevron-down text-gray-300 text-xs transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
+                                            </div>
+                                            {isOpen && canExpand && (
+                                                <div onClick={(e) => e.stopPropagation()}>
+                                                    <p className="mt-2 text-[11px] text-gray-400">Последняя засчитанная поездка: {fmtDateTime(item.last_trip_at)} — при равном счёте выше тот, у кого она раньше.</p>
+                                                    <DriversDetail rows={item.rows} />
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+            if (loading && !data) {
+                return (
+                    <div className="space-y-6">
+                        <div className="bg-white rounded-2xl shadow-lg p-6 animate-pulse h-40"></div>
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div className="bg-white rounded-2xl shadow-lg p-6 animate-pulse h-72"></div>
+                            <div className="bg-white rounded-2xl shadow-lg p-6 animate-pulse h-72"></div>
+                        </div>
+                    </div>
+                );
+            }
+
+            const rules = [
+                { icon: 'fa-link', text: 'Регистрация строго по ссылке в CRM' },
+                { icon: 'fa-route', text: `Засчитывается после первой завершённой поездки — до ${fmtDay(contest?.trip_deadline)} включительно` },
+                { icon: 'fa-user-check', text: 'Один водитель — одному оператору: кто первым зарегистрировал' },
+                { icon: 'fa-stopwatch', text: 'При равенстве выше тот, кто раньше набрал результат' },
+            ];
+
+            return (
+                <div className="space-y-6">
+                    <div className="bg-gradient-to-br from-teal-500 to-emerald-700 rounded-2xl p-6 text-white shadow-lg">
+                        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                            <div>
+                                <h3 className="text-2xl font-bold flex items-center gap-2"><FaIcon className="fas fa-trophy text-yellow-300" /> {contest?.title || 'Топ по регистрациям'}</h3>
+                                <p className="opacity-90 mt-1">{fmtDay(contest?.registered_from)} — {fmtDay(contest?.registered_to)} • итоги {fmtDay(contest?.results_date)}</p>
+                                <div className="flex flex-wrap gap-2 mt-3">
+                                    {daysLeft != null && (
+                                        <span className="text-xs font-semibold bg-white bg-opacity-20 rounded-full px-3 py-1 backdrop-blur-sm">{daysLeft === 0 ? 'Последний день регистраций' : `Осталось дней: ${daysLeft}`}</span>
+                                    )}
+                                    {sync.synced_at && (
+                                        <span className="text-xs bg-white bg-opacity-20 rounded-full px-3 py-1 backdrop-blur-sm opacity-90">Обновлено {fmtDateTime(sync.synced_at)}{sync.total_rows != null ? ` • засчитано: ${sync.total_rows}` : ''}</span>
+                                    )}
+                                    {isAdmin && sync.status === 'error' && (
+                                        <span className="text-xs font-semibold bg-red-500 bg-opacity-80 rounded-full px-3 py-1" title={sync.error || ''}>Последний синк с ошибкой</span>
+                                    )}
+                                </div>
+                            </div>
+                            {data?.can_sync && (
+                                <button onClick={handleSync} disabled={syncing}
+                                        className="flex-shrink-0 flex items-center gap-2 bg-white bg-opacity-20 hover:bg-opacity-30 disabled:opacity-60 transition-all rounded-xl px-4 py-2.5 text-sm font-semibold backdrop-blur-sm">
+                                    <FaIcon className={`fas fa-rotate ${syncing ? 'animate-spin' : ''}`} />
+                                    {syncing ? 'Обновляем…' : 'Обновить из CRM'}
+                                </button>
+                            )}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 mt-5">
+                            {rules.map((rule, i) => (
+                                <div key={i} className="flex items-start gap-2.5 bg-white bg-opacity-15 rounded-xl px-3 py-2.5 backdrop-blur-sm">
+                                    <FaIcon className={`fas ${rule.icon} mt-0.5 opacity-80`} />
+                                    <span className="text-xs leading-snug opacity-95">{rule.text}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {myEntry && (
+                        <div className="bg-white rounded-2xl shadow-lg p-5 flex flex-wrap items-center gap-x-8 gap-y-3">
+                            <div className="flex items-center gap-3">
+                                <RankBadge place={myEntry.place} />
+                                <div>
+                                    <p className="text-xs uppercase tracking-wide text-gray-400">Ваше место • {groupLabels[myEntry.group]}</p>
+                                    <p className="text-lg font-bold text-gray-800 leading-tight">#{myEntry.place} из {(groups[myEntry.group] || []).length}</p>
+                                </div>
+                            </div>
+                            <div>
+                                <p className="text-xs uppercase tracking-wide text-gray-400">Засчитано</p>
+                                <p className="text-lg font-bold text-gray-800 leading-tight">{myEntry.drivers} {pluralDrivers(myEntry.drivers)}</p>
+                            </div>
+                            {myEntry.prize != null ? (
+                                <div>
+                                    <p className="text-xs uppercase tracking-wide text-gray-400">Текущий приз</p>
+                                    <p className="text-lg font-bold text-emerald-600 leading-tight">{fmtTenge(myEntry.prize)}</p>
+                                </div>
+                            ) : (() => {
+                                const board = groups[myEntry.group] || [];
+                                const prizeCount = (contest?.prizes?.[myEntry.group] || []).length;
+                                const lastPrize = board[prizeCount - 1];
+                                if (!lastPrize) return null;
+                                const gap = (lastPrize.drivers - myEntry.drivers) + 1;
+                                return (
+                                    <div>
+                                        <p className="text-xs uppercase tracking-wide text-gray-400">До призового места</p>
+                                        <p className="text-lg font-bold text-gray-800 leading-tight">+{gap} {pluralDrivers(gap)}</p>
+                                    </div>
+                                );
+                            })()}
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <LeaderboardCard groupKey="chat" />
+                        <LeaderboardCard groupKey="line" />
+                    </div>
+
+                    {isAdmin && Array.isArray(data?.off) && data.off.length > 0 && (
+                        <div className="bg-white rounded-2xl shadow-lg p-5 md:p-6">
+                            <button onClick={() => setShowOff(!showOff)} className="w-full flex items-center justify-between gap-3 text-left">
+                                <div>
+                                    <h3 className="text-lg font-bold text-gray-800">Вне зачёта</h3>
+                                    <p className="text-xs text-gray-400 mt-0.5">Другие отделы и несопоставленные операторы CRM — {data.off.length} чел.</p>
+                                </div>
+                                <FaIcon className={`fas fa-chevron-down text-gray-300 transition-transform ${showOff ? 'rotate-180' : ''}`} />
+                            </button>
+                            {showOff && (
+                                <div className="mt-4 space-y-1.5">
+                                    {data.off.map((item, idx) => (
+                                        <div key={idx} className="flex items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-gray-50">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-semibold text-gray-800 truncate">{item.name}</span>
+                                                    <span className={`text-[11px] font-medium rounded-full px-2 py-0.5 flex-shrink-0 ${item.match_method === 'none' ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>
+                                                        {item.match_method === 'none' ? 'не сопоставлен' : 'другой отдел'}
+                                                    </span>
+                                                </div>
+                                                {item.operator_login && <p className="text-xs text-gray-400 truncate">{item.operator_login}</p>}
+                                            </div>
+                                            <div className="text-right flex-shrink-0">
+                                                <span className="text-lg font-bold text-gray-700 tabular-nums">{item.drivers}</span>
+                                                <span className="text-[11px] text-gray-400 ml-1">{pluralDrivers(item.drivers)}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         // Contests management component (admin only)
         const ContestsApp = ({ user: currentUser, operators = [], directions = [] }) => {
             const { useState, useEffect } = React;
-            const [activeTab, setActiveTab] = useState('baiga');
+            // Активный конкурс открывается первым; Байга и остальные — соседними вкладками.
+            const [activeTab, setActiveTab] = useState('registrations');
             const isAdmin = isAdminLikeRoleFn(currentUser?.role);
             const isOperatorOrSv = currentUser?.role === 'operator' || currentUser?.role === 'sv';
             const [toasts, setToasts] = useState([]);
@@ -33250,11 +33550,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const getAvailableTabs = () => {
                 if (isOperatorOrSv) {
                     return [
+                        { id: 'registrations', label: 'Топ по регистрациям', icon: 'fa-id-card' },
                         { id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },
                         { id: 'quality', label: 'Качество', icon: 'fa-star' }
                     ];
                 }
                 return [
+                    { id: 'registrations', label: 'Топ по регистрациям', icon: 'fa-id-card' },
                     { id: 'baiga', label: 'Байга ОТП', icon: 'fa-running' },
                     { id: 'quality', label: 'Качество', icon: 'fa-star' },
                     { id: 'chat', label: 'Чат', icon: 'fa-comments' },
@@ -33269,7 +33571,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement(FaIcon,{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement(FaIcon,{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement(FaIcon,{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
-                        React.createElement('div',null, activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
+                        React.createElement('div',null, activeTab==='registrations' && React.createElement(RegContestPanel,{currentUser:currentUser, isAdmin:isAdmin, addToast:addToast}), activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
                 )

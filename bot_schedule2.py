@@ -39,6 +39,7 @@ import html
 from concurrent.futures import ThreadPoolExecutor
 import group_late
 import amo_leads
+import reg_contest
 from database import (
     db,
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
@@ -9733,6 +9734,153 @@ def api_average_scores():
     except Exception as e:
         logging.exception("Error in /api/average_scores: %s", e)
         return jsonify({"error": "Internal server error"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Конкурс «Топ по регистрациям» (данные из CRM yataxi, см. reg_contest.py)
+# ---------------------------------------------------------------------------
+
+def sync_reg_contest(triggered_by='scheduler'):
+    """Полный цикл: CRM -> матчинг с пользователями iCORE -> срез в БД.
+
+    CRM отдаёт уже засчитанных водителей (дедуп + фильтр «есть завершённая
+    поездка до дедлайна»), поэтому каждый синк просто заменяет срез целиком.
+    """
+    contest = reg_contest.CONTEST
+    config = reg_contest.get_config()
+    if not reg_contest.api_ready(config):
+        return {"status": "skipped", "reason": "no_credentials"}
+    started = time.monotonic()
+    try:
+        client = reg_contest.RegContestClient.from_config(config)
+        crm_rows = client.fetch_all_rows(contest["registered_from"],
+                                         contest["registered_to"],
+                                         contest["trip_deadline"])
+        directory = db.get_reg_contest_operator_directory()
+        entries = reg_contest.resolve_rows(crm_rows, directory)
+        total = db.replace_reg_contest_entries(contest["code"], entries)
+        unmatched = sum(1 for e in entries if e["match_method"] == "none")
+        logging.info(
+            "reg_contest sync (%s): %s строк, %s не сопоставлено, %.1fs",
+            triggered_by, total, unmatched, time.monotonic() - started)
+        return {"status": "success", "rows": total, "unmatched": unmatched}
+    except Exception as exc:
+        db.mark_reg_contest_sync_error(contest["code"], exc)
+        raise
+
+
+def _reg_contest_iso(value):
+    """timestamptz из БД / ISO-строка из CRM -> ISO в Asia/Almaty."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(ZoneInfo('Asia/Almaty'))
+        return value.isoformat()
+    return str(value)
+
+
+def _reg_contest_public_item(item, include_rows):
+    """Строка рейтинга наружу; список водителей — только админам и владельцу."""
+    payload = {
+        "place": item.get("place"),
+        "user_id": item.get("user_id"),
+        "name": item.get("name"),
+        "drivers": item.get("drivers"),
+        "prize": item.get("prize"),
+        "last_trip_at": _reg_contest_iso(item.get("last_trip_at")),
+    }
+    if include_rows:
+        payload["rows"] = [{
+            "driver_name": row.get("driver_name"),
+            "driver_phone": row.get("driver_phone"),
+            "registered_at": _reg_contest_iso(row.get("registered_at")),
+            "first_trip_at": _reg_contest_iso(row.get("first_trip_at")),
+            "trips_count": row.get("trips_count"),
+        } for row in item.get("rows") or []]
+    return payload
+
+
+@app.route('/api/reg_contest/results', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_reg_contest_results():
+    """Рейтинг конкурса. Операторам — таблицы групп и свои регистрации,
+    админам — ещё и детали по каждому участнику + «вне зачёта»."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, error = _resolve_requester()
+    if error:
+        message, status_code = error
+        return jsonify({"error": message}), status_code
+    try:
+        is_admin = _is_admin_role(_normalize_user_role(requester[3]))
+        contest = reg_contest.CONTEST
+        entries = db.get_reg_contest_entries(contest["code"])
+        boards = reg_contest.build_leaderboards(entries)
+        groups = {}
+        for group in ("chat", "line"):
+            groups[group] = [
+                _reg_contest_public_item(
+                    item, is_admin or item.get("user_id") == requester_id)
+                for item in boards.get(group) or []
+            ]
+        sync_state = db.get_reg_contest_sync_state(contest["code"])
+        payload = {
+            "status": "success",
+            "contest": {
+                "code": contest["code"],
+                "title": contest["title"],
+                "registered_from": contest["registered_from"],
+                "registered_to": contest["registered_to"],
+                "trip_deadline": contest["trip_deadline"],
+                "results_date": contest["results_date"],
+                "prizes": contest["prizes"],
+                "group_labels": reg_contest.GROUP_LABELS,
+            },
+            "sync": {
+                "synced_at": _reg_contest_iso((sync_state or {}).get("synced_at")),
+                "status": (sync_state or {}).get("status"),
+                "total_rows": (sync_state or {}).get("total_rows"),
+                "error": (sync_state or {}).get("error") if is_admin else None,
+            },
+            "groups": groups,
+            "can_sync": is_admin,
+        }
+        if is_admin:
+            # Вне зачёта: другие отделы (ОП, фронт-офис) и несопоставленные
+            # операторы CRM — чтобы регистрации не пропадали молча.
+            payload["off"] = [
+                {**_reg_contest_public_item(item, True),
+                 "operator_login": item.get("operator_login"),
+                 "match_method": item.get("match_method")}
+                for item in boards.get("off") or []
+            ]
+        return jsonify(payload), 200
+    except Exception:
+        logging.exception("Error in /api/reg_contest/results")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/reg_contest/sync', methods=['POST', 'OPTIONS'])
+@require_api_key
+def api_reg_contest_sync():
+    """Ручное обновление данных из CRM (обычно его крутит ночной джоб)."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, requester, error = _resolve_requester()
+    if error:
+        message, status_code = error
+        return jsonify({"error": message}), status_code
+    if not _is_admin_role(_normalize_user_role(requester[3])):
+        return jsonify({"error": "Обновление доступно только администраторам"}), 403
+    try:
+        result = sync_reg_contest(triggered_by=f'manual:{requester_id}')
+        if result.get("status") == "skipped":
+            return jsonify({"error": "CRM_API_URL / CRM_INTEGRATION_TOKEN не заданы"}), 503
+        return jsonify({"status": "success", **result}), 200
+    except Exception as exc:
+        logging.exception("reg_contest manual sync failed")
+        return jsonify({"error": f"Не удалось обновить данные из CRM: {exc}"}), 502
 
 
 @app.route('/api/baiga/upload_day_csv', methods=['POST', 'OPTIONS'])
@@ -48060,6 +48208,27 @@ if __name__ == '__main__':
         except Exception as e:
             logging.exception(f"Error running tez_op_successes_job: {e}")
 
+    async def reg_contest_sync_job():
+        # Конкурс «Топ по регистрациям»: ночной срез засчитанных водителей из
+        # CRM. После дедлайна поездок (+2 дня на поздние правки CRM — снятие
+        # фрода и т.п.) джоба замолкает, рейтинг остаётся замороженным в БД.
+        try:
+            today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+            contest = reg_contest.CONTEST
+            start = datetime.strptime(contest['registered_from'], '%Y-%m-%d').date()
+            stop = (datetime.strptime(contest['trip_deadline'], '%Y-%m-%d').date()
+                    + timedelta(days=2))
+            if not (start <= today <= stop):
+                return
+            loop = asyncio.get_event_loop()
+            summary = await loop.run_in_executor(
+                executor_pool,
+                lambda: sync_reg_contest(triggered_by='scheduler'),
+            )
+            logging.info(f"reg_contest sync result: {summary}")
+        except Exception as e:
+            logging.exception(f"Error running reg_contest_sync_job: {e}")
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         generate_weekly_report, 
@@ -48131,6 +48300,18 @@ if __name__ == '__main__':
         tez_op_successes_job,
         CronTrigger(hour=1, minute=30, timezone=ZoneInfo('Asia/Almaty')),
         id='tez_op_successes_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Конкурс «Топ по регистрациям» — срез из CRM в 02:30 (Asia/Almaty),
+    # в стороне от TEZ-джобов 01:00–01:30. Вне периода конкурса и без
+    # CRM_API_URL/токена джоба — no-op (см. reg_contest_sync_job).
+    scheduler.add_job(
+        reg_contest_sync_job,
+        CronTrigger(hour=2, minute=30, timezone=ZoneInfo('Asia/Almaty')),
+        id='reg_contest_sync_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
