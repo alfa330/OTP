@@ -46,12 +46,16 @@ def _load_names(source, names, namespace, label="<szov-wallboard>"):
 
 
 class _FakeDb:
-    """Минимальный db: отделы, отдел пользователя, состав отдела."""
+    """Минимальный db: отделы, отдел пользователя, состав отдела, сохранённый снимок табло."""
 
-    def __init__(self, departments=None, user_departments=None, members=None):
+    def __init__(self, departments=None, user_departments=None, members=None,
+                 wallboard_snapshot=None, snapshot_error=False):
         self.departments = departments if departments is not None else [{'id': 1, 'code': 'szov'}]
         self.user_departments = user_departments or {}
         self.members = members or {}
+        self.wallboard_snapshot = wallboard_snapshot  # (payload, captured_at)
+        self.snapshot_error = snapshot_error
+        self.saved_snapshots = []
 
     def get_departments(self):
         return self.departments
@@ -61,6 +65,17 @@ class _FakeDb:
 
     def get_department_member_ids(self, department_id):
         return self.members.get(int(department_id), set())
+
+    def get_szov_wallboard_snapshot(self):
+        if self.snapshot_error:
+            raise RuntimeError("БД недоступна")
+        return self.wallboard_snapshot or (None, None)
+
+    def save_szov_wallboard_snapshot(self, payload, captured_at):
+        if self.snapshot_error:
+            raise RuntimeError("БД недоступна")
+        self.saved_snapshots.append((payload, captured_at))
+        self.wallboard_snapshot = (payload, captured_at)
 
 
 class SzovWallboardBackendGuardTests(unittest.TestCase):
@@ -177,18 +192,20 @@ class SzovWallboardSqlTests(unittest.TestCase):
             '_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS',
             '_oktell_wallboard_totals_sql',
             '_oktell_wallboard_operator_states_sql',
+            '_oktell_wallboard_snapshot_sql',
         }, {})
         cls.totals_sql = cls.ns['_oktell_wallboard_totals_sql'](20)
         cls.states_sql = cls.ns['_oktell_wallboard_operator_states_sql']()
+        cls.snapshot_sql = cls.ns['_oktell_wallboard_snapshot_sql'](20)
 
     def test_single_statement_only(self):
         """Прокси Oktell отклоняет несколько запросов в одной строке."""
-        for sql in (self.totals_sql, self.states_sql):
+        for sql in (self.totals_sql, self.states_sql, self.snapshot_sql):
             self.assertNotIn(';', sql)
 
     def test_no_write_keywords_beyond_whitelisted_column(self):
         """У прокси наивный блоклист по подстроке. Разрешена только колонка dt_insert."""
-        for sql in (self.totals_sql, self.states_sql):
+        for sql in (self.totals_sql, self.states_sql, self.snapshot_sql):
             lowered = sql.lower()
             self.assertNotIn('update', lowered)
             self.assertNotIn('delete', lowered)
@@ -234,6 +251,33 @@ class SzovWallboardSqlTests(unittest.TestCase):
         # 0 Выключен и 7 Без телефона — не на линии
         self.assertIn("x.State NOT IN (0, 7)", self.states_sql)
         self.assertIn("oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo", self.states_sql)
+
+    def test_snapshot_sql_merges_both_fragments(self):
+        """Итоги и статусы должны уехать одним запросом: у прокси дорого само обращение."""
+        self.assertIn(self.totals_sql, self.snapshot_sql)
+        self.assertIn(self.states_sql, self.snapshot_sql)
+        self.assertEqual(self.snapshot_sql.count('SELECT'), self.totals_sql.count('SELECT')
+                         + self.states_sql.count('SELECT') + 1)
+
+    def test_snapshot_sql_keeps_totals_without_operators(self):
+        """LEFT JOIN, а не CROSS JOIN: ночью операторов нет, а итоги дня всё равно нужны."""
+        self.assertIn("LEFT JOIN (", self.snapshot_sql)
+        self.assertIn(") s ON 1 = 1", self.snapshot_sql)
+        self.assertNotIn("CROSS JOIN (SELECT oi.Name", self.snapshot_sql)
+
+    def test_states_fragment_has_no_inner_order_by(self):
+        """Производной таблице сортировка запрещена — ORDER BY только снаружи."""
+        self.assertNotIn("ORDER BY oi.Name", self.states_sql)
+        self.assertTrue(self.snapshot_sql.endswith("ORDER BY s.operator_name"))
+
+    def test_snapshot_sql_selects_every_totals_column(self):
+        """Колонки итогов перечислены явно — потеря любой из них обнулит показатель на табло."""
+        for column in ('oktell_now', 'queue_now', 'queue_max_wait_seconds', 'talking_now',
+                       'arrived', 'served', 'lost', 'greet_drop', 'served_sl',
+                       'wait_seconds', 'max_wait_seconds', 'talk_seconds'):
+            self.assertIn(f"t.{column}", self.snapshot_sql)
+        for column in ('operator_name', 'state', 'icode', 'since', 'in_state_seconds'):
+            self.assertIn(f"s.{column}", self.snapshot_sql)
 
 
 class SzovWallboardOperatorMappingTests(unittest.TestCase):
@@ -407,8 +451,8 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
         self.assertEqual(result['online'], 0)
 
 
-class SzovWallboardSnapshotTests(unittest.TestCase):
-    """Сборка показателей и общий TTL-кэш."""
+class _SnapshotHarness:
+    """Общий стенд для тестов снимка: поддельные Oktell и БД в подготовленном namespace."""
 
     TOTALS_ROW = {
         'oktell_now': '2026-08-03 12:07:18',
@@ -425,7 +469,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
         'talk_seconds': 107708.0,
     }
 
-    def _namespace(self, totals_row=None, state_rows=None, fail=False):
+    def _namespace(self, totals_row=None, state_rows=None, fail=False, db=None):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
         state = {'calls': 0, 'timeouts': []}
 
@@ -434,9 +478,10 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             state['timeouts'].append(timeout)
             if fail:
                 raise RuntimeError("Oktell proxy HTTP 500")
-            if 'A_UserStateHistory' in sql:
-                return list(state_rows or [])
-            return [dict(totals_row if totals_row is not None else self.TOTALS_ROW)]
+            # Прокси отдаёт склеенный ответ: итоги дня продублированы в каждой строке статуса.
+            totals = dict(totals_row if totals_row is not None else self.TOTALS_ROW)
+            rows = [dict(totals, **row) for row in (state_rows or [])]
+            return rows or [dict(totals)]
 
         ns = {
             'time': time,
@@ -447,7 +492,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             '_env_int': lambda name, default, minimum=None, maximum=None: default,
             'OKTELL_BILLING_SL_DEFAULT_SECONDS': 20,
             '_oktell_query': fake_query,
-            'db': _FakeDb(members={1: {10, 11}}),
+            'db': db if db is not None else _FakeDb(members={1: {10, 11}}),
             '_status_import_build_operator_lookup': lambda restrict_to_ids=None: {'lookup': True},
             '_status_import_resolve_operator_matches': lambda name, lookup: [],
         }
@@ -458,6 +503,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             'SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS',
             'SZOV_WALLBOARD_LOCK_WAIT_SECONDS',
             'SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS',
+            'SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS',
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE',
             '_SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL',
             '_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS',
@@ -477,13 +523,21 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
             '_szov_wallboard_build_operators',
             '_oktell_wallboard_totals_sql',
             '_oktell_wallboard_operator_states_sql',
+            '_oktell_wallboard_snapshot_sql',
+            '_szov_wallboard_restore_cache',
+            '_szov_wallboard_persist_cache',
             '_szov_wallboard_fetch_snapshot',
             '_szov_wallboard_snapshot',
         }, ns)
         ns['_SZOV_WALLBOARD_DEPARTMENT_CACHE'].update(ts=0.0, id=None)
-        ns['_szov_wallboard_cache'].update(ts=0.0, payload=None)
+        ns['_szov_wallboard_cache'].update(ts=0.0, payload=None, failed_at=0.0, error=None,
+                                           restored=False, persisted_at=0.0)
         ns['_query_state'] = state
         return ns
+
+
+class SzovWallboardSnapshotTests(_SnapshotHarness, unittest.TestCase):
+    """Сборка показателей и общий TTL-кэш."""
 
     def test_today_metrics_match_billing_definitions(self):
         ns = self._namespace()
@@ -520,11 +574,24 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
         self.assertIsNone(today['avg_talk_seconds'])
         self.assertEqual(today['total'], 0)
 
-    def test_two_oktell_queries_per_snapshot(self):
-        """Прокси Oktell низкоконкурентный: снимок должен стоить ровно два запроса."""
+    def test_single_oktell_query_per_snapshot(self):
+        """Снимок стоит ровно ОДНО обращение к прокси: у него дорого само соединение.
+
+        Табло опрашивается круглосуточно, поэтому второй запрос здесь — это лишние 5,7 тыс.
+        HTTP-соединений и столько же ODBC-логинов на стороне прокси в сутки."""
         ns = self._namespace()
         ns['_szov_wallboard_fetch_snapshot']()
-        self.assertEqual(ns['_query_state']['calls'], 2)
+        self.assertEqual(ns['_query_state']['calls'], 1)
+
+    def test_totals_survive_when_nobody_is_on_the_line(self):
+        """Ночью статусных строк нет — LEFT JOIN отдаёт одну строку с итогами и пустым именем."""
+        ns = self._namespace(state_rows=[{'operator_name': None, 'state': None, 'icode': None,
+                                          'since': None, 'in_state_seconds': None}])
+        snap = ns['_szov_wallboard_fetch_snapshot']()
+        self.assertEqual(snap['today']['served'], 392)
+        self.assertEqual(snap['now']['queue'], 3)
+        self.assertEqual(snap['now']['operators_online'], 0)
+        self.assertEqual(snap['diagnostics']['unmatched_oktell_names'], [])
 
     def test_cache_coalesces_concurrent_viewers(self):
         ns = self._namespace()
@@ -557,6 +624,7 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
         self.assertIn('500', stale['error'])
         self.assertGreaterEqual(stale['age_seconds'], 60)
 
+
     def test_error_propagates_when_no_snapshot_ever_succeeded(self):
         ns = self._namespace(fail=True)
         with self.assertRaises(RuntimeError):
@@ -569,13 +637,11 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
 
         def capturing(sql, timeout=None):
             seen.append(timeout)
-            if 'A_UserStateHistory' in sql:
-                return []
             return [dict(self.TOTALS_ROW)]
 
         ns['_oktell_query'] = capturing
         ns['_szov_wallboard_fetch_snapshot']()
-        self.assertEqual(seen, [ns['SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS']] * 2)
+        self.assertEqual(seen, [ns['SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS']])
         self.assertLess(ns['SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS'], 60)
 
     def test_second_viewer_does_not_queue_behind_a_slow_refresh(self):
@@ -654,6 +720,66 @@ class SzovWallboardSnapshotTests(unittest.TestCase):
         ns['_szov_wallboard_cache']['ts'] = time.time() - (ns['SZOV_WALLBOARD_STALE_MAX_SECONDS'] + 5)
         with self.assertRaises(RuntimeError):
             ns['_szov_wallboard_snapshot']()
+
+
+class SzovWallboardPersistedSnapshotTests(_SnapshotHarness, unittest.TestCase):
+    """Снимок переживает рестарт процесса: деплой не должен гасить экран в зале."""
+
+    def test_cold_start_serves_snapshot_from_db_while_oktell_is_down(self):
+        """Ровно тот случай, ради которого копия и заведена: рестарт в момент недоступности."""
+        saved = {'today': {'served': 111}, 'now': {'queue': 2}, 'generated_at': '2026-08-07 09:00:00'}
+        fake_db = _FakeDb(members={1: {10, 11}}, wallboard_snapshot=(saved, time.time() - 30))
+        ns = self._namespace(fail=True, db=fake_db)
+        snap = ns['_szov_wallboard_snapshot']()
+        self.assertTrue(snap['stale'])
+        self.assertEqual(snap['today']['served'], 111)
+        self.assertGreaterEqual(snap['age_seconds'], 30)
+
+    def test_cold_start_ignores_snapshot_older_than_stale_window(self):
+        """Данные часовой давности на табло опаснее пустого экрана — их не поднимаем."""
+        saved = {'today': {'served': 111}, 'now': {'queue': 2}}
+        fake_db = _FakeDb(members={1: {10, 11}}, wallboard_snapshot=(saved, time.time() - 4000))
+        ns = self._namespace(fail=True, db=fake_db)
+        with self.assertRaises(RuntimeError):
+            ns['_szov_wallboard_snapshot']()
+
+    def test_successful_snapshot_is_persisted_once_per_interval(self):
+        """Копия нужна только на холодный старт, поэтому пишем не на каждый опрос."""
+        fake_db = _FakeDb(members={1: {10, 11}})
+        ns = self._namespace(db=fake_db)
+        ns['_szov_wallboard_snapshot']()
+        self.assertEqual(len(fake_db.saved_snapshots), 1)
+        self.assertEqual(fake_db.saved_snapshots[0][0]['today']['served'], 392)
+        # Следующий опрос за пределами TTL, но внутри интервала записи — второй записи нет.
+        ns['_szov_wallboard_cache']['ts'] = time.time() - 20
+        ns['_szov_wallboard_snapshot']()
+        self.assertEqual(ns['_query_state']['calls'], 2)
+        self.assertEqual(len(fake_db.saved_snapshots), 1)
+
+    def test_db_failure_never_breaks_the_wallboard(self):
+        """Ни чтение, ни запись копии не имеют права уронить живое табло."""
+        fake_db = _FakeDb(members={1: {10, 11}}, snapshot_error=True)
+        ns = self._namespace(db=fake_db)
+        snap = ns['_szov_wallboard_snapshot']()
+        self.assertFalse(snap['stale'])
+        self.assertEqual(snap['today']['served'], 392)
+
+    def test_restore_reads_the_db_only_once_per_process(self):
+        """Пустая таблица не должна превращаться в запрос к БД на каждый опрос табло."""
+        reads = {'n': 0}
+        fake_db = _FakeDb(members={1: {10, 11}})
+        original = fake_db.get_szov_wallboard_snapshot
+
+        def counted():
+            reads['n'] += 1
+            return original()
+
+        fake_db.get_szov_wallboard_snapshot = counted
+        ns = self._namespace(fail=True, db=fake_db)
+        for _ in range(3):
+            with contextlib.suppress(RuntimeError):
+                ns['_szov_wallboard_snapshot']()
+        self.assertEqual(reads['n'], 1)
 
 
 class SzovWallboardArCorridorTests(unittest.TestCase):
