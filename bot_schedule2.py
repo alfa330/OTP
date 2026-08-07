@@ -30703,33 +30703,45 @@ def _chat_hourly_fetch_operators():
     return rows
 
 
-def _chat_hourly_online(operator_rows):
-    """Кто сейчас на линии и кто залогинен, но на статусе.
+def _chat_hourly_operator_states(operator_rows):
+    """{имя: {status, is_online, on_status, open_chats}} по живым учёткам Chat2Desk.
 
-    Удалённые и отключённые учётки в отчёт не берём: их в Chat2Desk 100 из 149, и почти все
-    висят с online=1 от последнего входа. Админскую учётку тоже отбрасываем — она не чатник."""
-    online, on_status = [], []
+    Удалённые и отключённые учётки не берём: их в Chat2Desk 100 из 149, и почти все висят
+    с online=1 от последнего входа. Админская учётка туда же — она не чатник."""
+    states = {}
     for row in operator_rows or []:
         if not isinstance(row, dict):
             continue
         if str(row.get('status') or '').strip().lower() != 'enabled':
             continue
-        if not _chat_hourly_number(row.get('online')):
-            continue
         name = _chat2desk_operator_display_name(row)
         if not name:
             continue
         raw_status = str(row.get('offline_type') or '').strip().lower()
-        if raw_status:
-            on_status.append({
-                'name': name,
-                'status': CHAT_HOURLY_STATUS_LABELS.get(raw_status, raw_status),
-            })
+        is_logged_in = bool(_chat_hourly_number(row.get('online')))
+        if not is_logged_in:
+            label = 'офлайн'
+        elif raw_status:
+            label = CHAT_HOURLY_STATUS_LABELS.get(raw_status, raw_status)
         else:
-            online.append({
-                'name': name,
-                'open_chats': int(_chat_hourly_number(row.get('opened_dialogs')) or 0),
-            })
+            label = 'онлайн'
+        states[name] = {
+            'status': label,
+            # «Онлайн» здесь — то же, что на табло: свободен или в разговоре. Оператор
+            # на перерыве залогинен, но на линии его нет.
+            'is_online': is_logged_in and not raw_status,
+            'on_status': is_logged_in and bool(raw_status),
+            'open_chats': int(_chat_hourly_number(row.get('opened_dialogs')) or 0),
+        }
+    return states
+
+
+def _chat_hourly_online(states):
+    """Кто сейчас на линии и кто залогинен, но на статусе — из карты состояний."""
+    online = [{'name': name, 'open_chats': state['open_chats']}
+              for name, state in states.items() if state['is_online']]
+    on_status = [{'name': name, 'status': state['status']}
+                 for name, state in states.items() if state['on_status']]
     online.sort(key=lambda item: (-item['open_chats'], item['name']))
     on_status.sort(key=lambda item: item['name'])
     return online, on_status
@@ -30768,7 +30780,7 @@ def _chat_hourly_operator_name(row):
 
 
 def _chat_hourly_collect(now=None):
-    """Данные отчёта: чаты за час и за сутки, чатники, время ответа, кто на линии."""
+    """Данные отчёта: чаты за час и за сутки, время ответа — общее и по каждому чатнику."""
     tz = ZoneInfo(CHAT_HOURLY_TIMEZONE)
     now = now or datetime.now(tz)
     day_str = now.strftime('%Y-%m-%d')
@@ -30785,26 +30797,51 @@ def _chat_hourly_collect(now=None):
     hour_rows = [row for row in rows
                  if window_from <= _chat_hourly_request_start(row) < window_to]
 
-    operators = {}
+    try:
+        states = _chat_hourly_operator_states(_chat_hourly_fetch_operators())
+        online, on_status = _chat_hourly_online(states)
+        online_error = None
+    except Exception as exc:
+        # Цифры по чатам важнее статусов: отчёт уходит без них, но с честной пометкой.
+        logging.warning("Отчёт по чатам: список операторов недоступен: %s", exc)
+        states, online, on_status, online_error = {}, [], [], str(exc)[:200]
+
+    # Строки по чатникам собираем в разрезе, потому что среднее время ответа считается
+    # по тем же формулам, что и итог: те же функции, просто на подмножестве обращений.
+    by_operator, hour_by_operator = {}, {}
     for row in rows:
         name = _chat_hourly_operator_name(row)
         if name:
-            operators.setdefault(name, {'name': name, 'chats': 0, 'chats_hour': 0})['chats'] += 1
+            by_operator.setdefault(name, []).append(row)
     for row in hour_rows:
         name = _chat_hourly_operator_name(row)
-        if name in operators:
-            operators[name]['chats_hour'] += 1
+        if name:
+            hour_by_operator.setdefault(name, []).append(row)
+
+    operators = []
+    # В таблицу попадают и те, кто сегодня ещё не брал чатов, но сейчас на линии, —
+    # иначе «кто онлайн» пришлось бы держать отдельным списком рядом с таблицей.
+    for name in set(by_operator) | {n for n, s in states.items() if s['is_online'] or s['on_status']}:
+        own_rows = by_operator.get(name) or []
+        own_hour_rows = hour_by_operator.get(name) or []
+        first_day, inner_day = _chat_hourly_response_times(own_rows)
+        first_hour, inner_hour = _chat_hourly_response_times(own_hour_rows)
+        state = states.get(name) or {}
+        operators.append({
+            'name': name,
+            'status': state.get('status') or '—',
+            'chats': len(own_rows),
+            'chats_hour': len(own_hour_rows),
+            'first_reply_day': first_day,
+            'first_reply_hour': first_hour,
+            'inner_reply_day': inner_day,
+            'inner_reply_hour': inner_hour,
+            'open_chats': state.get('open_chats'),
+        })
+    operators.sort(key=lambda item: (-item['chats'], item['name']))
 
     day_first, day_inner = _chat_hourly_response_times(rows)
     hour_first, hour_inner = _chat_hourly_response_times(hour_rows)
-
-    try:
-        online, on_status = _chat_hourly_online(_chat_hourly_fetch_operators())
-        online_error = None
-    except Exception as exc:
-        # Цифры по чатам важнее списка на линии: отчёт уходит без него, но с честной пометкой.
-        logging.warning("Отчёт по чатам: список операторов недоступен: %s", exc)
-        online, on_status, online_error = [], [], str(exc)[:200]
 
     return {
         'generated_at': now.strftime('%d.%m.%Y %H:%M'),
@@ -30818,7 +30855,7 @@ def _chat_hourly_collect(now=None):
         'first_reply_hour': hour_first,
         'inner_reply_day': day_inner,
         'inner_reply_hour': hour_inner,
-        'operators': sorted(operators.values(), key=lambda item: (-item['chats'], item['name'])),
+        'operators': operators,
         'online': online,
         'on_status': on_status,
         'online_error': online_error,
@@ -30870,7 +30907,10 @@ def _chat_hourly_text(data):
         lines.append(f"<b>Чатники за сутки ({len(operators)}):</b>")
         for item in operators:
             suffix = f" (за час {item['chats_hour']})" if hour_label and item['chats_hour'] else ""
-            lines.append(f"• {item['name']} — {item['chats']}{suffix}")
+            lines.append(
+                f"• {item['name']} — {item['chats']}{suffix}, "
+                f"первый ответ {_chat_hourly_seconds(item.get('first_reply_day'))}, "
+                f"внутри чата {_chat_hourly_seconds(item.get('inner_reply_day'))}")
     else:
         lines.append("<b>Чатники за сутки:</b> чатов пока не было")
 
@@ -30891,6 +30931,162 @@ def _chat_hourly_text(data):
             f"{item['name']} — {item['status']}" for item in on_status))
     return "\n".join(lines)
 
+
+
+# --- Картинка отчёта --------------------------------------------------------------------------
+# Владелец просил присылать отчёт таблицей-картинкой, как отбивку табло. Рисуем тем же
+# Pillow и теми же шрифтами (`_szov_font`): второй способ рисовать таблицы в проекте не нужен.
+# Колонки «за час» и «за сутки» разведены подложкой — как звонки и смены в таблице табло.
+_CHAT_HOURLY_TABLE_COLUMNS = (
+    ('name', 'Чатник', 250),
+    ('status', 'Статус', 130),
+    ('chats_hour', 'Чатов\nза час', 110),
+    ('first_hour', 'Первый\nответ\nза час', 135),
+    ('inner_hour', 'Внутри чата\nза час', 155),
+    ('chats', 'Чатов\nза сутки', 120),
+    ('first_day', 'Первый\nответ\nза сутки', 145),
+    ('inner_day', 'Внутри чата\nза сутки', 165),
+    ('open_chats', 'Открыто\nсейчас', 130),
+)
+_CHAT_HOURLY_HOUR_COLUMN_KEYS = frozenset({'chats_hour', 'first_hour', 'inner_hour'})
+
+
+def _chat_hourly_table_columns(with_hour):
+    """Колонки таблицы. В отчёте за 00:00 часа нет — и пустых колонок быть не должно."""
+    return tuple(col for col in _CHAT_HOURLY_TABLE_COLUMNS
+                 if with_hour or col[0] not in _CHAT_HOURLY_HOUR_COLUMN_KEYS)
+
+
+def _chat_hourly_table_row(item):
+    """Значения ячеек для одного чатника. Прочерк — «нечего считать», а не ноль."""
+    def count(value):
+        # Прочерк вместо нуля: колонка из нулей — визуальный шум, значимые числа в ней теряются.
+        return '—' if not value else str(value)
+
+    return {
+        'name': item['name'],
+        'status': item.get('status') or '—',
+        'chats_hour': count(item.get('chats_hour')),
+        'first_hour': _chat_hourly_seconds(item.get('first_reply_hour')),
+        'inner_hour': _chat_hourly_seconds(item.get('inner_reply_hour')),
+        'chats': count(item.get('chats')),
+        'first_day': _chat_hourly_seconds(item.get('first_reply_day')),
+        'inner_day': _chat_hourly_seconds(item.get('inner_reply_day')),
+        'open_chats': count(item.get('open_chats')),
+    }
+
+
+def _chat_hourly_render_table_png(data):
+    """PNG всего отчёта: шапка, строка на каждого чатника и итог внизу."""
+    from PIL import Image, ImageDraw
+
+    font = _szov_font(20)
+    font_bold = _szov_font(20, bold=True)
+    columns = _chat_hourly_table_columns(bool(data.get('hour_label')))
+    operators = data.get('operators') or []
+
+    row_h, head_h, title_h = 34, 74, 76
+    width = sum(col[2] for col in columns)
+    height = title_h + head_h + row_h * (len(operators) + 1)
+    image = Image.new('RGB', (width + 2, height + 2), '#ffffff')
+    draw = ImageDraw.Draw(image)
+
+    head_fill, border = '#b7c7e0', '#9aa7b8'
+    # Часовые колонки — то, ради чего отчёт приходит каждый час; их и подсвечиваем.
+    hour_head_fill, hour_cell_fill = '#a3b9d9', '#e8f0fb'
+    total_fill = '#eef2f7'
+
+    subtitle = (f"за час {data['hour_label']} и с начала суток" if data.get('hour_label')
+                else "с начала суток")
+    draw.text((4, 6), f"Чаты — {data['generated_at']}", font=_szov_font(26, bold=True), fill='#0f172a')
+    draw.text((4, 42), subtitle, font=_szov_font(17), fill='#64748b')
+
+    x = 1
+    for key, title, col_w in columns:
+        draw.rectangle([x, title_h, x + col_w, title_h + head_h],
+                       fill=hour_head_fill if key in _CHAT_HOURLY_HOUR_COLUMN_KEYS else head_fill,
+                       outline=border)
+        parts = title.split('\n')
+        ty = title_h + (head_h - len(parts) * 22) // 2
+        for part in parts:
+            tw = draw.textlength(part, font=font_bold)
+            draw.text((x + (col_w - tw) / 2, ty), part, font=font_bold, fill='#1a1a1a')
+            ty += 22
+        x += col_w
+
+    def draw_row(y, values, fill=None, bold=False):
+        x = 1
+        for key, _title, col_w in columns:
+            cell_fill = fill or (hour_cell_fill if key in _CHAT_HOURLY_HOUR_COLUMN_KEYS else '#ffffff')
+            draw.rectangle([x, y, x + col_w, y + row_h], fill=cell_fill, outline=border)
+            text = values.get(key, '')
+            cell_font = font_bold if (bold or key == 'name') else font
+            tw = draw.textlength(text, font=cell_font)
+            # Имя прижимаем влево — колонка узкая, а по центру фамилии «прыгают».
+            tx = x + 8 if key == 'name' else x + (col_w - tw) / 2
+            draw.text((tx, y + (row_h - 24) / 2), text, font=cell_font, fill='#1a1a1a')
+            x += col_w
+
+    y = title_h + head_h
+    for item in operators:
+        draw_row(y, _chat_hourly_table_row(item))
+        y += row_h
+
+    draw_row(y, _chat_hourly_table_row({
+        'name': 'Итого',
+        'status': f"онлайн {len(data.get('online') or [])}",
+        'chats_hour': data.get('chats_hour'),
+        'chats': data.get('chats_day'),
+        'first_reply_hour': data.get('first_reply_hour'),
+        'inner_reply_hour': data.get('inner_reply_hour'),
+        'first_reply_day': data.get('first_reply_day'),
+        'inner_reply_day': data.get('inner_reply_day'),
+        'open_chats': data.get('chats_open'),
+    }), fill=total_fill, bold=True)
+
+    buffer = BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _chat_hourly_caption(data):
+    """Подпись к картинке. Цифры не повторяем — они все в таблице; тут только отклонения."""
+    hour_label = data.get('hour_label')
+    lines = [f"<b>Чаты</b> — {data['generated_at']}"
+             + (f", за {hour_label}" if hour_label else "")]
+    if data.get('online_error'):
+        lines.append("Статусы операторов Chat2Desk не отдал — колонка «Статус» пустая.")
+    return "\n".join(lines)
+
+
+async def _chat_hourly_prepare(now=None):
+    """Собрать отчёт целиком: данные, подпись и картинку.
+
+    Отдельно от отправки: подписчиков несколько, а собирать одно и то же по разу
+    на каждый чат — лишние запросы к Chat2Desk, квота там общая на компанию."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(executor_pool, functools.partial(_chat_hourly_report, now=now))
+    caption = _chat_hourly_caption(data)
+    try:
+        image = await loop.run_in_executor(executor_pool, _chat_hourly_render_table_png, data)
+    except Exception as exc:
+        # Без шрифта с кириллицей картинку не собрать — тогда уходит текстовый вид.
+        logging.error("Отчёт по чатам: не удалось нарисовать таблицу: %s", exc)
+        image = None
+    return data, caption, image
+
+
+async def _chat_hourly_deliver(chat_id, data, caption, image):
+    """Отправить готовый отчёт в один чат: картинка с подписью, иначе текстом."""
+    if image:
+        try:
+            await bot.send_photo(chat_id, types.InputFile(BytesIO(image), filename='chats.png'),
+                                 caption=caption, parse_mode='HTML')
+            return
+        except Exception as exc:
+            logging.error("Отчёт по чатам: картинка не ушла, отправляю текстом: %s", exc)
+    await bot.send_message(chat_id, _chat_hourly_text(data), parse_mode='HTML')
 
 def _chat_hourly_access_allowed(user):
     """Отчёт по чатам — администраторам, главам отделов и СВ отдела СЗоВ."""
@@ -30921,8 +31117,7 @@ async def chat_hourly_broadcast_job():
         return
 
     try:
-        data = await loop.run_in_executor(executor_pool, _chat_hourly_report)
-        text = _chat_hourly_text(data)
+        data, caption, image = await _chat_hourly_prepare()
     except Exception as exc:
         logging.error("Отчёт по чатам: не удалось собрать: %s", exc, exc_info=True)
         return
@@ -30930,7 +31125,7 @@ async def chat_hourly_broadcast_job():
     for subscription in subscriptions:
         chat_id = subscription['chat_id']
         try:
-            await bot.send_message(chat_id, text, parse_mode='HTML')
+            await _chat_hourly_deliver(chat_id, data, caption, image)
             await loop.run_in_executor(
                 executor_pool, db.mark_chat_hourly_subscription_sent, chat_id)
         except Exception as exc:
@@ -36550,12 +36745,12 @@ async def chat_hourly_command(message: types.Message):
 
     await message.reply("Собираю чаты…")
     try:
-        data = await loop.run_in_executor(executor_pool, _chat_hourly_report)
+        data, caption, image = await _chat_hourly_prepare()
     except Exception as exc:
         logging.error("Команда /chats: не удалось собрать отчёт: %s", exc, exc_info=True)
         await message.reply("Не удалось собрать отчёт — Chat2Desk не ответил.")
         return
-    await message.reply(_chat_hourly_text(data), parse_mode='HTML')
+    await _chat_hourly_deliver(message.chat.id, data, caption, image)
 
 
 @dp.message_handler(commands=['chats_subscribe'])

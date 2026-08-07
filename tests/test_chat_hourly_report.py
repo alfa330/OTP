@@ -29,9 +29,12 @@ NAMES = {
     'CHAT_HOURLY_CACHE_SECONDS', 'CHAT_HOURLY_BROADCAST_HOURS', 'CHAT_HOURLY_BROADCAST_MINUTE',
     '_chat_hourly_requests_cache', '_chat_hourly_report_cache', '_chat_hourly_lock',
     '_chat_hourly_number', '_chat_hourly_is_open', '_chat_hourly_request_start',
-    '_chat_hourly_operator_name', '_chat_hourly_fetch_requests', '_chat_hourly_online',
+    '_chat_hourly_operator_name', '_chat_hourly_fetch_requests',
+    '_chat_hourly_operator_states', '_chat_hourly_online',
     '_chat_hourly_response_times', '_chat_hourly_collect', '_chat_hourly_report',
-    '_chat_hourly_seconds', '_chat_hourly_text',
+    '_chat_hourly_seconds', '_chat_hourly_text', '_chat_hourly_caption',
+    '_CHAT_HOURLY_TABLE_COLUMNS', '_CHAT_HOURLY_HOUR_COLUMN_KEYS',
+    '_chat_hourly_table_columns', '_chat_hourly_table_row',
 }
 
 
@@ -216,7 +219,7 @@ class ChatHourlyFetchTests(unittest.TestCase):
 
 
 class ChatHourlyOnlineTests(unittest.TestCase):
-    """«Кто онлайн» из /v1/operators: живые учётки, статусы отдельно."""
+    """Статусы из /v1/operators: живые учётки, «онлайн» отдельно от «на статусе»."""
 
     OPERATORS = [
         {'first_name': 'Асан', 'last_name': 'Тестбаев', 'status': 'enabled',
@@ -234,10 +237,17 @@ class ChatHourlyOnlineTests(unittest.TestCase):
     ]
 
     def setUp(self):
-        self.online, self.on_status = _namespace()['_chat_hourly_online'](self.OPERATORS)
+        ns = _namespace()
+        self.states = ns['_chat_hourly_operator_states'](self.OPERATORS)
+        self.online, self.on_status = ns['_chat_hourly_online'](self.states)
 
-    def test_only_enabled_and_logged_in_operators_are_online(self):
-        """Удалённых и админскую учётку в отчёт не берём: они висят online от последнего входа."""
+    def test_dead_accounts_never_appear(self):
+        """Удалённых и админскую учётку не берём: они висят online от последнего входа."""
+        self.assertEqual(set(self.states),
+                         {'Асан Тестбаев', 'Бекзат Сынакбай',
+                          'Ерсын Досанбаев', 'Мади Кыдырбай'})
+
+    def test_only_logged_in_and_free_operators_are_online(self):
         self.assertEqual([item['name'] for item in self.online],
                          ['Асан Тестбаев', 'Бекзат Сынакбай'])
 
@@ -245,8 +255,13 @@ class ChatHourlyOnlineTests(unittest.TestCase):
         """«Онлайн» на табло — это свободные и в разговоре, перерыв туда не входит."""
         self.assertEqual(self.on_status, [{'name': 'Ерсын Досанбаев', 'status': 'отпуск'}])
 
-    def test_open_chats_are_shown_per_operator(self):
-        self.assertEqual(self.online[0]['open_chats'], 61)
+    def test_status_labels_are_russian(self):
+        self.assertEqual(self.states['Ерсын Досанбаев']['status'], 'отпуск')
+        self.assertEqual(self.states['Асан Тестбаев']['status'], 'онлайн')
+        self.assertEqual(self.states['Мади Кыдырбай']['status'], 'офлайн')
+
+    def test_open_chats_are_kept_per_operator(self):
+        self.assertEqual(self.states['Асан Тестбаев']['open_chats'], 61)
 
 
 class ChatHourlyCollectTests(unittest.TestCase):
@@ -282,6 +297,48 @@ class ChatHourlyCollectTests(unittest.TestCase):
         _ns, data = self._collect()
         self.assertEqual([(o['name'], o['chats'], o['chats_hour']) for o in data['operators']],
                          [('Алихан', 2, 1), ('Ерланов', 2, 1)])
+
+    def test_response_times_are_computed_per_operator(self):
+        """Время ответа по чатнику считается теми же формулами, что и итог."""
+        _ns, data = self._collect()
+        by_name = {o['name']: o for o in data['operators']}
+        # Алихан: заявки 1 и 2 → первый ответ (10+20)/2 = 15, внутри чата (80-20)/2 = 30
+        self.assertEqual(by_name['Алихан']['first_reply_day'], 15)
+        self.assertEqual(by_name['Алихан']['inner_reply_day'], 30)
+        # Ерланов: заявки 3 и 4 → (30+40)/2 = 35, внутри чата (90-30)/1 = 60
+        self.assertEqual(by_name['Ерланов']['first_reply_day'], 35)
+        self.assertEqual(by_name['Ерланов']['inner_reply_day'], 60)
+        # за час у Алихана только заявка 2
+        self.assertEqual(by_name['Алихан']['first_reply_hour'], 20)
+
+    def test_operator_row_carries_status_and_open_chats(self):
+        api = _FakeChat2Desk(self.ROWS, limit=10)
+        ns = _namespace(fake_requests=api)
+        ns['_chat_hourly_fetch_operators'] = lambda: [
+            {'first_name': 'Ерланов', 'last_name': '', 'status': 'enabled',
+             'online': 1, 'offline_type': None, 'opened_dialogs': 12},
+        ]
+        now = datetime(2026, 8, 7, 11, 0, tzinfo=ZoneInfo('Asia/Almaty'))
+        by_name = {o['name']: o for o in ns['_chat_hourly_collect'](now=now)['operators']}
+        self.assertEqual(by_name['Ерланов']['status'], 'онлайн')
+        self.assertEqual(by_name['Ерланов']['open_chats'], 12)
+        # у того, кого нет в Chat2Desk, статуса и открытых чатов просто нет
+        self.assertEqual(by_name['Алихан']['status'], '—')
+        self.assertIsNone(by_name['Алихан']['open_chats'])
+
+    def test_online_operator_without_chats_is_still_a_row(self):
+        """Иначе «кто онлайн» пришлось бы держать отдельным списком рядом с таблицей."""
+        api = _FakeChat2Desk(self.ROWS, limit=10)
+        ns = _namespace(fake_requests=api)
+        ns['_chat_hourly_fetch_operators'] = lambda: [
+            {'first_name': 'Новичок', 'last_name': '', 'status': 'enabled',
+             'online': 1, 'offline_type': None, 'opened_dialogs': 0},
+        ]
+        now = datetime(2026, 8, 7, 11, 0, tzinfo=ZoneInfo('Asia/Almaty'))
+        data = ns['_chat_hourly_collect'](now=now)
+        row = next(o for o in data['operators'] if o['name'] == 'Новичок')
+        self.assertEqual(row['chats'], 0)
+        self.assertEqual(row['status'], 'онлайн')
 
     def test_hour_and_day_response_times_differ(self):
         _ns, data = self._collect()
@@ -320,8 +377,12 @@ class ChatHourlyTextTests(unittest.TestCase):
         'chats_day': 337, 'chats_hour': 52, 'chats_open': 133,
         'first_reply_day': 54, 'first_reply_hour': 21,
         'inner_reply_day': 170, 'inner_reply_hour': 290,
-        'operators': [{'name': 'Бекзат Сынакбай', 'chats': 73, 'chats_hour': 17},
-                      {'name': 'Нурлан Айтбай', 'chats': 13, 'chats_hour': 0}],
+        'operators': [{'name': 'Бекзат Сынакбай', 'status': 'онлайн', 'chats': 73,
+                       'chats_hour': 17, 'first_reply_day': 33, 'first_reply_hour': 12,
+                       'inner_reply_day': 190, 'inner_reply_hour': 210, 'open_chats': 63},
+                      {'name': 'Нурлан Айтбай', 'status': 'офлайн', 'chats': 13,
+                       'chats_hour': 0, 'first_reply_day': 96, 'first_reply_hour': None,
+                       'inner_reply_day': None, 'inner_reply_hour': None, 'open_chats': 0}],
         'online': [{'name': 'Асан Тестбаев', 'open_chats': 63}],
         'on_status': [{'name': 'Карим Тестов', 'status': 'перерыв'}],
         'online_error': None,
@@ -340,8 +401,13 @@ class ChatHourlyTextTests(unittest.TestCase):
 
     def test_operator_hour_count_is_hidden_when_it_is_zero(self):
         """«(за час 0)» у каждого второго — это шум, а не информация."""
-        self.assertIn('• Бекзат Сынакбай — 73 (за час 17)', self.text)
-        self.assertIn('• Нурлан Айтбай — 13\n', self.text)
+        self.assertIn('• Бекзат Сынакбай — 73 (за час 17),', self.text)
+        self.assertIn('• Нурлан Айтбай — 13, первый ответ 1:36', self.text)
+
+    def test_response_times_are_broken_down_per_operator(self):
+        """Владелец просил видеть время ответа не только итогом, но и по чатникам."""
+        self.assertIn('• Бекзат Сынакбай — 73 (за час 17), '
+                      'первый ответ 0:33, внутри чата 3:10', self.text)
 
     def test_status_operators_are_named_with_their_status(self):
         self.assertIn('<b>На статусе:</b> Карим Тестов — перерыв', self.text)
@@ -356,6 +422,84 @@ class ChatHourlyTextTests(unittest.TestCase):
         text = _namespace()['_chat_hourly_text'](data)
         self.assertIn('чатов пока не было', text)
         self.assertIn('<b>Онлайн:</b> никого', text)
+
+
+class ChatHourlyTableTests(unittest.TestCase):
+    """Таблица-картинка: набор колонок и что попадает в ячейки."""
+
+    OPERATOR = {
+        'name': 'Бекзат Сынакбай', 'status': 'онлайн',
+        'chats': 82, 'chats_hour': 30,
+        'first_reply_day': 93, 'first_reply_hour': 99,
+        'inner_reply_day': 848, 'inner_reply_hour': 1625,
+        'open_chats': 70,
+    }
+
+    def setUp(self):
+        self.ns = _namespace()
+
+    def test_hour_columns_disappear_in_the_midnight_report(self):
+        """В отчёте за 00:00 часа нет — пустые колонки показывать нечестно."""
+        with_hour = [c[0] for c in self.ns['_chat_hourly_table_columns'](True)]
+        without = [c[0] for c in self.ns['_chat_hourly_table_columns'](False)]
+        self.assertIn('chats_hour', with_hour)
+        self.assertNotIn('chats_hour', without)
+        self.assertNotIn('first_hour', without)
+        self.assertNotIn('inner_hour', without)
+        self.assertIn('chats', without)
+        self.assertIn('first_day', without)
+
+    def test_both_response_times_are_columns_for_hour_and_day(self):
+        """Ровно то, что просил владелец: время ответа в разрезе по операторам."""
+        keys = [c[0] for c in self.ns['_chat_hourly_table_columns'](True)]
+        for key in ('first_hour', 'inner_hour', 'first_day', 'inner_day'):
+            self.assertIn(key, keys)
+
+    def test_cells_show_minutes_and_seconds(self):
+        cells = self.ns['_chat_hourly_table_row'](self.OPERATOR)
+        self.assertEqual(cells['first_day'], '1:33')
+        self.assertEqual(cells['inner_day'], '14:08')
+        self.assertEqual(cells['first_hour'], '1:39')
+        self.assertEqual(cells['inner_hour'], '27:05')
+        self.assertEqual(cells['chats'], '82')
+        self.assertEqual(cells['open_chats'], '70')
+        self.assertEqual(cells['status'], 'онлайн')
+
+    def test_zero_and_missing_are_dashes(self):
+        """Колонка из нулей — визуальный шум, значимые числа в ней теряются."""
+        cells = self.ns['_chat_hourly_table_row']({
+            'name': 'Нурлан Айтбай', 'status': 'офлайн',
+            'chats': 13, 'chats_hour': 0,
+            'first_reply_day': 36, 'first_reply_hour': None,
+            'inner_reply_day': None, 'inner_reply_hour': None,
+            'open_chats': 0,
+        })
+        self.assertEqual(cells['chats_hour'], '—')
+        self.assertEqual(cells['first_hour'], '—')
+        self.assertEqual(cells['inner_day'], '—')
+        self.assertEqual(cells['open_chats'], '—')
+        self.assertEqual(cells['first_day'], '0:36')
+
+    def test_unknown_operator_has_no_status(self):
+        cells = self.ns['_chat_hourly_table_row']({'name': 'Кто-то', 'chats': 1})
+        self.assertEqual(cells['status'], '—')
+
+    def test_caption_does_not_repeat_the_table(self):
+        """Цифры уже на картинке — дублировать их подписью значит шуметь."""
+        caption = self.ns['_chat_hourly_caption']({
+            'generated_at': '07.08.2026 12:00', 'hour_label': '11:00–12:00',
+            'chats_day': 390, 'chats_hour': 67, 'online_error': None,
+        })
+        self.assertIn('<b>Чаты</b> — 07.08.2026 12:00, за 11:00–12:00', caption)
+        for gone in ('390', '67', 'Открыто', 'Среднее'):
+            self.assertNotIn(gone, caption, gone)
+
+    def test_caption_warns_when_statuses_are_missing(self):
+        caption = self.ns['_chat_hourly_caption']({
+            'generated_at': '07.08.2026 12:00', 'hour_label': None,
+            'online_error': 'Chat2Desk 500',
+        })
+        self.assertIn('Статусы операторов Chat2Desk не отдал', caption)
 
 
 class ChatHourlyWiringTests(unittest.TestCase):
@@ -385,7 +529,7 @@ class ChatHourlyWiringTests(unittest.TestCase):
         """Квота Chat2Desk общая на компанию — почасовая джоба без подписчиков её не тратит."""
         job = self.source[self.source.index("async def chat_hourly_broadcast_job("):]
         job = job[:job.index("\n\n\n")]
-        self.assertLess(job.index("if not subscriptions:"), job.index("_chat_hourly_report"))
+        self.assertLess(job.index("if not subscriptions:"), job.index("_chat_hourly_prepare"))
 
     def test_access_is_not_open_to_everyone(self):
         guard = self.source[self.source.index("def _chat_hourly_access_allowed("):]
