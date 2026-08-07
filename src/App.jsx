@@ -33862,7 +33862,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const availableTabs = getAvailableTabs();
 
             return (
-                React.createElement('div',{className:'min-h-screen p-2.5 sm:p-4 md:p-8'},
+                // Внешний main-content для «Конкурсов» отдаёт p-0 — все отступы
+                // вкладка задаёт сама. pt-[68px] — под fixed-гамбургер (16+44px),
+                // который виден до 768px ВКЛЮЧИТЕЛЬНО (media max-width:768), поэтому
+                // обычный top-отступ возвращается только с 769px (min-[769px]).
+                React.createElement('div',{className:'min-h-screen p-2.5 pt-[68px] sm:p-4 sm:pt-[68px] md:p-8 md:pt-[68px] min-[769px]:pt-8'},
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-3.5 mb-2.5 sm:p-6 sm:mb-6'}, React.createElement('div',{className:'flex flex-row flex-wrap justify-between items-center gap-3 md:gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-xl sm:text-3xl font-bold text-gray-800 sm:mb-2'}, React.createElement(FaIcon,{className:'fas fa-trophy text-yellow-500 mr-2 sm:mr-3'}), 'Конкурсы'), React.createElement('p',{className:'hidden sm:block text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-3 py-1.5 text-sm sm:px-6 sm:py-3 sm:text-base rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2 flex-shrink-0'}, React.createElement(FaIcon,{className:'fas fa-user-check'}), 'Админ-режим') : null)),
                         React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-1.5 mb-2.5 sm:p-4 sm:mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-1.5 sm:gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-3.5 py-2 text-sm sm:px-6 sm:py-3 sm:text-base rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement(FaIcon,{className:`fas ${tab.icon} mr-1.5 sm:mr-2`}), tab.label)) )),
@@ -44653,7 +44657,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
