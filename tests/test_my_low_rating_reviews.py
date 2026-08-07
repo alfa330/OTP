@@ -74,29 +74,33 @@ class MyLowRatingsEndpointScopeTests(unittest.TestCase):
             and ast.unparse(node.func.value) == "request.args"
         ])
 
-    def test_without_qr_access_no_rows_are_returned(self):
-        guard = next(
-            node for node in ast.walk(self.function)
-            if isinstance(node, ast.If) and ast.unparse(node.test) == "not granted"
-        )
+    def test_rows_are_gated_by_qr_access(self):
+        """Строки — только по QR: без подтверждения в ответе пустой список."""
         payload = next(
-            node for node in ast.walk(guard)
+            node for node in ast.walk(self.function)
             if isinstance(node, ast.Dict)
             and any(isinstance(key, ast.Constant) and key.value == "rows" for key in node.keys)
         )
         rows_value = payload.values[
             next(i for i, key in enumerate(payload.keys) if getattr(key, "value", None) == "rows")
         ]
-        self.assertEqual(ast.unparse(rows_value), "[]")
-        # Гейт стоит ДО обращения к данным.
-        guard_line = guard.lineno
-        fetch_line = next(
-            node.lineno for node in ast.walk(self.function)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "list_operator_low_rating_reviews"
+        self.assertIsInstance(rows_value, ast.IfExp)
+        self.assertEqual(ast.unparse(rows_value.test), "granted")
+        self.assertEqual(ast.unparse(rows_value.orelse), "[]")
+
+    def test_summary_is_returned_even_without_qr(self):
+        """Сводка (сколько оценок, сколько снято) показывается до сканирования QR."""
+        payload = next(
+            node for node in ast.walk(self.function)
+            if isinstance(node, ast.Dict)
+            and any(isinstance(key, ast.Constant) and key.value == "rows" for key in node.keys)
         )
-        self.assertLess(guard_line, fetch_line)
+        # summary приезжает распаковкой **result и ничем не перекрывается,
+        # значит счётчики есть в ответе при любом granted.
+        self.assertIn("**result", ast.unparse(payload))
+        self.assertNotIn("summary", [getattr(key, "value", None) for key in payload.keys])
+        # Ранних выходов с обнулённой сводкой в функции нет.
+        self.assertNotIn("'summary': {'total': 0", self.source)
 
     def test_access_is_required_for_operator_role(self):
         self.assertIn("_is_sensitive_access_unlocked(requester_id, session_id)", self.source)
@@ -164,6 +168,38 @@ class OperatorLowRatingItemTests(unittest.TestCase):
             "operator_id", "operator_name", "review_count",
         ):
             self.assertNotIn(forbidden, result)
+
+
+class LowRatingChatAccessTests(unittest.TestCase):
+    """Переписку своей низкой оценки оператор открывает только по QR и только свою."""
+
+    def setUp(self):
+        self.function = _bot_function("chat_manager_low_rating_review_chat")
+        self.source = ast.unparse(self.function)
+
+    def test_non_reviewer_can_open_only_own_rating(self):
+        self.assertIn("is_own_rating = int(current.get('operator_id') or 0) == int(requester_id)", self.source)
+        guard = next(
+            node for node in ast.walk(self.function)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "not is_reviewer"
+        )
+        own_check = next(
+            node for node in ast.walk(guard)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "not is_own_rating"
+        )
+        self.assertIn("403", ast.unparse(own_check))
+
+    def test_operator_chat_requires_unlocked_session(self):
+        guard = next(
+            node for node in ast.walk(self.function)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "not is_reviewer"
+        )
+        self.assertIn("_is_sensitive_access_unlocked", ast.unparse(guard))
+        self.assertIn("role == 'operator'", ast.unparse(guard))
+
+    def test_reviewer_department_scope_is_preserved(self):
+        self.assertIn("_department_scope_id_for_requester(requester_id)", self.source)
+        self.assertIn("_is_global_admin_requester(requester_role, requester_id)", self.source)
 
 
 if __name__ == "__main__":

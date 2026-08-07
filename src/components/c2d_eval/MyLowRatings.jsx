@@ -1,29 +1,29 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
+import ChatThread from './ChatThread';
 import { iosCard } from '../ui/ios';
 
 /* «Проверки низких оценок» в разделе «Мои оценки» чат-менеджера.
  *
  * Оценку клиента ниже 4 проверяет ОКК (см. «Учёт часов → Низкие оценки»):
  * необоснованную снимают, и она перестаёт влиять на показатель оператора.
- * Здесь оператор видит решения ТОЛЬКО по своим оценкам и только после
- * QR-подтверждения доступа — тем же ключом, что открывает телефоны и записи.
+ *
+ * На странице живёт только компактная сводка. Детали — переписка и вердикты —
+ * закрыты тем же QR-ключом, что телефоны и записи разговоров, и открываются
+ * в полноэкранном просмотре: та же раскладка, что у проверяющих в «Учёте
+ * часов», но строго свои чаты и без возможности вынести вердикт.
  *
  * Цвета согласованы с проверяющей стороной и намеренно «перевёрнуты»:
  * обоснованно (оценка остаётся) — красный, необоснованно (снята) — зелёный. */
 
 const VERDICTS = {
-    invalid: { label: 'Необоснованно · снята', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
-    valid: { label: 'Обоснованно', pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
-    pending: { label: 'На проверке', pill: 'bg-slate-100 text-slate-500 ring-slate-200' },
+    invalid: { short: 'Необоснованно', label: 'Необоснованно · снята', pill: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+    valid: { short: 'Обоснованно', label: 'Обоснованно', pill: 'bg-rose-50 text-rose-700 ring-rose-200' },
+    pending: { short: 'На проверке', label: 'На проверке', pill: 'bg-slate-100 text-slate-500 ring-slate-200' },
 };
 
 const verdictOf = (row) => VERDICTS[row?.final_status] || VERDICTS.pending;
-
-// За месяц у чат-менеджера набирается под сотню низких оценок — весь список
-// сразу превратил бы страницу оценок в простыню. Показываем свежие, остальные — по кнопке.
-const VISIBLE_LIMIT = 8;
 
 const formatDateTime = (value) => {
     const text = String(value || '').trim();
@@ -34,10 +34,27 @@ const formatDateTime = (value) => {
     return `${dd}.${mm}${timePart ? ` ${timePart.slice(0, 5)}` : ''}`;
 };
 
+// ISO-день → 01.07.2026, как в остальных датах сайта.
+const formatDay = (value) => {
+    const [yyyy, mm, dd] = String(value || '').slice(0, 10).split('-');
+    return dd ? `${dd}.${mm}.${yyyy}` : '';
+};
+
+const Stat = ({ value, label, tone }) => (
+    <div className="min-w-0 rounded-2xl bg-slate-50 px-3 py-2.5 text-center ring-1 ring-slate-200/70">
+        <div className={`text-[19px] font-semibold leading-tight ${tone}`}>{value}</div>
+        <div className="mt-0.5 truncate text-[11px] text-slate-500">{label}</div>
+    </div>
+);
+
 export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId, month, granted }) {
     const [data, setData] = useState(null);
-    const [expandedId, setExpandedId] = useState('');
-    const [showAll, setShowAll] = useState(false);
+    const [open, setOpen] = useState(false);
+    const [selectedId, setSelectedId] = useState('');
+    const [chat, setChat] = useState({ id: '', snapshot: null, loading: false, error: '' });
+    const [hideService, setHideService] = useState(false);
+    const chatCacheRef = useRef({});
+    const chatRequestRef = useRef('');
 
     useEffect(() => {
         if (!userId || !month) return undefined;
@@ -47,8 +64,7 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
             .then((response) => {
                 if (cancelled) return;
                 setData(response.data || null);
-                setExpandedId('');
-                setShowAll(false);
+                setSelectedId('');
             })
             .catch((e) => {
                 if (cancelled) return;
@@ -58,137 +74,317 @@ export default function MyLowRatings({ apiBaseUrl, withAccessTokenHeader, userId
                 setData(null);
             });
         return () => { cancelled = true; };
-        // granted в зависимостях: после скана QR данные нужно перезапросить.
+        // granted в зависимостях: после скана QR строки нужно перезапросить.
     }, [apiBaseUrl, withAccessTokenHeader, userId, month, granted]);
+
+    // Смена месяца закрывает просмотр: строки под ним уже другие.
+    useEffect(() => { setOpen(false); }, [month]);
+
+    const fetchChat = useCallback(async (reviewId, { force = false } = {}) => {
+        const key = String(reviewId || '');
+        if (!key) return;
+        chatRequestRef.current = key;
+        const cached = chatCacheRef.current[key];
+        if (cached && !force) {
+            setChat({ id: key, snapshot: cached, loading: false, error: '' });
+            return;
+        }
+        setChat({ id: key, snapshot: null, loading: true, error: '' });
+        try {
+            const headers = withAccessTokenHeader ? withAccessTokenHeader({ 'X-User-Id': userId }) : {};
+            const response = await axios.get(
+                `${apiBaseUrl}/api/chat_manager/low_rating_reviews/${encodeURIComponent(key)}/chat`,
+                { headers, withCredentials: true }
+            );
+            const snapshot = response.data?.snapshot || null;
+            if (snapshot) chatCacheRef.current[key] = snapshot;
+            // Пока грузили — могли переключиться на другую строку.
+            if (chatRequestRef.current !== key) return;
+            setChat({ id: key, snapshot, loading: false, error: snapshot ? '' : 'Переписка не найдена' });
+        } catch (e) {
+            if (chatRequestRef.current !== key) return;
+            setChat({
+                id: key,
+                snapshot: null,
+                loading: false,
+                error: e?.response?.data?.error || 'Не удалось загрузить переписку',
+            });
+        }
+    }, [apiBaseUrl, withAccessTokenHeader, userId]);
+
+    useEffect(() => {
+        if (!open || !selectedId) return;
+        fetchChat(selectedId);
+    }, [open, selectedId, fetchChat]);
+
+    // Полноэкранный просмотр: Esc закрывает, страница под ним не прокручивается.
+    useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const onKeyDown = (e) => { if (e.key === 'Escape') setOpen(false); };
+        window.addEventListener('keydown', onKeyDown);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            window.removeEventListener('keydown', onKeyDown);
+        };
+    }, [open]);
 
     // Оператору без чат-менеджерской модели блок не показываем совсем: низких
     // оценок клиента у него не бывает, пустая карточка была бы шумом.
     if (!data || !data.is_chat_manager) return null;
 
-    if (!data.sensitive_access?.granted) {
-        return (
-            <div className={`${iosCard} mb-6 flex items-center gap-2 px-4 py-3 text-[13px] text-slate-500`}>
-                <FaIcon className="fas fa-shield-alt text-slate-400" />
-                Проверки низких оценок откроются после QR-подтверждения доступа
-            </div>
-        );
-    }
-
     const rows = Array.isArray(data.rows) ? data.rows : [];
     const summary = data.summary || {};
-    const visibleRows = showAll ? rows : rows.slice(0, VISIBLE_LIMIT);
+    const total = Number(summary.total || 0);
+    const isGranted = Boolean(data.sensitive_access?.granted);
+    const selected = rows.find((row) => String(row.id) === String(selectedId)) || null;
+    const chatReady = Boolean(selected) && String(chat.id) === String(selected.id);
 
     return (
-        <section className={`${iosCard} mb-6 overflow-hidden`}>
-            <div className="border-b border-slate-100 px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
-                        <FaIcon className="fas fa-star text-amber-500" />
-                        Проверки низких оценок
-                    </h3>
-                    {rows.length > 0 && (
-                        <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] font-medium">
-                            {Number(summary.invalid) > 0 && (
-                                <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700 ring-1 ring-emerald-200">Снято {summary.invalid}</span>
-                            )}
-                            {Number(summary.valid) > 0 && (
-                                <span className="rounded-full bg-rose-50 px-2.5 py-1 text-rose-700 ring-1 ring-rose-200">Обоснованно {summary.valid}</span>
-                            )}
-                            {Number(summary.pending) > 0 && (
-                                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-500 ring-1 ring-slate-200">На проверке {summary.pending}</span>
-                            )}
-                        </div>
+        <>
+            <section className={`${iosCard} mb-6 p-4`}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <h3 className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
+                            <FaIcon className="fas fa-star-half-alt text-amber-500" />
+                            Низкие оценки клиентов
+                        </h3>
+                        <p className="mt-1 text-[12px] leading-5 text-slate-500">
+                            Оценку ниже 4 проверяет ОКК. Признанную необоснованной снимают — она не влияет на ваш показатель.
+                        </p>
+                    </div>
+                    {total > 0 && isGranted && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setOpen(true);
+                                // На телефоне сначала список: чат занимает весь экран,
+                                // и автовыбор увёл бы туда мимо списка.
+                                const wide = typeof window === 'undefined' || window.innerWidth >= 768;
+                                if (wide && !selectedId && rows.length) setSelectedId(String(rows[0].id));
+                            }}
+                            className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full bg-slate-900 px-4 text-[12.5px] font-semibold text-white shadow-sm transition hover:bg-slate-800 active:scale-[0.98]"
+                        >
+                            <FaIcon className="fas fa-comments" />
+                            Смотреть проверки
+                        </button>
                     )}
                 </div>
-                <p className="mt-1 text-[12px] text-slate-500">
-                    Оценку клиента ниже 4 проверяет ОКК. Признанную необоснованной снимают — она не влияет на ваш показатель.
-                </p>
-            </div>
 
-            {rows.length === 0 ? (
-                <div className="px-4 py-4 text-[13px] text-slate-500">За этот месяц низких оценок нет.</div>
-            ) : (
-                <ul className="divide-y divide-slate-100">
-                    {visibleRows.map((row) => {
-                        const verdict = verdictOf(row);
-                        const isOpen = String(expandedId) === String(row.id);
-                        const decisions = row.decisions || [];
-                        const hasDetails = Boolean(row.client_comment) || decisions.length > 0 || Boolean(row.final_comment);
-                        return (
-                            <li key={row.id}>
-                                <button
-                                    type="button"
-                                    onClick={() => setExpandedId(isOpen ? '' : String(row.id))}
-                                    disabled={!hasDetails}
-                                    className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${hasDetails ? 'hover:bg-slate-50' : 'cursor-default'}`}
-                                >
-                                    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-amber-50 text-[13px] font-semibold text-amber-700 ring-1 ring-amber-100">
-                                        {row.score}
-                                    </span>
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-[13.5px] text-slate-900">
-                                            {`${formatDateTime(row.rated_at || row.day)}${row.taxi_park ? ` · ${row.taxi_park}` : ''}`}
-                                        </span>
-                                        {row.client_comment && !isOpen && (
-                                            <span className="block truncate text-[12px] text-slate-500">{row.client_comment}</span>
-                                        )}
-                                    </span>
-                                    <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11.5px] font-medium ring-1 ${verdict.pill}`}>
-                                        {verdict.label}
-                                    </span>
-                                    {hasDetails && (
-                                        <FaIcon className={`fas ${isOpen ? 'fa-chevron-down' : 'fa-chevron-right'} text-slate-300`} />
-                                    )}
-                                </button>
+                {total === 0 ? (
+                    <div className="mt-3 rounded-2xl bg-slate-50 px-3 py-2.5 text-[13px] text-slate-500 ring-1 ring-slate-200/70">
+                        За этот месяц низких оценок нет.
+                    </div>
+                ) : (
+                    <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        <Stat value={total} label="Всего" tone="text-slate-900" />
+                        <Stat value={Number(summary.invalid || 0)} label="Снято" tone="text-emerald-600" />
+                        <Stat value={Number(summary.valid || 0)} label="Обоснованно" tone="text-rose-600" />
+                        <Stat value={Number(summary.pending || 0)} label="На проверке" tone="text-slate-500" />
+                    </div>
+                )}
 
-                                {isOpen && (
-                                    <div className="space-y-2.5 bg-slate-50/60 px-4 pb-4 pt-1">
-                                        {row.client_comment && (
-                                            <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200/70">
-                                                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Комментарий клиента</div>
-                                                <div className="mt-1 whitespace-pre-wrap break-words text-[13px] text-slate-700">{row.client_comment}</div>
-                                            </div>
-                                        )}
-                                        {decisions.map((decision, index) => (
-                                            <div key={`${row.id}-decision-${index}`} className="rounded-xl bg-white p-3 ring-1 ring-slate-200/70">
-                                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                                    <span className="text-[12.5px] font-semibold text-slate-700">{decision.reviewer_name}</span>
-                                                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${(VERDICTS[decision.status] || VERDICTS.pending).pill}`}>
-                                                        {decision.status === 'invalid' ? 'Необоснованно' : 'Обоснованно'}
-                                                    </span>
-                                                </div>
-                                                {decision.comment && (
-                                                    <div className="mt-1 whitespace-pre-wrap break-words text-[13px] text-slate-600">{decision.comment}</div>
-                                                )}
-                                            </div>
-                                        ))}
-                                        {row.final_comment && (
-                                            <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200/70">
-                                                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Решение руководителя</div>
-                                                <div className="mt-1 whitespace-pre-wrap break-words text-[13px] text-slate-700">{row.final_comment}</div>
-                                            </div>
-                                        )}
-                                        {row.phone_number && (
-                                            <div className="px-1 text-[11.5px] text-slate-400">Клиент: {row.phone_number}</div>
-                                        )}
-                                    </div>
-                                )}
-                            </li>
-                        );
-                    })}
-                    {rows.length > VISIBLE_LIMIT && (
-                        <li>
+                {total > 0 && !isGranted && (
+                    <div className="mt-2.5 flex items-start gap-2 px-1 text-[12px] leading-5 text-slate-500">
+                        <FaIcon className="fas fa-qrcode mt-0.5 shrink-0 text-slate-400" />
+                        <span>Чтобы посмотреть переписки и решения по каждой оценке, покажите QR-код супервайзеру или администратору для сканирования.</span>
+                    </div>
+                )}
+            </section>
+
+            {open && (
+                <div className="fixed inset-0 z-[135] flex bg-slate-100">
+                    <div className="flex h-full w-full min-w-0 flex-col overflow-hidden">
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:px-5">
+                            <div className="flex min-w-0 items-center gap-3">
+                                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                                    <FaIcon className="fas fa-star-half-alt" aria-hidden="true" />
+                                </span>
+                                <div className="min-w-0">
+                                    <h3 className="text-base font-semibold text-slate-900">Мои низкие оценки</h3>
+                                    <p className="text-xs leading-5 text-slate-500">
+                                        Переписка чата и решение проверяющих по каждой оценке.
+                                    </p>
+                                </div>
+                            </div>
                             <button
                                 type="button"
-                                onClick={() => setShowAll((prev) => !prev)}
-                                className="w-full px-4 py-2.5 text-[13px] font-medium text-blue-600 transition hover:bg-slate-50"
+                                onClick={() => setOpen(false)}
+                                className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700"
+                                aria-label="Закрыть"
                             >
-                                {showAll ? 'Свернуть' : `Показать все (${rows.length})`}
+                                <FaIcon className="fas fa-xmark" aria-hidden="true" />
                             </button>
-                        </li>
-                    )}
-                </ul>
+                        </div>
+
+                        <div className="flex min-h-0 flex-1 overflow-hidden">
+                            <aside className={`w-full shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-white md:flex md:w-[290px] xl:w-[330px] ${selected ? 'hidden' : 'flex'}`}>
+                                <div className="border-b border-slate-200 px-4 py-2.5">
+                                    <div className="text-sm font-semibold text-slate-900">Журнал</div>
+                                    <div className="truncate text-[11px] text-slate-500">
+                                        <span>{`${formatDay(data.start)} — ${formatDay(data.end)} · ${total} оценок`}</span>
+                                    </div>
+                                </div>
+                                <div className="min-h-0 flex-1 overflow-y-scroll overscroll-contain p-2.5 ios-modal-scroll">
+                                    <div className="space-y-2">
+                                        {rows.map((row) => {
+                                            const isSelected = String(row.id) === String(selectedId);
+                                            const verdict = verdictOf(row);
+                                            return (
+                                                <button
+                                                    key={row.id}
+                                                    type="button"
+                                                    onClick={() => setSelectedId(String(row.id))}
+                                                    title="Открыть переписку этого чата"
+                                                    className={`w-full rounded-2xl border p-3 text-left transition ${
+                                                        isSelected
+                                                            ? 'border-slate-900 bg-slate-50 shadow-sm ring-2 ring-slate-900/10'
+                                                            : 'border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <div className="min-w-0">
+                                                            <div className="truncate text-[13px] font-semibold text-slate-900">
+                                                                {row.taxi_park || row.channel_name || '—'}
+                                                            </div>
+                                                            <div className="mt-0.5 text-[11px] text-slate-500">
+                                                                {formatDateTime(row.rated_at || row.day)}
+                                                            </div>
+                                                        </div>
+                                                        <span className="inline-flex h-8 min-w-8 items-center justify-center rounded-full bg-rose-50 px-2 text-sm font-bold text-rose-700 ring-1 ring-rose-200">
+                                                            {Number(row.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}
+                                                        </span>
+                                                    </div>
+                                                    <div className="mt-2">
+                                                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10.5px] font-bold ring-1 ${verdict.pill}`}>
+                                                            {verdict.label}
+                                                        </span>
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </aside>
+
+                            <section className={`min-w-0 flex-1 flex-col overflow-hidden md:flex ${selected ? 'flex' : 'hidden'}`}>
+                                {!selected ? (
+                                    <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-400">
+                                        <FaIcon className="fas fa-comments text-3xl" aria-hidden="true" />
+                                        <div className="text-sm">Выберите оценку слева — откроется переписка.</div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {/* key по id оценки: переключение чата пересоздаёт шапку целиком,
+                                            поэтому подмена текстовых узлов извне (переводчик, расширения)
+                                            не может оставить в ней дату прошлого чата. */}
+                                        <div key={`mlr-head-${selected.id}`} className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-4 py-2.5">
+                                            <button
+                                                type="button"
+                                                onClick={() => setSelectedId('')}
+                                                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 md:hidden"
+                                                aria-label="Назад к списку"
+                                            >
+                                                <FaIcon className="fas fa-chevron-left" aria-hidden="true" />
+                                            </button>
+                                            <span className="inline-flex h-9 min-w-9 items-center justify-center rounded-2xl bg-rose-50 px-2 text-base font-bold text-rose-700 ring-1 ring-rose-200">
+                                                {Number(selected.score || 0).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}
+                                            </span>
+                                            <div className="min-w-0">
+                                                <div className="truncate text-[11px] text-slate-500">
+                                                    <span>{[
+                                                        formatDateTime(selected.rated_at || selected.day),
+                                                        selected.taxi_park || selected.channel_name || '—',
+                                                        selected.phone_number || '—',
+                                                    ].join(' · ')}</span>
+                                                </div>
+                                            </div>
+                                            <span className={`ml-auto inline-flex rounded-full px-3 py-1 text-[11px] font-bold ring-1 ${verdictOf(selected).pill}`}>
+                                                {verdictOf(selected).label}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setHideService((prev) => !prev)}
+                                                className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold transition ${
+                                                    hideService ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                                }`}
+                                                title="Скрыть системные сообщения и автоответы"
+                                            >
+                                                <FaIcon className={`fas ${hideService ? 'fa-eye' : 'fa-eye-slash'}`} aria-hidden="true" />
+                                                {hideService ? 'Автоответы' : 'Без автоответов'}
+                                            </button>
+                                        </div>
+
+                                        {selected.client_comment && (
+                                            <div key={`mlr-comment-${selected.id}`} className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[12.5px] leading-5 text-amber-900">
+                                                <FaIcon className="fas fa-comment-dots mt-0.5 shrink-0" aria-hidden="true" />
+                                                <div className="min-w-0 break-words">
+                                                    <span className="font-semibold">Комментарий клиента: </span>
+                                                    <span>{selected.client_comment}</span>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div className="flex min-h-0 flex-1 justify-center overflow-hidden bg-[#f2f2f7]">
+                                            <div className="flex min-h-0 w-full max-w-4xl flex-col overflow-hidden">
+                                                <ChatThread
+                                                    snapshot={chatReady ? chat.snapshot : null}
+                                                    loading={!chatReady || chat.loading}
+                                                    error={chatReady ? chat.error : ''}
+                                                    hideService={hideService}
+                                                    emptyText="В этом чате нет сообщений"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div key={`mlr-verdict-${selected.id}`} className="max-h-[38vh] shrink-0 overflow-y-auto border-t border-slate-200 bg-white px-4 py-3 shadow-[0_-10px_24px_-20px_rgba(15,23,42,0.6)] ios-modal-scroll">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    Решение по оценке
+                                                </span>
+                                                <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-semibold ring-1 ${verdictOf(selected).pill}`}>
+                                                    {verdictOf(selected).label}
+                                                </span>
+                                            </div>
+                                            {selected.decisions?.length ? (
+                                                <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                                                    {selected.decisions.map((decision, index) => (
+                                                        <div key={`${selected.id}-decision-${index}`} className="rounded-xl bg-slate-50 px-3 py-2 ring-1 ring-slate-200">
+                                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                                                <div className="min-w-0">
+                                                                    <div className="truncate text-[13px] font-semibold text-slate-900">{decision.reviewer_name}</div>
+                                                                    <div className="text-[10.5px] text-slate-400">{formatDateTime(decision.updated_at)}</div>
+                                                                </div>
+                                                                <span className={`inline-flex rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ${(VERDICTS[decision.status] || VERDICTS.pending).pill}`}>
+                                                                    {(VERDICTS[decision.status] || VERDICTS.pending).short}
+                                                                </span>
+                                                            </div>
+                                                            <div className="mt-1 whitespace-pre-wrap text-[12.5px] leading-5 text-slate-700">
+                                                                {decision.comment || 'Без комментария'}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] text-slate-500 ring-1 ring-slate-200">
+                                                    Оценка ещё проверяется — решение появится здесь.
+                                                </div>
+                                            )}
+                                            {selected.final_comment && (
+                                                <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] leading-5 text-slate-700 ring-1 ring-slate-200">
+                                                    <span className="font-semibold">Решение руководителя: </span>
+                                                    <span className="whitespace-pre-wrap">{selected.final_comment}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
+                            </section>
+                        </div>
+                    </div>
+                </div>
             )}
-        </section>
+        </>
     );
 }

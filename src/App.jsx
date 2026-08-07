@@ -47977,18 +47977,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                         )}
 
-                                        {/* Решения ОКК по своим низким оценкам — только у чат-менеджеров
-                                            и только после QR-подтверждения (компонент решает сам). */}
-                                        <Suspense fallback={null}>
-                                            <MyLowRatings
-                                                apiBaseUrl={API_BASE_URL}
-                                                withAccessTokenHeader={withAccessTokenHeader}
-                                                userId={user.id}
-                                                month={selectedMonth}
-                                                granted={!!sensitiveAccess.granted}
-                                            />
-                                        </Suspense>
-
                                         {isLoading ? (
                                         <EvaluationPageSkeleton />
                                         ) : (() => {
@@ -48406,6 +48394,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 />
                                                 </div>
                                             </div>
+
+                                            {/* Низкие оценки клиентов: сводка на странице, детали —
+                                                в полноэкранном просмотре и только по QR (решает компонент). */}
+                                            <Suspense fallback={null}>
+                                                <MyLowRatings
+                                                    apiBaseUrl={API_BASE_URL}
+                                                    withAccessTokenHeader={withAccessTokenHeader}
+                                                    userId={user.id}
+                                                    month={selectedMonth}
+                                                    granted={!!sensitiveAccess.granted}
+                                                />
+                                            </Suspense>
 
                                             {allEvals.length === 0 ? (
                                                 <p className="text-center text-gray-600 flex items-center justify-center">
