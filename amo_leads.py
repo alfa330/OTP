@@ -309,16 +309,20 @@ _CALL_EXCLUDE_RE = re.compile(r"nytime|arenda|аренда|departament")
 # Порядок строк — как в таблице.
 SOURCE_ORDER = ["Google", "YouTube", "SEO", "TikTok", "FB", "OLX", "Яндекс", "2GIS", "Звонки"]
 
+# Каждая строка «Сводки по Дням» — отдельная формула, и устроены они ПО-РАЗНОМУ:
+# где-то складываются два счётчика (и тогда возможен двойной счёт), где-то берётся
+# объединение условий, а наборы исключений не совпадают. Ниже каждая перенесена
+# дословно, с указанием ячейки-оригинала.
 SOURCE_RULES = {
-    "Google": "формула C3, дословно",
-    "Звонки": "формула C11, дословно",
-    "YouTube": "восстановлено, сверено с таблицей",
-    "SEO": "восстановлено, сверено с таблицей",
-    "TikTok": "восстановлено, сверено с таблицей",
-    "FB": "восстановлено, сверено с таблицей",
-    "OLX": "восстановлено, сверено с таблицей",
-    "Яндекс": "восстановлено, сверено с таблицей",
-    "2GIS": "восстановлено, сверено с таблицей",
+    "Google": "C3: СЧЁТЕСЛИМН(utm~google) + СЧЁТЕСЛИМН(тег~google)",
+    "YouTube": "C4: СЧЁТЕСЛИМН(utm~youtube) + СЧЁТЕСЛИМН(тег~youtube)",
+    "SEO": "C5: объединение (utm~chatgpt|seo) ИЛИ (utm пуст И тег~sait)",
+    "TikTok": "C6: СЧЁТЕСЛИМН(тег~tiktok) + СЧЁТЕСЛИМН(utm~tiktok И тег пуст)",
+    "FB": "C7: объединение (тег~fb|facebook) ИЛИ (utm~fb|facebook|ig)",
+    "OLX": "C8: СЧЁТЕСЛИМН(тег~olx)",
+    "Яндекс": "C9: СЧЁТЕСЛИМН(utm~ya) + СЧЁТЕСЛИМН(тег~yandex)",
+    "2GIS": "C10: четыре СЧЁТЕСЛИМН — utm и тег, латиницей и кириллицей",
+    "Звонки": "C11: звонок нужного бренда, у которого в теге нет канала",
 }
 
 
@@ -330,64 +334,69 @@ def _utm(row):
     return (row.get("utm_source") or "").lower()
 
 
-# Наборы исключений в таблице РАЗНЫЕ у разных строк — это не небрежность с нашей
-# стороны, а факт: C3 (Google) отсекает «arenda» и «departament», а C9 (Яндекс)
-# ещё и кириллическую «аренду». Держим их раздельно, иначе цифры разъедутся, как
-# только такие теги появятся.
-_EXCLUDE_DEFAULT = ("arenda", "departament")
-_EXCLUDE_YANDEX = ("arenda", "аренда", "departament")
+# Наборы исключений у строк РАЗНЫЕ, и это не небрежность переноса: C3/C4/C6
+# отсекают «arenda» и «departament», C8/C9 добавляют кириллическую «аренду»,
+# C5/C7/C11 — ещё и «nytime», а C10 аренду не отсекает вовсе.
+_EXCL_BASE = ("arenda", "departament")
+_EXCL_CYR = ("arenda", "аренда", "departament")
+_EXCL_FULL = ("nytime", "arenda", "аренда", "departament")
+_EXCL_DEPT = ("departament",)
 
 
-def _not_excluded(row, words=_EXCLUDE_DEFAULT):
-    """Фильтр вида «<>*arenda*» — всегда по колонке тегов, не по utm."""
+def _kept(row, words):
+    """Условие вида «<>*arenda*» — всегда по колонке тегов, не по utm."""
     tags = _tags(row)
     return not any(word in tags for word in words)
 
 
+def _has(text, *needles):
+    return any(n in text for n in needles)
+
+
 def count_by_source(rows):
     """Лиды по источникам за уже отфильтрованный по дате набор строк."""
-    def by_utm(needle):
-        return sum(1 for r in rows if needle in _utm(r) and _not_excluded(r))
 
-    def by_tag(needle):
-        return sum(1 for r in rows if needle in _tags(r) and _not_excluded(r))
+    def count(predicate):
+        return sum(1 for r in rows if predicate(r))
 
     counts = {
-        # C3: СЧЁТЕСЛИМН по utm_source + СЧЁТЕСЛИМН по тегам.
-        "Google": by_utm("google") + by_tag("google"),
-        "YouTube": by_utm("youtube") + by_tag("youtube"),
-        # C9 ловит utm маской «*ya*», а не «*yandex*»: в данных есть сделки с
-        # utm_source = «ya», и по «*yandex*» они бы потерялись. Тег при этом
-        # сверяется по полному «*yandex*».
-        "Яндекс": (sum(1 for r in rows
-                       if "ya" in _utm(r) and _not_excluded(r, _EXCLUDE_YANDEX))
-                   + sum(1 for r in rows
-                         if "yandex" in _tags(r) and _not_excluded(r, _EXCLUDE_YANDEX))),
-        # У этих двух формула считает только по utm_source: теги «*facebook*» и
-        # «*tiktok*» стоят и на сделках с другим utm, и второе слагаемое дало бы
-        # двойной счёт (проверено: FB было бы 473 вместо 263).
-        "FB": by_utm("fb"),
-        "TikTok": by_utm("tiktok"),
-        # Здесь наоборот — размечено только тегами.
-        "OLX": by_tag("olx"),
-        # Две формы написания — двумя счётчиками, как это устроено в таблице.
-        # ВНИМАНИЕ: тег, где встречаются сразу «2gis» и «2ГИС», посчитается
-        # дважды. Это поведение исходной «Сводки по Дням», и оно воспроизведено
-        # намеренно — цифры должны совпадать с ней, а не быть «правильнее».
-        # На всех проверенных данных таких тегов нет, расхождения не возникает.
-        "2GIS": by_tag("2gis") + by_tag("2гис"),
-        # SEO: свой utm, плюс заявки с сайта без utm, плюс переходы из ChatGPT.
-        "SEO": (by_utm("seo")
-                + sum(1 for r in rows if "sait" in _tags(r) and not _utm(r) and _not_excluded(r))
-                + by_utm("chatgpt")),
+        # C3: два счётчика — по utm и по тегу. Строка, где «google» есть в обоих,
+        # посчитается дважды: так устроена таблица, воспроизводим как есть.
+        "Google": (count(lambda r: "google" in _utm(r) and _kept(r, _EXCL_BASE))
+                   + count(lambda r: "google" in _tags(r) and _kept(r, _EXCL_BASE))),
+        # C4: тот же шаблон.
+        "YouTube": (count(lambda r: "youtube" in _utm(r) and _kept(r, _EXCL_BASE))
+                    + count(lambda r: "youtube" in _tags(r) and _kept(r, _EXCL_BASE))),
+        # C5: не сумма, а ОБЪЕДИНЕНИЕ — сделка засчитывается один раз, даже если
+        # подходит сразу под оба условия.
+        "SEO": count(lambda r: (_has(_utm(r), "chatgpt", "seo")
+                                or (not _utm(r) and "sait" in _tags(r)))
+                     and _kept(r, _EXCL_FULL)),
+        # C6: первый счётчик идёт по ТЕГУ, второй — по utm, но только у сделок
+        # вообще без тега. Сделка с utm=tiktok и посторонним тегом не считается.
+        "TikTok": (count(lambda r: "tiktok" in _tags(r) and _kept(r, _EXCL_BASE))
+                   + count(lambda r: "tiktok" in _utm(r) and not _tags(r))),
+        # C7: объединение, причём в utm ловится ещё и «ig» (Instagram).
+        "FB": count(lambda r: (_has(_tags(r), "fb", "facebook")
+                               or _has(_utm(r), "fb", "facebook", "ig"))
+                    and _kept(r, _EXCL_FULL)),
+        # C8: только по тегу.
+        "OLX": count(lambda r: "olx" in _tags(r) and _kept(r, _EXCL_CYR)),
+        # C9: utm ловится коротким «ya» — сделки с utm_source=«ya» существуют,
+        # и по «yandex» они бы потерялись.
+        "Яндекс": (count(lambda r: "ya" in _utm(r) and _kept(r, _EXCL_CYR))
+                   + count(lambda r: "yandex" in _tags(r) and _kept(r, _EXCL_CYR))),
+        # C10: четыре счётчика (utm и тег, латиница и кириллица), и аренда здесь
+        # НЕ отсекается — только departament.
+        "2GIS": (count(lambda r: "2gis" in _utm(r) and _kept(r, _EXCL_DEPT))
+                 + count(lambda r: "2гис" in _utm(r) and _kept(r, _EXCL_DEPT))
+                 + count(lambda r: "2gis" in _tags(r) and _kept(r, _EXCL_DEPT))
+                 + count(lambda r: "2гис" in _tags(r) and _kept(r, _EXCL_DEPT))),
         # C11: звонок нужного бренда, у которого в теге нет ни одного канала.
-        "Звонки": sum(
-            1 for r in rows
-            if "call" in _tags(r)
-            and _BRAND_RE.search(_tags(r))
-            and not _CHANNEL_RE.search(_tags(r))
-            and not _CALL_EXCLUDE_RE.search(_tags(r))
-        ),
+        "Звонки": count(lambda r: "call" in _tags(r)
+                        and _BRAND_RE.search(_tags(r))
+                        and not _CHANNEL_RE.search(_tags(r))
+                        and not _CALL_EXCLUDE_RE.search(_tags(r))),
     }
     counts["Общее"] = sum(counts[name] for name in SOURCE_ORDER)
     return counts
