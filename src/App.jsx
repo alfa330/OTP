@@ -32345,6 +32345,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         };
 
         const REG_PLACE_MEDAL = { 1: 'medal-gold', 2: 'medal-silver', 3: 'medal-bronze' };
+        // Сколько строк рейтинга видно без «Показать всех» (Линия может
+        // дорасти до ~60 операторов СЗоВ — весь хвост на телефоне не нужен).
+        const REG_LIST_COLLAPSE = 10;
         // Тона лаврового венка по призовым местам: золото, серебро, бронза.
         const REG_WREATH_TONES = {
             1: { leaf: '#E8B10E', leafAlt: '#C98F06', berry: '#F6CE53' },
@@ -32389,8 +32392,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Призовое место на подиуме группы. Пустой слот — приз ещё не занят.
         const RegPodiumSlot = ({ item, place, prizeAmount, big = false, isMe = false }) => (
-            <div className={`flex min-w-0 flex-col items-center ${big ? 'w-28 sm:w-32' : 'w-24 sm:w-28'}`}>
-                <div className={`relative flex-shrink-0 ${big ? 'h-24 w-24 sm:h-28 sm:w-28' : 'h-[72px] w-[72px] sm:h-[88px] sm:w-[88px]'}`}>
+            <div className={`flex min-w-0 flex-col items-center ${big ? 'w-24 sm:w-32' : 'w-[76px] sm:w-28'}`}>
+                <div className={`relative flex-shrink-0 ${big ? 'h-24 w-24 sm:h-28 sm:w-28' : 'h-[68px] w-[68px] sm:h-[88px] sm:w-[88px]'}`}>
                     {item ? (
                         <>
                             <RegLaurelWreath place={place} className="pointer-events-none absolute inset-0 h-full w-full" />
@@ -32412,7 +32415,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {item ? item.name : 'Место свободно'}
                 </p>
                 {isMe && <span className="mt-0.5 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">Вы</span>}
-                <span className={`mt-1 rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold ${item ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{regFmtTenge(prizeAmount)}</span>
+                <span className={`mt-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold sm:px-2.5 sm:text-[11.5px] ${item ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{regFmtTenge(prizeAmount)}</span>
             </div>
         );
 
@@ -32549,8 +32552,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const RegRankBadge = ({ place, hasScore }) => {
             const medal = hasScore ? REG_PLACE_MEDAL[place] : null;
-            if (medal) return <div className={`${medal} flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-[13px] font-bold text-white`}>{place}</div>;
-            return <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-[13px] font-semibold text-slate-400">{place}</div>;
+            if (medal) return <div className={`${medal} flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[12px] font-bold text-white sm:h-8 sm:w-8 sm:text-[13px]`}>{place}</div>;
+            return <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-[12px] font-semibold text-slate-400 sm:h-8 sm:w-8 sm:text-[13px]">{place}</div>;
         };
 
         const RegDriversDetail = ({ rows }) => (
@@ -32563,16 +32566,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <span className="col-span-1 text-right">Поездок</span>
                 </div>
                 {rows.map((r, i) => (
-                    <div key={i} className="grid grid-cols-2 gap-x-2 gap-y-0.5 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50 md:grid-cols-12">
-                        <span className="col-span-2 truncate font-medium text-slate-700 md:col-span-4">{r.driver_name || '—'}</span>
-                        <span className="tabular-nums text-slate-500 md:col-span-3">{r.driver_phone || '—'}</span>
-                        <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.registered_at)}</span>
-                        {r.first_trip_at ? (
-                            <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.first_trip_at)}</span>
-                        ) : (
-                            <span className="md:col-span-2"><span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><FaIcon className="fas fa-hourglass-half text-[9px]" /> ждёт поездку</span></span>
-                        )}
-                        <span className="hidden text-right tabular-nums text-slate-600 md:block md:col-span-1">{r.trips_count ?? '—'}</span>
+                    <div key={i} className="rounded-lg px-2 py-1.5 hover:bg-slate-50">
+                        <div className="md:hidden">
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="min-w-0 truncate text-sm font-medium text-slate-700">{r.driver_name || '—'}</span>
+                                <span className="flex-shrink-0 text-sm tabular-nums text-slate-500">{r.driver_phone || '—'}</span>
+                            </div>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-slate-400">
+                                <span>рег. <span className="tabular-nums text-slate-500">{regFmtDateTime(r.registered_at)}</span></span>
+                                {r.first_trip_at ? (
+                                    <span>поездка <span className="tabular-nums text-slate-500">{regFmtDateTime(r.first_trip_at)}</span></span>
+                                ) : (
+                                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><FaIcon className="fas fa-hourglass-half text-[9px]" /> ждёт поездку</span>
+                                )}
+                            </div>
+                        </div>
+                        <div className="hidden gap-x-2 text-sm md:grid md:grid-cols-12">
+                            <span className="truncate font-medium text-slate-700 md:col-span-4">{r.driver_name || '—'}</span>
+                            <span className="tabular-nums text-slate-500 md:col-span-3">{r.driver_phone || '—'}</span>
+                            <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.registered_at)}</span>
+                            {r.first_trip_at ? (
+                                <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.first_trip_at)}</span>
+                            ) : (
+                                <span className="md:col-span-2"><span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><FaIcon className="fas fa-hourglass-half text-[9px]" /> ждёт поездку</span></span>
+                            )}
+                            <span className="text-right tabular-nums text-slate-600 md:col-span-1">{r.trips_count ?? '—'}</span>
+                        </div>
                     </div>
                 ))}
             </div>
@@ -32582,12 +32601,58 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // На модульном уровне (а не внутри панели), иначе каждый setState
         // панели пересоздавал бы тип компонента и ремоунтил обе карточки.
         const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, expandedKey, onToggleExpand, showRegistrations }) => {
+            const { useState } = React;
+            // Длинный хвост сворачиваем: топ виден всегда, своя строка — даже
+            // из свёрнутого хвоста, остальные — по «Показать всех».
+            const [showAll, setShowAll] = useState(false);
             const leaderMax = items.length ? Math.max(...items.map(i => i.drivers || 0)) : 0;
+            const collapsible = items.length > REG_LIST_COLLAPSE + 1;
+            const visibleItems = collapsible && !showAll ? items.slice(0, REG_LIST_COLLAPSE) : items;
+            const hiddenMine = collapsible && !showAll
+                ? items.slice(REG_LIST_COLLAPSE).find(i => i.user_id != null && i.user_id === currentUserId)
+                : null;
             // Порядок подиума: первое место в центре (классика 2-1-3);
             // для двух призов — просто слева направо.
             const podiumPlaces = prizes.length >= 3 ? [2, 1, 3] : [1, 2].slice(0, prizes.length);
+
+            const renderRow = (item) => {
+                const isMe = item.user_id != null && item.user_id === currentUserId;
+                const key = `${groupKey}:${item.place}`;
+                const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
+                const isOpen = expandedKey === key;
+                return (
+                    <div key={key} className={`rounded-xl px-2.5 py-2.5 transition-all sm:px-3 ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${canExpand ? 'cursor-pointer' : ''}`}
+                         onClick={() => canExpand && onToggleExpand(isOpen ? null : key)}>
+                        <div className="flex items-center gap-2 sm:gap-3">
+                            <RegRankBadge place={item.place} hasScore={(item.drivers || 0) > 0} />
+                            <RegContestAvatar item={item} sizeClass="h-8 w-8 sm:h-9 sm:w-9" />
+                            <div className="min-w-0 flex-1">
+                                <div className="flex min-w-0 items-center gap-2">
+                                    <span className="truncate text-[14px] font-semibold text-slate-800">{item.name}</span>
+                                    {isMe && <span className="flex-shrink-0 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">Вы</span>}
+                                </div>
+                                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100">
+                                    <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${leaderMax && (item.drivers || 0) > 0 ? Math.max(3, Math.round(((item.drivers || 0) / leaderMax) * 100)) : 0}%` }}></div>
+                                </div>
+                            </div>
+                            <div className="flex-shrink-0 text-right">
+                                <div className="text-lg font-bold leading-none tabular-nums text-slate-900">{item.drivers}</div>
+                                <div className="mt-0.5 text-[11px] text-slate-400">{showRegistrations && item.registrations != null ? `из ${item.registrations} рег.` : regPluralDrivers(item.drivers)}</div>
+                            </div>
+                            {canExpand && <FaIcon className={`fas fa-chevron-down text-xs text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
+                        </div>
+                        {isOpen && canExpand && (
+                            <div onClick={(e) => e.stopPropagation()}>
+                                <p className="mt-2 text-[11px] text-slate-400">Последняя засчитанная поездка: {regFmtDateTime(item.last_trip_at)} — при равном счёте выше тот, у кого она раньше.</p>
+                                <RegDriversDetail rows={item.rows} />
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
             return (
-                <div className={`${iosCard} p-5 md:p-6`} style={{ fontFamily: APPLE_FONT }}>
+                <div className={`${iosCard} p-4 sm:p-5 md:p-6`} style={{ fontFamily: APPLE_FONT }}>
                     <div className="mb-5 flex items-baseline justify-between gap-3">
                         <h3 className="text-[17px] font-bold text-slate-900">{groupLabel}</h3>
                         {items.length > 0 && <p className="text-[12px] text-slate-400">Участников: {items.length}</p>}
@@ -32612,41 +32677,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ) : null
                     ) : (
                         <div className="space-y-1">
-                            {items.map((item, idx) => {
-                                const isMe = item.user_id != null && item.user_id === currentUserId;
-                                const key = `${groupKey}:${idx}`;
-                                const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
-                                const isOpen = expandedKey === key;
-                                return (
-                                    <div key={key} className={`rounded-xl px-3 py-2.5 transition-all ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${canExpand ? 'cursor-pointer' : ''}`}
-                                         onClick={() => canExpand && onToggleExpand(isOpen ? null : key)}>
-                                        <div className="flex items-center gap-3">
-                                            <RegRankBadge place={item.place} hasScore={(item.drivers || 0) > 0} />
-                                            <RegContestAvatar item={item} sizeClass="h-9 w-9" />
-                                            <div className="min-w-0 flex-1">
-                                                <div className="flex min-w-0 items-center gap-2">
-                                                    <span className="truncate text-[14px] font-semibold text-slate-800">{item.name}</span>
-                                                    {isMe && <span className="flex-shrink-0 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">Вы</span>}
-                                                </div>
-                                                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100">
-                                                    <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${leaderMax && (item.drivers || 0) > 0 ? Math.max(3, Math.round(((item.drivers || 0) / leaderMax) * 100)) : 0}%` }}></div>
-                                                </div>
-                                            </div>
-                                            <div className="flex-shrink-0 text-right">
-                                                <div className="text-lg font-bold leading-none tabular-nums text-slate-900">{item.drivers}</div>
-                                                <div className="mt-0.5 text-[11px] text-slate-400">{showRegistrations && item.registrations != null ? `из ${item.registrations} рег.` : regPluralDrivers(item.drivers)}</div>
-                                            </div>
-                                            {canExpand && <FaIcon className={`fas fa-chevron-down text-xs text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
-                                        </div>
-                                        {isOpen && canExpand && (
-                                            <div onClick={(e) => e.stopPropagation()}>
-                                                <p className="mt-2 text-[11px] text-slate-400">Последняя засчитанная поездка: {regFmtDateTime(item.last_trip_at)} — при равном счёте выше тот, у кого она раньше.</p>
-                                                <RegDriversDetail rows={item.rows} />
-                                            </div>
-                                        )}
-                                    </div>
-                                );
-                            })}
+                            {visibleItems.map(renderRow)}
+                            {hiddenMine && (
+                                <>
+                                    <div className="select-none text-center text-[13px] leading-none text-slate-300">···</div>
+                                    {renderRow(hiddenMine)}
+                                </>
+                            )}
+                            {collapsible && (
+                                <button type="button" onClick={() => setShowAll(!showAll)}
+                                        className="flex w-full items-center justify-center gap-1.5 rounded-xl py-2 text-[13px] font-medium text-slate-500 transition-colors hover:bg-slate-50">
+                                    {showAll ? 'Свернуть' : `Показать всех (${items.length})`}
+                                    <FaIcon className={`fas fa-chevron-down text-[10px] transition-transform ${showAll ? 'rotate-180' : ''}`} />
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>
@@ -32661,19 +32705,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [expandedKey, setExpandedKey] = useState(null);
             const [showRules, setShowRules] = useState(false);
 
-            const fetchResults = async () => {
+            // silent — фоновое автообновление: без скелетона и тостов об ошибке.
+            const fetchResults = async (silent = false) => {
                 try {
-                    setLoading(true);
+                    if (!silent) setLoading(true);
                     const resp = await axios.get(`${API_BASE_URL}/api/reg_contest/results`, { headers: { 'X-User-Id': currentUser?.id } });
                     setData(resp?.data || null);
                 } catch (err) {
                     console.error('Error fetching reg contest results', err);
-                    addToast && addToast('Не удалось загрузить рейтинг конкурса', 'error');
+                    if (!silent) addToast && addToast('Не удалось загрузить рейтинг конкурса', 'error');
                 } finally {
-                    setLoading(false);
+                    if (!silent) setLoading(false);
                 }
             };
-            useEffect(() => { fetchResults(); }, []);
+            useEffect(() => {
+                fetchResults();
+                // Бэкенд синкается с CRM каждые полчаса — открытая вкладка
+                // подтягивает свежий срез с тем же шагом, кнопка не нужна.
+                const timer = setInterval(() => fetchResults(true), 30 * 60 * 1000);
+                return () => clearInterval(timer);
+            }, []);
 
             const handleSync = async () => {
                 if (syncing) return;
@@ -32774,7 +32825,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </div>
                                     </div>
                                 </div>
-                                <div className="flex flex-shrink-0 items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2 md:flex-shrink-0">
                                     <button type="button" onClick={() => setShowRules(true)}
                                             className="flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-semibold backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98]">
                                         <FaIcon className="fas fa-book" /> Правила
@@ -32797,7 +32848,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
 
                     {myEntry && (
-                        <div className={`${iosCard} flex flex-wrap items-center gap-x-8 gap-y-3 p-5`} style={{ fontFamily: APPLE_FONT }}>
+                        <div className={`${iosCard} flex flex-wrap items-center gap-x-6 gap-y-3 p-4 sm:gap-x-8 sm:p-5`} style={{ fontFamily: APPLE_FONT }}>
                             <div className="flex items-center gap-3">
                                 <RegContestAvatar item={myEntry} sizeClass="h-11 w-11" textClass="text-sm" />
                                 <div>
