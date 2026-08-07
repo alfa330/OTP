@@ -330,10 +330,18 @@ def _utm(row):
     return (row.get("utm_source") or "").lower()
 
 
-def _not_excluded(row):
-    """Общий фильтр формул: «<>*arenda*» и «<>*departament*» по колонке тегов."""
+# Наборы исключений в таблице РАЗНЫЕ у разных строк — это не небрежность с нашей
+# стороны, а факт: C3 (Google) отсекает «arenda» и «departament», а C9 (Яндекс)
+# ещё и кириллическую «аренду». Держим их раздельно, иначе цифры разъедутся, как
+# только такие теги появятся.
+_EXCLUDE_DEFAULT = ("arenda", "departament")
+_EXCLUDE_YANDEX = ("arenda", "аренда", "departament")
+
+
+def _not_excluded(row, words=_EXCLUDE_DEFAULT):
+    """Фильтр вида «<>*arenda*» — всегда по колонке тегов, не по utm."""
     tags = _tags(row)
-    return "arenda" not in tags and "departament" not in tags
+    return not any(word in tags for word in words)
 
 
 def count_by_source(rows):
@@ -348,7 +356,13 @@ def count_by_source(rows):
         # C3: СЧЁТЕСЛИМН по utm_source + СЧЁТЕСЛИМН по тегам.
         "Google": by_utm("google") + by_tag("google"),
         "YouTube": by_utm("youtube") + by_tag("youtube"),
-        "Яндекс": by_utm("yandex") + by_tag("yandex"),
+        # C9 ловит utm маской «*ya*», а не «*yandex*»: в данных есть сделки с
+        # utm_source = «ya», и по «*yandex*» они бы потерялись. Тег при этом
+        # сверяется по полному «*yandex*».
+        "Яндекс": (sum(1 for r in rows
+                       if "ya" in _utm(r) and _not_excluded(r, _EXCLUDE_YANDEX))
+                   + sum(1 for r in rows
+                         if "yandex" in _tags(r) and _not_excluded(r, _EXCLUDE_YANDEX))),
         # У этих двух формула считает только по utm_source: теги «*facebook*» и
         # «*tiktok*» стоят и на сделках с другим utm, и второе слагаемое дало бы
         # двойной счёт (проверено: FB было бы 473 вместо 263).

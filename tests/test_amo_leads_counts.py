@@ -125,3 +125,32 @@ def test_sync_error_is_html_escaped():
     assert "<b>Unauthorized</b>" not in text
     assert "&lt;b&gt;Unauthorized&lt;/b&gt;" in text
     assert "&amp;" in text
+
+
+def test_yandex_catches_short_utm_ya():
+    """C9 ловит utm маской «*ya*», а не «*yandex*».
+
+    В данных есть сделки с utm_source = «ya» — по «*yandex*» они терялись, и
+    бот расходился с отчётом на шести днях из двадцати одного.
+    """
+    rows = [
+        {"tags": "forma_noltaxi_sait", "utm_source": "ya"},
+        {"tags": "forma_noltaxi_sait", "utm_source": "yandex"},
+        {"tags": "forma_noltaxi_sait", "utm_source": "yandex_network"},
+    ]
+    assert amo_leads.count_by_source(rows)["Яндекс"] == 3
+
+
+def test_yandex_also_excludes_cyrillic_arenda():
+    """У C9 набор исключений шире, чем у C3: там есть и кириллическая «аренда»."""
+    rows = [{"tags": "forma_itaxi_аренда", "utm_source": "yandex"}]
+    assert amo_leads.count_by_source(rows)["Яндекс"] == 0
+    # У Google такого исключения в формуле нет — значит и у нас его быть не должно.
+    rows = [{"tags": "forma_itaxi_аренда", "utm_source": "google"}]
+    assert amo_leads.count_by_source(rows)["Google"] == 1
+
+
+def test_yandex_counts_tag_and_utm_separately():
+    """Звонок с тегом *yandex* и пустым utm — тоже Яндекс."""
+    rows = [{"tags": "call_jana_yandex", "utm_source": ""}]
+    assert amo_leads.count_by_source(rows)["Яндекс"] == 1
