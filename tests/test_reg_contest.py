@@ -37,6 +37,18 @@ class FoldNameTests(unittest.TestCase):
         self.assertEqual(reg_contest.fold_name("  ИВАНОВ   иван "), "иванов иван")
 
 
+class MaskPhoneTests(unittest.TestCase):
+    def test_only_last_four_digits_visible(self):
+        # Телефон — персональные данные: оператору отдаём только хвост.
+        self.assertEqual(reg_contest.mask_phone("+77011234567"), "••• 4567")
+        self.assertEqual(reg_contest.mask_phone("8 (701) 123-45-67"), "••• 4567")
+
+    def test_empty_phone_stays_empty(self):
+        self.assertIsNone(reg_contest.mask_phone(None))
+        self.assertIsNone(reg_contest.mask_phone(""))
+        self.assertIsNone(reg_contest.mask_phone("—"))
+
+
 class ClassifyGroupTests(unittest.TestCase):
     def test_szov_chat_manager_is_chat(self):
         self.assertEqual(reg_contest.classify_group("Чат менеджер", "СЗоВ — Служба заботы о водителях"), "chat")
@@ -150,6 +162,61 @@ class LeaderboardTests(unittest.TestCase):
             e["registered_at"] = datetime.fromisoformat(e["registered_at"]).astimezone(timezone.utc)
         boards = reg_contest.build_leaderboards(entries)
         self.assertEqual(boards["chat"][0]["name"], "Чатовый Второй")
+
+
+class PendingRegistrationsTests(unittest.TestCase):
+    """Регистрации без поездки (first_trip_at = null) — когда CRM начнёт
+    отдавать их по include_no_trip: считаются в registrations, но не в drivers."""
+
+    def _directory(self):
+        return [
+            _user(10, "Чатовый Первый", email="chat1@yandextaxi.kz", direction="Чат менеджер"),
+            _user(11, "Чатовый Второй", email="chat2@yandextaxi.kz", direction="Чат менеджер"),
+        ]
+
+    def test_pending_rows_count_as_registrations_only(self):
+        rows = [
+            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00"),
+            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d2", None, trips=0),
+            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d3", None, trips=0),
+        ]
+        entries = reg_contest.resolve_rows(rows, self._directory())
+        item = reg_contest.build_leaderboards(entries)["chat"][0]
+        self.assertEqual(item["drivers"], 1)
+        self.assertEqual(item["registrations"], 3)
+        self.assertEqual(len(item["rows"]), 3)
+
+    def test_all_qualified_registrations_equal_drivers(self):
+        rows = [_crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00")]
+        entries = reg_contest.resolve_rows(rows, self._directory())
+        item = reg_contest.build_leaderboards(entries)["chat"][0]
+        self.assertEqual(item["registrations"], item["drivers"])
+
+    def test_pending_only_participant_ranks_below_and_gets_no_prize(self):
+        # Одни «ожидающие» регистрации не дают ни места в топе, ни приза.
+        rows = [
+            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", None, trips=0),
+            _crm_row("chat2@yandextaxi.kz", "Чатовый Второй", "d2", "2026-08-09T12:00:00+05:00"),
+        ]
+        entries = reg_contest.resolve_rows(rows, self._directory())
+        chat = reg_contest.build_leaderboards(entries)["chat"]
+        self.assertEqual([i["name"] for i in chat], ["Чатовый Второй", "Чатовый Первый"])
+        self.assertEqual(chat[0]["prize"], 40000)
+        self.assertIsNone(chat[1]["prize"])
+
+    def test_pending_rows_do_not_touch_tie_break(self):
+        # Поздняя «ожидающая» регистрация не должна портить время последней
+        # засчитанной поездки при равном счёте.
+        rows = [
+            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00"),
+            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d2", None,
+                     registered_at="2026-08-20T10:00:00+05:00", trips=0),
+            _crm_row("chat2@yandextaxi.kz", "Чатовый Второй", "d3", "2026-08-10T12:00:00+05:00"),
+        ]
+        entries = reg_contest.resolve_rows(rows, self._directory())
+        chat = reg_contest.build_leaderboards(entries)["chat"]
+        self.assertEqual(chat[0]["name"], "Чатовый Первый")
+        self.assertEqual(chat[0]["last_trip_at"], "2026-08-09T12:00:00+05:00")
 
 
 if __name__ == "__main__":

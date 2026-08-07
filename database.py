@@ -5435,6 +5435,21 @@ class Database:
                     "direction_name", "department_name")
             return [dict(zip(keys, row)) for row in cursor.fetchall()]
 
+    def get_reg_contest_avatar_refs(self, user_ids):
+        """Аватарки участников рейтинга одной выборкой:
+        {user_id: (avatar_bucket, avatar_blob_path)}. Подписанный URL из
+        ссылки строит вызывающая сторона (кэш живёт в bot_schedule2)."""
+        ids = [int(uid) for uid in set(user_ids or []) if uid is not None]
+        if not ids:
+            return {}
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, avatar_bucket, avatar_blob_path
+                FROM users
+                WHERE id = ANY(%s) AND avatar_blob_path IS NOT NULL
+            """, (ids,))
+            return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
     def replace_reg_contest_entries(self, contest_code, entries):
         """Полная замена строк конкурса свежим срезом CRM (одна транзакция:
         читатели либо видят старый срез, либо новый — не пустоту)."""

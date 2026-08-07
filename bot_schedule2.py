@@ -9743,8 +9743,10 @@ def api_average_scores():
 def sync_reg_contest(triggered_by='scheduler'):
     """Полный цикл: CRM -> матчинг с пользователями iCORE -> срез в БД.
 
-    CRM отдаёт уже засчитанных водителей (дедуп + фильтр «есть завершённая
-    поездка до дедлайна»), поэтому каждый синк просто заменяет срез целиком.
+    CRM отдаёт зарегистрированных водителей уже дедуплицированными; каждый
+    синк просто заменяет срез целиком. Сейчас приходят только засчитанные
+    (с первой поездкой); в запросе стоит include_no_trip — когда CRM его
+    поддержит, в срез поедут и регистрации без поездки (first_trip_at NULL).
     """
     contest = reg_contest.CONTEST
     config = reg_contest.get_config()
@@ -9780,20 +9782,26 @@ def _reg_contest_iso(value):
     return str(value)
 
 
-def _reg_contest_public_item(item, include_rows):
-    """Строка рейтинга наружу; список водителей — только админам и владельцу."""
+def _reg_contest_public_item(item, include_rows, mask_phones, avatar_url=None):
+    """Строка рейтинга наружу; список водителей — только админам и владельцу.
+
+    Телефоны водителей — персональные данные: не-админам (оператор смотрит
+    собственный список) отдаём только последние 4 цифры."""
     payload = {
         "place": item.get("place"),
         "user_id": item.get("user_id"),
         "name": item.get("name"),
         "drivers": item.get("drivers"),
+        "registrations": item.get("registrations"),
         "prize": item.get("prize"),
         "last_trip_at": _reg_contest_iso(item.get("last_trip_at")),
+        "avatar_url": avatar_url,
     }
     if include_rows:
         payload["rows"] = [{
             "driver_name": row.get("driver_name"),
-            "driver_phone": row.get("driver_phone"),
+            "driver_phone": (reg_contest.mask_phone(row.get("driver_phone"))
+                             if mask_phones else row.get("driver_phone")),
             "registered_at": _reg_contest_iso(row.get("registered_at")),
             "first_trip_at": _reg_contest_iso(row.get("first_trip_at")),
             "trips_count": row.get("trips_count"),
@@ -9804,8 +9812,10 @@ def _reg_contest_public_item(item, include_rows):
 @app.route('/api/reg_contest/results', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_reg_contest_results():
-    """Рейтинг конкурса. Операторам — таблицы групп и свои регистрации,
-    админам — ещё и детали по каждому участнику + «вне зачёта»."""
+    """Рейтинг конкурса. Операторам — таблицы групп и свои регистрации
+    (телефоны водителей замаскированы), админам — детали по каждому
+    участнику. «Вне зачёта» наружу намеренно не отдаём — требование
+    владельца: чужие отделы в конкурсе не показываются совсем."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, requester, error = _resolve_requester()
@@ -9817,13 +9827,22 @@ def api_reg_contest_results():
         contest = reg_contest.CONTEST
         entries = db.get_reg_contest_entries(contest["code"])
         boards = reg_contest.build_leaderboards(entries)
+        # Аватарки участников одной выборкой; подписанные URL кэшируются.
+        participant_ids = [item["user_id"]
+                           for group in ("chat", "line")
+                           for item in boards.get(group) or []
+                           if item.get("user_id")]
+        avatar_refs = db.get_reg_contest_avatar_refs(participant_ids)
         groups = {}
         for group in ("chat", "line"):
-            groups[group] = [
-                _reg_contest_public_item(
-                    item, is_admin or item.get("user_id") == requester_id)
-                for item in boards.get(group) or []
-            ]
+            groups[group] = []
+            for item in boards.get(group) or []:
+                bucket, blob = avatar_refs.get(item.get("user_id"), (None, None))
+                groups[group].append(_reg_contest_public_item(
+                    item,
+                    include_rows=is_admin or item.get("user_id") == requester_id,
+                    mask_phones=not is_admin,
+                    avatar_url=_build_avatar_signed_url(bucket, blob)))
         sync_state = db.get_reg_contest_sync_state(contest["code"])
         payload = {
             "status": "success",
@@ -9845,16 +9864,13 @@ def api_reg_contest_results():
             },
             "groups": groups,
             "can_sync": is_admin,
+            # CRM пока отдаёт только засчитанных водителей; когда начнёт
+            # присылать и регистрации без поездки (include_no_trip, допзапрос
+            # в API_REQ_TOP_REGISTRATIONS_2026-08-07.md), флаг включится и
+            # фронт покажет колонку «регистраций всего».
+            "registrations_supported": any(
+                e.get("first_trip_at") is None for e in entries),
         }
-        if is_admin:
-            # Вне зачёта: другие отделы (ОП, фронт-офис) и несопоставленные
-            # операторы CRM — чтобы регистрации не пропадали молча.
-            payload["off"] = [
-                {**_reg_contest_public_item(item, True),
-                 "operator_login": item.get("operator_login"),
-                 "match_method": item.get("match_method")}
-                for item in boards.get("off") or []
-            ]
         return jsonify(payload), 200
     except Exception:
         logging.exception("Error in /api/reg_contest/results")

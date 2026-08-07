@@ -25,7 +25,7 @@ import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from './components/ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary } from './utils/salaryFormula';
@@ -32316,16 +32316,350 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         );
         }
 
+        // ────────────────────────────────────────────────────────────────
         // Конкурс «Топ по регистрациям»: живой рейтинг из CRM (/api/reg_contest/*).
-        // Отдельным компонентом вне ContestsApp: у вкладки свой fetch-цикл, а
+        // Компоненты вынесены из ContestsApp: у вкладки свой fetch-цикл, а
         // определение внутри пересоздавало бы компонент (и запрос) на каждый рендер.
+        // ────────────────────────────────────────────────────────────────
+
+        const REG_MONTHS_GEN = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+        const regFmtDay = (iso) => {
+            if (!iso) return '';
+            const d = new Date(`${iso}T00:00:00`);
+            return `${d.getDate()} ${REG_MONTHS_GEN[d.getMonth()]}`;
+        };
+        const regFmtDateTime = (iso) => iso
+            ? new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+            : '—';
+        const regFmtTenge = (n) => (n == null ? null : `${Number(n).toLocaleString('ru-RU')} ₸`);
+        const regPluralDrivers = (n) => {
+            const abs = Math.abs(n) % 100; const d = abs % 10;
+            if (abs > 10 && abs < 20) return 'водителей';
+            if (d === 1) return 'водитель';
+            if (d >= 2 && d <= 4) return 'водителя';
+            return 'водителей';
+        };
+        const regInitials = (name) => {
+            const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+            return (parts.slice(0, 2).map((w) => w[0]).join('') || '•').toUpperCase();
+        };
+
+        const REG_PLACE_MEDAL = { 1: 'medal-gold', 2: 'medal-silver', 3: 'medal-bronze' };
+        // Тона лаврового венка по призовым местам: золото, серебро, бронза.
+        const REG_WREATH_TONES = {
+            1: { leaf: '#E8B10E', leafAlt: '#C98F06', berry: '#F6CE53' },
+            2: { leaf: '#A8B2BD', leafAlt: '#8B96A3', berry: '#CBD3DB' },
+            3: { leaf: '#C4854E', leafAlt: '#A76B39', berry: '#DFAC7C' },
+        };
+
+        // Лавровый венок призёра: две зеркальные ветви обнимают аватарку снизу
+        // и по бокам, сверху разрыв — лицо не перекрывается. Рисуется слоем ПОД
+        // аватаркой, наружу выглядывают только кончики листьев.
+        const RegLaurelWreath = ({ place, className = '' }) => {
+            const tone = REG_WREATH_TONES[place];
+            if (!tone) return null;
+            const leaves = [78, 100, 122, 143, 162, 176];
+            return (
+                <svg viewBox="0 0 100 100" className={className} aria-hidden="true">
+                    {[false, true].map((mirrored) => (
+                        <g key={mirrored ? 'left' : 'right'} transform={mirrored ? 'scale(-1 1) translate(-100 0)' : undefined}>
+                            {leaves.map((angle, i) => (
+                                <path key={angle}
+                                      d="M50 3 C57 9 57 21 50 27 C43 21 43 9 50 3"
+                                      fill={i % 2 ? tone.leafAlt : tone.leaf}
+                                      transform={`rotate(${angle} 50 50) rotate(-22 50 15)`} />
+                            ))}
+                            <circle cx="50" cy="7" r="3" fill={tone.berry} transform="rotate(168 50 50)" />
+                        </g>
+                    ))}
+                </svg>
+            );
+        };
+
+        // Аватарка участника: фото или инициалы на нейтральной подложке.
+        const RegContestAvatar = ({ item, sizeClass = 'h-9 w-9', textClass = 'text-xs' }) => (
+            <div className={`${sizeClass} rounded-full overflow-hidden bg-slate-100 ring-1 ring-slate-200/70 flex items-center justify-center flex-shrink-0`}>
+                {item?.avatar_url ? (
+                    <AvatarImage src={item.avatar_url} alt={item?.name || 'Участник'} className="h-full w-full object-cover" />
+                ) : (
+                    <span className={`${textClass} font-semibold text-slate-400 select-none`}>{regInitials(item?.name)}</span>
+                )}
+            </div>
+        );
+
+        // Призовое место на подиуме группы. Пустой слот — приз ещё не занят.
+        const RegPodiumSlot = ({ item, place, prizeAmount, big = false, isMe = false }) => (
+            <div className={`flex min-w-0 flex-col items-center ${big ? 'w-28 sm:w-32' : 'w-24 sm:w-28'}`}>
+                <div className={`relative flex-shrink-0 ${big ? 'h-24 w-24 sm:h-28 sm:w-28' : 'h-[72px] w-[72px] sm:h-[88px] sm:w-[88px]'}`}>
+                    {item ? (
+                        <>
+                            <RegLaurelWreath place={place} className="pointer-events-none absolute inset-0 h-full w-full" />
+                            <div className="absolute inset-[15%]">
+                                <RegContestAvatar item={item} sizeClass="h-full w-full" textClass={big ? 'text-xl' : 'text-base'} />
+                            </div>
+                            <div className={`${REG_PLACE_MEDAL[place]} absolute -bottom-0.5 left-1/2 flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full text-[12px] font-bold text-white shadow ring-2 ring-white`}>{place}</div>
+                        </>
+                    ) : (
+                        <>
+                            <div className="absolute inset-[15%] flex items-center justify-center rounded-full border-2 border-dashed border-slate-200">
+                                <FaIcon className="fas fa-user text-xl text-slate-200" />
+                            </div>
+                            <div className="absolute -bottom-0.5 left-1/2 flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full bg-slate-100 text-[12px] font-bold text-slate-400 ring-2 ring-white">{place}</div>
+                        </>
+                    )}
+                </div>
+                <p className={`mt-2 w-full truncate text-center text-[13px] font-semibold ${item ? 'text-slate-800' : 'text-slate-400'}`} title={item?.name || undefined}>
+                    {item ? item.name : 'Место свободно'}
+                </p>
+                {isMe && <span className="mt-0.5 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">Вы</span>}
+                <span className={`mt-1 rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold ${item ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{regFmtTenge(prizeAmount)}</span>
+            </div>
+        );
+
+        // Иллюстрация модалки правил: пьедестал, кубок, лавры, конфетти.
+        const RegRulesIllustration = () => (
+            <svg viewBox="0 0 320 130" className="mx-auto h-auto w-full max-w-sm" aria-hidden="true">
+                <circle cx="46" cy="28" r="3" fill="#34D399" opacity="0.7" />
+                <circle cx="274" cy="22" r="3" fill="#FBBF24" opacity="0.8" />
+                <circle cx="298" cy="54" r="2.5" fill="#60A5FA" opacity="0.7" />
+                <circle cx="26" cy="60" r="2.5" fill="#F472B6" opacity="0.6" />
+                <rect x="92" y="16" width="5" height="5" rx="1" fill="#60A5FA" opacity="0.7" transform="rotate(20 94 18)" />
+                <rect x="236" y="42" width="5" height="5" rx="1" fill="#34D399" opacity="0.6" transform="rotate(-15 238 44)" />
+                <rect x="142" y="6" width="4" height="4" rx="1" fill="#F472B6" opacity="0.5" transform="rotate(30 144 8)" />
+                {[-1, 1].map((s) => (
+                    <g key={s} transform={`translate(160 50) scale(${s} 1)`}>
+                        <path d="M24 8 C31 11 33 18 30 24 C23 21 21 13 24 8" fill="#E8B10E" />
+                        <path d="M32 -3 C39 -1 42 6 40 12 C33 9 31 2 32 -3" fill="#C98F06" />
+                        <path d="M37 -15 C44 -14 48 -8 47 -2 C40 -4 36 -10 37 -15" fill="#E8B10E" />
+                    </g>
+                ))}
+                <rect x="70" y="88" width="58" height="38" rx="6" fill="#E2E8F0" />
+                <rect x="131" y="70" width="58" height="56" rx="6" fill="#CBD5E1" />
+                <rect x="192" y="98" width="58" height="28" rx="6" fill="#E2E8F0" />
+                <text x="99" y="113" textAnchor="middle" fontSize="15" fontWeight="700" fill="#94A3B8">2</text>
+                <text x="160" y="102" textAnchor="middle" fontSize="17" fontWeight="700" fill="#64748B">1</text>
+                <text x="221" y="118" textAnchor="middle" fontSize="13" fontWeight="700" fill="#94A3B8">3</text>
+                <path d="M147 32 h26 v11 a13 13 0 0 1 -26 0 z" fill="#F59E0B" />
+                <path d="M147 35 a8 7 0 1 0 -3 12" fill="none" stroke="#F59E0B" strokeWidth="3" />
+                <path d="M173 35 a8 7 0 1 1 3 12" fill="none" stroke="#F59E0B" strokeWidth="3" />
+                <rect x="156" y="54" width="8" height="6" fill="#D97706" />
+                <rect x="149" y="60" width="22" height="5" rx="2" fill="#B45309" />
+                <path d="M152 36 q1 5 4 8" stroke="#FDE68A" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+            </svg>
+        );
+
+        // Модалка «Правила»: призовой фонд, механика, сроки — вместо простыни
+        // текста в шапке вкладки.
+        const RegContestRulesModal = ({ open, onClose, contest, groupLabels, showRegistrations }) => {
+            if (!open || !contest) return null;
+            const steps = [
+                { title: 'Зарегистрируй водителя', text: 'Строго по твоей реферальной ссылке в CRM — иначе регистрация в конкурсе не участвует.' },
+                { title: 'Водитель выходит на линию', text: `Регистрация засчитывается после первой завершённой поездки водителя — до ${regFmtDay(contest.trip_deadline)} включительно.` },
+                { title: 'Следи за рейтингом', text: 'Данные подтягиваются из CRM каждую ночь. Место в группе определяют засчитанные водители.' },
+                { title: 'Забери приз', text: `Итоги ${regFmtDay(contest.results_date)}. Лучшие в группах «${groupLabels.chat}» и «${groupLabels.line}» получают выплаты.` },
+            ];
+            const fairPlay = [
+                { icon: 'fa-user-check', text: 'Один водитель — одному оператору: тому, кто зарегистрировал его первым. Повторные регистрации не считаются.' },
+                { icon: 'fa-stopwatch', text: 'При равном счёте выше тот, кто набрал свой результат раньше.' },
+            ];
+            if (showRegistrations) {
+                fairPlay.push({ icon: 'fa-hourglass-half', text: '«Регистраций» — все твои водители за период, «засчитано» — те, кто уже совершил первую поездку.' });
+            }
+            const timeline = [
+                { date: contest.registered_from, label: 'Старт конкурса — регистрации открыты' },
+                { date: contest.registered_to, label: 'Последний день регистраций' },
+                { date: contest.trip_deadline, label: 'Дедлайн первой поездки, итоги и награждение' },
+            ];
+            return (
+                <IosModal open={open} onClose={onClose} title="Правила конкурса"
+                          subtitle={`${regFmtDay(contest.registered_from)} — ${regFmtDay(contest.registered_to)}`}
+                          maxWidth="max-w-2xl"
+                          footer={<button type="button" className={iosBtnPrimary} onClick={onClose}>Понятно</button>}>
+                    <div className="space-y-6" style={{ fontFamily: APPLE_FONT }}>
+                        <div>
+                            <RegRulesIllustration />
+                            <h4 className="mt-3 text-center text-[17px] font-bold text-slate-900">Зарегистрируй больше всех — забери приз</h4>
+                            <p className="mx-auto mt-1 max-w-md text-center text-[13px] leading-relaxed text-slate-500">Соревнуются две группы — «{groupLabels.chat}» и «{groupLabels.line}». Считаются водители, зарегистрированные по твоей ссылке и совершившие первую поездку.</p>
+                        </div>
+                        <section>
+                            <div className={iosGroupLabel}>Призовой фонд</div>
+                            <div className="mt-1.5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                {['chat', 'line'].map((groupKey) => (
+                                    <div key={groupKey} className={`${iosCard} p-4`}>
+                                        <p className="text-[13px] font-semibold text-slate-900">{groupLabels[groupKey]}</p>
+                                        <div className="mt-2.5 space-y-2">
+                                            {(contest.prizes?.[groupKey] || []).map((amount, i) => (
+                                                <div key={i} className="flex items-center gap-2.5">
+                                                    <span className={`${REG_PLACE_MEDAL[i + 1] || 'bg-slate-300'} flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white`}>{i + 1}</span>
+                                                    <span className="text-[13px] text-slate-500">{i + 1} место</span>
+                                                    <span className="ml-auto text-[13px] font-semibold tabular-nums text-slate-900">{regFmtTenge(amount)}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                        <section>
+                            <div className={iosGroupLabel}>Как это работает</div>
+                            <div className={`${iosCard} mt-1.5 divide-y divide-slate-100`}>
+                                {steps.map((step, i) => (
+                                    <div key={i} className="flex items-start gap-3 px-4 py-3">
+                                        <span className="mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-blue-600 text-[12px] font-bold text-white">{i + 1}</span>
+                                        <div className="min-w-0">
+                                            <p className="text-[13.5px] font-medium text-slate-800">{step.title}</p>
+                                            <p className="mt-0.5 text-[12.5px] leading-relaxed text-slate-500">{step.text}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                        <section>
+                            <div className={iosGroupLabel}>Ключевые даты</div>
+                            <div className={`${iosCard} mt-1.5 px-4 py-3.5`}>
+                                {timeline.map((point, i) => (
+                                    <div key={i} className="flex gap-3">
+                                        <div className="flex flex-col items-center">
+                                            <span className={`mt-1 h-2.5 w-2.5 flex-shrink-0 rounded-full ${i === 0 ? 'bg-emerald-500' : i === timeline.length - 1 ? 'bg-amber-500' : 'bg-blue-500'}`}></span>
+                                            {i < timeline.length - 1 && <span className="my-0.5 w-px flex-1 bg-slate-200"></span>}
+                                        </div>
+                                        <div className={i < timeline.length - 1 ? 'pb-4' : ''}>
+                                            <p className="text-[13px] font-semibold text-slate-800">{regFmtDay(point.date)}</p>
+                                            <p className="text-[12.5px] text-slate-500">{point.label}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                        <section>
+                            <div className={iosGroupLabel}>Честная игра</div>
+                            <div className={`${iosCard} mt-1.5 divide-y divide-slate-100`}>
+                                {fairPlay.map((rule, i) => (
+                                    <div key={i} className="flex items-start gap-3 px-4 py-3">
+                                        <FaIcon className={`fas ${rule.icon} mt-0.5 w-4 text-center text-slate-400`} />
+                                        <p className="text-[12.5px] leading-relaxed text-slate-600">{rule.text}</p>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                    </div>
+                </IosModal>
+            );
+        };
+
+        const RegRankBadge = ({ place, hasScore }) => {
+            const medal = hasScore ? REG_PLACE_MEDAL[place] : null;
+            if (medal) return <div className={`${medal} flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-[13px] font-bold text-white`}>{place}</div>;
+            return <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-[13px] font-semibold text-slate-400">{place}</div>;
+        };
+
+        const RegDriversDetail = ({ rows }) => (
+            <div className="mt-3 space-y-0.5 border-t border-slate-100 pt-2">
+                <div className="hidden gap-2 px-2 py-1 text-[11px] uppercase tracking-wide text-slate-400 md:grid md:grid-cols-12">
+                    <span className="col-span-4">Водитель</span>
+                    <span className="col-span-3">Телефон</span>
+                    <span className="col-span-2">Регистрация</span>
+                    <span className="col-span-2">Первая поездка</span>
+                    <span className="col-span-1 text-right">Поездок</span>
+                </div>
+                {rows.map((r, i) => (
+                    <div key={i} className="grid grid-cols-2 gap-x-2 gap-y-0.5 rounded-lg px-2 py-1.5 text-sm hover:bg-slate-50 md:grid-cols-12">
+                        <span className="col-span-2 truncate font-medium text-slate-700 md:col-span-4">{r.driver_name || '—'}</span>
+                        <span className="tabular-nums text-slate-500 md:col-span-3">{r.driver_phone || '—'}</span>
+                        <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.registered_at)}</span>
+                        {r.first_trip_at ? (
+                            <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.first_trip_at)}</span>
+                        ) : (
+                            <span className="md:col-span-2"><span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><FaIcon className="fas fa-hourglass-half text-[9px]" /> ждёт поездку</span></span>
+                        )}
+                        <span className="hidden text-right tabular-nums text-slate-600 md:block md:col-span-1">{r.trips_count ?? '—'}</span>
+                    </div>
+                ))}
+            </div>
+        );
+
+        // Карточка группы: подиум призовых мест + полный список участников.
+        // На модульном уровне (а не внутри панели), иначе каждый setState
+        // панели пересоздавал бы тип компонента и ремоунтил обе карточки.
+        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, expandedKey, onToggleExpand, showRegistrations }) => {
+            const leaderMax = items.length ? Math.max(...items.map(i => i.drivers || 0)) : 0;
+            // Порядок подиума: первое место в центре (классика 2-1-3);
+            // для двух призов — просто слева направо.
+            const podiumPlaces = prizes.length >= 3 ? [2, 1, 3] : [1, 2].slice(0, prizes.length);
+            return (
+                <div className={`${iosCard} p-5 md:p-6`} style={{ fontFamily: APPLE_FONT }}>
+                    <div className="mb-5 flex items-baseline justify-between gap-3">
+                        <h3 className="text-[17px] font-bold text-slate-900">{groupLabel}</h3>
+                        {items.length > 0 && <p className="text-[12px] text-slate-400">Участников: {items.length}</p>}
+                    </div>
+                    {prizes.length > 0 && (
+                        <div className="mb-6 flex items-end justify-center gap-2 sm:gap-5">
+                            {podiumPlaces.map((place) => {
+                                const candidate = items[place - 1];
+                                const slotItem = candidate && (candidate.drivers || 0) > 0 ? candidate : null;
+                                return (
+                                    <RegPodiumSlot key={place} item={slotItem} place={place} prizeAmount={prizes[place - 1]} big={place === 1}
+                                                   isMe={!!slotItem && slotItem.user_id != null && slotItem.user_id === currentUserId} />
+                                );
+                            })}
+                        </div>
+                    )}
+                    {items.length === 0 ? (
+                        // Пустые слоты подиума уже говорят, что мест ждут —
+                        // второй плейсхолдер рисуем, только когда подиума нет.
+                        prizes.length === 0 ? (
+                            <div className="rounded-xl border-2 border-dashed border-slate-100 py-10 text-center text-sm text-slate-400">Пока никто не засчитан — рейтинг появится после первых поездок</div>
+                        ) : null
+                    ) : (
+                        <div className="space-y-1">
+                            {items.map((item, idx) => {
+                                const isMe = item.user_id != null && item.user_id === currentUserId;
+                                const key = `${groupKey}:${idx}`;
+                                const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
+                                const isOpen = expandedKey === key;
+                                return (
+                                    <div key={key} className={`rounded-xl px-3 py-2.5 transition-all ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${canExpand ? 'cursor-pointer' : ''}`}
+                                         onClick={() => canExpand && onToggleExpand(isOpen ? null : key)}>
+                                        <div className="flex items-center gap-3">
+                                            <RegRankBadge place={item.place} hasScore={(item.drivers || 0) > 0} />
+                                            <RegContestAvatar item={item} sizeClass="h-9 w-9" />
+                                            <div className="min-w-0 flex-1">
+                                                <div className="flex min-w-0 items-center gap-2">
+                                                    <span className="truncate text-[14px] font-semibold text-slate-800">{item.name}</span>
+                                                    {isMe && <span className="flex-shrink-0 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">Вы</span>}
+                                                </div>
+                                                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100">
+                                                    <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${leaderMax && (item.drivers || 0) > 0 ? Math.max(3, Math.round(((item.drivers || 0) / leaderMax) * 100)) : 0}%` }}></div>
+                                                </div>
+                                            </div>
+                                            <div className="flex-shrink-0 text-right">
+                                                <div className="text-lg font-bold leading-none tabular-nums text-slate-900">{item.drivers}</div>
+                                                <div className="mt-0.5 text-[11px] text-slate-400">{showRegistrations && item.registrations != null ? `из ${item.registrations} рег.` : regPluralDrivers(item.drivers)}</div>
+                                            </div>
+                                            {canExpand && <FaIcon className={`fas fa-chevron-down text-xs text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
+                                        </div>
+                                        {isOpen && canExpand && (
+                                            <div onClick={(e) => e.stopPropagation()}>
+                                                <p className="mt-2 text-[11px] text-slate-400">Последняя засчитанная поездка: {regFmtDateTime(item.last_trip_at)} — при равном счёте выше тот, у кого она раньше.</p>
+                                                <RegDriversDetail rows={item.rows} />
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         const RegContestPanel = ({ currentUser, isAdmin, addToast }) => {
             const { useState, useEffect } = React;
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(true);
             const [syncing, setSyncing] = useState(false);
             const [expandedKey, setExpandedKey] = useState(null);
-            const [showOff, setShowOff] = useState(false);
+            const [showRules, setShowRules] = useState(false);
 
             const fetchResults = async () => {
                 try {
@@ -32355,36 +32689,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
 
-            const MONTHS_GEN = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
-            const fmtDay = (iso) => {
-                if (!iso) return '';
-                const d = new Date(`${iso}T00:00:00`);
-                return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`;
-            };
-            const fmtDateTime = (iso) => iso
-                ? new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-                : '—';
-            const fmtTenge = (n) => (n == null ? null : `${Number(n).toLocaleString('ru-RU')} ₸`);
-            const pluralDrivers = (n) => {
-                const abs = Math.abs(n) % 100; const d = abs % 10;
-                if (abs > 10 && abs < 20) return 'водителей';
-                if (d === 1) return 'водитель';
-                if (d >= 2 && d <= 4) return 'водителя';
-                return 'водителей';
-            };
-
             const contest = data?.contest;
             const groups = data?.groups || {};
             const sync = data?.sync || {};
             const groupLabels = contest?.group_labels || { chat: 'Чаты', line: 'Линия' };
-            const prizeEmoji = ['🥇', '🥈', '🥉'];
+            // CRM пока отдаёт только засчитанных водителей; как только начнёт
+            // присылать и регистрации без поездки, бэкенд поднимет флаг и тут
+            // появятся счётчики «регистраций всего».
+            const showRegistrations = !!data?.registrations_supported;
+            // Счётчик в чипе «Обновлено» — только видимые группы (chat+line):
+            // total_rows синка включает и «вне зачёта», которого на экране нет.
+            const countedRows = ['chat', 'line'].reduce((sum, g) => (groups[g] || []).reduce(
+                (acc, i) => acc + ((showRegistrations ? i.registrations : i.drivers) || 0), sum), 0);
+
+            const prizeFund = Object.values(contest?.prizes || {}).reduce(
+                (sum, list) => sum + (list || []).reduce((acc, n) => acc + (n || 0), 0), 0);
 
             // Сколько дней осталось регистрировать (по Алматы; конкурс включительно).
             const daysLeft = (() => {
                 if (!contest?.registered_to) return null;
                 const end = new Date(`${contest.registered_to}T23:59:59+05:00`);
-                const diff = Math.ceil((end - Date.now()) / 86400000);
+                const diff = Math.floor((end - Date.now()) / 86400000);
                 return diff >= 0 ? diff : null;
+            })();
+
+            // Доля пройденного периода регистраций — для полосы прогресса в шапке.
+            const contestProgress = (() => {
+                if (!contest?.registered_from || !contest?.registered_to) return null;
+                const start = new Date(`${contest.registered_from}T00:00:00+05:00`).getTime();
+                const end = new Date(`${contest.registered_to}T23:59:59+05:00`).getTime();
+                if (!(end > start)) return null;
+                return Math.min(1, Math.max(0, (Date.now() - start) / (end - start)));
             })();
 
             const myEntry = (() => {
@@ -32395,222 +32730,127 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return null;
             })();
 
-            const RankBadge = ({ place }) => {
-                const medal = { 1: 'medal-gold', 2: 'medal-silver', 3: 'medal-bronze' }[place];
-                if (medal) return <div className={`${medal} w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold shadow flex-shrink-0`}>{place}</div>;
-                return <div className="w-9 h-9 rounded-full bg-gray-100 text-gray-500 flex items-center justify-center text-sm font-semibold flex-shrink-0">{place}</div>;
-            };
-
-            const DriversDetail = ({ rows }) => (
-                <div className="mt-3 border-t border-gray-100 pt-2 space-y-1">
-                    <div className="hidden md:grid md:grid-cols-12 gap-2 px-2 py-1 text-[11px] uppercase tracking-wide text-gray-400">
-                        <span className="col-span-4">Водитель</span>
-                        <span className="col-span-3">Телефон</span>
-                        <span className="col-span-2">Регистрация</span>
-                        <span className="col-span-2">Первая поездка</span>
-                        <span className="col-span-1 text-right">Поездок</span>
-                    </div>
-                    {rows.map((r, i) => (
-                        <div key={i} className="grid grid-cols-2 md:grid-cols-12 gap-x-2 gap-y-0.5 px-2 py-1.5 rounded-lg hover:bg-gray-50 text-sm">
-                            <span className="col-span-2 md:col-span-4 font-medium text-gray-800 truncate">{r.driver_name || '—'}</span>
-                            <span className="md:col-span-3 text-gray-500 tabular-nums">{r.driver_phone || '—'}</span>
-                            <span className="md:col-span-2 text-gray-500 tabular-nums">{fmtDateTime(r.registered_at)}</span>
-                            <span className="md:col-span-2 text-gray-500 tabular-nums">{fmtDateTime(r.first_trip_at)}</span>
-                            <span className="hidden md:block md:col-span-1 text-right text-gray-700 tabular-nums">{r.trips_count ?? '—'}</span>
-                        </div>
-                    ))}
-                </div>
-            );
-
-            const LeaderboardCard = ({ groupKey }) => {
-                const items = groups[groupKey] || [];
-                const prizes = contest?.prizes?.[groupKey] || [];
-                const leaderMax = items.length ? Math.max(...items.map(i => i.drivers || 0)) : 0;
-                return (
-                    <div className="bg-white rounded-2xl shadow-lg p-5 md:p-6">
-                        <div className="flex items-start justify-between gap-3 mb-4">
-                            <div>
-                                <h3 className="text-xl font-bold text-gray-800">{groupLabels[groupKey]}</h3>
-                                <p className="text-xs text-gray-400 mt-0.5">{items.length > 0 ? `Участников: ${items.length}` : 'Рейтинг появится после первых засчитанных водителей'}</p>
-                            </div>
-                            <div className="flex flex-wrap justify-end gap-1.5">
-                                {prizes.map((amount, i) => (
-                                    <span key={i} className="text-xs font-semibold bg-amber-50 text-amber-700 rounded-full px-2.5 py-1 whitespace-nowrap">{prizeEmoji[i]} {fmtTenge(amount)}</span>
-                                ))}
-                            </div>
-                        </div>
-                        {items.length === 0 ? (
-                            <div className="border-2 border-dashed border-gray-100 rounded-xl py-10 text-center text-sm text-gray-400">Пока никто не засчитан</div>
-                        ) : (
-                            <div className="space-y-1.5">
-                                {items.map((item, idx) => {
-                                    const isMe = item.user_id != null && item.user_id === currentUser?.id;
-                                    const key = `${groupKey}:${idx}`;
-                                    const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
-                                    const isOpen = expandedKey === key;
-                                    return (
-                                        <div key={key} className={`rounded-xl px-3 py-2.5 transition-all ${isMe ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-gray-50'} ${canExpand ? 'cursor-pointer' : ''}`}
-                                             onClick={() => canExpand && setExpandedKey(isOpen ? null : key)}>
-                                            <div className="flex items-center gap-3">
-                                                <RankBadge place={item.place} />
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center gap-2 min-w-0">
-                                                        <span className="font-semibold text-gray-800 truncate">{item.name}</span>
-                                                        {isMe && <span className="text-[10px] font-bold uppercase tracking-wide bg-blue-600 text-white rounded-full px-2 py-0.5 flex-shrink-0">Вы</span>}
-                                                        {item.prize != null && <span className="text-[11px] font-semibold bg-emerald-50 text-emerald-700 rounded-full px-2 py-0.5 flex-shrink-0">{fmtTenge(item.prize)}</span>}
-                                                    </div>
-                                                    <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                                        <div className="h-full rounded-full bg-gradient-to-r from-teal-400 to-emerald-500 transition-all" style={{ width: `${leaderMax ? Math.max(4, Math.round((item.drivers / leaderMax) * 100)) : 0}%` }}></div>
-                                                    </div>
-                                                </div>
-                                                <div className="text-right flex-shrink-0">
-                                                    <div className="text-xl font-bold text-gray-800 tabular-nums leading-none">{item.drivers}</div>
-                                                    <div className="text-[11px] text-gray-400 mt-0.5">{pluralDrivers(item.drivers)}</div>
-                                                </div>
-                                                {canExpand && <FaIcon className={`fas fa-chevron-down text-gray-300 text-xs transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
-                                            </div>
-                                            {isOpen && canExpand && (
-                                                <div onClick={(e) => e.stopPropagation()}>
-                                                    <p className="mt-2 text-[11px] text-gray-400">Последняя засчитанная поездка: {fmtDateTime(item.last_trip_at)} — при равном счёте выше тот, у кого она раньше.</p>
-                                                    <DriversDetail rows={item.rows} />
-                                                </div>
-                                            )}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                );
-            };
-
             if (loading && !data) {
                 return (
-                    <div className="space-y-6">
-                        <div className="bg-white rounded-2xl shadow-lg p-6 animate-pulse h-40"></div>
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <div className="bg-white rounded-2xl shadow-lg p-6 animate-pulse h-72"></div>
-                            <div className="bg-white rounded-2xl shadow-lg p-6 animate-pulse h-72"></div>
+                    <div className="space-y-5">
+                        <div className={`${iosCard} h-44 animate-pulse`}></div>
+                        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                            <div className={`${iosCard} h-80 animate-pulse`}></div>
+                            <div className={`${iosCard} h-80 animate-pulse`}></div>
                         </div>
                     </div>
                 );
             }
 
-            const rules = [
-                { icon: 'fa-link', text: 'Регистрация строго по ссылке в CRM' },
-                { icon: 'fa-route', text: `Засчитывается после первой завершённой поездки — до ${fmtDay(contest?.trip_deadline)} включительно` },
-                { icon: 'fa-user-check', text: 'Один водитель — одному оператору: кто первым зарегистрировал' },
-                { icon: 'fa-stopwatch', text: 'При равенстве выше тот, кто раньше набрал результат' },
-            ];
-
             return (
-                <div className="space-y-6">
-                    <div className="bg-gradient-to-br from-teal-500 to-emerald-700 rounded-2xl p-6 text-white shadow-lg">
-                        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
-                            <div>
-                                <h3 className="text-2xl font-bold flex items-center gap-2"><FaIcon className="fas fa-trophy text-yellow-300" /> {contest?.title || 'Топ по регистрациям'}</h3>
-                                <p className="opacity-90 mt-1">{fmtDay(contest?.registered_from)} — {fmtDay(contest?.registered_to)} • итоги {fmtDay(contest?.results_date)}</p>
-                                <div className="flex flex-wrap gap-2 mt-3">
-                                    {daysLeft != null && (
-                                        <span className="text-xs font-semibold bg-white bg-opacity-20 rounded-full px-3 py-1 backdrop-blur-sm">{daysLeft === 0 ? 'Последний день регистраций' : `Осталось дней: ${daysLeft}`}</span>
-                                    )}
-                                    {sync.synced_at && (
-                                        <span className="text-xs bg-white bg-opacity-20 rounded-full px-3 py-1 backdrop-blur-sm opacity-90">Обновлено {fmtDateTime(sync.synced_at)}{sync.total_rows != null ? ` • засчитано: ${sync.total_rows}` : ''}</span>
-                                    )}
-                                    {isAdmin && sync.status === 'error' && (
-                                        <span className="text-xs font-semibold bg-red-500 bg-opacity-80 rounded-full px-3 py-1" title={sync.error || ''}>Последний синк с ошибкой</span>
+                <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+                    {/* Шапка-афиша: призовой фонд, сроки, прогресс периода. */}
+                    <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-teal-600 via-emerald-600 to-emerald-800 text-white shadow-lg">
+                        <div className="pointer-events-none absolute -right-16 -top-24 h-72 w-72 rounded-full bg-white/10 blur-2xl"></div>
+                        <div className="pointer-events-none absolute -bottom-28 -left-12 h-64 w-64 rounded-full bg-cyan-300/20 blur-3xl"></div>
+                        <RegLaurelWreath place={1} className="pointer-events-none absolute -bottom-16 -right-8 h-56 w-56 opacity-[0.14]" />
+                        <div className="relative p-5 md:p-7">
+                            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                                <div className="flex min-w-0 items-start gap-3.5">
+                                    <span className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-white/15 shadow-inner backdrop-blur-sm">
+                                        <FaIcon className="fas fa-trophy text-xl text-yellow-300" />
+                                    </span>
+                                    <div className="min-w-0">
+                                        <h3 className="text-[22px] font-bold leading-tight md:text-2xl">{contest?.title || 'Топ по регистрациям'}</h3>
+                                        <p className="mt-0.5 text-[13px] text-white/80">{regFmtDay(contest?.registered_from)} — {regFmtDay(contest?.registered_to)} • итоги {regFmtDay(contest?.results_date)}</p>
+                                        <div className="mt-3 flex flex-wrap gap-1.5">
+                                            {prizeFund > 0 && (
+                                                <span className="inline-flex items-center gap-1.5 rounded-full bg-yellow-300/20 px-3 py-1 text-xs font-semibold text-yellow-100 backdrop-blur-sm"><FaIcon className="fas fa-coins" /> Призовой фонд {regFmtTenge(prizeFund)}</span>
+                                            )}
+                                            {daysLeft != null && (
+                                                <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold backdrop-blur-sm">{daysLeft === 0 ? 'Последний день регистраций' : `Осталось дней: ${daysLeft}`}</span>
+                                            )}
+                                            {sync.synced_at && (
+                                                <span className="rounded-full bg-white/15 px-3 py-1 text-xs text-white/85 backdrop-blur-sm">Обновлено {regFmtDateTime(sync.synced_at)} • {showRegistrations ? 'регистраций' : 'засчитано'}: {countedRows}</span>
+                                            )}
+                                            {isAdmin && sync.status === 'error' && (
+                                                <span className="rounded-full bg-red-500/80 px-3 py-1 text-xs font-semibold" title={sync.error || ''}>Последний синк с ошибкой</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="flex flex-shrink-0 items-center gap-2">
+                                    <button type="button" onClick={() => setShowRules(true)}
+                                            className="flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-semibold backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98]">
+                                        <FaIcon className="fas fa-book" /> Правила
+                                    </button>
+                                    {data?.can_sync && (
+                                        <button type="button" onClick={handleSync} disabled={syncing}
+                                                className="flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-semibold backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98] disabled:opacity-60">
+                                            <FaIcon className={`fas fa-rotate ${syncing ? 'animate-spin' : ''}`} />
+                                            {syncing ? 'Обновляем…' : 'Обновить из CRM'}
+                                        </button>
                                     )}
                                 </div>
                             </div>
-                            {data?.can_sync && (
-                                <button onClick={handleSync} disabled={syncing}
-                                        className="flex-shrink-0 flex items-center gap-2 bg-white bg-opacity-20 hover:bg-opacity-30 disabled:opacity-60 transition-all rounded-xl px-4 py-2.5 text-sm font-semibold backdrop-blur-sm">
-                                    <FaIcon className={`fas fa-rotate ${syncing ? 'animate-spin' : ''}`} />
-                                    {syncing ? 'Обновляем…' : 'Обновить из CRM'}
-                                </button>
-                            )}
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2 mt-5">
-                            {rules.map((rule, i) => (
-                                <div key={i} className="flex items-start gap-2.5 bg-white bg-opacity-15 rounded-xl px-3 py-2.5 backdrop-blur-sm">
-                                    <FaIcon className={`fas ${rule.icon} mt-0.5 opacity-80`} />
-                                    <span className="text-xs leading-snug opacity-95">{rule.text}</span>
+                            {contestProgress != null && (
+                                <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-white/20">
+                                    <div className="h-full rounded-full bg-white/85 transition-all" style={{ width: `${Math.round(contestProgress * 100)}%` }}></div>
                                 </div>
-                            ))}
+                            )}
                         </div>
                     </div>
 
                     {myEntry && (
-                        <div className="bg-white rounded-2xl shadow-lg p-5 flex flex-wrap items-center gap-x-8 gap-y-3">
+                        <div className={`${iosCard} flex flex-wrap items-center gap-x-8 gap-y-3 p-5`} style={{ fontFamily: APPLE_FONT }}>
                             <div className="flex items-center gap-3">
-                                <RankBadge place={myEntry.place} />
+                                <RegContestAvatar item={myEntry} sizeClass="h-11 w-11" textClass="text-sm" />
                                 <div>
-                                    <p className="text-xs uppercase tracking-wide text-gray-400">Ваше место • {groupLabels[myEntry.group]}</p>
-                                    <p className="text-lg font-bold text-gray-800 leading-tight">#{myEntry.place} из {(groups[myEntry.group] || []).length}</p>
+                                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Ваше место • {groupLabels[myEntry.group]}</p>
+                                    <p className="text-lg font-bold leading-tight text-slate-900">#{myEntry.place} из {(groups[myEntry.group] || []).length}</p>
                                 </div>
                             </div>
                             <div>
-                                <p className="text-xs uppercase tracking-wide text-gray-400">Засчитано</p>
-                                <p className="text-lg font-bold text-gray-800 leading-tight">{myEntry.drivers} {pluralDrivers(myEntry.drivers)}</p>
+                                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Засчитано</p>
+                                <p className="text-lg font-bold leading-tight text-slate-900">{myEntry.drivers} {regPluralDrivers(myEntry.drivers)}</p>
                             </div>
+                            {showRegistrations && myEntry.registrations != null && (
+                                <div>
+                                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Регистраций</p>
+                                    <p className="text-lg font-bold leading-tight text-slate-900">{myEntry.registrations}</p>
+                                </div>
+                            )}
                             {myEntry.prize != null ? (
                                 <div>
-                                    <p className="text-xs uppercase tracking-wide text-gray-400">Текущий приз</p>
-                                    <p className="text-lg font-bold text-emerald-600 leading-tight">{fmtTenge(myEntry.prize)}</p>
+                                    <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Текущий приз</p>
+                                    <p className="text-lg font-bold leading-tight text-emerald-600">{regFmtTenge(myEntry.prize)}</p>
                                 </div>
                             ) : (() => {
                                 const board = groups[myEntry.group] || [];
                                 const prizeCount = (contest?.prizes?.[myEntry.group] || []).length;
                                 const lastPrize = board[prizeCount - 1];
                                 if (!lastPrize) return null;
-                                const gap = (lastPrize.drivers - myEntry.drivers) + 1;
+                                const gap = ((lastPrize.drivers || 0) - (myEntry.drivers || 0)) + 1;
                                 return (
                                     <div>
-                                        <p className="text-xs uppercase tracking-wide text-gray-400">До призового места</p>
-                                        <p className="text-lg font-bold text-gray-800 leading-tight">+{gap} {pluralDrivers(gap)}</p>
+                                        <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">До призового места</p>
+                                        <p className="text-lg font-bold leading-tight text-slate-900">+{gap} {regPluralDrivers(gap)}</p>
                                     </div>
                                 );
                             })()}
                         </div>
                     )}
 
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <LeaderboardCard groupKey="chat" />
-                        <LeaderboardCard groupKey="line" />
+                    <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                        {['chat', 'line'].map((groupKey) => (
+                            <RegLeaderboardCard key={groupKey} groupKey={groupKey}
+                                                items={groups[groupKey] || []}
+                                                prizes={contest?.prizes?.[groupKey] || []}
+                                                groupLabel={groupLabels[groupKey]}
+                                                currentUserId={currentUser?.id}
+                                                expandedKey={expandedKey}
+                                                onToggleExpand={setExpandedKey}
+                                                showRegistrations={showRegistrations} />
+                        ))}
                     </div>
 
-                    {isAdmin && Array.isArray(data?.off) && data.off.length > 0 && (
-                        <div className="bg-white rounded-2xl shadow-lg p-5 md:p-6">
-                            <button onClick={() => setShowOff(!showOff)} className="w-full flex items-center justify-between gap-3 text-left">
-                                <div>
-                                    <h3 className="text-lg font-bold text-gray-800">Вне зачёта</h3>
-                                    <p className="text-xs text-gray-400 mt-0.5">Другие отделы и несопоставленные операторы CRM — {data.off.length} чел.</p>
-                                </div>
-                                <FaIcon className={`fas fa-chevron-down text-gray-300 transition-transform ${showOff ? 'rotate-180' : ''}`} />
-                            </button>
-                            {showOff && (
-                                <div className="mt-4 space-y-1.5">
-                                    {data.off.map((item, idx) => (
-                                        <div key={idx} className="flex items-center gap-3 rounded-xl px-3 py-2.5 hover:bg-gray-50">
-                                            <div className="flex-1 min-w-0">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="font-semibold text-gray-800 truncate">{item.name}</span>
-                                                    <span className={`text-[11px] font-medium rounded-full px-2 py-0.5 flex-shrink-0 ${item.match_method === 'none' ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>
-                                                        {item.match_method === 'none' ? 'не сопоставлен' : 'другой отдел'}
-                                                    </span>
-                                                </div>
-                                                {item.operator_login && <p className="text-xs text-gray-400 truncate">{item.operator_login}</p>}
-                                            </div>
-                                            <div className="text-right flex-shrink-0">
-                                                <span className="text-lg font-bold text-gray-700 tabular-nums">{item.drivers}</span>
-                                                <span className="text-[11px] text-gray-400 ml-1">{pluralDrivers(item.drivers)}</span>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
+                    <RegContestRulesModal open={showRules} onClose={() => setShowRules(false)} contest={contest}
+                                          groupLabels={groupLabels} showRegistrations={showRegistrations} />
                 </div>
             );
         };
