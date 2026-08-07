@@ -5113,6 +5113,7 @@ class Database:
             """)
             self._init_group_late_bot_schema_tx(cursor)
             self._init_amo_leads_schema_tx(cursor)
+            self._init_chat_hourly_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5181,18 +5182,6 @@ class Database:
             -- Подписки на отбивку. Чат подписывает себя сам командой, поэтому
             -- отдельного реестра чатов и раздела в интерфейсе не нужно.
             CREATE TABLE IF NOT EXISTS amo_lead_subscriptions (
-                chat_id       TEXT PRIMARY KEY,
-                title         TEXT,
-                chat_type     TEXT,
-                subscribed_by BIGINT,
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                last_sent_at  TIMESTAMPTZ
-            );
-
-            -- Подписки на почасовой отчёт по чатам Chat2Desk. Отдельно от лидов:
-            -- расписание, права и содержимое у отчётов разные, а один общий реестр
-            -- заставил бы держать колонку «на что подписан» и фильтровать по ней.
-            CREATE TABLE IF NOT EXISTS chat_hourly_subscriptions (
                 chat_id       TEXT PRIMARY KEY,
                 title         TEXT,
                 chat_type     TEXT,
@@ -5321,6 +5310,23 @@ class Database:
             cursor.execute(
                 "UPDATE amo_lead_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
                 (str(chat_id),))
+
+    def _init_chat_hourly_schema_tx(self, cursor):
+        """Подписки на почасовой отчёт по чатам Chat2Desk.
+
+        Отдельно от подписок на лиды: расписание, права и содержимое у отчётов разные,
+        а один общий реестр заставил бы держать колонку «на что подписан» и фильтровать
+        по ней в каждом запросе."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_hourly_subscriptions (
+                chat_id       TEXT PRIMARY KEY,
+                title         TEXT,
+                chat_type     TEXT,
+                subscribed_by BIGINT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_sent_at  TIMESTAMPTZ
+            );
+        """)
 
     def add_chat_hourly_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
         """Подписать чат на почасовой отчёт по чатам. Повторная подписка обновляет данные чата."""
