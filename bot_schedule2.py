@@ -35799,6 +35799,69 @@ def chat_manager_low_rating_reviews():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/my/low_rating_reviews', methods=['GET'])
+@require_api_key
+def my_low_rating_reviews():
+    """Свои низкие оценки и решения по ним — для раздела «Мои оценки» чат-менеджера.
+
+    Данные строго свои: operator_id всегда равен запрашивающему. Как и телефоны с
+    записями в оценках, открываются только после QR-подтверждения доступа
+    (см. /api/sensitive-access/*): до подтверждения возвращаем пустой список и
+    флаг granted=false, чтобы фронт показал подсказку, а не данные."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        month = request.args.get('month') or datetime.now().strftime('%Y-%m')
+        role = _normalize_user_role(requester[3])
+        if role == 'operator':
+            session_id = _current_session_id_from_access_token()
+            granted = bool(_is_sensitive_access_unlocked(requester_id, session_id))
+        else:
+            granted = True
+
+        try:
+            year, mon = map(int, str(month).split('-'))
+            period_end = dt_date(year, mon, calendar.monthrange(year, mon)[1])
+        except Exception:
+            return jsonify({"error": "month must be in YYYY-MM format"}), 400
+
+        def _is_chat_manager():
+            """Модель расчёта на конец месяца — по ней решаем, показывать ли блок."""
+            model_code = (db.get_operator_calculation_models_as_of([requester_id], period_end) or {}).get(int(requester_id))
+            return str(model_code or '').strip().lower() == 'chat_manager'
+
+        if not granted:
+            return jsonify({
+                "status": "success",
+                "month": month,
+                "rows": [],
+                "summary": {"total": 0, "pending": 0, "valid": 0, "invalid": 0},
+                "is_chat_manager": _is_chat_manager(),
+                "sensitive_access": {"required": True, "granted": False}
+            }), 200
+
+        result = db.list_operator_low_rating_reviews(operator_id=requester_id, month=month)
+        # Есть проверки за период — блок нужен независимо от текущей модели
+        # (оператор мог перейти в чат-менеджеры или из них посреди месяца), и
+        # лишний запрос модели тогда не делаем.
+        has_rows = int((result.get('summary') or {}).get('total') or 0) > 0
+        return jsonify({
+            "status": "success",
+            **result,
+            "is_chat_manager": has_rows or _is_chat_manager(),
+            "sensitive_access": {"required": role == 'operator', "granted": True}
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error loading own low rating reviews: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/chat_manager/low_rating_reviews/<review_id>', methods=['GET', 'PATCH'])
 @require_api_key
 def update_chat_manager_low_rating_review(review_id):
