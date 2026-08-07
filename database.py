@@ -3803,6 +3803,43 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_szov_wallboard_broadcast_history_changed_at
                 ON szov_wallboard_broadcast_history(changed_at DESC);
             """)
+            # Получатели отбивки. Раньше чат был один (singleton выше), но одному отделу
+            # нужна каждая отбивка, а руководству — только когда показатели вышли из нормы,
+            # поэтому получателей стало несколько и у каждого свой режим:
+            #   always     — каждая плановая отбивка;
+            #   deviations — то же расписание, но письмо уходит, только если есть отклонения.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_chats (
+                    chat_id BIGINT PRIMARY KEY,
+                    chat_title VARCHAR(255) NOT NULL DEFAULT '',
+                    mode VARCHAR(16) NOT NULL DEFAULT 'always',
+                    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    CONSTRAINT szov_wallboard_broadcast_chats_mode
+                        CHECK (mode IN ('always', 'deviations'))
+                );
+            """)
+            # Переезд с одного чата на список — ровно один раз. Флаг нужен, чтобы удалённый
+            # получатель не воскресал на каждом рестарте; строку в config при этом НЕ трогаем,
+            # чтобы откат деплоя на прежний код продолжал слать в тот же чат.
+            cursor.execute("""
+                ALTER TABLE szov_wallboard_broadcast_config
+                ADD COLUMN IF NOT EXISTS chats_migrated BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                INSERT INTO szov_wallboard_broadcast_chats
+                    (chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
+                SELECT chat_id, chat_title, 'always', is_enabled, updated_by, updated_at
+                FROM szov_wallboard_broadcast_config
+                WHERE id = 1 AND chat_id IS NOT NULL AND NOT chats_migrated
+                ON CONFLICT (chat_id) DO NOTHING;
+            """)
+            cursor.execute("""
+                UPDATE szov_wallboard_broadcast_config
+                SET chats_migrated = TRUE
+                WHERE id = 1 AND NOT chats_migrated;
+            """)
             # Общий код автодозвона: номер, на который оператор один раз звонит,
             # чтобы телефон подключился к режиму автодозвона. Один на всех.
             cursor.execute("""
@@ -5151,6 +5188,18 @@ class Database:
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 last_sent_at  TIMESTAMPTZ
             );
+
+            -- Подписки на почасовой отчёт по чатам Chat2Desk. Отдельно от лидов:
+            -- расписание, права и содержимое у отчётов разные, а один общий реестр
+            -- заставил бы держать колонку «на что подписан» и фильтровать по ней.
+            CREATE TABLE IF NOT EXISTS chat_hourly_subscriptions (
+                chat_id       TEXT PRIMARY KEY,
+                title         TEXT,
+                chat_type     TEXT,
+                subscribed_by BIGINT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_sent_at  TIMESTAMPTZ
+            );
         """)
 
     def upsert_amo_leads(self, rows):
@@ -5271,6 +5320,43 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute(
                 "UPDATE amo_lead_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
+                (str(chat_id),))
+
+    def add_chat_hourly_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
+        """Подписать чат на почасовой отчёт по чатам. Повторная подписка обновляет данные чата."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO chat_hourly_subscriptions (chat_id, title, chat_type, subscribed_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    subscribed_by = EXCLUDED.subscribed_by
+                RETURNING (xmax = 0) AS is_new
+            """, (str(chat_id), title, chat_type, user_id))
+            return bool(cursor.fetchone()[0])
+
+    def remove_chat_hourly_subscription(self, chat_id):
+        """Отписать чат. Возвращает True, если подписка была."""
+        with self._get_cursor() as cursor:
+            cursor.execute("DELETE FROM chat_hourly_subscriptions WHERE chat_id = %s",
+                           (str(chat_id),))
+            return cursor.rowcount > 0
+
+    def get_chat_hourly_subscriptions(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT chat_id, title, chat_type
+                FROM chat_hourly_subscriptions
+                ORDER BY created_at
+            """)
+            return [{"chat_id": r[0], "title": r[1], "chat_type": r[2]}
+                    for r in cursor.fetchall()]
+
+    def mark_chat_hourly_subscription_sent(self, chat_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE chat_hourly_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
                 (str(chat_id),))
 
     def get_last_amo_lead_sync(self):

@@ -30453,6 +30453,419 @@ async def szov_broadcast_job():
         logging.error("Отбивка табло: плановая отправка не удалась: %s", exc, exc_info=True)
 
 
+# === Почасовой отчёт по чатам ===================================================================
+# Раньше «количество чатов» было одной строкой в отбивке табло. Владелец попросил вынести
+# чаты в самостоятельный отчёт и слать его каждый час: сколько чатов, кто их вёл, как быстро
+# отвечают и кто сейчас на линии. Подписка — командой в чате, как у отбивки по лидам.
+#
+# Источники (Chat2Desk):
+#   request_stats  — по строке на обращение: request_start/request_end, operator_name,
+#                    reaction_time (первый ответ), replies + total_replies_time (ответы в чате);
+#   /v1/operators  — живой список операторов: online + offline_type (перерыв/обучение/отпуск).
+# Квота Chat2Desk общая на компанию и расходуется быстро, поэтому день не перекачиваем
+# целиком каждый час — см. _chat_hourly_fetch_requests.
+CHAT_HOURLY_BROADCAST_MINUTE = _env_int('CHAT_HOURLY_BROADCAST_MINUTE', 0, minimum=0, maximum=59)
+# Часы отправки в формате CronTrigger: '*' — каждый час, '8-23' — только рабочие.
+CHAT_HOURLY_BROADCAST_HOURS = (os.getenv('CHAT_HOURLY_BROADCAST_HOURS') or '*').strip() or '*'
+CHAT_HOURLY_TIMEZONE = (os.getenv('CHAT_HOURLY_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
+# Свежесть собранного отчёта. Команда и плановая рассылка, попавшие в одну минуту, не должны
+# дважды выгребать день из Chat2Desk.
+CHAT_HOURLY_CACHE_SECONDS = _env_int('CHAT_HOURLY_CACHE_SECONDS', 120, minimum=0, maximum=3600)
+# Обращения-опросы (request_type='rating') чатами не являются: это автоматическая оценка
+# после диалога. Считаем только 'common'.
+CHAT_HOURLY_REQUEST_TYPE = 'common'
+# Статусы Chat2Desk (offline_type) по-русски. Оператор с любым из них залогинен, но не на линии.
+CHAT_HOURLY_STATUS_LABELS = {
+    'break': 'перерыв',
+    'busy': 'занят',
+    'study': 'обучение',
+    'holiday': 'отпуск',
+    'tech brake': 'тех. перерыв',
+    'tech break': 'тех. перерыв',
+}
+
+_chat_hourly_requests_cache = {'day': None, 'rows': {}}
+_chat_hourly_report_cache = {'ts': 0.0, 'payload': None}
+_chat_hourly_lock = threading.Lock()
+
+
+def _chat_hourly_number(value):
+    """Число из строки Chat2Desk. Пустая строка там означает «нет данных», а не ноль."""
+    text = str(value if value is not None else '').strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_hourly_is_open(row):
+    ended = str(row.get('request_end') or '').strip()
+    return ended in ('', 'None', 'null')
+
+
+def _chat_hourly_request_start(row):
+    return str(row.get('request_start') or '').strip()
+
+
+def _chat_hourly_fetch_requests(day_str):
+    """Обращения Chat2Desk за день. Между вызовами день накапливаем, а не перекачиваем.
+
+    Отчёт про «с начала суток», значит формально нужен весь день — а это ~10 страниц по 200
+    строк каждый час, при том что месячная квота Chat2Desk общая на компанию и уже
+    расходуется ежедневным синком метрик.
+    Экономим на том, что отчёт отдаёт строки по УБЫВАНИЮ request_start, а закрытое обращение
+    больше не меняется. Поэтому листаем только до самого старого обращения, которое на прошлом
+    заходе оставалось открытым: всё, что глубже, уже закрыто и лежит в кэше неизменным.
+    Первый заход за день упирается в начало суток и качает день целиком.
+    """
+    cache = _chat_hourly_requests_cache
+    if cache.get('day') != day_str:
+        cache['day'] = day_str
+        cache['rows'] = {}
+    known = cache['rows']
+    had_cache = bool(known)
+
+    # Докуда обязаны долистать: старейшее незакрытое обращение из кэша. Нет кэша — весь день.
+    watermark = None
+    for row in known.values():
+        if _chat_hourly_is_open(row):
+            start = _chat_hourly_request_start(row)
+            if start and (watermark is None or start < watermark):
+                watermark = start
+
+    authorization = _chat2desk_authorization_header()
+    if not authorization:
+        raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
+    limit = _env_int('CHAT2DESK_API_PAGE_LIMIT', CHAT2DESK_API_PAGE_LIMIT, minimum=1, maximum=200)
+    timeout = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', CHAT2DESK_API_TIMEOUT_SECONDS,
+                       minimum=5, maximum=300)
+    url = f"{_chat2desk_api_base_url()}/v1/statistics"
+    headers = {'Authorization': authorization, 'Accept': 'application/json'}
+
+    offset = 0
+    max_pages = _env_int('CHAT2DESK_API_MAX_PAGES', CHAT2DESK_API_MAX_PAGES, minimum=1, maximum=1000)
+    for _page in range(max_pages):
+        response = requests.get(url, headers=headers, timeout=timeout, params={
+            'report': CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS,
+            'date': day_str,
+            'limit': limit,
+            'offset': offset,
+        })
+        if response.status_code >= 400:
+            raise RuntimeError(_chat2desk_api_error_message(
+                response, CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS, day_str))
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise RuntimeError(f"Chat2Desk request_stats {day_str} вернул не JSON") from exc
+        page_rows = _chat2desk_extract_response_rows(payload)
+        if not page_rows:
+            break
+        page_min_start = None
+        page_new = 0
+        for row in page_rows:
+            if not isinstance(row, dict):
+                continue
+            request_id = str(_chat2desk_row_first(row, 'request_id') or '').strip()
+            if not request_id:
+                continue
+            if request_id not in known:
+                page_new += 1
+            known[request_id] = row
+            start = _chat_hourly_request_start(row)
+            if start and (page_min_start is None or start < page_min_start):
+                page_min_start = start
+        offset += len(page_rows)
+        if len(page_rows) < limit:
+            break
+        total = _chat2desk_extract_total(payload)
+        if total is not None and offset >= total:
+            break
+        if not had_cache:
+            continue  # первый заход за день — качаем сутки целиком
+        if watermark is not None:
+            # Долистали за самое старое открытое обращение — глубже данные уже не изменятся.
+            if page_min_start is not None and page_min_start < watermark:
+                break
+        elif page_new == 0:
+            # Открытых обращений в кэше нет, меняться там нечему. Новые заявки лежат сверху:
+            # как только страница перестала их приносить — дальше листать нечего.
+            break
+    else:
+        logging.warning("Отчёт по чатам: остановился на CHAT2DESK_API_MAX_PAGES=%s", max_pages)
+
+    return [row for row in known.values()
+            if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
+
+
+def _chat_hourly_fetch_operators():
+    """Живой список операторов Chat2Desk: кто залогинен и на каком статусе.
+
+    Один запрос вместо перебора operator_events за день — там пришлось бы качать тысячи
+    строк, чтобы найти последнее событие каждого оператора."""
+    authorization = _chat2desk_authorization_header()
+    if not authorization:
+        raise RuntimeError("CHAT2DESK_API_TOKEN is not set")
+    timeout = _env_int('CHAT2DESK_API_TIMEOUT_SECONDS', CHAT2DESK_API_TIMEOUT_SECONDS,
+                       minimum=5, maximum=300)
+    rows = []
+    offset = 0
+    for _page in range(20):
+        response = requests.get(
+            f"{_chat2desk_api_base_url()}/v1/operators",
+            headers={'Authorization': authorization, 'Accept': 'application/json'},
+            params={'limit': 200, 'offset': offset},
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Chat2Desk /v1/operators: HTTP {response.status_code}")
+        page_rows = _chat2desk_extract_response_rows(response.json())
+        if not page_rows:
+            break
+        rows.extend(page_rows)
+        offset += len(page_rows)
+        if len(page_rows) < 200:
+            break
+    return rows
+
+
+def _chat_hourly_online(operator_rows):
+    """Кто сейчас на линии и кто залогинен, но на статусе.
+
+    Удалённые и отключённые учётки в отчёт не берём: их в Chat2Desk 100 из 149, и почти все
+    висят с online=1 от последнего входа. Админскую учётку тоже отбрасываем — она не чатник."""
+    online, on_status = [], []
+    for row in operator_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get('status') or '').strip().lower() != 'enabled':
+            continue
+        if not _chat_hourly_number(row.get('online')):
+            continue
+        name = _chat2desk_operator_display_name(row)
+        if not name:
+            continue
+        raw_status = str(row.get('offline_type') or '').strip().lower()
+        if raw_status:
+            on_status.append({
+                'name': name,
+                'status': CHAT_HOURLY_STATUS_LABELS.get(raw_status, raw_status),
+            })
+        else:
+            online.append({
+                'name': name,
+                'open_chats': int(_chat_hourly_number(row.get('opened_dialogs')) or 0),
+            })
+    online.sort(key=lambda item: (-item['open_chats'], item['name']))
+    on_status.sort(key=lambda item: item['name'])
+    return online, on_status
+
+
+def _chat_hourly_response_times(rows):
+    """(первый ответ, ответ внутри чата) — средние в секундах, None если считать не по чему.
+
+    Первый ответ — среднее `reaction_time`: ровно так же считает веб-отчёт Chat2Desk, по
+    которому владелец сверяет цифры.
+    Ответ внутри чата — это ВТОРОЙ и последующие ответы оператора. В `total_replies_time`
+    первый ответ включён, поэтому вычитаем его: (Σtotal − Σreaction) / Σ(replies − 1).
+    Считаем суммой по всем чатам, а не средним от средних — иначе диалог из двух реплик
+    весит столько же, сколько диалог из двадцати."""
+    first_sum, first_count = 0.0, 0
+    inner_sum, inner_count = 0.0, 0
+    for row in rows:
+        reaction = _chat_hourly_number(row.get('reaction_time'))
+        if reaction is not None:
+            first_sum += reaction
+            first_count += 1
+        replies = _chat_hourly_number(row.get('replies'))
+        total = _chat_hourly_number(row.get('total_replies_time'))
+        if reaction is None or total is None or replies is None or replies < 2:
+            continue
+        inner_sum += total - reaction
+        inner_count += int(replies) - 1
+    return (
+        (first_sum / first_count) if first_count else None,
+        (inner_sum / inner_count) if inner_count > 0 else None,
+    )
+
+
+def _chat_hourly_operator_name(row):
+    return str(_chat2desk_row_first(row, 'operator_name', 'operator', 'name') or '').strip()
+
+
+def _chat_hourly_collect(now=None):
+    """Данные отчёта: чаты за час и за сутки, чатники, время ответа, кто на линии."""
+    tz = ZoneInfo(CHAT_HOURLY_TIMEZONE)
+    now = now or datetime.now(tz)
+    day_str = now.strftime('%Y-%m-%d')
+    # Отчёт уходит в начале часа и рассказывает про ЗАКОНЧИВШИЙСЯ час, а не про начавшуюся минуту.
+    hour_end = now.replace(minute=0, second=0, microsecond=0)
+    hour_start = hour_end - timedelta(hours=1)
+    if hour_start.strftime('%Y-%m-%d') != day_str:
+        # Отчёт в 00:00: прошедший час — это уже вчера, отдельной строкой его не показываем.
+        hour_start = hour_end
+    window_from = hour_start.strftime('%Y-%m-%d %H:%M:%S')
+    window_to = hour_end.strftime('%Y-%m-%d %H:%M:%S')
+
+    rows = _chat_hourly_fetch_requests(day_str)
+    hour_rows = [row for row in rows
+                 if window_from <= _chat_hourly_request_start(row) < window_to]
+
+    operators = {}
+    for row in rows:
+        name = _chat_hourly_operator_name(row)
+        if name:
+            operators.setdefault(name, {'name': name, 'chats': 0, 'chats_hour': 0})['chats'] += 1
+    for row in hour_rows:
+        name = _chat_hourly_operator_name(row)
+        if name in operators:
+            operators[name]['chats_hour'] += 1
+
+    day_first, day_inner = _chat_hourly_response_times(rows)
+    hour_first, hour_inner = _chat_hourly_response_times(hour_rows)
+
+    try:
+        online, on_status = _chat_hourly_online(_chat_hourly_fetch_operators())
+        online_error = None
+    except Exception as exc:
+        # Цифры по чатам важнее списка на линии: отчёт уходит без него, но с честной пометкой.
+        logging.warning("Отчёт по чатам: список операторов недоступен: %s", exc)
+        online, on_status, online_error = [], [], str(exc)[:200]
+
+    return {
+        'generated_at': now.strftime('%d.%m.%Y %H:%M'),
+        'day': day_str,
+        'hour_label': (f"{hour_start.strftime('%H:%M')}–{hour_end.strftime('%H:%M')}"
+                       if hour_start != hour_end else None),
+        'chats_day': len(rows),
+        'chats_hour': len(hour_rows),
+        'chats_open': sum(1 for row in rows if _chat_hourly_is_open(row)),
+        'first_reply_day': day_first,
+        'first_reply_hour': hour_first,
+        'inner_reply_day': day_inner,
+        'inner_reply_hour': hour_inner,
+        'operators': sorted(operators.values(), key=lambda item: (-item['chats'], item['name'])),
+        'online': online,
+        'on_status': on_status,
+        'online_error': online_error,
+    }
+
+
+def _chat_hourly_report(now=None):
+    """Собранный отчёт с коротким кэшем: команда и рассылка в одну минуту считают его один раз."""
+    with _chat_hourly_lock:
+        cached = _chat_hourly_report_cache.get('payload')
+        if (cached is not None and now is None
+                and time.time() - _chat_hourly_report_cache['ts'] < CHAT_HOURLY_CACHE_SECONDS):
+            return cached
+        payload = _chat_hourly_collect(now=now)
+        if now is None:
+            _chat_hourly_report_cache.update(ts=time.time(), payload=payload)
+        return payload
+
+
+def _chat_hourly_seconds(seconds):
+    return '—' if seconds is None else _szov_format_seconds_mmss(int(round(seconds)))
+
+
+def _chat_hourly_text(data):
+    """Текст отчёта. HTML parse_mode: подписи жирные, цифры обычные."""
+    hour_label = data.get('hour_label')
+
+    def _pair(hour_value, day_value):
+        if not hour_label:
+            return f"{_chat_hourly_seconds(day_value)} (сутки)"
+        return (f"{_chat_hourly_seconds(hour_value)} (за час), "
+                f"{_chat_hourly_seconds(day_value)} (сутки)")
+
+    lines = [f"<b>Чаты</b> — {data['generated_at']}", ""]
+    if hour_label:
+        lines.append(f"<b>Количество чатов:</b> {data['chats_hour']} за {hour_label}, "
+                     f"{data['chats_day']} с начала суток")
+    else:
+        lines.append(f"<b>Количество чатов:</b> {data['chats_day']} с начала суток")
+    lines.append(f"<b>Открыто сейчас:</b> {data['chats_open']}")
+    lines.append(f"<b>Среднее время первого ответа:</b> "
+                 f"{_pair(data['first_reply_hour'], data['first_reply_day'])}")
+    lines.append(f"<b>Среднее время ответа внутри чата:</b> "
+                 f"{_pair(data['inner_reply_hour'], data['inner_reply_day'])}")
+
+    operators = data.get('operators') or []
+    lines.append("")
+    if operators:
+        lines.append(f"<b>Чатники за сутки ({len(operators)}):</b>")
+        for item in operators:
+            suffix = f" (за час {item['chats_hour']})" if hour_label and item['chats_hour'] else ""
+            lines.append(f"• {item['name']} — {item['chats']}{suffix}")
+    else:
+        lines.append("<b>Чатники за сутки:</b> чатов пока не было")
+
+    online = data.get('online') or []
+    on_status = data.get('on_status') or []
+    lines.append("")
+    if data.get('online_error'):
+        lines.append("<b>Онлайн:</b> Chat2Desk не отдал список операторов")
+    elif online:
+        lines.append(f"<b>Онлайн ({len(online)}):</b>")
+        for item in online:
+            lines.append(f"• {item['name']} — {item['open_chats']} "
+                         f"{_szov_plural(item['open_chats'], 'чат', 'чата', 'чатов')}")
+    else:
+        lines.append("<b>Онлайн:</b> никого")
+    if on_status:
+        lines.append("<b>На статусе:</b> " + ", ".join(
+            f"{item['name']} — {item['status']}" for item in on_status))
+    return "\n".join(lines)
+
+
+def _chat_hourly_access_allowed(user):
+    """Отчёт по чатам — администраторам, главам отделов и СВ отдела СЗоВ."""
+    if not user:
+        return False
+    role = _normalize_user_role(user[3])
+    if _is_admin_role(role):
+        return True
+    if db.headed_department_id_for_user(user[0]) is not None:
+        return True
+    department_id = _szov_wallboard_department_id()
+    return (department_id is not None
+            and _is_supervisor_role(role)
+            and db.get_user_department_id(user[0]) == department_id)
+
+
+async def chat_hourly_broadcast_job():
+    """Почасовая рассылка отчёта по чатам подписанным чатам."""
+    loop = asyncio.get_event_loop()
+    try:
+        subscriptions = await loop.run_in_executor(
+            executor_pool, db.get_chat_hourly_subscriptions)
+    except Exception as exc:
+        logging.error("Отчёт по чатам: не удалось получить подписки: %s", exc, exc_info=True)
+        return
+    if not subscriptions:
+        # Никто не подписан — Chat2Desk не дёргаем вовсе: квота там общая на компанию.
+        return
+
+    try:
+        data = await loop.run_in_executor(executor_pool, _chat_hourly_report)
+        text = _chat_hourly_text(data)
+    except Exception as exc:
+        logging.error("Отчёт по чатам: не удалось собрать: %s", exc, exc_info=True)
+        return
+
+    for subscription in subscriptions:
+        chat_id = subscription['chat_id']
+        try:
+            await bot.send_message(chat_id, text, parse_mode='HTML')
+            await loop.run_in_executor(
+                executor_pool, db.mark_chat_hourly_subscription_sent, chat_id)
+        except Exception as exc:
+            logging.error("Отчёт по чатам: чат %s не получил сообщение: %s", chat_id, exc)
+
+
+
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
 
 def amo_leads_sync(days=None):
@@ -36030,6 +36443,84 @@ async def amo_leads_unsubscribe_command(message: types.Message):
     await message.reply("Отписал этот чат от отбивки по лидам."
                         if removed else "Этот чат и не был подписан.")
 
+
+
+@dp.message_handler(commands=['chats'])
+async def chat_hourly_command(message: types.Message):
+    """/chats — почасовой отчёт по чатам прямо сейчас.
+
+    Доступно администраторам, главам отделов и СВ отдела СЗоВ."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not user:
+        await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
+        return
+
+    if not await loop.run_in_executor(executor_pool, _chat_hourly_access_allowed, user):
+        await message.reply("Отчёт по чатам доступен администраторам, главам отделов и СВ СЗоВ.")
+        return
+
+    await message.reply("Собираю чаты…")
+    try:
+        data = await loop.run_in_executor(executor_pool, _chat_hourly_report)
+    except Exception as exc:
+        logging.error("Команда /chats: не удалось собрать отчёт: %s", exc, exc_info=True)
+        await message.reply("Не удалось собрать отчёт — Chat2Desk не ответил.")
+        return
+    await message.reply(_chat_hourly_text(data), parse_mode='HTML')
+
+
+@dp.message_handler(commands=['chats_subscribe'])
+async def chat_hourly_subscribe_command(message: types.Message):
+    """/chats_subscribe — присылать отчёт по чатам в этот чат каждый час.
+
+    Подписывается ЧАТ, а не человек: команда работает и в личке, и в группе."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not await loop.run_in_executor(executor_pool, _chat_hourly_access_allowed, user):
+        await message.reply("Подписка на отчёт по чатам доступна администраторам, "
+                            "главам отделов и СВ СЗоВ.")
+        return
+
+    def _subscribe():
+        return db.add_chat_hourly_subscription(
+            message.chat.id,
+            title=(message.chat.title or message.chat.full_name or None),
+            chat_type=message.chat.type,
+            user_id=user[0],
+        )
+
+    try:
+        is_new = await loop.run_in_executor(executor_pool, _subscribe)
+    except Exception as exc:
+        logging.error("Подписка на чаты: не удалось сохранить: %s", exc, exc_info=True)
+        await message.reply("Не удалось оформить подписку, попробуйте ещё раз.")
+        return
+
+    schedule = ("каждый час" if CHAT_HOURLY_BROADCAST_HOURS == '*'
+                else f"в часы {CHAT_HOURLY_BROADCAST_HOURS}")
+    await message.reply(
+        ("Подписал этот чат на отчёт по чатам.\nПрисылаю %s в :%02d."
+         if is_new else "Этот чат уже подписан. Присылаю %s в :%02d.")
+        % (schedule, CHAT_HOURLY_BROADCAST_MINUTE))
+
+
+@dp.message_handler(commands=['chats_unsubscribe'])
+async def chat_hourly_unsubscribe_command(message: types.Message):
+    """/chats_unsubscribe — перестать присылать отчёт по чатам в этот чат."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not await loop.run_in_executor(executor_pool, _chat_hourly_access_allowed, user):
+        await message.reply("Подписка на отчёт по чатам доступна администраторам, "
+                            "главам отделов и СВ СЗоВ.")
+        return
+    removed = await loop.run_in_executor(
+        executor_pool, db.remove_chat_hourly_subscription, message.chat.id)
+    await message.reply("Отписал этот чат от отчёта по чатам."
+                        if removed else "Этот чат и не был подписан.")
 
 @dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
@@ -46930,7 +47421,7 @@ _register_bot_chat_discovery()
 # только части сотрудников, рекламировать их всем подряд незачем. Сами команды
 # работают, если набрать их руками: права по-прежнему проверяют обработчики.
 # Живой список: /start, /tablo, /leads, /leads_subscribe, /leads_unsubscribe,
-# /report (в чатах контроля опозданий).
+# /chats, /chats_subscribe, /chats_unsubscribe, /report (в чатах контроля опозданий).
 
 
 async def _clear_bot_commands():
@@ -47357,6 +47848,20 @@ if __name__ == '__main__':
             max_instances=1,
             coalesce=True
         )
+
+    # Отчёт по чатам: каждый час подписанным чатам. Если подписок нет, джоба выходит
+    # сразу и Chat2Desk не дёргает — квота там общая на компанию.
+    scheduler.add_job(
+        chat_hourly_broadcast_job,
+        CronTrigger(hour=CHAT_HOURLY_BROADCAST_HOURS, minute=CHAT_HOURLY_BROADCAST_MINUTE,
+                    timezone=ZoneInfo(CHAT_HOURLY_TIMEZONE)),
+        id='chat_hourly_broadcast',
+        misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True
+    )
+    logging.info("⏰ Отчёт по чатам: часы %s, минута %02d",
+                 CHAT_HOURLY_BROADCAST_HOURS, CHAT_HOURLY_BROADCAST_MINUTE)
 
     # Лиды amoCRM: выгрузка раз в 3 часа. Заменила Apps Script, который заливал
     # сделки на вкладку «Импорт ДЕНЬ» Google-таблицы.
