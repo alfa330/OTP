@@ -33,6 +33,7 @@ NAMES = {
     '_chat_hourly_operator_states', '_chat_hourly_online',
     '_chat_hourly_response_times', '_chat_hourly_collect', '_chat_hourly_report',
     '_chat_hourly_seconds', '_chat_hourly_text', '_chat_hourly_caption',
+    'CHAT_HOURLY_PRESENCE_ORDER', '_CHAT_HOURLY_PRESENCE_RANK', 'CHAT_HOURLY_PRESENCE_COLORS',
     '_CHAT_HOURLY_TABLE_COLUMNS', '_CHAT_HOURLY_HOUR_COLUMN_KEYS',
     '_chat_hourly_table_columns', '_chat_hourly_table_row',
 }
@@ -260,6 +261,12 @@ class ChatHourlyOnlineTests(unittest.TestCase):
         self.assertEqual(self.states['Темирлан Ерланов']['status'], 'онлайн')
         self.assertEqual(self.states['Алмаз Токен']['status'], 'офлайн')
 
+    def test_presence_splits_online_status_and_offline(self):
+        """По присутствию строятся и порядок строк, и цвет — оно должно быть явным полем."""
+        self.assertEqual(self.states['Темирлан Ерланов']['presence'], 'online')
+        self.assertEqual(self.states['Бехруз Рахимжанов']['presence'], 'status')
+        self.assertEqual(self.states['Алмаз Токен']['presence'], 'offline')
+
     def test_open_chats_are_kept_per_operator(self):
         self.assertEqual(self.states['Темирлан Ерланов']['open_chats'], 61)
 
@@ -339,6 +346,26 @@ class ChatHourlyCollectTests(unittest.TestCase):
         row = next(o for o in data['operators'] if o['name'] == 'Новичок')
         self.assertEqual(row['chats'], 0)
         self.assertEqual(row['status'], 'онлайн')
+
+    def test_rows_go_online_then_status_then_offline(self):
+        """Владелец просил видеть в первых строках тех, кто держит линию прямо сейчас."""
+        api = _FakeChat2Desk(self.ROWS, limit=10)
+        ns = _namespace(fake_requests=api)
+        ns['_chat_hourly_fetch_operators'] = lambda: [
+            # у «Алихана» чатов больше, но он офлайн и обязан уехать вниз
+            {'first_name': 'Алихан', 'last_name': '', 'status': 'enabled',
+             'online': 0, 'offline_type': None, 'opened_dialogs': 0},
+            {'first_name': 'Ерланов', 'last_name': '', 'status': 'enabled',
+             'online': 1, 'offline_type': 'break', 'opened_dialogs': 3},
+            {'first_name': 'Новичок', 'last_name': '', 'status': 'enabled',
+             'online': 1, 'offline_type': None, 'opened_dialogs': 1},
+        ]
+        now = datetime(2026, 8, 7, 11, 0, tzinfo=ZoneInfo('Asia/Almaty'))
+        data = ns['_chat_hourly_collect'](now=now)
+        self.assertEqual([o['name'] for o in data['operators']],
+                         ['Новичок', 'Ерланов', 'Алихан'])
+        self.assertEqual([o['presence'] for o in data['operators']],
+                         ['online', 'status', 'offline'])
 
     def test_hour_and_day_response_times_differ(self):
         _ns, data = self._collect()
@@ -483,6 +510,18 @@ class ChatHourlyTableTests(unittest.TestCase):
     def test_unknown_operator_has_no_status(self):
         cells = self.ns['_chat_hourly_table_row']({'name': 'Кто-то', 'chats': 1})
         self.assertEqual(cells['status'], '—')
+
+    def test_only_presence_that_means_something_is_coloured(self):
+        """Зелёный — на линии, янтарный — залогинен, но не на ней. Офлайн не красим."""
+        colors = self.ns['CHAT_HOURLY_PRESENCE_COLORS']
+        self.assertEqual(colors['online'][0], '#d1fae5')
+        self.assertEqual(colors['status'][0], '#fef3c7')
+        self.assertNotIn('offline', colors)
+        self.assertNotIn('unknown', colors)
+
+    def test_presence_order_puts_the_line_first(self):
+        self.assertEqual(self.ns['CHAT_HOURLY_PRESENCE_ORDER'],
+                         ('online', 'status', 'offline', 'unknown'))
 
     def test_caption_does_not_repeat_the_table(self):
         """Цифры уже на картинке — дублировать их подписью значит шуметь."""
