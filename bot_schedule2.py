@@ -30574,6 +30574,18 @@ CHAT_HOURLY_STATUS_LABELS = {
     'tech brake': 'тех. перерыв',
     'tech break': 'тех. перерыв',
 }
+# Порядок строк в таблице: сначала те, кто на линии, потом залогиненные на статусе, потом
+# офлайн. Так таблица читается сверху вниз по убыванию доступности — а кто сейчас держит
+# линию, видно в первых строках, без поиска глазами.
+CHAT_HOURLY_PRESENCE_ORDER = ('online', 'status', 'offline', 'unknown')
+_CHAT_HOURLY_PRESENCE_RANK = {name: index for index, name in enumerate(CHAT_HOURLY_PRESENCE_ORDER)}
+# Цвет только там, где он что-то значит: зелёный — на линии, янтарный — залогинен, но не на
+# ней. Офлайн и неизвестных не красим, иначе таблица превращается в светофор. Пары взяты
+# те же, что на табло СЗоВ, чтобы один и тот же смысл не горел в двух местах разным цветом.
+CHAT_HOURLY_PRESENCE_COLORS = {
+    'online': ('#d1fae5', '#047857'),
+    'status': ('#fef3c7', '#b45309'),
+}
 
 _chat_hourly_requests_cache = {'day': None, 'rows': {}}
 _chat_hourly_report_cache = {'ts': 0.0, 'payload': None}
@@ -30739,13 +30751,14 @@ def _chat_hourly_operator_states(operator_rows):
         raw_status = str(row.get('offline_type') or '').strip().lower()
         is_logged_in = bool(_chat_hourly_number(row.get('online')))
         if not is_logged_in:
-            label = 'офлайн'
+            label, presence = 'офлайн', 'offline'
         elif raw_status:
-            label = CHAT_HOURLY_STATUS_LABELS.get(raw_status, raw_status)
+            label, presence = CHAT_HOURLY_STATUS_LABELS.get(raw_status, raw_status), 'status'
         else:
-            label = 'онлайн'
+            label, presence = 'онлайн', 'online'
         states[name] = {
             'status': label,
+            'presence': presence,
             # «Онлайн» здесь — то же, что на табло: свободен или в разговоре. Оператор
             # на перерыве залогинен, но на линии его нет.
             'is_online': is_logged_in and not raw_status,
@@ -30849,6 +30862,7 @@ def _chat_hourly_collect(now=None):
         operators.append({
             'name': name,
             'status': state.get('status') or '—',
+            'presence': state.get('presence') or 'unknown',
             'chats': len(own_rows),
             'chats_hour': len(own_hour_rows),
             'first_reply_day': first_day,
@@ -30857,7 +30871,9 @@ def _chat_hourly_collect(now=None):
             'inner_reply_hour': inner_hour,
             'open_chats': state.get('open_chats'),
         })
-    operators.sort(key=lambda item: (-item['chats'], item['name']))
+    operators.sort(key=lambda item: (
+        _CHAT_HOURLY_PRESENCE_RANK.get(item['presence'], len(CHAT_HOURLY_PRESENCE_ORDER)),
+        -item['chats'], item['name']))
 
     day_first, day_inner = _chat_hourly_response_times(rows)
     hour_first, hour_inner = _chat_hourly_response_times(hour_rows)
@@ -31033,22 +31049,26 @@ def _chat_hourly_render_table_png(data):
             ty += 22
         x += col_w
 
-    def draw_row(y, values, fill=None, bold=False):
+    def draw_row(y, values, fill=None, bold=False, presence=None):
+        status_bg, status_fg = CHAT_HOURLY_PRESENCE_COLORS.get(presence, (None, None))
         x = 1
         for key, _title, col_w in columns:
             cell_fill = fill or (hour_cell_fill if key in _CHAT_HOURLY_HOUR_COLUMN_KEYS else '#ffffff')
+            text_fill = '#1a1a1a'
+            if key == 'status' and status_bg:
+                cell_fill, text_fill = status_bg, status_fg
             draw.rectangle([x, y, x + col_w, y + row_h], fill=cell_fill, outline=border)
             text = values.get(key, '')
             cell_font = font_bold if (bold or key == 'name') else font
             tw = draw.textlength(text, font=cell_font)
             # Имя прижимаем влево — колонка узкая, а по центру фамилии «прыгают».
             tx = x + 8 if key == 'name' else x + (col_w - tw) / 2
-            draw.text((tx, y + (row_h - 24) / 2), text, font=cell_font, fill='#1a1a1a')
+            draw.text((tx, y + (row_h - 24) / 2), text, font=cell_font, fill=text_fill)
             x += col_w
 
     y = title_h + head_h
     for item in operators:
-        draw_row(y, _chat_hourly_table_row(item))
+        draw_row(y, _chat_hourly_table_row(item), presence=item.get('presence'))
         y += row_h
 
     draw_row(y, _chat_hourly_table_row({
