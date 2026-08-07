@@ -94,7 +94,7 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
             onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
         >
             <div className={`flex w-full ${maxWidth} flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl`}>
-                <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-5 py-3.5 backdrop-blur-xl">
+                <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl sm:px-5 sm:py-3.5">
                     <div className="min-w-0">
                         <h3 className="truncate text-[15px] font-semibold text-slate-900">{title}</h3>
                         {subtitle && <p className="truncate text-[12px] text-slate-500">{subtitle}</p>}
@@ -108,11 +108,11 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
                         <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/></svg>
                     </button>
                 </div>
-                <div className="flex-1 overflow-y-auto px-5 py-4">
+                <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
                     {children}
                 </div>
                 {footer && (
-                    <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-5 py-3 backdrop-blur-xl">
+                    <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-xl sm:px-5">
                         {footer}
                     </div>
                 )}

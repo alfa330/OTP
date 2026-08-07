@@ -32392,7 +32392,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Призовое место на подиуме группы. Пустой слот — приз ещё не занят.
         const RegPodiumSlot = ({ item, place, prizeAmount, big = false, isMe = false }) => (
-            <div className={`flex min-w-0 flex-col items-center ${big ? 'w-24 sm:w-32' : 'w-[76px] sm:w-28'}`}>
+            <div className={`flex min-w-0 flex-col items-center ${big ? 'w-24 sm:w-32' : 'w-[84px] sm:w-28'}`}>
                 <div className={`relative flex-shrink-0 ${big ? 'h-24 w-24 sm:h-28 sm:w-28' : 'h-[68px] w-[68px] sm:h-[88px] sm:w-[88px]'}`}>
                     {item ? (
                         <>
@@ -32412,7 +32412,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     )}
                 </div>
                 <p className={`mt-2 w-full truncate text-center text-[13px] font-semibold ${item ? 'text-slate-800' : 'text-slate-400'}`} title={item?.name || undefined}>
-                    {item ? item.name : 'Место свободно'}
+                    {item ? item.name : 'Свободно'}
                 </p>
                 {isMe && <span className="mt-0.5 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">Вы</span>}
                 <span className={`mt-1 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold sm:px-2.5 sm:text-[11.5px] ${item ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-400'}`}>{regFmtTenge(prizeAmount)}</span>
@@ -32421,7 +32421,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         // Иллюстрация модалки правил: пьедестал, кубок, лавры, конфетти.
         const RegRulesIllustration = () => (
-            <svg viewBox="0 0 320 130" className="mx-auto h-auto w-full max-w-sm" aria-hidden="true">
+            <svg viewBox="0 0 320 130" className="mx-auto h-auto w-full max-w-[260px] sm:max-w-sm" aria-hidden="true">
                 <circle cx="46" cy="28" r="3" fill="#34D399" opacity="0.7" />
                 <circle cx="274" cy="22" r="3" fill="#FBBF24" opacity="0.8" />
                 <circle cx="298" cy="54" r="2.5" fill="#60A5FA" opacity="0.7" />
@@ -32477,8 +32477,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <IosModal open={open} onClose={onClose} title="Правила конкурса"
                           subtitle={`${regFmtDay(contest.registered_from)} — ${regFmtDay(contest.registered_to)}`}
                           maxWidth="max-w-2xl"
-                          footer={<button type="button" className={iosBtnPrimary} onClick={onClose}>Понятно</button>}>
-                    <div className="space-y-6" style={{ fontFamily: APPLE_FONT }}>
+                          footer={<button type="button" className={`${iosBtnPrimary} w-full sm:w-auto`} onClick={onClose}>Понятно</button>}>
+                    <div className="space-y-5 sm:space-y-6" style={{ fontFamily: APPLE_FONT }}>
                         <div>
                             <RegRulesIllustration />
                             <h4 className="mt-3 text-center text-[17px] font-bold text-slate-900">Зарегистрируй больше всех — забери приз</h4>
@@ -32486,15 +32486,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                         <section>
                             <div className={iosGroupLabel}>Призовой фонд</div>
-                            <div className="mt-1.5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <div className="mt-1.5 grid grid-cols-2 gap-2.5 sm:gap-3">
                                 {['chat', 'line'].map((groupKey) => (
-                                    <div key={groupKey} className={`${iosCard} p-4`}>
+                                    <div key={groupKey} className={`${iosCard} p-3 sm:p-4`}>
                                         <p className="text-[13px] font-semibold text-slate-900">{groupLabels[groupKey]}</p>
                                         <div className="mt-2.5 space-y-2">
                                             {(contest.prizes?.[groupKey] || []).map((amount, i) => (
                                                 <div key={i} className="flex items-center gap-2.5">
                                                     <span className={`${REG_PLACE_MEDAL[i + 1] || 'bg-slate-300'} flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white`}>{i + 1}</span>
-                                                    <span className="text-[13px] text-slate-500">{i + 1} место</span>
+                                                    <span className="hidden text-[13px] text-slate-500 sm:inline">{i + 1} место</span>
                                                     <span className="ml-auto text-[13px] font-semibold tabular-nums text-slate-900">{regFmtTenge(amount)}</span>
                                                 </div>
                                             ))}
@@ -32569,8 +32569,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <div key={i} className="rounded-lg px-2 py-1.5 hover:bg-slate-50">
                         <div className="md:hidden">
                             <div className="flex items-center justify-between gap-2">
-                                <span className="min-w-0 truncate text-sm font-medium text-slate-700">{r.driver_name || '—'}</span>
-                                <span className="flex-shrink-0 text-sm tabular-nums text-slate-500">{r.driver_phone || '—'}</span>
+                                <span className="min-w-0 truncate text-[13px] font-medium text-slate-700">{r.driver_name || '—'}</span>
+                                <span className="flex-shrink-0 text-[13px] tabular-nums text-slate-500">{r.driver_phone || '—'}</span>
                             </div>
                             <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-slate-400">
                                 <span>рег. <span className="tabular-nums text-slate-500">{regFmtDateTime(r.registered_at)}</span></span>
@@ -32623,7 +32623,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
                 const isOpen = expandedKey === key;
                 return (
-                    <div key={key} className={`rounded-xl px-2.5 py-2.5 transition-all sm:px-3 ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${canExpand ? 'cursor-pointer' : ''}`}
+                    <div key={key} className={`rounded-xl px-2 py-2.5 transition-all sm:px-3 ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${canExpand ? 'cursor-pointer' : ''}`}
                          onClick={() => canExpand && onToggleExpand(isOpen ? null : key)}>
                         <div className="flex items-center gap-2 sm:gap-3">
                             <RegRankBadge place={item.place} hasScore={(item.drivers || 0) > 0} />
@@ -32638,7 +32638,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             </div>
                             <div className="flex-shrink-0 text-right">
-                                <div className="text-lg font-bold leading-none tabular-nums text-slate-900">{item.drivers}</div>
+                                <div className="text-base font-bold leading-none tabular-nums text-slate-900 sm:text-lg">{item.drivers}</div>
                                 <div className="mt-0.5 text-[11px] text-slate-400">{showRegistrations && item.registrations != null ? `из ${item.registrations} рег.` : regPluralDrivers(item.drivers)}</div>
                             </div>
                             {canExpand && <FaIcon className={`fas fa-chevron-down text-xs text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
@@ -32654,13 +32654,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
 
             return (
-                <div className={`${iosCard} p-4 sm:p-5 md:p-6`} style={{ fontFamily: APPLE_FONT }}>
-                    <div className="mb-5 flex items-baseline justify-between gap-3">
-                        <h3 className="text-[17px] font-bold text-slate-900">{groupLabel}</h3>
+                <div className={`${iosCard} p-3.5 sm:p-5 md:p-6`} style={{ fontFamily: APPLE_FONT }}>
+                    <div className="mb-4 flex items-baseline justify-between gap-3 sm:mb-5">
+                        <h3 className="text-[16px] font-bold text-slate-900 sm:text-[17px]">{groupLabel}</h3>
                         {items.length > 0 && <p className="text-[12px] text-slate-400">Участников: {items.length}</p>}
                     </div>
                     {prizes.length > 0 && (
-                        <div className="mb-6 flex items-end justify-center gap-2 sm:gap-5">
+                        <div className="mb-5 flex items-end justify-center gap-2 sm:mb-6 sm:gap-5">
                             {podiumPlaces.map((place) => {
                                 const candidate = items[place - 1];
                                 const slotItem = candidate && (candidate.drivers || 0) > 0 ? candidate : null;
@@ -32675,7 +32675,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         // Пустые слоты подиума уже говорят, что мест ждут —
                         // второй плейсхолдер рисуем, только когда подиума нет.
                         prizes.length === 0 ? (
-                            <div className="rounded-xl border-2 border-dashed border-slate-100 py-10 text-center text-sm text-slate-400">Пока никто не засчитан — рейтинг появится после первых поездок</div>
+                            <div className="rounded-xl border-2 border-dashed border-slate-100 py-8 text-center text-sm text-slate-400 sm:py-10">Пока никто не засчитан — рейтинг появится после первых поездок</div>
                         ) : null
                     ) : (
                         <div className="space-y-1">
@@ -32689,7 +32689,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             )}
                             {canShowAll && overflow && (
                                 <button type="button" onClick={() => setShowAll(!showAll)}
-                                        className="flex w-full items-center justify-center gap-1.5 rounded-xl py-2 text-[13px] font-medium text-slate-500 transition-colors hover:bg-slate-50">
+                                        className="flex w-full items-center justify-center gap-1.5 rounded-xl py-2.5 text-[13px] font-medium text-slate-500 transition-colors hover:bg-slate-50 md:py-2">
                                     {expanded ? 'Свернуть' : `Показать всех (${items.length})`}
                                     <FaIcon className={`fas fa-chevron-down text-[10px] transition-transform ${expanded ? 'rotate-180' : ''}`} />
                                 </button>
@@ -32786,9 +32786,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             if (loading && !data) {
                 return (
-                    <div className="space-y-5">
-                        <div className={`${iosCard} h-44 animate-pulse`}></div>
-                        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                    <div className="space-y-2.5 sm:space-y-5">
+                        <div className={`${iosCard} h-40 animate-pulse sm:h-44`}></div>
+                        <div className="grid grid-cols-1 gap-2.5 sm:gap-5 lg:grid-cols-2">
                             <div className={`${iosCard} h-80 animate-pulse`}></div>
                             <div className={`${iosCard} h-80 animate-pulse`}></div>
                         </div>
@@ -32797,45 +32797,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
 
             return (
-                <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+                <div className="space-y-2.5 sm:space-y-5" style={{ fontFamily: APPLE_FONT }}>
                     {/* Шапка-афиша: призовой фонд, сроки, прогресс периода. */}
-                    <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-teal-600 via-emerald-600 to-emerald-800 text-white shadow-lg">
+                    <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-teal-600 sm:rounded-3xl via-emerald-600 to-emerald-800 text-white shadow-lg">
                         <div className="pointer-events-none absolute -right-16 -top-24 h-72 w-72 rounded-full bg-white/10 blur-2xl"></div>
                         <div className="pointer-events-none absolute -bottom-28 -left-12 h-64 w-64 rounded-full bg-cyan-300/20 blur-3xl"></div>
                         <RegLaurelWreath place={1} className="pointer-events-none absolute -bottom-16 -right-8 h-56 w-56 opacity-[0.14]" />
-                        <div className="relative p-5 md:p-7">
-                            <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                                <div className="flex min-w-0 items-start gap-3.5">
-                                    <span className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-white/15 shadow-inner backdrop-blur-sm">
-                                        <FaIcon className="fas fa-trophy text-xl text-yellow-300" />
+                        <div className="relative p-4 sm:p-5 md:p-7">
+                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between md:gap-4">
+                                <div className="flex min-w-0 items-start gap-3 sm:gap-3.5">
+                                    <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-white/15 shadow-inner backdrop-blur-sm sm:h-12 sm:w-12 sm:rounded-2xl">
+                                        <FaIcon className="fas fa-trophy text-lg text-yellow-300 sm:text-xl" />
                                     </span>
                                     <div className="min-w-0">
-                                        <h3 className="text-[22px] font-bold leading-tight md:text-2xl">{contest?.title || 'Топ по регистрациям'}</h3>
-                                        <p className="mt-0.5 text-[13px] text-white/80">{regFmtDay(contest?.registered_from)} — {regFmtDay(contest?.registered_to)} • итоги {regFmtDay(contest?.results_date)}</p>
-                                        <div className="mt-3 flex flex-wrap gap-1.5">
+                                        <h3 className="text-[20px] font-bold leading-tight sm:text-[22px] md:text-2xl">{contest?.title || 'Топ по регистрациям'}</h3>
+                                        <p className="mt-0.5 text-[12px] text-white/80 sm:text-[13px]">{regFmtDay(contest?.registered_from)} — {regFmtDay(contest?.registered_to)} • итоги {regFmtDay(contest?.results_date)}</p>
+                                        <div className="mt-2.5 flex flex-wrap gap-1 sm:mt-3 sm:gap-1.5">
                                             {prizeFund > 0 && (
-                                                <span className="inline-flex items-center gap-1.5 rounded-full bg-yellow-300/20 px-3 py-1 text-xs font-semibold text-yellow-100 backdrop-blur-sm"><FaIcon className="fas fa-coins" /> Призовой фонд {regFmtTenge(prizeFund)}</span>
+                                                <span className="inline-flex items-center gap-1.5 rounded-full bg-yellow-300/20 px-2.5 py-1 text-[11px] font-semibold text-yellow-100 sm:px-3 sm:text-xs backdrop-blur-sm"><FaIcon className="fas fa-coins" /> Призовой фонд {regFmtTenge(prizeFund)}</span>
                                             )}
                                             {daysLeft != null && (
-                                                <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold backdrop-blur-sm">{daysLeft === 0 ? 'Последний день регистраций' : `Осталось дней: ${daysLeft}`}</span>
+                                                <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] font-semibold backdrop-blur-sm sm:px-3 sm:text-xs">{daysLeft === 0 ? 'Последний день регистраций' : `Осталось дней: ${daysLeft}`}</span>
                                             )}
                                             {sync.synced_at && (
-                                                <span className="rounded-full bg-white/15 px-3 py-1 text-xs text-white/85 backdrop-blur-sm">Обновлено {regFmtDateTime(sync.synced_at)} • {showRegistrations ? 'регистраций' : 'засчитано'}: {countedRows}</span>
+                                                <span className="rounded-full bg-white/15 px-2.5 py-1 text-[11px] text-white/85 backdrop-blur-sm sm:px-3 sm:text-xs">Обновлено {regFmtDateTime(sync.synced_at)} • {showRegistrations ? 'регистраций' : 'засчитано'}: {countedRows}</span>
                                             )}
                                             {isAdmin && sync.status === 'error' && (
-                                                <span className="rounded-full bg-red-500/80 px-3 py-1 text-xs font-semibold" title={sync.error || ''}>Последний синк с ошибкой</span>
+                                                <span className="rounded-full bg-red-500/80 px-2.5 py-1 text-[11px] font-semibold sm:px-3 sm:text-xs" title={sync.error || ''}>Последний синк с ошибкой</span>
                                             )}
                                         </div>
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center gap-2 md:flex-shrink-0">
                                     <button type="button" onClick={() => setShowRules(true)}
-                                            className="flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-semibold backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98]">
+                                            className="flex items-center gap-2 rounded-lg bg-white/15 px-3.5 py-2 text-[13px] font-semibold sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-sm backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98]">
                                         <FaIcon className="fas fa-book" /> Правила
                                     </button>
                                     {data?.can_sync && (
                                         <button type="button" onClick={handleSync} disabled={syncing}
-                                                className="flex items-center gap-2 rounded-xl bg-white/15 px-4 py-2.5 text-sm font-semibold backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98] disabled:opacity-60">
+                                                className="flex items-center gap-2 rounded-lg bg-white/15 px-3.5 py-2 text-[13px] font-semibold sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-sm backdrop-blur-sm transition-all hover:bg-white/25 active:scale-[0.98] disabled:opacity-60">
                                             <FaIcon className={`fas fa-rotate ${syncing ? 'animate-spin' : ''}`} />
                                             {syncing ? 'Обновляем…' : 'Обновить из CRM'}
                                         </button>
@@ -32843,7 +32843,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 </div>
                             </div>
                             {contestProgress != null && (
-                                <div className="mt-5 h-1.5 overflow-hidden rounded-full bg-white/20">
+                                <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/20 sm:mt-5">
                                     <div className="h-full rounded-full bg-white/85 transition-all" style={{ width: `${Math.round(contestProgress * 100)}%` }}></div>
                                 </div>
                             )}
@@ -32851,28 +32851,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </div>
 
                     {myEntry && (
-                        <div className={`${iosCard} flex flex-wrap items-center gap-x-6 gap-y-3 p-4 sm:gap-x-8 sm:p-5`} style={{ fontFamily: APPLE_FONT }}>
-                            <div className="flex items-center gap-3">
-                                <RegContestAvatar item={myEntry} sizeClass="h-11 w-11" textClass="text-sm" />
+                        <div className={`${iosCard} grid grid-cols-2 items-center gap-x-3 gap-y-3.5 p-3.5 sm:flex sm:flex-wrap sm:gap-x-8 sm:gap-y-3 sm:p-5`} style={{ fontFamily: APPLE_FONT }}>
+                            <div className="col-span-2 flex items-center gap-3 sm:col-auto">
+                                <RegContestAvatar item={myEntry} sizeClass="h-10 w-10 sm:h-11 sm:w-11" textClass="text-sm" />
                                 <div>
                                     <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Ваше место • {groupLabels[myEntry.group]}</p>
-                                    <p className="text-lg font-bold leading-tight text-slate-900">#{myEntry.place} из {(groups[myEntry.group] || []).length}</p>
+                                    <p className="text-base font-bold leading-tight text-slate-900 sm:text-lg">#{myEntry.place} из {(groups[myEntry.group] || []).length}</p>
                                 </div>
                             </div>
                             <div>
                                 <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Засчитано</p>
-                                <p className="text-lg font-bold leading-tight text-slate-900">{myEntry.drivers} {regPluralDrivers(myEntry.drivers)}</p>
+                                <p className="text-base font-bold leading-tight text-slate-900 sm:text-lg">{myEntry.drivers} {regPluralDrivers(myEntry.drivers)}</p>
                             </div>
                             {showRegistrations && myEntry.registrations != null && (
                                 <div>
                                     <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Регистраций</p>
-                                    <p className="text-lg font-bold leading-tight text-slate-900">{myEntry.registrations}</p>
+                                    <p className="text-base font-bold leading-tight text-slate-900 sm:text-lg">{myEntry.registrations}</p>
                                 </div>
                             )}
                             {myEntry.prize != null ? (
                                 <div>
                                     <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Текущий приз</p>
-                                    <p className="text-lg font-bold leading-tight text-emerald-600">{regFmtTenge(myEntry.prize)}</p>
+                                    <p className="text-base font-bold leading-tight text-emerald-600 sm:text-lg">{regFmtTenge(myEntry.prize)}</p>
                                 </div>
                             ) : (() => {
                                 const board = groups[myEntry.group] || [];
@@ -32883,14 +32883,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 return (
                                     <div>
                                         <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">До призового места</p>
-                                        <p className="text-lg font-bold leading-tight text-slate-900">+{gap} {regPluralDrivers(gap)}</p>
+                                        <p className="text-base font-bold leading-tight text-slate-900 sm:text-lg">+{gap} {regPluralDrivers(gap)}</p>
                                     </div>
                                 );
                             })()}
                         </div>
                     )}
 
-                    <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-2.5 sm:gap-5 lg:grid-cols-2">
                         {['chat', 'line'].map((groupKey) => (
                             <RegLeaderboardCard key={groupKey} groupKey={groupKey}
                                                 items={groups[groupKey] || []}
@@ -33862,10 +33862,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const availableTabs = getAvailableTabs();
 
             return (
-                React.createElement('div',{className:'min-h-screen p-4 md:p-8'},
+                React.createElement('div',{className:'min-h-screen p-2.5 sm:p-4 md:p-8'},
                     React.createElement('div',{className:'max-w-7xl mx-auto'},
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-6 mb-6'}, React.createElement('div',{className:'flex flex-col md:flex-row justify-between items-start md:items-center gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-3xl font-bold text-gray-800 mb-2'}, React.createElement(FaIcon,{className:'fas fa-trophy text-yellow-500 mr-3'}), 'Конкурсы'), React.createElement('p',{className:'text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-6 py-3 rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2'}, React.createElement(FaIcon,{className:'fas fa-user-check mr-2'}), 'Админ-режим') : null)),
-                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-4 mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-6 py-3 rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement(FaIcon,{className:`fas ${tab.icon} mr-2`}), tab.label)) )),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-3.5 mb-2.5 sm:p-6 sm:mb-6'}, React.createElement('div',{className:'flex flex-row flex-wrap justify-between items-center gap-3 md:gap-4'}, React.createElement('div',null, React.createElement('h1',{className:'text-xl sm:text-3xl font-bold text-gray-800 sm:mb-2'}, React.createElement(FaIcon,{className:'fas fa-trophy text-yellow-500 mr-2 sm:mr-3'}), 'Конкурсы'), React.createElement('p',{className:'hidden sm:block text-gray-600'}, 'Отслеживайте результаты и лидеров')), isAdmin ? React.createElement('div',{className:'px-3 py-1.5 text-sm sm:px-6 sm:py-3 sm:text-base rounded-xl font-semibold bg-green-500 text-white flex items-center gap-2 flex-shrink-0'}, React.createElement(FaIcon,{className:'fas fa-user-check'}), 'Админ-режим') : null)),
+                        React.createElement('div',{className:'bg-white rounded-2xl shadow-lg p-1.5 mb-2.5 sm:p-4 sm:mb-6 overflow-x-auto scrollbar-hide'}, React.createElement('div',{className:'flex gap-1.5 sm:gap-2 min-w-max'}, availableTabs.map(tab=> React.createElement('button',{key:tab.id, onClick:()=>setActiveTab(tab.id), className:`px-3.5 py-2 text-sm sm:px-6 sm:py-3 sm:text-base rounded-xl font-semibold transition-all whitespace-nowrap ${activeTab===tab.id ? 'tab-active shadow-lg' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}, React.createElement(FaIcon,{className:`fas ${tab.icon} mr-1.5 sm:mr-2`}), tab.label)) )),
                         React.createElement('div',null, activeTab==='registrations' && React.createElement(RegContestPanel,{currentUser:currentUser, isAdmin:isAdmin, addToast:addToast}), activeTab==='baiga' && renderBaiga(), activeTab==='quality' && renderQuality(), activeTab==='chat' && renderChat(), activeTab==='smz' && renderSmz())
                     ),
                     React.createElement(ToastContainer,{toasts:toasts, removeToast:removeToast})
