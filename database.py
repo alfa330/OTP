@@ -5126,7 +5126,6 @@ class Database:
             self._init_group_late_bot_schema_tx(cursor)
             self._init_amo_leads_schema_tx(cursor)
             self._init_chat_hourly_schema_tx(cursor)
-            self._init_szov_ops_schema_tx(cursor)
             self._init_reg_contest_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -5341,60 +5340,6 @@ class Database:
                 last_sent_at  TIMESTAMPTZ
             );
         """)
-
-    def _init_szov_ops_schema_tx(self, cursor):
-        """Подписки на почасовой отчёт по операторам СЗоВ.
-
-        Своя таблица, а не общая с чатами: у отчётов разные права и разное расписание, а один
-        реестр заставил бы держать колонку «на что подписан» и фильтровать по ней в каждом
-        запросе."""
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS szov_ops_subscriptions (
-                chat_id       TEXT PRIMARY KEY,
-                title         TEXT,
-                chat_type     TEXT,
-                subscribed_by BIGINT,
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                last_sent_at  TIMESTAMPTZ
-            );
-        """)
-
-    def add_szov_ops_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
-        """Подписать чат на отчёт по операторам. Повторная подписка обновляет данные чата."""
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO szov_ops_subscriptions (chat_id, title, chat_type, subscribed_by)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (chat_id) DO UPDATE SET
-                    title = EXCLUDED.title,
-                    chat_type = EXCLUDED.chat_type,
-                    subscribed_by = EXCLUDED.subscribed_by
-                RETURNING (xmax = 0) AS is_new
-            """, (str(chat_id), title, chat_type, user_id))
-            return bool(cursor.fetchone()[0])
-
-    def remove_szov_ops_subscription(self, chat_id):
-        """Отписать чат. Возвращает True, если подписка была."""
-        with self._get_cursor() as cursor:
-            cursor.execute("DELETE FROM szov_ops_subscriptions WHERE chat_id = %s",
-                           (str(chat_id),))
-            return cursor.rowcount > 0
-
-    def get_szov_ops_subscriptions(self):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT chat_id, title, chat_type
-                FROM szov_ops_subscriptions
-                ORDER BY created_at
-            """)
-            return [{"chat_id": r[0], "title": r[1], "chat_type": r[2]}
-                    for r in cursor.fetchall()]
-
-    def mark_szov_ops_subscription_sent(self, chat_id):
-        with self._get_cursor() as cursor:
-            cursor.execute(
-                "UPDATE szov_ops_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
-                (str(chat_id),))
 
     def add_chat_hourly_subscription(self, chat_id, title=None, chat_type=None, user_id=None):
         """Подписать чат на почасовой отчёт по чатам. Повторная подписка обновляет данные чата."""
