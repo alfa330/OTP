@@ -4,13 +4,20 @@
   - метод: POST {CRM_API_URL} (= /api/partners/registrations-contest)
   - авторизация: заголовок X-Integration-Token
   - тело: {"registered_from": "YYYY-MM-DD", "registered_to": "YYYY-MM-DD",
-           "trip_deadline": "YYYY-MM-DD", "page": N, "per_page": M}
+           "trip_deadline": "YYYY-MM-DD", "include_no_trip": true,
+           "page": N, "per_page": M}
   - ответ: {"total", "page", "per_page", "has_more", "rows": [...]}
-    строка = один ЗАСЧИТАННЫЙ водитель (дедуп и фильтр «есть завершённая
-    поездка до trip_deadline» делает CRM); поля строки:
+    строка = один зарегистрированный водитель (дедуп делает CRM); поля строки:
     operator_id / operator_login / operator_name / operator_group (null),
     driver_id / driver_phone / driver_name,
     registered_at / first_trip_at (ISO с +05:00), trips_count.
+    Водитель ЗАСЧИТАН (успешная регистрация), когда first_trip_at заполнен —
+    CRM отдаёт его только для завершённой поездки до trip_deadline.
+    include_no_trip просит CRM отдавать и регистрации без поездки
+    (first_trip_at = null): сейчас CRM флаг игнорирует (проверено живым API
+    2026-08-07 — неизвестные поля не ломают запрос), допзапрос в
+    API_REQ_TOP_REGISTRATIONS_2026-08-07.md; как только CRM его реализует,
+    счётчик «регистраций всего» оживёт без правок кода.
 
 ВАЖНО (проверено на живом API 2026-08-07):
   1. operator_group CRM не заполняет — группу (Чаты/Линия) определяем сами по
@@ -29,6 +36,7 @@ ENV (окружение или .env.codex.local):
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -143,6 +151,7 @@ class RegContestClient:
                 "registered_from": registered_from,
                 "registered_to": registered_to,
                 "trip_deadline": trip_deadline,
+                "include_no_trip": True,
                 "page": page,
                 "per_page": PER_PAGE,
             })
@@ -173,6 +182,17 @@ def fold_name(value):
     if not value:
         return ""
     return " ".join(str(value).lower().translate(_KZ_FOLD).split())
+
+
+def mask_phone(value):
+    """Телефон водителя для оператора: видны только последние 4 цифры.
+
+    Номера — персональные данные; полный номер отдаём только админам,
+    формат исходника не восстанавливаем — просто «••• 4567»."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not digits:
+        return None
+    return f"••• {digits[-4:]}"
 
 
 def classify_group(direction_name, department_name):
@@ -253,12 +273,15 @@ def resolve_rows(crm_rows, directory):
 def build_leaderboards(entries):
     """Схлопывает строки-водители в рейтинги по группам конкурса.
 
-    Правила из условий конкурса: место — по числу засчитанных водителей;
-    при равенстве выше тот, кто раньше достиг итога — сравниваем время
+    Правила из условий конкурса: место — по числу ЗАСЧИТАННЫХ водителей
+    (drivers = есть завершённая поездка, first_trip_at заполнен); при
+    равенстве выше тот, кто раньше достиг итога — сравниваем время
     ПОСЛЕДНЕЙ засчитанной поездки (меньше = раньше = выше).
+    registrations — все зарегистрированные водители, включая ожидающих
+    первую поездку (first_trip_at = null, когда CRM их отдаёт).
     Возвращает {"chat": [...], "line": [...], "off": [...]} — off отдельным
-    списком, чтобы админ видел регистрации вне зачёта (ОП, фронт-офис,
-    несопоставленные), а не терял их молча.
+    списком, чтобы регистрации других отделов и несопоставленных операторов
+    не пропадали молча (наружу off не отдаём — только для диагностики).
     """
     buckets = {}
     for entry in entries:
@@ -275,13 +298,16 @@ def build_leaderboards(entries):
                 "match_method": entry.get("match_method"),
                 "group": group,
                 "drivers": 0,
+                "registrations": 0,
                 "last_trip_at": None,
                 "rows": [],
             }
-        agg["drivers"] += 1
+        agg["registrations"] += 1
         trip_at = entry.get("first_trip_at")
-        if trip_at and (agg["last_trip_at"] is None or trip_at > agg["last_trip_at"]):
-            agg["last_trip_at"] = trip_at
+        if trip_at:
+            agg["drivers"] += 1
+            if agg["last_trip_at"] is None or trip_at > agg["last_trip_at"]:
+                agg["last_trip_at"] = trip_at
         agg["rows"].append({
             "driver_id": entry.get("driver_id"),
             "driver_phone": entry.get("driver_phone"),
@@ -305,5 +331,8 @@ def build_leaderboards(entries):
         prizes = CONTEST["prizes"].get(group) or []
         for idx, item in enumerate(items):
             item["place"] = idx + 1
-            item["prize"] = prizes[idx] if idx < len(prizes) else None
+            # Приз только за засчитанных водителей: одни «ожидающие поездку»
+            # регистрации призового места не занимают.
+            item["prize"] = (prizes[idx]
+                             if idx < len(prizes) and item["drivers"] > 0 else None)
     return result
