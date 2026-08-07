@@ -5,6 +5,7 @@ namespace — так проверяется настоящая логика, а 
 модуль нельзя: он на старте поднимает пул к боевой БД и падает на Windows (time.tzset).
 """
 import ast
+import contextlib
 import json
 import logging
 import os
@@ -692,6 +693,23 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
     def test_sl_is_neutral_before_any_calls(self):
         self.assertEqual(self._sl_tone([None]), ['neutral'])
 
+    def test_deviation_thresholds_match_the_wallboard_tiles(self):
+        """Отбивка ругается ровно на то, что на табло перестало быть зелёным.
+
+        Иначе одна и та же цифра была бы «в норме» на экране и «отклонением» в отбивке,
+        а чат с режимом «только при отклонениях» получал бы письма невпопад."""
+        api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+
+        def backend(name):
+            return float(re.search(rf"{name} = float\(os\.getenv\('{name}'\) or ([\d.]+)\)", api).group(1))
+
+        def frontend(name):
+            return float(re.search(rf"^const {name} = ([\d.]+);$", self.source, flags=re.MULTILINE).group(1))
+
+        self.assertEqual(backend('SZOV_SL_MIN_PERCENT') / 100, frontend('SL_GOOD_RATIO'))
+        self.assertEqual(backend('SZOV_AR_MIN_PERCENT'), frontend('AR_MIN_PERCENT'))
+        self.assertEqual(backend('SZOV_AR_MAX_PERCENT'), frontend('AR_MAX_PERCENT'))
+
     def test_sl_thresholds_match_the_billing_report(self):
         """Одна цифра не должна гореть на табло и в отчёте разными цветами."""
         billing = (ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx").read_text(encoding="utf-8-sig")
@@ -940,12 +958,14 @@ class SzovBroadcastTests(unittest.TestCase):
         _load_names(source, {
             '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
             'SZOV_BROADCAST_SEND_TIMES', 'SZOV_BROADCAST_TIMEZONE',
-            'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT',
+            'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT', 'SZOV_SL_MIN_PERCENT',
+            'SZOV_BROADCAST_MODE_ALWAYS', 'SZOV_BROADCAST_MODE_DEVIATIONS',
             '_szov_wallboard_int',
             '_oktell_wallboard_hourly_sql', '_szov_broadcast_hourly_rows',
             '_szov_broadcast_collect',
             '_szov_plural', '_szov_format_seconds_mmss', '_szov_format_percent',
             '_szov_format_age_ru',
+            '_szov_broadcast_stale_note', '_szov_broadcast_deviations',
             '_szov_broadcast_notes', '_szov_broadcast_text',
             '_szov_broadcast_send_times',
         }, ns)
@@ -1071,6 +1091,75 @@ class SzovBroadcastTests(unittest.TestCase):
         notes = ' '.join(ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']()))
         self.assertIn('не обновляются уже 12 минут', notes)
 
+    # --- отклонения от нормы: по ним решается, писать ли «тревожному» чату ---
+
+    NORMAL_HOURLY = [
+        # AR = 4 % — внутри коридора 3…5 %.
+        {'hh': 9, 'served': 960, 'arrived': 1000, 'lost': 40, 'greet_drop': 0, 'talk_seconds': 260000},
+    ]
+
+    def _calm(self, **kwargs):
+        """Смена, где всё в норме: AR в коридоре, SL выше порога, снимок свежий."""
+        kwargs.setdefault('hourly_raw', self.NORMAL_HOURLY)
+        kwargs.setdefault('snapshot', {'now': {}, 'today': {'sl_ratio': 0.9},
+                                       'stale': False, 'age_seconds': 0})
+        return self._namespace(**kwargs)
+
+    def test_no_deviations_when_everything_is_within_norm(self):
+        ns = self._calm()
+        self.assertEqual(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()), [])
+
+    def test_ar_outside_the_corridor_is_a_deviation(self):
+        ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.9},
+                                       'stale': False, 'age_seconds': 0})
+        deviations = ' '.join(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()))
+        self.assertIn('AR выше установленного диапазона', deviations)
+
+    def test_sl_below_the_norm_is_a_deviation(self):
+        """Порог тот же, при котором плитка SL на табло перестаёт быть зелёной."""
+        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.72},
+                                  'stale': False, 'age_seconds': 0})
+        deviations = ' '.join(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()))
+        self.assertIn('SL ниже нормы', deviations)
+        self.assertIn('72,0%', deviations)
+
+    def test_sl_at_the_norm_is_not_a_deviation(self):
+        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.8},
+                                  'stale': False, 'age_seconds': 0})
+        self.assertEqual(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']()), [])
+
+    def test_sl_is_not_checked_for_a_past_hour_slice(self):
+        """SL в снимке — за весь день; на срез «на 14:00» его натягивать нельзя."""
+        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.4},
+                                  'stale': False, 'age_seconds': 0})
+        self.assertEqual(ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect'](hour_to=14)), [])
+
+    def test_frozen_data_is_a_deviation_too(self):
+        """Если Oktell молчит, «тревожный» чат должен узнать об этом, а не промолчать."""
+        ns = self._calm(snapshot={'now': {}, 'today': {'sl_ratio': 0.9},
+                                  'stale': True, 'age_seconds': 40 * 60})
+        deviations = ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']())
+        self.assertEqual(len(deviations), 1)
+        self.assertIn('не обновляются уже 40 минут', deviations[0])
+
+    def test_routine_notes_are_not_deviations(self):
+        """Перерывы и среднее время разговора есть всегда — иначе «тревожный» чат
+        получал бы сообщение каждый раз, и режим терял бы смысл."""
+        ns = self._calm(snapshot={'now': {'operators_on_recall': 2, 'operators_on_break': 3},
+                                  'today': {'sl_ratio': 0.9}, 'stale': False, 'age_seconds': 0})
+        data = ns['_szov_broadcast_collect']()
+        self.assertEqual(ns['_szov_broadcast_deviations'](data), [])
+        notes = ' '.join(ns['_szov_broadcast_notes'](data))
+        self.assertIn('на перерыве', notes)
+        self.assertIn('Среднее время разговора', notes)
+
+    def test_notes_keep_the_frozen_data_line_last(self):
+        ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.4},
+                                       'stale': True, 'age_seconds': 12 * 60})
+        notes = ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']())
+        self.assertIn('не обновляются уже 12 минут', notes[-1])
+        self.assertEqual(len([note for note in notes if 'не обновляются' in note]), 1)
+
     def test_age_wording(self):
         age = self._namespace()['_szov_format_age_ru']
         self.assertEqual(age(30), 'меньше минуты')
@@ -1111,19 +1200,35 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         cls.view = (ROOT / "src" / "components" / "monitoring"
                     / "SzovWallboardView.jsx").read_text(encoding="utf-8-sig")
 
-    def test_config_and_history_tables_exist(self):
-        self.assertIn("CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_config", self.db)
+    def test_recipient_and_history_tables_exist(self):
+        self.assertIn("CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_chats", self.db)
         self.assertIn("CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_history", self.db)
-        self.assertIn("szov_wallboard_broadcast_config_singleton CHECK (id = 1)", self.db)
-        for method in ("def get_szov_broadcast_config", "def update_szov_broadcast_config",
+        # режим получателя ограничен на уровне схемы, а не только формой
+        self.assertIn("CHECK (mode IN ('always', 'deviations'))", self.db)
+        for method in ("def get_szov_broadcast_chats", "def save_szov_broadcast_chat",
+                       "def delete_szov_broadcast_chat",
                        "def get_szov_broadcast_history", "def list_bot_group_chats"):
             self.assertIn(method, self.db, method)
+
+    def test_one_chat_is_one_row(self):
+        """Дубль получателя = две отбивки в один чат."""
+        self.assertIn("chat_id BIGINT PRIMARY KEY", self.db)
+        self.assertIn("ON CONFLICT (chat_id) DO UPDATE SET", self.db)
+
+    def test_single_chat_setting_is_migrated_exactly_once(self):
+        """Переезд с singleton на список: удалённый получатель не должен воскресать
+        на каждом рестарте, поэтому миграция помечается флагом."""
+        self.assertIn("ADD COLUMN IF NOT EXISTS chats_migrated BOOLEAN NOT NULL DEFAULT FALSE",
+                      self.db)
+        self.assertIn("INSERT INTO szov_wallboard_broadcast_chats", self.db)
+        self.assertIn("WHERE id = 1 AND chat_id IS NOT NULL AND NOT chats_migrated", self.db)
+        self.assertIn("SET chats_migrated = TRUE", self.db)
 
     def test_enabling_without_a_chat_is_rejected(self):
         self.assertIn('raise ValueError("Не выбран чат для отбивки")', self.db)
 
     def test_endpoints_are_registered_and_guarded(self):
-        self.assertIn("@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])", self.api)
+        self.assertIn("@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])", self.api)
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
         # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])", self.api)
@@ -1143,6 +1248,33 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("szov_broadcast_job,", self.api)
         self.assertIn("id=f'szov_wallboard_broadcast_{_hour:02d}{_minute:02d}'", self.api)
         self.assertIn("timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)", self.api)
+
+    def test_scheduled_send_collects_once_for_all_recipients(self):
+        """Прокси Oktell низкоконкурентный: сбор данных один на всех, отправка — по чатам."""
+        block = re.search(r"async def szov_broadcast_job\(\).*?(?=\n# ===)", self.api,
+                          flags=re.DOTALL).group(0)
+        self.assertEqual(block.count("_szov_broadcast_prepare("), 1)
+        self.assertIn("for chat in targets:", block)
+        self.assertIn("await _szov_broadcast_deliver(int(chat['chat_id']), text, media)", block)
+
+    def test_one_dead_chat_does_not_stop_the_rest(self):
+        block = re.search(r"for chat in targets:.*?(?=\n    except Exception)", self.api,
+                          flags=re.DOTALL).group(0)
+        self.assertIn("не получил сообщение", block)
+
+    def test_deviation_mode_is_silent_while_everything_is_within_norm(self):
+        block = re.search(r"async def szov_broadcast_job\(\).*?(?=\n# ===)", self.api,
+                          flags=re.DOTALL).group(0)
+        self.assertIn("deviations = _szov_broadcast_deviations(data)", block)
+        self.assertIn("if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or deviations", block)
+
+    def test_manual_send_only_targets_a_configured_recipient(self):
+        """Кнопка проверяет настроенную рассылку, а не пишет в произвольную группу."""
+        block = re.search(r"def api_szov_wallboard_broadcast_test.*?(?=\n# ===)", self.api,
+                          flags=re.DOTALL).group(0)
+        self.assertIn("recipients = {str(chat['chat_id']): chat for chat in db.get_szov_broadcast_chats()}",
+                      block)
+        self.assertIn('return jsonify({"error": "Сначала выберите чат"}), 400', block)
 
     def test_bot_loop_is_captured_for_flask_triggered_sends(self):
         """Из потока Flask нельзя слать через чужой цикл — ссылку берём на старте бота."""
@@ -1173,14 +1305,144 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("отправляю текстом", self.api)
         self.assertIn("await bot.send_message(chat_id, text, parse_mode='HTML')", self.api)
 
-    def test_settings_panel_is_wired_above_the_wallboard(self):
-        self.assertIn("const BroadcastPanel = ", self.view)
-        self.assertIn("<BroadcastPanel", self.view)
+    def test_settings_live_in_a_modal_behind_a_header_button(self):
+        """Табло смотрят, а не настраивают: на экране остаётся кнопка, форма — в модалке."""
+        self.assertIn("const BroadcastModal = ", self.view)
+        self.assertNotIn("const BroadcastPanel = ", self.view)
+        self.assertIn("<IosModal", self.view)
         self.assertIn("/api/szov_wallboard/broadcast", self.view)
         self.assertIn("Кто менял", self.view)
-        # свёрнута по умолчанию — табло смотрят, а не настраивают
-        self.assertIn("const [open, setOpen] = useState(false);", self.view)
+        self.assertIn("const [broadcastOpen, setBroadcastOpen] = useState(false);", self.view)
 
+    def test_broadcast_button_follows_the_refresh_button(self):
+        header = self.view[self.view.index("Обновить\n"):self.view.index("На весь экран")]
+        self.assertIn("setBroadcastOpen(true)", header)
+        self.assertIn("Отбивка", header)
+
+    def test_recipient_row_offers_both_modes_and_removal(self):
+        self.assertIn("{ key: 'always'", self.view)
+        self.assertIn("{ key: 'deviations'", self.view)
+        self.assertIn("<ModeSwitch", self.view)
+        self.assertIn("save('DELETE', { chat_id: item.chat_id }", self.view)
+
+    def test_a_chat_cannot_be_added_twice(self):
+        """Дубль в списке — две одинаковые отбивки в одну группу."""
+        self.assertIn("const taken = new Set(recipients.map((item) => String(item.chat_id)));",
+                      self.view)
+
+
+
+class SzovBroadcastRecipientTests(unittest.TestCase):
+    """Нормализация получателей отбивки: методы Database гоняем с поддельным курсором.
+
+    database.py на Windows не импортируется (time.tzset), поэтому берём методы из AST —
+    тот же приём, что в SzovShiftGroupingTests."""
+
+    @classmethod
+    def setUpClass(cls):
+        source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        db_class = next(node for node in tree.body
+                        if isinstance(node, ast.ClassDef) and node.name == "Database")
+        wanted = {'save_szov_broadcast_chat', 'delete_szov_broadcast_chat',
+                  '_log_szov_broadcast_change'}
+        nodes = [ast.FunctionDef(name=item.name, args=item.args, body=item.body,
+                                 decorator_list=[], returns=None, type_comment=None,
+                                 type_params=[])
+                 for item in db_class.body
+                 if isinstance(item, ast.FunctionDef) and item.name in wanted]
+        module = ast.Module(body=nodes, type_ignores=[])
+        ast.fix_missing_locations(module)
+        ns = {'json': json}
+        exec(compile(module, "<broadcast>", "exec"), ns)
+        cls.methods = {name: ns[name] for name in wanted}
+
+    def _fake_db(self, rows=(), deleted_row=None):
+        methods = self.methods
+        recorded = []
+
+        class FakeCursor:
+            def execute(self, sql, params=None):
+                recorded.append((' '.join(sql.split()), params))
+                self._last = sql
+
+            def fetchone(self):
+                return deleted_row if 'DELETE' in self._last else None
+
+        class FakeDb:
+            SZOV_BROADCAST_MODES = ('always', 'deviations')
+
+            @contextlib.contextmanager
+            def _get_cursor(self):
+                yield FakeCursor()
+
+            def get_szov_broadcast_chats(self):
+                return [dict(row) for row in rows]
+
+        for name, fn in methods.items():
+            setattr(FakeDb, name, fn)
+        return FakeDb(), recorded
+
+    @staticmethod
+    def _insert(recorded):
+        return next(params for sql, params in recorded
+                    if sql.startswith('INSERT INTO szov_wallboard_broadcast_chats'))
+
+    @staticmethod
+    def _audit(recorded):
+        return next(params for sql, params in recorded
+                    if 'broadcast_history' in sql)
+
+    EXISTING = {'chat_id': -100123, 'chat_title': 'Руководство', 'mode': 'deviations',
+                'is_enabled': True, 'updated_by': 7, 'updated_by_name': None, 'updated_at': None}
+
+    def test_new_recipient_is_written_as_given(self):
+        db, recorded = self._fake_db()
+        db.save_szov_broadcast_chat({'chat_id': '-100123', 'chat_title': 'Руководство',
+                                     'mode': 'deviations'}, user_id=7)
+        self.assertEqual(self._insert(recorded), (-100123, 'Руководство', 'deviations', True, 7))
+        self.assertIn('"action": "added"', self._audit(recorded)[1])
+
+    def test_mode_switch_keeps_title_and_toggle(self):
+        """Форма шлёт точечные патчи: пришёл только режим — остальное трогать нельзя."""
+        db, recorded = self._fake_db(rows=[self.EXISTING])
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'mode': 'always'}, user_id=9)
+        self.assertEqual(self._insert(recorded), (-100123, 'Руководство', 'always', True, 9))
+        self.assertIn('"action": "changed"', self._audit(recorded)[1])
+
+    def test_toggle_keeps_the_mode(self):
+        db, recorded = self._fake_db(rows=[self.EXISTING])
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'is_enabled': False}, user_id=9)
+        self.assertEqual(self._insert(recorded), (-100123, 'Руководство', 'deviations', False, 9))
+
+    def test_missing_chat_is_rejected(self):
+        db, _ = self._fake_db()
+        for payload in ({}, {'chat_id': None}, {'chat_id': ''}, {'chat_id': 'абв'}):
+            with self.assertRaises(ValueError, msg=payload):
+                db.save_szov_broadcast_chat(payload)
+
+    def test_unknown_mode_is_rejected(self):
+        """Иначе строка не прошла бы CHECK и запрос упал бы уже в БД."""
+        db, _ = self._fake_db()
+        with self.assertRaises(ValueError):
+            db.save_szov_broadcast_chat({'chat_id': -1, 'mode': 'иногда'})
+
+    def test_removal_is_audited(self):
+        db, recorded = self._fake_db(deleted_row=('Руководство', 'deviations'))
+        db.delete_szov_broadcast_chat(-100123, user_id=9)
+        self.assertIn('"action": "removed"', self._audit(recorded)[1])
+
+    def test_removing_a_chat_that_was_not_there_writes_nothing(self):
+        db, recorded = self._fake_db(deleted_row=None)
+        db.delete_szov_broadcast_chat(-999, user_id=9)
+        self.assertEqual([sql for sql, _ in recorded if 'broadcast_history' in sql], [])
+
+    def test_audit_keeps_the_whole_recipient_list(self):
+        """Снимок целиком: по истории видно, кому уходила отбивка на момент правки."""
+        db, recorded = self._fake_db(rows=[self.EXISTING])
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'mode': 'always'}, user_id=9)
+        stored = json.loads(self._audit(recorded)[1])
+        self.assertEqual([chat['chat_id'] for chat in stored['chats']], [-100123])
 
 
 class SzovShiftGroupingTests(unittest.TestCase):

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
-import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnPrimary, iosInput, IosToggle } from '../ui/ios';
+import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosBadge, IosModal, IosToggle } from '../ui/ios';
 
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108).
@@ -239,16 +239,68 @@ const StatusColumn = ({ now, scale = 1 }) => (
 );
 
 /*
- * Настройка отбивки показателей в Telegram. Свёрнута по умолчанию: табло смотрят, а не
- * настраивают, и держать форму раскрытой — лишний шум. В свёрнутом виде видно главное:
- * включена ли отбивка и куда уходит.
+ * Режимы получателя. Оба стоят в одном расписании — разница только в том, при каких
+ * показателях сообщение уходит. «Только при отклонениях» нужен руководству: писать ему
+ * каждые четыре часа, когда всё в норме, — тот же шум, что и молчать, когда всё плохо.
  */
-const BroadcastPanel = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const BROADCAST_MODES = [
+    { key: 'always', label: 'Каждую отбивку', hint: 'Во все часы расписания' },
+    { key: 'deviations', label: 'Только при отклонениях', hint: 'То же расписание, но письмо уходит, только если показатели вне нормы' },
+];
+
+const modeLabel = (key) => (BROADCAST_MODES.find((mode) => mode.key === key) || BROADCAST_MODES[0]).label;
+
+/** Сегментированный переключатель режима — тот же, что в остальных разделах. */
+const ModeSwitch = ({ value, disabled, onChange }) => (
+    <div className="flex rounded-xl bg-slate-100 p-1">
+        {BROADCAST_MODES.map((mode) => (
+            <button
+                key={mode.key}
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (value !== mode.key) onChange(mode.key); }}
+                title={mode.hint}
+                className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all disabled:opacity-50 ${
+                    value === mode.key
+                        ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                        : 'text-slate-500 hover:text-slate-700'}`}
+            >
+                {mode.label}
+            </button>
+        ))}
+    </div>
+);
+
+/** Строка истории «кто менял» человеческим языком. */
+const historyLine = (settings) => {
+    const title = settings?.chat_title || settings?.chat_id || 'чат';
+    const mode = modeLabel(settings?.mode).toLowerCase();
+    const state = settings?.is_enabled ? 'отправка включена' : 'отправка выключена';
+    if (settings?.action === 'added') return `добавил чат «${title}» — ${mode}`;
+    if (settings?.action === 'removed') return `убрал чат «${title}»`;
+    if (settings?.action === 'changed') return `изменил чат «${title}» — ${mode}, ${state}`;
+    // Записи, сделанные до перехода на список получателей: там был один чат и один тумблер.
+    return `${settings?.is_enabled ? 'включил отправку' : 'выключил отправку'}`
+        + (settings?.chat_title ? `, чат «${settings.chat_title}»` : '');
+};
+
+/*
+ * Настройка отбивки показателей в Telegram. Живёт в модалке, а не на самом табло:
+ * табло смотрят, а не настраивают, и форма поверх экрана, который висит на стене, — лишний шум.
+ */
+const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [state, setState] = useState(null);
-    const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
+    const [draftChat, setDraftChat] = useState('');
+    const [draftMode, setDraftMode] = useState('always');
+    const [historyOpen, setHistoryOpen] = useState(false);
     const headersRef = useRef(withAccessTokenHeader);
     headersRef.current = withAccessTokenHeader;
+    // showToast приходит новой функцией на каждый рендер родителя (а он перерисовывается
+    // раз в 15 с по опросу табло). В зависимостях эффекта это дало бы лишний GET на каждый
+    // тик, поэтому держим её в ref.
+    const toastRef = useRef(showToast);
+    toastRef.current = showToast;
 
     const request = useCallback(async (method, body) => {
         const build = headersRef.current;
@@ -265,17 +317,23 @@ const BroadcastPanel = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         return data;
     }, [apiBaseUrl]);
 
+    // Список тянем при каждом открытии: бота могли добавить в новую группу, пока модалка закрыта.
     useEffect(() => {
+        if (!open) return undefined;
         let cancelled = false;
-        request('GET').then((data) => { if (!cancelled) setState(data); }).catch(() => {});
+        request('GET')
+            .then((data) => { if (!cancelled) setState(data); })
+            .catch((error) => {
+                if (!cancelled) toastRef.current?.(error.message || 'Не удалось загрузить настройку', 'error');
+            });
         return () => { cancelled = true; };
-    }, [request]);
+    }, [open, request]);
 
-    const save = async (patch) => {
+    const save = async (method, body, successText) => {
         setBusy(true);
         try {
-            setState(await request('POST', patch));
-            showToast?.('Настройка отбивки сохранена', 'success');
+            setState(await request(method, body));
+            if (successText) showToast?.(successText, 'success');
         } catch (error) {
             showToast?.(error.message || 'Не удалось сохранить', 'error');
         } finally {
@@ -283,14 +341,17 @@ const BroadcastPanel = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     };
 
-    const sendNow = async () => {
+    const sendNow = async (chatId) => {
         setBusy(true);
         try {
             const build = headersRef.current;
+            const headers = build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' };
+            headers['Content-Type'] = 'application/json';
             const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/broadcast_test`, {
                 method: 'POST',
-                headers: build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' },
+                headers,
                 credentials: 'include',
+                body: JSON.stringify({ chat_id: chatId }),
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
@@ -302,103 +363,170 @@ const BroadcastPanel = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     };
 
-    if (!state) return null;
-    const { config, history = [], chats = [], send_times: sendTimes = [] } = state;
-    const summary = config.is_enabled
-        ? `Включена · ${config.chat_title || config.chat_id || 'чат не выбран'}`
-        : 'Выключена';
+    const recipients = state?.recipients || [];
+    const chats = state?.chats || [];
+    const sendTimes = state?.send_times || [];
+
+    // Чат, который уже получает отбивку, второй раз не предлагаем: дублей быть не должно.
+    const available = useMemo(() => {
+        const taken = new Set(recipients.map((item) => String(item.chat_id)));
+        return chats.filter((chat) => !taken.has(String(chat.chat_id)));
+    }, [chats, recipients]);
+
+    const addRecipient = () => {
+        const picked = available.find((chat) => String(chat.chat_id) === draftChat);
+        if (!picked) return;
+        setDraftChat('');
+        setDraftMode('always');
+        save('POST', {
+            chat_id: picked.chat_id,
+            chat_title: picked.title || picked.username || String(picked.chat_id),
+            mode: draftMode,
+            is_enabled: true,
+        }, 'Группа добавлена');
+    };
 
     return (
-        <div className={`${iosCard} p-4`}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
-                    <FaIcon className="fas fa-paper-plane"></FaIcon>
-                    <span>Отбивка показателей</span>
-                    <span className="text-[14px] font-normal text-slate-400">· {summary}</span>
-                </div>
-                <button type="button" className={iosBtnGhost} onClick={() => setOpen((value) => !value)}>
-                    <FaIcon className={`fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}`}></FaIcon>
-                    {open ? 'Свернуть' : 'Настроить'}
-                </button>
-            </div>
-
-            {open ? (
-                <div className="mt-4 space-y-4 border-t border-slate-200/70 pt-4">
-                    <div className="flex flex-wrap items-center gap-4">
-                        <label className="flex items-center gap-2.5 text-[14px] text-slate-700">
-                            <IosToggle
-                                checked={Boolean(config.is_enabled)}
-                                disabled={busy}
-                                onChange={(next) => save({ is_enabled: next })}
-                            />
-                            Отправлять по расписанию
-                        </label>
-                        <div className="text-[14px] text-slate-500">
-                            Время отправки: <span className="tabular-nums">{sendTimes.join(', ') || '—'}</span>
-                        </div>
+        <IosModal
+            open={open}
+            onClose={onClose}
+            title="Отбивка показателей"
+            subtitle={`Расписание ${sendTimes.join(', ') || '—'} · Алматы`}
+            maxWidth="max-w-3xl"
+            footer={<button type="button" className={iosBtnSecondary} onClick={onClose}>Готово</button>}
+        >
+            {!state ? (
+                <div className="py-6 text-center text-[13px] text-slate-500">Загружаем настройку…</div>
+            ) : (
+                <div className="space-y-5">
+                    <div className={`${iosCard} divide-y divide-slate-100`}>
+                        {recipients.length === 0 ? (
+                            <div className="px-4 py-5 text-[13.5px] text-slate-500">
+                                Отбивка никуда не уходит: получателей пока нет.
+                            </div>
+                        ) : recipients.map((item) => (
+                            <div key={item.chat_id} className="flex flex-wrap items-center gap-3 px-4 py-3.5">
+                                <div className="min-w-[10rem] flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="truncate text-[14px] font-medium text-slate-900">
+                                            {item.chat_title || item.chat_id}
+                                        </span>
+                                        {item.is_enabled ? null : <IosBadge tone="slate">выключена</IosBadge>}
+                                    </div>
+                                    <div className="mt-0.5 text-[12px] text-slate-400">
+                                        {[item.updated_by_name, String(item.updated_at || '').replace('T', ' ').slice(0, 16)]
+                                            .filter(Boolean).join(' · ')}
+                                    </div>
+                                </div>
+                                <ModeSwitch
+                                    value={item.mode}
+                                    disabled={busy}
+                                    onChange={(mode) => save('POST', { chat_id: item.chat_id, mode }, 'Режим изменён')}
+                                />
+                                <IosToggle
+                                    checked={Boolean(item.is_enabled)}
+                                    disabled={busy}
+                                    onChange={(next) => save(
+                                        'POST',
+                                        { chat_id: item.chat_id, is_enabled: next },
+                                        next ? 'Отправка включена' : 'Отправка выключена',
+                                    )}
+                                />
+                                <button
+                                    type="button"
+                                    className={iosBtnGhost}
+                                    disabled={busy}
+                                    title="Отправить в этот чат прямо сейчас"
+                                    onClick={() => sendNow(item.chat_id)}
+                                >
+                                    <FaIcon className="fas fa-paper-plane"></FaIcon>
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`${iosBtnGhost} text-rose-500 hover:bg-rose-50`}
+                                    disabled={busy}
+                                    title="Убрать группу из получателей"
+                                    onClick={() => save('DELETE', { chat_id: item.chat_id }, 'Группа убрана')}
+                                >
+                                    <FaIcon className="fas fa-trash"></FaIcon>
+                                </button>
+                            </div>
+                        ))}
                     </div>
 
-                    <div className="flex flex-wrap items-end gap-3">
-                        <label className="min-w-[16rem] flex-1">
-                            <div className="mb-1.5 text-[13px] font-medium text-slate-500">Чат для отбивки</div>
-                            <select
-                                className={iosInput}
-                                disabled={busy}
-                                value={config.chat_id ?? ''}
-                                onChange={(event) => {
-                                    const value = event.target.value;
-                                    const picked = chats.find((chat) => String(chat.chat_id) === value);
-                                    save({ chat_id: value || null, chat_title: picked?.title || '' });
-                                }}
-                            >
-                                <option value="">Не выбран</option>
-                                {chats.map((chat) => (
-                                    <option key={chat.chat_id} value={chat.chat_id}>
-                                        {chat.title || chat.username || chat.chat_id}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
-                        <button type="button" className={iosBtnPrimary} disabled={busy || !config.chat_id} onClick={sendNow}>
-                            <FaIcon className="fas fa-paper-plane"></FaIcon>
-                            Отправить сейчас
-                        </button>
-                    </div>
-                    {chats.length === 0 ? (
-                        <div className="text-[13px] text-amber-700">
-                            Список пуст: добавьте бота в нужную группу — он появится здесь сам.
+                    <div className={`${iosCard} space-y-3 p-4`}>
+                        <div className="text-[13px] font-semibold text-slate-500">Добавить группу</div>
+                        <div className="flex flex-wrap items-end gap-3">
+                            <label className="min-w-[14rem] flex-1">
+                                <div className="mb-1.5 text-[12.5px] text-slate-500">Чат</div>
+                                <select
+                                    className={iosInput}
+                                    disabled={busy || available.length === 0}
+                                    value={draftChat}
+                                    onChange={(event) => setDraftChat(event.target.value)}
+                                >
+                                    <option value="">Выберите чат</option>
+                                    {available.map((chat) => (
+                                        <option key={chat.chat_id} value={chat.chat_id}>
+                                            {chat.title || chat.username || chat.chat_id}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <div>
+                                <div className="mb-1.5 text-[12.5px] text-slate-500">Когда отправлять</div>
+                                <ModeSwitch value={draftMode} disabled={busy} onChange={setDraftMode} />
+                            </div>
+                            <button type="button" className={iosBtnPrimary} disabled={busy || !draftChat} onClick={addRecipient}>
+                                <FaIcon className="fas fa-plus"></FaIcon>
+                                Добавить
+                            </button>
                         </div>
-                    ) : null}
+                        {chats.length === 0 ? (
+                            <div className="text-[12.5px] text-amber-700">
+                                Список пуст: добавьте бота в нужную группу — он появится здесь сам.
+                            </div>
+                        ) : available.length === 0 ? (
+                            <div className="text-[12.5px] text-slate-400">
+                                Все известные боту группы уже получают отбивку.
+                            </div>
+                        ) : null}
+                    </div>
+
+                    <div className="px-1 text-[12.5px] leading-relaxed text-slate-500">
+                        Отклонением считаем то же, что подсвечено на табло: AR вне коридора{' '}
+                        {AR_MIN_PERCENT}–{AR_MAX_PERCENT}%, SL ниже {Math.round(SL_GOOD_RATIO * 100)}%
+                        {' '}или Oktell не отвечает и цифры на табло замерли.
+                    </div>
 
                     <div>
-                        <div className="mb-2 text-[13px] font-semibold uppercase tracking-wide text-slate-500">
+                        <button type="button" className={iosBtnGhost} onClick={() => setHistoryOpen((value) => !value)}>
+                            <FaIcon className={`fas ${historyOpen ? 'fa-chevron-up' : 'fa-chevron-down'}`}></FaIcon>
                             Кто менял
-                        </div>
-                        {history.length === 0 ? (
-                            <div className="text-[14px] text-slate-400">Изменений пока не было</div>
-                        ) : (
-                            <ul className="divide-y divide-slate-100 text-[14px]">
-                                {history.map((item) => (
-                                    <li key={`${item.changed_at}-${item.changed_by}`} className="flex flex-wrap justify-between gap-2 py-2">
-                                        <span className="text-slate-700">
-                                            {item.changed_by_name || 'Неизвестно'}
-                                            <span className="text-slate-400">
-                                                {' · '}
-                                                {item.settings?.is_enabled ? 'включил отправку' : 'выключил отправку'}
-                                                {item.settings?.chat_title ? `, чат «${item.settings.chat_title}»` : ''}
+                        </button>
+                        {historyOpen ? (
+                            (state.history || []).length === 0 ? (
+                                <div className="px-1 py-2 text-[13px] text-slate-400">Изменений пока не было</div>
+                            ) : (
+                                <ul className="mt-1 divide-y divide-slate-100 text-[13px]">
+                                    {(state.history || []).map((item) => (
+                                        <li key={`${item.changed_at}-${item.changed_by}`} className="flex flex-wrap justify-between gap-2 py-2">
+                                            <span className="text-slate-700">
+                                                {item.changed_by_name || 'Неизвестно'}
+                                                <span className="text-slate-400">{' · '}{historyLine(item.settings)}</span>
                                             </span>
-                                        </span>
-                                        <span className="tabular-nums text-slate-400">
-                                            {String(item.changed_at || '').replace('T', ' ').slice(0, 16)}
-                                        </span>
-                                    </li>
-                                ))}
-                            </ul>
-                        )}
+                                            <span className="tabular-nums text-slate-400">
+                                                {String(item.changed_at || '').replace('T', ' ').slice(0, 16)}
+                                            </span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )
+                        ) : null}
                     </div>
                 </div>
-            ) : null}
-        </div>
+            )}
+        </IosModal>
     );
 };
 
@@ -502,6 +630,7 @@ export default function SzovWallboardView(props) {
     const [error, setError] = useState(null);
     const [loading, setLoading] = useState(true);
     const [fullscreen, setFullscreen] = useState(false);
+    const [broadcastOpen, setBroadcastOpen] = useState(false);
 
     const inFlightRef = useRef(false);
     const abortRef = useRef(null);
@@ -604,11 +733,27 @@ export default function SzovWallboardView(props) {
                     <FaIcon className="fas fa-rotate"></FaIcon>
                     Обновить
                 </button>
+                <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
+                    <FaIcon className="fas fa-paper-plane"></FaIcon>
+                    Отбивка
+                </button>
                 <button type="button" className={iosBtnGhost} onClick={() => setFullscreen(true)}>
                     <FaIcon className="fas fa-expand"></FaIcon>
                     На весь экран
                 </button>
             </div>
+            {/* Через портал, как и полноэкранный режим: модалка не должна зависеть от
+                вертикальных отступов шапки, а шапка рисуется во всех трёх состояниях экрана. */}
+            {createPortal(
+                <BroadcastModal
+                    open={broadcastOpen}
+                    onClose={() => setBroadcastOpen(false)}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />,
+                document.body,
+            )}
         </div>
     );
 
@@ -635,11 +780,6 @@ export default function SzovWallboardView(props) {
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
-            <BroadcastPanel
-                apiBaseUrl={apiBaseUrl}
-                withAccessTokenHeader={withAccessTokenHeader}
-                showToast={showToast}
-            />
             <WallboardBody snapshot={snapshot} scale={1} />
             {fullscreen ? createPortal(
                 <FullscreenSheet

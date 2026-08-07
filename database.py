@@ -22073,66 +22073,117 @@ class Database:
 
     # --- Отбивка показателей «Табло СЗоВ» в Telegram ---------------------------------------
 
-    def get_szov_broadcast_config(self) -> dict:
-        """Куда слать отбивку табло (singleton id=1)."""
+    # Режимы получателя: каждая отбивка или только та, где есть отклонения от нормы.
+    SZOV_BROADCAST_MODES = ('always', 'deviations')
+
+    def get_szov_broadcast_chats(self) -> list:
+        """Получатели отбивки табло: куда, в каком режиме и включён ли чат."""
         with self._get_cursor() as cur:
             cur.execute("""
-                SELECT c.chat_id, c.chat_title, c.is_enabled, c.updated_by, c.updated_at, u.name
-                FROM szov_wallboard_broadcast_config c
+                SELECT c.chat_id, c.chat_title, c.mode, c.is_enabled,
+                       c.updated_by, c.updated_at, u.name
+                FROM szov_wallboard_broadcast_chats c
                 LEFT JOIN users u ON u.id = c.updated_by
-                WHERE c.id = 1
+                ORDER BY COALESCE(NULLIF(c.chat_title, ''), c.chat_id::text)
             """)
-            r = cur.fetchone()
-        if not r:
-            return {"chat_id": None, "chat_title": "", "is_enabled": False,
-                    "updated_by": None, "updated_by_name": None, "updated_at": None}
-        return {
+            rows = cur.fetchall()
+        return [{
             "chat_id": r[0],
             "chat_title": r[1] or "",
-            "is_enabled": bool(r[2]),
-            "updated_by": r[3],
-            "updated_by_name": r[5],
-            "updated_at": r[4].isoformat() if r[4] else None,
-        }
+            "mode": r[2] or "always",
+            "is_enabled": bool(r[3]),
+            "updated_by": r[4],
+            "updated_by_name": r[6],
+            "updated_at": r[5].isoformat() if r[5] else None,
+        } for r in rows]
 
-    def update_szov_broadcast_config(self, payload: dict, user_id=None) -> dict:
-        """Сменить чат отбивки / включить-выключить + записать в историю.
+    def save_szov_broadcast_chat(self, payload: dict, user_id=None) -> list:
+        """Добавить получателя или изменить его режим / включённость.
 
-        В историю пишем снимок целиком, а не diff: строк мало, зато видно, что именно
-        стояло на момент каждого изменения."""
-        current = self.get_szov_broadcast_config()
+        Один чат — одна строка: повторное добавление того же чата не плодит дубли,
+        иначе отбивка приходила бы в него дважды."""
         payload = payload or {}
-        chat_id = current["chat_id"]
-        chat_title = current["chat_title"]
-        is_enabled = current["is_enabled"]
-        if 'chat_id' in payload:
-            raw = payload.get('chat_id')
-            chat_id = None if raw in (None, '', 'null') else int(raw)
-        if payload.get('chat_title') is not None:
-            chat_title = str(payload['chat_title']).strip()[:255]
-        if payload.get('is_enabled') is not None:
-            is_enabled = bool(payload['is_enabled'])
-        # Без чата включать нечего — иначе джоба будет молча падать каждый час.
-        if is_enabled and chat_id is None:
+        raw = payload.get('chat_id')
+        if raw in (None, '', 'null'):
+            raise ValueError("Не выбран чат для отбивки")
+        try:
+            chat_id = int(raw)
+        except (TypeError, ValueError):
             raise ValueError("Не выбран чат для отбивки")
 
-        snapshot = json.dumps({
-            "chat_id": chat_id,
-            "chat_title": chat_title,
-            "is_enabled": is_enabled,
-        })
+        existing = {row['chat_id']: row for row in self.get_szov_broadcast_chats()}.get(chat_id)
+        # Не переданное поле означает «оставить как было»: форма шлёт точечные патчи
+        # (переключили режим / щёлкнули тумблером), а не всю карточку получателя.
+        mode = payload.get('mode')
+        if mode is None:
+            mode = (existing or {}).get('mode', 'always')
+        mode = str(mode).strip()
+        if mode not in self.SZOV_BROADCAST_MODES:
+            raise ValueError("Неизвестный режим отправки")
+        title = payload.get('chat_title')
+        chat_title = str(title).strip()[:255] if title is not None else (existing or {}).get('chat_title', '')
+        is_enabled = payload.get('is_enabled')
+        is_enabled = bool(is_enabled) if is_enabled is not None else bool((existing or {}).get('is_enabled', True))
+
         with self._get_cursor() as cur:
             cur.execute("""
-                UPDATE szov_wallboard_broadcast_config
-                SET chat_id = %s, chat_title = %s, is_enabled = %s,
-                    updated_by = %s, updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                WHERE id = 1
-            """, (chat_id, chat_title, is_enabled, user_id))
+                INSERT INTO szov_wallboard_broadcast_chats
+                    (chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    chat_title = EXCLUDED.chat_title,
+                    mode = EXCLUDED.mode,
+                    is_enabled = EXCLUDED.is_enabled,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = EXCLUDED.updated_at
+            """, (chat_id, chat_title, mode, is_enabled, user_id))
+        chats = self.get_szov_broadcast_chats()
+        self._log_szov_broadcast_change(
+            user_id,
+            'added' if existing is None else 'changed',
+            {"chat_id": chat_id, "chat_title": chat_title, "mode": mode, "is_enabled": is_enabled},
+            chats,
+        )
+        return chats
+
+    def delete_szov_broadcast_chat(self, chat_id, user_id=None) -> list:
+        """Убрать чат из получателей."""
+        try:
+            chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            raise ValueError("Не выбран чат для отбивки")
+        with self._get_cursor() as cur:
+            cur.execute("""
+                DELETE FROM szov_wallboard_broadcast_chats WHERE chat_id = %s
+                RETURNING chat_title, mode
+            """, (chat_id,))
+            removed = cur.fetchone()
+        chats = self.get_szov_broadcast_chats()
+        if removed:
+            self._log_szov_broadcast_change(
+                user_id, 'removed',
+                {"chat_id": chat_id, "chat_title": removed[0] or "", "mode": removed[1] or "always",
+                 "is_enabled": False},
+                chats,
+            )
+        return chats
+
+    def _log_szov_broadcast_change(self, user_id, action: str, target: dict, chats: list) -> None:
+        """Аудит: что именно сделали и каким после этого стал весь список получателей.
+
+        Снимок целиком, а не diff: строк мало, зато видно, кому уходила отбивка на
+        момент каждого изменения."""
+        snapshot = json.dumps({
+            "action": action,
+            **target,
+            "chats": [{"chat_id": c["chat_id"], "chat_title": c["chat_title"],
+                       "mode": c["mode"], "is_enabled": c["is_enabled"]} for c in chats],
+        })
+        with self._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO szov_wallboard_broadcast_history (changed_by, settings)
                 VALUES (%s, %s::jsonb)
             """, (user_id, snapshot))
-        return self.get_szov_broadcast_config()
 
     def get_szov_broadcast_history(self, limit: int = 50) -> list:
         """Кто и когда менял чат отбивки."""
