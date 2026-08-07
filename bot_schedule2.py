@@ -29916,6 +29916,11 @@ SZOV_BROADCAST_TIMEZONE = (os.getenv('SZOV_BROADCAST_TIMEZONE') or 'Asia/Almaty'
 # Коридор AR (тот же, что на экране): норма 3…5 %. Ниже 3 % — тоже отклонение.
 SZOV_AR_MIN_PERCENT = float(os.getenv('SZOV_AR_MIN_PERCENT') or 3)
 SZOV_AR_MAX_PERCENT = float(os.getenv('SZOV_AR_MAX_PERCENT') or 5)
+# Нижняя граница SL — та же, при которой плитка на табло перестаёт быть зелёной.
+SZOV_SL_MIN_PERCENT = float(os.getenv('SZOV_SL_MIN_PERCENT') or 80)
+# Режимы получателя отбивки: каждая отбивка или только та, где есть отклонения от нормы.
+SZOV_BROADCAST_MODE_ALWAYS = 'always'
+SZOV_BROADCAST_MODE_DEVIATIONS = 'deviations'
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None):
@@ -30095,11 +30100,25 @@ def _szov_format_percent(ratio, digits=1):
     return f"{ratio * 100:.{digits}f}".replace('.', ',') + '%'
 
 
-def _szov_broadcast_notes(data):
-    """Примечания об отклонениях. Пустой список — значит всё в норме, и блока не будет."""
+def _szov_broadcast_stale_note(data):
+    """Примечание о замерших данных. None — снимок свежий."""
+    if not data.get('snapshot_stale'):
+        return None
+    age = _szov_format_age_ru(data.get('snapshot_age_seconds'))
+    return (f"Также данные на дашборде не обновляются уже {age} "
+            f"из-за отсутствия ответа от Oktell.")
+
+
+def _szov_broadcast_deviations(data):
+    """Отклонения от нормы. Пустой список — линия в норме.
+
+    По нему решается, получит ли сообщение чат в режиме «только при отклонениях»:
+    ему пишем не по расписанию, а когда есть о чём написать. Норма здесь ровно та же,
+    что красит плитки на табло, — коридор AR 3…5 % и SL не ниже порога «Биллинга»,
+    иначе одна и та же цифра считалась бы отклонением на экране и нормой в отбивке.
+    Молчание Oktell тоже отклонение: цифры не обновляются, и знать об этом надо."""
     notes = []
     totals = data['totals']
-    ops = data['operators']
     ar = totals['ar_ratio']
     if ar is not None:
         percent = ar * 100
@@ -30115,6 +30134,31 @@ def _szov_broadcast_notes(data):
                 f"За день потеряно {totals['lost']} {_szov_plural(totals['lost'], 'звонок', 'звонка', 'звонков')}."
             )
 
+    # SL приходит из снимка «за сегодня». Для среза на прошедший час он относится к другому
+    # периоду, чем остальная таблица, поэтому там его не проверяем — иначе отбивка «на 14:00»
+    # ругалась бы на SL всего дня.
+    sl = ((data.get('snapshot') or {}).get('today') or {}).get('sl_ratio')
+    if data.get('hour_to') is None and sl is not None and sl * 100 < SZOV_SL_MIN_PERCENT:
+        notes.append(
+            f"Обратите внимание: SL ниже нормы ({SZOV_SL_MIN_PERCENT:g}%) — {_szov_format_percent(sl)}."
+        )
+
+    stale = _szov_broadcast_stale_note(data)
+    if stale:
+        notes.append(stale)
+    return notes
+
+
+def _szov_broadcast_notes(data):
+    """Примечания отбивки: отклонения от нормы плюс дежурные строки.
+
+    Дежурные строки (кто на перерыве, среднее время разговора) отклонениями НЕ считаются —
+    иначе «тревожный» чат получал бы сообщение каждый раз."""
+    stale = _szov_broadcast_stale_note(data)
+    # Замершие данные упоминаем последними, после дежурных строк.
+    notes = [note for note in _szov_broadcast_deviations(data) if note != stale]
+    ops = data['operators']
+
     # Статусы операторов — только «на сейчас». Для запроса на прошедшее время их не показываем:
     # восстановить, кто был на перерыве в 14:00, мы не можем, а выдавать текущие за прошлые нельзя.
     if data.get('hour_to') is None:
@@ -30128,14 +30172,10 @@ def _szov_broadcast_notes(data):
         if parts:
             notes.append(', '.join(parts) + '.')
 
-    notes.append(f"Среднее время разговора — {_szov_format_seconds_mmss(totals['avg_talk_seconds'])}")
+    notes.append(f"Среднее время разговора — {_szov_format_seconds_mmss(data['totals']['avg_talk_seconds'])}")
 
-    if data.get('snapshot_stale'):
-        age = _szov_format_age_ru(data.get('snapshot_age_seconds'))
-        notes.append(
-            f"Также данные на дашборде не обновляются уже {age} "
-            f"из-за отсутствия ответа от Oktell."
-        )
+    if stale:
+        notes.append(stale)
     return notes
 
 
@@ -30390,11 +30430,13 @@ def _bot_event_loop():
     return None
 
 
-async def _szov_broadcast_send(chat_id, hour_to=None):
-    """Собрать и отправить отбивку в чат: две картинки одним альбомом + текст.
+async def _szov_broadcast_prepare(hour_to=None):
+    """Собрать отбивку целиком: данные, текст и обе картинки.
 
-    Данные тянем в пуле потоков: Oktell и Chat2Desk — синхронные requests, и держать
-    на них event loop бота нельзя."""
+    Отдельно от отправки, потому что получателей несколько: прокси Oktell
+    низкоконкурентный, и собирать одно и то же по разу на каждый чат нельзя.
+    Данные тянем в пуле потоков: Oktell — синхронный requests, и держать на нём
+    event loop бота недопустимо."""
     loop = asyncio.get_event_loop()
     data = await loop.run_in_executor(executor_pool, _szov_broadcast_collect, hour_to)
     text = _szov_broadcast_text(data)
@@ -30409,7 +30451,11 @@ async def _szov_broadcast_send(chat_id, hour_to=None):
     except Exception as exc:
         # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинок.
         logging.error("Отбивка табло: не удалось собрать картинки: %s", exc)
+    return data, text, media
 
+
+async def _szov_broadcast_deliver(chat_id, text, media):
+    """Отправить уже собранную отбивку в один чат: две картинки альбомом + текст."""
     if media:
         try:
             group = types.MediaGroup()
@@ -30418,10 +30464,16 @@ async def _szov_broadcast_send(chat_id, hour_to=None):
                                    caption=text if index == 0 else None,
                                    parse_mode='HTML' if index == 0 else None)
             await bot.send_media_group(chat_id, group)
-            return data
+            return
         except Exception as exc:
             logging.error("Отбивка табло: альбом не ушёл, отправляю текстом: %s", exc)
     await bot.send_message(chat_id, text, parse_mode='HTML')
+
+
+async def _szov_broadcast_send(chat_id, hour_to=None):
+    """Собрать и отправить отбивку в один чат: команда /tablo и «Отправить сейчас»."""
+    data, text, media = await _szov_broadcast_prepare(hour_to)
+    await _szov_broadcast_deliver(chat_id, text, media)
     return data
 
 
@@ -30441,14 +30493,34 @@ def _szov_broadcast_send_times():
 
 
 async def szov_broadcast_job():
-    """Плановая отбивка. Молчит, если чат не выбран или отправка выключена."""
+    """Плановая отбивка всем получателям. Молчит, если получателей нет.
+
+    Данные собираем ОДИН раз на всех: прокси Oktell низкоконкурентный, и повторять
+    сбор на каждый чат нельзя. Чат в режиме «только при отклонениях» стоит в том же
+    расписании, но сообщение получает, лишь когда показатели вышли из нормы."""
     try:
-        config = await asyncio.get_event_loop().run_in_executor(
-            executor_pool, db.get_szov_broadcast_config)
-        if not config.get('is_enabled') or not config.get('chat_id'):
+        loop = asyncio.get_event_loop()
+        chats = await loop.run_in_executor(executor_pool, db.get_szov_broadcast_chats)
+        recipients = [chat for chat in chats if chat.get('is_enabled') and chat.get('chat_id')]
+        if not recipients:
             return
-        await _szov_broadcast_send(int(config['chat_id']))
-        logging.info("Отбивка табло отправлена в чат %s", config['chat_id'])
+        data, text, media = await _szov_broadcast_prepare()
+        deviations = _szov_broadcast_deviations(data)
+        targets = [chat for chat in recipients
+                   if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or deviations]
+        if not targets:
+            logging.info("Отбивка табло: отклонений нет, %d чатам с режимом «только при "
+                         "отклонениях» не пишем", len(recipients))
+            return
+        for chat in targets:
+            # Один недоступный чат (бота выгнали из группы) не должен лишать отбивки остальных.
+            try:
+                await _szov_broadcast_deliver(int(chat['chat_id']), text, media)
+                logging.info("Отбивка табло отправлена в чат %s (%s)",
+                             chat['chat_id'], chat.get('mode'))
+            except Exception as exc:
+                logging.error("Отбивка табло: чат %s не получил сообщение: %s",
+                              chat['chat_id'], exc)
     except Exception as exc:
         logging.error("Отбивка табло: плановая отправка не удалась: %s", exc, exc_info=True)
 
@@ -30999,26 +31071,33 @@ async def amo_leads_broadcast_job():
 
 # --- Настройка отбивки: эндпоинты --------------------------------------------------------------
 
-@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
 @require_api_key
 def api_szov_wallboard_broadcast():
-    """Настройка отбивки: куда слать, включена ли, история изменений и список чатов бота."""
+    """Получатели отбивки: кому слать, в каком режиме, история изменений и чаты бота.
+
+    POST добавляет получателя или меняет его режим / включённость (чат — ключ, дублей не
+    заводим), DELETE убирает из списка."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _szov_wallboard_guard()
     if err:
         return err
-    if request.method == 'POST':
+    if request.method in ('POST', 'DELETE'):
         payload = request.get_json(silent=True) or {}
         try:
-            db.update_szov_broadcast_config(payload, user_id=requester_id)
+            if request.method == 'DELETE':
+                db.delete_szov_broadcast_chat(
+                    payload.get('chat_id') or request.args.get('chat_id'), user_id=requester_id)
+            else:
+                db.save_szov_broadcast_chat(payload, user_id=requester_id)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
             logging.error("Отбивка табло: не удалось сохранить настройку: %s", exc)
             return jsonify({"error": "Не удалось сохранить настройку"}), 500
     return jsonify({
-        "config": db.get_szov_broadcast_config(),
+        "recipients": db.get_szov_broadcast_chats(),
         "history": db.get_szov_broadcast_history(),
         "chats": db.list_bot_group_chats(),
         "send_times": [f"{h:02d}:{m:02d}" for h, m in _szov_broadcast_send_times()],
@@ -31083,16 +31162,24 @@ def api_szov_wallboard_broadcast_preview():
 @app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_szov_wallboard_broadcast_test():
-    """Отправить отбивку прямо сейчас — проверить, что чат и картинки настроены."""
+    """Отправить отбивку прямо сейчас — проверить, что чат и картинки настроены.
+
+    Шлём в явно указанный чат и только если он уже в получателях: кнопка проверяет
+    настроенную рассылку, а не служит способом написать в произвольную группу.
+    Режим «только при отклонениях» здесь не действует — проверяют вид сообщения."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _szov_wallboard_guard()
     if err:
         return err
-    config = db.get_szov_broadcast_config()
-    chat_id = config.get('chat_id')
-    if not chat_id:
+    payload = request.get_json(silent=True) or {}
+    raw = payload.get('chat_id')
+    recipients = {str(chat['chat_id']): chat for chat in db.get_szov_broadcast_chats()}
+    if raw in (None, '') and len(recipients) == 1:
+        raw = next(iter(recipients))
+    if str(raw) not in recipients:
         return jsonify({"error": "Сначала выберите чат"}), 400
+    chat_id = recipients[str(raw)]['chat_id']
     try:
         loop = _bot_event_loop()
         if loop is None:
