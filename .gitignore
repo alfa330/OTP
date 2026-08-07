@@ -13,6 +13,9 @@ tools_find_tdz.cjs
 .claude/worktrees/
 .claude/skills/task-daily-report/
 
+# Выгрузки с персональными данными (ФИО/телефоны/записи разговоров) — не в git
+outputs/
+
 # Python cache
 __pycache__/
 *.py[cod]
