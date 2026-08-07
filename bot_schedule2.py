@@ -35804,10 +35804,10 @@ def chat_manager_low_rating_reviews():
 def my_low_rating_reviews():
     """Свои низкие оценки и решения по ним — для раздела «Мои оценки» чат-менеджера.
 
-    Данные строго свои: operator_id всегда равен запрашивающему. Как и телефоны с
-    записями в оценках, открываются только после QR-подтверждения доступа
-    (см. /api/sensitive-access/*): до подтверждения возвращаем пустой список и
-    флаг granted=false, чтобы фронт показал подсказку, а не данные."""
+    Данные строго свои: operator_id всегда равен запрашивающему. Сводку (сколько
+    оценок, сколько снято) отдаём всегда — она и без QR ничего не раскрывает, а
+    сами строки с переписками и вердиктами открываются после QR-подтверждения
+    доступа (см. /api/sensitive-access/*), как телефоны и записи разговоров."""
     try:
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -35828,31 +35828,25 @@ def my_low_rating_reviews():
         except Exception:
             return jsonify({"error": "month must be in YYYY-MM format"}), 400
 
-        def _is_chat_manager():
-            """Модель расчёта на конец месяца — по ней решаем, показывать ли блок."""
-            model_code = (db.get_operator_calculation_models_as_of([requester_id], period_end) or {}).get(int(requester_id))
-            return str(model_code or '').strip().lower() == 'chat_manager'
-
-        if not granted:
-            return jsonify({
-                "status": "success",
-                "month": month,
-                "rows": [],
-                "summary": {"total": 0, "pending": 0, "valid": 0, "invalid": 0},
-                "is_chat_manager": _is_chat_manager(),
-                "sensitive_access": {"required": True, "granted": False}
-            }), 200
-
         result = db.list_operator_low_rating_reviews(operator_id=requester_id, month=month)
         # Есть проверки за период — блок нужен независимо от текущей модели
         # (оператор мог перейти в чат-менеджеры или из них посреди месяца), и
         # лишний запрос модели тогда не делаем.
         has_rows = int((result.get('summary') or {}).get('total') or 0) > 0
+        if has_rows:
+            is_chat_manager = True
+        else:
+            model_code = (db.get_operator_calculation_models_as_of([requester_id], period_end) or {}).get(int(requester_id))
+            is_chat_manager = str(model_code or '').strip().lower() == 'chat_manager'
+
         return jsonify({
             "status": "success",
             **result,
-            "is_chat_manager": has_rows or _is_chat_manager(),
-            "sensitive_access": {"required": role == 'operator', "granted": True}
+            # Без QR — только сводка: сами строки (переписки, вердикты, телефоны)
+            # закрыты тем же ключом, что и записи разговоров.
+            "rows": result.get('rows') if granted else [],
+            "is_chat_manager": is_chat_manager,
+            "sensitive_access": {"required": role == 'operator', "granted": granted}
         }), 200
 
     except ValueError as e:
@@ -35966,13 +35960,28 @@ def chat_manager_low_rating_review_chat(review_id):
 
         requester_role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role) or headed_dept_id is not None):
-            return jsonify({"error": "Forbidden"}), 403
+        is_reviewer = (
+            _is_admin_role(requester_role)
+            or _is_supervisor_role(requester_role)
+            or headed_dept_id is not None
+        )
 
         current = db.get_chat_manager_low_rating_review(review_id)
         if not current:
             return jsonify({"error": "Review not found"}), 404
-        if not _is_global_admin_requester(requester_role, requester_id):
+
+        # Оператор открывает переписку СВОЕЙ низкой оценки из «Мои оценки» —
+        # только для чтения и только по QR-подтверждённой сессии (тот же ключ,
+        # что открывает записи разговоров). Чужие оценки ему недоступны.
+        is_own_rating = int(current.get('operator_id') or 0) == int(requester_id)
+        if not is_reviewer:
+            if not is_own_rating:
+                return jsonify({"error": "Forbidden"}), 403
+            if requester_role == 'operator' and not _is_sensitive_access_unlocked(
+                requester_id, _current_session_id_from_access_token()
+            ):
+                return jsonify({"error": "Переписка откроется после QR-подтверждения доступа"}), 403
+        elif not _is_global_admin_requester(requester_role, requester_id):
             scope_dept = _department_scope_id_for_requester(requester_id)
             if scope_dept is not None and int(current.get('department_id') or 0) != int(scope_dept):
                 return jsonify({"error": "Forbidden"}), 403
