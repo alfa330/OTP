@@ -33,6 +33,7 @@ from openpyxl.utils import get_column_letter
 import re
 import functools
 import xlsxwriter
+from http.client import RemoteDisconnected
 import json
 import html
 from concurrent.futures import ThreadPoolExecutor
@@ -257,6 +258,10 @@ OKTELL_API_TOKEN = (os.getenv('OKTELL_API_TOKEN') or '').strip()
 OKTELL_SYNC_ENABLED = _env_bool('OKTELL_SYNC_ENABLED', True)
 OKTELL_SYNC_TIMEZONE = (os.getenv('OKTELL_SYNC_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 OKTELL_API_TIMEOUT_SECONDS = _env_int('OKTELL_API_TIMEOUT_SECONDS', 60, minimum=5, maximum=300)
+# Установка TCP-соединения отдельно от ожидания ответа. Живой прокси отвечает целиком за
+# 0,1-0,3 с; когда он захлёбывается, хендшейк не завершается вовсе, и ждать его столько же,
+# сколько ответ, бессмысленно — быстрее сдаться и показать предыдущий снимок.
+OKTELL_API_CONNECT_TIMEOUT_SECONDS = _env_int('OKTELL_API_CONNECT_TIMEOUT_SECONDS', 5, minimum=1, maximum=60)
 OKTELL_AUDIO_FETCH_WORKERS = _env_int('OKTELL_AUDIO_FETCH_WORKERS', 4, minimum=1, maximum=16)
 OKTELL_API_PAGE_SIZE = _env_int('OKTELL_API_PAGE_SIZE', 1000, minimum=1, maximum=1000)
 OKTELL_API_MAX_PAGES = _env_int('OKTELL_API_MAX_PAGES', 500, minimum=1, maximum=5000)
@@ -27961,20 +27966,77 @@ def _oktell_operator_model_gate(range_from, range_to, operator_ids):
     return operator_model_op_ids, _is_operator_model_day
 
 
+# Одна общая HTTP-сессия на процесс. Голый requests.post открывал НОВОЕ TCP-соединение на
+# каждый SELECT (~11,6 тыс. хендшейков в сутки с одного egress-IP), а прокси на каждое
+# соединение поднимает своё ODBC-подключение к SQL Server — это и есть его узкое место.
+# Keep-alive у прокси включён: замер 2026-08-07 — соединение переиспользуется, простаивающее
+# сервер закрывал через ~5 с, после нашей просьбы поднять --timeout-keep-alive — через ~60 с,
+# то есть при опросе табло раз в 15 с соединение живёт постоянно. Пул держим маленьким
+# намеренно: прокси низкоконкурентный, запросы у нас последовательные, и пул не должен
+# провоцировать обратное.
+def _build_oktell_session():
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=4)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+
+_oktell_session = _build_oktell_session()
+
+# Обрывы, которые означают «соединение из пула умерло на стороне прокси», а не «прокси
+# недоступен». Отличать обязательно: повторять запрос по протухшему keep-alive безопасно и
+# нужно, а повторять таймауты и отказы в соединении — то самое «долбить умирающий прокси»,
+# от которого мы отказались.
+_OKTELL_DROPPED_CONNECTION_ERRORS = (
+    RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
+def _oktell_dropped_keepalive(exc):
+    """Оборвалось ли соединение уже ПОСЛЕ установки — то есть протух сокет из пула.
+
+    Гонка неизбежна: простаивающее соединение сервер рано или поздно закрывает (табло опрашивает
+    его чаще, а вот между ночными синками пауза куда больше любого keep-alive), и сокет может
+    умереть ровно между проверкой пула и отправкой запроса. Причину ищем по всей цепочке:
+    requests заворачивает urllib3, urllib3 — http.client."""
+    stack = [exc]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _OKTELL_DROPPED_CONNECTION_ERRORS):
+            return True
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+        stack.extend(getattr(current, 'args', ()) or ())
+    return False
+
+
 def _oktell_query(sql, timeout=None):
     """Один read-only SELECT к прокси Oktell. Возвращает список dict (rows).
 
-    timeout — переопределение общего OKTELL_API_TIMEOUT_SECONDS. Нужно интерактивным
-    потребителям (табло): прокси иногда держит установку соединения десятки секунд, и
-    для экрана лучше быстро сдаться и показать предыдущий снимок, чем ждать минуту."""
+    timeout — переопределение общего OKTELL_API_TIMEOUT_SECONDS для ОЖИДАНИЯ ОТВЕТА. Нужно
+    интерактивным потребителям (табло): экрану лучше быстро сдаться и показать предыдущий
+    снимок, чем ждать минуту. Установка соединения ограничена отдельно и всегда коротко."""
     if not _oktell_api_ready():
         raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
-    resp = requests.post(
-        OKTELL_API_URL,
-        json={"sql": sql},
-        headers={"X-API-Key": OKTELL_API_TOKEN},
-        timeout=timeout or OKTELL_API_TIMEOUT_SECONDS,
-    )
+    timeouts = (OKTELL_API_CONNECT_TIMEOUT_SECONDS, timeout or OKTELL_API_TIMEOUT_SECONDS)
+    request_kwargs = {
+        'json': {"sql": sql},
+        'headers': {"X-API-Key": OKTELL_API_TOKEN},
+        'timeout': timeouts,
+    }
+    try:
+        resp = _oktell_session.post(OKTELL_API_URL, **request_kwargs)
+    except requests.exceptions.RequestException as exc:
+        if not _oktell_dropped_keepalive(exc):
+            raise
+        # Единственный ретрай во всей интеграции — и тот не по вине прокси, а по гонке
+        # keep-alive. Запрос read-only, повтор идёт сразу и по новому сокету.
+        logging.info("Oktell: прокси закрыл keep-alive-соединение, повторяем запрос")
+        resp = _oktell_session.post(OKTELL_API_URL, **request_kwargs)
     if resp.status_code != 200:
         raise RuntimeError(f"Oktell proxy HTTP {resp.status_code}: {resp.text[:300]}")
     payload = resp.json()
@@ -29541,6 +29603,10 @@ SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS = _env_int('SZOV_WALLBOARD_RETRY_AFTER_F
 # Сколько секунд отдавать последний удачный снимок, если Oktell перестал отвечать. Табло на стене
 # не должно гаснуть из-за одной сетевой ошибки — показываем данные с пометкой «устарели».
 SZOV_WALLBOARD_STALE_MAX_SECONDS = _env_int('SZOV_WALLBOARD_STALE_MAX_SECONDS', 600, minimum=60, maximum=3600)
+# Как часто последний удачный снимок дублируется в БД. Копия нужна ровно для одного случая —
+# холодный старт процесса (деплой, рестарт), — поэтому писать её каждые TTL секунд незачем:
+# снимок минутной давности всё равно уйдёт на экран с пометкой «устарел».
+SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS = _env_int('SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS', 60, minimum=10, maximum=600)
 # Окна поиска незакрытых легов: разговор длиннее 6 ч и ожидание длиннее 3 ч — это зависшие в БД
 # леги, а не живые звонки. Границы держат запрос по индексу и отсекают мусор.
 _SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS = 3
@@ -29570,7 +29636,8 @@ _SZOV_WALLBOARD_RECALL_ICODE = 2
 
 _SZOV_WALLBOARD_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
 _SZOV_WALLBOARD_DEPARTMENT_CACHE_TTL = 600  # отделы меняются раз в никогда
-_szov_wallboard_cache = {'ts': 0.0, 'payload': None, 'failed_at': 0.0, 'error': None}
+_szov_wallboard_cache = {'ts': 0.0, 'payload': None, 'failed_at': 0.0, 'error': None,
+                         'restored': False, 'persisted_at': 0.0}
 _szov_wallboard_lock = threading.Lock()
 
 
@@ -29630,11 +29697,12 @@ def _szov_broadcast_guard():
 
 
 def _oktell_wallboard_totals_sql(sl_seconds):
-    """Один SELECT: итоги за текущий день Oktell + очередь и разговоры «на сейчас».
+    """Итоги за текущий день Oktell + очередь и разговоры «на сейчас». Ровно одна строка.
 
-    Один запрос вместо трёх — прокси Oktell просит не распараллеливать и не частить.
-    «Сегодня» считаем по часам самого Oktell (CONVERT(date, GETDATE())), чтобы граница суток
-    совпадала с источником, а не с нашим сервером."""
+    Фрагмент: подставляется подзапросом в _oktell_wallboard_snapshot_sql. Считаем всё одним
+    выражением — прокси Oktell просит не распараллеливать и не частить. «Сегодня» берём по
+    часам самого Oktell (CONVERT(date, GETDATE())), чтобы граница суток совпадала с
+    источником, а не с нашим сервером."""
     grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
     fail = _OKTELL_FAILED_CALL.replace("'", "''")
     # Цепочки, которые прямо сейчас ждут ответа: открытый лег в IVR/очереди и ни одного лега
@@ -29684,6 +29752,9 @@ def _oktell_wallboard_totals_sql(sl_seconds):
 def _oktell_wallboard_operator_states_sql():
     """Текущий статус каждого оператора: последняя запись A_UserStateHistory на пользователя.
 
+    Фрагмент без ORDER BY: подставляется подзапросом в _oktell_wallboard_snapshot_sql, а
+    производной таблице сортировка запрещена — она навешивается снаружи.
+
     State 0/7 (Выключен/Без телефона) отбрасываем — это «не на линии». Окно в 2 суток нужно,
     чтобы поймать смену, начавшуюся вчера; Oktell пишет явный переход в 0 при отключении,
     поэтому «залипших» готовых операторов из прошлых дней здесь не будет."""
@@ -29696,8 +29767,29 @@ def _oktell_wallboard_operator_states_sql():
         "FROM oktell.dbo.A_UserStateHistory h "
         "WHERE h.TimeChange >= DATEADD(day, -2, GETDATE())) x "
         "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = x.UserId "
-        "WHERE x.rn = 1 AND x.State NOT IN (0, 7) "
-        "ORDER BY oi.Name"
+        "WHERE x.rn = 1 AND x.State NOT IN (0, 7)"
+    )
+
+
+def _oktell_wallboard_snapshot_sql(sl_seconds):
+    """Весь снимок табло ОДНИМ SELECT: итоги дня, очередь «на сейчас» и статусы операторов.
+
+    Раньше это стоило два запроса на цикл опроса, то есть 11,5 тыс. обращений к прокси в
+    сутки. Для прокси цена запроса — не сам SELECT (доли секунды), а новое HTTP-соединение и
+    новый ODBC-логин к SQL Server на каждое из них, поэтому склейка убирает ровно половину
+    его работы. Однострочные итоги подклеиваются к каждой строке статусов; на 20-40 операторов
+    это десяток лишних килобайт в ответе — несопоставимо дешевле второго обращения.
+
+    LEFT JOIN, а не CROSS JOIN: если на линии нет ни одного оператора (ночь, все выключены),
+    итоги дня всё равно должны приехать — вернётся одна строка со статусными колонками NULL."""
+    return (
+        "SELECT t.oktell_now, t.queue_now, t.queue_max_wait_seconds, t.talking_now, "
+        "t.arrived, t.served, t.lost, t.greet_drop, t.served_sl, "
+        "t.wait_seconds, t.max_wait_seconds, t.talk_seconds, "
+        "s.operator_name, s.state, s.icode, s.since, s.in_state_seconds "
+        f"FROM ({_oktell_wallboard_totals_sql(sl_seconds)}) t "
+        f"LEFT JOIN ({_oktell_wallboard_operator_states_sql()}) s ON 1 = 1 "
+        "ORDER BY s.operator_name"
     )
 
 
@@ -29800,12 +29892,14 @@ def _szov_wallboard_build_operators(raw_rows):
 
 
 def _szov_wallboard_fetch_snapshot():
-    """Свежий снимок табло. Два последовательных запроса к Oktell, без параллелизма."""
+    """Свежий снимок табло. Ровно ОДИН запрос к Oktell — итоги и статусы приезжают вместе."""
     sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
-    timeout = SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS
-    totals_rows = _oktell_query(_oktell_wallboard_totals_sql(sl_seconds), timeout=timeout)
-    totals = (totals_rows or [{}])[0] or {}
-    state_rows = _oktell_query(_oktell_wallboard_operator_states_sql(), timeout=timeout)
+    rows = _oktell_query(_oktell_wallboard_snapshot_sql(sl_seconds),
+                         timeout=SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS) or []
+    # Итоги дня продублированы в каждой строке — берём из первой. Строка без имени оператора
+    # означает «на линии никого»: LEFT JOIN отдал итоги с пустой статусной частью.
+    totals = (rows or [{}])[0] or {}
+    state_rows = [row for row in rows if str(row.get('operator_name') or '').strip()]
     operators = _szov_wallboard_build_operators(state_rows)
 
     arrived = _szov_wallboard_int(totals.get('arrived'))
@@ -29855,6 +29949,42 @@ def _szov_wallboard_fetch_snapshot():
     }
 
 
+def _szov_wallboard_restore_cache():
+    """Поднять последний снимок из БД в пустой кэш процесса. Ровно один раз за жизнь процесса.
+
+    Без этого деплой или рестарт оставлял экран в зале пустым до первого удачного ответа
+    Oktell, а прокси бывает недоступен минутами."""
+    if _szov_wallboard_cache.get('restored') or _szov_wallboard_cache.get('payload') is not None:
+        return
+    _szov_wallboard_cache['restored'] = True
+    try:
+        payload, captured_at = db.get_szov_wallboard_snapshot()
+    except Exception as exc:
+        logging.warning("Табло СЗоВ: не удалось прочитать сохранённый снимок: %s", exc)
+        return
+    if not payload or not captured_at:
+        return
+    # Протухшее старьё не поднимаем: показать данные часовой давности хуже, чем честно
+    # сказать «данных нет» — те же границы, что и для stale-отдачи из памяти.
+    if time.time() - captured_at >= SZOV_WALLBOARD_STALE_MAX_SECONDS:
+        return
+    _szov_wallboard_cache.update(ts=float(captured_at), payload=payload, persisted_at=float(captured_at))
+    logging.info("Табло СЗоВ: поднят сохранённый снимок %.0f с назад", time.time() - captured_at)
+
+
+def _szov_wallboard_persist_cache(payload, captured_at):
+    """Продублировать удачный снимок в БД, но не чаще SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS.
+
+    Ошибку записи глотаем: копия — страховка на рестарт, ронять из-за неё живое табло нельзя."""
+    if captured_at - (_szov_wallboard_cache.get('persisted_at') or 0.0) < SZOV_WALLBOARD_PERSIST_INTERVAL_SECONDS:
+        return
+    try:
+        db.save_szov_wallboard_snapshot(payload, captured_at)
+        _szov_wallboard_cache['persisted_at'] = captured_at
+    except Exception as exc:
+        logging.warning("Табло СЗоВ: не удалось сохранить снимок: %s", exc)
+
+
 def _szov_wallboard_snapshot():
     """Снимок с общим TTL-кэшем на процесс.
 
@@ -29869,6 +29999,7 @@ def _szov_wallboard_snapshot():
     def _stale(payload, at, reason):
         return dict(payload, stale=True, age_seconds=int(max(0, time.time() - at)), error=reason)
 
+    _szov_wallboard_restore_cache()
     cached = _szov_wallboard_cache.get('payload')
     cached_at = _szov_wallboard_cache['ts']
     if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
@@ -29903,6 +30034,7 @@ def _szov_wallboard_snapshot():
             raise
         payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
         _szov_wallboard_cache.update(ts=time.time(), payload=payload, failed_at=0.0, error=None)
+        _szov_wallboard_persist_cache(payload, _szov_wallboard_cache['ts'])
         return _fresh(payload, _szov_wallboard_cache['ts'])
     finally:
         _szov_wallboard_lock.release()

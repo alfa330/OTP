@@ -3840,6 +3840,18 @@ class Database:
                 SET chats_migrated = TRUE
                 WHERE id = 1 AND NOT chats_migrated;
             """)
+            # Последний удачный снимок табло. Кэш живёт в памяти процесса, поэтому рестарт или
+            # деплой раньше оставлял экран в операционном зале пустым до первого удачного ответа
+            # Oktell — а прокси бывает недоступен минутами. Снимок один (singleton): это не
+            # история, а «что показать, пока не приехали свежие данные».
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS szov_wallboard_snapshot (
+                    id INTEGER PRIMARY KEY DEFAULT 1,
+                    payload JSONB NOT NULL,
+                    captured_at DOUBLE PRECISION NOT NULL,
+                    CONSTRAINT szov_wallboard_snapshot_singleton CHECK (id = 1)
+                );
+            """)
             # Общий код автодозвона: номер, на который оператор один раз звонит,
             # чтобы телефон подключился к режиму автодозвона. Один на всех.
             cursor.execute("""
@@ -22070,6 +22082,31 @@ class Database:
                 "scope": "operator" if r[4] else ("department" if r[6] else "global"),
             })
         return out
+
+    # --- Последний снимок «Табло СЗоВ» -----------------------------------------------------
+
+    def get_szov_wallboard_snapshot(self):
+        """(payload, captured_at) последнего удачного снимка табло или (None, None).
+
+        Нужен только на холодном старте процесса: пока Oktell не ответил, экран показывает
+        этот снимок с пометкой «данные устарели» вместо пустоты."""
+        with self._get_cursor() as cur:
+            cur.execute("SELECT payload, captured_at FROM szov_wallboard_snapshot WHERE id = 1")
+            row = cur.fetchone()
+        if not row or not row[0]:
+            return None, None
+        return row[0], float(row[1] or 0.0)
+
+    def save_szov_wallboard_snapshot(self, payload: dict, captured_at: float) -> None:
+        """Перезаписать снимок табло. Строка ровно одна — история табло никому не нужна."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO szov_wallboard_snapshot (id, payload, captured_at)
+                VALUES (1, %s, %s)
+                ON CONFLICT (id) DO UPDATE
+                SET payload = EXCLUDED.payload,
+                    captured_at = EXCLUDED.captured_at
+            """, (Json(payload or {}), float(captured_at or 0.0)))
 
     # --- Отбивка показателей «Табло СЗоВ» в Telegram ---------------------------------------
 
