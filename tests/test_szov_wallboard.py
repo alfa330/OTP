@@ -1102,7 +1102,8 @@ class SzovBroadcastTests(unittest.TestCase):
         }
         _load_names(source, {
             '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
-            'SZOV_BROADCAST_SEND_TIMES', 'SZOV_BROADCAST_TIMEZONE',
+            'SZOV_BROADCAST_SEND_TIMES', '_SZOV_BROADCAST_HOURLY',
+            'SZOV_BROADCAST_TIMEZONE',
             'SZOV_AR_MIN_PERCENT', 'SZOV_AR_MAX_PERCENT', 'SZOV_SL_MIN_PERCENT',
             'SZOV_BROADCAST_MODE_ALWAYS', 'SZOV_BROADCAST_MODE_DEVIATIONS',
             '_szov_wallboard_int',
@@ -1323,11 +1324,11 @@ class SzovBroadcastTests(unittest.TestCase):
 
     # --- расписание ---
 
-    def test_send_times_are_parsed(self):
-        """Владелец задал 10:00, 14:00, 18:00, 22:00 и 23:55."""
+    def test_broadcast_goes_out_every_hour(self):
+        """Владелец перевёл отбивку с четырёх раз в сутки на каждый час."""
         ns = self._namespace()
         self.assertEqual(ns['_szov_broadcast_send_times'](),
-                         [(10, 0), (14, 0), (18, 0), (22, 0), (23, 55)])
+                         [(hour, 0) for hour in range(24)])
 
     def test_broken_send_time_is_skipped_not_fatal(self):
         ns = self._namespace()

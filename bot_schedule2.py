@@ -30207,10 +30207,13 @@ def api_szov_wallboard_snapshot():
 
 
 # === Отбивка показателей «Табло СЗоВ» в Telegram ================================================
-# Раз в несколько часов в выбранный чат уходит: картинка с почасовой таблицей, картинка табло,
+# Каждый час в выбранные чаты уходит: картинка с почасовой таблицей, картинка табло,
 # текст с показателями и примечания об отклонениях. Данные — те же, что на экране.
 # Чаты сюда больше не входят: у них свой почасовой отчёт (см. «Отчёт по чатам»).
-SZOV_BROADCAST_SEND_TIMES = (os.getenv('SZOV_BROADCAST_SEND_TIMES') or '10:00,14:00,18:00,22:00,23:55').strip()
+# Расписание перечислением, а не cron-строкой: получатели с режимом «только при отклонениях»
+# и ручная правка через env оставались бы читаемыми только так.
+_SZOV_BROADCAST_HOURLY = ','.join('%02d:00' % hour for hour in range(24))
+SZOV_BROADCAST_SEND_TIMES = (os.getenv('SZOV_BROADCAST_SEND_TIMES') or _SZOV_BROADCAST_HOURLY).strip()
 SZOV_BROADCAST_TIMEZONE = (os.getenv('SZOV_BROADCAST_TIMEZONE') or 'Asia/Almaty').strip() or 'Asia/Almaty'
 # Коридор AR (тот же, что на экране): норма 3…5 %. Ниже 3 % — тоже отклонение.
 SZOV_AR_MIN_PERCENT = float(os.getenv('SZOV_AR_MIN_PERCENT') or 3)
