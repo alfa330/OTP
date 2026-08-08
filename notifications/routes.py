@@ -39,11 +39,18 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
         if request.method == 'OPTIONS':
             return build_cors_preflight_response()
 
-        viewer, error = _authenticated()
-        if error:
-            return error
-
         try:
+            # Внутри try намеренно. Определение периметра зрителя тоже ходит в
+            # базу (отдел, доступ к «4 You»), и при исчерпанном пуле исключение
+            # вылетало отсюда мимо обработчика ниже: глобального errorhandler в
+            # проекте нет, и клиент получал HTML-страницу 500 вместо JSON. Один
+            # и тот же сбой отвечал то так, то иначе.
+            # Ошибка авторизации при этом возвращается как была — return внутри
+            # try отрабатывает раньше except.
+            viewer, error = _authenticated()
+            if error:
+                return error
+
             with db._get_cursor() as cursor:
                 counts, items = notif_sources.collect(cursor, viewer)
         except Exception:

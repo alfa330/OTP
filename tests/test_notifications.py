@@ -223,6 +223,55 @@ class MarkSeenRulesTest(unittest.TestCase):
         self.assertFalse(sources.mark_seen(FakeCursor(), 1, 'нет-такого'))
 
 
+class FailureResponseTest(unittest.TestCase):
+    """Отказ инфраструктуры обязан выглядеть отказом, а не пустой сводкой.
+
+    Клиент пишет counts прямо в бейджи сайдбара. Отдай сервер 200 с нулями при
+    исчерпанном пуле — у человека погасли бы «Ивенты» и «4 You», а просроченный
+    документ под обязательное ознакомление исчез бы с экрана, и отличить это от
+    честного «ничего нет» было бы нельзя ни ему, ни фронту.
+    """
+
+    def _client(self, *, resolver=None, viewer_ctx=None, db=None):
+        from flask import Flask
+        from notifications.routes import build_notifications_blueprint
+
+        class DeadDb:
+            def _get_cursor(self):
+                raise TimeoutError('POSTGRES_POOL_ACQUIRE_TIMEOUT')
+
+        app = Flask(__name__)
+        app.register_blueprint(build_notifications_blueprint(
+            db=db or DeadDb(),
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=resolver or (lambda: (2, None, None)),
+            viewer_context=viewer_ctx or (lambda rid, r: {'user_id': rid}),
+        ))
+        return app.test_client()
+
+    def test_pool_exhaustion_is_503_not_empty_summary(self):
+        with self.assertLogs(level='ERROR'):
+            response = self._client().get('/api/notifications')
+        self.assertEqual(503, response.status_code)
+        self.assertNotIn('counts', response.get_json())
+
+    def test_failure_inside_viewer_context_is_also_json(self):
+        """Периметр зрителя тоже ходит в базу — раньше отсюда летел HTML-500."""
+        def boom(requester_id, requester):
+            raise TimeoutError('POSTGRES_POOL_ACQUIRE_TIMEOUT')
+
+        with self.assertLogs(level='ERROR'):
+            response = self._client(viewer_ctx=boom).get('/api/notifications')
+        self.assertEqual(503, response.status_code)
+        self.assertEqual('application/json', response.headers['Content-Type'].split(';')[0])
+
+    def test_auth_error_is_not_swallowed_into_503(self):
+        client = self._client(resolver=lambda: (None, None, ('Unauthorized', 401)))
+        response = client.get('/api/notifications')
+        self.assertEqual(401, response.status_code)
+
+
 class SeenEndpointTest(unittest.TestCase):
     """Разбор тела запроса у POST /seen — на подставном курсоре, без базы."""
 
