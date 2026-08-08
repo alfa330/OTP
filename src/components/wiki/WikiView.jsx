@@ -2,12 +2,13 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers,
-    Loader2, RefreshCw, ScrollText, ShieldCheck, Users,
+    Building2, Loader2, RefreshCw, ScrollText, ShieldCheck, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import WikiLibrary from './WikiLibrary';
+import WikiParks from './WikiParks';
 import WikiStructure from './WikiStructure';
 import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
@@ -99,6 +100,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const tabs = useMemo(() => ([
         { key: 'library', label: 'Статьи', icon: BookOpen, show: true },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
+        { key: 'parks', label: 'Парки', icon: Building2, show: true },
         { key: 'structure', label: 'Структура', icon: Layers, show: canManageStructure },
         { key: 'access', label: 'Доступы', icon: KeyRound, show: canManageAccess },
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
@@ -297,6 +299,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         structure={structure}
                         canCreate={!!capabilities.can_create}
                     />
+                )}
+
+                {tab === 'parks' && (
+                    <WikiParks base={base} headers={headers} showToast={showToast} />
                 )}
 
                 {tab === 'structure' && (
