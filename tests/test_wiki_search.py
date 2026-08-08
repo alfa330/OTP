@@ -12,16 +12,10 @@
 запроса исполняется над синтетическими строками через read-only соединение.
 """
 
-import os
-import re
 import unittest
 from pathlib import Path
 
-try:
-    import psycopg2
-except ImportError:  # pragma: no cover
-    psycopg2 = None
-
+from tests import wiki_db
 from wiki import search as wiki_search
 from wiki.text import (
     ALIAS_GROUPS,
@@ -35,21 +29,6 @@ from wiki.text import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _dsn():
-    env = os.environ.get('DATABASE_URL_READONLY')
-    if env:
-        return env
-    local = ROOT / '.env.codex.local'
-    if not local.exists():
-        return None
-    text = local.read_text(encoding='utf-8', errors='replace')
-    match = re.search(r'^DATABASE_URL_READONLY\s*=\s*(.+)$', text, re.M)
-    return match.group(1).strip().strip('"\'') if match else None
-
-
-DSN = _dsn()
 
 
 class NormalizeTest(unittest.TestCase):
@@ -156,7 +135,6 @@ class ArticleAliasesTest(unittest.TestCase):
         self.assertLess(len(value), 3000)
 
 
-@unittest.skipIf(psycopg2 is None or not DSN, 'нет psycopg2 или DATABASE_URL_READONLY')
 class SearchSqlTest(unittest.TestCase):
     """Боевой SQL поиска на синтетических статьях."""
 
@@ -178,18 +156,19 @@ wiki_article_sections AS (
 ),
 """
 
+    has_trigram = False
+
     @classmethod
     def setUpClass(cls):
-        cls.conn = psycopg2.connect(DSN, connect_timeout=30)
-        cls.conn.set_session(readonly=True)
+        reason = wiki_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.conn = wiki_db.connection()
         cur = cls.conn.cursor()
         cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'")
         cls.has_trigram = cur.fetchone() is not None
-        cls.conn.rollback()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.conn.close()
+        cur.close()
+        wiki_db.rollback()
 
     def run_search(self, rows, query, *, sections=None, with_trigram=False, section_id=None):
         stub = self.STUB.format(
@@ -204,7 +183,7 @@ wiki_article_sections AS (
                               'section': section_id, 'limit': 10})
             return [dict(zip(wiki_search._KEYS, row)) for row in cur.fetchall()]
         finally:
-            self.conn.rollback()
+            wiki_db.rollback()
             cur.close()
 
     ARTICLES = [
@@ -259,7 +238,7 @@ wiki_article_sections AS (
             self.assertEqual(cur.fetchall(), [],
                              'статья вне периметра не должна попасть в выдачу')
         finally:
-            self.conn.rollback()
+            wiki_db.rollback()
             cur.close()
 
     def test_nothing_found(self):

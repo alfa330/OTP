@@ -17,37 +17,17 @@ wiki_article_sections / wiki_guest_access — и тот же самый боев
 исполняется над синтетическими строками. Соединение read-only, боевые таблицы
 не читаются и тем более не изменяются.
 
-Тест пропускается, если нет DATABASE_URL_READONLY (например, в CI без секретов).
+Тест пропускается, если базы нет (например, в CI без секретов). Соединение —
+общее на весь набор, см. tests/wiki_db.py: у роли лимит в два подключения.
 """
 
-import os
-import re
 import unittest
 from pathlib import Path
 
-try:
-    import psycopg2
-except ImportError:  # pragma: no cover
-    psycopg2 = None
-
+from tests import wiki_db
 from wiki.articles import _VISIBLE_ARTICLES_SQL
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _dsn():
-    env = os.environ.get('DATABASE_URL_READONLY')
-    if env:
-        return env
-    local = ROOT / '.env.codex.local'
-    if not local.exists():
-        return None
-    text = local.read_text(encoding='utf-8', errors='replace')
-    match = re.search(r'^DATABASE_URL_READONLY\s*=\s*(.+)$', text, re.M)
-    return match.group(1).strip().strip('"\'') if match else None
-
-
-DSN = _dsn()
 
 # Колонки заглушек — ровно те, что читает боевой запрос.
 # Типы приводим явно: NULL в VALUES без приведения Postgres считает text,
@@ -89,16 +69,13 @@ def _values(rows, fallback):
     return ', '.join(rows) if rows else fallback
 
 
-@unittest.skipIf(psycopg2 is None or not DSN, 'нет psycopg2 или DATABASE_URL_READONLY')
 class ArticleVisibilitySqlTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.conn = psycopg2.connect(DSN, connect_timeout=30)
-        cls.conn.set_session(readonly=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.conn.close()
+        reason = wiki_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.conn = wiki_db.connection()
 
     def visible(self, *, articles, rules=(), sections=(), guests=(),
                 user_id=10, role='operator', allowed_sections=(),
@@ -132,7 +109,8 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
             cur.execute(sql, params)
             return {row[0] for row in cur.fetchall()}
         finally:
-            self.conn.rollback()
+            wiki_db.rollback()
+            cur.close()
             cur.close()
 
     # ── Наследование от разделов ─────────────────────────────────────────

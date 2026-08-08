@@ -14,35 +14,15 @@ window.scrollY всегда 0, scrollHeight равен высоте вьюпор
 с первого кадра — отметка «ознакомлен» ставилась бы в момент ОТКРЫТИЯ статьи.
 """
 
-import os
 import re
 import unittest
 from pathlib import Path
 
-try:
-    import psycopg2
-except ImportError:  # pragma: no cover
-    psycopg2 = None
-
+from tests import wiki_db
 from wiki.ack import count_required_blocks
 
 ROOT = Path(__file__).resolve().parents[1]
 SCROLL_JS = ROOT / 'src' / 'components' / 'wiki' / 'scrollContainer.js'
-
-
-def _dsn():
-    env = os.environ.get('DATABASE_URL_READONLY')
-    if env:
-        return env
-    local = ROOT / '.env.codex.local'
-    if not local.exists():
-        return None
-    text = local.read_text(encoding='utf-8', errors='replace')
-    match = re.search(r'^DATABASE_URL_READONLY\s*=\s*(.+)$', text, re.M)
-    return match.group(1).strip().strip('"\'') if match else None
-
-
-DSN = _dsn()
 
 
 class RequiredBlocksTest(unittest.TestCase):
@@ -102,7 +82,6 @@ class ScrollGateSourceTest(unittest.TestCase):
         )
 
 
-@unittest.skipIf(psycopg2 is None or not DSN, 'нет psycopg2 или DATABASE_URL_READONLY')
 class AckFlowSqlTest(unittest.TestCase):
     """Порядок отметок на настоящем PostgreSQL, на синтетических назначениях.
 
@@ -112,12 +91,10 @@ class AckFlowSqlTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.conn = psycopg2.connect(DSN, connect_timeout=30)
-        cls.conn.set_session(readonly=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.conn.close()
+        reason = wiki_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.conn = wiki_db.connection()
 
     def check(self, sql, params=None):
         cur = self.conn.cursor()
@@ -125,7 +102,7 @@ class AckFlowSqlTest(unittest.TestCase):
             cur.execute(sql, params or {})
             return cur.fetchall()
         finally:
-            self.conn.rollback()
+            wiki_db.rollback()
             cur.close()
 
     def test_acknowledge_condition_requires_read(self):

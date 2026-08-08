@@ -193,6 +193,7 @@ const TOKEN_TO_ICON = {
     'fa-calendar-user': 'Calendar',
     'fa-calendar-xmark': 'CalendarX',
     'fa-camera': 'Camera',
+    'fa-car': 'Car',
     'fa-chalkboard-teacher': 'GraduationCap',
     'fa-chart-bar': 'BarChart3',
     'fa-chart-gantt': 'GanttChart',
