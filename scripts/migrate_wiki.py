@@ -39,19 +39,20 @@ BACKUP_DIR = r'C:\python\wiki2.0_backup'
 # Карта соответствий
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Разделы вики построены на должностях, которых у нас нет. Отделы вики
-# (Коммерческий, IT, Бухгалтерия, HR, Общий) тоже не совпадают ни с одним нашим
-# (szov, op, tez, front_office, marketing), поэтому пространства переносим по
-# названию, БЕЗ привязки к отделу: ложная связь хуже её отсутствия.
+# ПО УМОЛЧАНИЮ ВСЕ РАЗДЕЛЫ ПЕРЕНОСЯТСЯ ЗАКРЫТЫМИ: visibility_scope='restricted'
+# и НИ ОДНОГО правила доступа. Значит сразу после переноса содержимое видно
+# только администратору вики (и автору), а кому его открыть — решается потом,
+# на вкладке «Доступы»: правило выдаётся на отдел, направление, группу, роль,
+# роль в вики или конкретного человека, и при необходимости уточняется
+# правилами на отдельную статью.
 #
-# Правило доступа выводится из названия должности:
-#   ('role', X)  — правило на роль X и, по иерархии, на все роли выше;
-#   ('public',)  — раздел виден всем сотрудникам;
-#   ('admin',)   — правила нет: раздел виден только администратору вики.
-#                  Так помечены разделы, для которых у нас нет подходящего
-#                  субъекта. Это сознательный выбор в пользу недо-, а не
-#                  переоткрытия: доступ всегда можно расширить, отозвать
-#                  прочитанное — нельзя.
+# Это решение владельца, и оно же безопасное по умолчанию: доступ расширить
+# можно в любой момент, отозвать прочитанное — нельзя.
+#
+# Карта ниже применяется ТОЛЬКО с флагом --open-by-role и оставлена как
+# заготовка: разделы вики построены на должностях, которых у нас нет, а отделы
+# вики (Коммерческий, IT, Бухгалтерия, HR, Общий) не совпадают ни с одним нашим
+# (szov, op, tez, front_office, marketing).
 SECTION_RULES = {
     'Коммерческий директор': ('role', 'super_admin'),
     'Руководитель группы': ('role', 'admin'),
@@ -62,6 +63,9 @@ SECTION_RULES = {
     'Бухгалтер': ('admin',),
     'HR-менеджер': ('admin',),
 }
+
+# Всё закрыто — состояние по умолчанию.
+CLOSED = ('admin',)
 
 YANDEX_CDN = 'storage.yandexcloud.net'
 
@@ -238,7 +242,7 @@ def rewrite_images(api, html, article_id, stats):
 # Перенос
 # ─────────────────────────────────────────────────────────────────────────────
 
-def migrate(api, dump, only=None):
+def migrate(api, dump, only=None, open_by_role=False):
     stats = {'spaces': 0, 'sections': 0, 'rules': 0, 'articles': 0, 'published': 0,
              'image_base64': 0, 'image_cdn': 0, 'image_failed': 0, 'skipped': 0}
 
@@ -266,7 +270,7 @@ def migrate(api, dump, only=None):
     log('\n=== РАЗДЕЛЫ ===')
     section_map = {}
     for old_id, section in sorted(sections.items()):
-        rule = SECTION_RULES.get(section['name'], ('admin',))
+        rule = SECTION_RULES.get(section['name'], CLOSED) if open_by_role else CLOSED
         response = api.call('POST', '/api/wiki/sections', {
             'space_id': space_map.get(section['space_id']),
             'name': section['name'],
@@ -282,7 +286,7 @@ def migrate(api, dump, only=None):
     # 3. Правила доступа
     log('\n=== ПРАВИЛА ДОСТУПА ===')
     for old_id, section in sorted(sections.items()):
-        rule = SECTION_RULES.get(section['name'], ('admin',))
+        rule = SECTION_RULES.get(section['name'], CLOSED) if open_by_role else CLOSED
         if rule[0] != 'role':
             continue
         api.call('POST', '/api/wiki/access/section-rules', {
@@ -335,6 +339,9 @@ def main():
     parser.add_argument('--apply', action='store_true',
                         help='выполнить запись (по умолчанию — только план)')
     parser.add_argument('--only', help='список id статей вики через запятую')
+    parser.add_argument('--open-by-role', action='store_true',
+                        help='выдать правила по ролям из карты SECTION_RULES '
+                             '(по умолчанию всё закрыто)')
     args = parser.parse_args()
 
     env_path = os.path.join(ROOT, '.env.codex.local')
@@ -362,12 +369,14 @@ def main():
     log('Режим    : %s' % ('ЗАПИСЬ' if args.apply else 'холостой прогон (ничего не создаётся)'))
     log('К переносу: %d статей%s' % (len(articles),
                                      ' (фильтр: %s)' % sorted(only) if only else ''))
+    log('Доступ   : %s' % ('правила по ролям' if args.open_by_role
+                           else 'ВСЁ ЗАКРЫТО — открывать вручную после переноса'))
 
     api = Api(base_url, login_value, password, dry_run=not args.apply)
     user = api.authenticate()
     log('Вошли как: %s (%s)' % (user.get('name'), user.get('role')))
 
-    stats = migrate(api, dump, only=only)
+    stats = migrate(api, dump, only=only, open_by_role=args.open_by_role)
 
     log('\n=== ИТОГ ===')
     for key, label in (('spaces', 'пространств'), ('sections', 'разделов'),
