@@ -7,6 +7,7 @@ import {
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
+import WikiLibrary from './WikiLibrary';
 import WikiStructure from './WikiStructure';
 import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
@@ -68,7 +69,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
     const [structureLoading, setStructureLoading] = useState(true);
-    const [tab, setTab] = useState('overview');
+    const [tab, setTab] = useState('library');
 
     const loadPing = useCallback(() => {
         setLoading(true);
@@ -96,7 +97,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const canManageAccess = !!capabilities.can_manage_access;
 
     const tabs = useMemo(() => ([
-        { key: 'overview', label: 'Обзор', icon: BookOpen, show: true },
+        { key: 'library', label: 'Статьи', icon: BookOpen, show: true },
+        { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'structure', label: 'Структура', icon: Layers, show: canManageStructure },
         { key: 'access', label: 'Доступы', icon: KeyRound, show: canManageAccess },
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
@@ -104,7 +106,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
 
     // Если права сузились между заходами, активная вкладка может исчезнуть.
     useEffect(() => {
-        if (tabs.length && !tabs.some((t) => t.key === tab)) setTab('overview');
+        if (tabs.length && !tabs.some((t) => t.key === tab)) setTab('library');
     }, [tabs, tab]);
 
     const refresh = () => {
@@ -285,6 +287,15 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             </div>
                         </section>
                     </>
+                )}
+
+                {tab === 'library' && (
+                    <WikiLibrary
+                        base={base}
+                        headers={headers}
+                        showToast={showToast}
+                        structure={structure}
+                    />
                 )}
 
                 {tab === 'structure' && (

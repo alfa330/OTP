@@ -39540,6 +39540,17 @@ def _lms_bucket_name():
     )
 
 
+def _wiki_bucket_name():
+    """Бакет раздела «Вики». Каскад env как у остальных разделов: свой →
+    общий tasks → общий. Отдельная переменная нужна, если файлы вики захотят
+    развести по жизненному циклу с материалами LMS."""
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_WIKI') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
 def _lms_signed_url(bucket_name, blob_path, expires_minutes=120, response_disposition=None, response_type=None):
     bucket_name = str(bucket_name or '').strip()
     blob_path = str(blob_path or '').strip()
@@ -46390,6 +46401,14 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         client_ip=_client_ip,
+        # Файлы раздела живут в том же GCS, что LMS/Ивенты/аватарки.
+        # Подпись выдаётся на каждый запрос через прокси /api/wiki/file/<id>,
+        # а не вшивается в тело статьи: подписанная ссылка живёт часы, а статья
+        # хранится годами — у LMS картинки внутри HTML именно поэтому протухают.
+        gcs={
+            'signed_url': _lms_signed_url,
+            'bucket_name': _wiki_bucket_name,
+        },
     ))
     logging.info("Раздел «Вики»: Blueprint подключён на /api/wiki")
 except Exception:
