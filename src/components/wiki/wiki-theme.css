@@ -1,0 +1,377 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Стили раздела «Вики».
+
+   ВСЁ здесь заскоуплено классом .wiki-scope. Это не аккуратность ради
+   аккуратности — в globals.css оригинала четыре правила были глобальными и
+   в общем портале сломали бы чужие экраны:
+
+     * { border-color: rgb(var(--border)) }   — а безцветный `border` в OTP
+       встречается 1937 раз, и все границы перекрасились бы;
+     body:has([role="dialog"]) { … !important } — у нас 35 таких мест;
+     .modal-overlay, .dialog-overlay { … !important } — общие имена классов;
+     [id] { scroll-margin-top: 88px } — селектор задевает ЛЮБОЙ элемент с id.
+
+   Переменные названы --wiki-*, и объявлены НА .wiki-scope, а не на :root.
+   На :root у нас уже живут --primary/--primary-hover/--accent/--bg/--card
+   аудиоплеера (src/styles.css) — и они хранят ХЕКСЫ, тогда как вики хранила
+   в одноимённых переменных тройки «R G B». Совпадение имён обесцветило бы
+   кнопки плеера в разборе звонков.
+
+   Тёмной темы НЕТ по решению владельца: раздел светлый, как весь портал.
+   Поэтому в JSX-файлах раздела не должно остаться ни одного класса dark:* —
+   у нас darkMode в tailwind.config.cjs не задан, значит Tailwind работает в
+   режиме media, и такие классы сработали бы от тёмной темы системы.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.wiki-scope {
+    /* Палитра раздела: slate портала + индиго как акцент контента.
+       Синий (blue-600) остаётся за действиями — кнопками, тумблерами, фокусом. */
+    --wiki-accent: #4f46e5;
+    --wiki-accent-soft: #eef2ff;
+    --wiki-accent-line: #c7d2fe;
+
+    --wiki-ink: #0f172a;
+    --wiki-ink-soft: #475569;
+    --wiki-ink-mute: #94a3b8;
+    --wiki-line: #e2e8f0;
+    --wiki-line-soft: #f1f5f9;
+    --wiki-surface: #ffffff;
+    --wiki-surface-alt: #f8fafc;
+
+    /* Тот же системный стек, что APPLE_FONT в src/components/ui/ios.jsx.
+       Внешние шрифты (Inter/Outfit с Google Fonts) не тянем: в корпоративной
+       сети CDN может быть недоступен, а Outfit в оригинале и так не работал —
+       класса font-outfit не существовало, всё рисовалось одним Inter. */
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
+        system-ui, sans-serif;
+    color: var(--wiki-ink);
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Границы внутри раздела — вместо глобального `*` из оригинала. */
+.wiki-scope :where(*, ::before, ::after) {
+    border-color: var(--wiki-line);
+}
+
+.wiki-scope ::selection {
+    background-color: var(--wiki-accent-soft);
+}
+
+/* Видимый фокус: требование доступности, и в оригинале он был глобальным. */
+.wiki-scope :where(a, button, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--wiki-accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+}
+
+/* Якоря оглавления. В оригинале было html { scroll-padding-top } — но у нас
+   скроллится не окно, а .main-content, поэтому отступ вешаем на сами цели
+   и только внутри раздела. */
+.wiki-scope :is(h1, h2, h3, h4)[id] {
+    scroll-margin-top: 88px;
+}
+
+/* Скроллбар раздела — тонкий, как в вики. */
+.wiki-scope ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+.wiki-scope ::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.wiki-scope ::-webkit-scrollbar-thumb {
+    background: var(--wiki-line);
+    border-radius: 4px;
+}
+
+.wiki-scope ::-webkit-scrollbar-thumb:hover {
+    background: var(--wiki-ink-mute);
+}
+
+/* ── Тело статьи ──────────────────────────────────────────────────────────
+   Порт .prose-custom из globals.css вики (плагина @tailwindcss/typography
+   там нет, и все классы prose-* были мёртвыми — тело статьи держалось
+   исключительно на этих правилах). Нейтраль zinc заменена на slate портала,
+   ветки dark: убраны.
+   ──────────────────────────────────────────────────────────────────────── */
+
+.wiki-prose {
+    color: var(--wiki-ink-soft);
+    line-height: 1.7;
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+.wiki-prose h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--wiki-ink);
+    margin: 2rem 0 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--wiki-line);
+}
+
+.wiki-prose h2 {
+    font-size: 1.375rem;
+    font-weight: 650;
+    letter-spacing: -0.015em;
+    color: var(--wiki-ink);
+    margin: 1.5rem 0 0.75rem;
+}
+
+.wiki-prose h3 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--wiki-ink);
+    margin: 1.25rem 0 0.5rem;
+}
+
+.wiki-prose h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--wiki-ink);
+    margin: 1rem 0 0.5rem;
+}
+
+.wiki-prose p {
+    margin: 0.75rem 0;
+    line-height: 1.75;
+}
+
+.wiki-prose a {
+    color: var(--wiki-accent);
+    text-decoration: underline;
+    text-decoration-color: rgba(79, 70, 229, 0.3);
+    text-underline-offset: 4px;
+    transition: text-decoration-color 0.15s ease;
+}
+
+.wiki-prose a:hover {
+    text-decoration-color: var(--wiki-accent);
+}
+
+.wiki-prose blockquote {
+    margin: 1rem 0;
+    padding-left: 1rem;
+    border-left: 4px solid var(--wiki-line);
+    font-style: italic;
+    color: var(--wiki-ink-mute);
+}
+
+.wiki-prose code {
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+    background: var(--wiki-surface-alt);
+    border: 1px solid var(--wiki-line-soft);
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.875em;
+    color: var(--wiki-ink);
+}
+
+.wiki-prose pre {
+    margin: 1rem 0;
+    padding: 1rem;
+    border-radius: 12px;
+    background: #0f172a;
+    color: #e2e8f0;
+    overflow-x: auto;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+}
+
+.wiki-prose pre code {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
+}
+
+.wiki-prose ul {
+    list-style: disc;
+    padding-left: 1.5rem;
+    margin: 0.75rem 0;
+}
+
+.wiki-prose ol {
+    list-style: decimal;
+    padding-left: 1.5rem;
+    margin: 0.75rem 0;
+}
+
+.wiki-prose li {
+    margin: 0.25rem 0;
+}
+
+.wiki-prose img {
+    max-width: 100%;
+    height: auto;
+    margin: 1.5rem 0;
+    border-radius: 12px;
+    border: 1px solid var(--wiki-line);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* Таблицы. В контенте их много: 63 <table> и 1618 <td> на 46 статей. */
+.wiki-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.25rem 0;
+    font-size: 0.9375rem;
+}
+
+.wiki-prose :is(th, td) {
+    border: 1px solid var(--wiki-line);
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+}
+
+.wiki-prose th {
+    background: var(--wiki-surface-alt);
+    font-weight: 600;
+    color: var(--wiki-ink);
+}
+
+/* Выделения из редактора: 251 <mark data-color> в контенте. */
+.wiki-prose mark {
+    padding: 0.05em 0.25em;
+    border-radius: 4px;
+    background: #fef3c7;
+    color: var(--wiki-ink);
+}
+
+/* ── Раскрывающиеся блоки ─────────────────────────────────────────────────
+   В оригинале они рисовались БЕЗ рамки и фона: в инлайновом <style> стояло
+   `border: 1px solid var(--border)`, а переменная хранила «228 228 231» —
+   не цвет. Правило было невалидным, и никто не замечал. Здесь чиним.
+   ──────────────────────────────────────────────────────────────────────── */
+
+.wiki-prose :is(details, [data-wiki-collapsible]) {
+    margin: 1rem 0;
+    border: 1px solid var(--wiki-line);
+    border-radius: 16px;
+    background: var(--wiki-surface);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    overflow: hidden;
+}
+
+.wiki-prose summary {
+    padding: 0.875rem 1rem;
+    font-weight: 600;
+    color: var(--wiki-ink);
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: background 0.15s ease;
+}
+
+.wiki-prose summary::-webkit-details-marker {
+    display: none;
+}
+
+.wiki-prose summary:hover {
+    background: var(--wiki-surface-alt);
+}
+
+.wiki-prose summary::after {
+    content: '';
+    margin-left: auto;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid var(--wiki-ink-mute);
+    border-bottom: 2px solid var(--wiki-ink-mute);
+    transform: rotate(45deg);
+    transition: transform 0.2s ease;
+}
+
+.wiki-prose details[open] summary::after {
+    transform: rotate(-135deg);
+}
+
+.wiki-prose details > :not(summary) {
+    padding: 0 1rem 1rem;
+    border-top: 1px solid var(--wiki-line-soft);
+}
+
+/* Блок, обязательный к раскрытию для подтверждения ознакомления.
+   Таких в контенте 35 штук (data-required-for-ack). */
+.wiki-prose [data-required-for-ack='true'] {
+    border-color: var(--wiki-accent-line);
+}
+
+/* Подсветка найденного по ?highlight= */
+.wiki-heading-pulse {
+    animation: wikiHeadingPulse 1.6s ease-out 1;
+}
+
+@keyframes wikiHeadingPulse {
+    0% {
+        background-color: rgba(79, 70, 229, 0.18);
+    }
+    100% {
+        background-color: transparent;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .wiki-heading-pulse {
+        animation: none;
+    }
+
+    .wiki-scope * {
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* ── Мобильная адаптация ──────────────────────────────────────────────────
+   Портал прячет сайдбар на ≤768px и вешает фиксированный гамбургер
+   (44×44 в левом верхнем углу, z-index 60), поэтому шапка раздела на
+   мобильном обязана иметь отступ слева, иначе кнопка накроет заголовок.
+   ──────────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+    .wiki-prose {
+        font-size: 0.9375rem;
+    }
+
+    .wiki-prose h1 {
+        font-size: 1.375rem;
+        margin: 1.5rem 0 0.75rem;
+    }
+
+    .wiki-prose h2 {
+        font-size: 1.1875rem;
+        margin: 1.25rem 0 0.5rem;
+    }
+
+    .wiki-prose h3 {
+        font-size: 1.0625rem;
+    }
+
+    .wiki-prose p {
+        margin: 0.5rem 0;
+        line-height: 1.65;
+    }
+
+    .wiki-prose pre {
+        margin-left: -0.75rem;
+        margin-right: -0.75rem;
+        border-radius: 0;
+        font-size: 0.75rem;
+        padding: 0.75rem;
+    }
+
+    /* Широкие таблицы прокручиваются сами, а не растягивают страницу. */
+    .wiki-prose table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        white-space: nowrap;
+    }
+}
