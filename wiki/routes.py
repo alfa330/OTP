@@ -147,4 +147,9 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "group_ids": ctx['group_ids'],
         })
 
+    # Структура и доступы — отдельным модулем, чтобы этот файл остался про
+    # каркас Blueprint'а, а не превратился во второй bot_schedule2.py.
+    from . import routes_structure
+    routes_structure.register(bp, wiki_route, db, _ip)
+
     return bp

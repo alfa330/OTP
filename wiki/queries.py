@@ -83,6 +83,161 @@ def load_access_context(cursor, user_id):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Периметр доступа
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Разделы, доступные на чтение в АВТОМАТИЧЕСКОМ режиме.
+#
+# Один рекурсивный CTE вместо двух расходившихся вычислителей оригинала
+# (getRuleAllowedSectionIds и getUserAllowedSections считали доступ по-разному,
+# из-за чего дерево навигации и список статей показывали разное).
+#
+# Порядок: правила по субъектам → потомки тех правил, где разрешено поддерево →
+# публичные разделы → собственные разделы → действующий гостевой доступ.
+_AUTO_SECTIONS_SQL = """
+WITH RECURSIVE rule_hits AS (
+    SELECT r.section_id, bool_or(r.grant_subsections) AS deep
+      FROM wiki_section_access_rules r
+      JOIN wiki_sections s ON s.id = r.section_id AND s.status = 'active'
+     WHERE r.can_read
+       AND (
+            (r.subject_type = 'department' AND r.subject_id   = ANY(%(departments)s))
+         OR (r.subject_type = 'direction'  AND r.subject_id   = ANY(%(directions)s))
+         OR (r.subject_type = 'group'      AND r.subject_id   = ANY(%(groups)s))
+         OR (r.subject_type = 'otp_role'   AND r.subject_role = ANY(%(roles)s))
+         OR (r.subject_type = 'wiki_role'  AND r.subject_id   = ANY(%(wiki_roles)s))
+         OR (r.subject_type = 'user'       AND r.subject_id   = %(user_id)s)
+       )
+     GROUP BY r.section_id
+),
+subtree AS (
+    SELECT section_id AS id FROM rule_hits WHERE deep
+    UNION
+    SELECT child.id
+      FROM wiki_sections child
+      JOIN subtree parent ON child.parent_section_id = parent.id
+     WHERE child.status = 'active'
+)
+SELECT id FROM subtree
+UNION
+SELECT section_id FROM rule_hits
+UNION
+SELECT id FROM wiki_sections WHERE status = 'active' AND visibility_scope = 'public'
+UNION
+SELECT id FROM wiki_sections WHERE status = 'active' AND owner_user_id = %(user_id)s
+UNION
+SELECT g.section_id
+  FROM wiki_guest_access g
+ WHERE g.user_id = %(user_id)s
+   AND g.section_id IS NOT NULL
+   AND g.revoked_at IS NULL
+   AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+"""
+
+# Ручной режим: человек видит ровно то, что ему выдали, плюс публичное.
+# Выдача отдела раскрывается во все разделы пространств этого отдела.
+_MANUAL_SECTIONS_SQL = """
+WITH RECURSIVE seed AS (
+    SELECT s.id
+      FROM wiki_sections s
+      JOIN wiki_user_manual_access m ON m.section_id = s.id
+     WHERE m.user_id = %(user_id)s AND s.status = 'active'
+    UNION
+    SELECT s.id
+      FROM wiki_sections s
+      JOIN wiki_spaces sp ON sp.id = s.space_id
+      JOIN wiki_user_manual_access m ON m.department_id = sp.department_id
+     WHERE m.user_id = %(user_id)s AND s.status = 'active'
+),
+subtree AS (
+    SELECT id FROM seed
+    UNION
+    SELECT child.id
+      FROM wiki_sections child
+      JOIN subtree parent ON child.parent_section_id = parent.id
+     WHERE child.status = 'active'
+)
+SELECT id FROM subtree
+UNION
+SELECT id FROM wiki_sections WHERE status = 'active' AND visibility_scope = 'public'
+UNION
+SELECT id FROM wiki_sections WHERE status = 'active' AND owner_user_id = %(user_id)s
+UNION
+SELECT g.section_id
+  FROM wiki_guest_access g
+ WHERE g.user_id = %(user_id)s
+   AND g.section_id IS NOT NULL
+   AND g.revoked_at IS NULL
+   AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+"""
+
+
+def allowed_section_ids(cursor, ctx, subjects):
+    """Идентификаторы разделов, доступных пользователю на чтение.
+
+    Администратор доступов видит все активные разделы — короткое замыкание.
+    ВАЖНО: проверка админа стоит ДО раннего выхода по пустому периметру.
+    В оригинале порядок был обратный, и администратор вики не мог создать
+    статью, пока ему не выдали хотя бы один раздел правилом.
+    """
+    if ctx['capabilities'].get('can_manage_access'):
+        cursor.execute("SELECT id FROM wiki_sections WHERE status = 'active'")
+        return {row[0] for row in cursor.fetchall()}
+
+    params = {
+        'user_id': ctx['user_id'],
+        'departments': subjects['department'] or [-1],
+        'directions': subjects['direction'] or [-1],
+        'groups': subjects['group'] or [-1],
+        'roles': subjects['otp_role'] or [''],
+        'wiki_roles': subjects['wiki_role'] or [-1],
+    }
+    sql = _MANUAL_SECTIONS_SQL if ctx.get('access_mode') == 'manual' else _AUTO_SECTIONS_SQL
+    cursor.execute(sql, params)
+    return {row[0] for row in cursor.fetchall()}
+
+
+def section_rules_for_user(cursor, section_ids, subjects, user_id):
+    """Правила разделов, действующие на пользователя, — для расчёта прав записи.
+
+    Возвращает {section_id: [правило, ...]}. Одним запросом на все разделы:
+    в оригинале матрица доступа делала по два запроса на каждую должность.
+    """
+    if not section_ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT r.section_id, r.can_read, r.can_create, r.can_edit,
+               r.can_delete, r.can_publish, r.can_approve
+          FROM wiki_section_access_rules r
+         WHERE r.section_id = ANY(%(sections)s)
+           AND (
+                (r.subject_type = 'department' AND r.subject_id   = ANY(%(departments)s))
+             OR (r.subject_type = 'direction'  AND r.subject_id   = ANY(%(directions)s))
+             OR (r.subject_type = 'group'      AND r.subject_id   = ANY(%(groups)s))
+             OR (r.subject_type = 'otp_role'   AND r.subject_role = ANY(%(roles)s))
+             OR (r.subject_type = 'wiki_role'  AND r.subject_id   = ANY(%(wiki_roles)s))
+             OR (r.subject_type = 'user'       AND r.subject_id   = %(user_id)s)
+           )
+        """,
+        {
+            'sections': list(section_ids),
+            'user_id': user_id,
+            'departments': subjects['department'] or [-1],
+            'directions': subjects['direction'] or [-1],
+            'groups': subjects['group'] or [-1],
+            'roles': subjects['otp_role'] or [''],
+            'wiki_roles': subjects['wiki_role'] or [-1],
+        },
+    )
+    keys = ('can_read', 'can_create', 'can_edit', 'can_delete', 'can_publish', 'can_approve')
+    result = {}
+    for row in cursor.fetchall():
+        result.setdefault(row[0], []).append(dict(zip(keys, row[1:])))
+    return result
+
+
 def log_action(cursor, *, actor_id, action, entity_type=None, entity_id=None,
                target_user_id=None, details=None, ip_address=None):
     """Запись в журнал раздела.
@@ -106,9 +261,17 @@ def log_action(cursor, *, actor_id, action, entity_type=None, entity_id=None,
 
 def schema_is_ready(cursor):
     """Созданы ли таблицы раздела. Нужно эндпоинту /api/wiki/ping, чтобы
-    отличить «раздел не разворачивался» от «раздел сломан»."""
-    cursor.execute("SELECT to_regclass('public.wiki_articles') IS NOT NULL")
-    return bool(cursor.fetchone()[0])
+    отличить «раздел не разворачивался» от «раздел сломан».
+
+    Намеренно не падает ни при каких обстоятельствах: это диагностика, и
+    эндпоинт, который сам отдаёт 500, бесполезен ровно тогда, когда он нужен.
+    """
+    try:
+        cursor.execute("SELECT to_regclass('public.wiki_articles') IS NOT NULL")
+        row = cursor.fetchone()
+        return bool(row and row[0])
+    except Exception:
+        return False
 
 
 def counters(cursor):
@@ -122,7 +285,8 @@ def counters(cursor):
                (SELECT count(*) FROM wiki_roles)
         """
     )
-    spaces, sections, published, articles, roles = cursor.fetchone()
+    row = cursor.fetchone() or (0, 0, 0, 0, 0)
+    spaces, sections, published, articles, roles = row
     return {
         'spaces': spaces,
         'sections': sections,
