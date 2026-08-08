@@ -25,7 +25,8 @@ from . import queries
 
 
 def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                         resolve_requester, client_ip=None, gcs=None):
+                         resolve_requester, client_ip=None, gcs=None,
+                         session_id_provider=None):
     """Собирает Blueprint раздела.
 
     Все зависимости приходят аргументами — импортировать их из bot_schedule2
@@ -39,7 +40,9 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     client_ip                    — () -> str, для журнала;
     gcs                          — {'signed_url': fn, 'bucket_name': fn} для
                                    прокси файлов: подпись выдаётся на каждый
-                                   запрос, а не вшивается в тело статьи.
+                                   запрос, а не вшивается в тело статьи;
+    session_id_provider          — _current_session_id_from_access_token, чтобы
+                                   версия статьи знала, из какой сессии её правили.
 
     Префикс ОБЯЗАН начинаться с /api: на этом завязаны CORS и оба before_request
     (hydrate_user_context_from_jwt первой строкой отсекает всё, что не /api/,
@@ -157,5 +160,8 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     from . import routes_articles
     routes_articles.register(bp, wiki_route, db, _ip, gcs or {})
+
+    from . import routes_edit
+    routes_edit.register(bp, wiki_route, db, _ip, session_id_provider)
 
     return bp

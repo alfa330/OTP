@@ -368,3 +368,35 @@ def register_file(cursor, *, article_id, bucket, blob_path, original_name,
          file_size, width, height, uploaded_by),
     )
     return cursor.fetchone()[0]
+
+
+def effective_permissions(cursor, ctx, article, subjects, allowed_sections,
+                          section_rules_fn):
+    """Эффективные права на статью — единая точка для чтения и для правки.
+
+    Вынесено сюда, чтобы эндпоинт просмотра и эндпоинт сохранения считали права
+    ОДНИМ способом. В оригинале удаление статьи гейтилось только ролью, причём
+    «редактором» там считались восемь ролей — то есть любой супервайзер мог
+    снести любую статью.
+
+    section_rules_fn — queries.section_rules_for_user; передаётся аргументом,
+    чтобы этот модуль не импортировал queries (там свои SQL периметра).
+    """
+    from . import access as wiki_access
+
+    relevant = [s for s in (article.get('section_ids') or []) if s in allowed_sections]
+    section_rules = section_rules_fn(cursor, relevant, subjects, ctx['user_id'])
+    flat = [rule for rules in section_rules.values() for rule in rules]
+    article_rules = article_rules_for_user(
+        cursor, [article['id']], subjects, ctx['user_id']).get(article['id'], [])
+
+    return wiki_access.resolve_article_permissions(
+        capabilities=ctx['capabilities'],
+        visibility_mode=article.get('visibility_mode', 'inherit'),
+        strict_mode=article.get('strict_mode', False),
+        section_rules=flat,
+        article_rules=article_rules,
+        otp_role=ctx['otp_role'],
+        is_article_owner=(article.get('author_id') == ctx['user_id']
+                          or article.get('owner_user_id') == ctx['user_id']),
+    )
