@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
+import WikiAckPanel from './WikiAckPanel';
 
 /* Страница статьи.
  *
@@ -152,6 +153,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast }) 
             <button type="button" className={iosBtnSecondary} onClick={onBack}>
                 <ArrowLeft size={14} /> К списку
             </button>
+
+            {/* Панель ознакомления идёт ПЕРЕД статьёй: требование надо видеть
+                до чтения, а не найти под текстом. */}
+            <WikiAckPanel
+                base={base}
+                headers={headers}
+                articleId={article.id}
+                bodyRef={bodyRef}
+                showToast={showToast}
+            />
 
             <article className={`${iosCard} overflow-hidden`}>
                 <header className="border-b border-slate-100 px-5 py-4 sm:px-7 sm:py-6">

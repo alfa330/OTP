@@ -178,6 +178,13 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
         if not changed:
             return jsonify({"error": "Нечего обновлять"}), 400
 
+        # Вышла новая версия — прежние незакрытые назначения устаревают.
+        # Подтверждённые не трогаем: они свидетельство, что человек читал
+        # именно ту редакцию.
+        if 'content' in fields:
+            from . import ack as wiki_ack
+            wiki_ack.supersede_older_versions(cursor, article_id)
+
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.update',
                            entity_type='article', entity_id=article_id,
                            details={'fields': sorted(fields.keys()),
