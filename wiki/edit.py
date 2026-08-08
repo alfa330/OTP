@@ -1,7 +1,38 @@
 """SQL правки статей: создание, обновление, версии, правила уровня статьи."""
 
+import re
+
 from .sanitize import sanitize_html, to_plain_text
 from .search import refresh_aliases
+
+# Ссылки на файлы внутри тела статьи: /api/wiki/file/<uuid>
+_FILE_REF = re.compile(
+    r'/api/wiki/file/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
+    re.I)
+
+
+def link_content_files(cursor, article_id, content):
+    """Привязывает к статье все файлы, на которые она ссылается.
+
+    Делается ПРИ СОХРАНЕНИИ, а не при загрузке файла, и это принципиально:
+    редактор загружает картинку до того, как статья существует (у новой статьи
+    ещё нет id), а импорт документа — тем более. Непривязанный файл по правилам
+    раздела виден только загрузившему, поэтому без этого шага картинки в статье
+    открывались бы у одного человека.
+
+    Идемпотентно: повторное сохранение просто подтверждает привязку.
+    """
+    ids = set(_FILE_REF.findall(str(content or '')))
+    if not ids:
+        return 0
+    cursor.execute(
+        """
+        UPDATE wiki_files SET article_id = %s
+         WHERE id = ANY(%s::uuid[]) AND (article_id IS NULL OR article_id = %s)
+        """,
+        (article_id, list(ids), article_id),
+    )
+    return cursor.rowcount
 
 
 def _next_version(cursor, article_id):
@@ -34,6 +65,7 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
     # вычислялись на каждый поисковый запрос и превращались в четыре
     # обращения к движку.
     refresh_aliases(cursor, article_id)
+    link_content_files(cursor, article_id, clean)
     snapshot_version(cursor, article_id, editor_id=author_id, session_id=None,
                      comment='Создание статьи')
     return article_id
@@ -79,6 +111,8 @@ def update_article(cursor, article_id, fields, *, editor_id, session_id, comment
     changed = cursor.rowcount > 0
     if changed:
         refresh_aliases(cursor, article_id)
+        if 'content' in fields:
+            link_content_files(cursor, article_id, fields['content'])
     return changed
 
 
