@@ -46366,6 +46366,39 @@ def lms_admin_revoke_certificate(certificate_id):
         logging.exception("Error in /api/lms/admin/certificates/<certificate_id>/revoke")
         return jsonify({"error": "Internal server error"}), 500
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Раздел «Вики» — единственный в проекте Blueprint.
+#
+# Роуты вынесены в пакет wiki/, а не объявлены здесь плоско, как остальные 362:
+# раздел приносит около семидесяти эндпоинтов, и в файле на 48k строк это
+# нечитаемо. Заодно логика прав и транслитерации становится импортируемой из
+# тестов — database.py импортировать нельзя, он поднимает пул к боевой базе.
+#
+# Импорт и регистрация именно ЗДЕСЬ, а не рядом с `app = Flask(__name__)`:
+# на той строке ещё не определены ни require_api_key (4110), ни
+# _resolve_requester (3885), ни _build_cors_preflight_response (4112), и
+# передать их фабрике было бы нечем. Обратный импорт из wiki.routes сюда
+# запрещён — вышел бы цикл.
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    from wiki.routes import build_wiki_blueprint  # noqa: E402
+
+    app.register_blueprint(build_wiki_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        client_ip=_client_ip,
+    ))
+    logging.info("Раздел «Вики»: Blueprint подключён на /api/wiki")
+except Exception:
+    # Раздел не должен уметь уронить весь портал при старте. Если Blueprint не
+    # собрался — остальные 362 роута и бот работают штатно, а вики отвечает 404,
+    # что фронт показывает как «Раздел недоступен».
+    logging.exception("Раздел «Вики»: Blueprint НЕ подключён")
+
+
 def extract_fio_and_links(spreadsheet_url):
     try:
         match = re.search(r"/d/([a-zA-Z0-9_-]+)", spreadsheet_url)

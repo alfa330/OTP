@@ -42,8 +42,18 @@ NO_PERMISSIONS = {name: False for name in PERMISSION_COLUMNS}
 NO_CAPABILITIES = {name: False for name in CAPABILITY_COLUMNS}
 
 
+# В базе исторически встречаются оба написания. _normalize_user_role
+# (bot_schedule2.py:1492) приводит их к канону — повторяем то же самое, иначе
+# носитель роли 'superadmin' не подпал бы ни под одно правило.
+_ROLE_ALIASES = {
+    'superadmin': 'super_admin',
+    'super admin': 'super_admin',
+}
+
+
 def normalize_role(role):
-    return str(role or '').strip().lower()
+    value = str(role or '').strip().lower()
+    return _ROLE_ALIASES.get(value, value)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

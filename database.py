@@ -5127,6 +5127,7 @@ class Database:
             self._init_amo_leads_schema_tx(cursor)
             self._init_chat_hourly_schema_tx(cursor)
             self._init_reg_contest_schema_tx(cursor)
+            self._init_wiki_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5377,6 +5378,40 @@ class Database:
             cursor.execute(
                 "UPDATE chat_hourly_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
                 (str(chat_id),))
+
+    def _init_wiki_schema_tx(self, cursor):
+        """Схема раздела «Вики» (таблицы wiki_*).
+
+        Сам DDL живёт в пакете wiki/schema.py, а не здесь: раздел большой
+        (20 таблиц), и держать его в database.py, где уже 48k строк, незачем.
+        Импорт локальный — на уровне модуля он создал бы цикл, потому что
+        database импортируется отовсюду.
+
+        SAVEPOINT нужен вот почему: весь _init_db идёт ОДНОЙ транзакцией, и
+        падение здесь уронило бы инициализацию всей базы — приложение просто
+        не поднялось бы из-за раздела с базой знаний. С савпоинтом отказ
+        локален: остальные подсистемы стартуют штатно, а раздел честно
+        сообщает о себе через /api/wiki/ping (schema_ready=false), и в
+        интерфейсе видно «раздел разворачивается».
+
+        Это сознательно не «тихий except»: в оригинальной вике вся инициализация
+        была обёрнута одним try/catch с console.error, из-за чего на чистой базе
+        половина таблиц молча не создавалась и никто об этом не знал.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT wiki_schema")
+        try:
+            from wiki.schema import init_wiki_schema
+            init_wiki_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT wiki_schema")
+            logging.exception(
+                "Схема раздела «Вики» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT wiki_schema")
 
     def _init_reg_contest_schema_tx(self, cursor):
         """Конкурс «Топ по регистрациям» (данные из CRM yataxi).

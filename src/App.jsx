@@ -132,6 +132,7 @@ const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupCh
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
+const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
@@ -204,6 +205,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     tasks: 'Tasks',
     technical_issues: 'Technical issues',
     trainings: 'Trainings',
+    wiki: 'Wiki',
     work_schedules: 'Work schedules'
 });
 const APP_SUBVIEW_ANALYTICS_NAMES = Object.freeze({
@@ -38105,7 +38107,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -38151,7 +38153,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules'].includes(view)) {
+                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -43217,6 +43219,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings' && canAccessSipSettings) return;
+                // «Вики» — база знаний, доступна всем сотрудникам независимо от отдела.
+                // Что человек увидит ВНУТРИ, решают правила разделов и статей на бэкенде,
+                // а не этот гард: у раздела своя модель прав с точностью до статьи.
+                if (view === 'wiki') return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
@@ -44239,6 +44245,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {renderSidebarDividerInner()}
                                     {renderEventsSidebarItemInner()}
 
+                                    {/* «Вики» — база знаний, открыта всем ролям, поэтому пункт
+                                        объявлен один раз здесь, а не продублирован по ролевым
+                                        веткам. Периметр внутри раздела считает бэкенд. */}
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'wiki')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'wiki' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
+                                        </button>
+                                    </li>
+
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
@@ -44657,7 +44676,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
@@ -44772,6 +44791,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <SzovWallboardView
                                     user={user}
                                     canManageBroadcast={canManageSzovBroadcastForUser(user)}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "wiki" && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка Вики…</div>}>
+                                <WikiView
+                                    user={user}
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}

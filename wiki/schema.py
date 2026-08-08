@@ -528,7 +528,11 @@ def init_wiki_schema(cursor):
     базы шла одной транзакцией, как у остальных подсистем проекта.
     """
     for statement in _STATEMENTS:
-        cursor.execute(statement % {'now': _NOW})
+        # Подстановка через str.replace, а НЕ через %-форматирование: в SQL есть
+        # комментарии вида LIKE '%общ%', и любой %-формат на них падает
+        # (ValueError: unsupported format character). psycopg2 интерполяцию тоже
+        # не делает — второй аргумент execute не передаётся.
+        cursor.execute(statement.replace('%(now)s', _NOW))
 
     for row in _SEED_ROLES:
         cursor.execute(
