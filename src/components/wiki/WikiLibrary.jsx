@@ -1,11 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
     BookOpen, ChevronRight, Clock, Eye, FileText, FolderTree, Loader2,
-    Search, Star, TrendingUp,
+    Plus, Search, Star, TrendingUp,
 } from 'lucide-react';
-import { iosCard, iosGroupLabel, iosInput, IosBadge } from '../ui/ios';
+import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
+
+// TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
+// редактора, а не при входе в раздел.
+const WikiEditor = lazy(() => import('./WikiEditor'));
 
 /* Библиотека: дерево разделов слева, статьи справа, статья по клику.
  *
@@ -81,8 +85,9 @@ const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
     </section>
 );
 
-export default function WikiLibrary({ base, headers, showToast, structure }) {
+export default function WikiLibrary({ base, headers, showToast, structure, canCreate }) {
     const [openSlug, setOpenSlug] = useState(null);
+    const [editing, setEditing] = useState(null);   // null | {} | статья
     const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
     const [items, setItems] = useState([]);
@@ -126,6 +131,27 @@ export default function WikiLibrary({ base, headers, showToast, structure }) {
         return spaces.map((space) => ({ space, rows: walk(`root:${space.id}`, 0) }));
     }, [spaces, sections]);
 
+    if (editing) {
+        return (
+            <Suspense fallback={(
+                <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
+                    <Loader2 size={18} className="animate-spin" />
+                    <span className="text-[13px]">Загружаем редактор…</span>
+                </div>
+            )}>
+                <WikiEditor
+                    base={base}
+                    headers={headers}
+                    showToast={showToast}
+                    article={editing.id ? editing : null}
+                    sections={sections}
+                    onClose={() => setEditing(null)}
+                    onSaved={(slug) => { setEditing(null); load(); if (slug) setOpenSlug(slug); }}
+                />
+            </Suspense>
+        );
+    }
+
     if (openSlug) {
         return (
             <WikiArticle
@@ -140,14 +166,21 @@ export default function WikiLibrary({ base, headers, showToast, structure }) {
 
     return (
         <div className="space-y-5">
-            <div className="relative">
-                <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                    className={`${iosInput} pl-10`}
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Поиск по названию и описанию"
-                />
+            <div className="flex flex-wrap items-center gap-2">
+                <div className="relative min-w-[200px] flex-1">
+                    <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                        className={`${iosInput} pl-10`}
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="Поиск по названию и описанию"
+                    />
+                </div>
+                {canCreate && (
+                    <button type="button" className={iosBtnPrimary} onClick={() => setEditing({})}>
+                        <Plus size={15} /> Новая статья
+                    </button>
+                )}
             </div>
 
             <div className="flex flex-col gap-5 lg:flex-row">
