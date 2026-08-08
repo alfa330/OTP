@@ -9,7 +9,8 @@
 одним списком:
 
     {'source', 'id', 'title', 'body', 'at' (ISO), 'view' (раздел фронта),
-     'target' (id внутри раздела, необязателен), 'tone'}
+     'target' (чем раздел открывает элемент: у вики — slug статьи, у остальных
+     id либо None), 'tone'}
 
 `tone` — только 'default' или 'warning'; второй для просроченного (дедлайн
 ознакомления прошёл). Цвет по важности, а не по разделу: пользователю нужно
@@ -49,7 +50,8 @@ def wiki_ack(cursor, viewer):
         """
         SELECT a.id, a.title, aa.due_at,
                aa.due_at IS NOT NULL
-               AND aa.due_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') AS overdue
+               AND aa.due_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') AS overdue,
+               a.slug
           FROM wiki_ack_assignments aa
           JOIN wiki_articles a ON a.id = aa.article_id
          WHERE aa.user_id = %(user_id)s
@@ -69,7 +71,9 @@ def wiki_ack(cursor, viewer):
                                              if row[2] else 'Требуется ознакомление'),
         'at': _iso(row[2]),
         'view': 'wiki',
-        'target': row[0],
+        # Раздел открывает статьи по slug, а не по id — отдаём то, чем он
+        # умеет пользоваться, иначе переход упрётся в корень раздела.
+        'target': row[4],
         'tone': 'warning' if row[3] else 'default',
     } for row in rows[:ITEMS_PER_SOURCE]]
     return len(rows), items

@@ -127,8 +127,9 @@ const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
     </section>
 );
 
-export default function WikiLibrary({ base, headers, showToast, structure, canCreate }) {
-    const [openSlug, setOpenSlug] = useState(null);
+export default function WikiLibrary({ base, headers, showToast, structure, canCreate,
+                                      initialSlug, onInitialSlugConsumed }) {
+    const [openSlug, setOpenSlug] = useState(initialSlug || null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
     const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
@@ -136,6 +137,16 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
     const [home, setHome] = useState(null);
     const [found, setFound] = useState(null);   // null = поиска не было
     const [loading, setLoading] = useState(true);
+
+    /* Статья из уведомления открывается один раз: значение сразу гасится в
+       App, иначе следующий заход в раздел снова открывал бы её поверх того,
+       что пользователь смотрел. Отдельный ref не нужен — гашение и есть
+       признак того, что переход уже отработал. */
+    useEffect(() => {
+        if (!initialSlug) return;
+        setOpenSlug(initialSlug);
+        onInitialSlugConsumed?.();
+    }, [initialSlug, onInitialSlugConsumed]);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];

@@ -34849,6 +34849,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Бейдж «Задачи»: сколько задач ждут действия лично от пользователя.
             const [tasksActionRequiredCount, setTasksActionRequiredCount] = useState(0);
             const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
+            /* Статья, которую надо открыть сразу при входе в «Вики» — приходит
+               из колокола (уведомление об обязательном ознакомлении). Раздел
+               гасит значение, как только его использовал, иначе следующий вход
+               в раздел снова открывал бы ту же статью. */
+            const [wikiInitialSlug, setWikiInitialSlug] = useState(null);
+            const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
             const [fourYouUnreadCount, setFourYouUnreadCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -43447,8 +43453,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             const stableNotificationsNavigate = useCallback((nextView, target) => {
                 if (!nextView) return;
-                // target (id статьи/поста/опроса) раздел подхватит сам из своего
-                // состояния — здесь достаточно довести до нужного раздела.
+                /* Вики — единственный раздел, которому переход по target нужен
+                   по делу: статья под обязательное ознакомление лежит внутри
+                   раздела, и высадка в его корень заставляла бы искать её
+                   руками. В «Ивентах» и «Опросах» нужный элемент и так наверху
+                   списка, поэтому им достаточно самого перехода. */
+                if (nextView === 'wiki' && target) setWikiInitialSlug(String(target));
                 sidebarLatestRef.current.navigateToView?.(nextView);
             }, []);
             /* Бейджи «Ивенты» и «4 You» питаются из ответа колокола. Оба числа
@@ -44817,6 +44827,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    initialArticleSlug={wikiInitialSlug}
+                                    onInitialArticleConsumed={clearWikiInitialSlug}
                                 />
                             </Suspense>
                         )}

@@ -58,7 +58,8 @@ const StatTile = ({ icon: Icon, value, label }) => (
     </div>
 );
 
-export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user }) {
+export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
+                                   initialArticleSlug, onInitialArticleConsumed }) {
     const headers = useMemo(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -110,6 +111,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     useEffect(() => {
         if (tabs.length && !tabs.some((t) => t.key === tab)) setTab('library');
     }, [tabs, tab]);
+
+    /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
+       даже если в прошлый раз ушли, например, в «Доступы». */
+    useEffect(() => {
+        if (initialArticleSlug) setTab('library');
+    }, [initialArticleSlug]);
 
     const refresh = () => {
         Promise.all([loadPing(), loadStructure()])
@@ -298,6 +305,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         showToast={showToast}
                         structure={structure}
                         canCreate={!!capabilities.can_create}
+                        initialSlug={initialArticleSlug}
+                        onInitialSlugConsumed={onInitialArticleConsumed}
                     />
                 )}
 
