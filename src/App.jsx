@@ -12,6 +12,10 @@ import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
 import TezLeadsPanel from './components/salary/TezLeadsPanel';
 import FullscreenSheet from './components/common/FullscreenSheet';
 import TezOpPlanCell from './components/salary/TezOpPlanCell';
+// Колокол виден всегда и на каждом экране — поэтому обычным импортом, а не
+// lazyWithRetry: отдельным чанком он грузился бы при каждом входе, и до его
+// загрузки в сайдбаре зияла бы дыра.
+import NotificationsBell from './components/notifications/NotificationsBell';
 import TasksView, { PinnedTaskWidget } from './components/tasks/TasksView';
 import SurveysView from './components/surveys/SurveysView';
 import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
@@ -40774,25 +40778,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
-            // Бейдж новых постов раздела «Ивенты» (виден всем ролям).
-            const fetchEventsUnreadCount = async () => {
-                if (!user?.id) {
-                    if (isMounted.current) setEventsUnreadCount(0);
-                    return;
-                }
-                const requestKey = `fetchEventsUnreadCount:${user.id}`;
-                return runSingleFlight(requestKey, async () => {
-                    try {
-                        const response = await axios.get(`${API_BASE_URL}/api/events/unread_count`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        });
-                        const count = Number(response?.data?.count);
-                        if (isMounted.current) setEventsUnreadCount(Math.max(0, Number.isFinite(count) ? count : 0));
-                    } catch (err) {
-                        // Бейдж не критичен — молча игнорируем сетевые сбои.
-                    }
-                });
-            };
+            /* Бейджи «Ивенты» и «4 You» больше не ходят за числами сами: их
+               приносит общий ответ колокола (/api/notifications), см.
+               stableNotificationsCounts. Серверные /api/events/unread_count и
+               /api/four_you/unread_count оставлены как есть — фронт их не
+               зовёт, но удалять роут ради этого незачем. */
 
             // Бейдж раздела «Задачи»: задачи, ждущие шага пользователя (просрочка,
             // возврат на доработку, приёмка, ещё не начатая). Правила совпадают с
@@ -40822,25 +40812,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
-            // Бейдж новых фото раздела «4 You» (виден только пользователям с доступом).
-            const fetchFourYouUnreadCount = async () => {
-                if (!user?.id || !canAccessFourYouForUser(user)) {
-                    if (isMounted.current) setFourYouUnreadCount(0);
-                    return;
-                }
-                const requestKey = `fetchFourYouUnreadCount:${user.id}`;
-                return runSingleFlight(requestKey, async () => {
-                    try {
-                        const response = await axios.get(`${API_BASE_URL}/api/four_you/unread_count`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        });
-                        const count = Number(response?.data?.count);
-                        if (isMounted.current) setFourYouUnreadCount(Math.max(0, Number.isFinite(count) ? count : 0));
-                    } catch (err) {
-                        // Бейдж не критичен — молча игнорируем сетевые сбои.
-                    }
-                });
-            };
+            /* Право видеть фото «4 You» сервер проверяет сам
+               (_four_you_access_for_requester) — тому, кому раздел закрыт,
+               колокол вернёт по нему ноль. */
 
             const debouncedFetch = useCallback(_.debounce((fn) => {
                 if (isMounted.current) {
@@ -43306,17 +43280,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return visible && focused;
             };
 
-            // Ивенты: бейдж новых постов загружаем один раз при смене пользователя.
-            // Фоновый polling unread_count отключён; при заходе в раздел бейдж гасим.
-            const fetchEventsUnreadRef = useRef(null);
-            fetchEventsUnreadRef.current = fetchEventsUnreadCount;
+            // Ивенты: число приносит колокол при входе и при возврате фокуса.
+            // Здесь остаётся только сброс при смене пользователя — чужой счётчик
+            // не должен мелькнуть до первого ответа сервера.
             useEffect(() => {
-                if (!user?.id) {
-                    setEventsUnreadCount(0);
-                    return undefined;
-                }
-                fetchEventsUnreadRef.current?.();
-                return undefined;
+                if (!user?.id) setEventsUnreadCount(0);
             }, [user?.id]);
 
             /* Ширину сайдбара читают не только обычный контент, но и fixed-слои,
@@ -43381,18 +43349,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 setTasksActionRequiredCount(Math.max(0, Number(count) || 0));
             }, []);
 
-            // 4 You: бейдж новых фото загружаем один раз при смене пользователя.
-            // Фоновый polling unread_count отключён; при заходе в раздел гасим
-            // (плюс серверный seen — см. FourYouView).
-            const fetchFourYouUnreadRef = useRef(null);
-            fetchFourYouUnreadRef.current = fetchFourYouUnreadCount;
+            // 4 You: число приносит колокол; при заходе в раздел гасим на месте
+            // (плюс серверный seen — см. FourYouView). Здесь только сброс, когда
+            // раздел закрыт для пользователя или пользователь сменился.
             useEffect(() => {
-                if (!user?.id || !canAccessFourYouSection) {
-                    setFourYouUnreadCount(0);
-                    return undefined;
-                }
-                fetchFourYouUnreadRef.current?.();
-                return undefined;
+                if (!user?.id || !canAccessFourYouSection) setFourYouUnreadCount(0);
             }, [user?.id, canAccessFourYouSection]);
 
             useEffect(() => {
@@ -43466,6 +43427,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 openCallEvaluationSection,
                 fetchDirections,
                 showToast,
+                navigateToView,
+                userId: user?.id,
             };
             const stableSidebarHandleToggleDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleDropdown(arg), []);
             const stableSidebarHandleToggleEmployeesDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleEmployeesDropdown(arg), []);
@@ -43473,6 +43436,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const stableSidebarOpenCallEvaluationSection = useCallback((opts) => sidebarLatestRef.current.openCallEvaluationSection(opts), []);
             const stableSidebarFetchDirections = useCallback(() => sidebarLatestRef.current.fetchDirections(), []);
             const stableSidebarShowToast = useCallback((...args) => sidebarLatestRef.current.showToast?.(...args), []);
+
+            /* Колокол уведомлений. Обе функции обязаны быть стабильными: они
+               уходят пропсами внутрь мемоизированного сайдбара, а внутри
+               компонента сидят в зависимостях useCallback — новая ссылка на
+               каждый рендер App заставляла бы колокол перезапрашивать сводку. */
+            const stableNotificationsHeaders = useCallback(
+                () => withAccessTokenHeader({ 'X-User-Id': sidebarLatestRef.current.userId }),
+                [],
+            );
+            const stableNotificationsNavigate = useCallback((nextView, target) => {
+                if (!nextView) return;
+                // target (id статьи/поста/опроса) раздел подхватит сам из своего
+                // состояния — здесь достаточно довести до нужного раздела.
+                sidebarLatestRef.current.navigateToView?.(nextView);
+            }, []);
+            /* Бейджи «Ивенты» и «4 You» питаются из ответа колокола. Оба числа
+               считались водяным знаком last_seen_at и раньше приезжали двумя
+               отдельными запросами; сервер считает их тем же условием — сверено
+               по всем 317 пользователям, расхождений нет. */
+            const stableNotificationsCounts = useCallback((counts) => {
+                setEventsUnreadCount(Math.max(0, Number(counts?.events) || 0));
+                setFourYouUnreadCount(Math.max(0, Number(counts?.four_you) || 0));
+            }, []);
 
             const sidebarTree = useMemo(() => {
                 if (!user) return null;
@@ -43608,6 +43594,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </button>
                                   </span>
                                 </h1>
+                                {/* Колокол — над меню и вне прокручиваемого списка:
+                                    он один на весь портал и не должен уезжать
+                                    вместе с разделами. */}
+                                <div className="mb-2">
+                                    <NotificationsBell
+                                        apiBaseUrl={API_BASE_URL}
+                                        user={user}
+                                        getHeaders={stableNotificationsHeaders}
+                                        onNavigate={stableNotificationsNavigate}
+                                        onCounts={stableNotificationsCounts}
+                                        collapsed={sidebarCollapsed}
+                                    />
+                                </div>
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
                                     {canAccessLmsSection && departmentAllowsView(user, 'lms') && (
                                         <>

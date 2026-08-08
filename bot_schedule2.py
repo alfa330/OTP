@@ -46420,6 +46420,58 @@ except Exception:
     logging.exception("Раздел «Вики»: Blueprint НЕ подключён")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Центр уведомлений — второй Blueprint, по той же схеме внедрения зависимостей.
+#
+# Собирает в один ответ то, что до него спрашивали пятью запросами при каждом
+# входе: «Ивенты», «4 You», «Обучение», «Опросы» и — с появлением вики —
+# статьи под обязательное ознакомление. Пять запросов означали пять соединений
+# из общего пула, того самого, что держит SSE аукциона смен.
+# ─────────────────────────────────────────────────────────────────────────────
+def _notifications_viewer_context(requester_id, requester):
+    """Единый портрет зрителя для всех источников уведомлений.
+
+    Границы считаются теми же функциями, что и в самих разделах, а не заново:
+    видимость постов — _events_viewer_scope, доступ к фото —
+    _four_you_access_for_requester. Иначе колокол показывал бы не то же
+    самое, что раздел, и это заметили бы как «бейдж врёт».
+
+    Отдельного гейта по роли для вики здесь нет и он не нужен: назначение на
+    ознакомление создаётся адресно — админ выбирает конкретных людей, — а права
+    на саму статью проверяются при её открытии. Показать «вас ждёт документ»
+    тому, кому его назначили, правильно в любом случае.
+    """
+    role = _normalize_user_role(requester[3] if requester else None)
+    is_global, viewer_dept = _events_viewer_scope(requester_id, role)
+    can_see_four_you, _ = _four_you_access_for_requester(requester_id, requester)
+
+    return {
+        'user_id': int(requester_id),
+        'role': role,
+        'department_id': viewer_dept,
+        'is_global': is_global,
+        'can_see_four_you': bool(can_see_four_you),
+        'hidden_sources': (),
+    }
+
+
+try:
+    from notifications.routes import build_notifications_blueprint  # noqa: E402
+
+    app.register_blueprint(build_notifications_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        viewer_context=_notifications_viewer_context,
+    ))
+    logging.info("Центр уведомлений: Blueprint подключён на /api/notifications")
+except Exception:
+    # Колокол — удобство, а не функция портала: не собрался, значит фронт
+    # молча остаётся без него и показывает бейджи разделов как раньше.
+    logging.exception("Центр уведомлений: Blueprint НЕ подключён")
+
+
 def extract_fio_and_links(spreadsheet_url):
     try:
         match = re.search(r"/d/([a-zA-Z0-9_-]+)", spreadsheet_url)
