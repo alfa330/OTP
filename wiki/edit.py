@@ -1,6 +1,7 @@
 """SQL правки статей: создание, обновление, версии, правила уровня статьи."""
 
 from .sanitize import sanitize_html, to_plain_text
+from .search import refresh_aliases
 
 
 def _next_version(cursor, article_id):
@@ -29,6 +30,10 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
     article_id = cursor.fetchone()[0]
     set_sections(cursor, article_id, section_ids)
     set_tags(cursor, article_id, tags)
+    # Варианты написания считаем ОДИН раз при сохранении. В оригинале они
+    # вычислялись на каждый поисковый запрос и превращались в четыре
+    # обращения к движку.
+    refresh_aliases(cursor, article_id)
     snapshot_version(cursor, article_id, editor_id=author_id, session_id=None,
                      comment='Создание статьи')
     return article_id
@@ -71,7 +76,10 @@ def update_article(cursor, article_id, fields, *, editor_id, session_id, comment
     sets.append("updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')")
     values.append(article_id)
     cursor.execute('UPDATE wiki_articles SET ' + ', '.join(sets) + ' WHERE id = %s', values)
-    return cursor.rowcount > 0
+    changed = cursor.rowcount > 0
+    if changed:
+        refresh_aliases(cursor, article_id)
+    return changed
 
 
 def normalize_session_id(value):

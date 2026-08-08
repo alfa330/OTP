@@ -521,6 +521,47 @@ _SEED_ROLES = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Поиск
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Генерируемая колонка вместо триггера: значение не может разъехаться с текстом
+# в принципе. Это структурно снимает баг оригинала, где массовая переиндексация
+# заливала в поисковый движок пустое тело статьи (models/article.ts: '' as content),
+# и после каждого рестарта поиск работал только через ILIKE-фолбэк.
+#
+# Веса: заголовок > алиасы > описание > текст. В Meilisearch приоритетов было
+# девять, в Postgres их четыре (A-D) — разница есть, но алиасы забирают на себя
+# ровно тот слой, ради которого в оригинале держали отдельные searchable-поля.
+_SEARCH_STATEMENTS = [
+    """
+    ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS search_vector tsvector
+        GENERATED ALWAYS AS (
+            setweight(to_tsvector('russian', coalesce(title, '')),          'A') ||
+            setweight(to_tsvector('russian', coalesce(search_aliases, '')), 'B') ||
+            setweight(to_tsvector('russian', coalesce(summary, '')),        'C') ||
+            setweight(to_tsvector('russian', coalesce(content_plain, '')),  'D')
+        ) STORED;
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_articles_fts ON wiki_articles USING GIN (search_vector);",
+]
+
+# Опечатки и префиксный поиск. Отдельно и под своим савпоинтом: расширение
+# требует прав, и если их нет — поиск обязан продолжить работать на одном FTS,
+# а не утащить за собой всю схему раздела.
+_TRIGRAM_STATEMENTS = [
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+    """
+    CREATE INDEX IF NOT EXISTS idx_wiki_articles_title_trgm
+        ON wiki_articles USING GIN (lower(title) gin_trgm_ops);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_wiki_articles_aliases_trgm
+        ON wiki_articles USING GIN (lower(search_aliases) gin_trgm_ops);
+    """,
+]
+
+
 def init_wiki_schema(cursor):
     """Создаёт/дополняет схему раздела «Вики». Идемпотентно.
 
@@ -545,3 +586,32 @@ def init_wiki_schema(cursor):
             """,
             row,
         )
+
+    for statement in _SEARCH_STATEMENTS:
+        cursor.execute(statement)
+
+    # Триграммы — под собственным савпоинтом. Расширение может быть недоступно
+    # по правам; тогда поиск остаётся полнотекстовым (без опечаток), а схема
+    # раздела не откатывается целиком.
+    cursor.execute('SAVEPOINT wiki_trgm')
+    try:
+        for statement in _TRIGRAM_STATEMENTS:
+            cursor.execute(statement)
+    except Exception:
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_trgm')
+        import logging
+        logging.warning(
+            'Раздел «Вики»: pg_trgm недоступен — поиск будет без опечаток '
+            '(полнотекстовый работает)'
+        )
+    else:
+        cursor.execute('RELEASE SAVEPOINT wiki_trgm')
+
+
+def trigram_available(cursor):
+    """Установлено ли pg_trgm — от этого зависит форма поискового запроса."""
+    try:
+        cursor.execute("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'")
+        return cursor.fetchone() is not None
+    except Exception:
+        return False
