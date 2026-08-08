@@ -170,4 +170,7 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     from . import routes_ack
     routes_ack.register(bp, wiki_route, db, _ip)
 
+    from . import routes_parks
+    routes_parks.register(bp, wiki_route, db, _ip)
+
     return bp

@@ -522,6 +522,67 @@ _SEED_ROLES = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Таксопарки и акции
+#
+# Автономная фича на три таблицы: к статьям она не привязана и живёт своей
+# вкладкой. В проде вики её содержимым не пользовались (16 парков — ровно
+# захардкоженный сид, акций ноль), поэтому переносим механику, а не данные:
+# заполнять начнут заново.
+#
+# Публичных эндпоинтов, в отличие от оригинала, не будет: там GET по паркам и
+# акциям отдавались без авторизации вообще.
+# ─────────────────────────────────────────────────────────────────────────────
+_PARK_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_taxi_parks (
+        id            SERIAL PRIMARY KEY,
+        slug          VARCHAR(120) NOT NULL UNIQUE,
+        name          VARCHAR(255) NOT NULL,
+        description   TEXT,
+        city          VARCHAR(120),
+        phone         VARCHAR(64),
+        address       TEXT,
+        website       TEXT,
+        commission    NUMERIC(5,2),
+        logo_file_id  UUID REFERENCES wiki_files(id) ON DELETE SET NULL,
+        status        VARCHAR(16) NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'archived')),
+        position      INTEGER NOT NULL DEFAULT 0,
+        created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at    TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_parks_order ON wiki_taxi_parks(status, position, id);",
+    """
+    CREATE TABLE IF NOT EXISTS wiki_promotions (
+        id            SERIAL PRIMARY KEY,
+        title         VARCHAR(255) NOT NULL,
+        description   TEXT,
+        content       TEXT NOT NULL DEFAULT '',
+        banner_file_id UUID REFERENCES wiki_files(id) ON DELETE SET NULL,
+        starts_at     TIMESTAMP,
+        ends_at       TIMESTAMP,
+        status        VARCHAR(16) NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'archived')),
+        created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at    TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_promotions_period ON wiki_promotions(status, ends_at);",
+    """
+    CREATE TABLE IF NOT EXISTS wiki_promotion_taxi_parks (
+        promotion_id INTEGER NOT NULL REFERENCES wiki_promotions(id) ON DELETE CASCADE,
+        park_id      INTEGER NOT NULL REFERENCES wiki_taxi_parks(id) ON DELETE CASCADE,
+        PRIMARY KEY (promotion_id, park_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_promo_parks_park ON wiki_promotion_taxi_parks(park_id);",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Поиск
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -586,6 +647,9 @@ def init_wiki_schema(cursor):
             """,
             row,
         )
+
+    for statement in _PARK_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
 
     for statement in _SEARCH_STATEMENTS:
         cursor.execute(statement)
