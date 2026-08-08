@@ -295,6 +295,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         headers={headers}
                         showToast={showToast}
                         structure={structure}
+                        canCreate={!!capabilities.can_create}
                     />
                 )}
 
