@@ -211,6 +211,67 @@ class MarkSeenRulesTest(unittest.TestCase):
         self.assertFalse(sources.mark_seen(FakeCursor(), 1, 'нет-такого'))
 
 
+class SeenEndpointTest(unittest.TestCase):
+    """Разбор тела запроса у POST /seen — на подставном курсоре, без базы."""
+
+    def setUp(self):
+        from flask import Flask
+        from notifications.routes import build_notifications_blueprint
+
+        self.executed = []
+        outer = self
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                outer.executed.append(sql.strip().split()[0].upper())
+
+        class Db:
+            def _get_cursor(self):
+                import contextlib
+
+                @contextlib.contextmanager
+                def cm():
+                    yield Cursor()
+                return cm()
+
+        app = Flask(__name__)
+        app.register_blueprint(build_notifications_blueprint(
+            db=Db(), require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (2, None, None),
+            viewer_context=lambda rid, r: {'user_id': rid},
+        ))
+        self.client = app.test_client()
+
+    def post(self, payload):
+        return self.client.post('/api/notifications/seen', json=payload)
+
+    def test_duplicates_are_collapsed(self):
+        """Иначе лишний UPDATE и ответ вида ["events", "events"]."""
+        response = self.post({'sources': ['events', 'events', 'four_you']})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(['events', 'four_you'], response.get_json()['marked'])
+        self.assertEqual(2, len(self.executed), 'на каждый источник ровно один запрос')
+
+    def test_unknown_source_is_rejected_without_touching_db(self):
+        response = self.post({'sources': ['нет-такого']})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual([], self.executed)
+
+    def test_single_source_form_works(self):
+        self.assertEqual(['lms'], self.post({'source': 'lms'}).get_json()['marked'])
+
+    def test_empty_body_is_rejected(self):
+        self.assertEqual(400, self.post({}).status_code)
+
+    def test_action_bound_source_is_accepted_but_marks_nothing(self):
+        """Фронт его не шлёт, но ответ обязан быть честным: ничего не погашено."""
+        response = self.post({'sources': ['wiki_ack']})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual([], response.get_json()['marked'])
+        self.assertEqual([], self.executed)
+
+
 class FrontendAgreesWithBackendTest(unittest.TestCase):
     """Списки гасимых источников во фронте и в бэке обязаны совпадать."""
 

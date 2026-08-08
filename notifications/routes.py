@@ -69,7 +69,14 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
 
         body = request.get_json(silent=True) or {}
         requested = body.get('sources') or ([body['source']] if body.get('source') else [])
-        wanted = [s for s in requested if s in notif_sources.SOURCES]
+        # Дубликаты отсеиваем: повторное гашение того же источника — лишний
+        # UPDATE и вводящий в заблуждение ответ ("marked": ["events","events"]).
+        # Порядок сохраняем, он определяет порядок запросов.
+        wanted, seen_names = [], set()
+        for name in requested:
+            if name in notif_sources.SOURCES and name not in seen_names:
+                seen_names.add(name)
+                wanted.append(name)
         if not wanted:
             return jsonify({"error": "Не указан источник"}), 400
 
