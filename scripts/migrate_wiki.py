@@ -252,12 +252,32 @@ def existing_by_name(api, path, key='items'):
             for item in (data.get(key) or [])}
 
 
+def existing_by_name(api, path, key='items'):
+    """Что уже есть в разделе — чтобы повторный запуск не плодил дубли.
+
+    Архивные пропускаем: если пространство убрали в архив осознанно, повторный
+    перенос не должен молча его воскрешать и складывать туда статьи.
+    """
+    try:
+        data = api.call('GET', path)
+    except RuntimeError:
+        return {}
+    result = {}
+    for item in (data.get(key) or []):
+        if item.get('status') == 'archived':
+            continue
+        result[(item.get('name') or '').strip().lower()] = item.get('id')
+    return result
+
+
 def existing_slugs(api):
     try:
         data = api.call('GET', '/api/wiki/articles?limit=200')
     except RuntimeError:
         return {}
-    return {(item.get('slug') or ''): item.get('id') for item in (data.get('items') or [])}
+    return {(item.get('slug') or ''): item.get('id')
+            for item in (data.get('items') or [])
+            if item.get('status') != 'archived'}
 
 
 def migrate(api, dump, only=None, open_by_role=False):
@@ -276,8 +296,15 @@ def migrate(api, dump, only=None, open_by_role=False):
 
     # 1. Пространства
     log('\n=== ПРОСТРАНСТВА ===')
+    have_spaces = existing_by_name(api, '/api/wiki/spaces')
     space_map = {}
     for old_id, space in sorted(spaces.items()):
+        key = space['name'].strip().lower()
+        if key in have_spaces:
+            space_map[old_id] = have_spaces[key]
+            stats['reused'] += 1
+            log('   %-26s уже есть, id=%s' % (space['name'], have_spaces[key]))
+            continue
         response = api.call('POST', '/api/wiki/spaces',
                             {'name': space['name'], 'description': space.get('description')},
                             label='«%s»' % space['name'])
@@ -287,8 +314,15 @@ def migrate(api, dump, only=None, open_by_role=False):
 
     # 2. Разделы
     log('\n=== РАЗДЕЛЫ ===')
+    have_sections = existing_by_name(api, '/api/wiki/sections')
     section_map = {}
     for old_id, section in sorted(sections.items()):
+        key = section['name'].strip().lower()
+        if key in have_sections:
+            section_map[old_id] = have_sections[key]
+            stats['reused'] += 1
+            log('   %-26s уже есть, id=%s' % (section['name'], have_sections[key]))
+            continue
         rule = SECTION_RULES.get(section['name'], CLOSED) if open_by_role else CLOSED
         response = api.call('POST', '/api/wiki/sections', {
             'space_id': space_map.get(section['space_id']),
@@ -320,9 +354,15 @@ def migrate(api, dump, only=None, open_by_role=False):
 
     # 4. Статьи
     log('\n=== СТАТЬИ ===')
+    have_slugs = existing_slugs(api)
     for article in live_articles(dump):
         if only and article['id'] not in only:
             stats['skipped'] += 1
+            continue
+        if article.get('slug') in have_slugs:
+            stats['reused'] += 1
+            log('   #%-4s %-46s уже перенесена, id=%s' % (
+                article['id'], article['title'][:46], have_slugs[article['slug']]))
             continue
 
         target_sections = [section_map[s] for s in sections_by_article.get(article['id'], [])
