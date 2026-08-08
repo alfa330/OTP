@@ -25,7 +25,7 @@ from . import queries
 
 
 def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                         resolve_requester, client_ip=None):
+                         resolve_requester, client_ip=None, gcs=None):
     """Собирает Blueprint раздела.
 
     Все зависимости приходят аргументами — импортировать их из bot_schedule2
@@ -36,7 +36,10 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     build_cors_preflight_response— ответ на OPTIONS;
     resolve_requester            — () -> (user_id, user_row, error),
                                    где error = (message, status_code) или None;
-    client_ip                    — () -> str, для журнала.
+    client_ip                    — () -> str, для журнала;
+    gcs                          — {'signed_url': fn, 'bucket_name': fn} для
+                                   прокси файлов: подпись выдаётся на каждый
+                                   запрос, а не вшивается в тело статьи.
 
     Префикс ОБЯЗАН начинаться с /api: на этом завязаны CORS и оба before_request
     (hydrate_user_context_from_jwt первой строкой отсекает всё, что не /api/,
@@ -147,9 +150,12 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "group_ids": ctx['group_ids'],
         })
 
-    # Структура и доступы — отдельным модулем, чтобы этот файл остался про
-    # каркас Blueprint'а, а не превратился во второй bot_schedule2.py.
+    # Структура, доступы и статьи — отдельными модулями, чтобы этот файл остался
+    # про каркас Blueprint'а, а не превратился во второй bot_schedule2.py.
     from . import routes_structure
     routes_structure.register(bp, wiki_route, db, _ip)
+
+    from . import routes_articles
+    routes_articles.register(bp, wiki_route, db, _ip, gcs or {})
 
     return bp
