@@ -34855,6 +34855,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                в раздел снова открывал бы ту же статью. */
             const [wikiInitialSlug, setWikiInitialSlug] = useState(null);
             const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
+
+            /* Раздел прочитан — колокол обязан узнать об этом сам.
+               Связь была односторонней: заход в «Ивенты» гасил бейдж в сайдбаре,
+               но собственные counts колокола оставались прежними, и он до конца
+               сессии показывал «2 новых поста» в двух сантиметрах от погашенного
+               бейджа. Гасим локально, без запроса: сервер вернёт тот же ноль при
+               следующем обновлении — раздел уже отправил свой seen. */
+            const [bellReadSource, setBellReadSource] = useState(null);
+            const bellReadNonceRef = useRef(0);
+            const markBellSourceRead = useCallback((source) => {
+                bellReadNonceRef.current += 1;
+                setBellReadSource({ source, nonce: bellReadNonceRef.current });
+            }, []);
             const [fourYouUnreadCount, setFourYouUnreadCount] = useState(0);
             const [newSvName, setNewSvName] = useState('');
             const [newTableUrl, setNewTableUrl] = useState('');
@@ -43305,9 +43318,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 return () => document.body.classList.remove('sidebar-collapsed');
             }, [sidebarCollapsed]);
 
+            /* Ушли из вики раньше, чем библиотека успела смонтироваться и
+               погасить slug — значение обязано сброситься здесь. Иначе
+               следующий обычный заход в раздел открыл бы чужую статью вместо
+               списка, и человек не понял бы, откуда она взялась. */
             useEffect(() => {
-                if (view === 'events') setEventsUnreadCount(0);
+                if (view !== 'wiki') setWikiInitialSlug(null);
             }, [view]);
+
+            useEffect(() => {
+                if (view !== 'events') return;
+                setEventsUnreadCount(0);
+                markBellSourceRead('events');
+            }, [view, markBellSourceRead]);
 
             // Задачи: бейдж «ждут вашего действия». Без фонового опроса — задача
             // появляется от чужого действия, а не сама по себе, и увидеть её нужно
@@ -43363,8 +43386,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, canAccessFourYouSection]);
 
             useEffect(() => {
-                if (view === 'four_you') setFourYouUnreadCount(0);
-            }, [view]);
+                if (view !== 'four_you') return;
+                setFourYouUnreadCount(0);
+                markBellSourceRead('four_you');
+            }, [view, markBellSourceRead]);
 
             useEffect(() => {
                 if (view !== 'evaluation') {
@@ -43435,6 +43460,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 showToast,
                 navigateToView,
                 userId: user?.id,
+                // Нужен колоколу: он не должен зажигать бейдж раздела, который
+                // пользователь прямо сейчас читает.
+                view,
             };
             const stableSidebarHandleToggleDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleDropdown(arg), []);
             const stableSidebarHandleToggleEmployeesDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleEmployeesDropdown(arg), []);
@@ -43464,10 +43492,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             /* Бейджи «Ивенты» и «4 You» питаются из ответа колокола. Оба числа
                считались водяным знаком last_seen_at и раньше приезжали двумя
                отдельными запросами; сервер считает их тем же условием — сверено
-               по всем 317 пользователям, расхождений нет. */
+               по всем 317 пользователям, расхождений нет.
+
+               Два защитных условия, оба не гипотетические:
+               1) обновляем бейдж ТОЛЬКО если ключ реально пришёл. Ответ без
+                  ключей источников означает, что сводку собрать не удалось, и
+                  трактовать это как «ноль непрочитанного» нельзя;
+               2) не трогаем бейдж раздела, который у пользователя сейчас
+                  открыт. Иначе при заходе сразу в ?view=events ответ колокола
+                  приезжает ПОСЛЕ эффекта, гасящего бейдж, и число залипает
+                  ненулевым, пока человек читает те самые посты. */
             const stableNotificationsCounts = useCallback((counts) => {
-                setEventsUnreadCount(Math.max(0, Number(counts?.events) || 0));
-                setFourYouUnreadCount(Math.max(0, Number(counts?.four_you) || 0));
+                if (!counts || typeof counts !== 'object') return;
+                const currentView = sidebarLatestRef.current?.view;
+                const apply = (key, setter, viewName) => {
+                    if (!(key in counts)) return;
+                    const value = currentView === viewName
+                        ? 0
+                        : Math.max(0, Number(counts[key]) || 0);
+                    setter(value);
+                };
+                apply('events', setEventsUnreadCount, 'events');
+                apply('four_you', setFourYouUnreadCount, 'four_you');
             }, []);
 
             const sidebarTree = useMemo(() => {
@@ -43614,6 +43660,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         getHeaders={stableNotificationsHeaders}
                                         onNavigate={stableNotificationsNavigate}
                                         onCounts={stableNotificationsCounts}
+                                        readSource={bellReadSource}
                                         collapsed={sidebarCollapsed}
                                     />
                                 </div>
@@ -44453,6 +44500,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tasksActionRequiredCount,
                 eventsUnreadCount,
                 fourYouUnreadCount,
+                bellReadSource,
                 selectedSvId,
                 selectedReportMonth,
                 selectedMonth,

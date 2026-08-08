@@ -48,7 +48,8 @@ const fmtWhen = (iso) => {
 /* getHeaders — функция, а не готовый объект: токен доступа обновляется в фоне,
    и объект, собранный один раз, ушёл бы в запрос протухшим. Заодно не даёт
    новой ссылке на каждый рендер сбрасывать зависимости useCallback. */
-export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate, onCounts, collapsed }) {
+export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate,
+                                            onCounts, readSource, collapsed }) {
     const [open, setOpen] = useState(false);
     const [loading, setLoading] = useState(false);
     const [counts, setCounts] = useState({ total: 0 });
@@ -59,11 +60,16 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const panelRef = useRef(null);
     const fetchedAtRef = useRef(0);
     const aliveRef = useRef(true);
+    // Запрос уже в пути. Отметка свежести ставится только по ответу, поэтому
+    // без этого флага возврат во вкладку при медленной сети слал бы второй
+    // такой же запрос поверх первого.
+    const inFlightRef = useRef(false);
 
     useEffect(() => () => { aliveRef.current = false; }, []);
 
     const load = useCallback(async () => {
-        if (!user?.id) return;
+        if (!user?.id || inFlightRef.current) return;
+        inFlightRef.current = true;
         setLoading(true);
         try {
             const response = await axios.get(`${apiBaseUrl}/api/notifications`, { headers: getHeaders() });
@@ -76,8 +82,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             // и «4 You» ходили за ними своими запросами, считая ровно то же.
             onCounts?.(nextCounts);
         } catch (e) {
-            // Колокол — удобство: сетевой сбой не должен ничего ломать на экране.
+            /* Сетевой сбой или 503 «сводку собрать не удалось». Ничего не
+               трогаем: прежние числа честнее, чем нули, которых сервер не
+               присылал. onCounts намеренно НЕ вызывается — иначе бейджи
+               сайдбара погасли бы из-за недоступности базы. */
         } finally {
+            inFlightRef.current = false;
             if (aliveRef.current) setLoading(false);
         }
     }, [apiBaseUrl, getHeaders, onCounts, user?.id]);
@@ -102,16 +112,43 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         };
     }, [user?.id, load]);
 
+    /* Раздел прочитан — гасим его здесь же, без запроса. Иначе колокол до
+       конца сессии показывал бы «2 новых поста» в двух сантиметрах от уже
+       погашенного бейджа: связь была односторонней. Сервер вернёт тот же ноль
+       при следующем обновлении, раздел уже отправил свой seen. */
+    useEffect(() => {
+        const source = readSource?.source;
+        if (!source) return;
+        setCounts((prev) => {
+            if (!prev || !(source in prev)) return prev;
+            const wasCount = Math.max(0, Number(prev[source]) || 0);
+            if (!wasCount) return prev;
+            return {
+                ...prev,
+                [source]: 0,
+                total: Math.max(0, (Number(prev.total) || 0) - wasCount),
+            };
+        });
+        setItems((prev) => (prev.some((item) => item.source === source)
+            ? prev.filter((item) => item.source !== source)
+            : prev));
+    }, [readSource?.source, readSource?.nonce]);
+
     /* Панель рендерится порталом в body: сайдбар — fixed-слой со своим
        контекстом наложения, и вложенная панель обрезалась бы им при свёрнутом
        состоянии. Координаты считаем от кнопки. */
     const place = useCallback(() => {
         const rect = buttonRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const width = 360;
+        // На телефоне 360px не помещаются рядом с сайдбаром — панель уезжала
+        // за правый край без возможности прокрутки. Ужимаем по месту.
+        const width = Math.min(360, Math.max(240, window.innerWidth - 24));
         const left = Math.min(rect.right + 12, window.innerWidth - width - 12);
+        // Высоту панели ограничивает max-h-[70vh]; на низком экране прижимаем
+        // её к верху, а не к отрицательной координате.
+        const height = Math.min(480, window.innerHeight * 0.7);
         setAnchor({
-            top: Math.max(12, Math.min(rect.top, window.innerHeight - 480)),
+            top: Math.max(12, Math.min(rect.top, window.innerHeight - height - 12)),
             left: Math.max(12, left),
             width,
         });

@@ -517,6 +517,10 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
     const [nextBefore, setNextBefore] = useState(null);
+    // Читается из togglePin: тот работает функциональными апдейтами и не должен
+    // тянуть hasMore в зависимости, иначе пересоздавался бы на каждой подгрузке.
+    const hasMoreRef = useRef(false);
+    hasMoreRef.current = hasMore;
     const [error, setError] = useState('');
     const [layout, setLayout] = useState(readLayout);
     const [canPublish, setCanPublish] = useState(false);
@@ -680,8 +684,20 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                 setPinned((prev) => [moved, ...prev.filter((e) => e.id !== event.id)]);
             } else {
                 setPinned((prev) => prev.filter((e) => e.id !== event.id));
-                setEvents((prev) => [moved, ...prev.filter((e) => e.id !== event.id)]
-                    .sort((a, b) => b.id - a.id));
+                /* Открепление возвращает пост в общую ленту — но только если он
+                   вообще попадает в уже загруженное окно. Пост старее последнего
+                   загруженного принадлежит ещё не показанной странице: вставить
+                   его сюда значит навсегда оставить в середине ленты, потому что
+                   следующая страница допишется ПОД ним, а её id больше. Пусть
+                   придёт на своей странице — подгрузка отсеет дубликат по id. */
+                setEvents((prev) => {
+                    const without = prev.filter((e) => e.id !== event.id);
+                    const oldestLoaded = without.length ? without[without.length - 1].id : null;
+                    if (hasMoreRef.current && oldestLoaded != null && moved.id < oldestLoaded) {
+                        return without;
+                    }
+                    return [...without, moved].sort((a, b) => b.id - a.id);
+                });
             }
             setDetailEvent((prev) => (prev && prev.id === event.id ? moved : prev));
             notify(isPinned ? 'Пост закреплён' : 'Пост откреплён', 'success');

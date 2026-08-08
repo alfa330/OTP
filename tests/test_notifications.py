@@ -57,12 +57,24 @@ class CollectOrderTest(unittest.TestCase):
         sources._HANDLERS.update(mapping)
 
     def test_overdue_goes_first(self):
+        """Просроченное поднимается ВОПРЕКИ порядку источников.
+
+        Важно, какой источник помечен просроченным: wiki_ack идёт первым в
+        SOURCES, и тест с ним проходил бы даже при полностью удалённой
+        сортировке — порядок обеспечила бы сама константа. Поэтому «горит»
+        здесь four_you, последний в SOURCES: подняться наверх он может только
+        сортировкой.
+        """
         self._stub({
+            'wiki_ack': lambda c, v: (1, [_item('wiki_ack', 'Регламент')]),
             'events': lambda c, v: (1, [_item('events', 'Новый пост')]),
-            'wiki_ack': lambda c, v: (1, [_item('wiki_ack', 'Регламент', tone='warning')]),
+            'four_you': lambda c, v: (1, [_item('four_you', 'Просрочено', tone='warning')]),
         })
         _, items = sources.collect(FakeCursor(), {'user_id': 1})
-        self.assertEqual('Регламент', items[0]['title'])
+        self.assertEqual('Просрочено', items[0]['title'])
+        # Остальные обязаны сохранить свой порядок — сортировка устойчивая.
+        self.assertEqual(['Просрочено', 'Регламент', 'Новый пост'],
+                         [i['title'] for i in items])
 
     def test_sources_keep_their_own_order(self):
         """Внутри источника порядок задаёт его ORDER BY и трогать его нельзя.

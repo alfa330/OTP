@@ -47534,6 +47534,11 @@ class Database:
         where = "WHERE " + " AND ".join(conditions)
         columns = """e.id, e.author_id, u.name, u.avatar_bucket, u.avatar_blob_path,
                      e.department_id, d.name, e.title, e.body, e.created_at, e.is_pinned"""
+        # Потолок на закреплённые. Их число ничем не ограничено, а идут они все
+        # на первую страницу — и каждому медиа при отдаче подписывается URL.
+        # Закрепить два десятка постов это уже не закрепление, а вторая лента;
+        # лучше показать первые и не растить первый экран без предела.
+        PINNED_LIMIT = 20
         with self._get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT {columns}
@@ -47559,6 +47564,7 @@ class Database:
                     LEFT JOIN departments d ON d.id = e.department_id
                     WHERE e.is_pinned AND {visible}
                     ORDER BY e.id DESC
+                    LIMIT {PINNED_LIMIT}
                 """, tuple(visible_params))
                 pinned = [self._event_row_basic(r) for r in cursor.fetchall()]
 

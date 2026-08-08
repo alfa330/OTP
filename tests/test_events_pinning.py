@@ -42,6 +42,29 @@ departments AS (SELECT NULL::int AS id, NULL::text AS name)
 """
 
 
+# Заглушка для скоупного зрителя: 11 — обычный для всех, 12 — закреплён для
+# отдела 7, 13 — закреплён для всех, 14 — закреплён для отдела 9.
+_SCOPED_STUB = """
+WITH events AS (
+    SELECT id::int, author_id::int, NULL::int AS department_id,
+           title::text, body::text, NULL::timestamp AS created_at,
+           is_pinned::boolean
+      FROM (VALUES (11, NULL::int, 'Обычный', NULL::text, FALSE),
+                   (12, NULL::int, 'Наш закреплённый', NULL::text, TRUE),
+                   (13, NULL::int, 'Общий закреплённый', NULL::text, TRUE),
+                   (14, NULL::int, 'Чужой закреплённый', NULL::text, TRUE))
+           AS t(id, author_id, title, body, is_pinned)
+),
+event_departments AS (
+    SELECT event_id::int, department_id::int
+      FROM (VALUES (12, 7), (14, 9)) AS t(event_id, department_id)
+),
+users AS (SELECT NULL::int AS id, NULL::text AS name,
+                 NULL::text AS avatar_bucket, NULL::text AS avatar_blob_path),
+departments AS (SELECT NULL::int AS id, NULL::text AS name)
+"""
+
+
 class _CapturingCursor:
     """Запоминает запросы вместо исполнения — нужен только текст SQL."""
 
@@ -132,20 +155,50 @@ class EventsPinningSqlTest(unittest.TestCase):
                             before_id=5, limit=12)
         self.assertEqual(1, len(capturing.calls))
 
-    def test_visibility_is_shared_between_both_queries(self):
-        """Оба запроса обязаны фильтровать по отделам одинаково.
+    def _scoped_ids(self, index, viewer_department_id=7):
+        """Прогоняет запрос скоупного зрителя на постах с адресацией по отделам."""
+        capturing = _CapturingCursor()
+        _load_list_events()(_FakeDatabase(capturing), viewer_id=1,
+                            viewer_department_id=viewer_department_id,
+                            is_global=False, before_id=None, limit=12)
+        sql, params = capturing.calls[index]
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(_SCOPED_STUB + sql.strip().rstrip(';'), params)
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            prod_db.rollback()
+            cursor.close()
 
-        Разъедься они — закреплённый пост показался бы отделу, которому не
-        предназначен, и это самый неприятный из возможных здесь дефектов.
+    def test_pinned_respects_department_targeting(self):
+        """Закреплённый пост чужого отдела не должен всплыть наверх ленты.
+
+        Проверяется ПОВЕДЕНИЕ, а не наличие подстроки event_departments в
+        запросе: закрепление поднимает пост поверх всего, что человек видит, и
+        показать так чужому отделу — самый неприятный из возможных здесь
+        дефектов. Тест на вхождение подстроки прошёл бы и при сломанном
+        условии.
         """
+        # 12 — закреплён для отдела 7 (наш), 13 — закреплён для всех,
+        # 14 — закреплён для отдела 9 (чужой).
+        self.assertEqual([13, 12], self._scoped_ids(1),
+                         'наверху только адресованные нам и общие, в порядке id')
+
+    def test_pinned_hidden_from_foreign_department(self):
+        self.assertEqual([14, 13], self._scoped_ids(1, viewer_department_id=9))
+
+    def test_scoped_feed_excludes_pinned_and_foreign(self):
+        """У скоупного зрителя обычная лента тоже без закреплённых и без чужих."""
+        self.assertEqual([11], self._scoped_ids(0))
+
+    def test_both_queries_get_the_same_visibility_parameters(self):
+        """Условие видимости обязано собираться один раз на оба запроса."""
         capturing = _CapturingCursor()
         _load_list_events()(_FakeDatabase(capturing), viewer_id=1,
                             viewer_department_id=7, is_global=False,
                             before_id=None, limit=12)
-        feed_sql, feed_params = capturing.calls[0]
-        pinned_sql, pinned_params = capturing.calls[1]
-        self.assertIn('event_departments', feed_sql)
-        self.assertIn('event_departments', pinned_sql)
+        _feed_sql, feed_params = capturing.calls[0]
+        _pinned_sql, pinned_params = capturing.calls[1]
         self.assertEqual([7, 7], list(pinned_params))
         self.assertEqual([7, 7], list(feed_params[:2]))
 

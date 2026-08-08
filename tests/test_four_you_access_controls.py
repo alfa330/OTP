@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 import unittest
 
@@ -149,8 +150,13 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("fourYouUnreadCount", self.app_source)
         # Само число фронт больше не запрашивает отдельно: его приносит общий
         # ответ центра уведомлений (см. test_badges_come_from_one_request).
-        # Открытие раздела гасит счётчик и серверный seen.
-        self.assertIn("if (view === 'four_you') setFourYouUnreadCount(0);", self.app_source)
+        # Открытие раздела гасит счётчик и серверный seen. Проверяем сам факт,
+        # а не написание строки: тест, прибитый к точной строке, ломается на
+        # любом рефакторинге и охраняет форму вместо гарантии.
+        self.assertTrue("setFourYouUnreadCount(0)" in self.app_source,
+                        "заход в раздел обязан гасить бейдж")
+        self.assertTrue("markBellSourceRead('four_you')" in self.app_source,
+                        "колокол обязан узнать, что раздел прочитан")
         self.assertIn("/api/four_you/seen", self.lenta_source)
         # Комментарии видны на карточке и без её выбора (не только при activeIndex).
         self.assertNotIn("activeIndex === index && image.annotations?.comments?.length > 0", self.lenta_source)
@@ -164,11 +170,19 @@ class FourYouAccessControlTests(unittest.TestCase):
         счётчики приходят из /api/notifications вместе с остальными, — поэтому
         сторожим уже отсутствие собственных запросов, а не их количество.
         """
-        self.assertIn("stableNotificationsCounts", self.app_source)
-        self.assertIn("setEventsUnreadCount(Math.max(0, Number(counts?.events) || 0));",
-                      self.app_source)
-        self.assertIn("setFourYouUnreadCount(Math.max(0, Number(counts?.four_you) || 0));",
-                      self.app_source)
+        start = self.app_source.find("const stableNotificationsCounts = useCallback(")
+        self.assertNotEqual(-1, start, "обработчик counts колокола пропал")
+        end = self.app_source.find("}, []);", start)
+        self.assertNotEqual(-1, end, "не найден конец обработчика counts")
+        block = self.app_source[start:end]
+        body = block
+        for setter in ("setEventsUnreadCount", "setFourYouUnreadCount"):
+            self.assertTrue(setter in body,
+                            "%s обязан питаться из ответа колокола" % setter)
+        # Ключ, которого в ответе нет, не должен трактоваться как ноль: ответ без
+        # источников означает, что сводку собрать не удалось.
+        self.assertTrue("in counts" in body,
+                        "бейдж обновляется только по реально пришедшим ключам")
         # Именно форма ВЫЗОВА, а не упоминание: имена эндпоинтов остались в
         # комментарии, объясняющем, почему фронт их больше не зовёт.
         # assertNotIn на файле в 50k строк вывалил бы его целиком в отчёт,
