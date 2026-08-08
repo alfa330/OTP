@@ -133,6 +133,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
+const ClassifierView = lazyWithRetry(() => import('./components/classifier/ClassifierView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
@@ -205,6 +206,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     tasks: 'Tasks',
     technical_issues: 'Technical issues',
     trainings: 'Trainings',
+    car_classifier: 'Car classifier',
     wiki: 'Wiki',
     work_schedules: 'Work schedules'
 });
@@ -38107,7 +38109,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki', 'car_classifier']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -38153,7 +38155,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki'].includes(view)) {
+                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki', 'car_classifier'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -43223,6 +43225,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Что человек увидит ВНУТРИ, решают правила разделов и статей на бэкенде,
                 // а не этот гард: у раздела своя модель прав с точностью до статьи.
                 if (view === 'wiki') return;
+                // «Классификатор авто» — справочник для операторов, общий для всех отделов.
+                if (view === 'car_classifier') return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
@@ -44258,6 +44262,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     </li>
 
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'car_classifier')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'car_classifier' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Классификатор авто</span>
+                                        </button>
+                                    </li>
+
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
@@ -44676,7 +44690,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || view === 'car_classifier' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
@@ -44805,6 +44819,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                 />
+                            </Suspense>
+                        )}
+                        {view === "car_classifier" && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка справочника…</div>}>
+                                <ClassifierView />
                             </Suspense>
                         )}
                         {(view === "shift_auction" && (
