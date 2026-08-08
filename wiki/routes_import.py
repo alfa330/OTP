@@ -85,9 +85,40 @@ def register(bp, wiki_route, db, log_ip, gcs):
         if not content_type.startswith('image/'):
             return jsonify({"error": "Можно загружать только изображения"}), 400
 
+        # Файл можно сразу привязать к статье. Без привязки он виден только
+        # загрузившему — это защита на время, пока картинка ещё не в тексте.
+        # Значит при миграции и при вставке в существующую статью привязку надо
+        # указать явно, иначе картинки увидит один человек.
+        article_id = None
+        raw_article_id = request.form.get('article_id')
+        if raw_article_id:
+            try:
+                article_id = int(raw_article_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Неверный article_id"}), 400
+
+            from . import access as wiki_access
+            from . import queries as wiki_queries
+            subjects = wiki_access.collect_subjects(
+                user_id=ctx['user_id'], otp_role=ctx['otp_role'],
+                department_id=ctx['department_id'],
+                headed_department_ids=ctx['headed_department_ids'],
+                direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
+                wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
+            )
+            sections = wiki_queries.allowed_section_ids(cursor, ctx, subjects)
+            article = wiki_articles.get_article(cursor, article_id=article_id)
+            if not article:
+                return jsonify({"error": "Статья не найдена"}), 404
+            permissions = wiki_articles.effective_permissions(
+                cursor, ctx, article, subjects, sections,
+                wiki_queries.section_rules_for_user)
+            if not permissions.get('can_edit'):
+                return jsonify({"error": "Нет права править эту статью"}), 403
+
         url = _store_file(cursor, data=data, filename=uploaded.filename,
                           content_type=content_type, uploaded_by=ctx['user_id'],
-                          article_id=None)
+                          article_id=article_id)
         if not url:
             return jsonify({"error": "Хранилище файлов не настроено"}), 503
         return jsonify({"url": url}), 201
