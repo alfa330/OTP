@@ -363,7 +363,7 @@ const PostActions = ({ event, onToggleLike, onOpenComments, busyLike }) => (
 );
 
 /* ── Карточка-строка (режим «строки») ──────────────────────────────── */
-const EventRow = ({ event, onOpen, onToggleLike, onDelete, busyLike }) => (
+const EventRow = ({ event, onOpen, onToggleLike, onDelete, onTogglePin, busyLike }) => (
     <article className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden transition-shadow hover:shadow-md">
         <div className="px-4 sm:px-5 pt-4 flex items-start gap-3">
             <Avatar name={event.author_name} url={event.author_avatar_url} size={40} />
@@ -371,9 +371,26 @@ const EventRow = ({ event, onOpen, onToggleLike, onDelete, busyLike }) => (
                 <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-semibold text-gray-900 truncate">{event.author_name}</span>
                     <DepartmentBadge event={event} />
+                    {event.is_pinned && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-[11px] font-medium">
+                            <FaIcon className="fas fa-thumbtack text-[9px]" /> Закреплено
+                        </span>
+                    )}
                 </div>
                 <div className="text-xs text-gray-400 mt-0.5">{formatDate(event.created_at)}</div>
             </div>
+            {event.can_pin && (
+                <button
+                    type="button"
+                    onClick={() => onTogglePin?.(event)}
+                    className={`p-1.5 rounded-lg transition-colors ${event.is_pinned
+                        ? 'text-amber-500 hover:bg-amber-50'
+                        : 'text-slate-300 hover:text-amber-500 hover:bg-amber-50'}`}
+                    title={event.is_pinned ? 'Открепить пост' : 'Закрепить пост наверху ленты'}
+                >
+                    <FaIcon className="fas fa-thumbtack" />
+                </button>
+            )}
             {event.can_delete && (
                 <button
                     type="button"
@@ -491,6 +508,11 @@ const CommentItem = ({ comment, onDelete }) => (
 
 const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessTokenHeader, onSeen }) => {
     const [events, setEvents] = useState([]);
+    /* Закреплённые держим отдельным списком, а не флагом внутри events:
+       лента листается курсором по id, и всплывший наверх пост ломал бы
+       пагинацию — сервер по той же причине отдаёт их отдельно и только к
+       первой странице (см. Database.list_events). */
+    const [pinned, setPinned] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [hasMore, setHasMore] = useState(false);
@@ -534,6 +556,9 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                 const seen = new Set(prev.map((e) => e.id));
                 return [...prev, ...rows.filter((e) => !seen.has(e.id))];
             });
+            // Закреплённые приходят только к первой странице; при догрузке
+            // ответ их не содержит, и затирать уже показанные нельзя.
+            if (!append) setPinned(Array.isArray(data.pinned) ? data.pinned : []);
             setHasMore(Boolean(data.has_more));
             setNextBefore(data.next_before ?? null);
             setCanPublish(Boolean(data.can_publish));
@@ -585,15 +610,19 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
     }, [hasMore, isLoading, isLoadingMore, nextBefore]);
 
     const patchEvent = useCallback((id, patch) => {
-        setEvents((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+        const apply = (list) => list.map((e) => (e.id === id ? { ...e, ...patch } : e));
+        setEvents(apply);
+        setPinned(apply);
         setDetailEvent((prev) => (prev && prev.id === id ? { ...prev, ...patch } : prev));
     }, []);
 
     // Счётчик комментов меняем функционально (от предыдущего значения), чтобы
     // несколько подряд добавлений/удалений не затирали друг друга устаревшим snapshot.
     const bumpCommentCount = useCallback((id, delta) => {
-        setEvents((prev) => prev.map((e) => (e.id === id
-            ? { ...e, comment_count: Math.max(0, (e.comment_count || 0) + delta) } : e)));
+        const apply = (list) => list.map((e) => (e.id === id
+            ? { ...e, comment_count: Math.max(0, (e.comment_count || 0) + delta) } : e));
+        setEvents(apply);
+        setPinned(apply);
         setDetailEvent((prev) => (prev && prev.id === id
             ? { ...prev, comment_count: Math.max(0, (prev.comment_count || 0) + delta) } : prev));
     }, []);
@@ -624,10 +653,40 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
         try {
             await axios.delete(`${apiRoot}/api/events/${event.id}`, { headers: authHeaders() });
             setEvents((prev) => prev.filter((e) => e.id !== event.id));
+            setPinned((prev) => prev.filter((e) => e.id !== event.id));
             setDetailEvent((prev) => (prev && prev.id === event.id ? null : prev));
             notify('Пост удалён', 'success');
         } catch (e) {
             notify(e?.response?.data?.error || 'Не удалось удалить пост', 'error');
+        }
+    }, [apiRoot, authHeaders, notify]);
+
+    /* Закрепление меняет принадлежность поста к спискам, а не поле внутри
+       одного: закреплённые исключены из постраничной выдачи, поэтому пост
+       переезжает между pinned и events целиком. Оптимистично не делаем —
+       перекладывание между списками при откате выглядело бы дёрганьем. */
+    const togglePin = useCallback(async (event) => {
+        const next = !event.is_pinned;
+        try {
+            const response = await axios.post(
+                `${apiRoot}/api/events/${event.id}/pin`,
+                { pinned: next },
+                { headers: authHeaders() },
+            );
+            const isPinned = Boolean(response?.data?.is_pinned);
+            const moved = { ...event, is_pinned: isPinned };
+            if (isPinned) {
+                setEvents((prev) => prev.filter((e) => e.id !== event.id));
+                setPinned((prev) => [moved, ...prev.filter((e) => e.id !== event.id)]);
+            } else {
+                setPinned((prev) => prev.filter((e) => e.id !== event.id));
+                setEvents((prev) => [moved, ...prev.filter((e) => e.id !== event.id)]
+                    .sort((a, b) => b.id - a.id));
+            }
+            setDetailEvent((prev) => (prev && prev.id === event.id ? moved : prev));
+            notify(isPinned ? 'Пост закреплён' : 'Пост откреплён', 'success');
+        } catch (e) {
+            notify(e?.response?.data?.error || 'Не удалось изменить закрепление', 'error');
         }
     }, [apiRoot, authHeaders, notify]);
 
@@ -713,7 +772,7 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                         Повторить
                     </button>
                 </div>
-            ) : events.length === 0 ? (
+            ) : (events.length === 0 && pinned.length === 0) ? (
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-10 text-center">
                     <div className="w-14 h-14 rounded-2xl bg-blue-50 flex items-center justify-center mx-auto mb-3">
                         <FaIcon className="fas fa-calendar-days text-blue-300 text-2xl" />
@@ -733,12 +792,36 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                 <>
                     {layout === 'grid' ? (
                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3">
-                            {events.map((event) => (
+                            {[...pinned, ...events].map((event) => (
                                 <EventTile key={event.id} event={event} onOpen={setDetailEvent} />
                             ))}
                         </div>
                     ) : (
                         <div className="space-y-4">
+                            {pinned.length > 0 && (
+                                <div className="space-y-4">
+                                    {pinned.map((event) => (
+                                        <EventRow
+                                            key={event.id}
+                                            event={event}
+                                            busyLike={likeBusy.has(event.id)}
+                                            onOpen={setDetailEvent}
+                                            onToggleLike={toggleLike}
+                                            onDelete={deleteEvent}
+                                            onTogglePin={togglePin}
+                                        />
+                                    ))}
+                                    {events.length > 0 && (
+                                        <div className="flex items-center gap-3 px-1 pt-1">
+                                            <span className="h-px flex-1 bg-gray-200" />
+                                            <span className="text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                                                Лента
+                                            </span>
+                                            <span className="h-px flex-1 bg-gray-200" />
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                             {events.map((event) => (
                                 <EventRow
                                     key={event.id}
@@ -747,6 +830,7 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                                     onOpen={setDetailEvent}
                                     onToggleLike={toggleLike}
                                     onDelete={deleteEvent}
+                                    onTogglePin={togglePin}
                                 />
                             ))}
                         </div>

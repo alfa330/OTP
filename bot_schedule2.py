@@ -3675,6 +3675,11 @@ def _events_event_payload(event, requester_id=None, role=None, viewer_scope=_EVE
         "liked": bool(event.get("liked")),
         "media": [_events_media_payload(m) for m in (event.get("media") or [])],
         "can_delete": _events_can_delete_post(event, requester_id, role, viewer_scope),
+        "is_pinned": bool(event.get("is_pinned")),
+        # Закрепление строже удаления: свой пост автор убрать вправе, а поднять
+        # его над чужими поверх всей ленты — решение уровня отдела.
+        "can_pin": _events_is_moderator_for(
+            requester_id, role, event.get("department_ids") or [], viewer_scope),
     }
 
 
@@ -9375,9 +9380,16 @@ def api_events():
             _events_event_payload(ev, requester_id, role, viewer_dept)
             for ev in result["events"]
         ]
+        # Закреплённые приходят отдельным списком и только к первой странице —
+        # иначе они ломали бы курсор по id (см. Database.list_events).
+        pinned_payload = [
+            _events_event_payload(ev, requester_id, role, viewer_dept)
+            for ev in result.get("pinned") or []
+        ]
         response = jsonify({
             "status": "success",
             "events": events_payload,
+            "pinned": pinned_payload,
             "has_more": result["has_more"],
             "next_before": result["next_before"],
             **_events_publish_options(role, requester_id),
@@ -9686,6 +9698,35 @@ def api_event_delete(event_id):
         return jsonify({"error": "Ивент не найден"}), 404
     _delete_events_blobs(blobs)
     return jsonify({"status": "success", "deleted_id": event_id}), 200
+
+
+@app.route('/api/events/<int:event_id>/pin', methods=['POST', 'OPTIONS'])
+@require_auth
+def api_event_pin(event_id):
+    """Закрепить/открепить пост. Право — только модератора, не автора.
+
+    Осознанно строже удаления: свой пост автор вправе убрать, но поднять его
+    над чужими поверх всей ленты — решение уровня отдела, а не автора.
+    """
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return jsonify({"error": message}), status_code
+
+    info = db.get_event_author_and_departments(event_id)
+    if not info:
+        return jsonify({"error": "Ивент не найден"}), 404
+    _author_id, dept_ids = info
+
+    role = _normalize_user_role(requester[3])
+    if not _events_is_moderator_for(requester_id, role, dept_ids):
+        return jsonify({"error": "Недостаточно прав"}), 403
+
+    payload = request.get_json(silent=True) or {}
+    pinned = db.set_event_pinned(event_id, bool(payload.get('pinned', True)))
+    if pinned is None:
+        return jsonify({"error": "Ивент не найден"}), 404
+    return jsonify({"status": "success", "id": event_id, "is_pinned": pinned}), 200
 
 
 @app.route('/api/average_scores', methods=['GET'])

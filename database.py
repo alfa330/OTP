@@ -1359,6 +1359,23 @@ class Database:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_events_id_desc ON events(id DESC);
             """)
+            # Закреплённый пост. Единственное, что перенесено из ленты новостей
+            # вики: остальное (теги, вложения, отдельный статус прочтения) там
+            # существовало, но за всё время не было использовано ни разу —
+            # в дампе прода ноль новостей.
+            #
+            # Закреплённые НЕ участвуют в постраничной выдаче: лента листается
+            # курсором по id, а пост, всплывший наверх, ломал бы курсор —
+            # выпадал бы из выборки следующей страницы или дублировался.
+            # Поэтому они отдаются отдельным списком к первой странице.
+            cursor.execute("""
+                ALTER TABLE events
+                ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_pinned
+                ON events(id DESC) WHERE is_pinned;
+            """)
             # Отделы-получатели поста (M:N). Пустой набор => пост виден всем.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS event_departments (
@@ -47383,8 +47400,8 @@ class Database:
     # ──────────────────────────────────────────────────────────────────
     def _event_row_basic(self, row):
         """row: id, author_id, author_name, avatar_bucket, avatar_blob_path,
-        legacy_department_id, legacy_department_name, title, body, created_at.
-        Отделы догружаются в _attach_event_aggregates."""
+        legacy_department_id, legacy_department_name, title, body, created_at,
+        is_pinned. Отделы догружаются в _attach_event_aggregates."""
         return {
             "id": int(row[0]),
             "author_id": int(row[1]) if row[1] is not None else None,
@@ -47396,6 +47413,7 @@ class Database:
             "title": row[7],
             "body": row[8] or "",
             "created_at": row[9].isoformat() if row[9] else None,
+            "is_pinned": bool(row[10]) if len(row) > 10 else False,
             "department_ids": [],
             "department_names": [],
             "media": [],
@@ -47482,30 +47500,43 @@ class Database:
     def list_events(self, viewer_id, viewer_department_id=None, is_global=False,
                     before_id=None, limit=12):
         """Лента постов, видимых зрителю, id-курсором (новые сверху).
-        Возвращает {events, has_more, next_before}."""
+        Возвращает {events, pinned, has_more, next_before}.
+
+        Закреплённые идут отдельным списком и ТОЛЬКО к первой странице. Всплыви
+        они внутри общей выдачи — сломался бы курсор: лента листается условием
+        e.id < before_id, и пост, поднятый наверх вопреки порядку id, либо
+        продублировался бы на следующей странице, либо выпал из неё совсем.
+        Из постраничной выдачи они поэтому исключены (иначе задвоились бы на
+        первом же экране)."""
         limit = max(1, min(int(limit or 12), 50))
-        conditions = []
-        params = []
+
+        # Условие видимости одно на оба запроса — собираем его отдельно, чтобы
+        # закреплённые и обычные посты не могли разъехаться в правах.
+        visible, visible_params = "TRUE", []
         if not is_global:
             # Виден, если у поста нет привязки к отделам (для всех) ИЛИ отдел
             # зрителя есть среди получателей. Legacy fallback по e.department_id
             # оставлен, чтобы старые посты не пропали, если бэкфилл ещё не прошёл.
-            conditions.append("""(
+            visible = """(
                 (
                     NOT EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id)
                     AND (e.department_id IS NULL OR e.department_id = %s)
                 )
                 OR EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id AND ed.department_id = %s)
-            )""")
-            params.extend([viewer_department_id, viewer_department_id])
+            )"""
+            visible_params = [viewer_department_id, viewer_department_id]
+
+        conditions = ["NOT e.is_pinned", visible]
+        params = list(visible_params)
         if before_id:
             conditions.append("e.id < %s")
             params.append(int(before_id))
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where = "WHERE " + " AND ".join(conditions)
+        columns = """e.id, e.author_id, u.name, u.avatar_bucket, u.avatar_blob_path,
+                     e.department_id, d.name, e.title, e.body, e.created_at, e.is_pinned"""
         with self._get_cursor() as cursor:
             cursor.execute(f"""
-                SELECT e.id, e.author_id, u.name, u.avatar_bucket, u.avatar_blob_path,
-                       e.department_id, d.name, e.title, e.body, e.created_at
+                SELECT {columns}
                 FROM events e
                 LEFT JOIN users u ON u.id = e.author_id
                 LEFT JOIN departments d ON d.id = e.department_id
@@ -47517,9 +47548,26 @@ class Database:
             has_more = len(rows) > limit
             rows = rows[:limit]
             events = [self._event_row_basic(r) for r in rows]
-            self._attach_event_aggregates(cursor, events, viewer_id)
+
+            # Закреплённые — только к первой странице (before_id ещё нет).
+            pinned = []
+            if not before_id:
+                cursor.execute(f"""
+                    SELECT {columns}
+                    FROM events e
+                    LEFT JOIN users u ON u.id = e.author_id
+                    LEFT JOIN departments d ON d.id = e.department_id
+                    WHERE e.is_pinned AND {visible}
+                    ORDER BY e.id DESC
+                """, tuple(visible_params))
+                pinned = [self._event_row_basic(r) for r in cursor.fetchall()]
+
+            # Один батч на обе выдачи: агрегаты грузятся без N+1 и без второго
+            # круга запросов ради закреплённых.
+            self._attach_event_aggregates(cursor, events + pinned, viewer_id)
         next_before = events[-1]["id"] if (events and has_more) else None
-        return {"events": events, "has_more": has_more, "next_before": next_before}
+        return {"events": events, "pinned": pinned,
+                "has_more": has_more, "next_before": next_before}
 
     def get_event(self, event_id, viewer_id=None):
         with self._get_cursor() as cursor:
@@ -47612,6 +47660,19 @@ class Database:
                 int(media.get("sort_order") or 0),
             ))
             return int(cursor.fetchone()[0])
+
+    def set_event_pinned(self, event_id, pinned):
+        """Закрепить/открепить пост. Возвращает новое значение либо None."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE events
+                   SET is_pinned = %s,
+                       updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                 WHERE id = %s
+             RETURNING is_pinned
+            """, (bool(pinned), int(event_id)))
+            row = cursor.fetchone()
+        return bool(row[0]) if row else None
 
     def delete_event(self, event_id):
         """Удаляет пост (каскадом медиа/лайки/комменты). Возвращает список
