@@ -11,9 +11,11 @@
 
 import re
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from notifications import sources
+from tests import prod_db
 
 ROOT = Path(__file__).resolve().parents[1]
 BELL_JSX = ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx'
@@ -117,6 +119,73 @@ class CollectOrderTest(unittest.TestCase):
         counts, _ = sources.collect(FakeCursor(), {'user_id': 1, 'hidden_sources': ('four_you',)})
         self.assertEqual(0, counts['four_you'])
         self.assertEqual([], called)
+
+
+class SurveyWindowTimezoneTest(unittest.TestCase):
+    """Окно теста считается во времени Алматы, а не в UTC базы.
+
+    starts_at/ends_at хранятся наивными во времени Алматы: их пишет
+    _parse_survey_schedule_value без tzinfo, а сравнивает survey_test_status с
+    datetime.now() — процесс живёт в Asia/Almaty. База стоит в UTC, поэтому
+    голый CURRENT_TIMESTAMP в запросе даёт сдвиг ровно на 5 часов, и колокол
+    показывает тест открытым ещё пять часов после закрытия.
+
+    Дефект молчаливый: ошибки нет, цифра просто неверная. Поэтому проверяется и
+    исходник (чтобы CURRENT_TIMESTAMP не вернулся), и поведение на настоящей
+    базе.
+    """
+
+    SOURCE = (ROOT / 'notifications' / 'sources.py').read_text(encoding='utf-8')
+
+    def test_window_does_not_use_bare_current_timestamp(self):
+        block = re.search(r'def surveys\(.*?\n    \)\n', self.SOURCE, re.S)
+        self.assertIsNotNone(block, 'не найдено тело запроса опросов')
+        sql = block.group(0)
+        self.assertNotRegex(
+            sql, r'(starts_at|ends_at)\s*[<>]=?\s*CURRENT_TIMESTAMP',
+            'окно теста снова сравнивается с UTC-временем базы — сдвиг 5 часов',
+        )
+        self.assertIn('%(now)s', sql, 'время должно приходить параметром')
+
+    def test_almaty_now_matches_process_clock(self):
+        """Тот же вызов, что и у Database.survey_test_status."""
+        self.assertAlmostEqual(
+            sources._almaty_now().timestamp(), datetime.now().timestamp(), delta=2,
+        )
+
+    def test_closed_window_is_closed_on_real_postgres(self):
+        """Окно, закрывшееся два часа назад, обязано считаться закрытым."""
+        reason = prod_db.skip_reason()
+        if reason:
+            self.skipTest(reason)
+        now = sources._almaty_now()
+        closed = now - timedelta(hours=2)
+        cursor = prod_db.connection().cursor()
+        try:
+            cursor.execute('SELECT %(ends)s::timestamp > %(now)s::timestamp',
+                           {'ends': closed, 'now': now})
+            self.assertFalse(cursor.fetchone()[0],
+                             'закрывшийся тест не должен считаться открытым')
+
+            # Показываем, чем именно был дефект: сдвиг между часами процесса и
+            # часами базы. Утверждение делаем только если сдвиг реально есть —
+            # на машине разработчика в UTC его не будет, и падать тут не за что.
+            cursor.execute('SELECT CURRENT_TIMESTAMP::timestamp')
+            db_now = cursor.fetchone()[0]
+            shift_hours = (now - db_now).total_seconds() / 3600
+            if shift_hours <= 2:
+                self.skipTest('часы процесса и базы совпадают (сдвиг %.1f ч) — '
+                              'сравнивать не с чем' % shift_hours)
+            cursor.execute('SELECT %(ends)s::timestamp > CURRENT_TIMESTAMP',
+                           {'ends': closed})
+            self.assertTrue(
+                cursor.fetchone()[0],
+                'при сдвиге %.1f ч голый CURRENT_TIMESTAMP обязан был бы считать '
+                'закрытый тест открытым — иначе дефект был не в этом' % shift_hours,
+            )
+        finally:
+            prod_db.rollback()
+            cursor.close()
 
 
 class MarkSeenRulesTest(unittest.TestCase):

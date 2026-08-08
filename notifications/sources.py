@@ -18,6 +18,7 @@
 """
 
 import logging
+from datetime import datetime
 
 # Порядок здесь = порядок групп в колоколе. Сначала то, что требует действия с
 # дедлайном, потом то, что просто новое.
@@ -36,6 +37,17 @@ ITEMS_PER_SOURCE = 5
 
 def _iso(value):
     return value.isoformat() if value is not None else None
+
+
+def _almaty_now():
+    """«Сейчас» в том же виде, в каком раздел опросов хранит границы окна.
+
+    Параметром, а не выражением в SQL: боевой процесс живёт в Asia/Almaty
+    (os.environ['TZ'] + tzset() в начале bot_schedule2.py и database.py), и
+    datetime.now() здесь совпадает с тем, с чем сравнивает
+    Database.survey_test_status.
+    """
+    return datetime.now()
 
 
 # ── Вики: статьи под обязательное ознакомление ───────────────────────────────
@@ -119,6 +131,13 @@ def surveys(cursor, viewer):
     Колокол — личный: он отвечает на вопрос «что ждёт меня». Управленческое
     число опросов «сколько не прошли мои люди» осталось бейджем самого раздела,
     у него другой смысл, и складывать их в одно было бы враньём.
+
+    Про время. starts_at/ends_at хранятся НАИВНЫМИ во времени Алматы: их пишет
+    _parse_survey_schedule_value без tzinfo, а сравнивает survey_test_status с
+    datetime.now() — процесс живёт в Asia/Almaty. База же стоит в UTC, поэтому
+    голый CURRENT_TIMESTAMP здесь давал сдвиг ровно на 5 часов: тест считался
+    открытым ещё пять часов после закрытия и закрытым первые пять часов после
+    открытия.
     """
     cursor.execute(
         """
@@ -130,12 +149,13 @@ def surveys(cursor, viewer):
            AND COALESCE(sa.status, '') <> 'completed'
            AND s.is_active
            AND (NOT s.is_test
-                OR ((s.starts_at IS NULL OR s.starts_at <= CURRENT_TIMESTAMP)
-                    AND (s.ends_at IS NULL OR s.ends_at > CURRENT_TIMESTAMP)))
+                OR ((s.starts_at IS NULL OR s.starts_at <= %(now)s)
+                    AND (s.ends_at IS NULL OR s.ends_at > %(now)s)))
          ORDER BY s.ends_at NULLS LAST, s.id DESC
          LIMIT %(limit)s
         """,
-        {'user_id': viewer['user_id'], 'limit': ITEMS_PER_SOURCE},
+        {'user_id': viewer['user_id'], 'limit': ITEMS_PER_SOURCE,
+         'now': _almaty_now()},
     )
     rows = cursor.fetchall()
     total = int(rows[0][4]) if rows else 0
