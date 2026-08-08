@@ -173,6 +173,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
             _subjects, _sections, visible = _perimeter(cursor, ctx)
             if record['article_id'] not in visible:
                 return jsonify({"error": "Файл не найден"}), 404
+        elif record.get('uploaded_by') != ctx['user_id']:
+            # Файл ещё не привязан к статье (загружен в редактор или пришёл из
+            # импорта). Пока привязки нет, проверять нечего — значит доступ
+            # только у того, кто его загрузил.
+            return jsonify({"error": "Файл не найден"}), 404
 
         url = gcs['signed_url'](
             record['bucket'], record['blob_path'],

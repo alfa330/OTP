@@ -14,7 +14,8 @@ import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table
 import {
     AlignCenter, AlignLeft, AlignRight, Bold, Code, Heading1, Heading2, Heading3,
     Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
-    Save, Strikethrough, Table as TableIcon, Underline as UnderlineIcon, Undo2,
+    Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
+    Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
@@ -78,6 +79,7 @@ export default function WikiEditor({
     const [sectionIds, setSectionIds] = useState(article?.section_ids || []);
     const [saving, setSaving] = useState(false);
     const [dirty, setDirty] = useState(false);
+    const [importing, setImporting] = useState(false);
 
     const editor = useEditor({
         extensions: [
@@ -148,6 +150,43 @@ export default function WikiEditor({
     }, [editor, title, summary, articleType, sectionIds, isNew, base, headers,
         article, showToast, onSaved]);
 
+    const importDocument = (file) => {
+        if (!file) return;
+        const form = new FormData();
+        form.append('file', file);
+        setImporting(true);
+        axios.post(`${base}/import`, form, { headers })
+            .then((r) => {
+                const data = r.data || {};
+                if (!title.trim() && data.title) setTitle(data.title);
+                if (!summary.trim() && data.summary) setSummary(data.summary);
+                editor.commands.setContent(data.content || '');
+                setDirty(true);
+                const extra = data.images?.length
+                    ? `, картинок: ${data.images.length}` : '';
+                showToast?.(`Документ разобран (${data.kind}${extra})`, 'success');
+                if (data.warnings?.length) {
+                    showToast?.(`Замечания при разборе: ${data.warnings.length}`, 'info');
+                }
+            })
+            .catch((e) => showToast?.(errText(e, 'Не удалось разобрать документ'), 'error'))
+            .finally(() => setImporting(false));
+    };
+
+    const uploadImage = (file) => {
+        if (!file) return;
+        const form = new FormData();
+        form.append('file', file);
+        axios.post(`${base}/upload`, form, { headers })
+            .then((r) => {
+                // Адрес постоянный (/api/wiki/file/<id>), подпись выдаётся при
+                // каждом запросе — картинки в статье не протухают.
+                editor.chain().focus().setImage({ src: r.data.url }).run();
+                setDirty(true);
+            })
+            .catch((e) => showToast?.(errText(e, 'Не удалось загрузить картинку'), 'error'));
+    };
+
     const setLink = () => {
         const previous = editor.getAttributes('link').href || '';
         const url = window.prompt('Адрес ссылки', previous);
@@ -178,6 +217,18 @@ export default function WikiEditor({
                     {dirty && <IosBadge tone="amber">Есть несохранённые правки</IosBadge>}
                 </div>
                 <div className="flex items-center gap-2">
+                    <label className={`${iosBtnSecondary} cursor-pointer`}>
+                        {importing
+                            ? <Loader2 size={14} className="animate-spin" />
+                            : <Upload size={14} />}
+                        Из документа
+                        <input
+                            type="file"
+                            className="hidden"
+                            accept=".docx,.doc,.pdf,.xlsx,.xlsm,.csv,.txt,.md"
+                            onChange={(e) => { importDocument(e.target.files?.[0]); e.target.value = ''; }}
+                        />
+                    </label>
                     <button
                         type="button"
                         className={iosBtnSecondary}
@@ -333,6 +384,18 @@ export default function WikiEditor({
                         >
                             <TableIcon size={15} />
                         </ToolButton>
+                        <label
+                            title="Картинка"
+                            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100"
+                        >
+                            <ImageIcon size={15} />
+                            <input
+                                type="file"
+                                className="hidden"
+                                accept="image/*"
+                                onChange={(e) => { uploadImage(e.target.files?.[0]); e.target.value = ''; }}
+                            />
+                        </label>
                         <Divider />
 
                         <span className="flex items-center gap-1 px-1">

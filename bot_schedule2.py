@@ -46408,6 +46408,7 @@ try:
         gcs={
             'signed_url': _lms_signed_url,
             'bucket_name': _wiki_bucket_name,
+            'client': get_gcs_client,
         },
         session_id_provider=_current_session_id_from_access_token,
     ))

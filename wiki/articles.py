@@ -343,7 +343,8 @@ def set_favorite(cursor, user_id, article_id, favorite):
 def get_file(cursor, file_id):
     cursor.execute(
         """
-        SELECT id, article_id, bucket, blob_path, original_name, content_type
+        SELECT id, article_id, bucket, blob_path, original_name, content_type,
+               uploaded_by
           FROM wiki_files WHERE id = %s
         """,
         (file_id,),
@@ -352,7 +353,7 @@ def get_file(cursor, file_id):
     if not row:
         return None
     return dict(zip(('id', 'article_id', 'bucket', 'blob_path',
-                     'original_name', 'content_type'), row))
+                     'original_name', 'content_type', 'uploaded_by'), row))
 
 
 def register_file(cursor, *, article_id, bucket, blob_path, original_name,
