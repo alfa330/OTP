@@ -61,6 +61,48 @@ const ArticleCard = ({ article, onOpen }) => (
     </button>
 );
 
+/* Сниппет приходит с сервера уже с <mark>. Санитизация здесь не нужна и была
+   бы вредна: ts_headline вставляет ровно те теги, что мы задали, а любой текст
+   статьи внутри экранирован Postgres. Тем не менее собираем разметку вручную,
+   а не через dangerouslySetInnerHTML, чтобы не открывать этот путь в принципе. */
+const Snippet = ({ html }) => {
+    if (!html) return null;
+    const parts = String(html).split(/(<mark>.*?<\/mark>)/g);
+    return (
+        <p className="mt-1 text-[12.5px] leading-relaxed text-slate-500">
+            {parts.map((part, index) => (
+                part.startsWith('<mark>')
+                    ? (
+                        <mark key={index} className="rounded bg-amber-200/70 px-0.5 font-medium text-slate-900">
+                            {part.slice(6, -7)}
+                        </mark>
+                    )
+                    : <React.Fragment key={index}>{part}</React.Fragment>
+            ))}
+        </p>
+    );
+};
+
+const SearchHit = ({ article, onOpen }) => (
+    <button
+        type="button"
+        onClick={() => onOpen(article.slug)}
+        className={`${iosCard} w-full p-4 text-left transition hover:ring-2 hover:ring-indigo-500/20`}
+    >
+        <div className="flex items-start gap-3">
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
+                <FileText size={16} />
+            </div>
+            <div className="min-w-0 flex-1">
+                <div className="text-[14px] font-semibold leading-snug text-slate-900">
+                    {article.title}
+                </div>
+                <Snippet html={article.snippet} />
+            </div>
+        </div>
+    </button>
+);
+
 const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
     <section className="space-y-1.5">
         <div className={`${iosGroupLabel} flex items-center gap-1.5`}>
@@ -92,6 +134,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
     const [query, setQuery] = useState('');
     const [items, setItems] = useState([]);
     const [home, setHome] = useState(null);
+    const [found, setFound] = useState(null);   // null = поиска не было
     const [loading, setLoading] = useState(true);
 
     const spaces = structure?.spaces || [];
@@ -99,9 +142,26 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
 
     const load = useCallback(() => {
         setLoading(true);
+        const term = query.trim();
+
+        // Короткий ввод — обычный список; от двух символов включается
+        // полнотекстовый поиск со сниппетами, как в оригинале.
+        if (term.length >= 2) {
+            const params = { q: term };
+            if (sectionId) params.section_id = sectionId;
+            axios.get(`${base}/search`, { headers, params })
+                .then((r) => setFound(r.data?.items || []))
+                .catch((e) => {
+                    setFound([]);
+                    showToast?.(errText(e, 'Поиск не сработал'), 'error');
+                })
+                .finally(() => setLoading(false));
+            return;
+        }
+
+        setFound(null);
         const params = {};
         if (sectionId) params.section_id = sectionId;
-        if (query.trim()) params.q = query.trim();
         axios.get(`${base}/articles`, { headers, params })
             .then((r) => setItems(r.data?.items || []))
             .catch((e) => showToast?.(errText(e, 'Не удалось загрузить статьи'), 'error'))
@@ -173,7 +233,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                         className={`${iosInput} pl-10`}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Поиск по названию и описанию"
+                        placeholder="Поиск по статьям — понимает опечатки и раскладку"
                     />
                 </div>
                 {canCreate && (
@@ -239,7 +299,31 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                         </div>
                     )}
 
-                    {!loading && items.length === 0 && (
+                    {!loading && found !== null && (
+                        found.length > 0 ? (
+                            <div className="space-y-3">
+                                <div className={iosGroupLabel}>
+                                    Найдено: {found.length}
+                                </div>
+                                {found.map((article) => (
+                                    <SearchHit key={article.id} article={article} onOpen={setOpenSlug} />
+                                ))}
+                            </div>
+                        ) : (
+                            <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
+                                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                                    <Search size={22} />
+                                </div>
+                                <div className="text-[15px] font-semibold text-slate-900">Ничего не найдено</div>
+                                <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
+                                    Поиск понимает опечатки, латиницу и забытую раскладку —
+                                    попробуйте другое слово.
+                                </p>
+                            </div>
+                        )
+                    )}
+
+                    {!loading && found === null && items.length === 0 && (
                         <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                             <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                                 <BookOpen size={22} />
@@ -255,7 +339,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                         </div>
                     )}
 
-                    {!loading && items.length > 0 && (
+                    {!loading && found === null && items.length > 0 && (
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                             {items.map((article) => (
                                 <ArticleCard key={article.id} article={article} onOpen={setOpenSlug} />

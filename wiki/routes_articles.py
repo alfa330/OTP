@@ -11,6 +11,8 @@ from flask import jsonify, redirect, request
 from . import access as wiki_access
 from . import articles as wiki_articles
 from . import queries
+from . import schema as wiki_schema
+from . import search as wiki_search
 
 
 def _int_or_none(value):
@@ -54,6 +56,40 @@ def register(bp, wiki_route, db, log_ip, gcs):
             limit=limit, offset=offset,
         )
         return jsonify({"items": items, "total_visible": len(visible)})
+
+    # ── Поиск ────────────────────────────────────────────────────────────
+    @wiki_route('/search')
+    def wiki_search_articles(cursor, ctx):
+        """Полнотекстовый поиск в границах периметра.
+
+        Выдача пересекается с visible_article_ids так же, как список: подсказки
+        поиска — это читающий путь, и без фильтра закрытая статья утекла бы
+        заголовком и сниппетом.
+        """
+        query = (request.args.get('q') or '').strip()
+        if len(query) < 2:
+            return jsonify({"items": [], "query": query})
+
+        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        limit = min(max(_int_or_none(request.args.get('limit')) or 20, 1), 50)
+        items = wiki_search.search(
+            cursor, visible, query,
+            section_id=_int_or_none(request.args.get('section_id')),
+            limit=limit,
+            with_trigram=wiki_schema.trigram_available(cursor),
+        )
+        return jsonify({"items": items, "query": query})
+
+    @wiki_route('/suggest')
+    def wiki_suggest(cursor, ctx):
+        """Подсказки по мере ввода — с двух символов, как в оригинале."""
+        query = (request.args.get('q') or '').strip()
+        if len(query) < 2:
+            return jsonify({"items": []})
+        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        return jsonify({"items": wiki_search.suggest(
+            cursor, visible, query,
+            with_trigram=wiki_schema.trigram_available(cursor))})
 
     # ── Главная раздела ──────────────────────────────────────────────────
     @wiki_route('/home')
