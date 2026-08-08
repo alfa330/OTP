@@ -18,7 +18,7 @@ import re
 import unittest
 from pathlib import Path
 
-from tests import wiki_db
+from tests import prod_db
 from wiki.ack import count_required_blocks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,10 +91,10 @@ class AckFlowSqlTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        reason = wiki_db.skip_reason()
+        reason = prod_db.skip_reason()
         if reason:
             raise unittest.SkipTest(reason)
-        cls.conn = wiki_db.connection()
+        cls.conn = prod_db.connection()
 
     def check(self, sql, params=None):
         cur = self.conn.cursor()
@@ -102,7 +102,7 @@ class AckFlowSqlTest(unittest.TestCase):
             cur.execute(sql, params or {})
             return cur.fetchall()
         finally:
-            wiki_db.rollback()
+            prod_db.rollback()
             cur.close()
 
     def test_acknowledge_condition_requires_read(self):

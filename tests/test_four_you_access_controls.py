@@ -147,7 +147,8 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("@app.route('/api/four_you/seen', methods=['POST', 'OPTIONS'])", self.api_source)
         self.assertIn("@app.route('/api/four_you/unread_count', methods=['GET', 'OPTIONS'])", self.api_source)
         self.assertIn("fourYouUnreadCount", self.app_source)
-        self.assertIn("/api/four_you/unread_count", self.app_source)
+        # Само число фронт больше не запрашивает отдельно: его приносит общий
+        # ответ центра уведомлений (см. test_badges_come_from_one_request).
         # Открытие раздела гасит счётчик и серверный seen.
         self.assertIn("if (view === 'four_you') setFourYouUnreadCount(0);", self.app_source)
         self.assertIn("/api/four_you/seen", self.lenta_source)
@@ -155,15 +156,39 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertNotIn("activeIndex === index && image.annotations?.comments?.length > 0", self.lenta_source)
         self.assertIn("{!selectMode && image.annotations?.comments?.length > 0 && (", self.lenta_source)
 
-    def test_unread_badges_fetch_once_without_background_polling(self):
-        # После входа остаётся один bootstrap-запрос, но повторных запросов по
-        # таймеру, focus и visibilitychange для unread_count больше нет.
-        self.assertEqual(1, self.app_source.count("fetchEventsUnreadRef.current?.();"))
-        self.assertEqual(1, self.app_source.count("fetchFourYouUnreadRef.current?.();"))
+    def test_badges_come_from_one_request(self):
+        """Бейджи «Ивенты» и «4 You» питаются из общего ответа колокола.
+
+        Раньше каждый ходил за своим числом сам, и тест сторожил, чтобы эти
+        запросы хотя бы не повторялись по таймеру. Теперь запросов нет вовсе —
+        счётчики приходят из /api/notifications вместе с остальными, — поэтому
+        сторожим уже отсутствие собственных запросов, а не их количество.
+        """
+        self.assertIn("stableNotificationsCounts", self.app_source)
+        self.assertIn("setEventsUnreadCount(Math.max(0, Number(counts?.events) || 0));",
+                      self.app_source)
+        self.assertIn("setFourYouUnreadCount(Math.max(0, Number(counts?.four_you) || 0));",
+                      self.app_source)
+        # Именно форма ВЫЗОВА, а не упоминание: имена эндпоинтов остались в
+        # комментарии, объясняющем, почему фронт их больше не зовёт.
+        # assertNotIn на файле в 50k строк вывалил бы его целиком в отчёт,
+        # поэтому проверяем булевым условием с коротким сообщением.
+        for gone in ("${API_BASE_URL}/api/events/unread_count",
+                     "${API_BASE_URL}/api/four_you/unread_count",
+                     "fetchEventsUnreadRef", "fetchFourYouUnreadRef"):
+            self.assertTrue(gone not in self.app_source,
+                            "%s: бейдж снова ходит за числом сам" % gone)
+
+    def test_no_background_polling_of_badges(self):
+        """Опрос по таймеру не должен вернуться ни в каком виде."""
         self.assertNotIn("setInterval(pollIfActive, 45000)", self.app_source)
-        self.assertNotIn("const onFocus = () => fetchEventsUnreadRef.current?.();", self.app_source)
-        self.assertNotIn("const onFocus = () => fetchFourYouUnreadRef.current?.();", self.app_source)
-        self.assertNotIn("document.addEventListener('visibilitychange', pollIfActive);", self.app_source)
+        self.assertNotIn("document.addEventListener('visibilitychange', pollIfActive);",
+                         self.app_source)
+        bell = (ROOT / "src" / "components" / "notifications" / "NotificationsBell.jsx"
+                ).read_text(encoding="utf-8")
+        self.assertNotIn("setInterval", bell,
+                         "колокол обязан обновляться по возврату фокуса, а не по таймеру")
+        self.assertIn("REFRESH_GAP_MS", bell, "у обновления должен быть троттлинг")
 
 
 if __name__ == "__main__":

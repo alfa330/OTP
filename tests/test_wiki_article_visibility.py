@@ -18,13 +18,13 @@ wiki_article_sections / wiki_guest_access — и тот же самый боев
 не читаются и тем более не изменяются.
 
 Тест пропускается, если базы нет (например, в CI без секретов). Соединение —
-общее на весь набор, см. tests/wiki_db.py: у роли лимит в два подключения.
+общее на весь набор, см. tests/prod_db.py: у роли лимит в два подключения.
 """
 
 import unittest
 from pathlib import Path
 
-from tests import wiki_db
+from tests import prod_db
 from wiki.articles import _VISIBLE_ARTICLES_SQL
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,10 +72,10 @@ def _values(rows, fallback):
 class ArticleVisibilitySqlTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        reason = wiki_db.skip_reason()
+        reason = prod_db.skip_reason()
         if reason:
             raise unittest.SkipTest(reason)
-        cls.conn = wiki_db.connection()
+        cls.conn = prod_db.connection()
 
     def visible(self, *, articles, rules=(), sections=(), guests=(),
                 user_id=10, role='operator', allowed_sections=(),
@@ -109,8 +109,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
             cur.execute(sql, params)
             return {row[0] for row in cur.fetchall()}
         finally:
-            wiki_db.rollback()
-            cur.close()
+            prod_db.rollback()
             cur.close()
 
     # ── Наследование от разделов ─────────────────────────────────────────

@@ -15,7 +15,7 @@
 import unittest
 from pathlib import Path
 
-from tests import wiki_db
+from tests import prod_db
 from wiki import search as wiki_search
 from wiki.text import (
     ALIAS_GROUPS,
@@ -160,15 +160,15 @@ wiki_article_sections AS (
 
     @classmethod
     def setUpClass(cls):
-        reason = wiki_db.skip_reason()
+        reason = prod_db.skip_reason()
         if reason:
             raise unittest.SkipTest(reason)
-        cls.conn = wiki_db.connection()
+        cls.conn = prod_db.connection()
         cur = cls.conn.cursor()
         cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'")
         cls.has_trigram = cur.fetchone() is not None
         cur.close()
-        wiki_db.rollback()
+        prod_db.rollback()
 
     def run_search(self, rows, query, *, sections=None, with_trigram=False, section_id=None):
         stub = self.STUB.format(
@@ -183,7 +183,7 @@ wiki_article_sections AS (
                               'section': section_id, 'limit': 10})
             return [dict(zip(wiki_search._KEYS, row)) for row in cur.fetchall()]
         finally:
-            wiki_db.rollback()
+            prod_db.rollback()
             cur.close()
 
     ARTICLES = [
@@ -238,7 +238,7 @@ wiki_article_sections AS (
             self.assertEqual(cur.fetchall(), [],
                              'статья вне периметра не должна попасть в выдачу')
         finally:
-            wiki_db.rollback()
+            prod_db.rollback()
             cur.close()
 
     def test_nothing_found(self):
