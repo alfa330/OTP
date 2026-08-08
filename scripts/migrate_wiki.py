@@ -242,9 +242,28 @@ def rewrite_images(api, html, article_id, stats):
 # Перенос
 # ─────────────────────────────────────────────────────────────────────────────
 
+def existing_by_name(api, path, key='items'):
+    """Что уже есть в разделе — чтобы повторный запуск не плодил дубли."""
+    try:
+        data = api.call('GET', path)
+    except RuntimeError:
+        return {}
+    return {(item.get('name') or '').strip().lower(): item.get('id')
+            for item in (data.get(key) or [])}
+
+
+def existing_slugs(api):
+    try:
+        data = api.call('GET', '/api/wiki/articles?limit=200')
+    except RuntimeError:
+        return {}
+    return {(item.get('slug') or ''): item.get('id') for item in (data.get('items') or [])}
+
+
 def migrate(api, dump, only=None, open_by_role=False):
     stats = {'spaces': 0, 'sections': 0, 'rules': 0, 'articles': 0, 'published': 0,
-             'image_base64': 0, 'image_cdn': 0, 'image_failed': 0, 'skipped': 0}
+             'image_base64': 0, 'image_cdn': 0, 'image_failed': 0, 'skipped': 0,
+             'reused': 0}
 
     spaces = {s['id']: s for s in dump['spaces']}
     sections = {s['id']: s for s in dump['sections']}
@@ -385,7 +404,8 @@ def main():
                        ('image_base64', 'картинок из base64 в GCS'),
                        ('image_cdn', 'картинок с чужого CDN в GCS'),
                        ('image_failed', 'картинок не перенеслось'),
-                       ('skipped', 'пропущено фильтром')):
+                       ('skipped', 'пропущено фильтром'),
+                       ('reused', 'уже было — переиспользовано')):
         log('   %-32s %s' % (label, stats[key]))
 
     if not args.apply:
