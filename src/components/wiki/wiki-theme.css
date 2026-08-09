@@ -29,6 +29,11 @@
     --wiki-accent: #4f46e5;
     --wiki-accent-soft: #eef2ff;
     --wiki-accent-line: #c7d2fe;
+    /* Подсветка ВЫДЕЛЕННОГО текста — отдельный токен, а не accent-soft.
+       accent-soft (#eef2ff) — это фон плашек; на белой странице выделение им
+       практически не отличается от невыделенного, и выглядело так, будто текст
+       в разделе не выделяется вовсе. Здесь нужна заметная плотность. */
+    --wiki-selection: rgba(99, 102, 241, 0.28);
 
     --wiki-ink: #0f172a;
     --wiki-ink-soft: #475569;
@@ -54,7 +59,8 @@
 }
 
 .wiki-scope ::selection {
-    background-color: var(--wiki-accent-soft);
+    background-color: var(--wiki-selection);
+    color: var(--wiki-ink);
 }
 
 /* Видимый фокус: требование доступности, и в оригинале он был глобальным. */

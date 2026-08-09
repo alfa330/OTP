@@ -72,6 +72,14 @@ export const markedWord = (snippet, fallback) => {
     return (match && match[1].trim()) || fallback;
 };
 
+/* Человек тянул мышью по строке, чтобы скопировать кусок сниппета — а mouseup
+   на той же кнопке даёт click, и вместо копирования открывалась статья. Клик с
+   непустым выделением игнорируем: это было выделение, а не выбор. */
+const isTextSelection = () => {
+    const selection = window.getSelection();
+    return !!selection && !selection.isCollapsed && !!selection.toString().trim();
+};
+
 /** Бар машины: город, год и вердикты по тарифам. */
 function CarWidget({ data, car, onOpenClassifier }) {
     const [cityId, setCityId] = useState('almaty');
@@ -222,7 +230,6 @@ function ResultsPane({
                     Поиск не ответил.
                     <button
                         type="button"
-                        onMouseDown={(e) => e.preventDefault()}
                         onClick={onRetry}
                         className="ml-1.5 inline-flex items-center gap-1 font-medium text-indigo-600 hover:text-indigo-700"
                     >
@@ -254,7 +261,7 @@ function ResultsPane({
                         </SectionLabel>
                         {/* Свой скроллер: у Toyota моделей под сотню, и без
                             ограничения они выдавливали «Статьи» за экран. */}
-                        <ul className="max-h-[164px] space-y-0.5 overflow-y-auto pr-0.5">
+                        <ul className="max-h-[196px] space-y-0.5 overflow-y-auto pr-0.5">
                             {brandModels.map((car) => {
                                 const isActive = activeCar
                                     && activeCar.brand === car.brand
@@ -263,8 +270,7 @@ function ResultsPane({
                                     <li key={`${car.brand}-${car.model}`}>
                                         <button
                                             type="button"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => onPickCar(car)}
+                                            onClick={() => { if (!isTextSelection()) onPickCar(car); }}
                                             className={`flex w-full items-center justify-between gap-2 rounded-xl px-3 py-1.5 text-left transition ${
                                                 isActive ? 'bg-indigo-50' : 'hover:bg-slate-50'
                                             }`}
@@ -298,10 +304,9 @@ function ResultsPane({
                                     <li key={item.id} data-row={index}>
                                         <button
                                             type="button"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => onPick(row)}
+                                            onClick={() => { if (!isTextSelection()) onPick(row); }}
                                             onMouseEnter={() => onHover(index)}
-                                            className={`flex w-full items-start gap-2.5 rounded-xl px-3 py-2 text-left transition ${rowClass(index)}`}
+                                            className={`flex w-full select-text items-start gap-2.5 rounded-xl px-3 py-2 text-left transition ${rowClass(index)}`}
                                         >
                                             <FileText size={15} className={`mt-0.5 shrink-0 ${
                                                 index === selectedIndex ? 'text-indigo-500' : 'text-slate-300'
@@ -346,10 +351,9 @@ function ResultsPane({
                                     <li key={`${row.item.id}-${row.index}`} data-row={index}>
                                         <button
                                             type="button"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => onPick(row)}
+                                            onClick={() => { if (!isTextSelection()) onPick(row); }}
                                             onMouseEnter={() => onHover(index)}
-                                            className={`w-full rounded-xl px-3 py-2 text-left transition ${rowClass(index)}`}
+                                            className={`w-full select-text rounded-xl px-3 py-2 text-left transition ${rowClass(index)}`}
                                         >
                                             <span className="mb-0.5 block truncate text-[11px] text-slate-400">
                                                 из: <span className="font-medium text-slate-500">{row.item.title}</span>
@@ -564,8 +568,10 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         return () => window.removeEventListener('keydown', onKey);
     }, [close]);
 
-    // Клик мимо — выпадашка закрывается. Внутри неё мышь гасится onMouseDown,
-    // поэтому фокус из поля не уходит и выбор строки работает с первого клика.
+    /* Клик мимо — выпадашка закрывается. Внутри неё закрывать нечему:
+       слушатель проверяет containerRef, а blur поля выпадашку не гасит.
+       Раньше здесь дополнительно гасился mousedown на строках — из-за этого
+       текст в выдаче нельзя было выделить мышью, и это убрано. */
     useEffect(() => {
         if (!focused) return undefined;
         const onDown = (e) => {
@@ -647,7 +653,6 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                 {query ? (
                     <button
                         type="button"
-                        onMouseDown={(e) => e.preventDefault()}
                         onClick={() => { setQuery(''); inputRef.current?.focus(); }}
                         className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"
                         aria-label="Очистить"
@@ -675,17 +680,17 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                             opacity: 0, y: 6, scale: 0.99,
                             transition: { duration: reduceMotion ? 0 : 0.12, ease: 'easeIn' },
                         }}
-                        className={`absolute right-0 top-full z-40 mt-2 hidden max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl bg-white p-2.5 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/10 transition-[width] duration-300 ease-out sm:flex ${
-                            activeCar ? 'w-[720px] gap-3' : 'w-[460px]'
+                        className={`absolute right-0 top-full z-40 mt-2 hidden max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl bg-white p-3 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/10 transition-[width] duration-300 ease-out sm:flex ${
+                            activeCar ? 'w-[900px] gap-3' : 'w-[580px]'
                         }`}
                     >
-                        <ResultsPane {...paneProps} listRef={listRef} maxHeight="46vh" />
+                        <ResultsPane {...paneProps} listRef={listRef} maxHeight="60vh" />
                         {carPane && (
                             <motion.div
                                 initial={reduceMotion ? false : { opacity: 0 }}
                                 animate={{ opacity: 1 }}
                                 transition={{ duration: reduceMotion ? 0 : 0.2, delay: reduceMotion ? 0 : 0.1 }}
-                                className="w-[290px] shrink-0"
+                                className="w-[320px] shrink-0"
                             >
                                 {carPane}
                             </motion.div>
