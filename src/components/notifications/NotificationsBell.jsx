@@ -460,15 +460,38 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         }, 200);
     }, []);
 
+    const notificationKey = (item) => `${item.source}:${item.id}:${item.title}`;
+
+    /* Пришедшее может не оказаться в показанной порции: список отсортирован по
+       важности, и свежая задача «поручена, работа не начата» стоит ЗА четырьмя
+       просроченными, то есть за пределами первых пяти. Счётчик при этом растёт.
+       Поэтому, когда роста не видно в выдаче, один раз спрашиваем расширенную
+       выдачу — только чтобы понять, что именно пришло. */
+    const probeBeyondPage = useCallback(async (known) => {
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/notifications`, {
+                headers: getHeaders(),
+                params: { limit: MAX_PAGE_SIZE },
+            });
+            const all = Array.isArray(response?.data?.items) ? response.data.items : [];
+            const fresh = all.filter((item) => !known.has(notificationKey(item)));
+            // Запоминаем и хвост: иначе те же элементы прозвенят снова при
+            // следующем росте счётчика.
+            all.forEach((item) => knownKeysRef.current?.add(notificationKey(item)));
+            return fresh;
+        } catch (e) {
+            return [];
+        }
+    }, [apiBaseUrl, getHeaders]);
+
     /* Пришла новая сводка — решаем, есть ли повод звенеть.
        Три условия, и каждое закрывает свой ложный повод:
        известный состав — иначе вход в портал звенел бы всем, что накопилось;
        выросший счётчик — иначе догрузка следующей порции (там сплошь «новые»
        для нас элементы) выглядела бы как поток уведомлений;
        закрытая панель — при открытой человек и так смотрит на список. */
-    const announce = useCallback((nextItems, nextCounts) => {
-        const keyOf = (item) => `${item.source}:${item.id}:${item.title}`;
-        const nextKeys = new Set(nextItems.map(keyOf));
+    const announce = useCallback(async (nextItems, nextCounts) => {
+        const nextKeys = new Set(nextItems.map(notificationKey));
         const known = knownKeysRef.current;
         knownKeysRef.current = nextKeys;
 
@@ -477,24 +500,35 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         totalRef.current = nextTotal;
 
         if (!known || nextTotal <= prevTotal || openRef.current) return;
-        const fresh = nextItems.filter((item) => !known.has(keyOf(item)));
-        if (!fresh.length) return;
 
-        // Элементы уже отсортированы сервером: горящее сверху, поэтому первое
-        // свежее — самое важное из пришедшего.
+        // Счётчик вырос — значит пришло. Звоним сразу, не дожидаясь, пока
+        // выясним подробности: сигнал важнее деталей.
         setRingNonce((value) => value + 1);
+
+        let fresh = nextItems.filter((item) => !known.has(notificationKey(item)));
+        if (!fresh.length) fresh = await probeBeyondPage(known);
+        if (!aliveRef.current || openRef.current) return;
+
+        // Элементы отсортированы сервером — горящее сверху, поэтому первое
+        // свежее и есть самое важное из пришедшего. Если найти не удалось
+        // (например, «4 You» сворачивает все фото в одну строку), показываем
+        // хотя бы сам факт: сколько прибавилось.
         if (toastCloseTimerRef.current) {
             clearTimeout(toastCloseTimerRef.current);
             toastCloseTimerRef.current = null;
         }
         setToastClosing(false);
-        setToast({ item: fresh[0], extra: fresh.length - 1 });
+        setToast({
+            item: fresh[0] || null,
+            extra: Math.max(0, (fresh.length || (nextTotal - prevTotal)) - 1),
+            added: nextTotal - prevTotal,
+        });
         if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
         toastTimerRef.current = setTimeout(() => {
             toastTimerRef.current = null;
             closeToast();
         }, TOAST_VISIBLE_MS);
-    }, [closeToast]);
+    }, [closeToast, probeBeyondPage]);
     announceRef.current = announce;
 
     const toggle = () => {
@@ -646,7 +680,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const toastItem = toast?.item;
     const toastMeta = toastItem ? (SOURCE_META[toastItem.source] || {}) : {};
     const ToastIcon = toastMeta.icon || Bell;
-    const toastNode = toastItem && !open ? (
+    const toastNode = toast && !open ? (
         <div
             role="status"
             aria-live="polite"
@@ -670,7 +704,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 type="button"
                 onClick={() => {
                     closeToast();
-                    onNavigate?.(toastItem.view, toastItem.target);
+                    // Не знаем, что именно пришло, — открываем список: там оно
+                    // есть, и человек сам увидит.
+                    if (toastItem) onNavigate?.(toastItem.view, toastItem.target);
+                    else setOpen(true);
                 }}
                 className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
             >
@@ -679,15 +716,19 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 </span>
                 <span className="min-w-0 flex-1">
                     <span className="flex items-baseline justify-between gap-2">
-                        <span className="truncate text-[13.5px] font-medium text-slate-900">{toastItem.title}</span>
-                        <span className="shrink-0 text-[11px] text-slate-400">{fmtWhen(toastItem.at)}</span>
+                        <span className="truncate text-[13.5px] font-medium text-slate-900">
+                            {toastItem ? toastItem.title : `Новых уведомлений: ${toast.added}`}
+                        </span>
+                        {toastItem && (
+                            <span className="shrink-0 text-[11px] text-slate-400">{fmtWhen(toastItem.at)}</span>
+                        )}
                     </span>
                     <span className="mt-0.5 block text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                        {toastMeta.label || toastItem.source}
+                        {toastItem ? (toastMeta.label || toastItem.source) : 'Откройте список'}
                     </span>
-                    {/* Детали показываем целиком в две строки: в списке на них
-                        места нет, а здесь ради них всё и раскрывается. */}
-                    {toastItem.body && (
+                    {/* Детали показываем целиком: в списке на них места нет,
+                        а здесь ради них всё и раскрывается. */}
+                    {toastItem?.body && (
                         <span className={`mt-1 block text-[12px] leading-snug ${toastItem.tone === 'warning' ? 'font-medium text-amber-600' : 'text-slate-500'}`}>
                             {toastItem.body}
                         </span>

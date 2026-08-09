@@ -338,6 +338,31 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         # При открытом списке человек и так всё видит.
         self.assertIn('openRef.current', block)
 
+    def test_rings_even_when_the_new_one_is_beyond_the_page(self):
+        """Реальный случай: супервайзер поставил задачу — счётчик вырос, звона нет.
+
+        Список отсортирован по важности, и свежая задача «поручена, работа не
+        начата» стоит ЗА просроченными, то есть за пределами порции из пяти.
+        Значит звонить надо по росту счётчика, а что именно пришло — выяснять
+        отдельным запросом расширенной выдачи.
+        """
+        start = self.SOURCE.index('const announce = useCallback(')
+        block = self.SOURCE[start:self.SOURCE.index('announceRef.current = announce;', start)]
+        # Звон — сразу по росту счётчика, до выяснения подробностей.
+        ring_at = block.index('setRingNonce')
+        probe_at = block.index('probeBeyondPage')
+        self.assertLess(ring_at, probe_at, 'сигнал важнее деталей — звон не ждёт запроса')
+        self.assertIn('if (!fresh.length) fresh = await probeBeyondPage(known);', block)
+        # Не нашли конкретное — показываем хотя бы сам факт.
+        self.assertIn('added: nextTotal - prevTotal', block)
+
+    def test_probe_remembers_the_tail(self):
+        """Иначе хвост выдачи прозвенит повторно при следующем росте счётчика."""
+        start = self.SOURCE.index('const probeBeyondPage = useCallback(')
+        block = self.SOURCE[start:self.SOURCE.index('/* Пришла новая сводка', start)]
+        self.assertIn('knownKeysRef.current?.add', block)
+        self.assertIn('limit: MAX_PAGE_SIZE', block)
+
     def test_toast_is_not_marked_as_the_dropdown(self):
         """Класс .notifications-dropdown держит свёрнутый сайдбар развёрнутым
         (правило :has), и каждое уведомление дёргало бы всю вёрстку."""
