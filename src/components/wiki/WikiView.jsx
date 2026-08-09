@@ -169,7 +169,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     <button
                         type="button"
                         onClick={() => setSearchOpen(true)}
-                        className="order-3 flex w-full items-center gap-2.5 rounded-xl bg-white px-3.5 py-2.5 text-left shadow-sm ring-1 ring-slate-900/5 transition hover:ring-slate-900/10 sm:order-none sm:w-auto sm:min-w-[260px] sm:flex-1 sm:max-w-md"
+                        aria-haspopup="dialog"
+                        aria-expanded={searchOpen}
+                        className="order-3 flex w-full items-center gap-2.5 rounded-xl bg-white px-3.5 py-2.5 text-left shadow-sm ring-1 ring-slate-900/5 transition hover:ring-slate-900/10 active:scale-[0.99] sm:order-none sm:w-auto sm:min-w-[260px] sm:flex-1 sm:max-w-md"
                     >
                         <Search size={15} className="shrink-0 text-slate-400" />
                         <span className="min-w-0 flex-1 truncate text-[13.5px] text-slate-400">

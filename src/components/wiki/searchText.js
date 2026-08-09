@@ -207,7 +207,33 @@ export function aliasesForText(text) {
     return Array.from(matched).sort();
 }
 
-/** Варианты написания запроса, в порядке убывания близости к оригиналу. */
+/** «хундай солярис» -> «hyundai solaris»: пословная подстановка алиасов.
+ *
+ * Алиасы попадают в варианты отдельными словами ('hyundai', 'solaris'), и пара
+ * «марка + модель» рассыпается: по одинокому 'hyundai' matchCar отвечает первой
+ * моделью марки, а не запрошенной. Собранная обратно фраза возвращает пару.
+ * Написание выбирается детерминированно — первое по алфавиту.
+ */
+export function aliasPhrase(text) {
+    const words = normalizeText(text).split(WORD_SPLIT).filter(Boolean);
+    if (words.length < 2) return '';
+    let substituted = false;
+    const phrase = words.map((word) => {
+        const bucket = ALIAS_INDEX.get(word);
+        if (!bucket || !bucket.size) return word;
+        substituted = true;
+        return Array.from(bucket).sort()[0];
+    });
+    return substituted ? phrase.join(' ') : '';
+}
+
+/** Варианты написания запроса, в порядке убывания близости к оригиналу.
+ *
+ * Порядок и условие раскладки обязаны совпадать с wiki/text.py::query_variants —
+ * см. подробное объяснение там (сводка: «BYD» флипается в «инв» и утаскивал
+ * выдачу в «Инвентаризацию», поэтому раскладку чиним только для неопознанных
+ * словарём запросов длиной от четырёх символов).
+ */
 export function queryVariants(query) {
     const variants = [];
     const add = (value) => {
@@ -221,14 +247,20 @@ export function queryVariants(query) {
     add(transliterateCyrillicToLatin(normalized));
     add(transliterateLatinToCyrillic(normalized));
 
-    const fixedLayout = fixKeyboardLayout(query);
-    add(fixedLayout);
-    const normalizedFixed = normalizeText(fixedLayout);
-    add(normalizedFixed);
-    add(transliterateCyrillicToLatin(normalizedFixed));
+    const baseAliases = aliasesForText(normalized);
+    add(aliasPhrase(normalized));
+    for (const alias of baseAliases) add(alias);
 
-    for (const alias of aliasesForText(normalized)) add(alias);
-    for (const alias of aliasesForText(normalizedFixed)) add(alias);
+    const fixedLayout = fixKeyboardLayout(query);
+    if (fixedLayout !== query && !baseAliases.length
+            && String(query || '').trim().length >= 4) {
+        add(fixedLayout);
+        const normalizedFixed = normalizeText(fixedLayout);
+        add(normalizedFixed);
+        add(transliterateCyrillicToLatin(normalizedFixed));
+        add(aliasPhrase(normalizedFixed));
+        for (const alias of aliasesForText(normalizedFixed)) add(alias);
+    }
 
     return variants;
 }

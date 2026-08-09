@@ -10,6 +10,77 @@ import React from 'react';
 export const APPLE_FONT =
     '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif';
 
+/*
+ * Моторика оверлеев портала — единый набор для всех модалок раздела.
+ *
+ * Тайминги сняты с оригинальной вики (frontend/src/components/search-modal.tsx):
+ * панель там въезжала за 0.12 с ease-out, выпадашка — за 0.15 с со сдвигом
+ * y:10 и scale 0.99. Кривая 0.16/1/0.3/1 — та самая «.animate-scaleUp» из
+ * globals.css оригинала, узаконенная там как кривая раскрытия модалки: быстрый
+ * старт, мягкое приземление, характер macOS.
+ *
+ * Выход короче входа: закрытие не должно заставлять ждать.
+ *
+ * Затемнение и панель — РАЗНЫЕ слои. Если навесить прозрачность на общий
+ * корень, opacity родителя перемножится с потомками и панель будет выцветать
+ * вместе с фоном: получится не раскрытие, а общее проявление. В оригинале
+ * backdrop тоже отдельный motion-слой.
+ */
+/* Именованные варианты, а не инлайновые объекты: только с именами
+   onAnimationComplete получает строку и вход можно отличить от выхода
+   (по завершении входа мы ставим фокус в поле поиска). */
+export const IOS_MODAL_MOTION = {
+    backdrop: {
+        initial: 'hidden',
+        animate: 'visible',
+        exit: 'hidden',
+        variants: {
+            hidden: { opacity: 0, transition: { duration: 0.12, ease: 'easeIn' } },
+            visible: { opacity: 1, transition: { duration: 0.18, ease: 'easeOut' } },
+        },
+    },
+    panel: {
+        initial: 'hidden',
+        animate: 'visible',
+        exit: 'hidden',
+        variants: {
+            hidden: {
+                opacity: 0, scale: 0.98, y: 8,
+                transition: { duration: 0.12, ease: 'easeIn' },
+            },
+            visible: {
+                opacity: 1, scale: 1, y: 0,
+                transition: { duration: 0.16, ease: [0.16, 1, 0.3, 1] },
+            },
+        },
+    },
+};
+
+/* prefers-reduced-motion: CSS-переходы глушит правило в теме, но framer пишет
+   инлайновые стили через rAF и под это правило не подпадает — нужен свой
+   набор с нулевой длительностью. Имена вариантов те же, чтобы код компонента
+   не разветвлялся. */
+export const IOS_MODAL_MOTION_REDUCED = {
+    backdrop: {
+        initial: 'hidden',
+        animate: 'visible',
+        exit: 'hidden',
+        variants: {
+            hidden: { opacity: 0, transition: { duration: 0 } },
+            visible: { opacity: 1, transition: { duration: 0 } },
+        },
+    },
+    panel: {
+        initial: 'hidden',
+        animate: 'visible',
+        exit: 'hidden',
+        variants: {
+            hidden: { opacity: 0, transition: { duration: 0 } },
+            visible: { opacity: 1, transition: { duration: 0 } },
+        },
+    },
+};
+
 // Заполненное поле в стиле iOS «grouped form».
 export const iosInput =
     'w-full px-3.5 py-2.5 text-[14px] rounded-xl bg-slate-100 border-0 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:bg-white transition';

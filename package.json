@@ -12,6 +12,7 @@
     "test:board-query": "node --test tests/board_query.test.mjs",
     "test:board-grouping": "node --test tests/board_grouping.test.mjs",
     "test:wiki-search": "node --test tests/wiki_search_text.test.mjs",
+    "test:wiki-car": "node --test tests/wiki_car_match.test.mjs",
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",
     "test:telegram-text": "node --test tests/telegram_text.test.mjs"
   },

@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
+import { markedWord } from './WikiSearchModal';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
 // редактора, а не при входе в раздел.
@@ -166,6 +167,15 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         setOpenHighlight(null);
         setOpenSlug(slug);
     }, []);
+
+    /* Открытие ИЗ ВЫДАЧИ — с подсветкой, как из поисковой модалки. Раньше это
+       же действие в двух местах интерфейса работало по-разному: человеку
+       показывали сниппет с найденным словом, а статья открывалась на первом
+       экране, где этого слова нет. */
+    const openHit = useCallback((article) => {
+        setOpenHighlight(markedWord(article.snippet, query.trim()));
+        setOpenSlug(article.slug);
+    }, [query]);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
@@ -337,7 +347,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                                     Найдено: {found.length}
                                 </div>
                                 {found.map((article) => (
-                                    <SearchHit key={article.id} article={article} onOpen={openArticle} />
+                                    <SearchHit key={article.id} article={article}
+                                               onOpen={() => openHit(article)} />
                                 ))}
                             </div>
                         ) : (

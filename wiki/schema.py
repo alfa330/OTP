@@ -614,17 +614,28 @@ _SEARCH_STATEMENTS = [
 # Опечатки и префиксный поиск. Отдельно и под своим савпоинтом: расширение
 # требует прав, и если их нет — поиск обязан продолжить работать на одном FTS,
 # а не утащить за собой всю схему раздела.
+# Триграммных ИНДЕКСОВ здесь намеренно нет, хотя расширение нужно.
+#
+# Проверено на боевой базе: планировщик не берёт GIN gin_trgm_ops ни для
+# word_similarity(q, lower(title)) >= 0.45, ни для оператора %> — Seq Scan
+# остаётся даже при enable_seqscan = off. Причина в форме условия: индексируемая
+# сторона у word_similarity/%> — «стог сена», и он стоит СПРАВА, а индексному
+# скану нужно индексируемое выражение слева. Индексы, заведённые под этот поиск,
+# не использовались ни разу и стоили только записи; их сносим.
+#
+# Когда возвращаться к вопросу: если статей станет тысячи и Seq Scan по
+# заголовкам перестанет укладываться в десятки миллисекунд. Тогда предикат надо
+# переписать на индексируемую форму (similarity через оператор % с
+# pg_trgm.similarity_threshold) и завести индекс уже под неё.
 _TRIGRAM_STATEMENTS = [
     "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-    """
-    CREATE INDEX IF NOT EXISTS idx_wiki_articles_title_trgm
-        ON wiki_articles USING GIN (lower(title) gin_trgm_ops);
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_wiki_articles_aliases_trgm
-        ON wiki_articles USING GIN (lower(search_aliases) gin_trgm_ops);
-    """,
 ]
+
+# Индексы, заведённые под триграммный поиск и не использованные ни разу.
+_DEAD_TRIGRAM_INDEXES = (
+    'idx_wiki_articles_title_trgm',
+    'idx_wiki_articles_aliases_trgm',
+)
 
 
 def init_wiki_schema(cursor):
@@ -690,6 +701,8 @@ def init_wiki_schema(cursor):
     # раздела не откатывается целиком.
     cursor.execute('SAVEPOINT wiki_trgm')
     try:
+        for index_name in _DEAD_TRIGRAM_INDEXES:
+            cursor.execute('DROP INDEX IF EXISTS ' + index_name)
         for statement in _TRIGRAM_STATEMENTS:
             cursor.execute(statement)
     except Exception:

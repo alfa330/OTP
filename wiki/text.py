@@ -243,11 +243,49 @@ def aliases_for_text(text):
     return sorted(matched)
 
 
+def alias_phrase(text):
+    """«хундай солярис» -> «hyundai solaris»: пословная подстановка алиасов.
+
+    Алиасы попадают в варианты ОТДЕЛЬНЫМИ словами ('hyundai', 'solaris'), и
+    пара «марка + модель» из-за этого рассыпается: по одинокому 'hyundai' и
+    поиск, и справочник классификатора отвечают первой моделью марки, а не
+    запрошенной. Собранная обратно фраза возвращает точную пару.
+
+    Написание выбирается детерминированно (первое по алфавиту), иначе вариант
+    плясал бы от запуска к запуску: значения индекса — множества.
+    """
+    words = [word for word in _WORD_SPLIT.split(normalize_text(text)) if word]
+    if len(words) < 2:
+        return ''
+    substituted = False
+    phrase = []
+    for word in words:
+        options = sorted(_ALIAS_INDEX.get(word, ()))
+        phrase.append(options[0] if options else word)
+        substituted = substituted or bool(options)
+    return ' '.join(phrase) if substituted else ''
+
+
 def query_variants(query):
     """Варианты написания запроса, в порядке убывания близости к оригиналу.
 
-    Порядок повторяет оригинал: исходный текст, нормализованный, транслит в обе
-    стороны, исправленная раскладка и её транслит, затем алиасы.
+    Порядок: исходный текст, нормализованный, транслит в обе стороны, фраза с
+    подставленными алиасами, сами алиасы и только в конце — исправленная
+    раскладка.
+
+    ОТЛИЧИЕ ОТ ОРИГИНАЛА в порядке и в условии. Там раскладка стояла до алиасов,
+    но это было безопасно: варианты уходили в движок параллельно и результаты
+    сливались. Пока поиск перебирал варианты по очереди, до алиасов дело могло
+    не дойти вовсе — запрос «BYD» возвращал «Инвентаризацию автопарка», потому
+    что fix_keyboard_layout('BYD') = 'инв' и префиксный tsquery «инв:*» её
+    находил. Сейчас варианты снова сливаются (см. wiki/search.py), поэтому
+    порядок решает не всё — но мусорный вариант всё равно тащил бы в выдачу
+    посторонние статьи, и его лучше не порождать.
+
+    Раскладку чиним только когда её есть смысл чинить: запрос не опознан
+    словарём и длиннее трёх символов. У коротких латинских запросов флип
+    случайно совпадает с русским префиксом ('vw' -> 'мц', 'kia' -> 'лшф'),
+    а «ntrcn» -> «текст» и «fhtylf» -> «аренда» продолжают работать.
     """
     variants = []
 
@@ -262,16 +300,20 @@ def query_variants(query):
     add(transliterate_cyrillic_to_latin(normalized))
     add(transliterate_latin_to_cyrillic(normalized))
 
-    fixed_layout = fix_keyboard_layout(query)
-    add(fixed_layout)
-    normalized_fixed = normalize_text(fixed_layout)
-    add(normalized_fixed)
-    add(transliterate_cyrillic_to_latin(normalized_fixed))
+    base_aliases = aliases_for_text(normalized)
+    add(alias_phrase(normalized))
+    for alias in base_aliases:
+        add(alias)
 
-    for alias in aliases_for_text(normalized):
-        add(alias)
-    for alias in aliases_for_text(normalized_fixed):
-        add(alias)
+    fixed_layout = fix_keyboard_layout(query)
+    if fixed_layout != query and not base_aliases and len(str(query or '').strip()) >= 4:
+        add(fixed_layout)
+        normalized_fixed = normalize_text(fixed_layout)
+        add(normalized_fixed)
+        add(transliterate_cyrillic_to_latin(normalized_fixed))
+        add(alias_phrase(normalized_fixed))
+        for alias in aliases_for_text(normalized_fixed):
+            add(alias)
 
     return variants
 

@@ -12,6 +12,9 @@
 запроса исполняется над синтетическими строками через read-only соединение.
 """
 
+import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -130,6 +133,34 @@ class JsAliasSyncTest(unittest.TestCase):
 
     def test_alias_groups_match_python(self):
         self.assertEqual(self._js_groups(), ALIAS_GROUPS)
+
+    # Запросы, на которых расходились бы карты транслита, раскладки и порядок
+    # вариантов. Текстовое сравнение исходников здесь не помогает: регулярка
+    # ломается на записях с пустым значением ('ъ': '') и на ключе-апострофе
+    # ("'": 'э'), а поведение важнее данных.
+    CORPUS = ['камри', 'rfvhb', 'хундай солярис', 'BYD', 'vw', 'kia',
+              "Cee'd", 'wi-fi', 'вай фай', 'render.com', 'Қарағанды',
+              'ёж', 'node.js', 'ntrcn', 'fhtylf', 'Аренда транспорта', '']
+
+    def test_js_behaviour_matches_python(self):
+        """queryVariants в браузере обязан давать ровно то же, что на сервере.
+
+        Совпадать должны и состав, и ПОРЯДОК: сервер сливает варианты, а клиент
+        по ним же ищет машину — разъедутся, и статью найдёт, а бар
+        классификатора не откроется.
+        """
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('node недоступен')
+        script = (
+            'import { queryVariants } from %s;'
+            'process.stdout.write(JSON.stringify(%s.map(queryVariants)));'
+            % (json.dumps(self.JS_PATH.as_uri()), json.dumps(self.CORPUS))
+        )
+        out = subprocess.run([node, '--input-type=module', '-e', script],
+                             capture_output=True, check=True)
+        self.assertEqual(json.loads(out.stdout.decode('utf-8')),
+                         [query_variants(q) for q in self.CORPUS])
     def test_original_first(self):
         self.assertEqual(query_variants('Аренда')[0], 'Аренда')
 
@@ -199,18 +230,31 @@ wiki_article_sections AS (
 
     def run_search(self, rows, query, *, sections=None, with_trigram=False,
                    section_id=None, ids=(1, 2, 3, 4, 5)):
+        """Боевой SQL целиком, только wiki_articles подменена синтетикой.
+
+        Параметры собираются ровно как в wiki_search._run, включая слияние всех
+        написаний запроса — иначе тест проверял бы не тот запрос, что уходит
+        в прод.
+        """
         stub = self.STUB.format(
             rows=', '.join(rows),
             sections=', '.join(sections) if sections
             else '(NULL::int, NULL::int)',
         )
-        sql = wiki_search.build_sql(with_trigram).replace('WITH q AS (', stub + 'q AS (', 1)
+        sql = (wiki_search.build_sql(with_trigram)
+               .replace('WITH q AS (', stub + 'q AS (', 1))
+        variants = [v for v in query_variants(query) if len(v) >= 2]
         cur = self.conn.cursor()
         try:
-            cur.execute(sql, {'ids': list(ids), 'query': query,
-                              'prefix': wiki_search.prefix_tsquery(query),
-                              'section': section_id, 'limit': 10})
-            return [dict(zip(wiki_search._KEYS, row)) for row in cur.fetchall()]
+            cur.execute(sql, {
+                'ids': list(ids),
+                'variants': variants,
+                'prefixes': [wiki_search.prefix_tsquery(v) for v in variants],
+                'looses': [wiki_search.prefix_tsquery(v, ' | ') for v in variants],
+                'section': section_id,
+                'limit': 10,
+            })
+            return wiki_search._rows_to_items(cur)
         finally:
             prod_db.rollback()
             cur.close()
@@ -303,6 +347,114 @@ wiki_article_sections AS (
             self.skipTest('pg_trgm ещё не установлен в этой базе')
         found = self.run_search(self.ARTICLES, 'инстукция', with_trigram=True)
         self.assertIn(4, [a['id'] for a in found])
+
+
+class SearchMergeTest(SearchSqlTest):
+    """Слияние вариантов, ступени и деградация многословного запроса.
+
+    Наследуется от SearchSqlTest ради общего соединения и run_search: класс
+    добавляет только собственный набор статей и проверки того, что чинилось.
+    """
+
+    # Отдельный набор, чтобы не трогать проверки базового класса.
+    ROWS = [
+        "(1, 'hyundai', 'Обслуживание Hyundai', 'Сервис', 'published', 9,"
+        " 'Регламент обслуживания', 'hyundai хендай хёндай хундай')",
+        "(2, 'solaris', 'Solaris в парке', 'Условия', 'published', 1,"
+        " 'Про модель', 'solaris солярис')",
+        "(3, 'srez', 'Положение о проведении ежемесячного среза знаний', 'Порядок',"
+        " 'published', 4, 'Срез проводится ежемесячно', 'polozhenie')",
+        "(4, 'zakazy', 'Цепочка заказов', 'Как включить', 'published', 2,"
+        " 'Баллы приоритета влияют на распределение заказов', 'tsepochka')",
+        "(5, 'uchet', 'Учёт рабочего времени', 'Табель', 'published', 3,"
+        " 'Табель заполняется ежедневно', 'uchet')",
+        # Написание «хундай» есть только в алиасах: ни в заголовке, ни в
+        # описании, ни в теле его нет — значит подсвечивать нечего.
+        "(6, 'reglament', 'Сервисный регламент', 'Плановые работы', 'published', 1,"
+        " 'Порядок планового обслуживания', 'хундай хендай')",
+    ]
+
+    def run_search(self, rows, query, **kwargs):
+        kwargs.setdefault('ids', (1, 2, 3, 4, 5, 6))
+        return super(SearchMergeTest, self).run_search(rows, query, **kwargs)
+
+    def ids(self, found):
+        return [item['id'] for item in found]
+
+    def test_variants_are_merged_not_short_circuited(self):
+        """«hyundai solaris» обязан отдать ОБЕ статьи.
+
+        Раньше выигрывал первый вариант, давший строки: выдача варианта
+        «хендай» возвращалась целиком, а «solaris» не пробовался никогда.
+        """
+        found = self.ids(self.run_search(self.ROWS, 'hyundai solaris', with_trigram=True))
+        self.assertIn(1, found)
+        self.assertIn(2, found)
+
+    def test_exact_title_outranks_frequent_body(self):
+        """Ступень важнее суммы рангов: заголовок бьёт частоту в теле."""
+        rows = [
+            "(1, 'a', 'Заказы', 'Коротко', 'published', 0, 'Ничего', 'zakazy')",
+            "(2, 'b', 'Прочее', 'Разное', 'published', 99,"
+            " '%s', 'prochee')" % ('заказ ' * 60),
+        ]
+        found = self.ids(self.run_search(rows, 'заказы', with_trigram=True, ids=[1, 2]))
+        self.assertEqual(found[0], 1, 'точный заголовок обязан быть первым')
+
+    def test_multiword_degrades_instead_of_empty(self):
+        """Лишнее/опечатанное слово больше не обнуляет выдачу.
+
+        websearch_to_tsquery склеивает слова через AND; у Meilisearch на этот
+        случай matchingStrategy='last'. Наш эквивалент — OR-овый tsquery
+        последней ступенью.
+        """
+        found = self.ids(self.run_search(self.ROWS, 'срез занний', with_trigram=True))
+        self.assertEqual(found[0], 3)
+
+    def test_yo_folded_on_article_side_for_trigrams(self):
+        """«учот» -> «Учёт рабочего времени»: ё сворачивается и у статьи.
+
+        Полнотекстовая ветка сворачивает ё сама, а триграммная сравнивала
+        запрос со НЕсвёрнутым заголовком, и порог 0.45 не брался.
+        """
+        found = self.ids(self.run_search(self.ROWS, 'учот рабочего', with_trigram=True))
+        self.assertIn(5, found)
+
+    def test_typo_is_covered_by_aliases_not_by_body_scan(self):
+        """Опечатка ловится алиасами: в них лежат заголовок, описание и теги.
+
+        Отдельного триграммного слоя по ТЕЛУ статьи нет намеренно — замер на
+        боевой базе показал 13 попаданий из 15 уже на этом слое, а добор по
+        телу давал в основном шум (см. wiki/search.py).
+        """
+        found = self.ids(self.run_search(self.ROWS, 'полжение о срезе',
+                                         with_trigram=True))
+        self.assertIn(3, found)
+
+    def test_highlights_are_marked_fragments_only(self):
+        found = self.run_search(self.ROWS, 'срез', with_trigram=True)
+        self.assertTrue(found)
+        self.assertTrue(found[0]['highlights'])
+        for fragment in found[0]['highlights']:
+            self.assertIn('<mark>', fragment)
+        self.assertEqual(found[0]['snippet'], found[0]['highlights'][0])
+
+    def test_no_bogus_snippet_when_match_is_alias_only(self):
+        """Совпало только в алиасах — сниппета нет, а не кусок чужого текста.
+
+        Раньше ts_headline на промахе отдавал НАЧАЛО статьи, фронт рисовал его
+        как найденный фрагмент, и слово подсветки не совпадало с показанным.
+        """
+        found = self.run_search(self.ROWS, 'хундай', with_trigram=True,
+                                ids=[6])
+        self.assertTrue(found)
+        self.assertEqual(found[0]['id'], 6)
+        self.assertEqual(found[0]['snippet'], '')
+        self.assertEqual(found[0]['highlights'], [])
+
+    def test_long_query_is_capped(self):
+        self.assertEqual(len(('а' * 500)[:wiki_search.MAX_QUERY_CHARS]),
+                         wiki_search.MAX_QUERY_CHARS)
 
 
 class PrefixTsqueryTest(unittest.TestCase):
