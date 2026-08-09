@@ -164,6 +164,26 @@
     .sidebar.collapsed:hover .sidebar-logo-mini {
       display: none;
     }
+    /* Пока панель колокола открыта, свёрнутый сайдбар удерживается развёрнутым.
+       Панель — потомок сайдбара и потому сама держит его :hover: без удержания
+       уход мыши сжимал бы сайдбар с открытой панелью, а повторное наведение на
+       неё вновь разворачивал — панель дёргалась бы на 176px вбок из-под курсора. */
+    .sidebar.collapsed:has(.notifications-dropdown) {
+      width: 256px;
+    }
+    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-text {
+      opacity: 1;
+      width: auto;
+    }
+    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-surveys-collapsed-badge {
+      display: none;
+    }
+    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-logo-full {
+      display: flex;
+    }
+    .sidebar.collapsed:has(.notifications-dropdown) .sidebar-logo-mini {
+      display: none;
+    }
     .sidebar button > svg:not(.sidebar-text) {
       flex: 0 0 18px;
       width: 18px;
@@ -391,6 +411,24 @@
       }
       .sidebar .sidebar-logo-mini {
         display: none !important;
+      }
+      /* На мобильном сайдбар всегда несёт .collapsed (кнопка сворачивания
+         скрыта), а подписи принудительно видимы — без этого правила у пункта
+         с непрочитанным висели бы сразу два бейджа: компактный в углу кнопки
+         и обычный рядом с подписью. */
+      .sidebar .sidebar-surveys-collapsed-badge {
+        display: none !important;
+      }
+      /* Панель колокола: на мобильном сайдбар обрезает всё за своей шириной
+         (overflow-x hidden), вправо ей выпадать некуда — раскрывается вниз
+         под кнопкой на ширину пункта. */
+      .sidebar .notifications-dropdown {
+        left: 0;
+        right: 0;
+        top: 100%;
+        width: auto;
+        margin-left: 0;
+        margin-top: 8px;
       }
       /* На мобильном сайдбар выезжает поверх контента, поэтому отступа нет ни у
          контента, ни у fixed-слоёв. Оба селектора обнуляем вместе: у

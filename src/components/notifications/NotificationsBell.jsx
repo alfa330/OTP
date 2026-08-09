@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, Loader2 } from 'lucide-react';
+import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, Loader2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 
 /* Колокол уведомлений.
@@ -49,15 +48,18 @@ const fmtWhen = (iso) => {
    и объект, собранный один раз, ушёл бы в запрос протухшим. Заодно не даёт
    новой ссылке на каждый рендер сбрасывать зависимости useCallback. */
 export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate,
-                                            onCounts, readSource, collapsed }) {
+                                            onCounts, readSource }) {
     const [open, setOpen] = useState(false);
+    // Закрытие в два шага, как у дропдауна «Аккаунта»: сначала обратная
+    // анимация, через 200мс — размонтирование панели.
+    const [closing, setClosing] = useState(false);
     const [loading, setLoading] = useState(false);
     const [counts, setCounts] = useState({ total: 0 });
     const [items, setItems] = useState([]);
-    const [anchor, setAnchor] = useState(null);
 
     const buttonRef = useRef(null);
     const panelRef = useRef(null);
+    const closeTimerRef = useRef(null);
     const fetchedAtRef = useRef(0);
     const aliveRef = useRef(true);
     // Запрос уже в пути. Отметка свежести ставится только по ответу, поэтому
@@ -65,7 +67,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     // такой же запрос поверх первого.
     const inFlightRef = useRef(false);
 
-    useEffect(() => () => { aliveRef.current = false; }, []);
+    useEffect(() => () => {
+        aliveRef.current = false;
+        if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    }, []);
 
     const load = useCallback(async () => {
         if (!user?.id || inFlightRef.current) return;
@@ -134,44 +139,36 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             : prev));
     }, [readSource?.source, readSource?.nonce]);
 
-    /* Панель рендерится порталом в body: сайдбар — fixed-слой со своим
-       контекстом наложения, и вложенная панель обрезалась бы им при свёрнутом
-       состоянии. Координаты считаем от кнопки. */
-    const place = useCallback(() => {
-        const rect = buttonRef.current?.getBoundingClientRect();
-        if (!rect) return;
-        // На телефоне 360px не помещаются рядом с сайдбаром — панель уезжала
-        // за правый край без возможности прокрутки. Ужимаем по месту.
-        const width = Math.min(360, Math.max(240, window.innerWidth - 24));
-        const left = Math.min(rect.right + 12, window.innerWidth - width - 12);
-        // Высоту панели ограничивает max-h-[70vh]; на низком экране прижимаем
-        // её к верху, а не к отрицательной координате.
-        const height = Math.min(480, window.innerHeight * 0.7);
-        setAnchor({
-            top: Math.max(12, Math.min(rect.top, window.innerHeight - height - 12)),
-            left: Math.max(12, left),
-            width,
-        });
+    const close = useCallback(() => {
+        if (closeTimerRef.current) return;
+        setClosing(true);
+        closeTimerRef.current = setTimeout(() => {
+            closeTimerRef.current = null;
+            setOpen(false);
+            setClosing(false);
+        }, 200);
     }, []);
+
+    const toggle = () => {
+        if (closing) return;
+        if (open) close(); else setOpen(true);
+    };
 
     useEffect(() => {
         if (!open) return undefined;
-        place();
         const onOutside = (event) => {
             if (panelRef.current?.contains(event.target)) return;
             if (buttonRef.current?.contains(event.target)) return;
-            setOpen(false);
+            close();
         };
-        const onKey = (event) => { if (event.key === 'Escape') setOpen(false); };
+        const onKey = (event) => { if (event.key === 'Escape') close(); };
         document.addEventListener('mousedown', onOutside);
         document.addEventListener('keydown', onKey);
-        window.addEventListener('resize', place);
         return () => {
             document.removeEventListener('mousedown', onOutside);
             document.removeEventListener('keydown', onKey);
-            window.removeEventListener('resize', place);
         };
-    }, [open, place]);
+    }, [open, close]);
 
     const total = Math.max(0, Number(counts?.total) || 0);
 
@@ -191,19 +188,25 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     };
 
     const pick = (item) => {
-        setOpen(false);
+        close();
         onNavigate?.(item.view, item.target);
     };
 
-    const panel = open && anchor ? createPortal(
+    /* Панель — absolute-потомок пункта, как дропдаун «Аккаунта»: она приклеена
+       к сайдбару и едет вместе с ним, когда тот сворачивается или
+       разворачивается по наведению. Прежний портал в body с fixed-координатами
+       зависал на старом месте при любой смене ширины сайдбара. На мобильном
+       вправо выпадать некуда (сайдбар обрезает всё за своей шириной) — там
+       панель раскрывается вниз, см. .notifications-dropdown в styles.css. */
+    const panel = (open || closing) ? (
         <div
             ref={panelRef}
             role="dialog"
             aria-label="Уведомления"
-            style={{ ...anchor, fontFamily: APPLE_FONT, position: 'fixed', zIndex: 60 }}
-            className="max-h-[70vh] overflow-hidden rounded-2xl border border-black/5 bg-white/95 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl"
+            style={{ fontFamily: APPLE_FONT }}
+            className={`notifications-dropdown absolute left-full top-0 z-40 ml-2 flex w-[360px] origin-top flex-col max-h-[70vh] overflow-hidden rounded-2xl border border-black/5 bg-white/95 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${open && !closing ? 'animate-dropdown' : 'animate-dropdown-reverse'}`}
         >
-            <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
                 <div className="text-[15px] font-semibold text-slate-900">Уведомления</div>
                 {clearable.length > 0 && (
                     <button
@@ -216,7 +219,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 )}
             </div>
 
-            <div className="max-h-[calc(70vh-52px)] overflow-y-auto overscroll-contain">
+            {/* min-h-0 вместо вычитания высоты шапки: на узком пункте (мобильный,
+                224px) «Отметить прочитанным» переносится на вторую строку, и
+                панель с «max-h минус 52px» срезала бы низ списка. */}
+            <div className="min-h-0 overflow-y-auto overscroll-contain">
                 {loading && items.length === 0 && (
                     <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
                         <Loader2 size={16} className="animate-spin" />
@@ -269,40 +275,42 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                     );
                 })}
             </div>
-        </div>,
-        document.body,
+        </div>
     ) : null;
 
+    /* Кнопка собрана по образцу остальных пунктов меню: подпись живёт в
+       .sidebar-text и показывается самим CSS сайдбара — в том числе при
+       наведении на свёрнутый сайдбар, чего проп collapsed дать не мог; бейдж
+       в свёрнутом состоянии — общий .sidebar-surveys-collapsed-badge. */
     return (
-        <>
+        <div className="relative">
             <button
                 ref={buttonRef}
                 type="button"
-                onClick={() => setOpen((value) => !value)}
+                onClick={toggle}
                 title={total > 0 ? `Уведомлений: ${total}` : 'Уведомления'}
                 aria-label={total > 0 ? `Уведомлений: ${total}` : 'Уведомления'}
-                className={`relative flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-all duration-200 hover:bg-blue-700 ${open ? 'bg-blue-700' : ''}`}
+                aria-expanded={open && !closing}
+                aria-haspopup="dialog"
+                className={`group relative flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-all duration-200 hover:bg-blue-700 ${open && !closing ? 'bg-blue-700' : ''}`}
             >
-                <span className="relative shrink-0">
-                    <Bell size={16} />
+                <Bell size={18} />
+                {total > 0 && (
+                    <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
+                        {total > 9 ? '9+' : total}
+                    </span>
+                )}
+                <span className="sidebar-text inline-flex items-center gap-2">
+                    <span>Уведомления</span>
                     {total > 0 && (
-                        <span className="absolute -right-1.5 -top-1.5 inline-flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-semibold leading-none text-white">
-                            {total > 9 ? '9+' : total}
+                        <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold leading-none text-white">
+                            {total > 99 ? '99+' : total}
                         </span>
                     )}
                 </span>
-                {!collapsed && (
-                    <span className="sidebar-text inline-flex items-center gap-2">
-                        <span>Уведомления</span>
-                        {total > 0 && (
-                            <span className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold leading-none text-white">
-                                {total > 99 ? '99+' : total}
-                            </span>
-                        )}
-                    </span>
-                )}
+                <ChevronRight size={14} className="sidebar-text ml-auto translate-x-2 opacity-0 transition-all duration-300 group-hover:translate-x-0 group-hover:opacity-100" />
             </button>
             {panel}
-        </>
+        </div>
     );
 }

@@ -43661,7 +43661,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onNavigate={stableNotificationsNavigate}
                                         onCounts={stableNotificationsCounts}
                                         readSource={bellReadSource}
-                                        collapsed={sidebarCollapsed}
                                     />
                                 </div>
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
