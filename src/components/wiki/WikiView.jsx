@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers,
-    Building2, Loader2, RefreshCw, ScrollText, Search, ShieldCheck, Users,
+    Building2, Loader2, RefreshCw, ScrollText, ShieldCheck, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge,
@@ -12,7 +12,7 @@ import WikiParks from './WikiParks';
 import WikiStructure from './WikiStructure';
 import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
-import WikiSearchModal from './WikiSearchModal';
+import WikiSearch from './WikiSearch';
 import './wiki-theme.css';
 
 /* Раздел «Вики» — корпоративная база знаний.
@@ -74,23 +74,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [loading, setLoading] = useState(true);
     const [structureLoading, setStructureLoading] = useState(true);
     const [tab, setTab] = useState('library');
-    const [searchOpen, setSearchOpen] = useState(false);
     const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight}
-
-    /* ⌘K / Ctrl+K — пока открыт раздел. Слушатель живёт только у
-       смонтированной вики, поэтому с другими разделами не конфликтует.
-       Внутри редактора статьи сочетание не трогаем: в TipTap Ctrl+K —
-       вставка ссылки. */
-    useEffect(() => {
-        const onKeyDown = (e) => {
-            if (!(e.metaKey || e.ctrlKey) || String(e.key).toLowerCase() !== 'k') return;
-            if (e.target?.closest?.('.ProseMirror, [contenteditable="true"]')) return;
-            e.preventDefault();
-            setSearchOpen((prev) => !prev);
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, []);
 
     const loadPing = useCallback(() => {
         setLoading(true);
@@ -164,40 +148,23 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         </div>
                     </div>
 
-                    {/* Кнопка-«поле»: настоящий ввод живёт в модалке — так поиск
-                        доступен с любой вкладки раздела, а не только из библиотеки. */}
-                    <button
-                        type="button"
-                        onClick={() => setSearchOpen(true)}
-                        aria-haspopup="dialog"
-                        aria-expanded={searchOpen}
-                        className="order-3 flex w-full items-center gap-2.5 rounded-xl bg-white px-3.5 py-2.5 text-left shadow-sm ring-1 ring-slate-900/5 transition hover:ring-slate-900/10 active:scale-[0.99] sm:order-none sm:w-auto sm:min-w-[260px] sm:flex-1 sm:max-w-md"
-                    >
-                        <Search size={15} className="shrink-0 text-slate-400" />
-                        <span className="min-w-0 flex-1 truncate text-[13.5px] text-slate-400">
-                            Статья, марка или модель машины…
-                        </span>
-                        <kbd className="hidden shrink-0 rounded-md border border-slate-200 px-1.5 py-0.5 text-[10.5px] font-medium text-slate-400 lg:block">
-                            Ctrl K
-                        </kbd>
-                    </button>
+                    {/* Поиск живёт прямо в шапке: поле растёт при фокусе, выдача
+                        выпадает под ним. Так он доступен с любой вкладки раздела. */}
+                    <WikiSearch
+                        base={base}
+                        headers={headers}
+                        onOpenArticle={(slug, highlight) => {
+                            setTab('library');
+                            setSearchTarget({ slug, highlight });
+                        }}
+                        onOpenClassifier={onOpenClassifier}
+                    />
 
                     <button type="button" onClick={refresh} className={iosBtnSecondary}>
                         <RefreshCw size={15} /> Обновить
                     </button>
                 </header>
 
-                <WikiSearchModal
-                    open={searchOpen}
-                    onClose={() => setSearchOpen(false)}
-                    base={base}
-                    headers={headers}
-                    onOpenArticle={(slug, highlight) => {
-                        setTab('library');
-                        setSearchTarget({ slug, highlight });
-                    }}
-                    onOpenClassifier={onOpenClassifier}
-                />
 
                 {tabs.length > 1 && (
                     <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">

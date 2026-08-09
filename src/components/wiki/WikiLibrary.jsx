@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
-import { markedWord } from './WikiSearchModal';
+import { markedWord } from './WikiSearch';
 import useStableCallback from './useStableCallback';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
