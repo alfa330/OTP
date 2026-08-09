@@ -70,7 +70,7 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
                 limit = notif_sources.ITEMS_PER_SOURCE
 
             with db._get_cursor() as cursor:
-                counts, items, has_more = notif_sources.collect(cursor, viewer, limit=limit)
+                counts, items, meta = notif_sources.collect(cursor, viewer, limit=limit)
         except Exception:
             # Сюда долетает НЕ падение отдельного раздела — оно уже изолировано
             # SAVEPOINT'ом внутри collect() и даёт по нему ноль, — а отказ
@@ -92,8 +92,13 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
                 "code": "NOTIFICATIONS_UNAVAILABLE",
             }), 503
 
+        # next_change_in заменяет собой фоновую сверку: клиент спит ровно
+        # столько секунд, сколько названо, вместо того чтобы опрашивать сервер
+        # по кругу. Интервал, а не момент — чтобы не зависеть от часового пояса
+        # и часов на машине пользователя.
         response = jsonify({"status": "success", "counts": counts, "items": items,
-                            "has_more": has_more})
+                            "has_more": meta['has_more'],
+                            "next_change_in": meta['next_change_in']})
         # Счётчик обязан быть свежим: закешированный ноль прячет документ,
         # который человек обязан прочитать к сроку.
         response.headers['Cache-Control'] = 'no-store'
@@ -158,24 +163,22 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
 
         def generate():
             cursor_seq = realtime.current_seq()
-            reconciled_at = time.monotonic()
             yield ": connected %d\n\n" % int(time.time())
             while True:
-                until_reconcile = max(0.1, realtime.RECONCILE_SECONDS
-                                      - (time.monotonic() - reconciled_at))
+                # Строго событийно: reload уходит только когда на сервере
+                # ДЕЙСТВИТЕЛЬНО что-то изменилось. Периодической сверки здесь
+                # нет намеренно — это был фоновый опрос, ради отсутствия
+                # которого весь механизм триггеров и делался. Изменения от хода
+                # часов (окно теста, дедлайн) клиент ждёт по next_change_at,
+                # который приезжает вместе со сводкой.
                 poked, cursor_seq = realtime.wait_for_tick(
-                    cursor_seq,
-                    user_id,
-                    min(realtime.HEARTBEAT_SECONDS, until_reconcile),
-                )
-                now_monotonic = time.monotonic()
-                if poked or now_monotonic - reconciled_at >= realtime.RECONCILE_SECONDS:
+                    cursor_seq, user_id, realtime.HEARTBEAT_SECONDS)
+                if poked:
                     # Содержимого нет намеренно: клиент перечитает сводку сам.
-                    # Раз в RECONCILE_SECONDS это также покрывает изменения от
-                    # хода часов (старт теста/дедлайн), у которых нет DB-триггера.
-                    reconciled_at = now_monotonic
                     yield "event: reload\ndata: {}\n\n"
                 else:
+                    # Не опрос, а 20 байт комментария: без них прокси и браузер
+                    # считают молчащее соединение мёртвым.
                     yield ": heartbeat %d\n\n" % int(time.time())
 
         response = Response(generate(), mimetype='text/event-stream')

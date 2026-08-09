@@ -76,6 +76,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const scrollRef = useRef(null);
     const sentinelRef = useRef(null);
     const closeTimerRef = useRef(null);
+    const nextChangeTimerRef = useRef(null);
     const fetchedAtRef = useRef(0);
     const aliveRef = useRef(true);
     const userIdRef = useRef(user?.id);
@@ -93,6 +94,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         return () => {
             aliveRef.current = false;
             if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+            if (nextChangeTimerRef.current) clearTimeout(nextChangeTimerRef.current);
         };
     }, []);
 
@@ -113,6 +115,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             const more = Boolean(response?.data?.has_more);
             hasMoreRef.current = more;
             setHasMore(more);
+            scheduleNextChangeRef.current?.(response?.data?.next_change_in);
             fetchedAtRef.current = Date.now();
             // Бейджи разделов в сайдбаре берут числа отсюда же: раньше «Ивенты»
             // и «4 You» ходили за ними своими запросами, считая ровно то же.
@@ -143,6 +146,36 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             if (aliveRef.current) setLoading(false);
         }
     }, [user?.id]);
+
+    /* Единственное, что меняется в сводке без чьего-либо действия, — переходы
+       по часам: открылось окно теста, наступил дедлайн. Сервер вместе со
+       сводкой сообщает, через сколько секунд это случится, и мы просыпаемся
+       ровно к этому моменту. Именно это заменило сверку раз в минуту: холостых
+       запросов не остаётся вовсе, а задержка вместо минуты — секунда. */
+    const scheduleNextChange = useCallback((seconds) => {
+        if (nextChangeTimerRef.current) {
+            clearTimeout(nextChangeTimerRef.current);
+            nextChangeTimerRef.current = null;
+        }
+        if (seconds === null || seconds === undefined) return;
+        const untilChange = Number(seconds);
+        if (!Number.isFinite(untilChange) || untilChange < 0) return;
+        /* +1 секунда: просыпаемся ПОСЛЕ перехода. Проснувшись «за миг до», мы
+           получили бы ту же сводку и тот же интервал — и так по кругу, то есть
+           ровно тот опрос, от которого уходим.
+           Потолок в сутки: setTimeout переполняется на 24,8 днях и срабатывает
+           мгновенно — это дало бы тот же бесконечный цикл. Более далёкий переход
+           подхватится при любой следующей перечитке. */
+        const delay = untilChange * 1000 + 1000;
+        if (delay > 24 * 60 * 60 * 1000) return;
+        nextChangeTimerRef.current = setTimeout(() => {
+            nextChangeTimerRef.current = null;
+            if (!aliveRef.current || document.visibilityState === 'hidden') return;
+            load();
+        }, delay);
+    }, [load]);
+    const scheduleNextChangeRef = useRef(scheduleNextChange);
+    scheduleNextChangeRef.current = scheduleNextChange;
 
     /* Докрутили до низа — берём следующую порцию. Не догрузка «хвоста», а
        перезапрос всей сводки с бо́льшим лимитом: она собирается одним запросом,
@@ -182,6 +215,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         if (!user?.id) {
             setCounts({ total: 0 });
             setItems([]);
+            // Вышли из портала — гасим и отложенное пробуждение: перечитывать
+            // после выхода нечего, а таймер пережил бы сам сеанс.
+            if (nextChangeTimerRef.current) {
+                clearTimeout(nextChangeTimerRef.current);
+                nextChangeTimerRef.current = null;
+            }
             return undefined;
         }
         load();

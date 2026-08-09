@@ -45,6 +45,19 @@ def _iso(value):
     return value.isoformat() if value is not None else None
 
 
+def _seconds_until(moment):
+    """Сколько секунд осталось до момента, либо None.
+
+    Клиенту уходит именно интервал, а не абсолютное время: поля вроде due_at
+    хранятся НАИВНЫМИ во времени Алматы, и такую строку браузер прочитал бы как
+    своё локальное время — у сотрудника в другом поясе таймер уехал бы на часы.
+    Интервал же не зависит ни от пояса, ни от кривых часов на машине.
+    """
+    if moment is None:
+        return None
+    return max(0, int((moment - _almaty_now()).total_seconds()))
+
+
 def _almaty_now():
     """«Сейчас» в том же виде, в каком раздел опросов хранит границы окна.
 
@@ -393,7 +406,87 @@ def collect(cursor, viewer, only=None, limit=ITEMS_PER_SOURCE):
     # сохраняет свой порядок.
     items.sort(key=lambda item: item['tone'] != 'warning')
     counts['total'] = sum(counts.get(s, 0) for s in wanted)
-    return counts, items, has_more
+
+    # Момент следующего перехода по часам — под тем же SAVEPOINT: он заменяет
+    # фоновую сверку, но сам по себе не настолько важен, чтобы из-за него
+    # разваливалась вся сводка.
+    cursor.execute('SAVEPOINT notif_next_change')
+    try:
+        upcoming = next_change_at(cursor, viewer)
+        cursor.execute('RELEASE SAVEPOINT notif_next_change')
+    except Exception:
+        cursor.execute('ROLLBACK TO SAVEPOINT notif_next_change')
+        cursor.execute('RELEASE SAVEPOINT notif_next_change')
+        logging.exception('Уведомления: не удалось вычислить следующий переход')
+        upcoming = None
+
+    meta = {'has_more': has_more, 'next_change_in': _seconds_until(upcoming)}
+    return counts, items, meta
+
+
+def next_change_at(cursor, viewer):
+    """Ближайший момент, когда сводка изменится САМА, без чьего-либо действия.
+
+    Почти всё в колоколе меняется от записи в БД, и об этом мгновенно сообщает
+    триггер. Но три вещи наступают просто по часам, не оставляя следа в базе:
+    открывается окно теста, закрывается окно теста, наступает дедлайн (задача
+    становится просроченной, ознакомление — горящим).
+
+    Раньше это закрывала сверка раз в минуту — то есть обычный фоновый опрос,
+    ради которого весь механизм триггеров и затевался, чтобы его не было.
+    Вместо него сервер отдаёт МОМЕНТ следующего перехода, и клиент просыпается
+    ровно к нему: холостых запросов не остаётся вовсе.
+
+    Возвращает naive datetime во времени Алматы (как хранятся сами поля) либо
+    None, если впереди ничего не намечено.
+    """
+    hidden = viewer.get('hidden_sources', ()) or ()
+    now = _almaty_now()
+    params = {'user_id': viewer['user_id'], 'now': now}
+    parts = []
+
+    if 'surveys' not in hidden:
+        # Окно теста: и открытие, и закрытие меняют состав сводки.
+        parts.append("""
+            SELECT MIN(moment) FROM (
+                SELECT s.starts_at AS moment
+                  FROM survey_assignments sa JOIN surveys s ON s.id = sa.survey_id
+                 WHERE sa.operator_id = %(user_id)s AND COALESCE(sa.status, '') <> 'completed'
+                   AND s.is_active AND s.is_test AND s.starts_at > %(now)s
+                UNION ALL
+                SELECT s.ends_at
+                  FROM survey_assignments sa JOIN surveys s ON s.id = sa.survey_id
+                 WHERE sa.operator_id = %(user_id)s AND COALESCE(sa.status, '') <> 'completed'
+                   AND s.is_active AND s.is_test AND s.ends_at > %(now)s
+            ) w""")
+
+    if 'tasks' not in hidden:
+        # Дедлайн задачи: наступив, он меняет причину на «просрочена» и может
+        # вернуть в счётчик задачу, чьё прежнее уведомление уже просмотрели.
+        parts.append("""
+            SELECT MIN(t.due_at)
+              FROM tasks t
+             WHERE t.assigned_to = %(user_id)s AND t.is_backlog = FALSE
+               AND t.status IN ('assigned', 'in_progress', 'returned')
+               AND t.due_at > %(now)s""")
+
+    if 'wiki_ack' not in hidden:
+        # Срок ознакомления: счётчик не меняет, но документ становится горящим
+        # и поднимается наверх списка — это видимое изменение.
+        parts.append("""
+            SELECT MIN(aa.due_at)
+              FROM wiki_ack_assignments aa JOIN wiki_articles a ON a.id = aa.article_id
+             WHERE aa.user_id = %(user_id)s AND aa.acknowledged_at IS NULL
+               AND aa.status NOT IN ('superseded', 'cancelled') AND a.status = 'published'
+               AND aa.due_at > %(now)s""")
+
+    if not parts:
+        return None
+
+    cursor.execute('SELECT MIN(moment) FROM (%s) AS all_moments(moment)'
+                   % ' UNION ALL '.join(parts), params)
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 def mark_seen(cursor, user_id, source):

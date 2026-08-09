@@ -70,7 +70,7 @@ class CollectOrderTest(unittest.TestCase):
             'events': lambda c, v, limit: (1, [_item('events', 'Новый пост')]),
             'four_you': lambda c, v, limit: (1, [_item('four_you', 'Просрочено', tone='warning')]),
         })
-        _, items, _more = sources.collect(FakeCursor(), {'user_id': 1})
+        _, items, _meta = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual('Просрочено', items[0]['title'])
         # Остальные обязаны сохранить свой порядок — сортировка устойчивая.
         self.assertEqual(['Просрочено', 'Регламент', 'Новый пост'],
@@ -87,7 +87,7 @@ class CollectOrderTest(unittest.TestCase):
             _item('wiki_ack', 'Через месяц', at='2026-09-10T00:00:00'),
             _item('wiki_ack', 'Без срока', at=None),
         ])})
-        _, items, _more = sources.collect(FakeCursor(), {'user_id': 1})
+        _, items, _meta = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual(['Завтра', 'Через месяц', 'Без срока'],
                          [i['title'] for i in items])
 
@@ -96,7 +96,7 @@ class CollectOrderTest(unittest.TestCase):
             'events': lambda c, v, limit: (2, []),
             'lms': lambda c, v, limit: (3, []),
         })
-        counts, _, _more = sources.collect(FakeCursor(), {'user_id': 1})
+        counts, _, _meta = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual(5, counts['total'])
 
     def test_broken_source_does_not_kill_the_rest(self):
@@ -106,7 +106,7 @@ class CollectOrderTest(unittest.TestCase):
 
         self._stub({'wiki_ack': explode, 'lms': lambda c, v, limit: (4, [_item('lms', 'Урок')])})
         with self.assertLogs(level='ERROR'):
-            counts, items, _more = sources.collect(FakeCursor(), {'user_id': 1})
+            counts, items, _meta = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual(0, counts['wiki_ack'])
         self.assertEqual(4, counts['lms'])
         self.assertEqual(4, counts['total'])
@@ -128,7 +128,7 @@ class CollectOrderTest(unittest.TestCase):
     def test_hidden_source_is_skipped_entirely(self):
         called = []
         self._stub({'four_you': lambda c, v, limit: (called.append(1), (9, []))[1]})
-        counts, _, _more = sources.collect(FakeCursor(), {'user_id': 1, 'hidden_sources': ('four_you',)})
+        counts, _, _meta = sources.collect(FakeCursor(), {'user_id': 1, 'hidden_sources': ('four_you',)})
         self.assertEqual(0, counts['four_you'])
         self.assertEqual([], called)
 
@@ -162,14 +162,14 @@ class PaginationTest(unittest.TestCase):
     def test_limit_reaches_the_sixth_item(self):
         self._stub({'tasks': self._source_of('tasks', 6)})
 
-        counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
+        counts, items, meta = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
         self.assertEqual(6, counts['total'], 'счётчик всегда считает всё')
         self.assertEqual(5, len(items))
-        self.assertTrue(has_more, 'шестой элемент есть — клиент обязан узнать об этом')
+        self.assertTrue(meta['has_more'], 'шестой элемент есть — клиент обязан узнать об этом')
 
-        counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=10)
+        counts, items, meta = sources.collect(FakeCursor(), {'user_id': 1}, limit=10)
         self.assertEqual(6, len(items), 'следующая порция дотягивает остаток')
-        self.assertFalse(has_more, 'больше нечего подгружать')
+        self.assertFalse(meta['has_more'], 'больше нечего подгружать')
 
     def test_aggregated_source_never_asks_for_more(self):
         """«4 You» сворачивает 12 фото в ОДНУ строку.
@@ -178,10 +178,10 @@ class PaginationTest(unittest.TestCase):
         просить следующую порцию, ничего нового не получая.
         """
         self._stub({'four_you': lambda c, v, limit: (12, [_item('four_you', 'Новые фото: 12')])})
-        counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
+        counts, items, meta = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
         self.assertEqual(12, counts['total'])
         self.assertEqual(1, len(items))
-        self.assertFalse(has_more)
+        self.assertFalse(meta['has_more'])
 
     def test_limit_is_clamped_to_sane_range(self):
         """Кривой параметр — повод взять ближайшее допустимое, а не отдать 400."""
@@ -208,10 +208,104 @@ class PaginationTest(unittest.TestCase):
 
         self._stub({'wiki_ack': explode, 'tasks': self._source_of('tasks', 9)})
         with self.assertLogs(level='ERROR'):
-            counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
+            counts, items, meta = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
         self.assertEqual(0, counts['wiki_ack'])
         self.assertEqual(5, len(items))
-        self.assertTrue(has_more)
+        self.assertTrue(meta['has_more'])
+
+
+class NextChangeAtTest(unittest.TestCase):
+    """Момент следующего перехода по часам — замена фоновой сверке.
+
+    Всё остальное в колоколе меняется от записи в БД и приезжает триггером
+    мгновенно. Ход часов записи не оставляет, и раньше его ловил опрос раз в
+    минуту; теперь сервер называет точный момент, а клиент спит до него.
+    """
+
+    def test_asks_only_for_sources_the_viewer_can_see(self):
+        """Скрытому источнику незачем будить чужую вкладку своими дедлайнами."""
+        class Cursor(FakeCursor):
+            def __init__(self):
+                super().__init__()
+                self.sql = []
+
+            def execute(self, sql, params=None):
+                self.sql.append(sql)
+                super().execute(sql, params)
+
+            def fetchone(self):
+                return (None,)
+
+        cursor = Cursor()
+        sources.next_change_at(cursor, {'user_id': 1, 'hidden_sources': ('tasks', 'surveys')})
+        sql = ' '.join(cursor.sql)
+        self.assertIn('wiki_ack_assignments', sql)
+        self.assertNotIn('FROM tasks', sql)
+        self.assertNotIn('survey_assignments', sql)
+
+    def test_returns_none_when_every_source_is_hidden(self):
+        """Ни одного источника — ни одного запроса и никакого таймера."""
+        cursor = FakeCursor()
+        self.assertIsNone(sources.next_change_at(
+            cursor, {'user_id': 1, 'hidden_sources': sources.SOURCES}))
+        self.assertEqual([], cursor.commands, 'пустой запрос в базу не уходит')
+
+    def test_collect_reports_it_and_survives_a_broken_query(self):
+        # Ровно через час: клиенту уходит ИНТЕРВАЛ, а не абсолютное время —
+        # наивную строку браузер прочитал бы как своё локальное время.
+        upcoming = sources._almaty_now() + timedelta(hours=1)
+
+        class Cursor(FakeCursor):
+            def fetchone(self):
+                return (upcoming,)
+
+        original = dict(sources._HANDLERS)
+        sources._HANDLERS.clear()
+        sources._HANDLERS.update({'lms': lambda c, v, limit: (0, [])})
+        try:
+            _, _, meta = sources.collect(Cursor(), {'user_id': 1})
+            self.assertAlmostEqual(3600, meta['next_change_in'], delta=2)
+
+            class Broken(FakeCursor):
+                def fetchone(self):
+                    raise RuntimeError('нет таблицы опросов')
+
+            cursor = Broken()
+            with self.assertLogs(level='ERROR'):
+                _, _, meta = sources.collect(cursor, {'user_id': 1})
+            self.assertIsNone(meta['next_change_in'], 'сводка важнее таймера')
+            self.assertIn('ROLLBACK', cursor.commands)
+            self.assertEqual(cursor.commands.count('SAVEPOINT'),
+                             cursor.commands.count('RELEASE'))
+        finally:
+            sources._HANDLERS.clear()
+            sources._HANDLERS.update(original)
+
+
+class ClientWakesUpOnScheduleTest(unittest.TestCase):
+    """Клиент обязан спать до названного момента, а не опрашивать сервер."""
+
+    SOURCE = BELL_JSX.read_text(encoding='utf-8')
+
+    def test_schedules_a_timer_instead_of_polling(self):
+        self.assertIn('next_change_in', self.SOURCE)
+        self.assertIn('scheduleNextChange', self.SOURCE)
+        self.assertNotIn('setInterval', self.SOURCE)
+
+    def test_timer_is_bounded_to_a_day(self):
+        """setTimeout переполняется на 24,8 днях и срабатывает мгновенно —
+        это дало бы ровно тот бесконечный цикл, ради ухода от которого всё."""
+        self.assertIn('24 * 60 * 60 * 1000', self.SOURCE)
+
+    def test_wakes_up_after_the_moment_not_before(self):
+        """Пробуждение «за миг до» вернуло бы ту же сводку и тот же интервал."""
+        self.assertIn('untilChange * 1000 + 1000', self.SOURCE)
+
+    def test_interval_not_absolute_time_crosses_timezones(self):
+        """Наивный ISO браузер читает как локальное время — в другом поясе
+        таймер уехал бы на часы. Поэтому сервер шлёт секунды."""
+        self.assertNotIn('next_change_at', self.SOURCE)
+        self.assertIn('Number(seconds)', self.SOURCE)
 
 
 class ClientPaginationContractTest(unittest.TestCase):
@@ -639,22 +733,37 @@ class StreamEndpointTest(RealtimeStateMixin, unittest.TestCase):
         self.assertEqual(0, realtime.active_stream_count(),
                          'слот обязан вернуться при закрытии ответа')
 
-    def test_stream_periodically_reconciles_clock_driven_sources(self):
+    def test_idle_stream_never_asks_the_client_to_reload(self):
+        """Страж от возврата фонового опроса.
+
+        Периодическая сверка (она тут была и слала reload раз в минуту каждой
+        открытой вкладке) — это обычный polling: 1440 перечиток в сутки на
+        вкладку, ~285 тысяч SELECT в сутки на всех, ловивших ноль изменений.
+        Молчащий поток обязан слать только heartbeat-комментарии; переходы по
+        часам клиент ждёт по next_change_at из самой сводки.
+        """
         client = self._client(listen_connect=lambda: None, stream_limit=1)
-        original_reconcile = realtime.RECONCILE_SECONDS
         original_heartbeat = realtime.HEARTBEAT_SECONDS
-        realtime.RECONCILE_SECONDS = 0.01
         realtime.HEARTBEAT_SECONDS = 0.01
         try:
             response = client.get('/api/notifications/stream', buffered=False)
             stream = response.response if hasattr(response.response, '__next__') \
                 else iter(response.response)
             self.assertIn(b'connected', next(stream))
-            self.assertIn(b'event: reload', next(stream))
+            for _ in range(10):
+                frame = next(stream)
+                self.assertNotIn(b'event: reload', frame,
+                                 'молчащий поток не должен требовать перечитку')
+                self.assertIn(b'heartbeat', frame)
             response.close()
         finally:
-            realtime.RECONCILE_SECONDS = original_reconcile
             realtime.HEARTBEAT_SECONDS = original_heartbeat
+
+    def test_no_periodic_reconcile_constant_remains(self):
+        """Константа интервала сверки не должна вернуться ни в каком виде."""
+        self.assertFalse(hasattr(realtime, 'RECONCILE_SECONDS'))
+        routes_src = (ROOT / 'notifications' / 'routes.py').read_text(encoding='utf-8')
+        self.assertNotIn('RECONCILE', routes_src)
 
 
 class RealtimeTriggersPinnedTest(unittest.TestCase):
