@@ -60,11 +60,10 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
     )
     article_id = cursor.fetchone()[0]
     set_sections(cursor, article_id, section_ids)
+    # Варианты написания считаем ОДИН раз при сохранении (внутри set_tags).
+    # В оригинале они вычислялись на каждый поисковый запрос и превращались
+    # в четыре обращения к движку.
     set_tags(cursor, article_id, tags)
-    # Варианты написания считаем ОДИН раз при сохранении. В оригинале они
-    # вычислялись на каждый поисковый запрос и превращались в четыре
-    # обращения к движку.
-    refresh_aliases(cursor, article_id)
     link_content_files(cursor, article_id, clean)
     snapshot_version(cursor, article_id, editor_id=author_id, session_id=None,
                      comment='Создание статьи')
@@ -221,6 +220,9 @@ def restore_version(cursor, article_id, version_id, *, editor_id, session_id):
         """,
         (version_id, article_id, article_id),
     )
+    # Заголовок и текст только что заменились — алиасы обязаны следовать за
+    # ними, иначе после отката транслит/синонимы ищут по прошлой редакции.
+    refresh_aliases(cursor, article_id)
     return True
 
 
@@ -242,6 +244,10 @@ def set_tags(cursor, article_id, tags):
             'ON CONFLICT DO NOTHING',
             (article_id, tag),
         )
+    # Теги входят в search_aliases. Без пересчёта здесь PATCH, меняющий только
+    # теги, не доходил до refresh_aliases в update_article (нет полей — ранний
+    # выход), и поиск по свежему тегу не работал до следующей правки текста.
+    refresh_aliases(cursor, article_id)
 
 
 def delete_article(cursor, article_id):

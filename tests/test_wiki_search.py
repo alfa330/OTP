@@ -35,11 +35,13 @@ class NormalizeTest(unittest.TestCase):
     def test_case_and_punctuation(self):
         self.assertEqual(normalize_text('  Аренда, ТРАНСПОРТА!  '), 'аренда транспорта')
 
-    def test_yo_becomes_latin_e(self):
-        """В оригинале ё заменяется на ЛАТИНСКУЮ e. Из-за этого в самой вике
-        словарь алиасов не срабатывал на написание с ё — там ключи брались
-        без нормализации. У нас нормализуются и ключи, см. AliasTest."""
-        self.assertEqual(normalize_text('хёндай'), 'хeндай')
+    def test_yo_becomes_cyrillic_e(self):
+        """ё сворачивается в КИРИЛЛИЧЕСКУЮ е. В оригинале была латинская e,
+        из-за чего нормализованные «хёндай» и «хендай» не совпадали строково
+        (спасала только транслитерация), а нормализованный вариант запроса
+        превращался в смесь алфавитов и не стеммился как русский."""
+        self.assertEqual(normalize_text('хёндай'), 'хендай')
+        self.assertEqual(normalize_text('хёндай'), normalize_text('хендай'))
 
     def test_kazakh_letters_survive(self):
         self.assertEqual(normalize_text('Қарағанды'), 'қарағанды')
@@ -104,7 +106,31 @@ class AliasTest(unittest.TestCase):
                                 'группа %r: из %r не нашлись %r' % (group, word, expected - found))
 
 
-class QueryVariantsTest(unittest.TestCase):
+class JsAliasSyncTest(unittest.TestCase):
+    """Клиентский словарь (searchText.js) обязан совпадать с серверным.
+
+    Матчинг машины в поисковой строке идёт на клиенте по этому же словарю;
+    разъедутся — «мерс» найдёт статью, но не покажет бар классификатора.
+    Тот же приём, что в тесте scrollContainer: читаем исходник как текст.
+    """
+
+    JS_PATH = ROOT / 'src' / 'components' / 'wiki' / 'searchText.js'
+
+    def _js_groups(self):
+        import re
+        source = self.JS_PATH.read_text(encoding='utf-8')
+        start = source.index('export const ALIAS_GROUPS = [')
+        end = source.index('];', start)
+        block = source[start:end]
+        groups = []
+        for line_group in re.findall(r'\[([^\[\]]+)\]', block):
+            words = re.findall(r"'([^']+)'", line_group)
+            if words:
+                groups.append(words)
+        return groups
+
+    def test_alias_groups_match_python(self):
+        self.assertEqual(self._js_groups(), ALIAS_GROUPS)
     def test_original_first(self):
         self.assertEqual(query_variants('Аренда')[0], 'Аренда')
 
@@ -138,15 +164,17 @@ class ArticleAliasesTest(unittest.TestCase):
 class SearchSqlTest(unittest.TestCase):
     """Боевой SQL поиска на синтетических статьях."""
 
+    # Выражение обязано совпадать с генерируемой колонкой из wiki/schema.py —
+    # включая свёртку ё, иначе тест проверяет не тот индекс, что на проде.
     STUB = """
 WITH wiki_articles AS (
     SELECT id::int, slug::text, title::text, summary::text, status::text,
            views::int, NULL::timestamp AS updated_at,
            content_plain::text, search_aliases::text,
-           setweight(to_tsvector('russian', coalesce(title, '')),          'A') ||
-           setweight(to_tsvector('russian', coalesce(search_aliases, '')), 'B') ||
-           setweight(to_tsvector('russian', coalesce(summary, '')),        'C') ||
-           setweight(to_tsvector('russian', coalesce(content_plain, '')),  'D') AS search_vector
+           setweight(to_tsvector('russian', translate(coalesce(title, ''), 'ёЁ', 'еЕ')),          'A') ||
+           setweight(to_tsvector('russian', translate(coalesce(search_aliases, ''), 'ёЁ', 'еЕ')), 'B') ||
+           setweight(to_tsvector('russian', translate(coalesce(summary, ''), 'ёЁ', 'еЕ')),        'C') ||
+           setweight(to_tsvector('russian', translate(coalesce(content_plain, ''), 'ёЁ', 'еЕ')),  'D') AS search_vector
       FROM (VALUES {rows}) AS t(
         id, slug, title, summary, status, views, content_plain, search_aliases)
 ),
@@ -170,7 +198,8 @@ wiki_article_sections AS (
         cur.close()
         prod_db.rollback()
 
-    def run_search(self, rows, query, *, sections=None, with_trigram=False, section_id=None):
+    def run_search(self, rows, query, *, sections=None, with_trigram=False,
+                   section_id=None, ids=(1, 2, 3, 4, 5)):
         stub = self.STUB.format(
             rows=', '.join(rows),
             sections=', '.join(sections) if sections
@@ -179,7 +208,8 @@ wiki_article_sections AS (
         sql = wiki_search.build_sql(with_trigram).replace('WITH q AS (', stub + 'q AS (', 1)
         cur = self.conn.cursor()
         try:
-            cur.execute(sql, {'ids': [1, 2, 3], 'query': query,
+            cur.execute(sql, {'ids': list(ids), 'query': query,
+                              'prefix': wiki_search.prefix_tsquery(query),
                               'section': section_id, 'limit': 10})
             return [dict(zip(wiki_search._KEYS, row)) for row in cur.fetchall()]
         finally:
@@ -193,6 +223,10 @@ wiki_article_sections AS (
         " 'Баллы приоритета влияют на распределение заказов', 'bally prioriteta')",
         "(3, 'hyundai', 'Обслуживание Hyundai', 'Сервис', 'published', 1,"
         " 'Регламент обслуживания', 'hyundai хендай хёндай хундай')",
+        "(4, 'vozvraty', 'Инструкция по возвратам', 'Порядок возврата средств', 'published', 3,"
+        " 'Возврат оформляется через приложение', 'instruktsiya po vozvratam')",
+        "(5, 'otchyot', 'Сводка за смену', 'Ежедневная сводка', 'published', 2,"
+        " 'Ежедневный отчёт по сменам сдаётся до полуночи', 'svodka za smenu')",
     ]
 
     def test_finds_by_title(self):
@@ -229,20 +263,31 @@ wiki_article_sections AS (
 
     def test_perimeter_is_respected(self):
         """Выдача обязана пересекаться с множеством видимых статей."""
-        stub = self.STUB.format(rows=', '.join(self.ARTICLES),
-                                sections='(NULL::int, NULL::int)')
-        sql = wiki_search.build_sql(False).replace('WITH q AS (', stub + 'q AS (', 1)
-        cur = self.conn.cursor()
-        try:
-            cur.execute(sql, {'ids': [2], 'query': 'аренда', 'section': None, 'limit': 10})
-            self.assertEqual(cur.fetchall(), [],
-                             'статья вне периметра не должна попасть в выдачу')
-        finally:
-            prod_db.rollback()
-            cur.close()
+        found = self.run_search(self.ARTICLES, 'аренда', ids=[2])
+        self.assertEqual(found, [], 'статья вне периметра не должна попасть в выдачу')
 
     def test_nothing_found(self):
         self.assertEqual(self.run_search(self.ARTICLES, 'бетономешалка'), [])
+
+    def test_prefix_finds_partially_typed_word(self):
+        """Поиск по мере ввода: «инструк» короче стема «инструкц», без ':*'
+        полнотекст его не находил — ровно жалоба «не находит то, что есть»."""
+        found = self.run_search(self.ARTICLES, 'инструк')
+        self.assertIn(4, [a['id'] for a in found])
+
+    def test_prefix_multiword(self):
+        found = self.run_search(self.ARTICLES, 'инструкция по возв')
+        self.assertEqual([a['id'] for a in found], [4])
+
+    def test_yo_in_body_found_by_e_query(self):
+        """«отчет» обязан находить «отчёт» в теле: конфигурация 'russian'
+        сама ё/е не склеивает, склейка — наша, с обеих сторон."""
+        found = self.run_search(self.ARTICLES, 'отчет')
+        self.assertIn(5, [a['id'] for a in found])
+
+    def test_yo_query_finds_yo_body(self):
+        found = self.run_search(self.ARTICLES, 'отчёт')
+        self.assertIn(5, [a['id'] for a in found])
 
     def test_trigram_variant_parses(self):
         """Форма запроса с триграммами обязана быть валидной, даже если
@@ -251,6 +296,36 @@ wiki_article_sections AS (
             self.skipTest('pg_trgm ещё не установлен в этой базе')
         found = self.run_search(self.ARTICLES, 'аренда', with_trigram=True)
         self.assertTrue(found)
+
+    def test_trigram_typo_word_similarity(self):
+        """Опечатка внутри слова: сходство считается с лучшим словом
+        заголовка (word_similarity), а не с целой строкой."""
+        if not self.has_trigram:
+            self.skipTest('pg_trgm ещё не установлен в этой базе')
+        found = self.run_search(self.ARTICLES, 'инстукция', with_trigram=True)
+        self.assertIn(4, [a['id'] for a in found])
+
+
+class PrefixTsqueryTest(unittest.TestCase):
+    def test_words_get_prefix_marker(self):
+        self.assertEqual(wiki_search.prefix_tsquery('Инструкция по возв'),
+                         'инструкция:* & по:* & возв:*')
+
+    def test_single_letters_dropped(self):
+        self.assertEqual(wiki_search.prefix_tsquery('а б в'), '')
+
+    def test_tsquery_operators_stripped(self):
+        """Слова собираются только из букв и цифр — операторы tsquery
+        (&, |, !, :, скобки, кавычки) не способны сломать запрос."""
+        self.assertEqual(wiki_search.prefix_tsquery("ар!ен(да) & 'смз:'"),
+                         'ар:* & ен:* & да:* & смз:*')
+
+    def test_yo_folded(self):
+        self.assertEqual(wiki_search.prefix_tsquery('отчёт'), 'отчет:*')
+
+    def test_empty(self):
+        self.assertEqual(wiki_search.prefix_tsquery(''), '')
+        self.assertEqual(wiki_search.prefix_tsquery(None), '')
 
 
 if __name__ == '__main__':

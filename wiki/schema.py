@@ -594,14 +594,18 @@ _PARK_STATEMENTS = [
 # Веса: заголовок > алиасы > описание > текст. В Meilisearch приоритетов было
 # девять, в Postgres их четыре (A-D) — разница есть, но алиасы забирают на себя
 # ровно тот слой, ради которого в оригинале держали отдельные searchable-поля.
+#
+# translate(ё -> е) на каждом источнике: конфигурация 'russian' НЕ склеивает
+# ё и е, поэтому без свёртки запрос «отчет» не находил «отчёт» в теле статьи.
+# Запрос сворачивается так же (wiki/search.py) — обе стороны согласованы.
 _SEARCH_STATEMENTS = [
     """
     ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS search_vector tsvector
         GENERATED ALWAYS AS (
-            setweight(to_tsvector('russian', coalesce(title, '')),          'A') ||
-            setweight(to_tsvector('russian', coalesce(search_aliases, '')), 'B') ||
-            setweight(to_tsvector('russian', coalesce(summary, '')),        'C') ||
-            setweight(to_tsvector('russian', coalesce(content_plain, '')),  'D')
+            setweight(to_tsvector('russian', translate(coalesce(title, ''), 'ёЁ', 'еЕ')),          'A') ||
+            setweight(to_tsvector('russian', translate(coalesce(search_aliases, ''), 'ёЁ', 'еЕ')), 'B') ||
+            setweight(to_tsvector('russian', translate(coalesce(summary, ''), 'ёЁ', 'еЕ')),        'C') ||
+            setweight(to_tsvector('russian', translate(coalesce(content_plain, ''), 'ёЁ', 'еЕ')),  'D')
         ) STORED;
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_articles_fts ON wiki_articles USING GIN (search_vector);",
@@ -651,8 +655,35 @@ def init_wiki_schema(cursor):
     for statement in _PARK_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
 
+    # Выражение генерируемой колонки менять через ALTER нельзя — только
+    # пересоздать. Ловушка «ADD COLUMN IF NOT EXISTS молча оставляет старое
+    # определение» обходится явной проверкой выражения: старая версия без
+    # свёртки ё удаляется, и следующий блок создаёт колонку заново (35 строк
+    # на проде — пересчёт мгновенный).
+    cursor.execute(
+        """
+        SELECT pg_get_expr(d.adbin, d.adrelid)
+          FROM pg_attribute a
+          JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+         WHERE a.attrelid = 'wiki_articles'::regclass
+           AND a.attname = 'search_vector' AND NOT a.attisdropped
+        """
+    )
+    row = cursor.fetchone()
+    rebuilt_search_vector = bool(row and row[0] and 'translate' not in row[0])
+    if rebuilt_search_vector:
+        cursor.execute('ALTER TABLE wiki_articles DROP COLUMN search_vector')
+
     for statement in _SEARCH_STATEMENTS:
         cursor.execute(statement)
+
+    # Вместе с колонкой пересчитываются и search_aliases: нормализация запроса
+    # (ё -> е кириллическая) изменилась, а сохранённые алиасы считались старой.
+    if rebuilt_search_vector:
+        from .search import refresh_aliases
+        cursor.execute('SELECT id FROM wiki_articles')
+        for (article_id,) in cursor.fetchall():
+            refresh_aliases(cursor, article_id)
 
     # Триграммы — под собственным савпоинтом. Расширение может быть недоступно
     # по правам; тогда поиск остаётся полнотекстовым (без опечаток), а схема

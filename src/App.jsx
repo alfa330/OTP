@@ -34856,6 +34856,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [wikiInitialSlug, setWikiInitialSlug] = useState(null);
             const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
 
+            /* Предзаполнение «Классификатора авто» из поиска вики: запрос
+               «камри» показывает в поисковой строке бар машины, а кнопка
+               «Открыть в классификаторе» переносит марку/модель/год/город в
+               раздел. Значение живёт в состоянии (не гасится): пока открыт
+               классификатор, выбор пользователя внутри раздела важнее. */
+            const [classifierPrefill, setClassifierPrefill] = useState(null);
+            const openClassifierPrefilled = useCallback((prefill) => {
+                setClassifierPrefill({ ...prefill, nonce: Date.now() });
+                setView('car_classifier');
+            }, []);
+
             /* Раздел прочитан — колокол обязан узнать об этом сам.
                Связь была односторонней: заход в «Ивенты» гасил бейдж в сайдбаре,
                но собственные counts колокола оставались прежними, и он до конца
@@ -44876,12 +44887,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     initialArticleSlug={wikiInitialSlug}
                                     onInitialArticleConsumed={clearWikiInitialSlug}
+                                    onOpenClassifier={openClassifierPrefilled}
                                 />
                             </Suspense>
                         )}
                         {view === "car_classifier" && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка справочника…</div>}>
-                                <ClassifierView />
+                                <ClassifierView prefill={classifierPrefill} />
                             </Suspense>
                         )}
                         {(view === "shift_auction" && (

@@ -310,6 +310,15 @@
     animation: wikiHeadingPulse 1.6s ease-out 1;
 }
 
+/* Слово, по которому статью нашли в поиске. Индиго, а не янтарь: янтарные
+   <mark data-color> — авторские выделения в самом тексте, путать их нельзя. */
+.wiki-prose mark.wiki-search-hit {
+    padding: 0.05em 0.25em;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.22);
+    color: var(--wiki-ink);
+}
+
 @keyframes wikiHeadingPulse {
     0% {
         background-color: rgba(79, 70, 229, 0.18);

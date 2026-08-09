@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
+import { queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
 
 /* Страница статьи.
@@ -59,7 +60,8 @@ const SANITIZE_OPTIONS = {
     ],
 };
 
-export default function WikiArticle({ base, headers, slug, onBack, showToast }) {
+export default function WikiArticle({ base, headers, slug, onBack, showToast,
+                                      highlightTerm = null }) {
     const [article, setArticle] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -117,6 +119,77 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast }) 
         });
         return () => observer.disconnect();
     }, [toc]);
+
+    /* Подсветка слова, по которому статью нашли в поиске. Работает по
+       текстовым узлам готового DOM: разметку менять строкой нельзя — контент
+       уже прошёл DOMPurify, и любое склеивание HTML открыло бы дыру заново.
+       Совпадение ищется по вариантам написания (транслит, раскладка) — тем же,
+       которыми искал сервер. */
+    useEffect(() => {
+        const container = bodyRef.current;
+        const term = String(highlightTerm || '').trim();
+        if (!container || !safeHtml || term.length < 2) return undefined;
+
+        const needles = queryVariants(term)
+            .map((v) => v.toLowerCase())
+            .filter((v) => v.length >= 2)
+            .slice(0, 8);
+
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+        let firstHit = null;
+        let marked = 0;
+        for (const node of textNodes) {
+            if (marked >= 60) break;      // защита от вырожденного запроса
+            const lower = (node.nodeValue || '').toLowerCase();
+            let index = -1;
+            let length = 0;
+            for (const needle of needles) {
+                const found = lower.indexOf(needle);
+                if (found !== -1 && (index === -1 || found < index)) {
+                    index = found;
+                    length = needle.length;
+                }
+            }
+            if (index === -1) continue;
+
+            const range = document.createRange();
+            range.setStart(node, index);
+            range.setEnd(node, index + length);
+            const mark = document.createElement('mark');
+            mark.className = 'wiki-search-hit';
+            try {
+                range.surroundContents(mark);
+            } catch {
+                continue;    // узел уже разрезан предыдущей пометкой
+            }
+            marked += 1;
+            if (!firstHit) firstHit = mark;
+        }
+
+        if (firstHit) {
+            // Совпадение внутри свёрнутой раскрывашки без этого не видно.
+            let details = firstHit.closest('details');
+            while (details) {
+                details.open = true;
+                details = details.parentElement?.closest('details');
+            }
+            const timer = setTimeout(() => scrollToElement(firstHit), 80);
+            return () => {
+                clearTimeout(timer);
+                container.querySelectorAll('mark.wiki-search-hit').forEach((m) => {
+                    const parent = m.parentNode;
+                    if (!parent) return;
+                    while (m.firstChild) parent.insertBefore(m.firstChild, m);
+                    parent.removeChild(m);
+                    parent.normalize();
+                });
+            };
+        }
+        return undefined;
+    }, [safeHtml, highlightTerm]);
 
     const toggleFavorite = () => {
         if (!article) return;

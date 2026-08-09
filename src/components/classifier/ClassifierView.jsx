@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     AlertTriangle, Car, Check, ChevronDown, Loader2, MapPin, Search, X,
 } from 'lucide-react';
@@ -70,7 +70,7 @@ const TariffVerdict = ({ tariff, verdict }) => (
     </div>
 );
 
-export default function ClassifierView() {
+export default function ClassifierView({ prefill = null }) {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
 
@@ -81,6 +81,12 @@ export default function ClassifierView() {
     const [tableQuery, setTableQuery] = useState('');
     const [openTariff, setOpenTariff] = useState(null);
 
+    /* Модель из предзаполнения нельзя ставить сразу: эффект сброса модели при
+       смене марки сработает ПОСЛЕ и затёр бы её. Кладём в ref — сброс заберёт
+       её вместо пустой строки. */
+    const pendingModelRef = useRef(null);
+    const consumedPrefillRef = useRef(null);
+
     useEffect(() => {
         let cancelled = false;
         import('./classifier-data.json')
@@ -88,6 +94,33 @@ export default function ClassifierView() {
             .catch(() => { if (!cancelled) setError('Не удалось загрузить справочник'); });
         return () => { cancelled = true; };
     }, []);
+
+    /* Предзаполнение из поиска вики: «Открыть в классификаторе» на баре машины
+       переносит сюда марку/модель/год/город. nonce отличает повторное нажатие
+       от уже применённого значения. */
+    useEffect(() => {
+        if (!data || !prefill || consumedPrefillRef.current === prefill.nonce) return;
+        consumedPrefillRef.current = prefill.nonce;
+
+        if (prefill.cityId && data.cities.some((c) => c.id === prefill.cityId)) {
+            setCityId(prefill.cityId);
+        }
+        if (/^\d{4}$/.test(String(prefill.year || ''))) {
+            setYear(String(prefill.year));
+        }
+        const car = data.cars.find(
+            (c) => c.brand === prefill.brand && c.model === prefill.model,
+        );
+        if (!car) return;
+        setBrand((current) => {
+            if (current === car.brand) {
+                setModel(car.model);       // марка не меняется — сброс не сработает
+                return current;
+            }
+            pendingModelRef.current = car.model;
+            return car.brand;
+        });
+    }, [data, prefill]);
 
     const city = useMemo(
         () => (data?.cities || []).find((c) => c.id === cityId) || null,
@@ -107,8 +140,12 @@ export default function ClassifierView() {
             .sort((a, b) => a.localeCompare(b, 'ru'));
     }, [data, brand]);
 
-    // Сброс модели при смене марки — иначе на экране остаётся невозможная пара.
-    useEffect(() => { setModel(''); }, [brand]);
+    // Сброс модели при смене марки — иначе на экране остаётся невозможная
+    // пара. Модель из предзаполнения (ref) переживает этот сброс.
+    useEffect(() => {
+        setModel(pendingModelRef.current || '');
+        pendingModelRef.current = null;
+    }, [brand]);
 
     const verdicts = useMemo(() => {
         if (!data || !city || !brand || !model) return null;

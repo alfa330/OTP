@@ -128,8 +128,10 @@ const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
 );
 
 export default function WikiLibrary({ base, headers, showToast, structure, canCreate,
-                                      initialSlug, onInitialSlugConsumed }) {
+                                      initialSlug, onInitialSlugConsumed,
+                                      searchTarget, onSearchTargetConsumed }) {
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
+    const [openHighlight, setOpenHighlight] = useState(null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
     const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
@@ -144,9 +146,26 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
        признак того, что переход уже отработал. */
     useEffect(() => {
         if (!initialSlug) return;
+        setOpenHighlight(null);
         setOpenSlug(initialSlug);
         onInitialSlugConsumed?.();
     }, [initialSlug, onInitialSlugConsumed]);
+
+    /* Переход из поисковой модалки WikiView: та же одноразовая механика, но
+       вдобавок несёт слово для подсветки в тексте статьи. */
+    useEffect(() => {
+        if (!searchTarget?.slug) return;
+        setOpenHighlight(searchTarget.highlight || null);
+        setOpenSlug(searchTarget.slug);
+        onSearchTargetConsumed?.();
+    }, [searchTarget, onSearchTargetConsumed]);
+
+    /* Обычное открытие из списка — без подсветки: она осмысленна только когда
+       известно, по какому слову статью нашли. */
+    const openArticle = useCallback((slug) => {
+        setOpenHighlight(null);
+        setOpenSlug(slug);
+    }, []);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
@@ -229,8 +248,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                 base={base}
                 headers={headers}
                 slug={openSlug}
+                highlightTerm={openHighlight}
                 showToast={showToast}
-                onBack={() => setOpenSlug(null)}
+                onBack={() => { setOpenSlug(null); setOpenHighlight(null); }}
             />
         );
     }
@@ -317,7 +337,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                                     Найдено: {found.length}
                                 </div>
                                 {found.map((article) => (
-                                    <SearchHit key={article.id} article={article} onOpen={setOpenSlug} />
+                                    <SearchHit key={article.id} article={article} onOpen={openArticle} />
                                 ))}
                             </div>
                         ) : (
@@ -353,7 +373,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                     {!loading && found === null && items.length > 0 && (
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                             {items.map((article) => (
-                                <ArticleCard key={article.id} article={article} onOpen={setOpenSlug} />
+                                <ArticleCard key={article.id} article={article} onOpen={openArticle} />
                             ))}
                         </div>
                     )}
@@ -362,17 +382,17 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                             <MiniList
                                 title="Избранное" icon={Star}
-                                items={home.favorites || []} onOpen={setOpenSlug}
+                                items={home.favorites || []} onOpen={openArticle}
                                 empty="Пусто"
                             />
                             <MiniList
                                 title="Недавнее" icon={Clock}
-                                items={home.recent || []} onOpen={setOpenSlug}
+                                items={home.recent || []} onOpen={openArticle}
                                 empty="Пока не читали"
                             />
                             <MiniList
                                 title="Популярное" icon={TrendingUp}
-                                items={home.popular || []} onOpen={setOpenSlug}
+                                items={home.popular || []} onOpen={openArticle}
                                 empty="Пусто"
                             />
                         </div>
