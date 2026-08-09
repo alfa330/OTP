@@ -8,6 +8,7 @@ import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosBadge, IosModal,
 } from '../ui/ios';
+import useStableCallback from './useStableCallback';
 
 /* Таксопарки и акции.
  *
@@ -97,6 +98,8 @@ const ParkCard = ({ park, canManage, onEdit, onArchive }) => (
 );
 
 export default function WikiParks({ base, headers, showToast }) {
+    const toast = useStableCallback(showToast);
+
     const [parks, setParks] = useState([]);
     const [promotions, setPromotions] = useState([]);
     const [canManage, setCanManage] = useState(false);
@@ -116,9 +119,9 @@ export default function WikiParks({ base, headers, showToast }) {
                 setCanManage(!!parksResponse.data?.can_manage);
                 setPromotions(promoResponse.data?.items || []);
             })
-            .catch((e) => showToast?.(errText(e, 'Не удалось загрузить справочник'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось загрузить справочник'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, query, showToast]);
+    }, [base, headers, query, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);
@@ -140,16 +143,16 @@ export default function WikiParks({ base, headers, showToast }) {
             ? axios.patch(`${base}/parks/${draft.id}`, payload, { headers })
             : axios.post(`${base}/parks`, payload, { headers });
         request
-            .then(() => { showToast?.(draft.id ? 'Парк обновлён' : 'Парк добавлен', 'success'); setDraft(null); load(); })
-            .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
+            .then(() => { toast(draft.id ? 'Парк обновлён' : 'Парк добавлен', 'success'); setDraft(null); load(); })
+            .catch((e) => toast(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setBusy(false));
     };
 
     const archive = (park) => {
         setBusy(true);
         axios.delete(`${base}/parks/${park.id}`, { headers })
-            .then(() => { showToast?.('Парк убран в архив', 'success'); load(); })
-            .catch((e) => showToast?.(errText(e, 'Не удалось'), 'error'))
+            .then(() => { toast('Парк убран в архив', 'success'); load(); })
+            .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
             .finally(() => setBusy(false));
     };
 

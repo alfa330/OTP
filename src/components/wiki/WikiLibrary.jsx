@@ -7,6 +7,7 @@ import {
 import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
 import { markedWord } from './WikiSearchModal';
+import useStableCallback from './useStableCallback';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
 // редактора, а не при входе в раздел.
@@ -131,6 +132,13 @@ const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
 export default function WikiLibrary({ base, headers, showToast, structure, canCreate,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
+    /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
+       onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
+       статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
+    const toast = useStableCallback(showToast);
+    const consumeInitialSlug = useStableCallback(onInitialSlugConsumed);
+    const consumeSearchTarget = useStableCallback(onSearchTargetConsumed);
+
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
     const [openHighlight, setOpenHighlight] = useState(null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
@@ -149,8 +157,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         if (!initialSlug) return;
         setOpenHighlight(null);
         setOpenSlug(initialSlug);
-        onInitialSlugConsumed?.();
-    }, [initialSlug, onInitialSlugConsumed]);
+        consumeInitialSlug();
+    }, [initialSlug, consumeInitialSlug]);
 
     /* Переход из поисковой модалки WikiView: та же одноразовая механика, но
        вдобавок несёт слово для подсветки в тексте статьи. */
@@ -158,8 +166,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         if (!searchTarget?.slug) return;
         setOpenHighlight(searchTarget.highlight || null);
         setOpenSlug(searchTarget.slug);
-        onSearchTargetConsumed?.();
-    }, [searchTarget, onSearchTargetConsumed]);
+        consumeSearchTarget();
+    }, [searchTarget, consumeSearchTarget]);
 
     /* Обычное открытие из списка — без подсветки: она осмысленна только когда
        известно, по какому слову статью нашли. */
@@ -193,7 +201,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                 .then((r) => setFound(r.data?.items || []))
                 .catch((e) => {
                     setFound([]);
-                    showToast?.(errText(e, 'Поиск не сработал'), 'error');
+                    toast(errText(e, 'Поиск не сработал'), 'error');
                 })
                 .finally(() => setLoading(false));
             return;
@@ -204,9 +212,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         if (sectionId) params.section_id = sectionId;
         axios.get(`${base}/articles`, { headers, params })
             .then((r) => setItems(r.data?.items || []))
-            .catch((e) => showToast?.(errText(e, 'Не удалось загрузить статьи'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось загрузить статьи'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, sectionId, query, showToast]);
+    }, [base, headers, sectionId, query, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск

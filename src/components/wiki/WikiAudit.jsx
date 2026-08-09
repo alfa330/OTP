@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import { Loader2, RefreshCw, ScrollText } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
+import useStableCallback from './useStableCallback';
 
 /* Журнал раздела.
  *
@@ -42,6 +43,8 @@ const grantedFrom = (details) => Object.entries(details || {})
     .map(([key]) => key.replace('can_', ''));
 
 export default function WikiAudit({ base, headers, showToast }) {
+    const toast = useStableCallback(showToast);
+
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(true);
 
@@ -49,9 +52,9 @@ export default function WikiAudit({ base, headers, showToast }) {
         setLoading(true);
         axios.get(`${base}/audit`, { headers, params: { limit: 200 } })
             .then((r) => setItems(r.data?.items || []))
-            .catch((e) => showToast?.(errText(e, 'Не удалось загрузить журнал'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось загрузить журнал'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, showToast]);
+    }, [base, headers, toast]);
 
     useEffect(() => { load(); }, [load]);
 

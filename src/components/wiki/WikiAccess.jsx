@@ -8,6 +8,7 @@ import {
     IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import useStableCallback from './useStableCallback';
 
 /* Выдача доступов.
  *
@@ -57,6 +58,8 @@ const emptyRule = (sectionId) => ({
 });
 
 export default function WikiAccess({ base, headers, showToast, structure, reload }) {
+    const toast = useStableCallback(showToast);
+
     const sections = structure?.sections || [];
     const spaces = structure?.spaces || [];
 
@@ -84,9 +87,9 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
         setLoading(true);
         axios.get(`${base}/access/section-rules`, { headers, params: { section_id: sectionId } })
             .then((r) => setRules(r.data?.items || []))
-            .catch((e) => showToast?.(errText(e, 'Не удалось загрузить правила'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, sectionId, showToast]);
+    }, [base, headers, sectionId, toast]);
 
     useEffect(() => { loadRules(); }, [loadRules]);
 
@@ -117,20 +120,20 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
             subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
         }, { headers })
             .then(() => {
-                showToast?.('Правило сохранено', 'success');
+                toast('Правило сохранено', 'success');
                 setDraft(null);
                 loadRules();
                 reload?.();
             })
-            .catch((e) => showToast?.(errText(e, 'Не удалось сохранить правило'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось сохранить правило'), 'error'))
             .finally(() => setBusy(false));
     };
 
     const removeRule = (rule) => {
         setBusy(true);
         axios.delete(`${base}/access/section-rules/${rule.id}`, { headers })
-            .then(() => { showToast?.('Правило удалено', 'success'); loadRules(); reload?.(); })
-            .catch((e) => showToast?.(errText(e, 'Не удалось удалить'), 'error'))
+            .then(() => { toast('Правило удалено', 'success'); loadRules(); reload?.(); })
+            .catch((e) => toast(errText(e, 'Не удалось удалить'), 'error'))
             .finally(() => setBusy(false));
     };
 
