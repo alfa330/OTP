@@ -7,6 +7,7 @@ import {
 import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
 import { markedWord } from './WikiSearch';
+import { CLASSIFIER_SLUG } from './WikiArticle';
 import useStableCallback from './useStableCallback';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
@@ -54,7 +55,10 @@ const ArticleCard = ({ article, onOpen }) => (
                     {article.status === 'draft' ? 'Черновик' : article.status}
                 </IosBadge>
             )}
-            {article.visibility_mode === 'restricted' && (
+            {/* У классификатора собственный периметр (restricted), но правило в
+                нём одно: читать могут все роли. Бейдж на статье, открытой всем,
+                вводил бы в заблуждение — см. тот же гард в WikiArticle. */}
+            {article.visibility_mode === 'restricted' && article.slug !== CLASSIFIER_SLUG && (
                 <IosBadge tone="amber">Только по списку</IosBadge>
             )}
             <span className="flex items-center gap-1 tabular-nums"><Eye size={11} /> {article.views}</span>

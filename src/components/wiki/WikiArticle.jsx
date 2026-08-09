@@ -255,7 +255,12 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
                             {STATUS_LABELS[article.status] || article.status}
                         </IosBadge>
-                        {article.visibility_mode === 'restricted' && (
+                        {/* У классификатора visibility_mode='restricted' по
+                            устройству — у него собственный периметр, но правило
+                            в нём одно: читать могут все роли. Бейдж «только по
+                            списку» на статье, открытой всем, вводил бы в
+                            заблуждение каждого, кто её откроет. */}
+                        {article.visibility_mode === 'restricted' && !isClassifier && (
                             <IosBadge tone="amber">Только по списку</IosBadge>
                         )}
                         {article.strict_mode && <IosBadge tone="red">Строгий режим</IosBadge>}
