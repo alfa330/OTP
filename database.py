@@ -76,6 +76,9 @@ STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PA
 # clamped to this floor so they never depend on already-purged events. Minimum 30d guard rail.
 STATUS_EVENTS_RETENTION_DAYS = _env_int('STATUS_EVENTS_RETENTION_DAYS', 120, minimum=30)
 SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL = 'shift_auction_test_events'
+# Канал «тычков» колокола уведомлений: pg_notify шлют триггеры на таблицах
+# источников (см. _init_bell_notify_schema_tx), слушает notifications/realtime.py.
+BELL_EVENTS_NOTIFY_CHANNEL = 'bell_events'
 SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_SNAPSHOT_CACHE_TTL_SECONDS', 1.5, minimum=0)
 SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS = _env_float('SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS', 2, minimum=0)
 SHIFT_AUCTION_SNAPSHOT_COMMON_CACHE = {"key": None, "expires_at": 0.0, "value": None}
@@ -5166,6 +5169,163 @@ class Database:
             except Exception as exc:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_null_group_backfill")
                 logging.error("null group_id backfill skipped: %s", exc, exc_info=True)
+
+            # Триггеры мгновенных уведомлений (канал bell_events). Под SAVEPOINT:
+            # без них колокол просто остаётся на обновлении по фокусу, ронять
+            # инициализацию базы из-за реалтайма нельзя.
+            try:
+                cursor.execute("SAVEPOINT sp_bell_notify")
+                self._init_bell_notify_schema_tx(cursor)
+                cursor.execute("RELEASE SAVEPOINT sp_bell_notify")
+            except Exception as exc:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_bell_notify")
+                logging.error("bell notify triggers skipped: %s", exc, exc_info=True)
+
+    def _init_bell_notify_schema_tx(self, cursor):
+        """Триггеры мгновенных уведомлений: запись в таблицу источника — pg_notify.
+
+        Триггеры, а не вызовы в коде записи: точек записи много и часть из них
+        не проходит через роуты вовсе (ночной materialize_due_regulation_tasks
+        создаёт задачи регламентов, назначения опросов пишутся пачками) —
+        триггер не забудешь позвать. Payload несёт только адресатов
+        ('{"u":[id,...]}' либо '{"b":1}' для широковещательного), данные никто
+        не передаёт: получив тычок, клиент сам перечитывает /api/notifications,
+        поэтому потерянный тычок — это максимум задержка до обновления по
+        фокусу, а не потерянное уведомление.
+
+        «Ивенты» и «4 You» широковещательные: их видимость зависит от отдела
+        зрителя, и вычислять круг адресатов в триггере значило бы продублировать
+        _events_viewer_scope на PL/pgSQL. Дешевле разбудить всех — каждый клиент
+        перечитает свою сводку, и сервер сам отфильтрует по периметру.
+        """
+        cursor.execute("""
+            CREATE OR REPLACE FUNCTION bell_notify_change()
+            RETURNS TRIGGER
+            LANGUAGE plpgsql
+            AS $$
+            DECLARE
+                targets INTEGER[] := ARRAY[]::INTEGER[];
+            BEGIN
+                IF TG_TABLE_NAME IN ('events', 'four_you_images') THEN
+                    PERFORM pg_notify('bell_events', '{"b":1}');
+                    RETURN NULL;
+                ELSIF TG_TABLE_NAME = 'lms_notifications' THEN
+                    targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'survey_assignments' THEN
+                    -- В черновике теста UPDATE всегда упоминает status и
+                    -- started_at. Состав колокола меняется лишь при смене
+                    -- адресата/опроса или переходе через границу completed.
+                    IF TG_OP = 'UPDATE'
+                       AND OLD.operator_id IS NOT DISTINCT FROM NEW.operator_id
+                       AND OLD.survey_id IS NOT DISTINCT FROM NEW.survey_id
+                       AND (COALESCE(OLD.status, '') = 'completed') IS NOT DISTINCT FROM
+                           (COALESCE(NEW.status, '') = 'completed') THEN
+                        RETURN NULL;
+                    END IF;
+                    targets := ARRAY[NEW.operator_id];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.operator_id];
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'wiki_ack_assignments' THEN
+                    -- Прокрутка и раскрытие блоков меняют служебный прогресс,
+                    -- но уведомление остаётся тем же. Будим только если
+                    -- изменилась его видимость, адресат, статья или срок.
+                    IF TG_OP = 'UPDATE'
+                       AND OLD.user_id IS NOT DISTINCT FROM NEW.user_id
+                       AND OLD.article_id IS NOT DISTINCT FROM NEW.article_id
+                       AND OLD.due_at IS NOT DISTINCT FROM NEW.due_at
+                       AND (OLD.acknowledged_at IS NULL) IS NOT DISTINCT FROM
+                           (NEW.acknowledged_at IS NULL)
+                       AND COALESCE(OLD.status IN ('superseded', 'cancelled'), FALSE)
+                           IS NOT DISTINCT FROM
+                           COALESCE(NEW.status IN ('superseded', 'cancelled'), FALSE) THEN
+                        RETURN NULL;
+                    END IF;
+                    targets := ARRAY[NEW.user_id];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.user_id];
+                    END IF;
+                ELSIF TG_TABLE_NAME IN ('event_reads', 'four_you_reads') THEN
+                    -- Водяной знак гасит бейдж. Адресная тычка синхронизирует
+                    -- остальные вкладки того же пользователя без массовой
+                    -- перечитки у всех подключённых клиентов.
+                    targets := ARRAY[NEW.user_id];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.user_id];
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'task_action_reads' THEN
+                    targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'tasks' THEN
+                    -- Исполнитель и принимающий; при UPDATE — и прежние тоже:
+                    -- переназначенная задача должна погаснуть у старого владельца.
+                    targets := ARRAY[NEW.assigned_to,
+                                     COALESCE(NEW.requested_by_id, NEW.created_by)];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.assigned_to,
+                                                    COALESCE(OLD.requested_by_id, OLD.created_by)];
+                    END IF;
+                END IF;
+                targets := ARRAY(SELECT DISTINCT t FROM unnest(targets) AS t WHERE t IS NOT NULL);
+                IF array_length(targets, 1) IS NOT NULL THEN
+                    PERFORM pg_notify('bell_events', json_build_object('u', targets)::text);
+                END IF;
+                RETURN NULL;
+            EXCEPTION WHEN OTHERS THEN
+                -- Уведомление никогда не важнее записи: сломанный тычок — это
+                -- максимум задержка колокола до обновления по фокусу, а упавший
+                -- здесь триггер откатил бы само действие пользователя.
+                RETURN NULL;
+            END;
+            $$;
+        """)
+        # UPDATE у назначений опросов/ознакомлений и отметок задач нужен, чтобы
+        # действие пользователя (прошёл, подтвердил, просмотрел) мгновенно гасило
+        # уведомление в других его вкладках, а не только добавляло новые.
+        for trigger_name, table_name, timing, when_clause in (
+            ('trg_bell_events', 'events', 'AFTER INSERT', ''),
+            ('trg_bell_four_you', 'four_you_images', 'AFTER INSERT', ''),
+            ('trg_bell_lms', 'lms_notifications', 'AFTER INSERT OR UPDATE', ''),
+            ('trg_bell_surveys_insert', 'survey_assignments', 'AFTER INSERT', ''),
+            (
+                'trg_bell_surveys',
+                'survey_assignments',
+                'AFTER UPDATE OF operator_id, survey_id, status',
+                """WHEN (
+                    OLD.operator_id IS DISTINCT FROM NEW.operator_id
+                    OR OLD.survey_id IS DISTINCT FROM NEW.survey_id
+                    OR (COALESCE(OLD.status, '') = 'completed') IS DISTINCT FROM
+                       (COALESCE(NEW.status, '') = 'completed')
+                )""",
+            ),
+            ('trg_bell_wiki_ack_insert', 'wiki_ack_assignments', 'AFTER INSERT', ''),
+            (
+                'trg_bell_wiki_ack',
+                'wiki_ack_assignments',
+                'AFTER UPDATE OF user_id, article_id, due_at, acknowledged_at, status',
+                """WHEN (
+                    OLD.user_id IS DISTINCT FROM NEW.user_id
+                    OR OLD.article_id IS DISTINCT FROM NEW.article_id
+                    OR OLD.due_at IS DISTINCT FROM NEW.due_at
+                    OR (OLD.acknowledged_at IS NULL) IS DISTINCT FROM
+                       (NEW.acknowledged_at IS NULL)
+                    OR COALESCE(OLD.status IN ('superseded', 'cancelled'), FALSE)
+                       IS DISTINCT FROM
+                       COALESCE(NEW.status IN ('superseded', 'cancelled'), FALSE)
+                )""",
+            ),
+            ('trg_bell_tasks', 'tasks', 'AFTER INSERT OR UPDATE', ''),
+            ('trg_bell_task_reads', 'task_action_reads', 'AFTER INSERT OR UPDATE', ''),
+            ('trg_bell_event_reads', 'event_reads', 'AFTER INSERT OR UPDATE', ''),
+            ('trg_bell_four_you_reads', 'four_you_reads', 'AFTER INSERT OR UPDATE', ''),
+        ):
+            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name} ON {table_name};")
+            cursor.execute(f"""
+                CREATE TRIGGER {trigger_name}
+                {timing} ON {table_name}
+                FOR EACH ROW
+                {when_clause}
+                EXECUTE FUNCTION bell_notify_change();
+            """)
 
     def _init_amo_leads_schema_tx(self, cursor):
         """Схема выгрузки сделок amoCRM (раздел «Лиды по источникам»).

@@ -14,7 +14,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from notifications import sources
+from notifications import realtime, sources
 from tests import prod_db
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -397,6 +397,223 @@ class SeenEndpointTest(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual([], response.get_json()['marked'])
         self.assertEqual([], self.executed)
+
+
+class RealtimeStateMixin:
+    """Модуль realtime держит состояние процесса — тесты обязаны его вернуть."""
+
+    def setUp(self):
+        self._saved = (list(realtime._ticks), realtime._seq,
+                       realtime._active_streams, realtime._listener_started)
+        realtime._ticks.clear()
+        realtime._seq = 0
+        realtime._active_streams = 0
+        # Слушатель в тестах не поднимается: базы нет, поток крутился бы в
+        # цикле переподключений до конца прогона.
+        realtime._listener_started = True
+
+    def tearDown(self):
+        ticks, seq, streams, started = self._saved
+        realtime._ticks.clear()
+        realtime._ticks.extend(ticks)
+        realtime._seq = seq
+        realtime._active_streams = streams
+        realtime._listener_started = started
+
+
+class RealtimeTicksTest(RealtimeStateMixin, unittest.TestCase):
+    """Разбор payload'ов триггеров и матчинг тычков по адресату."""
+
+    def test_payload_parsing(self):
+        self.assertIsNone(realtime._parse_payload('{"b":1}'), 'широковещательный')
+        self.assertEqual(frozenset({3, 7}), realtime._parse_payload('{"u":[3,7]}'))
+        # Мусор игнорируется, а не будит всех: сломанный payload не повод
+        # устраивать всем клиентам массовую перечитку.
+        self.assertIs(False, realtime._parse_payload('не-json'))
+        self.assertIs(False, realtime._parse_payload('[1,2]'))
+        self.assertIs(False, realtime._parse_payload('{"u":[]}'))
+        self.assertIs(False, realtime._parse_payload(''))
+
+    def test_targeted_tick_reaches_only_its_user(self):
+        realtime._publish(frozenset({5}))
+        poked, seq = realtime.wait_for_tick(0, 5, 0.1)
+        self.assertTrue(poked)
+        poked_other, _ = realtime.wait_for_tick(0, 6, 0.1)
+        self.assertFalse(poked_other, 'чужой адресный тычок не должен будить')
+        # Курсор продвинулся — при следующем ожидании тот же тычок не всплывёт.
+        poked_again, _ = realtime.wait_for_tick(seq, 5, 0.1)
+        self.assertFalse(poked_again)
+
+    def test_broadcast_reaches_everyone(self):
+        realtime._publish(None)
+        for user_id in (1, 99):
+            poked, _ = realtime.wait_for_tick(0, user_id, 0.1)
+            self.assertTrue(poked)
+
+    def test_buffer_gap_forces_reload_even_without_matching_tick(self):
+        """Вытеснённый адресный тик мог быть нашим — угадывать нельзя."""
+        for _ in range(realtime.TICK_BUFFER_MAXLEN + 1):
+            realtime._publish(frozenset({999}))
+
+        poked, seq = realtime.wait_for_tick(0, 5, 0.1)
+
+        self.assertTrue(poked, 'разрыв курсора обязан принудить полную сверку')
+        self.assertEqual(realtime.current_seq(), seq)
+
+    def test_subscribe_broadcasts_resync_after_listen(self):
+        commands = []
+
+        class Cursor:
+            def execute(self, sql):
+                commands.append(sql)
+
+        class Connection:
+            def set_session(self, **kwargs):
+                self.session = kwargs
+
+            def cursor(self):
+                return Cursor()
+
+        connection = Connection()
+        realtime._subscribe(connection)
+
+        self.assertEqual({'autocommit': True}, connection.session)
+        self.assertEqual(['LISTEN %s' % realtime.BELL_NOTIFY_CHANNEL], commands)
+        for user_id in (1, 99):
+            poked, _ = realtime.wait_for_tick(0, user_id, 0.1)
+            self.assertTrue(poked, 'после LISTEN все живые потоки сверяют сводку')
+
+    def test_stream_slots_are_bounded(self):
+        self.assertTrue(realtime.try_acquire_stream_slot(2))
+        self.assertTrue(realtime.try_acquire_stream_slot(2))
+        self.assertFalse(realtime.try_acquire_stream_slot(2), 'мест ровно limit')
+        realtime.release_stream_slot()
+        self.assertTrue(realtime.try_acquire_stream_slot(2))
+
+
+class StreamEndpointTest(RealtimeStateMixin, unittest.TestCase):
+    """SSE-канал: выключен без базы, ограничен слотами, тычок будит клиента."""
+
+    def _client(self, *, listen_connect=None, stream_limit=50):
+        from flask import Flask
+        from notifications.routes import build_notifications_blueprint
+
+        app = Flask(__name__)
+        app.register_blueprint(build_notifications_blueprint(
+            db=object(),
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (2, None, None),
+            viewer_context=lambda rid, r: {'user_id': rid},
+            listen_connect=listen_connect,
+            stream_limit=stream_limit,
+        ))
+        return app.test_client()
+
+    def test_disabled_without_listener_factory(self):
+        """Юнит-тесты и сломанная фабрика: канал честно 503, колокол на фокусе."""
+        response = self._client().get('/api/notifications/stream')
+        self.assertEqual(503, response.status_code)
+
+    def test_over_capacity_is_503_with_retry_after(self):
+        client = self._client(listen_connect=lambda: None, stream_limit=1)
+        self.assertTrue(realtime.try_acquire_stream_slot(1))  # место занято
+        response = client.get('/api/notifications/stream')
+        self.assertEqual(503, response.status_code)
+        self.assertEqual('300', response.headers.get('Retry-After'))
+        # Отказ не должен съесть слот.
+        self.assertEqual(1, realtime.active_stream_count())
+
+    def test_tick_wakes_stream_and_slot_returns_on_close(self):
+        client = self._client(listen_connect=lambda: None, stream_limit=1)
+        response = client.get('/api/notifications/stream', buffered=False)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual('text/event-stream', response.mimetype)
+        stream = response.response if hasattr(response.response, '__next__') \
+            else iter(response.response)
+        first = next(stream)
+        self.assertIn(b'connected', first)
+        self.assertEqual(1, realtime.active_stream_count(), 'поток держит слот')
+
+        realtime._publish(frozenset({2}))  # адресный тычок нашему зрителю
+        self.assertIn(b'event: reload', next(stream))
+
+        response.close()
+        self.assertEqual(0, realtime.active_stream_count(),
+                         'слот обязан вернуться при закрытии ответа')
+
+    def test_stream_periodically_reconciles_clock_driven_sources(self):
+        client = self._client(listen_connect=lambda: None, stream_limit=1)
+        original_reconcile = realtime.RECONCILE_SECONDS
+        original_heartbeat = realtime.HEARTBEAT_SECONDS
+        realtime.RECONCILE_SECONDS = 0.01
+        realtime.HEARTBEAT_SECONDS = 0.01
+        try:
+            response = client.get('/api/notifications/stream', buffered=False)
+            stream = response.response if hasattr(response.response, '__next__') \
+                else iter(response.response)
+            self.assertIn(b'connected', next(stream))
+            self.assertIn(b'event: reload', next(stream))
+            response.close()
+        finally:
+            realtime.RECONCILE_SECONDS = original_reconcile
+            realtime.HEARTBEAT_SECONDS = original_heartbeat
+
+
+class RealtimeTriggersPinnedTest(unittest.TestCase):
+    """Триггеры в схеме и слушатель обязаны говорить об одном канале."""
+
+    DATABASE = (ROOT / 'database.py').read_text(encoding='utf-8')
+
+    def test_channel_name_matches_listener(self):
+        self.assertIn("BELL_EVENTS_NOTIFY_CHANNEL = '%s'" % realtime.BELL_NOTIFY_CHANNEL,
+                      self.DATABASE)
+        block = self._trigger_block()
+        self.assertIn("pg_notify('%s'" % realtime.BELL_NOTIFY_CHANNEL, block)
+
+    def _trigger_block(self):
+        start = self.DATABASE.index('def _init_bell_notify_schema_tx(self, cursor):')
+        return self.DATABASE[start:self.DATABASE.index('def _init_amo_leads_schema_tx', start)]
+
+    def test_every_source_table_has_a_trigger(self):
+        """Таблица без триггера = источник без реалтайма, молча."""
+        block = self._trigger_block()
+        for table in ('events', 'four_you_images', 'lms_notifications',
+                      'survey_assignments', 'wiki_ack_assignments',
+                      'tasks', 'task_action_reads', 'event_reads',
+                      'four_you_reads'):
+            self.assertIn("'%s'" % table, block)
+
+    def test_watermark_updates_wake_only_the_same_user(self):
+        block = self._trigger_block()
+        self.assertIn("TG_TABLE_NAME IN ('event_reads', 'four_you_reads')", block)
+        self.assertIn("targets := ARRAY[NEW.user_id]", block)
+
+    def test_survey_and_wiki_progress_updates_are_filtered(self):
+        block = self._trigger_block()
+        self.assertIn('AFTER UPDATE OF operator_id, survey_id, status', block)
+        self.assertIn(
+            'AFTER UPDATE OF user_id, article_id, due_at, acknowledged_at, status',
+            block,
+        )
+        self.assertIn("(COALESCE(OLD.status, '') = 'completed') IS NOT DISTINCT FROM", block)
+        self.assertIn('OLD.acknowledged_at IS NULL', block)
+        self.assertIn("COALESCE(OLD.status IN ('superseded', 'cancelled'), FALSE)", block)
+        self.assertIn('OLD.due_at IS NOT DISTINCT FROM NEW.due_at', block)
+
+    def test_trigger_never_breaks_the_write(self):
+        """Ошибка тычка не должна откатывать само действие пользователя."""
+        block = self._trigger_block()
+        self.assertIn('EXCEPTION WHEN OTHERS THEN', block)
+        # И вся установка триггеров — под SAVEPOINT в _init_db.
+        self.assertIn('SAVEPOINT sp_bell_notify', self.DATABASE)
+
+    def test_bell_client_keeps_focus_fallback(self):
+        """SSE — ускорение, а не замена: обновление по фокусу обязано остаться."""
+        source = BELL_JSX.read_text(encoding='utf-8')
+        self.assertIn('/api/notifications/stream', source)
+        self.assertIn("visibilityState === 'hidden'", source)
+        self.assertIn('REFRESH_GAP_MS', source)
 
 
 class FrontendAgreesWithBackendTest(unittest.TestCase):

@@ -46510,6 +46510,11 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         viewer_context=_notifications_viewer_context,
+        # Своё соединение для LISTEN bell_events — вне общего пула, как у
+        # слушателя аукциона. Лимит SSE-слотов держит бюджет нитей waitress
+        # (их ~96 на всё): сверх лимита колокол живёт обновлением по фокусу.
+        listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
+        stream_limit=_env_int('BELL_STREAM_LIMIT', 50, minimum=10, maximum=120),
     ))
     logging.info("Центр уведомлений: Blueprint подключён на /api/notifications")
 except Exception:

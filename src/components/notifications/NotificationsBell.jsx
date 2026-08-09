@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
+import { createCoalescedReload } from './coalescedReload.js';
 
 /* Колокол уведомлений.
  *
@@ -30,9 +31,10 @@ const SOURCE_META = {
 // снимаются действием — см. notifications/sources.py::mark_seen.
 const CLEARABLE = ['events', 'four_you', 'lms'];
 
-// Не чаще раза в 5 минут при возврате фокуса: уведомления приходят от чужих
-// действий, а не сами по себе, поэтому фоновый polling не нужен.
+// Последняя страховка при возврате фокуса. Обычные изменения будит SSE, а
+// переходы по времени и редкие потери канала сверяет сам поток раз в минуту.
 const REFRESH_GAP_MS = 5 * 60 * 1000;
+const SSE_STALL_MS = 90 * 1000;
 
 const fmtWhen = (iso) => {
     if (!iso) return '';
@@ -63,23 +65,26 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const closeTimerRef = useRef(null);
     const fetchedAtRef = useRef(0);
     const aliveRef = useRef(true);
-    // Запрос уже в пути. Отметка свежести ставится только по ответу, поэтому
-    // без этого флага возврат во вкладку при медленной сети слал бы второй
-    // такой же запрос поверх первого.
-    const inFlightRef = useRef(false);
+    const userIdRef = useRef(user?.id);
+    userIdRef.current = user?.id;
 
-    useEffect(() => () => {
-        aliveRef.current = false;
-        if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    useEffect(() => {
+        // React StrictMode в dev повторно запускает effects после их cleanup.
+        aliveRef.current = true;
+        return () => {
+            aliveRef.current = false;
+            if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+        };
     }, []);
 
-    const load = useCallback(async () => {
-        if (!user?.id || inFlightRef.current) return;
-        inFlightRef.current = true;
-        setLoading(true);
+    const reloadSnapshot = useCallback(async () => {
+        const requestedUserId = user?.id;
+        if (!aliveRef.current || !requestedUserId) return;
         try {
             const response = await axios.get(`${apiBaseUrl}/api/notifications`, { headers: getHeaders() });
-            if (!aliveRef.current) return;
+            // При logout/login без размонтирования старый ответ не должен на
+            // мгновение показать новому пользователю чужие уведомления.
+            if (!aliveRef.current || userIdRef.current !== requestedUserId) return;
             const nextCounts = response?.data?.counts || { total: 0 };
             setCounts(nextCounts);
             setItems(Array.isArray(response?.data?.items) ? response.data.items : []);
@@ -92,11 +97,27 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                трогаем: прежние числа честнее, чем нули, которых сервер не
                присылал. onCounts намеренно НЕ вызывается — иначе бейджи
                сайдбара погасли бы из-за недоступности базы. */
-        } finally {
-            inFlightRef.current = false;
-            if (aliveRef.current) setLoading(false);
         }
     }, [apiBaseUrl, getHeaders, onCounts, user?.id]);
+
+    // Сам gate живёт весь срок компонента, а ref подставляет ему актуальные
+    // URL, токен и пользователя без сброса single-flight на каждом рендере.
+    const reloadSnapshotRef = useRef(reloadSnapshot);
+    reloadSnapshotRef.current = reloadSnapshot;
+    const coalescedLoadRef = useRef(null);
+    if (!coalescedLoadRef.current) {
+        coalescedLoadRef.current = createCoalescedReload(() => reloadSnapshotRef.current());
+    }
+
+    const load = useCallback(async () => {
+        if (!user?.id) return;
+        setLoading(true);
+        try {
+            await coalescedLoadRef.current();
+        } finally {
+            if (aliveRef.current) setLoading(false);
+        }
+    }, [user?.id]);
 
     useEffect(() => {
         if (!user?.id) {
@@ -117,6 +138,150 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             document.removeEventListener('visibilitychange', onWake);
         };
     }, [user?.id, load]);
+
+    /* Мгновенные обновления: /api/notifications/stream отдаёт «тычок», когда
+       на сервере появилось что-то для этого пользователя, и load() перечитывает
+       сводку. EventSource не умеет наши заголовки авторизации — читаем fetch'ем,
+       как SSE аукциона. Канал держит только видимая вкладка: скрытая рвёт
+       соединение и отдаёт слот (их на сервере ровно BELL_STREAM_LIMIT — каждый
+       поток занимает нить waitress). Любой отказ канала — молчаливый откат на
+       прежнее обновление по фокусу, колокол без реалтайма остаётся полностью
+       рабочим. */
+    useEffect(() => {
+        if (!user?.id) return undefined;
+        let cancelled = false;
+        let abortController = null;
+        let retryTimer = null;
+        let pokeTimer = null;
+        let watchdogTimer = null;
+        let attempt = 0;
+
+        const clearWatchdog = () => {
+            if (!watchdogTimer) return;
+            clearTimeout(watchdogTimer);
+            watchdogTimer = null;
+        };
+
+        const scheduleRetry = (delayMs) => {
+            if (cancelled || retryTimer) return;
+            retryTimer = setTimeout(() => {
+                retryTimer = null;
+                connect();
+            }, delayMs);
+        };
+
+        const connect = async () => {
+            if (cancelled || document.visibilityState === 'hidden') return;
+            clearWatchdog();
+            abortController?.abort();
+            const controller = new AbortController();
+            abortController = controller;
+            let watchdogExpired = false;
+            const armWatchdog = () => {
+                clearWatchdog();
+                watchdogTimer = setTimeout(() => {
+                    watchdogTimer = null;
+                    if (cancelled || document.visibilityState === 'hidden'
+                        || abortController !== controller) return;
+                    watchdogExpired = true;
+                    controller.abort();
+                }, SSE_STALL_MS);
+            };
+            // Heartbeat приходит раз в 25 секунд; 90 секунд тишины означают,
+            // что proxy/соединение зависло и его нужно создать заново.
+            armWatchdog();
+            try {
+                const response = await fetch(`${apiBaseUrl}/api/notifications/stream`, {
+                    headers: { ...getHeaders(), Accept: 'text/event-stream' },
+                    signal: controller.signal,
+                    credentials: 'include',
+                });
+                if (response.status === 503) {
+                    // Слоты заняты (или канал выключен) — не мешаем, попробуем позже.
+                    scheduleRetry(5 * 60 * 1000);
+                    return;
+                }
+                if (response.status === 401) {
+                    /* Токен протух посреди сессии. fetch идёт мимо axios-перехватчика,
+                       поэтому обновляем сессию его руками: load() ходит axios'ом и
+                       перехватчик освежит токен — следующая попытка возьмёт свежие
+                       заголовки из getHeaders(). */
+                    load();
+                    throw new Error('bell stream auth expired');
+                }
+                if (!response.ok || !response.body) throw new Error('bell stream failed');
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+                let connected = false;
+                while (!cancelled) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    armWatchdog();
+                    buffer += decoder.decode(value, { stream: true });
+                    const chunks = buffer.split('\n\n');
+                    buffer = chunks.pop() || '';
+                    if (!connected && chunks.some((chunk) => chunk
+                        .split('\n')
+                        .some((line) => line.startsWith(': connected')))) {
+                        connected = true;
+                        attempt = 0;
+                        /* Сервер фиксирует current_seq перед этим фреймом. Snapshot
+                           после него закрывает окно между первой загрузкой и
+                           подпиской; reload во время snapshot попадёт в очередь. */
+                        load();
+                    }
+                    const poked = chunks.some((chunk) => chunk
+                        .split('\n')
+                        .some((line) => line.startsWith('event: reload')));
+                    if (poked && !pokeTimer) {
+                        // Джиттер размазывает перечитки после широковещательного
+                        // тычка (новый пост «Ивентов» будит все вкладки разом), а
+                        // таймер-гард склеивает всплеск тычков в одну перечитку.
+                        pokeTimer = setTimeout(() => {
+                            pokeTimer = null;
+                            if (!cancelled && document.visibilityState !== 'hidden') load();
+                        }, Math.random() * 2000);
+                    }
+                }
+            } catch (e) {
+                if (cancelled || document.visibilityState === 'hidden') return;
+                // visibility/unmount/new connect отменяют канал намеренно;
+                // watchdog-abort, напротив, должен пройти к retry ниже.
+                if (e?.name === 'AbortError' && !watchdogExpired) return;
+            } finally {
+                if (abortController === controller) clearWatchdog();
+            }
+            if (!cancelled && document.visibilityState !== 'hidden') {
+                attempt += 1;
+                scheduleRetry(Math.min(60000, 2000 * (2 ** Math.min(attempt, 5))) + Math.random() * 1000);
+            }
+        };
+
+        const onVisibility = () => {
+            if (cancelled) return;
+            if (document.visibilityState === 'hidden') {
+                clearWatchdog();
+                abortController?.abort();
+                return;
+            }
+            if (retryTimer) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
+            }
+            connect();
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+        connect();
+        return () => {
+            cancelled = true;
+            if (retryTimer) clearTimeout(retryTimer);
+            if (pokeTimer) clearTimeout(pokeTimer);
+            clearWatchdog();
+            abortController?.abort();
+            document.removeEventListener('visibilitychange', onVisibility);
+        };
+    }, [user?.id, apiBaseUrl, getHeaders, load]);
 
     /* Раздел прочитан — гасим его здесь же, без запроса. Иначе колокол до
        конца сессии показывал бы «2 новых поста» в двух сантиметрах от уже
@@ -223,7 +388,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             {/* min-h-0 вместо вычитания высоты шапки: на узком пункте (мобильный,
                 224px) «Отметить прочитанным» переносится на вторую строку, и
                 панель с «max-h минус 52px» срезала бы низ списка. */}
-            <div className="min-h-0 overflow-y-auto overscroll-contain">
+            <div className="notifications-scroll min-h-0 overflow-y-auto overscroll-contain">
                 {loading && items.length === 0 && (
                     <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
                         <Loader2 size={16} className="animate-spin" />

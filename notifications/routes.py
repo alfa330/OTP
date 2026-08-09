@@ -6,21 +6,29 @@
 (вышел бы цикл), а нужны и авторизация, и правила видимости разделов, которые
 живут там.
 
-Роутов всего два, и это принципиально: центр существует ради того, чтобы вход
-в портал стоил ОДИН запрос вместо пяти, и второй счётчик рядом свёл бы смысл
-на нет.
+Роутов три: сводка, гашение и SSE-канал тычков (/stream). Принцип «вход в
+портал стоит ОДИН запрос» цел: /stream не считает ничего сам — он лишь будит
+клиента, и тот перечитывает ту же единственную сводку.
 """
 
 import logging
+import time
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
+from . import realtime
 from . import sources as notif_sources
 
 
 def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                                  resolve_requester, viewer_context):
-    """viewer_context(requester_id, requester) -> dict для sources.collect."""
+                                  resolve_requester, viewer_context,
+                                  listen_connect=None, stream_limit=50):
+    """viewer_context(requester_id, requester) -> dict для sources.collect.
+
+    listen_connect() -> новое psycopg2-соединение для LISTEN (своё, вне пула).
+    Без него /stream отвечает 503 и колокол живёт на обновлении по фокусу —
+    так же блюпринт ведёт себя в юнит-тестах, где базы нет.
+    """
 
     bp = Blueprint('notifications', __name__, url_prefix='/api/notifications')
 
@@ -109,5 +117,63 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
                 if notif_sources.mark_seen(cursor, viewer['user_id'], name):
                     marked.append(name)
         return jsonify({"status": "success", "marked": marked}), 200
+
+    @bp.route('/stream', methods=('GET', 'OPTIONS'))
+    @require_api_key
+    def notifications_stream():
+        """SSE-канал «у тебя что-то изменилось» — см. notifications/realtime.py.
+
+        Каждый поток занимает нить waitress на всё время соединения, поэтому
+        мест ровно stream_limit: сверх лимита — 503, клиент молча остаётся на
+        обновлении по фокусу и попробует позже. Периметр зрителя здесь не
+        нужен: тычок не несёт данных, а перечитка сводки фильтруется сервером.
+        """
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        if listen_connect is None:
+            return jsonify({"error": "Реалтайм-канал не подключён"}), 503
+
+        requester_id, requester, auth_error = resolve_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        user_id = int(requester_id)
+
+        realtime.ensure_listener(listen_connect)
+        if not realtime.try_acquire_stream_slot(stream_limit):
+            response = jsonify({"status": "busy"})
+            response.headers['Retry-After'] = '300'
+            return response, 503
+
+        def generate():
+            cursor_seq = realtime.current_seq()
+            reconciled_at = time.monotonic()
+            yield ": connected %d\n\n" % int(time.time())
+            while True:
+                until_reconcile = max(0.1, realtime.RECONCILE_SECONDS
+                                      - (time.monotonic() - reconciled_at))
+                poked, cursor_seq = realtime.wait_for_tick(
+                    cursor_seq,
+                    user_id,
+                    min(realtime.HEARTBEAT_SECONDS, until_reconcile),
+                )
+                now_monotonic = time.monotonic()
+                if poked or now_monotonic - reconciled_at >= realtime.RECONCILE_SECONDS:
+                    # Содержимого нет намеренно: клиент перечитает сводку сам.
+                    # Раз в RECONCILE_SECONDS это также покрывает изменения от
+                    # хода часов (старт теста/дедлайн), у которых нет DB-триггера.
+                    reconciled_at = now_monotonic
+                    yield "event: reload\ndata: {}\n\n"
+                else:
+                    yield ": heartbeat %d\n\n" % int(time.time())
+
+        response = Response(generate(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        # Слот возвращается, когда WSGI-сервер закрывает ответ, — это надёжнее
+        # finally внутри генератора: у ни разу не итерированного генератора
+        # finally не выполнится, и слот утёк бы.
+        response.call_on_close(realtime.release_stream_slot)
+        return response
 
     return bp
