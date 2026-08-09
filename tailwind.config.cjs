@@ -26,6 +26,19 @@ module.exports = {
           '0%': { transform: 'scaleY(0)', opacity: '0' },
           '100%': { transform: 'scaleY(1)', opacity: '1' }
         },
+        // Звон: качание вокруг верхней точки крепления, затухающее к концу —
+        // ровно так качается настоящий колокол, поэтому амплитуда убывает.
+        'bell-ring': {
+          '0%, 100%': { transform: 'rotate(0deg)' },
+          '10%': { transform: 'rotate(-14deg)' },
+          '20%': { transform: 'rotate(12deg)' },
+          '30%': { transform: 'rotate(-10deg)' },
+          '40%': { transform: 'rotate(8deg)' },
+          '50%': { transform: 'rotate(-6deg)' },
+          '60%': { transform: 'rotate(4deg)' },
+          '70%': { transform: 'rotate(-2deg)' },
+          '80%': { transform: 'rotate(1deg)' }
+        },
         'dropdown-reverse': {
           '0%': { transform: 'scaleY(1)', opacity: '1' },
           '100%': { transform: 'scaleY(0)', opacity: '0' }
@@ -49,6 +62,7 @@ module.exports = {
         progress: 'progress 5s linear forwards',
         'fade-in-out': 'fade-in-out 5s ease-in-out forwards',
         dropdown: 'dropdown 0.2s ease-out forwards',
+        'bell-ring': 'bell-ring 0.9s ease-in-out',
         'dropdown-reverse': 'dropdown-reverse 0.2s ease-in forwards',
         'fade-in': 'fadeIn 0.3s ease-out forwards',
         'scale-in': 'scaleIn 0.2s ease-out forwards',

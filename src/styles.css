@@ -184,6 +184,33 @@
     .sidebar.collapsed:has(.notifications-dropdown) .sidebar-logo-mini {
       display: none;
     }
+    /* Колокол качается вокруг точки крепления, а не вокруг центра значка. */
+    .bell-icon-ring {
+      transform-origin: 50% 15%;
+    }
+    /* Всплывающая карточка нового уведомления. Классом .notifications-dropdown
+       её метить НЕЛЬЗЯ: он держит свёрнутый сайдбар развёрнутым (правило :has
+       выше), и каждое входящее уведомление дёргало бы всю вёрстку. Поэтому
+       своё мобильное позиционирование — там вправо выпадать некуда. */
+    @media (max-width: 768px) {
+      .sidebar .notifications-toast {
+        left: 0;
+        right: 0;
+        top: 100%;
+        width: auto;
+        margin-left: 0;
+        margin-top: 8px;
+      }
+    }
+    /* Уважаем системную настройку «меньше движения»: уведомление всё равно
+       появится и будет видно, просто без качания и раскрытия. */
+    @media (prefers-reduced-motion: reduce) {
+      .bell-icon-ring,
+      .notifications-toast {
+        animation: none !important;
+      }
+    }
+
     /* Очень тонкий скролл списка уведомлений: панель светлая, поэтому ползунок
        нейтрально-серый, а не голубой, как у тёмного меню сайдбара. */
     .notifications-scroll {

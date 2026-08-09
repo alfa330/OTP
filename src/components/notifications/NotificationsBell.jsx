@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2 } from 'lucide-react';
+import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 
@@ -40,6 +40,10 @@ const REFRESH_GAP_MS = 5 * 60 * 1000;
    ничего не сломает, но клиент просил бы порции, которых сервер уже не отдаёт. */
 const PAGE_SIZE = 5;
 const MAX_PAGE_SIZE = 50;
+
+// Сколько висит всплывающая карточка нового уведомления: хватает прочитать
+// заголовок с деталями и нажать, но она не заслоняет меню надолго.
+const TOAST_VISIBLE_MS = 7000;
 const SSE_STALL_MS = 90 * 1000;
 
 const fmtWhen = (iso) => {
@@ -70,6 +74,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
        не больше PAGE_SIZE на источник, поэтому без догрузки бейдж «6» висел бы
        над пятью карточками. */
     const [hasMore, setHasMore] = useState(false);
+    /* Пришло новое: колокол звенит, из сайдбара выезжает карточка с ним.
+       ringNonce перезапускает анимацию: одинаковый key React бы переиспользовал,
+       и второе уведомление подряд прошло бы беззвучно. */
+    const [ringNonce, setRingNonce] = useState(0);
+    const [toast, setToast] = useState(null);   // { item, extra } | null
+    const [toastClosing, setToastClosing] = useState(false);
 
     const buttonRef = useRef(null);
     const panelRef = useRef(null);
@@ -77,6 +87,16 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const sentinelRef = useRef(null);
     const closeTimerRef = useRef(null);
     const nextChangeTimerRef = useRef(null);
+    /* Что мы уже показывали. null — сводку ещё ни разу не получали: на первом
+       ответе только запоминаем состав, иначе вход в портал сам по себе звенел
+       бы всем, что накопилось за ночь. */
+    const knownKeysRef = useRef(null);
+    const totalRef = useRef(0);
+    const toastTimerRef = useRef(null);
+    const toastCloseTimerRef = useRef(null);
+    const announceRef = useRef(null);
+    const openRef = useRef(false);
+    openRef.current = open && !closing;
     const fetchedAtRef = useRef(0);
     const aliveRef = useRef(true);
     const userIdRef = useRef(user?.id);
@@ -95,6 +115,8 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             aliveRef.current = false;
             if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
             if (nextChangeTimerRef.current) clearTimeout(nextChangeTimerRef.current);
+            if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+            if (toastCloseTimerRef.current) clearTimeout(toastCloseTimerRef.current);
         };
     }, []);
 
@@ -110,8 +132,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             // мгновение показать новому пользователю чужие уведомления.
             if (!aliveRef.current || userIdRef.current !== requestedUserId) return;
             const nextCounts = response?.data?.counts || { total: 0 };
+            const nextItems = Array.isArray(response?.data?.items) ? response.data.items : [];
+            announceRef.current?.(nextItems, nextCounts);
             setCounts(nextCounts);
-            setItems(Array.isArray(response?.data?.items) ? response.data.items : []);
+            setItems(nextItems);
             const more = Boolean(response?.data?.has_more);
             hasMoreRef.current = more;
             setHasMore(more);
@@ -212,6 +236,11 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     }, [open, closing, hasMore, items.length, loadMore]);
 
     useEffect(() => {
+        /* Сменился пользователь — состав его сводки нам ещё неизвестен. Без
+           сброса первый же ответ выглядел бы как пачка новых уведомлений и
+           встретил бы человека звоном чужого непрочитанного. */
+        knownKeysRef.current = null;
+        totalRef.current = 0;
         if (!user?.id) {
             setCounts({ total: 0 });
             setItems([]);
@@ -417,8 +446,61 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         }, 200);
     }, []);
 
+    const closeToast = useCallback(() => {
+        if (toastCloseTimerRef.current) return;
+        if (toastTimerRef.current) {
+            clearTimeout(toastTimerRef.current);
+            toastTimerRef.current = null;
+        }
+        setToastClosing(true);
+        toastCloseTimerRef.current = setTimeout(() => {
+            toastCloseTimerRef.current = null;
+            setToast(null);
+            setToastClosing(false);
+        }, 200);
+    }, []);
+
+    /* Пришла новая сводка — решаем, есть ли повод звенеть.
+       Три условия, и каждое закрывает свой ложный повод:
+       известный состав — иначе вход в портал звенел бы всем, что накопилось;
+       выросший счётчик — иначе догрузка следующей порции (там сплошь «новые»
+       для нас элементы) выглядела бы как поток уведомлений;
+       закрытая панель — при открытой человек и так смотрит на список. */
+    const announce = useCallback((nextItems, nextCounts) => {
+        const keyOf = (item) => `${item.source}:${item.id}:${item.title}`;
+        const nextKeys = new Set(nextItems.map(keyOf));
+        const known = knownKeysRef.current;
+        knownKeysRef.current = nextKeys;
+
+        const nextTotal = Math.max(0, Number(nextCounts?.total) || 0);
+        const prevTotal = totalRef.current;
+        totalRef.current = nextTotal;
+
+        if (!known || nextTotal <= prevTotal || openRef.current) return;
+        const fresh = nextItems.filter((item) => !known.has(keyOf(item)));
+        if (!fresh.length) return;
+
+        // Элементы уже отсортированы сервером: горящее сверху, поэтому первое
+        // свежее — самое важное из пришедшего.
+        setRingNonce((value) => value + 1);
+        if (toastCloseTimerRef.current) {
+            clearTimeout(toastCloseTimerRef.current);
+            toastCloseTimerRef.current = null;
+        }
+        setToastClosing(false);
+        setToast({ item: fresh[0], extra: fresh.length - 1 });
+        if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = setTimeout(() => {
+            toastTimerRef.current = null;
+            closeToast();
+        }, TOAST_VISIBLE_MS);
+    }, [closeToast]);
+    announceRef.current = announce;
+
     const toggle = () => {
         if (closing) return;
+        // Открыли список — всплывающая карточка больше не нужна, она о том же.
+        if (toast) closeToast();
         if (open) close(); else setOpen(true);
     };
 
@@ -558,6 +640,63 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         </div>
     ) : null;
 
+    /* Карточка входящего уведомления — то же выпадение из сайдбара, что у
+       списка, но с одним пришедшим и его деталями. Показывается только при
+       закрытой панели: открытый список говорит ровно то же самое. */
+    const toastItem = toast?.item;
+    const toastMeta = toastItem ? (SOURCE_META[toastItem.source] || {}) : {};
+    const ToastIcon = toastMeta.icon || Bell;
+    const toastNode = toastItem && !open ? (
+        <div
+            role="status"
+            aria-live="polite"
+            style={{ fontFamily: APPLE_FONT }}
+            className={`notifications-toast absolute left-full top-0 z-40 ml-2 w-[320px] origin-top overflow-hidden rounded-2xl border border-black/5 bg-white/95 text-slate-900 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${toastClosing ? 'animate-dropdown-reverse' : 'animate-dropdown'}`}
+        >
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                    {toast.extra > 0 ? `Новые уведомления · ещё ${toast.extra}` : 'Новое уведомление'}
+                </span>
+                <button
+                    type="button"
+                    onClick={closeToast}
+                    aria-label="Скрыть"
+                    className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                >
+                    <X size={13} />
+                </button>
+            </div>
+            <button
+                type="button"
+                onClick={() => {
+                    closeToast();
+                    onNavigate?.(toastItem.view, toastItem.target);
+                }}
+                className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+            >
+                <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl ${toastMeta.tint || 'bg-slate-100 text-slate-500'}`}>
+                    <ToastIcon size={15} />
+                </span>
+                <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline justify-between gap-2">
+                        <span className="truncate text-[13.5px] font-medium text-slate-900">{toastItem.title}</span>
+                        <span className="shrink-0 text-[11px] text-slate-400">{fmtWhen(toastItem.at)}</span>
+                    </span>
+                    <span className="mt-0.5 block text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                        {toastMeta.label || toastItem.source}
+                    </span>
+                    {/* Детали показываем целиком в две строки: в списке на них
+                        места нет, а здесь ради них всё и раскрывается. */}
+                    {toastItem.body && (
+                        <span className={`mt-1 block text-[12px] leading-snug ${toastItem.tone === 'warning' ? 'font-medium text-amber-600' : 'text-slate-500'}`}>
+                            {toastItem.body}
+                        </span>
+                    )}
+                </span>
+            </button>
+        </div>
+    ) : null;
+
     /* Кнопка собрана по образцу остальных пунктов меню: подпись живёт в
        .sidebar-text и показывается самим CSS сайдбара — в том числе при
        наведении на свёрнутый сайдбар, чего проп collapsed дать не мог; бейдж
@@ -574,7 +713,13 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 aria-haspopup="dialog"
                 className={`group relative flex w-full items-center gap-3 rounded-lg px-4 py-3 text-left transition-all duration-200 hover:bg-blue-700 ${open && !closing ? 'bg-blue-700' : ''}`}
             >
-                <Bell size={18} />
+                {/* key перезапускает качание: без него второе уведомление
+                    подряд пришло бы беззвучно — элемент не пересоздался бы. */}
+                <Bell
+                    key={ringNonce}
+                    size={18}
+                    className={ringNonce > 0 ? 'bell-icon-ring animate-bell-ring' : undefined}
+                />
                 {total > 0 && (
                     <span className="sidebar-surveys-collapsed-badge inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-semibold leading-none">
                         {total > 9 ? '9+' : total}
@@ -591,6 +736,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 <ChevronRight size={14} className="sidebar-text ml-auto translate-x-2 opacity-0 transition-all duration-300 group-hover:translate-x-0 group-hover:opacity-100" />
             </button>
             {panel}
+            {toastNode}
         </div>
     );
 }

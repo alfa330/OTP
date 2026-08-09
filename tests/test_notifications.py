@@ -308,6 +308,60 @@ class ClientWakesUpOnScheduleTest(unittest.TestCase):
         self.assertIn('Number(seconds)', self.SOURCE)
 
 
+class IncomingNotificationEffectsTest(unittest.TestCase):
+    """Звон колокола и выезжающая карточка при новом уведомлении."""
+
+    SOURCE = BELL_JSX.read_text(encoding='utf-8')
+    STYLES = (ROOT / 'src' / 'styles.css').read_text(encoding='utf-8')
+    TAILWIND = (ROOT / 'tailwind.config.cjs').read_text(encoding='utf-8')
+
+    def test_ring_animation_is_defined_and_used(self):
+        self.assertIn("'bell-ring'", self.TAILWIND)
+        self.assertIn('animate-bell-ring', self.SOURCE)
+        # Качается вокруг точки крепления, а не вокруг центра значка.
+        self.assertIn('.bell-icon-ring', self.STYLES)
+        self.assertIn('transform-origin', self.STYLES)
+
+    def test_second_notification_in_a_row_also_rings(self):
+        """Без смены key React переиспользует элемент и анимация не повторится."""
+        self.assertIn('key={ringNonce}', self.SOURCE)
+        self.assertIn('setRingNonce((value) => value + 1)', self.SOURCE)
+
+    def test_three_guards_against_false_alarms(self):
+        """Вход в портал, догрузка порции и открытая панель — не повод звенеть."""
+        start = self.SOURCE.index('const announce = useCallback(')
+        block = self.SOURCE[start:self.SOURCE.index('announceRef.current = announce;', start)]
+        # Первый ответ только запоминает состав (иначе звон всему накопленному).
+        self.assertIn('!known', block)
+        # Догрузка не растит счётчик — значит и уведомлений не прибавилось.
+        self.assertIn('nextTotal <= prevTotal', block)
+        # При открытом списке человек и так всё видит.
+        self.assertIn('openRef.current', block)
+
+    def test_toast_is_not_marked_as_the_dropdown(self):
+        """Класс .notifications-dropdown держит свёрнутый сайдбар развёрнутым
+        (правило :has), и каждое уведомление дёргало бы всю вёрстку."""
+        start = self.SOURCE.index('const toastNode =')
+        block = self.SOURCE[start:self.SOURCE.index('/* Кнопка собрана', start)]
+        self.assertIn('notifications-toast', block)
+        self.assertNotIn('notifications-dropdown', block)
+        # На мобильном вправо выпадать некуда — там своё позиционирование.
+        self.assertIn('.sidebar .notifications-toast', self.STYLES)
+
+    def test_details_are_shown_on_the_card(self):
+        """Ради деталей карточка и раскрывается — в списке им места нет."""
+        start = self.SOURCE.index('const toastNode =')
+        block = self.SOURCE[start:self.SOURCE.index('/* Кнопка собрана', start)]
+        self.assertIn('toastItem.body', block)
+        self.assertIn('toastItem.title', block)
+
+    def test_reduced_motion_is_respected(self):
+        self.assertIn('prefers-reduced-motion', self.STYLES)
+        block = self.STYLES[self.STYLES.index('prefers-reduced-motion'):]
+        self.assertIn('.bell-icon-ring', block[:400])
+        self.assertIn('.notifications-toast', block[:400])
+
+
 class ClientPaginationContractTest(unittest.TestCase):
     """Клиент и сервер обязаны сойтись в размере порции и в её потолке."""
 
