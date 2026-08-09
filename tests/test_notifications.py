@@ -348,9 +348,11 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         """
         start = self.SOURCE.index('const announce = useCallback(')
         block = self.SOURCE[start:self.SOURCE.index('announceRef.current = announce;', start)]
-        # Звон — сразу по росту счётчика, до выяснения подробностей.
+        # Звон — сразу по росту счётчика, до выяснения подробностей. Сравниваем
+        # именно с разведкой при росте: в ветке первой загрузки она тоже есть,
+        # но там звонить не о чем.
         ring_at = block.index('setRingNonce')
-        probe_at = block.index('probeBeyondPage')
+        probe_at = block.index('probeBeyondPage(known)')
         self.assertLess(ring_at, probe_at, 'сигнал важнее деталей — звон не ждёт запроса')
         self.assertIn('if (!fresh.length) fresh = await probeBeyondPage(known);', block)
         # Не нашли конкретное — показываем хотя бы сам факт.
@@ -362,6 +364,19 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         block = self.SOURCE[start:self.SOURCE.index('/* Пришла новая сводка', start)]
         self.assertIn('knownKeysRef.current?.add', block)
         self.assertIn('limit: MAX_PAGE_SIZE', block)
+
+    def test_first_answer_learns_the_hidden_tail_too(self):
+        """Иначе карточка покажет давно лежащий хвост вместо новой задачи.
+
+        Клиент видит порцию из пяти; всё, что за ней, при первом же росте
+        счётчика выглядело бы «новым» — и в карточку попадала бы чужая старая
+        задача, а не только что поставленная.
+        """
+        start = self.SOURCE.index('const announce = useCallback(')
+        block = self.SOURCE[start:self.SOURCE.index('announceRef.current = announce;', start)]
+        self.assertIn('if (hasMoreItems) await probeBeyondPage(nextKeys);', block)
+        # Признак «есть скрытое» приходит из той же сводки.
+        self.assertIn("Boolean(response?.data?.has_more)", self.SOURCE)
 
     def test_toast_is_not_marked_as_the_dropdown(self):
         """Класс .notifications-dropdown держит свёрнутый сайдбар развёрнутым

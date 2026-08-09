@@ -133,7 +133,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             if (!aliveRef.current || userIdRef.current !== requestedUserId) return;
             const nextCounts = response?.data?.counts || { total: 0 };
             const nextItems = Array.isArray(response?.data?.items) ? response.data.items : [];
-            announceRef.current?.(nextItems, nextCounts);
+            announceRef.current?.(nextItems, nextCounts, Boolean(response?.data?.has_more));
             setCounts(nextCounts);
             setItems(nextItems);
             const more = Boolean(response?.data?.has_more);
@@ -490,7 +490,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
        выросший счётчик — иначе догрузка следующей порции (там сплошь «новые»
        для нас элементы) выглядела бы как поток уведомлений;
        закрытая панель — при открытой человек и так смотрит на список. */
-    const announce = useCallback(async (nextItems, nextCounts) => {
+    const announce = useCallback(async (nextItems, nextCounts, hasMoreItems) => {
         const nextKeys = new Set(nextItems.map(notificationKey));
         const known = knownKeysRef.current;
         knownKeysRef.current = nextKeys;
@@ -499,7 +499,14 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         const prevTotal = totalRef.current;
         totalRef.current = nextTotal;
 
-        if (!known || nextTotal <= prevTotal || openRef.current) return;
+        if (!known) {
+            /* Первый ответ — только запоминаем состав. Порции мало: всё, что за
+               её пределами, мы бы потом приняли за новое и показали в карточке
+               давно лежащий хвост вместо только что поставленной задачи. */
+            if (hasMoreItems) await probeBeyondPage(nextKeys);
+            return;
+        }
+        if (nextTotal <= prevTotal || openRef.current) return;
 
         // Счётчик вырос — значит пришло. Звоним сразу, не дожидаясь, пока
         // выясним подробности: сигнал важнее деталей.
