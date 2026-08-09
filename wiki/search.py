@@ -141,7 +141,7 @@ top AS (
 )
 SELECT id, slug, title, summary, status, views, updated_at, rank_fts, rank_trgm,
        ts_headline('russian',
-                   concat_ws(' … ', title, coalesce(summary, ''), coalesce(content_plain, '')),
+                   coalesce(content_plain, ''),
                    tsq_mark,
                    'MaxFragments=3, MaxWords=26, MinWords=10, '
                    'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet
@@ -264,6 +264,11 @@ def split_snippet(raw):
     в открытой статье бралось уже из сырого запроса и не совпадало с показанным.
     Оригинал этой болезни не имел: extractHighlights собирал сниппеты только из
     блоков, где <mark> действительно есть.
+
+    Подсветка считается по ТЕЛУ статьи, а не по «заголовок + описание + тело»:
+    во втором случае первый фрагмент почти всегда начинался с заголовка и
+    дублировал строку прямо над собой. Совпало только в заголовке или алиасах —
+    фрагментов нет, и фронт показывает описание статьи.
     """
     parts = [part.strip() for part in str(raw or '').split(FRAGMENT_SEPARATOR)]
     return [part for part in parts if '<mark>' in part]
