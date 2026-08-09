@@ -141,6 +141,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
 
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
     const [openHighlight, setOpenHighlight] = useState(null);
+    // Префилл для статьи-классификатора: пришли из поиска с готовой машиной.
+    const [openPrefill, setOpenPrefill] = useState(null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
     const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
@@ -165,6 +167,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
     useEffect(() => {
         if (!searchTarget?.slug) return;
         setOpenHighlight(searchTarget.highlight || null);
+        setOpenPrefill(searchTarget.prefill || null);
         setOpenSlug(searchTarget.slug);
         consumeSearchTarget();
     }, [searchTarget, consumeSearchTarget]);
@@ -173,6 +176,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
        известно, по какому слову статью нашли. */
     const openArticle = useCallback((slug) => {
         setOpenHighlight(null);
+        setOpenPrefill(null);
         setOpenSlug(slug);
     }, []);
 
@@ -182,6 +186,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
        экране, где этого слова нет. */
     const openHit = useCallback((article) => {
         setOpenHighlight(markedWord(article.snippet, query.trim()));
+        setOpenPrefill(null);
         setOpenSlug(article.slug);
     }, [query]);
 
@@ -267,8 +272,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                 headers={headers}
                 slug={openSlug}
                 highlightTerm={openHighlight}
+                classifierPrefill={openPrefill}
                 showToast={showToast}
-                onBack={() => { setOpenSlug(null); setOpenHighlight(null); }}
+                onBack={() => { setOpenSlug(null); setOpenHighlight(null); setOpenPrefill(null); }}
             />
         );
     }

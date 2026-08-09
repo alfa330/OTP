@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
@@ -8,6 +8,17 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
 import { queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
+
+/* Классификатор авто — статья вики с ПУСТЫМ телом: вместо текста рисуется
+   интерактивный калькулятор. Раньше он был отдельным разделом портала, но по
+   смыслу это справочник, то есть статья (в исходной вике он тоже жил статьёй,
+   по slug auto-list). Слаг фиксирован и совпадает с CLASSIFIER_SLUG из
+   wiki/schema.py, где статья засевается.
+
+   Компонент тянет за собой справочник на 106 КБ, поэтому грузится лениво —
+   ровно как раньше, когда он был отдельным разделом. */
+export const CLASSIFIER_SLUG = 'klassifikator-avto';
+const ClassifierView = lazy(() => import('../classifier/ClassifierView'));
 
 /* Страница статьи.
  *
@@ -61,7 +72,8 @@ const SANITIZE_OPTIONS = {
 };
 
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
-                                      highlightTerm = null }) {
+                                      highlightTerm = null, classifierPrefill = null }) {
+    const isClassifier = slug === CLASSIFIER_SLUG;
     const [article, setArticle] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -310,11 +322,24 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         </nav>
                     )}
 
-                    <div
-                        ref={bodyRef}
-                        className="wiki-prose min-w-0 flex-1"
-                        dangerouslySetInnerHTML={{ __html: safeHtml }}
-                    />
+                    {isClassifier ? (
+                        <div ref={bodyRef} className="min-w-0 flex-1">
+                            <Suspense fallback={(
+                                <div className="flex items-center justify-center gap-2 py-14 text-slate-400">
+                                    <Loader2 size={18} className="animate-spin" />
+                                    <span className="text-[13px]">Загружаем справочник…</span>
+                                </div>
+                            )}>
+                                <ClassifierView prefill={classifierPrefill} embedded />
+                            </Suspense>
+                        </div>
+                    ) : (
+                        <div
+                            ref={bodyRef}
+                            className="wiki-prose min-w-0 flex-1"
+                            dangerouslySetInnerHTML={{ __html: safeHtml }}
+                        />
+                    )}
                 </div>
 
                 {article.backlinks?.length > 0 && (

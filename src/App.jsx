@@ -137,7 +137,6 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
-const ClassifierView = lazyWithRetry(() => import('./components/classifier/ClassifierView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
@@ -210,7 +209,6 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     tasks: 'Tasks',
     technical_issues: 'Technical issues',
     trainings: 'Trainings',
-    car_classifier: 'Car classifier',
     wiki: 'Wiki',
     work_schedules: 'Work schedules'
 });
@@ -34732,6 +34730,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
         );
 
+        /* Сколько гамбургер побудет колоколом после нового уведомления.
+           Совпадает с TOAST_VISIBLE_MS в NotificationsBell: кнопка и карточка
+           должны гаснуть вместе, иначе колокол останется висеть без повода. */
+        const MOBILE_INCOMING_VISIBLE_MS = 7000;
+
         // Main App
         const App = () => {
             const location = useLocation();
@@ -34855,17 +34858,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                в раздел снова открывал бы ту же статью. */
             const [wikiInitialSlug, setWikiInitialSlug] = useState(null);
             const clearWikiInitialSlug = useCallback(() => setWikiInitialSlug(null), []);
-
-            /* Предзаполнение «Классификатора авто» из поиска вики: запрос
-               «камри» показывает в поисковой строке бар машины, а кнопка
-               «Открыть в классификаторе» переносит марку/модель/год/город в
-               раздел. Значение живёт в состоянии (не гасится): пока открыт
-               классификатор, выбор пользователя внутри раздела важнее. */
-            const [classifierPrefill, setClassifierPrefill] = useState(null);
-            const openClassifierPrefilled = useCallback((prefill) => {
-                setClassifierPrefill({ ...prefill, nonce: Date.now() });
-                setView('car_classifier');
-            }, []);
 
             /* Раздел прочитан — колокол обязан узнать об этом сам.
                Связь была односторонней: заход в «Ивенты» гасил бейдж в сайдбаре,
@@ -38143,7 +38135,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki', 'car_classifier']);
+                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki']);
                     if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
@@ -38189,7 +38181,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki', 'car_classifier'].includes(view)) {
+                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki'].includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
@@ -43204,7 +43196,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // а не этот гард: у раздела своя модель прав с точностью до статьи.
                 if (view === 'wiki') return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
-                if (view === 'car_classifier') return;
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
@@ -43466,6 +43457,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                   открыт. Иначе при заходе сразу в ?view=events ответ колокола
                   приезжает ПОСЛЕ эффекта, гасящего бейдж, и число залипает
                   ненулевым, пока человек читает те самые посты. */
+            /* Телефон: колокол уехал за экран вместе с сайдбаром, поэтому о
+               новом уведомлении сообщает гамбургер — он на это время сам
+               становится колоколом и звенит. Держим ровно столько же, сколько
+               висит карточка, чтобы кнопка и карточка исчезали вместе. */
+            const [mobileIncomingNonce, setMobileIncomingNonce] = useState(0);
+            const mobileIncomingTimerRef = useRef(null);
+            useEffect(() => () => {
+                if (mobileIncomingTimerRef.current) clearTimeout(mobileIncomingTimerRef.current);
+            }, []);
+            const stableNotificationsIncoming = useCallback(() => {
+                setMobileIncomingNonce((value) => value + 1);
+                if (mobileIncomingTimerRef.current) clearTimeout(mobileIncomingTimerRef.current);
+                mobileIncomingTimerRef.current = setTimeout(() => {
+                    mobileIncomingTimerRef.current = null;
+                    setMobileIncomingNonce(0);
+                }, MOBILE_INCOMING_VISIBLE_MS);
+            }, []);
+
             const stableNotificationsCounts = useCallback((counts) => {
                 if (!counts || typeof counts !== 'object') return;
                 const currentView = sidebarLatestRef.current?.view;
@@ -43577,10 +43586,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <>
                         {/* Гамбургер кнопка для мобильных */}
                         <button
-                            className={`hamburger-btn ${mobileMenuOpen ? 'menu-open' : ''}`}
+                            className={`hamburger-btn ${mobileMenuOpen ? 'menu-open' : ''} ${!mobileMenuOpen && mobileIncomingNonce > 0 ? 'has-incoming' : ''}`}
                             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                            aria-label={!mobileMenuOpen && mobileIncomingNonce > 0
+                                ? 'Новое уведомление — открыть меню'
+                                : (mobileMenuOpen ? 'Закрыть меню' : 'Открыть меню')}
                         >
-                            <FaIcon className={`fas ${mobileMenuOpen ? 'fa-times' : 'fa-bars'} text-xl`}></FaIcon>
+                            {/* Пришло новое — гамбургер на время становится
+                                колоколом и звенит: сам колокол сейчас за краем
+                                экрана вместе с сайдбаром. key перезапускает
+                                качание на каждом следующем уведомлении. */}
+                            <FaIcon
+                                key={mobileMenuOpen ? 'close' : `bell-${mobileIncomingNonce}`}
+                                className={`fas ${mobileMenuOpen
+                                    ? 'fa-times'
+                                    : (mobileIncomingNonce > 0 ? 'fa-bell bell-icon-ring animate-bell-ring' : 'fa-bars')} text-xl`}
+                            ></FaIcon>
                         </button>
 
                         {/* Overlay для мобильного меню */}
@@ -43633,6 +43654,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         onNavigate={stableNotificationsNavigate}
                                         onCounts={stableNotificationsCounts}
                                         readSource={bellReadSource}
+                                        onIncoming={stableNotificationsIncoming}
+                                        mobileMenuOpen={mobileMenuOpen}
                                     />
                                 </div>
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
@@ -44289,16 +44312,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     </li>
 
-                                    <li>
-                                        <button
-                                            type="button"
-                                            onClick={(e) => handleSidebarViewNavigation(e, 'car_classifier')}
-                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'car_classifier' ? 'bg-blue-700' : ''}`}
-                                        >
-                                            <FaIcon className="fas fa-car"></FaIcon> <span className="sidebar-text">Классификатор авто</span>
-                                        </button>
-                                    </li>
-
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
@@ -44472,6 +44485,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 eventsUnreadCount,
                 fourYouUnreadCount,
                 bellReadSource,
+                mobileIncomingNonce,
                 selectedSvId,
                 selectedReportMonth,
                 selectedMonth,
@@ -44718,7 +44732,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || view === 'car_classifier' || (view === 'resource_fte' && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || (view === 'resource_fte' && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
@@ -44848,13 +44862,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     initialArticleSlug={wikiInitialSlug}
                                     onInitialArticleConsumed={clearWikiInitialSlug}
-                                    onOpenClassifier={openClassifierPrefilled}
                                 />
-                            </Suspense>
-                        )}
-                        {view === "car_classifier" && (
-                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка справочника…</div>}>
-                                <ClassifierView prefill={classifierPrefill} />
                             </Suspense>
                         )}
                         {(view === "shift_auction" && (

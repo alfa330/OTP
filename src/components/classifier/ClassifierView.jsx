@@ -70,7 +70,11 @@ const TariffVerdict = ({ tariff, verdict }) => (
     </div>
 );
 
-export default function ClassifierView({ prefill = null }) {
+/* embedded — классификатор открыт внутри статьи вики, а не отдельным разделом.
+   Тогда своя страничная обёртка и заголовок не нужны: фон, отступы и шапку уже
+   дала статья, а второй заголовок «Классификатор авто» под таким же заголовком
+   статьи читался бы как дубль. */
+export default function ClassifierView({ prefill = null, embedded = false }) {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
 
@@ -197,24 +201,28 @@ export default function ClassifierView({ prefill = null }) {
 
     return (
         <div
-            className="min-h-full bg-slate-50 px-4 pb-10 pt-[68px] sm:px-6 min-[769px]:pt-8"
-            style={{ fontFamily: APPLE_FONT }}
+            className={embedded
+                ? ''
+                : 'min-h-full bg-slate-50 px-4 pb-10 pt-[68px] sm:px-6 min-[769px]:pt-8'}
+            style={embedded ? undefined : { fontFamily: APPLE_FONT }}
         >
-            <div className="mx-auto w-full max-w-4xl space-y-5">
+            <div className={embedded ? 'w-full space-y-5' : 'mx-auto w-full max-w-4xl space-y-5'}>
 
-                <header className="flex items-center gap-3">
-                    <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-indigo-600 text-white shadow-sm">
-                        <Car size={21} />
-                    </div>
-                    <div>
-                        <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
-                            Классификатор авто
-                        </h1>
-                        <p className="text-[13px] text-slate-500">
-                            Какие тарифы доступны машине в выбранном городе
-                        </p>
-                    </div>
-                </header>
+                {!embedded && (
+                    <header className="flex items-center gap-3">
+                        <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-indigo-600 text-white shadow-sm">
+                            <Car size={21} />
+                        </div>
+                        <div>
+                            <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
+                                Классификатор авто
+                            </h1>
+                            <p className="text-[13px] text-slate-500">
+                                Какие тарифы доступны машине в выбранном городе
+                            </p>
+                        </div>
+                    </header>
+                )}
 
                 {!data && !error && <Skeleton />}
 

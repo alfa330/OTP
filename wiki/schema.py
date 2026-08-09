@@ -638,6 +638,53 @@ _DEAD_TRIGRAM_INDEXES = (
 )
 
 
+# ── Классификатор авто как статья вики ───────────────────────────────────────
+#
+# Раньше это был отдельный раздел портала. Отдельного раздела он не заслуживает:
+# по смыслу это справочник, то есть статья. Тело у неё пустое — вместо него
+# фронт рисует интерактивный калькулятор (см. CLASSIFIER_SLUG в WikiArticle).
+#
+# Доступ. Пункт «Классификатор авто» в сайдбаре не был ничем ограничен: его
+# видели все. Разделы вики, наоборот, restricted и без правил, поэтому статья,
+# унаследовавшая их периметр, пропала бы у всех, кроме админов. Чтобы перенос
+# ничего не отнял, у статьи СВОЙ периметр (visibility_mode='restricted') и своё
+# правило: читать могут все роли OTP. Секретного в ней нет — марки, модели и
+# годы по тарифам.
+CLASSIFIER_SLUG = 'klassifikator-avto'
+
+_CLASSIFIER_SUMMARY = ('Подходит ли автомобиль под тарифы Яндекс Про: '
+                       'марка, модель, город и год выпуска.')
+
+# Текст для поиска: сама статья тела не имеет, но находиться по смыслу обязана.
+_CLASSIFIER_PLAIN = (
+    'Классификатор авто. Проверка автомобиля по тарифам Яндекс Про: '
+    'марка, модель, город, год выпуска. Эконом, комфорт, комфорт плюс, бизнес, '
+    'межгород, доставка. Какие машины подходят под тариф и с какого года.')
+
+_CLASSIFIER_STATEMENTS = [
+    """
+    INSERT INTO wiki_articles (slug, title, summary, content, content_plain,
+                               article_type, status, visibility_mode)
+    VALUES (%(slug)s, 'Классификатор авто', %(summary)s, '', %(plain)s,
+            'tool_description', 'published', 'restricted')
+    ON CONFLICT (slug) DO NOTHING;
+    """,
+    # Правило на каждую роль: подписки на «всех» в модели прав нет, и это
+    # правильно — субъект всегда назван явно.
+    """
+    INSERT INTO wiki_article_access_rules (article_id, subject_type, subject_role,
+                                           mode, can_read)
+    SELECT a.id, 'otp_role', r.role, 'grant', TRUE
+      FROM wiki_articles a, unnest(%(roles)s::text[]) AS r(role)
+     WHERE a.slug = %(slug)s
+       AND NOT EXISTS (SELECT 1 FROM wiki_article_access_rules x
+                        WHERE x.article_id = a.id
+                          AND x.subject_type = 'otp_role'
+                          AND x.subject_role = r.role);
+    """,
+]
+
+
 def init_wiki_schema(cursor):
     """Создаёт/дополняет схему раздела «Вики». Идемпотентно.
 
@@ -695,6 +742,18 @@ def init_wiki_schema(cursor):
         cursor.execute('SELECT id FROM wiki_articles')
         for (article_id,) in cursor.fetchall():
             refresh_aliases(cursor, article_id)
+
+    # Классификатор — статья вики, а не отдельный раздел портала.
+    for statement in _CLASSIFIER_STATEMENTS:
+        cursor.execute(statement, {'slug': CLASSIFIER_SLUG,
+                                   'summary': _CLASSIFIER_SUMMARY,
+                                   'plain': _CLASSIFIER_PLAIN,
+                                   'roles': list(OTP_ROLES)})
+    from .search import refresh_aliases as _refresh_aliases
+    cursor.execute('SELECT id FROM wiki_articles WHERE slug = %s', (CLASSIFIER_SLUG,))
+    _row = cursor.fetchone()
+    if _row:
+        _refresh_aliases(cursor, _row[0])
 
     # Триграммы — под собственным савпоинтом. Расширение может быть недоступно
     # по правам; тогда поиск остаётся полнотекстовым (без опечаток), а схема

@@ -13,6 +13,7 @@ import WikiStructure from './WikiStructure';
 import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
+import { CLASSIFIER_SLUG } from './WikiArticle';
 import './wiki-theme.css';
 
 /* Раздел «Вики» — корпоративная база знаний.
@@ -60,8 +61,7 @@ const StatTile = ({ icon: Icon, value, label }) => (
 );
 
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
-                                   initialArticleSlug, onInitialArticleConsumed,
-                                   onOpenClassifier }) {
+                                   initialArticleSlug, onInitialArticleConsumed }) {
     const headers = useMemo(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
@@ -157,7 +157,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             setTab('library');
                             setSearchTarget({ slug, highlight });
                         }}
-                        onOpenClassifier={onOpenClassifier}
+                        onOpenClassifier={(prefill) => {
+                            // Классификатор — теперь статья этой же вики,
+                            // поэтому никуда из раздела не уходим.
+                            setTab('library');
+                            setSearchTarget({ slug: CLASSIFIER_SLUG, prefill });
+                        }}
                     />
 
                     <button type="button" onClick={refresh} className={iosBtnSecondary}>
