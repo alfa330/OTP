@@ -88,20 +88,19 @@ class AliasTest(unittest.TestCase):
     def test_no_alias_for_unknown(self):
         self.assertEqual(aliases_for_text('невероятнаястатья'), [])
 
+    def test_compound_alias_matches_only_as_whole_phrase(self):
+        self.assertIn('рендер', aliases_for_text('Документация render.com'))
+        self.assertIn('github', aliases_for_text('Войти через git hub'))
+        self.assertIn('wifi', aliases_for_text('Настроить wi-fi'))
+        self.assertNotIn('рендер', aliases_for_text('Ссылка https://example.com'))
+        self.assertEqual(aliases_for_text('com'), [])
+
     def test_every_group_is_symmetric(self):
         """Любое написание группы обязано находить все остальные."""
         for group in ALIAS_GROUPS:
             for word in group:
                 found = set(aliases_for_text(word))
                 expected = {w for w in group if w != word}
-                # Многословные и составные написания («вай фай», «render.com»)
-                # разбиваются нормализацией на несколько слов — для них
-                # симметрия по определению неполная.
-                from wiki.text import _normalize_for_index, _WORD_SPLIT
-                if len(_WORD_SPLIT.split(_normalize_for_index(word))) > 1:
-                    continue
-                expected = {w for w in expected
-                            if len(_WORD_SPLIT.split(_normalize_for_index(w))) == 1}
                 self.assertTrue(expected <= found,
                                 'группа %r: из %r не нашлись %r' % (group, word, expected - found))
 

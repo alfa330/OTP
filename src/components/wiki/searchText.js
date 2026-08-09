@@ -139,18 +139,23 @@ export function normalizeText(text) {
         .trim();
 }
 
-// Слово -> все прочие написания той же сущности. Как и на сервере, ключи
-// нормализуются той же функцией, что и запрос.
+// Слово/фраза -> все прочие написания той же сущности. Как и на сервере,
+// ключи нормализуются той же функцией, что и запрос. Многословные написания
+// храним отдельно, чтобы «example.com» не совпадал с «render.com» по «com».
 const ALIAS_INDEX = new Map();
+const PHRASE_INDEX = new Map();
 for (const group of ALIAS_GROUPS) {
     for (const word of group) {
-        for (const key of normalizeText(word).split(WORD_SPLIT)) {
-            if (key.length < 2) continue;
-            if (!ALIAS_INDEX.has(key)) ALIAS_INDEX.set(key, new Set());
-            const bucket = ALIAS_INDEX.get(key);
-            for (const alias of group) {
-                if (alias !== word) bucket.add(alias);
-            }
+        const parts = normalizeText(word).split(WORD_SPLIT).filter(Boolean);
+        if (!parts.length) continue;
+        const isPhrase = parts.length > 1;
+        const key = parts.join(' ');
+        if (!isPhrase && key.length < 2) continue;
+        const index = isPhrase ? PHRASE_INDEX : ALIAS_INDEX;
+        if (!index.has(key)) index.set(key, new Set());
+        const bucket = index.get(key);
+        for (const alias of group) {
+            if (alias !== word) bucket.add(alias);
         }
     }
 }
@@ -187,10 +192,17 @@ export function fixKeyboardLayout(text) {
 /** Все альтернативные написания слов из текста. */
 export function aliasesForText(text) {
     const matched = new Set();
-    for (const word of normalizeText(text).split(WORD_SPLIT)) {
+    const words = normalizeText(text).split(WORD_SPLIT).filter(Boolean);
+    for (const word of words) {
         if (word.length < 2) continue;
         const bucket = ALIAS_INDEX.get(word);
         if (bucket) for (const alias of bucket) matched.add(alias);
+    }
+
+    const paddedText = ` ${words.join(' ')} `;
+    for (const [phrase, bucket] of PHRASE_INDEX) {
+        if (!paddedText.includes(` ${phrase} `)) continue;
+        for (const alias of bucket) matched.add(alias);
     }
     return Array.from(matched).sort();
 }

@@ -11,6 +11,7 @@
     "test:task-needs": "node --test tests/task_action_needs.test.mjs",
     "test:board-query": "node --test tests/board_query.test.mjs",
     "test:board-grouping": "node --test tests/board_grouping.test.mjs",
+    "test:wiki-search": "node --test tests/wiki_search_text.test.mjs",
     "test:telegram-text": "node --test tests/telegram_text.test.mjs"
   },
   "dependencies": {

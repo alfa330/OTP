@@ -160,15 +160,28 @@ def _normalize_for_index(value):
 # при том, что именно это написание в словарь и добавляли.
 # Ключи нормализуем так же, как запрос; значения храним в исходном виде, потому
 # что они уходят в поле поиска статьи и должны там читаться по-человечески.
+#
+# Многословные написания («render.com», «wi-fi», «git hub», «land rover») лежат
+# ОТДЕЛЬНО и сопоставляются целиком. Раньше они разбирались на слова и каждый
+# обрывок становился самостоятельным ключом — а это ключи 'com', 'git', 'js',
+# 'вай', 'ровер'. Любая статья, где в первых 2000 символах встретилось
+# «example.com», получала в search_aliases слова «render рендер» и находилась
+# по запросу «рендер». Оригинал сравнивал слово с элементом группы целиком и
+# такой болезни не имел.
 _ALIAS_INDEX = {}
+_PHRASE_INDEX = {}
 
 
 def _index_alias_group(group):
     for word in group:
-        for key in _WORD_SPLIT.split(_normalize_for_index(word)):
-            if len(key) < 2:
-                continue
-            _ALIAS_INDEX.setdefault(key, set()).update(a for a in group if a != word)
+        parts = [p for p in _WORD_SPLIT.split(_normalize_for_index(word)) if p]
+        if not parts:
+            continue
+        others = {a for a in group if a != word}
+        if len(parts) > 1:
+            _PHRASE_INDEX.setdefault(' '.join(parts), set()).update(others)
+        elif len(parts[0]) >= 2:
+            _ALIAS_INDEX.setdefault(parts[0], set()).update(others)
 
 
 for _group in ALIAS_GROUPS:
@@ -213,10 +226,20 @@ def fix_keyboard_layout(text):
 def aliases_for_text(text):
     """Все альтернативные написания слов из текста."""
     matched = set()
-    for word in _WORD_SPLIT.split(normalize_text(text)):
+    words = [word for word in _WORD_SPLIT.split(normalize_text(text)) if word]
+    for word in words:
         if len(word) < 2:
             continue
         matched |= _ALIAS_INDEX.get(word, set())
+
+    # Фразы сравниваем только по целым соседним словам. Благодаря этому
+    # «render.com» (render com после нормализации) остаётся рабочим алиасом,
+    # но отдельное «example.com» не срабатывает на общий обрывок «com».
+    canonical_text = ' '.join(words)
+    padded_text = ' %s ' % canonical_text
+    for phrase, aliases in _PHRASE_INDEX.items():
+        if ' %s ' % phrase in padded_text:
+            matched |= aliases
     return sorted(matched)
 
 
