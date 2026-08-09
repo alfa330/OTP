@@ -32,9 +32,13 @@ from datetime import datetime
 # tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
 SOURCES = ('wiki_ack', 'tasks', 'lms', 'surveys', 'events', 'four_you')
 
-# Сколько элементов тянем из одного источника. Колокол — не лента: он говорит
-# «что тебя ждёт», а полный список пользователь смотрит в самом разделе.
+# Сколько элементов тянем из одного источника в первой порции. Дальше клиент
+# добирает следующие, когда пользователь докручивает список до низа: счётчик
+# считает ВСЁ, и без догрузки бейдж «6» висел бы над пятью карточками.
 ITEMS_PER_SOURCE = 5
+# Потолок одной порции. Колокол — не лента: полный список пользователь смотрит
+# в самом разделе, а безлимитная выдача превратила бы сводку в тяжёлый запрос.
+MAX_ITEMS_PER_SOURCE = 50
 
 
 def _iso(value):
@@ -53,7 +57,7 @@ def _almaty_now():
 
 
 # ── Вики: статьи под обязательное ознакомление ───────────────────────────────
-def wiki_ack(cursor, viewer):
+def wiki_ack(cursor, viewer, limit):
     """Назначенные, но не подтверждённые ознакомления.
 
     Считаем по актуальной версии: назначение привязано к версии статьи, и если
@@ -89,12 +93,12 @@ def wiki_ack(cursor, viewer):
         # умеет пользоваться, иначе переход упрётся в корень раздела.
         'target': row[4],
         'tone': 'warning' if row[3] else 'default',
-    } for row in rows[:ITEMS_PER_SOURCE]]
+    } for row in rows[:limit]]
     return len(rows), items
 
 
 # ── Обучение ─────────────────────────────────────────────────────────────────
-def lms(cursor, viewer):
+def lms(cursor, viewer, limit):
     cursor.execute(
         """
         SELECT id, title, message, created_at,
@@ -104,7 +108,7 @@ def lms(cursor, viewer):
          ORDER BY created_at DESC
          LIMIT %(limit)s
         """,
-        {'user_id': viewer['user_id'], 'limit': ITEMS_PER_SOURCE},
+        {'user_id': viewer['user_id'], 'limit': limit},
     )
     rows = cursor.fetchall()
     total = int(rows[0][4]) if rows else 0
@@ -121,7 +125,7 @@ def lms(cursor, viewer):
 
 
 # ── Опросы ───────────────────────────────────────────────────────────────────
-def surveys(cursor, viewer):
+def surveys(cursor, viewer, limit):
     """Опросы и тесты, назначенные лично зрителю и ещё не пройденные.
 
     Раньше это число считал фронт, выгрузив ВЕСЬ список опросов со всеми
@@ -156,7 +160,7 @@ def surveys(cursor, viewer):
          ORDER BY s.ends_at NULLS LAST, s.id DESC
          LIMIT %(limit)s
         """,
-        {'user_id': viewer['user_id'], 'limit': ITEMS_PER_SOURCE,
+        {'user_id': viewer['user_id'], 'limit': limit,
          'now': _almaty_now()},
     )
     rows = cursor.fetchall()
@@ -175,14 +179,14 @@ def surveys(cursor, viewer):
 
 
 # ── Ивенты ───────────────────────────────────────────────────────────────────
-def events(cursor, viewer):
+def events(cursor, viewer, limit):
     """Посты новее водяного знака зрителя, видимые ему, кроме своих.
 
     Условие видимости повторяет Database.count_unread_events: пустой набор
     отделов = пост для всех, иначе отдел зрителя должен быть среди получателей.
     """
     params = {'user_id': viewer['user_id'], 'dept': viewer.get('department_id'),
-              'limit': ITEMS_PER_SOURCE}
+              'limit': limit}
     scope = '' if viewer.get('is_global') else """
            AND (
                 (NOT EXISTS (SELECT 1 FROM event_departments ed WHERE ed.event_id = e.id)
@@ -219,7 +223,7 @@ def events(cursor, viewer):
 
 
 # ── 4 You ────────────────────────────────────────────────────────────────────
-def four_you(cursor, viewer):
+def four_you(cursor, viewer, limit):
     if not viewer.get('can_see_four_you'):
         return 0, []
     cursor.execute(
@@ -260,7 +264,7 @@ _TASK_KIND_BODY = {
 }
 
 
-def tasks(cursor, viewer):
+def tasks(cursor, viewer, limit):
     """Задачи, ждущие действия лично зрителя, — правила бейджа сайдбара.
 
     Категории взаимоисключающие, у задачи ровно одна причина, самая срочная:
@@ -305,7 +309,7 @@ def tasks(cursor, viewer):
                   due_at NULLS LAST, id DESC
          LIMIT %(limit)s
         """,
-        {'user_id': viewer['user_id'], 'limit': ITEMS_PER_SOURCE, 'now': _almaty_now()},
+        {'user_id': viewer['user_id'], 'limit': limit, 'now': _almaty_now()},
     )
     rows = cursor.fetchall()
     total = int(rows[0][5]) if rows else 0
@@ -333,15 +337,30 @@ _HANDLERS = {
 }
 
 
-def collect(cursor, viewer, only=None):
-    """Счётчики и элементы всех доступных зрителю источников.
+def collect(cursor, viewer, only=None, limit=ITEMS_PER_SOURCE):
+    """(счётчики, элементы, есть ли ещё) по всем доступным зрителю источникам.
 
     Каждый источник считается под SAVEPOINT: раздел может быть ещё не
     развёрнут (нет таблицы) или сломан своей миграцией, и это не повод отдать
     500 на весь колокол — такой источник даёт ноль и строку в логе.
+
+    `has_more` — сигнал клиенту «докрути список, там ещё есть»: счётчики всегда
+    считают ВСЁ, а элементов отдаётся не больше limit на источник, и без этого
+    флага бейдж «6» висел бы над пятью карточками без всякой возможности
+    добраться до шестой.
     """
+    # Любая бессмыслица (ноль, отрицательное, не число) — это «клиент не указал
+    # порцию», а не «отдай одну строку»: берём дефолт, а не крайность.
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = ITEMS_PER_SOURCE
+    if limit < 1:
+        limit = ITEMS_PER_SOURCE
+    limit = min(limit, MAX_ITEMS_PER_SOURCE)
     wanted = [s for s in SOURCES if s in _HANDLERS and (not only or s in only)]
     counts, items = {}, []
+    has_more = False
 
     for name in wanted:
         if name in viewer.get('hidden_sources', ()):  # раздел закрыт для роли
@@ -349,7 +368,7 @@ def collect(cursor, viewer, only=None):
             continue
         cursor.execute('SAVEPOINT notif_source')
         try:
-            count, source_items = _HANDLERS[name](cursor, viewer)
+            count, source_items = _HANDLERS[name](cursor, viewer, limit)
             cursor.execute('RELEASE SAVEPOINT notif_source')
         except Exception:
             cursor.execute('ROLLBACK TO SAVEPOINT notif_source')
@@ -357,6 +376,12 @@ def collect(cursor, viewer, only=None):
             logging.exception('Уведомления: источник %s не посчитан', name)
             count, source_items = 0, []
         counts[name] = int(count or 0)
+        # Оба условия обязательны. Одного «счётчик больше показанного» мало:
+        # «4 You» сворачивает любое число фото в ОДНУ строку «Новые фото: 12»,
+        # и по нему клиент до бесконечности просил бы порцию за порцией, ничего
+        # нового не получая. Упёрлись в limit — значит следующая порция есть.
+        if int(count or 0) > len(source_items) and len(source_items) >= limit:
+            has_more = True
         items.extend(source_items)
 
     # Общий порядок уже верен: источники идут в порядке SOURCES, а внутри
@@ -368,7 +393,7 @@ def collect(cursor, viewer, only=None):
     # сохраняет свой порядок.
     items.sort(key=lambda item: item['tone'] != 'warning')
     counts['total'] = sum(counts.get(s, 0) for s in wanted)
-    return counts, items
+    return counts, items, has_more
 
 
 def mark_seen(cursor, user_id, source):

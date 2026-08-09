@@ -59,8 +59,18 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
             if error:
                 return error
 
+            # Размер порции. Клиент увеличивает его, докручивая список до низа:
+            # счётчики считают всё, а элементов до сих пор отдавалось пять на
+            # источник, и шестая задача была недостижима. Значение вне диапазона
+            # не ошибка, а повод взять ближайшее допустимое — сводка важнее
+            # придирок к параметру.
+            try:
+                limit = int(request.args.get('limit') or notif_sources.ITEMS_PER_SOURCE)
+            except (TypeError, ValueError):
+                limit = notif_sources.ITEMS_PER_SOURCE
+
             with db._get_cursor() as cursor:
-                counts, items = notif_sources.collect(cursor, viewer)
+                counts, items, has_more = notif_sources.collect(cursor, viewer, limit=limit)
         except Exception:
             # Сюда долетает НЕ падение отдельного раздела — оно уже изолировано
             # SAVEPOINT'ом внутри collect() и даёт по нему ноль, — а отказ
@@ -82,7 +92,8 @@ def build_notifications_blueprint(*, db, require_api_key, build_cors_preflight_r
                 "code": "NOTIFICATIONS_UNAVAILABLE",
             }), 503
 
-        response = jsonify({"status": "success", "counts": counts, "items": items})
+        response = jsonify({"status": "success", "counts": counts, "items": items,
+                            "has_more": has_more})
         # Счётчик обязан быть свежим: закешированный ноль прячет документ,
         # который человек обязан прочитать к сроку.
         response.headers['Cache-Control'] = 'no-store'

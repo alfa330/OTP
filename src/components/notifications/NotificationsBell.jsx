@@ -34,6 +34,12 @@ const CLEARABLE = ['events', 'four_you', 'lms'];
 // Последняя страховка при возврате фокуса. Обычные изменения будит SSE, а
 // переходы по времени и редкие потери канала сверяет сам поток раз в минуту.
 const REFRESH_GAP_MS = 5 * 60 * 1000;
+
+/* Порция элементов на источник. Совпадает с ITEMS_PER_SOURCE в
+   notifications/sources.py, потолок — с MAX_ITEMS_PER_SOURCE: расхождение
+   ничего не сломает, но клиент просил бы порции, которых сервер уже не отдаёт. */
+const PAGE_SIZE = 5;
+const MAX_PAGE_SIZE = 50;
 const SSE_STALL_MS = 90 * 1000;
 
 const fmtWhen = (iso) => {
@@ -60,13 +66,26 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const [counts, setCounts] = useState({ total: 0 });
     const [items, setItems] = useState([]);
 
+    /* Есть ли за показанным ещё элементы. Счётчик считает ВСЁ, а сервер отдаёт
+       не больше PAGE_SIZE на источник, поэтому без догрузки бейдж «6» висел бы
+       над пятью карточками. */
+    const [hasMore, setHasMore] = useState(false);
+
     const buttonRef = useRef(null);
     const panelRef = useRef(null);
+    const scrollRef = useRef(null);
+    const sentinelRef = useRef(null);
     const closeTimerRef = useRef(null);
     const fetchedAtRef = useRef(0);
     const aliveRef = useRef(true);
     const userIdRef = useRef(user?.id);
     userIdRef.current = user?.id;
+    /* Размер порции живёт в ref, а не в состоянии: он входит в запрос, но не
+       должен пересоздавать load — тот стоит в зависимостях SSE-эффекта, и
+       каждая догрузка рвала бы живой канал и занимала слот заново. */
+    const pageSizeRef = useRef(PAGE_SIZE);
+    const hasMoreRef = useRef(false);
+    const loadingMoreRef = useRef(false);
 
     useEffect(() => {
         // React StrictMode в dev повторно запускает effects после их cleanup.
@@ -81,13 +100,19 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         const requestedUserId = user?.id;
         if (!aliveRef.current || !requestedUserId) return;
         try {
-            const response = await axios.get(`${apiBaseUrl}/api/notifications`, { headers: getHeaders() });
+            const response = await axios.get(`${apiBaseUrl}/api/notifications`, {
+                headers: getHeaders(),
+                params: { limit: pageSizeRef.current },
+            });
             // При logout/login без размонтирования старый ответ не должен на
             // мгновение показать новому пользователю чужие уведомления.
             if (!aliveRef.current || userIdRef.current !== requestedUserId) return;
             const nextCounts = response?.data?.counts || { total: 0 };
             setCounts(nextCounts);
             setItems(Array.isArray(response?.data?.items) ? response.data.items : []);
+            const more = Boolean(response?.data?.has_more);
+            hasMoreRef.current = more;
+            setHasMore(more);
             fetchedAtRef.current = Date.now();
             // Бейджи разделов в сайдбаре берут числа отсюда же: раньше «Ивенты»
             // и «4 You» ходили за ними своими запросами, считая ровно то же.
@@ -118,6 +143,40 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             if (aliveRef.current) setLoading(false);
         }
     }, [user?.id]);
+
+    /* Докрутили до низа — берём следующую порцию. Не догрузка «хвоста», а
+       перезапрос всей сводки с бо́льшим лимитом: она собирается одним запросом,
+       а склейка страниц на клиенте разъезжалась бы с тычками, которые в любой
+       момент могут переписать список целиком. */
+    const loadMore = useCallback(async () => {
+        if (loadingMoreRef.current || !hasMoreRef.current) return;
+        if (pageSizeRef.current >= MAX_PAGE_SIZE) return;
+        loadingMoreRef.current = true;
+        pageSizeRef.current = Math.min(MAX_PAGE_SIZE, pageSizeRef.current + PAGE_SIZE);
+        try {
+            await load();
+        } finally {
+            loadingMoreRef.current = false;
+        }
+    }, [load]);
+
+    /* Наблюдатель, а не обработчик прокрутки: шести элементам прокручиваться
+       негде — пять помещаются целиком, и события scroll не случилось бы вовсе,
+       а шестой остался бы недостижим. Наблюдатель же срабатывает и на «низ
+       списка просто виден», поэтому недостающее подтягивается сразу.
+       Пересоздаётся на каждую порцию: observe() сразу сообщает текущее
+       пересечение, и цепочка продолжается, пока список не заполнит панель. */
+    useEffect(() => {
+        if (!open || closing || !hasMore) return undefined;
+        const root = scrollRef.current;
+        const target = sentinelRef.current;
+        if (!root || !target || typeof IntersectionObserver === 'undefined') return undefined;
+        const observer = new IntersectionObserver((entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) loadMore();
+        }, { root, rootMargin: '120px' });
+        observer.observe(target);
+        return () => observer.disconnect();
+    }, [open, closing, hasMore, items.length, loadMore]);
 
     useEffect(() => {
         if (!user?.id) {
@@ -308,6 +367,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const close = useCallback(() => {
         if (closeTimerRef.current) return;
         setClosing(true);
+        // Панель закрыта — возвращаем порцию к исходной. Иначе фоновые перечитки
+        // (их будит SSE) до конца сессии таскали бы полсотни элементов на
+        // источник ради счётчика, который считается и без них.
+        pageSizeRef.current = PAGE_SIZE;
         closeTimerRef.current = setTimeout(() => {
             closeTimerRef.current = null;
             setOpen(false);
@@ -388,7 +451,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             {/* min-h-0 вместо вычитания высоты шапки: на узком пункте (мобильный,
                 224px) «Отметить прочитанным» переносится на вторую строку, и
                 панель с «max-h минус 52px» срезала бы низ списка. */}
-            <div className="notifications-scroll min-h-0 overflow-y-auto overscroll-contain">
+            <div ref={scrollRef} className="notifications-scroll min-h-0 overflow-y-auto overscroll-contain">
                 {loading && items.length === 0 && (
                     <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
                         <Loader2 size={16} className="animate-spin" />
@@ -440,6 +503,18 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                         </button>
                     );
                 })}
+
+                {/* Метка низа списка: она же цель наблюдателя и индикатор
+                    догрузки. Рендерится только когда есть что подгружать. */}
+                {hasMore && items.length > 0 && (
+                    <div
+                        ref={sentinelRef}
+                        className="flex items-center justify-center gap-2 py-3 text-slate-400"
+                    >
+                        <Loader2 size={14} className="animate-spin" />
+                        <span className="text-[12px]">Загружаем ещё…</span>
+                    </div>
+                )}
             </div>
         </div>
     ) : null;

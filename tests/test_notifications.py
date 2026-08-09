@@ -66,11 +66,11 @@ class CollectOrderTest(unittest.TestCase):
         сортировкой.
         """
         self._stub({
-            'wiki_ack': lambda c, v: (1, [_item('wiki_ack', 'Регламент')]),
-            'events': lambda c, v: (1, [_item('events', 'Новый пост')]),
-            'four_you': lambda c, v: (1, [_item('four_you', 'Просрочено', tone='warning')]),
+            'wiki_ack': lambda c, v, limit: (1, [_item('wiki_ack', 'Регламент')]),
+            'events': lambda c, v, limit: (1, [_item('events', 'Новый пост')]),
+            'four_you': lambda c, v, limit: (1, [_item('four_you', 'Просрочено', tone='warning')]),
         })
-        _, items = sources.collect(FakeCursor(), {'user_id': 1})
+        _, items, _more = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual('Просрочено', items[0]['title'])
         # Остальные обязаны сохранить свой порядок — сортировка устойчивая.
         self.assertEqual(['Просрочено', 'Регламент', 'Новый пост'],
@@ -82,31 +82,31 @@ class CollectOrderTest(unittest.TestCase):
         У ознакомлений и опросов `at` — это СРОК, а не время события. Сортировка
         всего списка по дате подняла бы наверх самый дальний дедлайн.
         """
-        self._stub({'wiki_ack': lambda c, v: (3, [
+        self._stub({'wiki_ack': lambda c, v, limit: (3, [
             _item('wiki_ack', 'Завтра', at='2026-08-10T00:00:00'),
             _item('wiki_ack', 'Через месяц', at='2026-09-10T00:00:00'),
             _item('wiki_ack', 'Без срока', at=None),
         ])})
-        _, items = sources.collect(FakeCursor(), {'user_id': 1})
+        _, items, _more = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual(['Завтра', 'Через месяц', 'Без срока'],
                          [i['title'] for i in items])
 
     def test_total_is_sum_of_sources(self):
         self._stub({
-            'events': lambda c, v: (2, []),
-            'lms': lambda c, v: (3, []),
+            'events': lambda c, v, limit: (2, []),
+            'lms': lambda c, v, limit: (3, []),
         })
-        counts, _ = sources.collect(FakeCursor(), {'user_id': 1})
+        counts, _, _more = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual(5, counts['total'])
 
     def test_broken_source_does_not_kill_the_rest(self):
         """Сломанный раздел даёт ноль, а не 500 на весь колокол."""
-        def explode(cursor, viewer):
+        def explode(cursor, viewer, limit):
             raise RuntimeError('таблицы ещё нет')
 
-        self._stub({'wiki_ack': explode, 'lms': lambda c, v: (4, [_item('lms', 'Урок')])})
+        self._stub({'wiki_ack': explode, 'lms': lambda c, v, limit: (4, [_item('lms', 'Урок')])})
         with self.assertLogs(level='ERROR'):
-            counts, items = sources.collect(FakeCursor(), {'user_id': 1})
+            counts, items, _more = sources.collect(FakeCursor(), {'user_id': 1})
         self.assertEqual(0, counts['wiki_ack'])
         self.assertEqual(4, counts['lms'])
         self.assertEqual(4, counts['total'])
@@ -114,7 +114,7 @@ class CollectOrderTest(unittest.TestCase):
 
     def test_broken_source_rolls_back_to_savepoint(self):
         """Иначе упавший источник оставил бы транзакцию в aborted-состоянии."""
-        def explode(cursor, viewer):
+        def explode(cursor, viewer, limit):
             cursor.execute('SELECT неверно')
             raise RuntimeError('boom')
 
@@ -127,10 +127,107 @@ class CollectOrderTest(unittest.TestCase):
 
     def test_hidden_source_is_skipped_entirely(self):
         called = []
-        self._stub({'four_you': lambda c, v: (called.append(1), (9, []))[1]})
-        counts, _ = sources.collect(FakeCursor(), {'user_id': 1, 'hidden_sources': ('four_you',)})
+        self._stub({'four_you': lambda c, v, limit: (called.append(1), (9, []))[1]})
+        counts, _, _more = sources.collect(FakeCursor(), {'user_id': 1, 'hidden_sources': ('four_you',)})
         self.assertEqual(0, counts['four_you'])
         self.assertEqual([], called)
+
+
+class PaginationTest(unittest.TestCase):
+    """Догрузка порциями: счётчик считает всё, элементы приходят частями.
+
+    Без неё бейдж «6» висел над пятью карточками, и до шестой было не добраться:
+    пять элементов помещаются в панель целиком, так что даже прокрутить список
+    было нельзя.
+    """
+
+    def setUp(self):
+        self.original = dict(sources._HANDLERS)
+
+    def tearDown(self):
+        sources._HANDLERS.clear()
+        sources._HANDLERS.update(self.original)
+
+    def _stub(self, mapping):
+        sources._HANDLERS.clear()
+        sources._HANDLERS.update(mapping)
+
+    @staticmethod
+    def _source_of(name, count):
+        """Источник с `count` элементами, честно отдающий не больше лимита."""
+        def handler(cursor, viewer, limit):
+            return count, [_item(name, '%s %d' % (name, i)) for i in range(1, min(count, limit) + 1)]
+        return handler
+
+    def test_limit_reaches_the_sixth_item(self):
+        self._stub({'tasks': self._source_of('tasks', 6)})
+
+        counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
+        self.assertEqual(6, counts['total'], 'счётчик всегда считает всё')
+        self.assertEqual(5, len(items))
+        self.assertTrue(has_more, 'шестой элемент есть — клиент обязан узнать об этом')
+
+        counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=10)
+        self.assertEqual(6, len(items), 'следующая порция дотягивает остаток')
+        self.assertFalse(has_more, 'больше нечего подгружать')
+
+    def test_aggregated_source_never_asks_for_more(self):
+        """«4 You» сворачивает 12 фото в ОДНУ строку.
+
+        Наивное «счётчик больше показанного» заставило бы клиент бесконечно
+        просить следующую порцию, ничего нового не получая.
+        """
+        self._stub({'four_you': lambda c, v, limit: (12, [_item('four_you', 'Новые фото: 12')])})
+        counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
+        self.assertEqual(12, counts['total'])
+        self.assertEqual(1, len(items))
+        self.assertFalse(has_more)
+
+    def test_limit_is_clamped_to_sane_range(self):
+        """Кривой параметр — повод взять ближайшее допустимое, а не отдать 400."""
+        seen = []
+
+        def handler(cursor, viewer, limit):
+            seen.append(limit)
+            return 0, []
+
+        self._stub({'lms': handler})
+        sources.collect(FakeCursor(), {'user_id': 1}, limit=10 ** 6)
+        sources.collect(FakeCursor(), {'user_id': 1}, limit=0)
+        sources.collect(FakeCursor(), {'user_id': 1}, limit=-5)
+        sources.collect(FakeCursor(), {'user_id': 1}, limit='пять')
+        self.assertEqual(
+            [sources.MAX_ITEMS_PER_SOURCE] + [sources.ITEMS_PER_SOURCE] * 3, seen,
+            'слишком большая порция режется по потолку, любая бессмыслица — дефолт',
+        )
+
+    def test_has_more_survives_a_broken_source(self):
+        """Упавший источник даёт ноль и не мешает догружать соседний."""
+        def explode(cursor, viewer, limit):
+            raise RuntimeError('таблицы ещё нет')
+
+        self._stub({'wiki_ack': explode, 'tasks': self._source_of('tasks', 9)})
+        with self.assertLogs(level='ERROR'):
+            counts, items, has_more = sources.collect(FakeCursor(), {'user_id': 1}, limit=5)
+        self.assertEqual(0, counts['wiki_ack'])
+        self.assertEqual(5, len(items))
+        self.assertTrue(has_more)
+
+
+class ClientPaginationContractTest(unittest.TestCase):
+    """Клиент и сервер обязаны сойтись в размере порции и в её потолке."""
+
+    SOURCE = BELL_JSX.read_text(encoding='utf-8')
+
+    def test_page_size_matches_server(self):
+        self.assertIn('const PAGE_SIZE = %d;' % sources.ITEMS_PER_SOURCE, self.SOURCE)
+        self.assertIn('const MAX_PAGE_SIZE = %d;' % sources.MAX_ITEMS_PER_SOURCE, self.SOURCE)
+
+    def test_client_asks_for_the_next_page_by_observing_the_bottom(self):
+        """Обработчик прокрутки тут не работает: пять карточек не прокручиваются."""
+        self.assertIn('IntersectionObserver', self.SOURCE)
+        self.assertIn('params: { limit: pageSizeRef.current }', self.SOURCE)
+        self.assertIn('has_more', self.SOURCE)
 
 
 class SurveyWindowTimezoneTest(unittest.TestCase):
@@ -236,7 +333,7 @@ class TasksSourceRulesTest(unittest.TestCase):
     SOURCE = (ROOT / 'notifications' / 'sources.py').read_text(encoding='utf-8')
 
     def _block(self):
-        start = self.SOURCE.index('def tasks(cursor, viewer):')
+        start = self.SOURCE.index('def tasks(cursor, viewer, limit):')
         return self.SOURCE[start:self.SOURCE.index('_HANDLERS = {', start)]
 
     def test_rules_match_badge_sql(self):
@@ -279,7 +376,7 @@ class TasksSourceRulesTest(unittest.TestCase):
             def fetchall(self):
                 return rows
 
-        total, items = sources.tasks(Cursor(), {'user_id': 1})
+        total, items = sources.tasks(Cursor(), {'user_id': 1}, sources.ITEMS_PER_SOURCE)
         self.assertEqual(2, total)
         self.assertEqual(['warning', 'default'], [i['tone'] for i in items])
         self.assertEqual('2026-08-01T00:00:00', items[0]['at'])   # срок
