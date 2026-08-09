@@ -202,11 +202,28 @@
         margin-top: 8px;
       }
     }
+    /* Гамбургер, ставший колоколом: тёплый акцент вместо синего, чтобы кнопка
+       читалась как сигнал, а не как обычное меню. */
+    .hamburger-btn.has-incoming {
+      background: linear-gradient(135deg, #b45309, #f59e0b);
+      box-shadow: 0 4px 16px rgba(245, 158, 11, 0.45);
+    }
+    /* Карточка на телефоне при закрытом меню: сайдбар за краем экрана, поэтому
+       она живёт порталом в body и раскрывается из-под гамбургера — он в этот
+       момент сам показывает колокол. Гамбургер занимает 16..60px по вертикали,
+       начинаем сразу под ним. */
+    .notifications-toast-floating {
+      top: 68px;
+      left: 16px;
+      right: 16px;
+      max-width: 360px;
+    }
     /* Уважаем системную настройку «меньше движения»: уведомление всё равно
        появится и будет видно, просто без качания и раскрытия. */
     @media (prefers-reduced-motion: reduce) {
       .bell-icon-ring,
-      .notifications-toast {
+      .notifications-toast,
+      .notifications-toast-floating {
         animation: none !important;
       }
     }

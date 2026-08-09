@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, X } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
@@ -60,8 +61,13 @@ const fmtWhen = (iso) => {
 /* getHeaders — функция, а не готовый объект: токен доступа обновляется в фоне,
    и объект, собранный один раз, ушёл бы в запрос протухшим. Заодно не даёт
    новой ссылке на каждый рендер сбрасывать зависимости useCallback. */
+/* onIncoming — сигнал наружу «пришло новое». На телефоне сайдбар уехал за
+   экран вместе с колоколом, поэтому звенеть и показывать карточку должен тот,
+   кто виден: гамбургер. mobileMenuOpen говорит, открыто ли меню — при открытом
+   карточка живёт на своём обычном месте, в сайдбаре. */
 export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate,
-                                            onCounts, readSource }) {
+                                            onCounts, readSource, onIncoming,
+                                            mobileMenuOpen }) {
     const [open, setOpen] = useState(false);
     // Закрытие в два шага, как у дропдауна «Аккаунта»: сначала обратная
     // анимация, через 200мс — размонтирование панели.
@@ -74,6 +80,13 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
        не больше PAGE_SIZE на источник, поэтому без догрузки бейдж «6» висел бы
        над пятью карточками. */
     const [hasMore, setHasMore] = useState(false);
+    /* Телефон: сайдбар уехал за экран, и карточке внутри него взяться неоткуда.
+       Тот же запрос, что и у CSS сайдбара, — иначе состояния разъедутся. */
+    const [isNarrow, setIsNarrow] = useState(
+        () => typeof window !== 'undefined'
+            && typeof window.matchMedia === 'function'
+            && window.matchMedia('(max-width: 768px)').matches,
+    );
     /* Пришло новое: колокол звенит, из сайдбара выезжает карточка с ним.
        ringNonce перезапускает анимацию: одинаковый key React бы переиспользовал,
        и второе уведомление подряд прошло бы беззвучно. */
@@ -446,6 +459,20 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         }, 200);
     }, []);
 
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+        const query = window.matchMedia('(max-width: 768px)');
+        const sync = (event) => setIsNarrow(event.matches);
+        setIsNarrow(query.matches);
+        // addListener — для старых WebKit, где addEventListener у MediaQueryList нет.
+        if (query.addEventListener) query.addEventListener('change', sync);
+        else query.addListener(sync);
+        return () => {
+            if (query.removeEventListener) query.removeEventListener('change', sync);
+            else query.removeListener(sync);
+        };
+    }, []);
+
     const closeToast = useCallback(() => {
         if (toastCloseTimerRef.current) return;
         if (toastTimerRef.current) {
@@ -530,12 +557,15 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             extra: Math.max(0, (fresh.length || (nextTotal - prevTotal)) - 1),
             added: nextTotal - prevTotal,
         });
+        // Гамбургер на телефоне узнаёт отсюда, что пора звенеть: сам колокол
+        // в это время за краем экрана вместе с сайдбаром.
+        onIncoming?.();
         if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
         toastTimerRef.current = setTimeout(() => {
             toastTimerRef.current = null;
             closeToast();
         }, TOAST_VISIBLE_MS);
-    }, [closeToast, probeBeyondPage]);
+    }, [closeToast, probeBeyondPage, onIncoming]);
     announceRef.current = announce;
 
     const toggle = () => {
@@ -687,12 +717,18 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const toastItem = toast?.item;
     const toastMeta = toastItem ? (SOURCE_META[toastItem.source] || {}) : {};
     const ToastIcon = toastMeta.icon || Bell;
-    const toastNode = toast && !open ? (
+    /* На телефоне с закрытым меню сайдбар — за краем экрана, и карточке внутри
+       него взяться неоткуда. Тогда она уходит порталом в body и раскрывается
+       из-под гамбургера, который в этот момент сам стал колоколом. */
+    const toastDetached = isNarrow && !mobileMenuOpen;
+    const toastCard = toast && !open ? (
         <div
             role="status"
             aria-live="polite"
             style={{ fontFamily: APPLE_FONT }}
-            className={`notifications-toast absolute left-full top-0 z-40 ml-2 w-[320px] origin-top overflow-hidden rounded-2xl border border-black/5 bg-white/95 text-slate-900 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${toastClosing ? 'animate-dropdown-reverse' : 'animate-dropdown'}`}
+            className={`${toastDetached
+                ? 'notifications-toast-floating fixed z-[61] origin-top'
+                : 'notifications-toast absolute left-full top-0 z-40 ml-2 w-[320px] origin-top'} overflow-hidden rounded-2xl border border-black/5 bg-white/95 text-slate-900 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${toastClosing ? 'animate-dropdown-reverse' : 'animate-dropdown'}`}
         >
             <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
                 <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
@@ -744,6 +780,10 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             </button>
         </div>
     ) : null;
+
+    const toastNode = toastCard && toastDetached
+        ? createPortal(toastCard, document.body)
+        : toastCard;
 
     /* Кнопка собрана по образцу остальных пунктов меню: подпись живёт в
        .sidebar-text и показывается самим CSS сайдбара — в том числе при

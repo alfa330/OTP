@@ -381,8 +381,8 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
     def test_toast_is_not_marked_as_the_dropdown(self):
         """Класс .notifications-dropdown держит свёрнутый сайдбар развёрнутым
         (правило :has), и каждое уведомление дёргало бы всю вёрстку."""
-        start = self.SOURCE.index('const toastNode =')
-        block = self.SOURCE[start:self.SOURCE.index('/* Кнопка собрана', start)]
+        start = self.SOURCE.index('const toastCard =')
+        block = self.SOURCE[start:self.SOURCE.index('const toastNode =', start)]
         self.assertIn('notifications-toast', block)
         self.assertNotIn('notifications-dropdown', block)
         # На мобильном вправо выпадать некуда — там своё позиционирование.
@@ -390,8 +390,8 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
 
     def test_details_are_shown_on_the_card(self):
         """Ради деталей карточка и раскрывается — в списке им места нет."""
-        start = self.SOURCE.index('const toastNode =')
-        block = self.SOURCE[start:self.SOURCE.index('/* Кнопка собрана', start)]
+        start = self.SOURCE.index('const toastCard =')
+        block = self.SOURCE[start:self.SOURCE.index('const toastNode =', start)]
         self.assertIn('toastItem.body', block)
         self.assertIn('toastItem.title', block)
 
@@ -400,6 +400,53 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         block = self.STYLES[self.STYLES.index('prefers-reduced-motion'):]
         self.assertIn('.bell-icon-ring', block[:400])
         self.assertIn('.notifications-toast', block[:400])
+
+
+class MobileIncomingTest(unittest.TestCase):
+    """Телефон: сайдбар за краем экрана, поэтому сигналит гамбургер.
+
+    Без этого уведомление на телефоне не видно вообще: и колокол, и карточка
+    живут внутри сайдбара, который при закрытом меню уехал за экран.
+    """
+
+    BELL = BELL_JSX.read_text(encoding='utf-8')
+    APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+    STYLES = (ROOT / 'src' / 'styles.css').read_text(encoding='utf-8')
+
+    def test_bell_tells_the_app_about_incoming(self):
+        self.assertIn('onIncoming?.();', self.BELL)
+        self.assertIn('onIncoming={stableNotificationsIncoming}', self.APP)
+
+    def test_hamburger_turns_into_a_ringing_bell(self):
+        start = self.APP.index('className={`hamburger-btn')
+        block = self.APP[start:self.APP.index('</button>', start)]
+        # Меню закрыто и что-то пришло — вместо полосок колокол, и он звенит.
+        self.assertIn("mobileIncomingNonce > 0 ? 'fa-bell bell-icon-ring animate-bell-ring'", block)
+        # Открытое меню важнее: там крестик, а не сигнал.
+        self.assertIn("mobileMenuOpen\n                                    ? 'fa-times'", block)
+        # key перезапускает качание на каждом следующем уведомлении.
+        self.assertIn('key={mobileMenuOpen ? \'close\' : `bell-${mobileIncomingNonce}`}', block)
+
+    def test_button_and_card_disappear_together(self):
+        """Иначе колокол остался бы висеть, когда карточка уже пропала."""
+        self.assertIn('const MOBILE_INCOMING_VISIBLE_MS = 7000;', self.APP)
+        self.assertIn('const TOAST_VISIBLE_MS = 7000;', self.BELL)
+
+    def test_card_leaves_the_hidden_sidebar_on_a_phone(self):
+        self.assertIn('const toastDetached = isNarrow && !mobileMenuOpen;', self.BELL)
+        self.assertIn('createPortal(toastCard, document.body)', self.BELL)
+        # Тот же порог, что у CSS сайдбара, иначе состояния разъедутся.
+        self.assertIn("matchMedia('(max-width: 768px)')", self.BELL)
+        # И встаёт она ровно под гамбургером (он занимает 16..60px).
+        self.assertIn('.notifications-toast-floating', self.STYLES)
+        block = self.STYLES[self.STYLES.index('.notifications-toast-floating'):]
+        self.assertIn('top: 68px;', block[:260])
+
+    def test_floating_card_is_above_the_hamburger_layer(self):
+        """Гамбургер сидит на z-index 60 — карточка обязана быть выше."""
+        self.assertIn('notifications-toast-floating fixed z-[61]', self.BELL)
+        block = self.STYLES[self.STYLES.index('.hamburger-btn {'):]
+        self.assertIn('z-index: 60;', block[:400])
 
 
 class ClientPaginationContractTest(unittest.TestCase):
