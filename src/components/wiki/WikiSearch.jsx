@@ -1,5 +1,5 @@
 import React, {
-    useCallback, useEffect, useMemo, useRef, useState,
+    useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
@@ -384,12 +384,15 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const [classifier, setClassifier] = useState(null);
     const [classifierFailed, setClassifierFailed] = useState(false);
     const [pickedCar, setPickedCar] = useState(null);
+    // Сдвиг выпадашки, если центрирование увело её за край экрана.
+    const [shift, setShift] = useState(0);
 
     // Десктоп — выпадашка под полем; телефон — полноэкранный лист.
     const [focused, setFocused] = useState(false);
     const [sheetOpen, setSheetOpen] = useState(false);
 
     const inputRef = useRef(null);
+    const dropRef = useRef(null);
     const sheetInputRef = useRef(null);
     const containerRef = useRef(null);
     const listRef = useRef(null);
@@ -585,6 +588,25 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         if (sheetOpen) setTimeout(() => sheetInputRef.current?.focus(), 40);
     }, [sheetOpen]);
 
+    /* Выпадашка центрируется ПО ПОЛЮ, а не прижимается к его правому краю.
+       Само по себе центрирование может увести широкий блок (с баром
+       классификатора это 900 px) за край экрана, поэтому после раскладки
+       замеряем и при необходимости подвигаем обратно. Замер идёт от
+       НЕсдвинутого положения (r.left - shift), иначе поправка накапливалась бы
+       от прохода к проходу. */
+    useLayoutEffect(() => {
+        const el = dropRef.current;
+        if (!el) return;
+        const GAP = 12;
+        const rect = el.getBoundingClientRect();
+        const left = rect.left - shift;
+        const right = rect.right - shift;
+        let next = 0;
+        if (left < GAP) next = GAP - left;
+        else if (right > window.innerWidth - GAP) next = (window.innerWidth - GAP) - right;
+        if (Math.round(next) !== Math.round(shift)) setShift(next);
+    });
+
     const onHover = (index) => { if (!keyboardRef.current) setSelectedIndex(index); };
     const retry = () => setRetryTick((n) => n + 1);
 
@@ -670,6 +692,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                 влево, когда справа появляется бар классификатора. */}
             <AnimatePresence>
                 {focused && term.length >= 2 && (
+                    <div
+                        ref={dropRef}
+                        className="absolute left-1/2 top-full z-40 mt-2 hidden -translate-x-1/2 sm:block"
+                        style={{ marginLeft: shift }}
+                    >
                     <motion.div
                         initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.99 }}
                         animate={{
@@ -680,7 +707,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                             opacity: 0, y: 6, scale: 0.99,
                             transition: { duration: reduceMotion ? 0 : 0.12, ease: 'easeIn' },
                         }}
-                        className={`absolute right-0 top-full z-40 mt-2 hidden max-w-[calc(100vw-3rem)] overflow-hidden rounded-2xl bg-white p-3 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/10 transition-[width] duration-300 ease-out sm:flex ${
+                        className={`flex max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-2xl bg-white p-3 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ring-1 ring-slate-900/10 transition-[width] duration-300 ease-out ${
                             activeCar ? 'w-[900px] gap-3' : 'w-[580px]'
                         }`}
                     >
@@ -696,6 +723,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                             </motion.div>
                         )}
                     </motion.div>
+                    </div>
                 )}
             </AnimatePresence>
 
