@@ -1095,7 +1095,6 @@ class ActionNeedsBadgeTests(unittest.TestCase):
 
     def test_sidebar_badge_is_wired(self):
         src = _read(APP_JSX_PATH)
-        self.assertIn("/api/tasks/action_required", src)
         self.assertIn("const renderTasksSidebarButtonInner = () => (", src)
         # Пункт «Задачи» рендерится в нескольких ветках меню — бейдж нужен во всех.
         self.assertEqual(src.count("{renderTasksSidebarButtonInner()}"), 3)
@@ -1103,14 +1102,33 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         self.assertIn("onActionNeedsChange={handleTasksActionNeedsChange}", src)
 
     def test_sidebar_badge_does_not_poll_in_background(self):
+        """Число приносит сводка колокола (она событийная: вход и возврат фокуса
+        с троттлингом REFRESH_GAP_MS — см. tests/test_four_you_access_controls),
+        а при открытом разделе его ведёт сам раздел по загруженному списку.
+        Отдельного опроса /api/tasks/action_required у бейджа больше нет."""
         src = _read(APP_JSX_PATH)
-        start = src.index("const fetchTasksActionRequiredRef = useRef(null);")
-        block = src[start:src.index("const handleTasksActionNeedsChange", start)]
-        # Обновление только по событиям (вход, возврат фокуса, смена раздела).
-        self.assertNotIn("setInterval", block)
-        self.assertIn("TASKS_BADGE_MIN_GAP_MS", block)
-        self.assertIn("window.addEventListener('focus', onWake);", block)
-        self.assertIn("if (view === 'tasks' || !isPageActiveForBadges()) return;", block)
+        self.assertNotIn("fetchTasksActionRequiredCount", src)
+        self.assertNotIn("TASKS_BADGE_MIN_GAP_MS", src)
+        start = src.index("const stableNotificationsCounts = useCallback(")
+        block = src[start:src.index("const sidebarTree = useMemo(", start)]
+        # Питание из колокола, но раздел открыт — число не трогаем: снимок,
+        # снятый до действия пользователя, перетёр бы более свежее значение.
+        self.assertIn("'tasks' in counts && currentView !== 'tasks'", block)
+        self.assertIn("setTasksActionRequiredCount", block)
+
+    def test_mount_zero_does_not_clear_the_bell(self):
+        """Транзиентный ноль на маунте раздела (tasks=[] до ответа сервера) не
+        должен уходить в App: там count===0 гасит источник 'tasks' в колоколе,
+        и простой вход в раздел стирал бы задачи из панели на 5+ минут."""
+        src = _read(TASKS_VIEW_PATH)
+        start = src.index("if (!hasLoadedTasks) return;")
+        block = src[start:src.index("}, [hasLoadedTasks, actionNeedsUnseen, onActionNeedsChange]);", start)]
+        self.assertIn("onActionNeedsChange(actionNeedsUnseen)", block)
+        app_src = _read(APP_JSX_PATH)
+        self.assertIn("if (next === 0) markBellSourceRead('tasks');", app_src)
+        # Симметричный сброс фокус-запроса — как у вики: иначе после клика по
+        # задаче в колоколе каждый обычный вход в раздел открывал бы её снова.
+        self.assertIn("if (view !== 'tasks') setTaskFocusRequest(null);", app_src)
 
 
 class BoardPaginationTests(unittest.TestCase):

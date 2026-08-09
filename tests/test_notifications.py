@@ -205,7 +205,7 @@ class MarkSeenRulesTest(unittest.TestCase):
 
     def test_action_bound_sources_are_not_clearable(self):
         cursor = FakeCursor()
-        for source in ('wiki_ack', 'surveys'):
+        for source in ('wiki_ack', 'surveys', 'tasks'):
             self.assertFalse(
                 sources.mark_seen(cursor, 1, source),
                 'источник %s нельзя гасить: он снимается действием, иначе счётчик '
@@ -221,6 +221,72 @@ class MarkSeenRulesTest(unittest.TestCase):
 
     def test_unknown_source_is_ignored(self):
         self.assertFalse(sources.mark_seen(FakeCursor(), 1, 'нет-такого'))
+
+
+class TasksSourceRulesTest(unittest.TestCase):
+    """Источник «Задачи» — третья копия правил «задача ждёт вас».
+
+    Первые две — SQL бейджа (database.py::get_task_action_needs_summary) и
+    клиентские правила раздела (taskActionNeeds.js). Дрейф копий не падает и
+    не ошибается — числа на экране просто молча расходятся, поэтому маркеры
+    правил сверяются по исходнику, как это уже делает
+    test_task_backlog_board.ActionNeedsBadgeTests для первых двух.
+    """
+
+    SOURCE = (ROOT / 'notifications' / 'sources.py').read_text(encoding='utf-8')
+
+    def _block(self):
+        start = self.SOURCE.index('def tasks(cursor, viewer):')
+        return self.SOURCE[start:self.SOURCE.index('_HANDLERS = {', start)]
+
+    def test_rules_match_badge_sql(self):
+        block = self._block()
+        # Просрочка — только у исполнителя и только по живым статусам.
+        self.assertIn("t.status IN ('assigned', 'in_progress', 'returned')", block)
+        # Приёмку ждёт поручитель, а если его нет — постановщик.
+        self.assertIn("COALESCE(t.requested_by_id, t.created_by) = %(user_id)s", block)
+        self.assertIn("t.status = 'completed'", block)
+        # Бэклог не считается: это очередь планирования.
+        self.assertIn("t.is_backlog = FALSE", block)
+        # У каждой причины своя проверка отметки «просмотрено».
+        for kind in ('overdue', 'returned', 'review', 'fresh'):
+            self.assertIn(
+                "r.kind <> '%s' OR r.seen_at < t.updated_at" % kind, block,
+            )
+
+    def test_now_is_process_clock_not_db_clock(self):
+        """due_at хранится наивным во времени Алматы, база — в UTC.
+
+        Сравнение с голым CURRENT_TIMESTAMP давало бы сдвиг на 5 часов, как это
+        уже было с окнами тестов у опросов: задача считалась бы просроченной на
+        5 часов раньше срока.
+        """
+        block = self._block()
+        self.assertNotRegex(
+            block, r'due_at\s*[<>]=?\s*CURRENT_TIMESTAMP',
+            'дедлайн снова сравнивается с UTC-временем базы — сдвиг 5 часов',
+        )
+        self.assertIn('%(now)s', block, 'время должно приходить параметром')
+
+    def test_items_shape_and_tone(self):
+        """overdue горит и показывает срок; остальные — момент события."""
+        rows = [
+            (7, 'Отчёт по сменам', datetime(2026, 8, 1), datetime(2026, 7, 20), 'overdue', 2),
+            (9, 'Витрина KPI', None, datetime(2026, 8, 8), 'fresh', 2),
+        ]
+
+        class Cursor(FakeCursor):
+            def fetchall(self):
+                return rows
+
+        total, items = sources.tasks(Cursor(), {'user_id': 1})
+        self.assertEqual(2, total)
+        self.assertEqual(['warning', 'default'], [i['tone'] for i in items])
+        self.assertEqual('2026-08-01T00:00:00', items[0]['at'])   # срок
+        self.assertEqual('2026-08-08T00:00:00', items[1]['at'])   # когда поручили
+        self.assertEqual(['tasks', 'tasks'], [i['view'] for i in items])
+        self.assertEqual([7, 9], [i['target'] for i in items])
+        self.assertEqual('Просрочена', items[0]['body'])
 
 
 class FailureResponseTest(unittest.TestCase):

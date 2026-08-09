@@ -40808,39 +40808,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
-            /* Бейджи «Ивенты» и «4 You» больше не ходят за числами сами: их
-               приносит общий ответ колокола (/api/notifications), см.
-               stableNotificationsCounts. Серверные /api/events/unread_count и
-               /api/four_you/unread_count оставлены как есть — фронт их не
-               зовёт, но удалять роут ради этого незачем. */
-
-            // Бейдж раздела «Задачи»: задачи, ждущие шага пользователя (просрочка,
-            // возврат на доработку, приёмка, ещё не начатая). Правила совпадают с
-            // уведомлениями внутри раздела — см. src/components/tasks/taskActionNeeds.js.
-            const canSeeTasksBadge = Boolean(user?.id) && (
-                isAdminLikeRoleFn(currentUserRole)
-                || isSupervisorRole(currentUserRole)
-                || currentUserRole === 'trainer'
-                || isDepartmentHeadUser
-            );
-            const fetchTasksActionRequiredCount = async () => {
-                if (!canSeeTasksBadge) {
-                    if (isMounted.current) setTasksActionRequiredCount(0);
-                    return;
-                }
-                const requestKey = `fetchTasksActionRequiredCount:${user.id}`;
-                return runSingleFlight(requestKey, async () => {
-                    try {
-                        const response = await axios.get(`${API_BASE_URL}/api/tasks/action_required`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        });
-                        const count = Number(response?.data?.count);
-                        if (isMounted.current) setTasksActionRequiredCount(Math.max(0, Number.isFinite(count) ? count : 0));
-                    } catch (err) {
-                        // Бейдж не критичен — молча игнорируем сетевые сбои.
-                    }
-                });
-            };
+            /* Бейджи «Ивенты», «4 You» и «Задачи» больше не ходят за числами
+               сами: их приносит общий ответ колокола (/api/notifications), см.
+               stableNotificationsCounts. Серверные /api/events/unread_count,
+               /api/four_you/unread_count и /api/tasks/action_required оставлены
+               как есть — фронт их не зовёт, но удалять роуты ради этого
+               незачем. Роли без доступа к задачам получают по источнику ноль:
+               периметр держит сервер (hidden_sources в viewer_context). */
 
             /* Право видеть фото «4 You» сервер проверяет сам
                (_four_you_access_for_requester) — тому, кому раздел закрыт,
@@ -43298,23 +43272,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fetchSurveysPendingBadgeCount();
             }, [view, user?.id, user?.role]);
 
-            // Фоновые бейджи опрашиваем только когда вкладка реально активна:
-            // видима (Page Visibility API) и в фокусе. Если пользователь ушёл с
-            // сайта (другая вкладка/окно или окно свёрнуто) — запрос не шлём.
-            const isPageActiveForBadges = () => {
-                if (typeof document === 'undefined') return true;
-                const visible = document.visibilityState
-                    ? document.visibilityState === 'visible'
-                    : !document.hidden;
-                const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
-                return visible && focused;
-            };
-
-            // Ивенты: число приносит колокол при входе и при возврате фокуса.
-            // Здесь остаётся только сброс при смене пользователя — чужой счётчик
-            // не должен мелькнуть до первого ответа сервера.
+            // Ивенты и задачи: числа приносит колокол при входе и при возврате
+            // фокуса. Здесь остаётся только сброс при выходе — чужой счётчик
+            // не должен мелькнуть следующему пользователю до ответа сервера.
             useEffect(() => {
-                if (!user?.id) setEventsUnreadCount(0);
+                if (!user?.id) {
+                    setEventsUnreadCount(0);
+                    setTasksActionRequiredCount(0);
+                }
             }, [user?.id]);
 
             /* Ширину сайдбара читают не только обычный контент, но и fixed-слои,
@@ -43337,6 +43302,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view !== 'wiki') setWikiInitialSlug(null);
             }, [view]);
 
+            /* Задачам — тот же сброс, что и вики. Дедупликация фокус-запроса
+               (handledFocusRequestRef) живёт внутри TasksView и обнуляется при
+               размонтировании раздела, а запрос — в состоянии App: без сброса
+               каждый следующий обычный вход в «Задачи» заново открывал бы
+               карточку, по которой однажды кликнули в колоколе. На маунте
+               безопасно: view инициализируется из URL синхронно, и при
+               диплинке ?view=tasks&task=N условие не срабатывает. */
+            useEffect(() => {
+                if (view !== 'tasks') setTaskFocusRequest(null);
+            }, [view]);
+
             useEffect(() => {
                 if (view !== 'events') return;
                 setEventsUnreadCount(0);
@@ -43348,46 +43324,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // ровно когда пользователь вернулся к вкладке. Поэтому обновляем при
             // входе, при возврате фокуса и при смене раздела, но не чаще раза в
             // 5 минут. Пока открыт раздел «Задачи», свежее число присылает он сам.
-            const TASKS_BADGE_MIN_GAP_MS = 5 * 60 * 1000;
-            const fetchTasksActionRequiredRef = useRef(null);
-            fetchTasksActionRequiredRef.current = fetchTasksActionRequiredCount;
-            const tasksBadgeFetchedAtRef = useRef(0);
-            const tasksBadgeUserRef = useRef(0);
-            useEffect(() => {
-                if (!canSeeTasksBadge) {
-                    setTasksActionRequiredCount(0);
-                    tasksBadgeFetchedAtRef.current = 0;
-                    return undefined;
-                }
-                // Сменился пользователь — прошлый счётчик и его «свежесть» не в счёт.
-                if (tasksBadgeUserRef.current !== Number(user?.id || 0)) {
-                    tasksBadgeUserRef.current = Number(user?.id || 0);
-                    tasksBadgeFetchedAtRef.current = 0;
-                }
-                const refreshIfStale = () => {
-                    // Раздел открыт — счётчик приходит из него, запрос был бы лишним.
-                    if (view === 'tasks' || !isPageActiveForBadges()) return;
-                    const now = Date.now();
-                    if (now - tasksBadgeFetchedAtRef.current < TASKS_BADGE_MIN_GAP_MS) return;
-                    tasksBadgeFetchedAtRef.current = now;
-                    fetchTasksActionRequiredRef.current?.();
-                };
-                refreshIfStale();
-                const onWake = () => refreshIfStale();
-                window.addEventListener('focus', onWake);
-                document.addEventListener('visibilitychange', onWake);
-                return () => {
-                    window.removeEventListener('focus', onWake);
-                    document.removeEventListener('visibilitychange', onWake);
-                };
-            }, [user?.id, canSeeTasksBadge, view]);
-
             /* Раздел «Задачи» считает те же правила по уже загруженному списку и
-               отдаёт число сюда — бейдж меняется сразу после действия, без запроса. */
+               отдаёт число сюда — бейдж меняется сразу после действия, без запроса.
+               Когда всё разгребли, гасим источник и в колоколе: иначе он до
+               следующего обновления показывал бы задачи в двух сантиметрах от
+               уже пустого бейджа. Ненулевые изменения колокол не трогают —
+               его снимок освежится сам, как у опросов. */
             const handleTasksActionNeedsChange = useCallback((count) => {
-                tasksBadgeFetchedAtRef.current = Date.now();
-                setTasksActionRequiredCount(Math.max(0, Number(count) || 0));
-            }, []);
+                const next = Math.max(0, Number(count) || 0);
+                setTasksActionRequiredCount(next);
+                if (next === 0) markBellSourceRead('tasks');
+            }, [markBellSourceRead]);
 
             // 4 You: число приносит колокол; при заходе в раздел гасим на месте
             // (плюс серверный seen — см. FourYouView). Здесь только сброс, когда
@@ -43492,12 +43439,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
             const stableNotificationsNavigate = useCallback((nextView, target) => {
                 if (!nextView) return;
-                /* Вики — единственный раздел, которому переход по target нужен
-                   по делу: статья под обязательное ознакомление лежит внутри
-                   раздела, и высадка в его корень заставляла бы искать её
-                   руками. В «Ивентах» и «Опросах» нужный элемент и так наверху
-                   списка, поэтому им достаточно самого перехода. */
+                /* Переход по target нужен по делу двум разделам: у вики статья
+                   под обязательное ознакомление лежит внутри раздела, у задач
+                   карточка открывается тем же механизмом, что у закреплённой
+                   задачи (focusTaskRequest). В «Ивентах» и «Опросах» нужный
+                   элемент и так наверху списка — им достаточно перехода. */
                 if (nextView === 'wiki' && target) setWikiInitialSlug(String(target));
+                if (nextView === 'tasks' && Number(target)) {
+                    setTaskFocusRequest((prev) => ({
+                        taskId: Number(target),
+                        requestId: Number(prev?.requestId || 0) + 1,
+                    }));
+                }
                 sidebarLatestRef.current.navigateToView?.(nextView);
             }, []);
             /* Бейджи «Ивенты» и «4 You» питаются из ответа колокола. Оба числа
@@ -43525,6 +43478,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 };
                 apply('events', setEventsUnreadCount, 'events');
                 apply('four_you', setFourYouUnreadCount, 'four_you');
+                /* «Задачи» — не водяной знак: заход в раздел ничего не гасит,
+                   поэтому при открытом разделе бейдж не обнуляем, а вообще не
+                   трогаем — раздел сам ведёт число по загруженному списку
+                   (handleTasksActionNeedsChange), и снимок колокола, снятый до
+                   действия пользователя, перетёр бы более свежее значение. */
+                if ('tasks' in counts && currentView !== 'tasks') {
+                    setTasksActionRequiredCount(Math.max(0, Number(counts.tasks) || 0));
+                }
             }, []);
 
             const sidebarTree = useMemo(() => {

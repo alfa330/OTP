@@ -46485,6 +46485,11 @@ def _notifications_viewer_context(requester_id, requester):
     role = _normalize_user_role(requester[3] if requester else None)
     is_global, viewer_dept = _events_viewer_scope(requester_id, role)
     can_see_four_you, _ = _four_you_access_for_requester(requester_id, requester)
+    # «Задачи» в колоколе видят те же роли, что пускает в раздел _task_route_guard:
+    # админ-роли, СВ, тренеры и главы отделов. Остальным источник скрыт целиком —
+    # ноль без запроса, а не 403 посреди сводки.
+    can_see_tasks = (_is_admin_role(role) or role in ('sv', 'trainer')
+                     or _headed_department_id(requester_id) is not None)
 
     return {
         'user_id': int(requester_id),
@@ -46492,7 +46497,7 @@ def _notifications_viewer_context(requester_id, requester):
         'department_id': viewer_dept,
         'is_global': is_global,
         'can_see_four_you': bool(can_see_four_you),
-        'hidden_sources': (),
+        'hidden_sources': () if can_see_tasks else ('tasks',),
     }
 
 

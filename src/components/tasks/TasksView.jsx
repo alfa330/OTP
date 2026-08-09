@@ -6173,6 +6173,10 @@ const TasksView = ({
   const currentUserRole = normalizeRole(user?.role);
   const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer';
   const [tasks,               setTasks]               = useState([]);
+  /* Список «моих задач» хотя бы раз загрузился. До этого счётчик уведомлений
+     наружу не репортится: на маунте tasks=[] даёт транзиентный ноль, который
+     App принял бы за «всё разгребли» и погасил бы источник в колоколе. */
+  const [hasLoadedTasks,      setHasLoadedTasks]      = useState(false);
   const [pagedTasks,          setPagedTasks]          = useState([]);
   const [recipients,          setRecipients]          = useState([]);
   const [boardPeople,         setBoardPeople]         = useState([]);
@@ -6315,6 +6319,7 @@ const TasksView = ({
       });
       const list = Array.isArray(res?.data?.tasks) ? res.data.tasks : [];
       setTasks(list);
+      setHasLoadedTasks(true);
       setDrawerTask(prev => prev ? (list.find(t => t.id === prev.id) ?? prev) : null);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось загрузить задачи', 'error');
@@ -6461,8 +6466,11 @@ const TasksView = ({
   }, [currentUserId, actionNeedsNow, actionSeenLocal]);
 
   useEffect(() => {
+    // Ноль до первой загрузки (или после её отказа) — не знание, а отсутствие
+    // данных: наружу его отдавать нельзя, App погасил бы источник в колоколе.
+    if (!hasLoadedTasks) return;
     if (typeof onActionNeedsChange === 'function') onActionNeedsChange(actionNeedsUnseen);
-  }, [actionNeedsUnseen, onActionNeedsChange]);
+  }, [hasLoadedTasks, actionNeedsUnseen, onActionNeedsChange]);
 
   /* Открыли уведомление — гасим его в счётчике. Задача из списка не исчезает:
      она всё ещё ждёт действия, просто перестаёт быть новостью. Локальный набор

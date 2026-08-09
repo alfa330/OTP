@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, Loader2 } from 'lucide-react';
+import { Bell, BookLock, GraduationCap, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 
 /* Колокол уведомлений.
@@ -19,6 +19,7 @@ import { APPLE_FONT } from '../ui/ios';
 
 const SOURCE_META = {
     wiki_ack: { label: 'Ознакомление', icon: BookLock, tint: 'text-amber-600 bg-amber-50' },
+    tasks: { label: 'Задачи', icon: ListChecks, tint: 'text-blue-600 bg-blue-50' },
     lms: { label: 'Обучение', icon: GraduationCap, tint: 'text-indigo-600 bg-indigo-50' },
     surveys: { label: 'Опросы', icon: ClipboardList, tint: 'text-sky-600 bg-sky-50' },
     events: { label: 'Ивенты', icon: CalendarDays, tint: 'text-rose-600 bg-rose-50' },

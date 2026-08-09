@@ -23,12 +23,14 @@ from datetime import datetime
 # Порядок здесь = порядок групп в колоколе. Сначала то, что требует действия с
 # дедлайном, потом то, что просто новое.
 #
-# «Задачи» сюда не входят намеренно. Их бейдж — не «непрочитанное», а результат
-# правил (просрочка, возврат на доработку, приёмка), которые уже посчитаны
-# дважды: на сервере и в src/components/tasks/taskActionNeeds.js, чтобы раздел
-# обновлял число без запроса. Третья копия правил в колоколе разъехалась бы с
-# ними при первом же изменении — раздел оставлен со своим счётчиком.
-SOURCES = ('wiki_ack', 'lms', 'surveys', 'events', 'four_you')
+# «Задачи» — третья копия правил «задача ждёт вас»: первые две — SQL бейджа
+# (database.py::get_task_action_needs_summary) и клиентские правила раздела
+# (src/components/tasks/taskActionNeeds.js). Долго держались на двух копиях
+# намеренно, но колоколу нужны сами задачи, а не только число. Дрейф копий не
+# падает, а просто расходится числами на экране, поэтому все три сверяются
+# тестами: tests/test_notifications.py::TasksSourceRulesTest и
+# tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
+SOURCES = ('wiki_ack', 'tasks', 'lms', 'surveys', 'events', 'four_you')
 
 # Сколько элементов тянем из одного источника. Колокол — не лента: он говорит
 # «что тебя ждёт», а полный список пользователь смотрит в самом разделе.
@@ -248,8 +250,82 @@ def four_you(cursor, viewer):
     }]
 
 
+# ── Задачи ───────────────────────────────────────────────────────────────────
+# Подписи причин согласованы с ACTION_NEED_META в taskActionNeeds.js.
+_TASK_KIND_BODY = {
+    'overdue': 'Просрочена',
+    'returned': 'Вернули на доработку',
+    'review': 'Ждёт вашей приёмки',
+    'fresh': 'Поручена, работа не начата',
+}
+
+
+def tasks(cursor, viewer):
+    """Задачи, ждущие действия лично зрителя, — правила бейджа сайдбара.
+
+    Категории взаимоисключающие, у задачи ровно одна причина, самая срочная:
+      review   — я поручитель, исполнитель сдал работу и ждёт приёмки;
+      overdue  — я исполнитель, дедлайн прошёл, задача не закрыта;
+      returned — мне вернули на доработку;
+      fresh    — мне поручили, к работе ещё не приступил.
+    Бэклог не считается — это очередь планирования, а не работа. Просмотренные
+    уведомления (task_action_reads) не считаются, пока задачу не тронут снова.
+
+    Время сравниваем часами процесса (%(now)s), а не базы: due_at хранится
+    наивным во времени Алматы, база стоит в UTC — голый CURRENT_TIMESTAMP дал
+    бы сдвиг на 5 часов, ровно как это было с окнами тестов у опросов.
+    """
+    cursor.execute(
+        """
+        SELECT id, subject, due_at, updated_at, kind, COUNT(*) OVER () AS total
+          FROM (
+            SELECT t.id, t.subject, t.due_at, t.updated_at,
+                   CASE
+                       WHEN t.status = 'completed' THEN 'review'
+                       WHEN t.due_at IS NOT NULL AND t.due_at < %(now)s THEN 'overdue'
+                       WHEN t.status = 'returned' THEN 'returned'
+                       ELSE 'fresh'
+                   END AS kind
+              FROM tasks t
+              LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %(user_id)s
+             WHERE (t.status = 'completed'
+                    AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
+                    AND (r.task_id IS NULL OR r.kind <> 'review' OR r.seen_at < t.updated_at))
+                OR (t.assigned_to = %(user_id)s
+                    AND t.is_backlog = FALSE
+                    AND t.status IN ('assigned', 'in_progress', 'returned')
+                    AND ((t.due_at IS NOT NULL AND t.due_at < %(now)s
+                          AND (r.task_id IS NULL OR r.kind <> 'overdue' OR r.seen_at < t.updated_at))
+                         OR (t.status = 'returned' AND (t.due_at IS NULL OR t.due_at >= %(now)s)
+                             AND (r.task_id IS NULL OR r.kind <> 'returned' OR r.seen_at < t.updated_at))
+                         OR (t.status = 'assigned' AND (t.due_at IS NULL OR t.due_at >= %(now)s)
+                             AND (r.task_id IS NULL OR r.kind <> 'fresh' OR r.seen_at < t.updated_at))))
+          ) needs
+         ORDER BY array_position(ARRAY['overdue', 'returned', 'review', 'fresh']::text[], kind),
+                  due_at NULLS LAST, id DESC
+         LIMIT %(limit)s
+        """,
+        {'user_id': viewer['user_id'], 'limit': ITEMS_PER_SOURCE, 'now': _almaty_now()},
+    )
+    rows = cursor.fetchall()
+    total = int(rows[0][5]) if rows else 0
+    return total, [{
+        'source': 'tasks',
+        'id': row[0],
+        'title': row[1] or 'Задача',
+        'body': _TASK_KIND_BODY.get(row[4], ''),
+        # У просрочки «когда» — это СРОК; у остальных — момент, когда задачу
+        # поручили, вернули или сдали (updated_at).
+        'at': _iso(row[2] if row[4] == 'overdue' else row[3]),
+        'view': 'tasks',
+        'target': row[0],
+        'tone': 'warning' if row[4] == 'overdue' else 'default',
+    } for row in rows]
+
+
 _HANDLERS = {
     'wiki_ack': wiki_ack,
+    'tasks': tasks,
     'lms': lms,
     'surveys': surveys,
     'events': events,
