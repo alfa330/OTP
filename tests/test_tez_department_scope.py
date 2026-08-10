@@ -480,11 +480,19 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
         worker = _function_source(BOT_PATH, "sync_oktell_evaluation_calls")
         settings = _function_source(BOT_PATH, "call_distribution_settings_endpoint")
 
+        # Экран стал общим для отделов, но границу отдела по-прежнему держит бэкенд:
+        # выбор отдела централизован в резолвере (глава/СВ прибиты к своему отделу),
+        # а список операторов режется по членам ИМЕННО этого отдела.
+        resolver = _function_source(BOT_PATH, "_call_distribution_resolve_department")
+        run_endpoint = _function_source(BOT_PATH, "call_distribution_run")
+        self.assertIn("_call_distribution_resolve_department(", status)
+        self.assertIn("op_id in department_member_ids", status)
         self.assertIn(
-            "scope_dept = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)",
-            status,
+            "own_dept_id = _department_scope_id_for_requester(requester_id)",
+            resolver,
         )
-        self.assertIn("if scope_member_ids is not None and op_id not in scope_member_ids:", status)
+        self.assertIn("if not _is_global_admin_requester(role, requester_id):", resolver)
+        self.assertIn("_call_distribution_resolve_department(", run_endpoint)
         self.assertIn("department_id=scope_dept", sync_endpoint)
         self.assertIn("def sync_oktell_evaluation_calls(", worker)
         self.assertIn("department_id=None", worker)

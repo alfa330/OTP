@@ -325,6 +325,17 @@ TEZ_BINOTEL_SAMPLE_CAP = _env_int('TEZ_BINOTEL_SAMPLE_CAP', 500, minimum=1, maxi
 # Сколько случайных звонков разрешаем взять за один запрос (СЗоВ и TEZ).
 RANDOM_CALL_MAX_COUNT = _env_int('RANDOM_CALL_MAX_COUNT', 20, minimum=1, maximum=100)
 
+# «Деление звонков» — раздел общий для всех отделов: норма, пул и оценки считаются
+# по НАШИМ таблицам и от телефонии не зависят, поэтому статус видит каждый отдел
+# (глава/СВ — свой, админ переключается селектором). А вот ДОБРАТЬ пул можно только
+# там, где есть источник записей разговоров: СЗоВ живёт в Oktell, ТЭЗ — в Binotel
+# API 4.0. У отдела без источника (напр. Отдел продаж) экран остаётся в режиме
+# просмотра: кнопки запуска нет, звонки попадают в пул руками из журнала.
+CALL_DISTRIBUTION_SOURCE_BY_DEPARTMENT = {
+    OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE: 'oktell',
+    TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE: 'binotel',
+}
+
 if not API_TOKEN:
     raise Exception("Переменная окружения BOT_TOKEN обязательна.")
 
@@ -21936,6 +21947,182 @@ def operator_status_event_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+# === «Деление звонков»: выбор отдела ============================================================
+# Раздел показывает норму/пул/оценки любого отдела, поэтому «какой отдел смотрим»
+# решается в одном месте для статуса и для запуска: глава отдела и СВ прибиты к
+# своему отделу, глобальный админ/супер-админ переключается селектором.
+
+# Состояние фонового прогона распределения по отделам. Живёт в памяти процесса —
+# как и замки синков: приложение поднимается одним waitress-процессом. Прогон Binotel
+# идёт фоном (сканирование месяца по дням — это минута с лишним), поэтому кнопка
+# запуска не держит HTTP-запрос, а фронт дотягивает прогресс из /status.
+CALL_DISTRIBUTION_JOBS = {}
+CALL_DISTRIBUTION_JOBS_LOCK = threading.Lock()
+
+
+def _call_distribution_job_snapshot(department_id):
+    if department_id is None:
+        return None
+    with CALL_DISTRIBUTION_JOBS_LOCK:
+        job = CALL_DISTRIBUTION_JOBS.get(department_id)
+        return dict(job) if job else None
+
+
+def _call_distribution_job_update(department_id, **fields):
+    with CALL_DISTRIBUTION_JOBS_LOCK:
+        job = CALL_DISTRIBUTION_JOBS.setdefault(department_id, {'department_id': department_id})
+        job.update(fields)
+        return dict(job)
+
+
+def _start_binotel_distribution_job(department_id, month, importer_id):
+    """Запускает норма-добор Binotel в фоне. Возвращает (job, started)."""
+    running = _call_distribution_job_snapshot(department_id)
+    if running and running.get('status') == 'running':
+        return running, False
+
+    job = _call_distribution_job_update(
+        department_id,
+        status='running',
+        month=month,
+        started_at=datetime.now().isoformat(),
+        finished_at=None,
+        stage='Читаем звонки Binotel',
+        progress={'done': 0, 'total': 0},
+        result=None,
+        error=None,
+    )
+
+    def _runner():
+        try:
+            result = sync_binotel_evaluation_calls(
+                month=month,
+                triggered_by='manual',
+                force=True,
+                importer_id=importer_id,
+                department_id=department_id,
+                progress=lambda **kw: _call_distribution_job_update(department_id, **kw),
+            )
+            _call_distribution_job_update(
+                department_id,
+                status=result.get('status') or 'success',
+                result=result,
+                error=result.get('error'),
+                reason=result.get('reason'),
+                stage='Готово',
+                finished_at=datetime.now().isoformat(),
+            )
+        except Exception as exc:
+            logging.exception("Binotel eval distribution job failed (department=%s)", department_id)
+            _call_distribution_job_update(
+                department_id,
+                status='failed',
+                error=str(exc),
+                stage='Ошибка',
+                finished_at=datetime.now().isoformat(),
+            )
+
+    threading.Thread(
+        target=_runner,
+        name=f'binotel-distribution-{department_id}',
+        daemon=True,
+    ).start()
+    return job, True
+
+
+def _call_distribution_source_for_code(department_code):
+    """Источник записей разговоров отдела ('oktell' / 'binotel') или None."""
+    return CALL_DISTRIBUTION_SOURCE_BY_DEPARTMENT.get(str(department_code or '').strip().lower())
+
+
+def _call_distribution_operator_rows():
+    """Операторы звонковой модели как [(id, name)] — чат-менеджеры исключены:
+    «Деление звонков» про прослушку разговоров, у чатов свой отбор диалогов."""
+    rows = []
+    for row in (db.get_all_operators() or []):
+        try:
+            op_id = int(row[0])
+        except Exception:
+            continue
+        direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
+        calc = str(row[8] or '').strip().lower() if len(row) > 8 else ''
+        dkey = ' '.join(direction_name.lower().split())
+        if calc == 'chat_manager' or dkey in ('чат менеджер', 'chat manager'):
+            continue
+        rows.append((op_id, str(row[1] or '').strip()))
+    return rows
+
+
+def _call_distribution_department_options(operator_ids):
+    """Отделы экрана + их операторы: ({dept_id: {op_id}}, [option]).
+
+    Отдел попадает сюда, если он активен и в нём есть звонковые операторы. Роль
+    «занимается ли отдел прослушкой» играет has_activity: по модели направления
+    фронт-офисы неотличимы от КЦ (у них тоже calculation_model_code='operator'),
+    поэтому смотрим на факт — есть ли хоть одна оценка звонка или звонок в пуле.
+    Отсекаем по нему только селектор админа: свой отдел глава и СВ видят всегда.
+    """
+    activity_ids = db.get_departments_with_call_evaluation_activity() or set()
+    members_by_department = {}
+    options = []
+    for dept in (db.get_departments() or []):
+        if not dept.get('is_active', True):
+            continue
+        dept_id = dept.get('id')
+        if dept_id is None:
+            continue
+        dept_operator_ids = set(operator_ids) & db.get_department_member_ids(dept_id)
+        if not dept_operator_ids:
+            continue
+        members_by_department[dept_id] = dept_operator_ids
+        options.append({
+            'id': dept_id,
+            'code': dept.get('code'),
+            'name': dept.get('name'),
+            'source': _call_distribution_source_for_code(dept.get('code')),
+            'has_activity': dept_id in activity_ids,
+        })
+    return members_by_department, options
+
+
+def _call_distribution_department_id_by_code(department_code):
+    code = str(department_code or '').strip().lower()
+    return next(
+        (d.get('id') for d in (db.get_departments() or [])
+         if str(d.get('code') or '').strip().lower() == code),
+        None
+    )
+
+
+def _call_distribution_resolve_department(requester_id, role, requested_department_id, options):
+    """Какой отдел показываем/обрабатываем. Возвращает (department_id, options).
+
+    Глобальный админ выбирает любой отдел из options (по умолчанию — СЗоВ, как
+    было до появления селектора). Глава отдела и СВ видят ТОЛЬКО свой отдел:
+    параметр запроса игнорируется, а не отдаёт 403, — селектора у них нет, и
+    ссылка с чужим department_id должна открывать их собственный отдел.
+    """
+    if not _is_global_admin_requester(role, requester_id):
+        own_dept_id = _department_scope_id_for_requester(requester_id)
+        return own_dept_id, [o for o in options if o['id'] == own_dept_id]
+
+    # Селектор админа показывает только отделы, которые звонки слушают: с
+    # телефонией (добор пула) или с уже накопленными оценками (ОП оценивает
+    # вручную из журнала). Фронт-офисы и маркетинг в список не лезут.
+    options = [o for o in options if o.get('source') or o.get('has_activity')]
+    allowed_ids = {o['id'] for o in options}
+    try:
+        requested = int(requested_department_id) if requested_department_id is not None else None
+    except (TypeError, ValueError):
+        requested = None
+    if requested in allowed_ids:
+        return requested, options
+    default_id = _call_distribution_department_id_by_code(OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+    if default_id not in allowed_ids:
+        default_id = options[0]['id'] if options else None
+    return default_id, options
+
+
 @app.route('/api/call_distribution/status', methods=['GET', 'OPTIONS'])
 @require_api_key
 def call_distribution_status():
@@ -21959,40 +22146,21 @@ def call_distribution_status():
         if not re.match(r'^\d{4}-\d{2}$', str(month)):
             return jsonify({"error": "month must be in YYYY-MM format"}), 400
 
-        # Изоляция отделов: глава отдела и СВ видят только операторов своего отдела;
-        # глобальный админ/супер-админ — всех.
-        scope_dept = None if _is_global_admin_requester(role, requester_id) else _department_scope_id_for_requester(requester_id)
-        scope_member_ids = db.get_department_member_ids(scope_dept) if scope_dept is not None else None
+        # Изоляция отделов: показываем ровно один отдел. Глава отдела и СВ — свой,
+        # глобальный админ — выбранный в селекторе (по умолчанию СЗоВ). Раньше экран
+        # был прибит к СЗоВ даже для супер-админа, потому что пул наполнялся только из
+        # Oktell; теперь источник — свойство отдела, а норма/оценки считаются по нашим
+        # таблицам и есть у любого отдела.
+        operator_rows = _call_distribution_operator_rows()
+        members_by_department, options = _call_distribution_department_options(
+            {op_id for op_id, _ in operator_rows})
+        department_id, options = _call_distribution_resolve_department(
+            requester_id, role, request.args.get('department_id'), options)
+        department_member_ids = members_by_department.get(department_id) or set()
+        department = next((o for o in options if o['id'] == department_id), None)
+        source = department.get('source') if department else None
 
-        # Деление звонков питается из Oktell, а Oktell обслуживает только отдел СЗоВ —
-        # поэтому показываем ТОЛЬКО операторов этого отдела (даже супер-админу), иначе в
-        # норму/оценки/пул затекают другие отделы (Отдел продаж, Тез КЦ), которых Oktell
-        # не касается.
-        oktell_dept_id = next(
-            (d.get('id') for d in (db.get_departments() or [])
-             if str(d.get('code') or '').strip().lower() == OKTELL_CALL_DISTRIBUTION_DEPARTMENT_CODE),
-            None
-        )
-        oktell_member_ids = db.get_department_member_ids(oktell_dept_id) if oktell_dept_id else set()
-
-        # операторская модель (чат-менеджеры исключены)
-        ops = []
-        for row in (db.get_all_operators() or []):
-            try:
-                op_id = int(row[0])
-            except Exception:
-                continue
-            if op_id not in oktell_member_ids:
-                continue
-            if scope_member_ids is not None and op_id not in scope_member_ids:
-                continue
-            name = str(row[1] or '').strip()
-            direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
-            calc = str(row[8] or '').strip().lower() if len(row) > 8 else ''
-            dkey = ' '.join(direction_name.lower().split())
-            if calc == 'chat_manager' or dkey in ('чат менеджер', 'chat manager'):
-                continue
-            ops.append((op_id, name))
+        ops = [(op_id, name) for op_id, name in operator_rows if op_id in department_member_ids]
 
         op_ids = [o[0] for o in ops]
         targets = db.get_operator_call_evaluation_targets_for_month(op_ids, month) or {}
@@ -22033,11 +22201,120 @@ def call_distribution_status():
             "month": month,
             "operators": operators,
             "settings": db.get_call_distribution_settings(),
-            "can_edit": bool(is_admin or is_head)
+            "can_edit": bool(is_admin or is_head),
+            # Отдел, который сейчас на экране, и что с ним можно делать. departments
+            # непустой список из >1 элемента только у глобального админа — по нему
+            # фронт и решает, рисовать ли селектор.
+            "department_id": department_id,
+            "department_code": (department or {}).get('code'),
+            "department_name": (department or {}).get('name'),
+            "departments": options,
+            "source": source,
+            "can_run": bool((is_admin or is_head) and source),
+            "run_job": _call_distribution_job_snapshot(department_id),
         }), 200
     except Exception as e:
         logging.error(f"call_distribution status error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/call_distribution/run', methods=['POST', 'OPTIONS'])
+@require_api_key
+def call_distribution_run():
+    """Запуск добора пула до нормы для ВЫБРАННОГО отдела («Деление звонков»).
+
+    Куда идти за звонками, решает отдел, а не эндпоинт: СЗоВ обслуживает Oktell
+    (синхронно, вместе с аудио — так работало и раньше), ТЭЗ — Binotel (фоном:
+    месяц читается по дням, это минута с лишним, а запись докачивается после).
+    Отдел без телефонии отвечает 400 — у него раздел только на просмотр.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not (_is_admin_role(role) or _headed_department_id(requester_id) is not None):
+            return jsonify({"error": "Только администратор или глава отдела может запускать распределение"}), 403
+
+        payload = request.get_json(silent=True) or {}
+        month = payload.get('month') or datetime.now().strftime('%Y-%m')
+        if not re.match(r'^\d{4}-\d{2}$', str(month)):
+            return jsonify({"error": "month must be in YYYY-MM format"}), 400
+
+        _members, options = _call_distribution_department_options(
+            {op_id for op_id, _ in _call_distribution_operator_rows()})
+        department_id, options = _call_distribution_resolve_department(
+            requester_id, role, payload.get('department_id'), options)
+        department = next((o for o in options if o['id'] == department_id), None)
+        if department is None:
+            return jsonify({"error": "Отдел не найден или в нём нет звонковых операторов"}), 404
+        source = department.get('source')
+        if not source:
+            return jsonify({
+                "error": f"У отдела «{department.get('name')}» нет интеграции с телефонией: "
+                         "звонки попадают в пул вручную из журнала оценок",
+                "department_id": department_id,
+            }), 400
+
+        if source == 'binotel':
+            job, started = _start_binotel_distribution_job(department_id, month, requester_id)
+            if not started:
+                return jsonify({
+                    "status": "running",
+                    "message": "Распределение уже выполняется",
+                    "job": job,
+                }), 409
+            return jsonify({
+                "status": "started",
+                "message": "Распределение запущено, звонки появятся по мере чтения месяца",
+                "job": job,
+                "source": source,
+                "department_id": department_id,
+            }), 202
+
+        # --- Oktell / СЗоВ: синхронный прогон, как и до появления селектора отделов ---
+        result = sync_oktell_evaluation_calls(
+            month=month,
+            triggered_by='manual',
+            force=True,
+            importer_id=requester_id,
+            department_id=department_id,
+        )
+        status = result.get('status')
+        if status == 'skipped':
+            reason = result.get('reason')
+            if reason == 'missing_token':
+                return jsonify({"error": "OKTELL_IP/OKTELL_API_TOKEN не задан", "sync": result}), 400
+            if reason == 'locked':
+                return jsonify({
+                    "error": "Синхронизация уже выполняется. Повторите через несколько секунд.",
+                    "sync": result
+                }), 429
+            return jsonify({"error": f"Синхронизация пропущена: {reason or 'unknown'}", "sync": result}), 400
+        if status == 'failed':
+            return jsonify({"error": result.get('error') or "Распределение не выполнено", "sync": result}), 502
+        try:
+            result["call_end_party_backfill"] = backfill_oktell_call_end_parties(
+                batch_size=500, max_batches=8)
+        except Exception:
+            logging.exception("Manual Oktell call-end-party backfill failed")
+            result["call_end_party_backfill"] = {"status": "failed", "updated": 0}
+
+        return jsonify({
+            "status": "success",
+            "message": "Пул звонков на оценку синхронизирован из Oktell",
+            "sync": result,
+            "source": source,
+            "department_id": department_id,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"call_distribution run error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route('/api/call_evaluation', methods=['POST'])
 @require_api_key
@@ -32216,6 +32493,270 @@ def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, trigg
     finally:
         try:
             OKTELL_EVAL_SYNC_LOCK.release()
+        except Exception:
+            pass
+
+
+# === Binotel: распределение звонков на оценку («Деление звонков» для ТЭЗ) =======================
+# Зеркало норма-добора Oktell для отдела, который живёт в Binotel API 4.0: каждому
+# оператору добираем пул imported_calls до NORM(op, месяц) случайными записанными
+# звонками этого месяца. Три отличия от ветки Oktell:
+#   * список звонков берём ПО ДНЯМ КОМПАНИИ (stats/list-of-calls-for-period) — один
+#     запрос на день (~1,8 с, 500–1200 звонков) против пяти 7-дневных окон на КАЖДОГО
+#     оператора: цена месяца перестаёт зависеть от числа операторов;
+#   * оператора определяем по ИМЕНИ сотрудника в звонке, а не по внутреннему номеру:
+#     один sip со временем закрепляют за разными людьми (см. _binotel_random_call);
+#   * запись разговора не блокирует импорт. Oktell пропускает звонки без аудио, а тут
+#     mp3 докачивается фоном и по требованию из аудио-эндпоинта — он смотрит на notes,
+#     поэтому суффикс ':binotel' обязателен.
+BINOTEL_EVAL_SYNC_LOCK = threading.Lock()
+
+
+def _binotel_eval_month_days(month_str):
+    """Дни месяца для сканирования: с 1-го числа по сегодня включительно.
+    Будущие дни не запрашиваем — это заведомо пустой ответ и лишняя секунда лимита."""
+    y, mo = int(month_str[:4]), int(month_str[5:7])
+    today = datetime.now(ZoneInfo('Asia/Almaty')).date()
+    days = []
+    for day_num in range(1, calendar.monthrange(y, mo)[1] + 1):
+        day = dt_date(y, mo, day_num)
+        if day > today:
+            break
+        days.append(day)
+    return days
+
+
+def _binotel_eval_call_month(datetime_raw):
+    """'dd.mm.YYYY HH:MM:SS' -> 'YYYY-MM' (None, если не разобрали)."""
+    for fmt in ('%d.%m.%Y %H:%M:%S', '%d.%m.%Y %H:%M'):
+        try:
+            return datetime.strptime(str(datetime_raw), fmt).strftime('%Y-%m')
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _binotel_eval_call_is_recorded(call, binotel_module):
+    """Отвеченный разговор с записью: как в «Случайном звонке» — доверяем
+    recordingStatus, а если поля нет, падаем на эвристику по disposition."""
+    if int(call.get('billsec') or 0) <= 0 or not call.get('general_call_id'):
+        return False
+    rec_status = call.get('recording_status') or ''
+    if rec_status:
+        return rec_status in binotel_module.RECORDED_STATUSES
+    disposition = call.get('disposition')
+    return not disposition or disposition in binotel_module.RECORDED_DISPOSITIONS
+
+
+def _binotel_store_records_sequential(items):
+    """Докачка записей пачки распределённых звонков ОДНИМ потоком.
+
+    Binotel держит минимальный зазор между запросами под общим замком, поэтому
+    поток на звонок (как в «Случайном звонке», где звонков единицы) на пачке в
+    десятки записей только копил бы ожидание в этом замке."""
+    for imported_id, general_call_id in items:
+        _binotel_store_record_async(imported_id, general_call_id)
+
+
+def sync_binotel_evaluation_calls(month=None, triggered_by='scheduler', force=False,
+                                  importer_id=None, department_id=None, progress=None):
+    """Норма-ориентированное распределение звонков на оценку из Binotel.
+
+    department_id — отдел, чьим операторам добираем пул (None -> отдел ТЭЗ, т.к.
+    Binotel обслуживает именно его). force=True игнорирует флаг enabled в настройках.
+    progress — колбэк фонового прогона (stage/progress уходят в состояние job'а).
+    """
+    import tez_binotel_calls
+
+    def _report(**fields):
+        if progress:
+            try:
+                progress(**fields)
+            except Exception:
+                logging.exception("binotel distribution: progress callback failed")
+
+    started = time.time()
+    cfg = tez_binotel_calls.get_config()
+    if not tez_binotel_calls.api_ready(cfg):
+        return {'status': 'skipped', 'reason': 'missing_token', 'triggered_by': triggered_by}
+
+    settings = db.get_call_distribution_settings()
+    if not force and not settings.get('enabled', True):
+        logging.info("Binotel eval distribution skipped: disabled")
+        return {'status': 'skipped', 'reason': 'disabled', 'triggered_by': triggered_by}
+    min_d = int(settings.get('min_duration_sec') or 0)
+    max_d = int(settings.get('max_duration_sec') or 0)
+
+    months = _oktell_eval_active_months(month)
+
+    if department_id is None:
+        department_id = _call_distribution_department_id_by_code(TEZ_CALL_DISTRIBUTION_DEPARTMENT_CODE)
+    allowed_operator_ids = db.get_department_member_ids(department_id) if department_id else set()
+    if not allowed_operator_ids:
+        return {'status': 'skipped', 'reason': 'no_department_members',
+                'triggered_by': triggered_by, 'months': months}
+
+    if not BINOTEL_EVAL_SYNC_LOCK.acquire(blocking=False):
+        return {'status': 'skipped', 'reason': 'locked', 'triggered_by': triggered_by}
+
+    try:
+        ops = [(op_id, name) for op_id, name in _call_distribution_operator_rows()
+               if op_id in allowed_operator_ids]
+        name_by_op = dict(ops)
+        op_ids = [op_id for op_id, _ in ops]
+        operator_lookup = _status_import_build_operator_lookup(exclude_chat_managers=True)
+        client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
+
+        per_month = []
+        grand_added = 0
+        grand_ops = 0
+        grand_audio_pending = 0
+        for mstr in months:
+            # 1) кому и сколько добирать. Считаем ДО обращения к Binotel: если норма
+            # у всех закрыта (обычный случай ночного прогона), месяц не стоит
+            # ни одного запроса к телефонии.
+            targets = db.get_operator_call_evaluation_targets_for_month(op_ids, mstr) or {}
+            pool_counts = db.get_imported_calls_status_counts_by_operator(mstr)
+            journal = db.get_operator_score_aggregates_for_month(mstr, op_ids) or {}
+            need_by_op = {}
+            for op_id in op_ids:
+                norm = int((targets.get(op_id) or {}).get('required_calls') or 0)
+                pending = int((pool_counts.get(op_id) or {}).get('not_evaluated') or 0)
+                evaluated_real = int((journal.get(op_id) or {}).get('call_count') or 0)
+                need = max(0, norm - (evaluated_real + pending))
+                if need > 0:
+                    need_by_op[op_id] = need
+            if not need_by_op:
+                per_month.append({'month': mstr, 'operators': 0, 'added': 0,
+                                  'audio_pending': 0, 'days_scanned': 0, 'days_failed': 0})
+                continue
+
+            # 2) кандидаты: проходим месяц по дням и раскладываем звонки по операторам
+            days = _binotel_eval_month_days(mstr)
+            buckets = {}
+            name_cache = {}
+            days_failed = 0
+            for idx, day in enumerate(days, start=1):
+                _report(stage=f'Binotel: {day.isoformat()}',
+                        progress={'done': idx, 'total': len(days)})
+                try:
+                    day_calls = client.list_calls_for_day(day)
+                except Exception:
+                    logging.exception("binotel distribution: день %s не прочитан", day)
+                    days_failed += 1
+                    continue
+                for call in day_calls:
+                    if not _binotel_eval_call_is_recorded(call, tez_binotel_calls):
+                        continue
+                    billsec = int(call.get('billsec') or 0)
+                    if min_d and billsec < min_d:
+                        continue
+                    if max_d and billsec > max_d:
+                        continue
+                    employee_name = str(call.get('employee_name') or '').strip()
+                    if not employee_name:
+                        continue
+                    if employee_name not in name_cache:
+                        matches = _status_import_resolve_operator_matches(employee_name, operator_lookup)
+                        name_cache[employee_name] = int(matches[0]['id']) if len(matches) == 1 else None
+                    op_id = name_cache[employee_name]
+                    if op_id is None or op_id not in need_by_op:
+                        continue
+                    buckets.setdefault(op_id, []).append(call)
+
+            # 3) случайный отбор до нормы (уже лежащие в пуле звонки не дублируем)
+            _report(stage='Записываем звонки в пул')
+            existing = db.get_imported_call_keys_for_month(mstr)
+            created = []
+            month_added = 0
+            ready_operators = 0
+            for op_id, need in need_by_op.items():
+                bucket = buckets.get(op_id) or []
+                if not bucket:
+                    continue
+                random.shuffle(bucket)
+                already = set(existing.get(op_id) or set())
+                taken = 0
+                for call in bucket:
+                    if taken >= need:
+                        break
+                    general_call_id = str(call.get('general_call_id'))
+                    if general_call_id in already:
+                        continue
+                    datetime_raw = client.format_dt(call.get('start_time'))
+                    # День берём по TZ панели, но звонок на стыке месяцев может
+                    # уехать в соседний месяц — такие в пул этого месяца не кладём.
+                    if _binotel_eval_call_month(datetime_raw) != mstr:
+                        continue
+                    already.add(general_call_id)
+                    new_id = db.import_single_random_call(
+                        operator_id=op_id,
+                        operator_name=name_by_op.get(op_id) or '',
+                        external_id=general_call_id,
+                        month=mstr,
+                        datetime_raw=datetime_raw,
+                        phone=call.get('external_number'),
+                        duration_sec=int(call.get('billsec') or 0),
+                        notes=f"distribution:{importer_id or 'auto'}:binotel",
+                        call_end_party=call.get('call_end_party') or 'unknown',
+                    )
+                    if new_id:
+                        created.append((new_id, general_call_id))
+                        taken += 1
+                if taken:
+                    month_added += taken
+                    ready_operators += 1
+
+            if created:
+                threading.Thread(
+                    target=_binotel_store_records_sequential,
+                    args=(list(created),),
+                    name=f'binotel-distribution-audio-{mstr}',
+                    daemon=True,
+                ).start()
+
+            grand_added += month_added
+            grand_ops += ready_operators
+            grand_audio_pending += len(created)
+            per_month.append({
+                'month': mstr,
+                'operators': ready_operators,
+                'added': month_added,
+                'audio_pending': len(created),
+                'days_scanned': len(days) - days_failed,
+                'days_failed': days_failed,
+            })
+            logging.info(
+                "Binotel eval distribution month=%s operators=%s added=%s days_failed=%s",
+                mstr, ready_operators, month_added, days_failed,
+            )
+
+        return {
+            'status': 'success',
+            'source': 'binotel',
+            'triggered_by': triggered_by,
+            'months': months,
+            'operators': grand_ops,
+            'added': grand_added,
+            'audio_pending': grand_audio_pending,
+            'per_month': per_month,
+            'min_duration_sec': min_d,
+            'max_duration_sec': max_d,
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    except Exception as exc:
+        logging.exception("Binotel eval distribution failed")
+        return {
+            'status': 'failed',
+            'source': 'binotel',
+            'triggered_by': triggered_by,
+            'months': months,
+            'error': str(exc),
+            'elapsed_seconds': round(time.time() - started, 2),
+        }
+    finally:
+        try:
+            BINOTEL_EVAL_SYNC_LOCK.release()
         except Exception:
             pass
 
@@ -48492,6 +49033,17 @@ if __name__ == '__main__':
             logging.info(f"tez_status_sync result: {summary}")
         except Exception as e:
             logging.exception(f"Error running tez_status_sync_job: {e}")
+        # Норма прослушки зависит от часов, поэтому пул ТЭЗ добираем ПОСЛЕ импорта
+        # статусов — тем же порядком, что и у СЗоВ после синка Oktell.
+        try:
+            loop = asyncio.get_event_loop()
+            dist = await loop.run_in_executor(
+                executor_pool,
+                lambda: sync_binotel_evaluation_calls(triggered_by='scheduler-after-status'),
+            )
+            logging.info("Post-status TEZ eval distribution: %s", (dist or {}).get('status'))
+        except Exception:
+            logging.exception("Post-status TEZ eval distribution failed")
 
     async def tez_op_productivity_sync_job():
         # Отдельный от panel-status job сбор дневной аналитики звонков ОП через

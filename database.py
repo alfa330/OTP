@@ -13937,6 +13937,30 @@ class Database:
         sip = (str(r[0]).strip() if r and r[0] is not None else "")
         return sip or None
 
+    def get_departments_with_call_evaluation_activity(self) -> set:
+        """Отделы, где реально слушают звонки: есть хоть одна оценка в журнале или
+        звонок в пуле распределения.
+
+        Нужно селектору «Деления звонков»: отдел без телефонии всё равно попадает
+        на экран (ОП оценивают звонки руками из журнала), а отдел, который звонки
+        вообще не слушает (фронт-офисы, маркетинг), — не попадает, хотя формально
+        его сотрудники заведены с ролью оператора."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT department_id FROM (
+                    SELECT u.department_id
+                    FROM calls c
+                    JOIN users u ON u.id = c.operator_id
+                    WHERE c.is_draft = FALSE AND u.department_id IS NOT NULL
+                    UNION
+                    SELECT u.department_id
+                    FROM imported_calls ic
+                    JOIN users u ON u.id = ic.operator_id
+                    WHERE u.department_id IS NOT NULL
+                ) t
+            """)
+            return {r[0] for r in cursor.fetchall() if r[0] is not None}
+
     def get_department_member_ids(self, department_id):
         """Множество id пользователей, принадлежащих отделу (для скоупа главы)."""
         if not department_id:

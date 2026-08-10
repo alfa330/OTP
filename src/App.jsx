@@ -9205,15 +9205,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [cdRunning, setCdRunning] = useState(false);
             const [cdError, setCdError] = useState('');
             const [cdRunResult, setCdRunResult] = useState(null);
+            // Отдел на экране: глава/СВ видят только свой (селектор не приходит),
+            // админ переключается — бэкенд отдаёт список отделов со звонковыми операторами.
+            const [cdDepartments, setCdDepartments] = useState([]);
+            const [cdDeptId, setCdDeptId] = useState(null);
+            const [cdSource, setCdSource] = useState(null);
+            const [cdCanRun, setCdCanRun] = useState(false);
+            const [cdJob, setCdJob] = useState(null);
             const cdToast = (m, t) => { try { (typeof showToast === 'function' ? showToast : fallbackToast)(m, t); } catch (_) {} };
             const cdHeaders = () => withAccessTokenHeader(user?.id ? { 'X-User-Id': user.id } : {});
-            const loadCdStatus = async (mn = selectedMonth) => {
+            const loadCdStatus = async (mn = selectedMonth, deptId = cdDeptId) => {
                 if (!user?.id || typeof axios === 'undefined') return;
                 setCdLoading(true); setCdError('');
                 try {
-                    const r = await axios.get(`${API_BASE_URL}/api/call_distribution/status?month=${encodeURIComponent(mn)}`, { headers: cdHeaders() });
+                    const q = `month=${encodeURIComponent(mn)}` + (deptId ? `&department_id=${encodeURIComponent(deptId)}` : '');
+                    const r = await axios.get(`${API_BASE_URL}/api/call_distribution/status?${q}`, { headers: cdHeaders() });
                     const d = r.data || {};
                     setCdRows(Array.isArray(d.operators) ? d.operators : []);
+                    setCdDepartments(Array.isArray(d.departments) ? d.departments : []);
+                    setCdDeptId(d.department_id ?? null);
+                    setCdSource(d.source ?? null);
+                    setCdCanRun(Boolean(d.can_run));
+                    setCdJob(d.run_job || null);
                     if (d.settings) {
                         setCdSettings(d.settings);
                         setCdDraft({
@@ -9251,10 +9264,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             };
             const runCdDistribution = async () => {
-                if (!cdCanEdit || cdRunning) return;
+                if (!cdCanRun || cdRunning) return;
                 setCdRunning(true); setCdError(''); setCdRunResult(null);
                 try {
-                    const r = await axios.post(`${API_BASE_URL}/api/eval_calls/sync_oktell`, { month: selectedMonth }, { headers: cdHeaders() });
+                    const body = { month: selectedMonth, department_id: cdDeptId || undefined };
+                    const r = await axios.post(`${API_BASE_URL}/api/call_distribution/run`, body, { headers: cdHeaders() });
+                    // Binotel отвечает 202: прогон идёт фоном, прогресс дотягиваем из /status.
+                    if (r.data?.status === 'started') {
+                        setCdJob(r.data?.job || null);
+                        cdToast(r.data?.message || 'Распределение запущено', 'success');
+                        await loadCdStatus(selectedMonth, cdDeptId);
+                        return;
+                    }
                     const syncResult = r.data?.sync || null;
                     setCdRunResult(syncResult);
                     const audioSkipped = Number(syncResult?.audio_missing || 0) + Number(syncResult?.audio_failed || 0);
@@ -9264,7 +9285,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             : (r.data?.message || 'Распределение выполнено с аудио'),
                         audioSkipped > 0 ? 'warning' : 'success'
                     );
-                    await loadCdStatus(selectedMonth);
+                    await loadCdStatus(selectedMonth, cdDeptId);
                 } catch (e) {
                     const m = e?.response?.data?.error || 'Не удалось запустить распределение';
                     setCdError(m); cdToast(m, 'error');
@@ -9272,7 +9293,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setCdRunning(false);
                 }
             };
-            useEffect(() => { loadCdStatus(selectedMonth); }, [selectedMonth, user?.id]);
+            const changeCdDepartment = (deptId) => {
+                const id = Number(deptId) || null;
+                setCdDeptId(id);
+                setCdRunResult(null);
+                loadCdStatus(selectedMonth, id);
+            };
+            useEffect(() => { loadCdStatus(selectedMonth, cdDeptId); }, [selectedMonth, user?.id]);
+            // Фоновый прогон Binotel: пока job жив, подтягиваем статус — так в таблице
+            // сами появляются добранные звонки, а в карточке запуска идёт прогресс по дням.
+            const cdJobRunning = cdJob?.status === 'running';
+            useEffect(() => {
+                if (!cdJobRunning) return undefined;
+                const timer = setInterval(() => { loadCdStatus(selectedMonth, cdDeptId); }, 4000);
+                return () => clearInterval(timer);
+            }, [cdJobRunning, selectedMonth, cdDeptId, user?.id]);
 
             // --- helper / logic functions are kept unchanged (omitted here for brevity in the file preview) ---
             // To keep the canvas file compact but functional I've inlined the original functions from your
@@ -10360,12 +10395,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const totalInsufficientCount = insufficientOperators.length;
             const hasActiveFilters = !selectedStatuses.includes('all') || !selectedDirections.includes('all') || !selectedHireMonths.includes('all') || onlyWithCsv;
 
-            // ====== Новый экран «Деление звонков» (Oktell, норма-распределение) ======
+            // ====== Новый экран «Деление звонков» (норма-распределение по отделам) ======
             const cdTotals = cdRows.reduce((a, r) => ({
                 norm: a.norm + (Number(r.norm) || 0),
                 pool: a.pool + (Number(r.pool_display ?? r.coverage ?? r.in_pool) || 0),
                 ev: a.ev + (Number(r.evaluated) || 0),
             }), { norm: 0, pool: 0, ev: 0 });
+            const cdSourceLabel = cdSource === 'oktell' ? 'Oktell' : cdSource === 'binotel' ? 'Binotel' : null;
+            const cdDeptName = (cdDepartments.find((d) => d.id === cdDeptId) || {}).name || '';
+            const cdJobProgress = cdJob?.progress || null;
+            const cdJobPct = cdJobProgress?.total ? Math.min(100, Math.round((cdJobProgress.done / cdJobProgress.total) * 100)) : 0;
             const cdUpdatedAtLabel = (() => {
                 const t = cdSettings?.updated_at;
                 if (!t) return '';
@@ -10384,10 +10423,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       </div>
                       <div>
                         <h3 className="text-xl font-bold tracking-tight text-slate-900">Деление звонков</h3>
-                        <p className="text-[13px] text-slate-500">Случайный отбор звонков на оценку по норме прослушки · Oktell</p>
+                        <p className="text-[13px] text-slate-500">
+                          Случайный отбор звонков на оценку по норме прослушки
+                          {cdDeptName ? ` · ${cdDeptName}` : ''}
+                          {cdSourceLabel ? ` · ${cdSourceLabel}` : ''}
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {cdDepartments.length > 1 && (
+                        <select
+                          value={cdDeptId || ''}
+                          onChange={(e) => changeCdDepartment(e.target.value)}
+                          disabled={cdLoading}
+                          className="h-10 rounded-xl border border-slate-200 bg-white/80 px-3 text-sm font-medium text-slate-700 shadow-sm outline-none backdrop-blur transition focus:border-blue-300 focus:ring-4 focus:ring-blue-100 disabled:opacity-60"
+                        >
+                          {cdDepartments.map((d) => (
+                            <option key={d.id} value={d.id}>{d.name}</option>
+                          ))}
+                        </select>
+                      )}
                       <select
                         value={selectedMonth}
                         onChange={(e) => setSelectedMonth(e.target.value)}
@@ -10396,7 +10451,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         {getMonthOptions()}
                       </select>
                       <button
-                        onClick={() => loadCdStatus(selectedMonth)}
+                        onClick={() => loadCdStatus(selectedMonth, cdDeptId)}
                         disabled={cdLoading}
                         className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white/80 px-3.5 text-sm font-semibold text-slate-700 shadow-sm backdrop-blur transition hover:bg-white disabled:opacity-60"
                       >
@@ -10429,7 +10484,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
                           <FaIcon className="fa-solid fa-sliders text-sm" />
                         </span>
-                        <h4 className="text-sm font-semibold text-slate-900">Параметры отбора</h4>
+                        <div>
+                          <h4 className="text-sm font-semibold text-slate-900">Параметры отбора</h4>
+                          <div className="text-[11px] text-slate-400">Общие для всех отделов</div>
+                        </div>
                       </div>
 
                       <div className="space-y-4">
@@ -10500,7 +10558,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       </div>
 
                       <p className="text-[13px] leading-5 text-slate-500">
-                        Доберёт пул каждого оператора до его нормы за <span className="font-semibold text-slate-700">{selectedMonth}</span> случайными записанными звонками. Уже распределённые и оценённые звонки не дублируются.
+                        {cdSource
+                          ? (<>Доберёт пул каждого оператора до его нормы за <span className="font-semibold text-slate-700">{selectedMonth}</span> случайными записанными звонками из {cdSourceLabel}. Уже распределённые и оценённые звонки не дублируются.</>)
+                          : (<>У отдела {cdDeptName ? <span className="font-semibold text-slate-700">{cdDeptName}</span> : 'без интеграции с телефонией'} нет источника записей разговоров: звонки попадают в пул вручную — кнопкой «Случайный звонок» в журнале оценок. Норма и покрытие ниже считаются как обычно.</>)}
                       </p>
 
                       <div className="mt-3 grid grid-cols-3 gap-2">
@@ -10518,15 +10578,62 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </div>
                       </div>
 
-                      {cdCanEdit && (
+                      {cdCanRun && (
                         <button
                           onClick={runCdDistribution}
-                          disabled={cdRunning || cdLoading}
+                          disabled={cdRunning || cdLoading || cdJobRunning}
                           className="mt-4 inline-flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:from-blue-700 hover:to-indigo-700 disabled:opacity-60"
                         >
-                          <FaIcon className={`fa-solid ${cdRunning ? 'fa-spinner fa-spin' : 'fa-shuffle'}`} />
-                          {cdRunning ? 'Получаем аудио по очереди…' : 'Запустить распределение'}
+                          <FaIcon className={`fa-solid ${cdRunning || cdJobRunning ? 'fa-spinner fa-spin' : 'fa-shuffle'}`} />
+                          {cdJobRunning
+                            ? 'Распределение идёт…'
+                            : cdRunning
+                                ? (cdSource === 'binotel' ? 'Запускаем…' : 'Получаем аудио по очереди…')
+                                : 'Запустить распределение'}
                         </button>
+                      )}
+
+                      {/* Прогресс фонового прогона Binotel: месяц читается по дням. */}
+                      {cdJobRunning && (
+                        <div className="mt-3 rounded-2xl border border-blue-100 bg-blue-50 px-3.5 py-2.5 text-[13px] text-blue-700">
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{cdJob?.stage || 'Идёт распределение'}</span>
+                            {cdJobProgress?.total ? (
+                              <span className="tabular-nums font-semibold">{cdJobProgress.done} / {cdJobProgress.total}</span>
+                            ) : null}
+                          </div>
+                          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-blue-100">
+                            <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${cdJobPct}%` }} />
+                          </div>
+                        </div>
+                      )}
+
+                      {!cdJobRunning && cdJob?.status === 'success' && cdJob?.result && (
+                        <div className="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-3.5 py-2.5 text-[13px] text-emerald-700">
+                          Добавлено <b>{cdJob.result.added ?? 0}</b> звонков для <b>{cdJob.result.operators ?? 0}</b> операторов
+                          {Array.isArray(cdJob.result.months) && cdJob.result.months.length ? ` (${cdJob.result.months.join(', ')})` : ''}.
+                          {Number(cdJob.result.audio_pending || 0) > 0
+                            ? <> Записи докачиваются: <b>{cdJob.result.audio_pending}</b>.</>
+                            : null}
+                        </div>
+                      )}
+
+                      {/* Прогон мог не состояться: показываем причину, а не пустой экран. */}
+                      {!cdJobRunning && cdJob?.status === 'skipped' && (
+                        <div className="mt-3 rounded-2xl border border-amber-100 bg-amber-50 px-3.5 py-2.5 text-[13px] text-amber-700">
+                          Распределение не запускалось: {({
+                            missing_token: 'интеграция с Binotel не настроена',
+                            disabled: 'автораспределение выключено в параметрах отбора',
+                            locked: 'предыдущий прогон ещё идёт',
+                            no_department_members: 'в отделе нет операторов',
+                          })[cdJob.reason] || cdJob.reason || 'причина не указана'}.
+                        </div>
+                      )}
+
+                      {!cdJobRunning && (cdJob?.status === 'failed' || cdJob?.error) && (
+                        <div className="mt-3 rounded-2xl border border-rose-100 bg-rose-50 px-3.5 py-2.5 text-[13px] text-rose-700">
+                          Распределение не выполнено: {cdJob.error || 'неизвестная ошибка'}
+                        </div>
                       )}
 
                       {cdRunResult && (
