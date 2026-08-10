@@ -240,9 +240,15 @@ def register(bp, wiki_route, db, log_ip):
             result = ai_answer.compose(
                 question, found['rows'], ai_providers.generate,
                 history=history,
-                # После своего же уточняющего вопроса переспрашивать нельзя —
-                # разговор ходил бы по кругу.
-                allow_clarify=not after_clarify)
+                # Переспрашивать можно только у ХОЛОДНОГО короткого вопроса.
+                # Два случая, когда нельзя:
+                #   * предыдущая реплика помощника сама была уточнением — иначе
+                #     разговор ходит по кругу;
+                #   * вопрос короткий, но это продолжение темы (запрос обогащён
+                #     предыдущим). Гейт видит только длину текущей реплики и
+                #     считал двусмысленным «а для новичков» после ответа про
+                #     байги, хотя контекст его однозначно определяет.
+                allow_clarify=not after_clarify and search_query == question)
         except ai_providers.ProviderError as error:
             return jsonify({'error': 'ИИ недоступен',
                             'detail': str(error)[:300]}), 503
