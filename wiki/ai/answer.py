@@ -351,8 +351,18 @@ def ack_notice(sources):
     return [_ACK_NOTE.format(title=title) for title in titles]
 
 
-def compose(question, chunks, generate_fn):
-    """Собрать ответ. generate_fn(system, user) -> (текст, метаданные).
+def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
+    """Собрать ответ. generate_fn(system, user, history=…) -> (текст, метаданные).
+
+    history — предыдущие реплики диалога. Без них уточняющий вопрос был тупиком:
+    помощник спрашивал «какой именно офис — Ipartner, Global, Taxi24?», а на ответ
+    «Taxi24» отказывался, потому что реплика приходила в модель одна, без диалога.
+    Поиск при этом находил нужный кусок первым же результатом — не помнила именно
+    модель.
+
+    allow_clarify=False запрещает переспрашивать. Ставится, когда предыдущая
+    реплика помощника САМА была уточняющим вопросом: иначе на короткий ответ
+    оператора помощник переспрашивал снова, и разговор ходил по кругу.
 
     Возвращает словарь с kind: 'answer' | 'no_answer' | 'clarify'.
     """
@@ -362,7 +372,8 @@ def compose(question, chunks, generate_fn):
         return {'kind': 'no_answer', 'text': NO_ANSWER_TEXT, 'sources': [],
                 'notes': [], 'meta': {'reason': 'нет кусков выше порога'}}
 
-    clarify, reason = should_clarify(question, usable)
+    clarify, reason = (should_clarify(question, usable) if allow_clarify
+                       else (False, None))
     if clarify:
         return {'kind': 'clarify',
                 'text': ('Уточните вопрос: он допускает разные ответы. Про что '
@@ -371,7 +382,8 @@ def compose(question, chunks, generate_fn):
                 'meta': {'reason': reason}}
 
     wanted = detect_language(question)
-    text, meta = generate_fn(SYSTEM_PROMPT, build_user_prompt(question, usable))
+    text, meta = generate_fn(SYSTEM_PROMPT, build_user_prompt(question, usable),
+                             history=history)
     # Один повтор при несовпадении языка. Содержание модель находит верно, а язык
     # на коротких вопросах угадывает: на русском «Офис Астана» отвечала
     # по-казахски. Повтор стоит десятые доли секунды и делает поведение
@@ -383,7 +395,8 @@ def compose(question, chunks, generate_fn):
                 SYSTEM_PROMPT,
                 build_user_prompt(question, usable) + '\n\n'
                 + _LANGUAGE_DIRECTIVE[wanted]
-                + ' Предыдущая попытка была на другом языке — исправь.')
+                + ' Предыдущая попытка была на другом языке — исправь.',
+                history=history)
         except Exception:
             pass
     body, cited = split_sources(text)

@@ -163,14 +163,14 @@ class PromptTest(unittest.TestCase):
 
 class ComposeTest(unittest.TestCase):
     def test_no_chunks_means_refusal_without_calling_model(self):
-        def explode(*args):
+        def explode(*args, **kwargs):
             raise AssertionError('модель звать не нужно')
 
         result = ai_answer.compose('вопрос', [], explode)
         self.assertEqual('no_answer', result['kind'])
 
     def test_clarify_does_not_call_model(self):
-        def explode(*args):
+        def explode(*args, **kwargs):
             raise AssertionError('модель звать не нужно')
 
         # Как в боевом замере: куски пришли из ЛЕКСИКИ, поэтому порог близости
@@ -182,7 +182,7 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual('clarify', result['kind'])
 
     def test_answer_with_source(self):
-        def fake(system, user):
+        def fake(system, user, history=()):
             return 'Минимальный срок — 14 дней.\nИСТОЧНИКИ: [1]', {'provider': 'test'}
 
         result = ai_answer.compose('какой минимальный срок аренды', [chunk()], fake)
@@ -192,7 +192,7 @@ class ComposeTest(unittest.TestCase):
 
     def test_answer_survives_missing_sources_block(self):
         """Забытый блок ИСТОЧНИКИ больше не повод придержать верный ответ."""
-        def fake(system, user):
+        def fake(system, user, history=()):
             return 'Минимальный срок аренды — 14 дней.', {'provider': 'test'}
 
         result = ai_answer.compose('какой минимальный срок аренды', [chunk()], fake)
@@ -200,7 +200,7 @@ class ComposeTest(unittest.TestCase):
         self.assertTrue(result['sources'])
 
     def test_invented_number_is_withheld(self):
-        def fake(system, user):
+        def fake(system, user, history=()):
             return 'Залог составляет 250000 тенге.\nИСТОЧНИКИ: [1]', {'provider': 'test'}
 
         result = ai_answer.compose('какой залог', [chunk()], fake)
@@ -209,7 +209,7 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual([], result['sources'])
 
     def test_model_refusal_is_kept_as_refusal(self):
-        def fake(system, user):
+        def fake(system, user, history=()):
             return 'В доступных вам статьях этого нет. Спросите у СВ.', {}
 
         result = ai_answer.compose('сколько отпускных', [chunk()], fake)
@@ -218,7 +218,7 @@ class ComposeTest(unittest.TestCase):
 
     def test_refusal_carries_no_sources(self):
         """Список статей под фразой «этого нет» читается как противоречие."""
-        def fake(system, user):
+        def fake(system, user, history=()):
             return 'В доступных вам статьях этого нет. Спросите у СВ.', {}
 
         result = ai_answer.compose('сколько отпускных', [chunk()], fake)
@@ -226,7 +226,7 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual([], result['sources'])
 
     def test_ack_note_added_for_required_chunk(self):
-        def fake(system, user):
+        def fake(system, user, history=()):
             return 'Проговорить чек-лист.\nИСТОЧНИКИ: [1]', {}
 
         result = ai_answer.compose('что проговорить водителю',
@@ -250,15 +250,15 @@ class ProvidersTest(unittest.TestCase):
     def test_chain_falls_through_on_error_and_empty(self):
         calls = []
 
-        def failing(model, system, user):
+        def failing(model, system, user, history=()):
             calls.append(('fail', model))
             raise ai_providers.ProviderError('нет связи')
 
-        def empty(model, system, user):
+        def empty(model, system, user, history=()):
             calls.append(('empty', model))
             return {'text': '<think>только мысли</think>', 'finish': 'length'}
 
-        def good(model, system, user):
+        def good(model, system, user, history=()):
             calls.append(('good', model))
             return {'text': 'Ответ', 'elapsed': 0.5, 'usage': {}}
 
@@ -277,7 +277,7 @@ class ProvidersTest(unittest.TestCase):
         self.assertEqual([('fail', 'm1'), ('empty', 'm2'), ('good', 'm3')], calls)
 
     def test_all_failed_raises(self):
-        def failing(model, system, user):
+        def failing(model, system, user, history=()):
             raise ai_providers.ProviderError('нет связи')
 
         original = dict(ai_providers._ADAPTERS)
@@ -296,6 +296,70 @@ class ProvidersTest(unittest.TestCase):
                        'gemini-3.6-flash'):
             self.assertNotIn(banned, chain)
 
+
+
+class HistoryTest(unittest.TestCase):
+    """Диалог передаётся модели. Без этого уточняющий вопрос был тупиком.
+
+    Замер на проде: помощник спрашивал «какой именно офис — Ipartner, Global,
+    Taxi24?», а на ответ «Taxi24» отвечал «в доступных вам статьях этого нет» —
+    хотя поиск по одному слову «Taxi24» отдавал «Адреса Офисов Taxi24» ПЕРВЫМ
+    результатом. Не помнил именно модель: реплика приходила одна, без диалога.
+    """
+
+    def test_history_reaches_the_model(self):
+        seen = {}
+
+        def fake(system, user, history=()):
+            seen['history'] = list(history)
+            return 'Адрес: Проспект Сарыарка, 31.\nИСТОЧНИКИ: [1]', {}
+
+        turns = [{'role': 'user', 'kind': 'question', 'text': 'Офис Астана'},
+                 {'role': 'assistant', 'kind': 'clarify', 'text': 'Какой именно офис?'}]
+        ai_answer.compose('Taxi24', [chunk(text='Адрес: Проспект Сарыарка, 31')],
+                          fake, history=turns)
+        self.assertEqual(2, len(seen['history']))
+        self.assertEqual('Офис Астана', seen['history'][0]['text'])
+
+    def test_clarify_can_be_forbidden(self):
+        """После своего же уточнения переспрашивать нельзя — иначе круг."""
+        rows = [chunk(chunk_id=i, article_id=10 + i, similarity=0.716,
+                      found_by=(0, 1)) for i in range(4)]
+
+        def fake(system, user, history=()):
+            return 'Ответ по сути.\nИСТОЧНИКИ: [1]', {}
+
+        loop = ai_answer.compose('Taxi24', rows, fake, allow_clarify=True)
+        self.assertEqual('clarify', loop['kind'])
+        answered = ai_answer.compose('Taxi24', rows, fake, allow_clarify=False)
+        self.assertNotEqual('clarify', answered['kind'])
+
+    def test_provider_messages_carry_roles(self):
+        built = ai_providers._messages('sys', 'вопрос', [
+            {'role': 'user', 'text': 'первый вопрос'},
+            {'role': 'assistant', 'text': 'уточните'},
+            {'role': 'assistant', 'text': '   '},          # пустое не шлём
+        ])
+        self.assertEqual(['system', 'user', 'assistant', 'user'],
+                         [item['role'] for item in built])
+        self.assertEqual('вопрос', built[-1]['content'])
+
+    def test_provider_chain_passes_history(self):
+        seen = {}
+
+        def adapter(model, system, user, history=()):
+            seen['history'] = list(history)
+            return {'text': 'Ответ', 'elapsed': 0.1, 'usage': {}}
+
+        original = dict(ai_providers._ADAPTERS)
+        ai_providers._ADAPTERS['h'] = adapter
+        try:
+            ai_providers.generate('sys', 'user', chain=(('h', 'm'),),
+                                  history=[{'role': 'user', 'text': 'раньше'}])
+        finally:
+            ai_providers._ADAPTERS.clear()
+            ai_providers._ADAPTERS.update(original)
+        self.assertEqual('раньше', seen['history'][0]['text'])
 
 if __name__ == '__main__':
     unittest.main()

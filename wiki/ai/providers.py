@@ -125,10 +125,20 @@ def _post(url, payload, headers, params=None):
     return response.json(), elapsed
 
 
-def _openai_shape(url, key, model, system, user, extra_headers=None):
+def _messages(system, user, history):
+    out = [{'role': 'system', 'content': system}]
+    for turn in history or ():
+        role = 'assistant' if turn.get('role') == 'assistant' else 'user'
+        text = str(turn.get('text') or '').strip()
+        if text:
+            out.append({'role': role, 'content': text})
+    out.append({'role': 'user', 'content': user})
+    return out
+
+
+def _openai_shape(url, key, model, system, user, extra_headers=None, history=()):
     payload = {'model': model, 'temperature': 0.1, 'max_tokens': MAX_TOKENS,
-               'messages': [{'role': 'system', 'content': system},
-                            {'role': 'user', 'content': user}]}
+               'messages': _messages(system, user, history)}
     headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
     headers.update(extra_headers or {})
     body, elapsed = _post(url, payload, headers)
@@ -141,18 +151,20 @@ def _openai_shape(url, key, model, system, user, extra_headers=None):
             'usage': body.get('usage') or {}, 'elapsed': elapsed}
 
 
-def _call_groq(model, system, user):
+def _call_groq(model, system, user, history=()):
     return _openai_shape('https://api.groq.com/openai/v1/chat/completions',
-                         os.environ['GROQ_API_KEY'], model, system, user)
+                         os.environ['GROQ_API_KEY'], model, system, user,
+                         history=history)
 
 
-def _call_openrouter(model, system, user):
+def _call_openrouter(model, system, user, history=()):
     return _openai_shape('https://openrouter.ai/api/v1/chat/completions',
                          os.environ['OPEN_ROUTER_API_KEY'], model, system, user,
-                         extra_headers={'X-Title': 'OTP wiki assistant'})
+                         extra_headers={'X-Title': 'OTP wiki assistant'},
+                         history=history)
 
 
-def _call_cloudflare(model, system, user):
+def _call_cloudflare(model, system, user, history=()):
     """Cloudflare отдаёт ТРИ формы ответа — знать надо все.
 
     Парсер на одну форму даёт ложный «пустой ответ»: на этом я уже ошибся и
@@ -161,8 +173,7 @@ def _call_cloudflare(model, system, user):
     account = os.environ['CLOUDFLARE_ACCOUNT_ID'].strip()
     url = f'https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}'
     payload = {'temperature': 0.1, 'max_tokens': MAX_TOKENS,
-               'messages': [{'role': 'system', 'content': system},
-                            {'role': 'user', 'content': user}]}
+               'messages': _messages(system, user, history)}
     headers = {'Authorization': 'Bearer '
                                 + os.environ['CLOUDFLARE_WORKER_AI_KEY'].strip(),
                'Content-Type': 'application/json'}
@@ -187,7 +198,7 @@ def _call_cloudflare(model, system, user):
             'usage': result.get('usage') or {}, 'elapsed': elapsed}
 
 
-def _call_gemini(model, system, user):
+def _call_gemini(model, system, user, history=()):
     """Gemini с гашением «мышления» и обязательным откатом на 400.
 
     На моделях 3.x параметр thinkingConfig отдаёт 400 (он изменился), поэтому
@@ -196,9 +207,17 @@ def _call_gemini(model, system, user):
     """
     url = ('https://generativelanguage.googleapis.com/v1beta/models/'
            + model + ':generateContent')
+    # У Gemini роль модели называется 'model', а не 'assistant'.
+    contents = []
+    for turn in history or ():
+        text = str(turn.get('text') or '').strip()
+        if text:
+            role = 'model' if turn.get('role') == 'assistant' else 'user'
+            contents.append({'role': role, 'parts': [{'text': text}]})
+    contents.append({'role': 'user', 'parts': [{'text': user}]})
     base = {
         'system_instruction': {'parts': [{'text': system}]},
-        'contents': [{'role': 'user', 'parts': [{'text': user}]}],
+        'contents': contents,
         'generationConfig': {'temperature': 0.1, 'maxOutputTokens': MAX_TOKENS},
     }
     last_error = None
@@ -235,7 +254,7 @@ _ADAPTERS = {'groq': _call_groq, 'gemini': _call_gemini,
              'cloudflare': _call_cloudflare, 'openrouter': _call_openrouter}
 
 
-def generate(system, user, *, chain=None):
+def generate(system, user, *, chain=None, history=()):
     """Пройти цепочку до первого содержательного ответа.
 
     Возвращает (текст, метаданные). Пустой ответ — это ОШИБКА провайдера, а не
@@ -256,7 +275,7 @@ def generate(system, user, *, chain=None):
                              'error': 'неизвестный провайдер'})
             continue
         try:
-            result = adapter(model, system, user)
+            result = adapter(model, system, user, history)
         except Exception as error:                    # noqa: BLE001
             attempts.append({'provider': provider, 'model': model,
                              'error': str(error)[:200]})

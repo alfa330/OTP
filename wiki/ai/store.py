@@ -110,6 +110,30 @@ UPDATE wiki_ai_messages m
 """
 
 
+_RECENT_TURNS = """
+SELECT role, kind, text FROM wiki_ai_messages
+ WHERE chat_id = %(chat_id)s
+ ORDER BY seq DESC
+ LIMIT %(limit)s
+"""
+
+
+def recent_turns(cursor, chat_id, *, limit=6):
+    """Последние реплики диалога для передачи модели, в прямом порядке.
+
+    Без них уточняющий вопрос был тупиком: помощник спрашивал «какой именно офис
+    — Ipartner, Global, Taxi24?», а на ответ «Taxi24» отказывался, потому что не
+    помнил собственного вопроса. Реплика приходила в модель одна, без диалога.
+
+    Берём немного (по умолчанию 6): контекст нужен для уточнений, а не для
+    пересказа всей переписки — лимит провайдера минутный, и каждая лишняя реплика
+    отнимает пропускную способность у следующего оператора.
+    """
+    cursor.execute(_RECENT_TURNS, {'chat_id': chat_id, 'limit': max(int(limit), 0)})
+    rows = list(reversed(cursor.fetchall()))
+    return [{'role': row[0], 'kind': row[1], 'text': row[2]} for row in rows]
+
+
 def _title_from(question, limit=60):
     text = ' '.join(str(question or '').split())
     return text[:limit] if text else 'Новый вопрос'

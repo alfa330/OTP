@@ -211,21 +211,38 @@ def register(bp, wiki_route, db, log_ip):
                             'detail': 'помощнику не выдан доступ ни к одной статье'
                                       ' — обратитесь к администратору вики'}), 409
 
+        # История берётся ДО записи нового вопроса, иначе он попал бы в контекст
+        # дважды — и как история, и как сам вопрос.
+        history = ai_store.recent_turns(cursor, chat_id, limit=6)
+        previous_user = next((turn['text'] for turn in reversed(history)
+                              if turn['role'] == 'user'), '')
+        after_clarify = bool(history) and history[-1].get('kind') == 'clarify'
+
+        # ПОИСК идёт по обогащённому запросу. Короткая реплика вроде «Taxi24» сама
+        # по себе ищется плохо, а после уточняющего вопроса именно такие и приходят.
+        search_query = question
+        if previous_user and len(ai_answer.meaningful_words(question)) <= 4:
+            search_query = f'{previous_user} {question}'
+
         query_vector = None
         try:
-            query_vector = ai_embed.embed_query(question)
+            query_vector = ai_embed.embed_query(search_query)
         except Exception:
             query_vector = None      # деградация до лексики, не отказ
 
         found = ai_retrieve.search_hybrid(
-            cursor, article_ids=scope['article_ids'], query=question,
+            cursor, article_ids=scope['article_ids'], query=search_query,
             query_vector=query_vector, limit=8, per_article=3)
 
         ai_store.append_message(cursor, chat_id, role='user', kind='question',
                                 text=question)
         try:
-            result = ai_answer.compose(question, found['rows'],
-                                       ai_providers.generate)
+            result = ai_answer.compose(
+                question, found['rows'], ai_providers.generate,
+                history=history,
+                # После своего же уточняющего вопроса переспрашивать нельзя —
+                # разговор ходил бы по кругу.
+                allow_clarify=not after_clarify)
         except ai_providers.ProviderError as error:
             return jsonify({'error': 'ИИ недоступен',
                             'detail': str(error)[:300]}), 503
