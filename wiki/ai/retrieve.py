@@ -124,6 +124,175 @@ SELECT r.id, r.article_id, a.title, a.slug, r.chunk_idx, r.heading_path,
 """
 
 
+# Плотная ветка. Периметр — в WHERE, индекса по вектору нет намеренно (см. шапку):
+# при плоском переборе предикат прав применяется ДО отбора, и разрешённая
+# релевантная статья не может быть вытеснена запрещёнными соседями.
+_DENSE_CHUNKS_SQL = """
+SELECT c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
+       c.text, c.requires_ack,
+       1 - (e.embedding <=> %(qvec)s::vector) AS similarity
+  FROM wiki_ai_chunks c
+  JOIN wiki_ai_embeddings e
+    ON e.text_hash = c.text_hash
+   AND e.embed_provider = %(provider)s
+   AND e.embed_model = %(model)s
+   AND e.embed_dim = %(dim)s
+  JOIN wiki_articles a ON a.id = c.article_id
+ WHERE c.article_id = ANY(%(article_ids)s)
+   AND 1 - (e.embedding <=> %(qvec)s::vector) >= %(min_similarity)s
+ ORDER BY e.embedding <=> %(qvec)s::vector
+ LIMIT %(limit)s
+"""
+
+# Порог близости. Замерен на живых вопросах: при 0,72 вопрос «сколько мне
+# отпускных положено» даёт лучшую близость 0,661, куски в контекст не попадают
+# вовсе, и модель отвечает «в доступных вам статьях этого нет» — то есть порог, а
+# не уговоры в промпте, и есть главный анти-галлюцинационный слой. Для ВЫДАЧИ
+# порог мягче (0,68), чтобы гибрид имел материал для слияния; строгий гейт на
+# «есть ли ответ вообще» ставится слоем ответа.
+DENSE_FLOOR = 0.68
+
+# Константа RRF. 60 — общепринятое значение: оно делает вклад первых позиций
+# сопоставимым, а не подавляющим, поэтому кусок, найденный ОБЕИМИ ветками
+# невысоко, обгоняет кусок, найденный одной ветвью первым. Именно это нам и
+# нужно: лексика ловит термины и номера, вектор — перефразировки.
+RRF_K = 60
+
+# Вклад ветвей в RRF: (лексика, вектор). Само RRF в боевом пути НЕ используется —
+# см. fuse() и замер там же; оставлено как инструмент для равноправных ветвей.
+BRANCH_WEIGHTS = (0.4, 1.0)
+
+
+def search_dense(cursor, *, article_ids, query_vector, limit=20,
+                 min_similarity=DENSE_FLOOR):
+    """Куски, близкие к вектору вопроса, в границах периметра."""
+    ids = sorted({int(x) for x in (article_ids or ())})
+    if not ids or not query_vector:
+        return []
+
+    from .embed import _as_vector, provider_contract
+
+    params = dict(provider_contract())
+    params.update({'qvec': _as_vector(query_vector), 'article_ids': ids,
+                   'limit': int(limit), 'min_similarity': float(min_similarity)})
+    cursor.execute(_DENSE_CHUNKS_SQL, params)
+    columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx',
+               'heading_path', 'text', 'requires_ack', 'similarity')
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def fuse_rrf(*branches, limit=8, per_article=3, weights=None):
+    """Слияние выдач по reciprocal rank fusion.
+
+    Складываются ОБРАТНЫЕ РАНГИ, а не счёта ветвей: счёт лексики — это сумма IDF
+    в неограниченной шкале, счёт вектора — косинус в [0,1]. Складывать их напрямую
+    значило бы отдать вес случайности масштабов.
+
+    weights задаёт вклад ветвей и по умолчанию НЕ равен единицам. Замер на боевом
+    корпусе (29 вопросов, 202 куска): чистый вектор даёт 22/25 первым результатом
+    по-русски, равновесный гибрид — 19/25, то есть слияние с равными весами ХУЖЕ
+    одной плотной ветки. Причина в том, что лексика ранжирует заметно слабее
+    (14/25 первым), а RRF отдаёт её первому месту тот же вклад. Поэтому ветки
+    неравноправны: порядок задаёт вектор, лексика добавляет полноту.
+    """
+    if weights is None:
+        weights = BRANCH_WEIGHTS
+    fused = {}
+    for branch_index, rows in enumerate(branches):
+        weight = weights[branch_index] if branch_index < len(weights) else 1.0
+        for rank, row in enumerate(rows, start=1):
+            key = row['chunk_id']
+            entry = fused.setdefault(key, {**row, 'rrf': 0.0, 'found_by': []})
+            entry['rrf'] += weight / (RRF_K + rank)
+            entry['found_by'].append(branch_index)
+            # Счёт и близость приходят из разных ветвей — сохраняем оба, если есть.
+            for field in ('score', 'similarity'):
+                if field in row and row[field] is not None:
+                    entry[field] = row[field]
+
+    ordered = sorted(fused.values(),
+                     key=lambda item: (-item['rrf'], item['article_id'],
+                                       item['chunk_idx']))
+    out, per_article_count = [], {}
+    for item in ordered:
+        seen = per_article_count.get(item['article_id'], 0)
+        if seen >= per_article:
+            continue
+        per_article_count[item['article_id']] = seen + 1
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _cap_and_limit(rows, limit, per_article):
+    out, per_article_count = [], {}
+    for row in rows:
+        seen = per_article_count.get(row['article_id'], 0)
+        if seen >= per_article:
+            continue
+        per_article_count[row['article_id']] = seen + 1
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def fuse(lexical, dense, *, limit=8, per_article=3):
+    """Слияние ветвей: порядок задаёт вектор, лексика ДОБИРАЕТ пропущенное.
+
+    Не RRF — и это вывод замера, а не вкусовщина. На боевом корпусе (29 вопросов,
+    202 куска) по-русски первым результатом: одна плотная ветка 22/25, равновесный
+    RRF 19/25, RRF с любым весом лексики от 0,2 до 0,5 — 20/25. Полнота (в топ-6)
+    у всех вариантов одинаковая, 25/25.
+
+    Механика провала RRF здесь такая. При RRF_K = 60 разница вкладов первого и
+    второго места одной ветки — 1/61 - 1/62 = 0,00003, а вклад лексического
+    первого места даже с весом 0,2 — 0,0033, то есть в сто раз больше. Лексика
+    перестаёт быть дополнением и становится решающим тайбрейкером, переставляя
+    верх плотной выдачи. Уменьшать RRF_K значит превращать слияние в «кто первый»,
+    что тоже не слияние.
+
+    Поэтому ветки неравноправны по построению: вектор отвечает за порядок, лексика
+    — только за полноту. Она нужна не на этом наборе вопросов, а на том, чего
+    набор не проверяет: точные термины, номера тарифов и пунктов. Диагностика это
+    показала — запрос «термопакет» находится лексикой как strict-совпадение.
+    """
+    dense_ids = {row['chunk_id'] for row in dense}
+    extra = [row for row in lexical if row['chunk_id'] not in dense_ids]
+    merged = []
+    for branch_index, rows in ((1, dense), (0, extra)):
+        for row in rows:
+            merged.append({**row, 'found_by': [branch_index]})
+    # Пометим куски, найденные обеими ветвями: полезно в витрине и в журнале.
+    lexical_ids = {row['chunk_id'] for row in lexical}
+    for row in merged:
+        if row['chunk_id'] in lexical_ids and row['chunk_id'] in dense_ids:
+            row['found_by'] = [0, 1]
+    return _cap_and_limit(merged, limit, per_article)
+
+
+def search_hybrid(cursor, *, article_ids, query, query_vector=None,
+                  limit=8, per_article=3, candidates=24):
+    """Гибрид: лексика + вектор, слияние RRF, ограничение на статью.
+
+    query_vector=None — вектор посчитать не удалось (нет ключа, провайдер лежит,
+    расширение не установлено). Тогда работает одна лексика: помощник хуже, но
+    жив. Молча деградировать нельзя — вызывающий видит это по полю branches.
+    """
+    lexical = search_chunks(cursor, article_ids=article_ids, query=query,
+                            limit=candidates, per_article=per_article)
+    dense = []
+    if query_vector:
+        dense = search_dense(cursor, article_ids=article_ids,
+                             query_vector=query_vector, limit=candidates)
+
+    rows = fuse(lexical, dense, limit=limit, per_article=per_article)
+    return {'rows': rows,
+            'branches': {'lexical': len(lexical), 'dense': len(dense)},
+            'degraded': not dense}
+
+
 def search_chunks(cursor, *, article_ids, query, limit=8, per_article=3):
     """Куски из периметра, отсортированные по релевантности запросу.
 

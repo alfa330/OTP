@@ -673,6 +673,41 @@ _AI_STATEMENTS = [
     "ON wiki_ai_chunks USING GIN (chunk_tsv);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chunks_article "
     "ON wiki_ai_chunks (article_id, chunk_idx);",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chunks_text_hash "
+    "ON wiki_ai_chunks (text_hash);",
+]
+
+# ── Векторы кусков ───────────────────────────────────────────────────────────
+#
+# Под ОТДЕЛЬНЫМ савпоинтом, как pg_trgm: расширение vector может быть недоступно
+# по правам, и тогда помощник обязан продолжить работать на одной лексике, а не
+# утащить за собой всю схему раздела. На проде vector 0.8.0 уже стоит (его
+# ставит call_qa/rag/schema.sql), но опираться на это в DDL нельзя.
+#
+# Ключ — ХЕШ ТЕКСТА, а не идентификатор куска. Пересборка индекса удаляет и
+# создаёт куски заново, и при ключе по куску правка одного абзаца в статье из 28
+# кусков сжигала бы 28 векторов вместо одного. Provider/model/dim в ключе:
+# смена контракта не портит старые векторы, они просто перестают подходить.
+#
+# vector БЕЗ размерности намеренно: так же сделано в call_qa
+# (qa_policy_rule_embeddings), и это позволяет сменить модель без переливки
+# таблицы. Индекса HNSW нет и не планируется: pgvector фильтрует права уже ПОСЛЕ
+# прохода по индексу, а у оператора с 15 доступными статьями из 36 выдача тогда
+# оказалась бы пустой при наличии разрешённой релевантной статьи. На нашем
+# масштабе (около 200 кусков) плоский перебор — единицы миллисекунд.
+_AI_VECTOR_STATEMENTS = [
+    "CREATE EXTENSION IF NOT EXISTS vector;",
+    """
+    CREATE TABLE IF NOT EXISTS wiki_ai_embeddings (
+        text_hash      CHAR(64) NOT NULL,
+        embed_provider VARCHAR(32) NOT NULL,
+        embed_model    VARCHAR(128) NOT NULL,
+        embed_dim      INTEGER NOT NULL,
+        embedding      vector NOT NULL,
+        created_at     TIMESTAMP NOT NULL DEFAULT %(now)s,
+        PRIMARY KEY (text_hash, embed_provider, embed_model, embed_dim)
+    );
+    """,
 ]
 
 # Опечатки и префиксный поиск. Отдельно и под своим савпоинтом: расширение
@@ -805,6 +840,22 @@ def init_wiki_schema(cursor):
     # передаётся, поэтому psycopg2 %(now)s сам не раскрыл бы.
     for statement in _AI_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Векторы — под своим савпоинтом: без расширения помощник остаётся на
+    # лексическом поиске, а схема раздела не откатывается целиком.
+    cursor.execute('SAVEPOINT wiki_ai_vector')
+    try:
+        for statement in _AI_VECTOR_STATEMENTS:
+            cursor.execute(statement.replace('%(now)s', _NOW))
+    except Exception:
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_vector')
+        import logging
+        logging.warning(
+            'Раздел «Вики»: расширение vector недоступно — ИИ-помощник будет '
+            'искать только лексически (гибрид отключён)'
+        )
+    else:
+        cursor.execute('RELEASE SAVEPOINT wiki_ai_vector')
 
     # Вместе с колонкой пересчитываются и search_aliases: нормализация запроса
     # (ё -> е кириллическая) изменилась, а сохранённые алиасы считались старой.

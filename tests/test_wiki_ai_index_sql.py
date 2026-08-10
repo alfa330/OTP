@@ -29,7 +29,8 @@ _INSERT = re.compile(r'INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)', re.S | re.I)
 def _declared_columns():
     """{таблица: {колонки}} из операторов схемы раздела."""
     tables = {}
-    for statement in wiki_schema._AI_STATEMENTS:
+    for statement in (list(wiki_schema._AI_STATEMENTS)
+                      + list(wiki_schema._AI_VECTOR_STATEMENTS)):
         for table, body in _CREATE.findall(statement):
             columns = set()
             depth = 0
@@ -67,9 +68,32 @@ class IndexSqlMatchesSchemaTest(unittest.TestCase):
         self.assertTrue(expected <= self.declared['wiki_ai_article_index'],
                         expected - self.declared['wiki_ai_article_index'])
 
+    def test_embedding_table_has_required_columns(self):
+        expected = {'text_hash', 'embed_provider', 'embed_model', 'embed_dim',
+                    'embedding', 'created_at'}
+        self.assertIn('wiki_ai_embeddings', self.declared)
+        self.assertTrue(expected <= self.declared['wiki_ai_embeddings'],
+                        expected - self.declared['wiki_ai_embeddings'])
+
+    def test_vector_ddl_is_under_its_own_savepoint(self):
+        """Без расширения vector помощник обязан остаться на лексике.
+
+        Если операторы с CREATE EXTENSION уедут в общий список, падение прав на
+        расширение откатит всю схему раздела — а это уже не деградация, а потеря
+        вики целиком.
+        """
+        joined = ' '.join(wiki_schema._AI_STATEMENTS)
+        self.assertNotIn('CREATE EXTENSION', joined.upper())
+        self.assertIn('CREATE EXTENSION',
+                      ' '.join(wiki_schema._AI_VECTOR_STATEMENTS).upper())
+
     def test_inserts_reference_declared_columns_only(self):
+        from wiki.ai import embed as ai_embed
+
         statements = [getattr(ai_index, name) for name in dir(ai_index)
                       if name.startswith('_') and isinstance(getattr(ai_index, name), str)]
+        statements += [getattr(ai_embed, name) for name in dir(ai_embed)
+                       if name.startswith('_') and isinstance(getattr(ai_embed, name), str)]
         checked = 0
         for sql in statements:
             for table, columns in _INSERT.findall(sql):
