@@ -1255,6 +1255,7 @@ class Database:
                     close_contact_2_full_name VARCHAR(255),
                     close_contact_2_phone VARCHAR(50),
                     card_number VARCHAR(64),
+                    city VARCHAR(255),
                     internship_in_company BOOLEAN NOT NULL DEFAULT FALSE,
                     front_office_training BOOLEAN NOT NULL DEFAULT FALSE,
                     front_office_training_date DATE,
@@ -1285,6 +1286,13 @@ class Database:
             cursor.execute("""
                 ALTER TABLE users
                 ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);
+            """)
+            # Город сотрудника: офисы отдела «Фронт офисы» стоят в разных городах,
+            # поэтому город — часть кадровых данных (в карточке показываем только
+            # отделам из EMPLOYEE_CITY_DEPARTMENT_CODES).
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS city VARCHAR(255);
             """)
             # Переключатель получения Telegram-отчёта о сменах ставок операторов
             # (для админов — глобальный отчёт, для глав отделов — по своему отделу).
@@ -4681,12 +4689,15 @@ class Database:
                     close_contact_2_relation VARCHAR(100),
                     close_contact_2_full_name VARCHAR(255),
                     close_contact_2_phone VARCHAR(50),
-                    card_number VARCHAR(64)
+                    card_number VARCHAR(64),
+                    city VARCHAR(255)
                 );
                 ALTER TABLE user_hr_profiles
                 ADD COLUMN IF NOT EXISTS employment_type VARCHAR(10);
                 ALTER TABLE user_hr_profiles
                 ADD COLUMN IF NOT EXISTS personal_email VARCHAR(255);
+                ALTER TABLE user_hr_profiles
+                ADD COLUMN IF NOT EXISTS city VARCHAR(255);
                 ALTER TABLE user_hr_profiles
                 DROP CONSTRAINT IF EXISTS user_hr_profiles_employment_type_check;
                 ALTER TABLE user_hr_profiles
@@ -6502,6 +6513,7 @@ class Database:
         close_contact_2_full_name=None,
         close_contact_2_phone=None,
         card_number=None,
+        city=None,
         internship_in_company=None,
         front_office_training=None,
         front_office_training_date=None,
@@ -6543,6 +6555,7 @@ class Database:
         close_contact_2_full_name = str(close_contact_2_full_name).strip() if close_contact_2_full_name is not None else ""
         close_contact_2_phone = str(close_contact_2_phone).strip() if close_contact_2_phone is not None else ""
         card_number = str(card_number).strip() if card_number is not None else ""
+        city = str(city).strip() if city is not None else ""
         taxipro_id = str(taxipro_id).strip() if taxipro_id is not None else ""
 
         phone = phone or None
@@ -6571,6 +6584,7 @@ class Database:
         close_contact_2_full_name = close_contact_2_full_name or None
         close_contact_2_phone = close_contact_2_phone or None
         card_number = card_number or None
+        city = city or None
         taxipro_id = taxipro_id or None
         if employment_type not in (None, 'gph', 'of', 'smz'):
             raise ValueError("Invalid employment_type")
@@ -6617,8 +6631,8 @@ class Database:
                         study_place, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                        card_number
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        card_number, city
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (user_id) DO UPDATE SET
                         phone = COALESCE(EXCLUDED.phone, user_hr_profiles.phone),
                         email = COALESCE(EXCLUDED.email, user_hr_profiles.email),
@@ -6637,7 +6651,8 @@ class Database:
                         close_contact_2_relation = COALESCE(EXCLUDED.close_contact_2_relation, user_hr_profiles.close_contact_2_relation),
                         close_contact_2_full_name = COALESCE(EXCLUDED.close_contact_2_full_name, user_hr_profiles.close_contact_2_full_name),
                         close_contact_2_phone = COALESCE(EXCLUDED.close_contact_2_phone, user_hr_profiles.close_contact_2_phone),
-                        card_number = COALESCE(EXCLUDED.card_number, user_hr_profiles.card_number)
+                        card_number = COALESCE(EXCLUDED.card_number, user_hr_profiles.card_number),
+                        city = COALESCE(EXCLUDED.city, user_hr_profiles.city)
                 """, (
                     uid, phone, email, personal_email, instagram, telegram_nick,
                     company_name, employment_type,
@@ -6646,7 +6661,7 @@ class Database:
                     study_completion_year,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                    card_number
+                    card_number, city
                 ))
 
                 # Operator profile (only for operator/trainee)
@@ -6700,9 +6715,9 @@ class Database:
                         study_place, study_course, study_completed, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                        card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id
+                        card_number, city, internship_in_company, front_office_training, front_office_training_date, taxipro_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     telegram_id, name, role, direction_id, rate, hire_date, supervisor_id,
@@ -6719,6 +6734,7 @@ class Database:
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                     card_number,
+                    city,
                     (internship_in_company_value if internship_in_company_value is not None else False),
                     (front_office_training_value if front_office_training_value is not None else False),
                     front_office_training_date,
@@ -6761,6 +6777,7 @@ class Database:
                             close_contact_2_full_name = COALESCE(%s, close_contact_2_full_name),
                             close_contact_2_phone = COALESCE(%s, close_contact_2_phone),
                             card_number = COALESCE(%s, card_number),
+                            city = COALESCE(%s, city),
                             internship_in_company = COALESCE(%s, internship_in_company),
                             front_office_training = COALESCE(%s, front_office_training),
                             front_office_training_date = COALESCE(%s, front_office_training_date),
@@ -6773,7 +6790,7 @@ class Database:
                         study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                        card_number, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
+                        card_number, city, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
                         name, role
                     ))
                     result = cursor.fetchone()
@@ -6820,6 +6837,7 @@ class Database:
                             close_contact_2_full_name = COALESCE(%s, close_contact_2_full_name),
                             close_contact_2_phone = COALESCE(%s, close_contact_2_phone),
                             card_number = COALESCE(%s, card_number),
+                            city = COALESCE(%s, city),
                             internship_in_company = COALESCE(%s, internship_in_company),
                             front_office_training = COALESCE(%s, front_office_training),
                             front_office_training_date = COALESCE(%s, front_office_training_date),
@@ -6833,7 +6851,7 @@ class Database:
                         study_place, study_course, study_completed_value, study_completion_year,
                         close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                         close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                        card_number, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
+                        card_number, city, internship_in_company_value, front_office_training_value, front_office_training_date, taxipro_id,
                         telegram_id
                     ))
                     updated_user_id = cursor.fetchone()[0]
@@ -26431,7 +26449,7 @@ class Database:
         'study_place', 'study_course', 'study_completed', 'study_completion_year',
         'close_contact_1_relation', 'close_contact_1_full_name', 'close_contact_1_phone',
         'close_contact_2_relation', 'close_contact_2_full_name', 'close_contact_2_phone',
-        'card_number'
+        'card_number', 'city'
     ])
 
     def update_user(self, user_id, field, value, changed_by=None):
@@ -26468,6 +26486,7 @@ class Database:
             'close_contact_2_full_name',
             'close_contact_2_phone',
             'card_number',
+            'city',
             'internship_in_company',
             'front_office_training',
             'front_office_training_date',
@@ -29945,6 +29964,7 @@ class Database:
                         u.close_contact_2_full_name,
                         u.close_contact_2_phone,
                         u.card_number,
+                        u.city,
                         COALESCE(u.internship_in_company, FALSE) as internship_in_company,
                         COALESCE(u.front_office_training, FALSE) as front_office_training,
                         u.front_office_training_date,
@@ -29997,9 +30017,23 @@ class Database:
                 else:
                     cursor.execute(users_report_query)
                 all_operators = cursor.fetchall()
-            
+                city_column_index = next(
+                    (
+                        index
+                        for index, column in enumerate(getattr(cursor, 'description', None) or ())
+                        if column.name == 'city'
+                    ),
+                    None
+                )
+
             if not all_operators:
                 logging.warning("No operators found for users report")
+
+            # «Город» есть только у отделов, чьи офисы стоят в разных городах
+            # (сейчас — «Фронт офисы»). Пустую колонку остальным не добавляем.
+            include_city_column = city_column_index is not None and any(
+                str(row[city_column_index] or '').strip() for row in all_operators
+            )
             
             def _format_date(value):
                 if not value:
@@ -30065,6 +30099,7 @@ class Database:
                 "Логин",
                 "Роль",
                 "Отдел",
+                *(["Город"] if include_city_column else []),
                 "Направление",
                 "Супервайзер",
                 "Статус",
@@ -30117,7 +30152,7 @@ class Database:
                     has_proxy, proxy_card_number, proxy_status, has_driver_license, sip_number,
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
-                    card_number, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender,
+                    card_number, city, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender,
                     dismissal_start_date, dismissal_end_date, dismissal_reason, dismissal_comment, dismissal_is_blacklist,
                     status_fired_changed_at
                 ) = row
@@ -30130,6 +30165,7 @@ class Database:
                     login or "",
                     role or "",
                     department_name or "N/A",
+                    *([city or ""] if include_city_column else []),
                     direction or "N/A",
                     supervisor or "N/A",
                     _format_status(status),

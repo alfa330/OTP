@@ -31,7 +31,7 @@ import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
-import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
+import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 
@@ -36041,6 +36041,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
 
                 if (employeeTableSection === 'corporate') {
+                    // Кадровые колонки отдела: у фронт-офисов «Город» вместо
+                    // отметки об обучении во фронт офисе (см. departmentViews).
                     return [
                         nameColumn,
                         {
@@ -36049,6 +36051,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             sortField: 'hire_date',
                             render: (employee) => formatEmployeeTableDate(employee?.hire_date)
                         },
+                        ...(departmentUsesEmployeeCity(user) ? [
+                        {
+                            key: 'city',
+                            label: 'Город',
+                            render: (employee) => employee?.city || '-'
+                        }
+                        ] : []),
                         {
                             key: 'company_name',
                             label: 'ТОО/ИП',
@@ -36064,6 +36073,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             label: 'Практика',
                             render: (employee) => formatEmployeeBoolLabel(employee?.internship_in_company)
                         },
+                        ...(departmentHidesFrontOfficeTraining(user) ? [] : [
                         {
                             key: 'front_office_training',
                             label: 'Обучение ФО',
@@ -36073,7 +36083,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             key: 'front_office_training_date',
                             label: 'Дата обучения',
                             render: (employee) => formatEmployeeTableDate(employee?.front_office_training_date)
-                        },
+                        }
+                        ]),
                         {
                             key: 'taxipro_id',
                             label: 'ID таксипро',
@@ -40173,6 +40184,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             close_contact_2_phone: normalizeTextForApi(editedUser.close_contact_2_phone),
                             company_name: normalizeTextForApi(editedUser.company_name),
                             employment_type: normalizeEmploymentTypeForApi(editedUser.employment_type),
+                            city: normalizeTextForApi(editedUser.city),
                             internship_in_company: normalizeBoolForApi(editedUser.internship_in_company),
                             front_office_training: normalizeBoolForApi(editedUser.front_office_training),
                             front_office_training_date: normalizeBoolForApi(editedUser.front_office_training)
@@ -40597,6 +40609,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             user_id: editedUser.id,
                             field: 'employment_type',
                             value: nextEmploymentType
+                        }, {
+                            headers: { 'X-User-Id': user.id }
+                        });
+                    }
+                    const nextCity = normalizeTextForApi(editedUser?.city);
+                    const prevCity = normalizeTextForApi(userToEdit?.city);
+                    if (nextCity !== prevCity) {
+                        await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                            user_id: editedUser.id,
+                            field: 'city',
+                            value: nextCity
                         }, {
                             headers: { 'X-User-Id': user.id }
                         });

@@ -6,8 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = ROOT / "database.py"
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 APP_PATH = ROOT / "src" / "App.jsx"
+MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
 
 
 def _read(path):
@@ -132,7 +134,9 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         self.assertIn(
-            "import { departmentAllowsView, departmentHidesColleagueSchedules, departmentRestrictsViews, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';",
+            "import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining,"
+            " departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting,"
+            " firstAllowedView } from './utils/departmentViews';",
             source,
         )
         self.assertIn(
@@ -182,6 +186,116 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
             "if (!isOperatorSelfSchedules || !user || operatorColleagueShiftsHidden || operatorSelfTab !== 'direction') return;",
             source,
         )
+
+
+class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
+    """Карточка сотрудника front_office: есть «Город» (офисы в разных городах),
+    нет отметки «Был во фронт офисе на обучении» — они и есть фронт офис."""
+
+    def test_department_field_helpers(self):
+        source = _read(DEPARTMENT_VIEWS_PATH)
+
+        self.assertIn("const EMPLOYEE_CITY_DEPARTMENTS = new Set(['front_office']);", source)
+        self.assertIn("export const departmentCodeUsesEmployeeCity = (code) => {", source)
+        self.assertIn(
+            "export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCity(departmentCodeOf(user));",
+            source,
+        )
+
+        self.assertIn("const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office']);", source)
+        self.assertIn("export const departmentCodeHidesFrontOfficeTraining = (code) => {", source)
+        self.assertIn(
+            "export const departmentHidesFrontOfficeTraining = (user) ="
+            "> departmentCodeHidesFrontOfficeTraining(departmentCodeOf(user));",
+            source,
+        )
+
+    def test_modal_gates_both_fields_by_employee_department(self):
+        modal = _read(MODAL_PATH)
+
+        self.assertIn(
+            "import { departmentCodeHidesFrontOfficeTraining, departmentCodeUsesEmployeeCity }"
+            " from '../../utils/departmentViews';",
+            modal,
+        )
+        self.assertIn("const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);", modal)
+        self.assertIn(
+            "const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);",
+            modal,
+        )
+
+        # Оба режима модалки (создание и редактирование) гейтятся одинаково.
+        self.assertEqual(modal.count("{showEmployeeCity && ("), 2)
+        self.assertEqual(modal.count("{showFrontOfficeTraining && ("), 2)
+        self.assertEqual(modal.count("<span>Был во фронт офисе на обучении</span>"), 2)
+
+    def test_modal_falls_back_to_requester_department_code(self):
+        # /api/admin/departments супервайзеру отдаёт 403 — без фолбэка у СВ
+        # фронт-офисов «Город» бы не показался.
+        modal = _read(MODAL_PATH)
+
+        self.assertIn("const requesterScopeDeptCode = isScopedDepartmentHeadRequester", modal)
+        self.assertIn(
+            "?? (isDeptScoped && Number(effectiveDeptId) === Number(requesterScopeDeptId)"
+            " ? requesterScopeDeptCode : null);",
+            modal,
+        )
+
+    def test_modal_requires_training_date_only_when_field_is_shown(self):
+        modal = _read(MODAL_PATH)
+
+        self.assertIn(
+            "if (showFrontOfficeTraining && editedUser?.front_office_training"
+            " && !toDateInputValue(editedUser?.front_office_training_date)) {",
+            modal,
+        )
+
+    def test_app_sends_city_on_create_and_edit(self):
+        app = _read(APP_PATH)
+
+        self.assertIn("city: normalizeTextForApi(editedUser.city),", app)
+        self.assertIn("const nextCity = normalizeTextForApi(editedUser?.city);", app)
+        self.assertIn("const prevCity = normalizeTextForApi(userToEdit?.city);", app)
+        self.assertIn("field: 'city',", app)
+
+    def test_employee_table_swaps_columns_for_front_office(self):
+        app = _read(APP_PATH)
+
+        self.assertIn("...(departmentUsesEmployeeCity(user) ? [", app)
+        self.assertIn("label: 'Город',", app)
+        self.assertIn("...(departmentHidesFrontOfficeTraining(user) ? [] : [", app)
+
+    def test_backend_stores_and_returns_city(self):
+        bot = _read(BOT_PATH)
+        database = _read(DATABASE_PATH)
+
+        # Миграция и обе таблицы-приёмника кадровых данных.
+        self.assertIn("ADD COLUMN IF NOT EXISTS city VARCHAR(255);", database)
+        self.assertIn("'card_number', 'city'", database)
+
+        # update_user пропускает поле и чистит пустую строку в NULL.
+        self.assertIn("            'city',\n", database)
+        update_field_list = bot.split("elif field in [\n            'phone',", 1)[1].split("]:", 1)[0]
+        self.assertIn("'city',", update_field_list)
+
+        # add_user принимает город и передаёт его в create_user.
+        add_user = _function_source(BOT_PATH, "add_user")
+        self.assertIn("city = str(data.get('city') or '').strip() or None", add_user)
+        self.assertIn("city=city,", add_user)
+
+        # Списки сотрудников и супервайзеров отдают город.
+        self.assertIn('"city": row[51] or ""', bot)
+        self.assertIn('"city": sv[40] or ""', bot)
+
+    def test_users_report_adds_city_column_only_when_filled(self):
+        database = _read(DATABASE_PATH)
+
+        self.assertIn(
+            "include_city_column = city_column_index is not None and any(",
+            database,
+        )
+        self.assertIn('*(["Город"] if include_city_column else []),', database)
+        self.assertIn('*([city or ""] if include_city_column else []),', database)
 
 
 class FrontOfficeBackendScopeTests(unittest.TestCase):

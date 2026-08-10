@@ -71,10 +71,34 @@ class _CursorContext:
         return False
 
 
+class _FakeColumn:
+    """Минимум от psycopg2.extensions.Column: отчёт читает только .name."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+# Порядок колонок ``users_report_query`` — по нему отчёт находит «Город».
+REPORT_COLUMN_NAMES = (
+    "name", "login", "role", "department_name", "direction", "supervisor",
+    "status", "rate", "hire_date", "phone", "email", "personal_email",
+    "instagram", "telegram_nick", "study_place", "study_course", "company_name",
+    "employment_type", "has_proxy", "proxy_card_number", "proxy_status",
+    "has_driver_license", "sip_number",
+    "close_contact_1_relation", "close_contact_1_full_name", "close_contact_1_phone",
+    "close_contact_2_relation", "close_contact_2_full_name", "close_contact_2_phone",
+    "card_number", "city", "internship_in_company", "front_office_training",
+    "front_office_training_date", "taxipro_id", "supervisor_id", "gender",
+    "dismissal_start_date", "dismissal_end_date", "dismissal_reason",
+    "dismissal_comment", "dismissal_is_blacklist", "status_fired_changed_at",
+)
+
+
 class _FakeCursor:
     def __init__(self, rows=()):
         self.rows = list(rows)
         self.executions = []
+        self.description = tuple(_FakeColumn(name) for name in REPORT_COLUMN_NAMES)
 
     def execute(self, query, params=None):
         self.executions.append((str(query), list(params or [])))
@@ -99,30 +123,36 @@ def _operator_row(
     hire_date=date(2024, 11, 7),
     dismissal_start=date(2026, 2, 25),
     dismissal_end=date(2026, 7, 12),
+    city=None,
 ):
     """Return one row in the shape selected by ``generate_users_report``."""
-    row = [None] * 42
-    row[0] = name
-    row[1] = "alan.erlanov"
-    row[2] = "operator"
-    row[3] = "СЗоВ"
-    row[4] = "Основное"
-    row[5] = "Тестовый СВ"
-    row[6] = "working"
-    row[7] = 1.0
-    row[8] = hire_date
-    row[18] = False
-    row[21] = False
-    row[30] = False
-    row[31] = False
-    row[34] = 126
-    row[35] = "male"
-    row[36] = dismissal_start
-    row[37] = dismissal_end
-    row[38] = "Нарушение дисциплины"
-    row[39] = "Тестовый комментарий"
-    row[40] = False
-    row[41] = datetime(2026, 3, 5, 12, 20)
+    row = [None] * len(REPORT_COLUMN_NAMES)
+
+    def _set(column, value):
+        row[REPORT_COLUMN_NAMES.index(column)] = value
+
+    _set("name", name)
+    _set("login", "alan.erlanov")
+    _set("role", "operator")
+    _set("department_name", "СЗоВ")
+    _set("direction", "Основное")
+    _set("supervisor", "Тестовый СВ")
+    _set("status", "working")
+    _set("rate", 1.0)
+    _set("hire_date", hire_date)
+    _set("has_proxy", False)
+    _set("has_driver_license", False)
+    _set("city", city)
+    _set("internship_in_company", False)
+    _set("front_office_training", False)
+    _set("supervisor_id", 126)
+    _set("gender", "male")
+    _set("dismissal_start_date", dismissal_start)
+    _set("dismissal_end_date", dismissal_end)
+    _set("dismissal_reason", "Нарушение дисциплины")
+    _set("dismissal_comment", "Тестовый комментарий")
+    _set("dismissal_is_blacklist", False)
+    _set("status_fired_changed_at", datetime(2026, 3, 5, 12, 20))
     return tuple(row)
 
 
@@ -197,6 +227,19 @@ class UsersReportPeriodQueryTests(unittest.TestCase):
         self.assertEqual(workbook.sheetnames, ["Summary"])
         self.assertEqual(workbook["Summary"]["A2"].value, "Тестбаев Алан Тестович")
         self.assertEqual(workbook["Summary"]["J2"].value, "2024-11-07")
+        # Ни у кого нет города — колонку не добавляем, чтобы не плодить пустую.
+        self.assertNotIn("Город", [cell.value for cell in workbook["Summary"][1]])
+
+    def test_city_column_appears_only_when_someone_has_a_city(self):
+        (_filename, content), _sql, _params = self._build([_operator_row(city="Актобе")])
+
+        workbook = load_workbook(BytesIO(content), data_only=True)
+        headers = [cell.value for cell in workbook["Summary"][1]]
+        self.assertEqual(headers.index("Город"), headers.index("Отдел") + 1)
+        self.assertEqual(
+            workbook["Summary"].cell(2, headers.index("Город") + 1).value,
+            "Актобе",
+        )
 
 
 if __name__ == "__main__":

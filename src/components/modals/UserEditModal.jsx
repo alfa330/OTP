@@ -1,6 +1,7 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
+import { departmentCodeHidesFrontOfficeTraining, departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';
 import CustomSelect from '../ui/CustomSelect';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
@@ -285,6 +286,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         if (d !== '' && d != null) return Number(d);
         return isDeptScoped ? requesterScopeDeptId : szovDeptId;
     })();
+    // Набор кадровых полей зависит от отдела сотрудника (не от отдела админа,
+    // который его редактирует): у фронт-офисов есть «Город», но нет отметки
+    // «Был во фронт офисе на обучении».
+    // Супервайзеру /api/admin/departments отдаёт 403, поэтому в скоупе отдела
+    // код берём из самого запрашивающего — иначе у СВ поля бы «пропали».
+    const requesterScopeDeptCode = isScopedDepartmentHeadRequester
+        ? (user?.headed_department_code ?? user?.headedDepartmentCode ?? null)
+        : (user?.department_code ?? user?.departmentCode ?? null);
+    const effectiveDeptCode = (departments || [])
+        .find((d) => Number(d?.id) === Number(effectiveDeptId))?.code
+        ?? (isDeptScoped && Number(effectiveDeptId) === Number(requesterScopeDeptId) ? requesterScopeDeptCode : null);
+    const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);
+    const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);
     const directionDeptOf = (dir) => dir?.department_id ?? dir?.departmentId ?? null;
     // Направления, доступные для выбранного отдела сотрудника (Этап 11):
     // показываем только направления отдела; если отдел не определён — все.
@@ -406,6 +420,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         close_contact_2_phone: base.close_contact_2_phone ?? "",
         company_name: base.company_name ?? "",
         employment_type: base.employment_type ?? "",
+        city: base.city ?? "",
         internship_in_company: !!base.internship_in_company,
         front_office_training: !!base.front_office_training,
         front_office_training_date: base.front_office_training_date ?? "",
@@ -447,6 +462,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         defaults.employment_type = ['gph', 'of', 'smz'].includes(String(defaults.employment_type || '').trim().toLowerCase())
             ? String(defaults.employment_type || '').trim().toLowerCase()
             : "";
+        defaults.city = String(defaults.city ?? '').trim();
         defaults.internship_in_company = !!defaults.internship_in_company;
         defaults.front_office_training = !!defaults.front_office_training;
         defaults.front_office_training_date = defaults.front_office_training
@@ -673,6 +689,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         close_contact_2_phone: "",
         company_name: "",
         employment_type: "",
+        city: "",
         internship_in_company: false,
         front_office_training: false,
         front_office_training_date: "",
@@ -760,7 +777,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         setModalError(`Телефон близкого контакта 2 должен быть в формате ${KZ_PHONE_PLACEHOLDER}`);
         return;
         }
-        if (editedUser?.front_office_training && !toDateInputValue(editedUser?.front_office_training_date)) {
+        // Дату обучения требуем только там, где саму отметку показываем: иначе
+        // сотрудника фронт-офиса со старым флагом без даты было бы не сохранить.
+        if (showFrontOfficeTraining && editedUser?.front_office_training && !toDateInputValue(editedUser?.front_office_training_date)) {
         setModalError("Если сотрудник был на обучении во фронт офисе, укажите дату.");
         return;
         }
@@ -833,6 +852,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
             employment_type: ['gph', 'of', 'smz'].includes(String(editedUser?.employment_type || '').trim().toLowerCase())
                 ? String(editedUser?.employment_type || '').trim().toLowerCase()
                 : '',
+            city: String(editedUser?.city || '').trim(),
             internship_in_company: !!editedUser?.internship_in_company,
             front_office_training: !!editedUser?.front_office_training,
             front_office_training_date: !!editedUser?.front_office_training
@@ -1329,6 +1349,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     />
                     </div>
 
+                    {showEmployeeCity && (
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Город</label>
+                        <input
+                        type="text"
+                        value={editedUser?.city || ""}
+                        onChange={(e) => setEditedUser({ ...editedUser, city: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        disabled={isLoading || !!createdCredentials}
+                        />
+                    </div>
+                    )}
+
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
                         <input
@@ -1369,6 +1402,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         </label>
                     </div>
 
+                    {showFrontOfficeTraining && (
+                    <>
                     <div>
                         <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
                         <input
@@ -1397,6 +1432,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
+                    )}
+                    </>
                     )}
 
                     <div>
@@ -1985,6 +2022,19 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </div>
                         </div>
 
+                        {showEmployeeCity && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Город</label>
+                            <input
+                            type="text"
+                            value={editedUser?.city || ""}
+                            onChange={(e) => setEditedUser({ ...editedUser, city: e.target.value })}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            disabled={isLoading}
+                            />
+                        </div>
+                        )}
+
                         <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Наименование ТОО/ИП</label>
                             <input
@@ -2024,6 +2074,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             </label>
                         </div>
 
+                        {showFrontOfficeTraining && (
+                        <>
                         <div>
                             <label className="inline-flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer">
                             <input
@@ -2052,6 +2104,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             disabled={isLoading}
                             />
                         </div>
+                        )}
+                        </>
                         )}
 
                         <div>

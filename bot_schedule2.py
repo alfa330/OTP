@@ -10180,7 +10180,9 @@ def get_admin_users():
                         u.study_completion_year,
                         u.department_id,
                         grp.group_id,
-                        grp.group_name
+                        grp.group_name,
+                        -- «Город» дописан в конец, чтобы не сдвигать индексы выше
+                        u.city
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -10276,7 +10278,8 @@ def get_admin_users():
                         "study_completion_year": int(row[47]) if row[47] is not None else None,
                         "department_id": row[48],
                         "group_id": row[49],
-                        "group_name": row[50] or ""
+                        "group_name": row[50] or "",
+                        "city": row[51] or ""
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
@@ -10404,6 +10407,7 @@ def admin_update_user():
             'close_contact_2_full_name',
             'close_contact_2_phone',
             'card_number',
+            'city',
             'taxipro_id'
         ]:
             value = str(value).strip() if value is not None else ''
@@ -12151,7 +12155,10 @@ def get_sv_list():
                         rate,
                         direction_id,
                         supervisor_id,
-                        department_id
+                        department_id,
+                        -- «Город» дописан в конец: индекс department_id (39) уже
+                        -- используется фильтром возглавляемых отделов ниже
+                        city
                     FROM users
                     WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                     ORDER BY name
@@ -12204,7 +12211,8 @@ def get_sv_list():
                         "rate": float(sv[36]) if sv[36] is not None else 1.0,
                         "direction_id": sv[37],
                         "supervisor_id": sv[38],
-                        "department_id": sv[39]
+                        "department_id": sv[39],
+                        "city": sv[40] or ""
                     })
             else:
                 # Супервайзер видит только супервайзеров СВОЕГО отдела
@@ -15722,6 +15730,7 @@ def add_user():
         close_contact_2_full_name = str(data.get('close_contact_2_full_name') or '').strip() or None
         close_contact_2_phone = str(data.get('close_contact_2_phone') or '').strip() or None
         card_number = str(data.get('card_number') or '').strip() or None
+        city = str(data.get('city') or '').strip() or None
         taxipro_id = str(data.get('taxipro_id') or '').strip() or None
 
         if phone and not _is_valid_kz_phone(phone):
@@ -15939,6 +15948,7 @@ def add_user():
             close_contact_2_full_name=close_contact_2_full_name,
             close_contact_2_phone=close_contact_2_phone,
             card_number=card_number,
+            city=city,
             internship_in_company=internship_in_company,
             front_office_training=front_office_training,
             front_office_training_date=front_office_training_date,

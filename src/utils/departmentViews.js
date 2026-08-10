@@ -118,6 +118,31 @@ export const departmentUsesSimpleEmployeeAccounting = (user) => {
     return Boolean(code && SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code));
 };
 
+const normalizeDepartmentCodeValue = (code) => String(code ?? '').trim().toLowerCase();
+
+// Отделы, чьи сотрудники сидят по офисам в разных городах: в карточке
+// сотрудника у них есть «Город», у остальных отделов поля нет.
+const EMPLOYEE_CITY_DEPARTMENTS = new Set(['front_office']);
+
+export const departmentCodeUsesEmployeeCity = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && EMPLOYEE_CITY_DEPARTMENTS.has(normalized));
+};
+
+export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCity(departmentCodeOf(user));
+
+// Отделы, у сотрудников которых не спрашиваем «Был во фронт офисе на обучении»:
+// сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна.
+// Скрываем только ввод — уже сохранённое значение сохраняется как есть.
+const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office']);
+
+export const departmentCodeHidesFrontOfficeTraining = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS.has(normalized));
+};
+
+export const departmentHidesFrontOfficeTraining = (user) => departmentCodeHidesFrontOfficeTraining(departmentCodeOf(user));
+
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {
     // Глобальные админы — без ограничений по отделу; главы отделов идут по head-набору.
