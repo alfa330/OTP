@@ -7,6 +7,7 @@
 from flask import jsonify, request
 
 from . import access as wiki_access
+from . import articles as wiki_articles
 from . import queries, structure
 
 
@@ -77,7 +78,14 @@ def register(bp, wiki_route, db, log_ip):
     # ── Дерево структуры ─────────────────────────────────────────────────
     @wiki_route('/structure')
     def wiki_structure(cursor, ctx):
-        """Пространства и разделы, доступные пользователю, плюс его права на них."""
+        """Пространства и разделы, доступные пользователю, плюс его права на них.
+
+        Периметр здесь ЛИЧНЫЙ (master_key=False): по этому же ответу рисуется
+        дерево разделов на вкладке «Статьи», а это витрина чтения. С мастер-ключом
+        флаг accessible был бы истинным у всех разделов сразу, и управляющий
+        структурой видел бы в дереве чужие отделы. Раздел вне периметра остаётся
+        в ответе (он нужен вкладке «Структура»), но помечен accessible=false.
+        """
         subjects = wiki_access.collect_subjects(
             user_id=ctx['user_id'], otp_role=ctx['otp_role'],
             department_id=ctx['department_id'],
@@ -85,11 +93,18 @@ def register(bp, wiki_route, db, log_ip):
             direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
             wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
         )
-        allowed = queries.allowed_section_ids(cursor, ctx, subjects)
+        allowed = queries.allowed_section_ids(cursor, ctx, subjects, master_key=False)
         rules_by_section = queries.section_rules_for_user(cursor, allowed, subjects,
                                                           ctx['user_id'])
         can_manage = bool(ctx['capabilities'].get('can_manage_structure')
                           or ctx['capabilities'].get('can_manage_access'))
+
+        # Счётчик статей в дереве — по тем же статьям, что человек реально
+        # откроет. Общее число остаётся отдельным полем: вкладке «Структура»
+        # нужен факт «в разделе 15 статей», даже если читателю видно три.
+        readable = wiki_articles.visible_article_ids(cursor, ctx, subjects, allowed,
+                                                     master_key=False)
+        readable_counts = structure.article_counts_by_section(cursor, readable)
 
         spaces = structure.list_spaces(cursor, include_archived=can_manage)
         sections = structure.list_sections(cursor, include_archived=can_manage)
@@ -107,6 +122,7 @@ def register(bp, wiki_route, db, log_ip):
             section['permissions'] = wiki_access.permissions_only(permissions)
             section['why'] = permissions['_reason']
             section['accessible'] = section['id'] in allowed
+            section['readable_count'] = readable_counts.get(section['id'], 0)
             visible.append(section)
 
         used_spaces = {s['space_id'] for s in visible}
@@ -358,6 +374,11 @@ def register(bp, wiki_route, db, log_ip):
         Такого эндпоинта в оригинале нет, но при четырёх уровнях правил
         (раздел → потомки → статья → запрет) без него невозможно ответить на
         вопрос «почему Иванов видит этот регламент».
+
+        Разделы считаются ЛИЧНЫМ периметром — ровно тем, что человек увидит в
+        «Все статьи». Мастер-ключ сюда не подмешивается: иначе у носителя роли
+        'admin' ответ был бы «видит все восемь разделов», хотя в его списке
+        статей лежит один. Сам мастер-ключ виден в capabilities ответа.
         """
         target_id = _int_or_none(request.args.get('user_id'))
         if not target_id:
@@ -378,7 +399,7 @@ def register(bp, wiki_route, db, log_ip):
             direction_id=target['direction_id'], group_ids=target['group_ids'],
             wiki_role_ids=[r.get('id') for r in target['wiki_roles']],
         )
-        allowed = queries.allowed_section_ids(cursor, target, subjects)
+        allowed = queries.allowed_section_ids(cursor, target, subjects, master_key=False)
         rules_by_section = queries.section_rules_for_user(cursor, allowed, subjects,
                                                           target['user_id'])
 

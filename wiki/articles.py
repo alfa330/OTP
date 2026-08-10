@@ -12,6 +12,18 @@
   2. mode='deny' сильнее любого grant;
   3. can_manage_access обходит deny, но НЕ обходит strict_mode;
   4. strict_mode обходит только super_admin, и это пишется в журнал.
+
+Периметра два, и это не дубль правил, а разные вопросы к одной модели:
+  * ПОЛНЫЙ (master_key=True) — «вправе ли открыть»: сюда входит мастер-ключ
+    администратора вики. По нему работают точечные пути: статья по слагу,
+    файл, избранное, правка, ознакомление;
+  * ЛИЧНЫЙ (master_key=False) — «имеет ли отношение»: только правила, авторство
+    и гостевой доступ. По нему работают ВИТРИНЫ: список «Все статьи», поиск,
+    подсказки, главная раздела, дерево разделов.
+Разделение появилось потому, что мастер-ключ достаётся роли OTP 'admin'
+автоматически, а её носят руководители разных служб: в «Все статьи» им
+выкладывалось содержимое чужих отделов вместе с черновиками. Администратор
+по-прежнему может увидеть всё — но по явной просьбе (?scope=all), а не молча.
 """
 
 # Подстановка субъектов повторяется в нескольких запросах — держим одной строкой,
@@ -77,7 +89,7 @@ SELECT a.id
 """
 
 
-def _subject_params(ctx, subjects, sections):
+def _subject_params(ctx, subjects, sections, master_key=True):
     caps = ctx['capabilities']
     role = str(ctx.get('otp_role') or '').strip().lower()
     return {
@@ -88,18 +100,30 @@ def _subject_params(ctx, subjects, sections):
         'groups': subjects['group'] or [-1],
         'roles': subjects['otp_role'] or [''],
         'wiki_roles': subjects['wiki_role'] or [-1],
-        'is_wiki_admin': bool(caps.get('can_manage_access')),
-        'is_super_admin': role in ('super_admin', 'superadmin'),
-        'can_see_drafts': bool(caps.get('can_edit') or caps.get('can_publish')
+        'is_wiki_admin': bool(caps.get('can_manage_access')) and master_key,
+        'is_super_admin': role in ('super_admin', 'superadmin') and master_key,
+        # Черновик — незаконченный текст, и в списке чтения ему не место.
+        # Гейтом было can_edit, а эту способность в OTP по умолчанию получают
+        # супервайзер и тренер: чужие неопубликованные статьи попадали к ним
+        # в «Все статьи». Право видеть черновик оставляем тому, кто вправе его
+        # опубликовать; автор и владелец видят свой всегда (условие в SQL).
+        'can_see_drafts': bool(caps.get('can_publish')
                                or caps.get('can_manage_access')),
         'can_see_archived': bool(caps.get('can_manage_structure')
                                  or caps.get('can_manage_access')),
     }
 
 
-def visible_article_ids(cursor, ctx, subjects, allowed_sections):
-    """Множество статей, которые пользователь вправе прочитать."""
-    cursor.execute(_VISIBLE_ARTICLES_SQL, _subject_params(ctx, subjects, allowed_sections))
+def visible_article_ids(cursor, ctx, subjects, allowed_sections, *, master_key=True):
+    """Множество статей, которые пользователь вправе прочитать.
+
+    master_key=False считает ЛИЧНЫЙ периметр: мастер-ключ администратора вики
+    (can_manage_access) и обход строгого режима super_admin не применяются, и
+    остаются только правила разделов и статей, авторство и гостевой доступ.
+    Так считают витрины чтения — см. allowed_section_ids с тем же флагом.
+    """
+    cursor.execute(_VISIBLE_ARTICLES_SQL,
+                   _subject_params(ctx, subjects, allowed_sections, master_key))
     return {row[0] for row in cursor.fetchall()}
 
 

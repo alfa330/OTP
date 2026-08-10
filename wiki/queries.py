@@ -173,15 +173,21 @@ SELECT g.section_id
 """
 
 
-def allowed_section_ids(cursor, ctx, subjects):
+def allowed_section_ids(cursor, ctx, subjects, *, master_key=True):
     """Идентификаторы разделов, доступных пользователю на чтение.
 
     Администратор доступов видит все активные разделы — короткое замыкание.
     ВАЖНО: проверка админа стоит ДО раннего выхода по пустому периметру.
     В оригинале порядок был обратный, и администратор вики не мог создать
     статью, пока ему не выдали хотя бы один раздел правилом.
+
+    master_key=False отключает это замыкание и считает ЛИЧНЫЙ периметр — то,
+    к чему у человека есть отношение по правилам. Витрины для чтения (список
+    статей, поиск, дерево разделов) считают именно его: роль 'admin' в OTP
+    носят руководители разных служб, и мастер-ключ выкладывал им в «Все статьи»
+    содержимое чужих отделов вместе с чужими черновиками.
     """
-    if ctx['capabilities'].get('can_manage_access'):
+    if master_key and ctx['capabilities'].get('can_manage_access'):
         cursor.execute("SELECT id FROM wiki_sections WHERE status = 'active'")
         return {row[0] for row in cursor.fetchall()}
 

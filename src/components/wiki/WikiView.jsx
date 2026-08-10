@@ -327,6 +327,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         showToast={showToast}
                         structure={structure}
                         canCreate={!!capabilities.can_create}
+                        canSeeEverything={canManageAccess}
                         initialSlug={initialArticleSlug}
                         onInitialSlugConsumed={onInitialArticleConsumed}
                         searchTarget={searchTarget}

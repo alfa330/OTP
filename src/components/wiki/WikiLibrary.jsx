@@ -4,7 +4,7 @@ import {
     BookOpen, ChevronRight, Clock, Eye, FileText, FolderTree, Loader2,
     Plus, Search, Star, TrendingUp,
 } from 'lucide-react';
-import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge } from '../ui/ios';
+import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosToggle } from '../ui/ios';
 import WikiArticle from './WikiArticle';
 import { markedWord } from './WikiSearch';
 import { CLASSIFIER_SLUG } from './WikiArticle';
@@ -134,6 +134,7 @@ const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
 );
 
 export default function WikiLibrary({ base, headers, showToast, structure, canCreate,
+                                      canSeeEverything = false,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
@@ -154,6 +155,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
     const [home, setHome] = useState(null);
     const [found, setFound] = useState(null);   // null = поиска не было
     const [loading, setLoading] = useState(true);
+    /* «Всё содержимое портала» — только для администратора доступов и только по
+       его явному нажатию. По умолчанию раздел показывает личный периметр: то,
+       к чему у человека есть отношение по правилам. */
+    const [scopeAll, setScopeAll] = useState(false);
 
     /* Статья из уведомления открывается один раз: значение сразу гасится в
        App, иначе следующий заход в раздел снова открывал бы её поверх того,
@@ -204,7 +209,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         // Короткий ввод — обычный список; от двух символов включается
         // полнотекстовый поиск со сниппетами, как в оригинале.
         if (term.length >= 2) {
-            const params = { q: term };
+            const params = { q: term, ...(scopeAll ? { scope: 'all' } : {}) };
             if (sectionId) params.section_id = sectionId;
             axios.get(`${base}/search`, { headers, params })
                 .then((r) => setFound(r.data?.items || []))
@@ -217,13 +222,13 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         }
 
         setFound(null);
-        const params = {};
+        const params = scopeAll ? { scope: 'all' } : {};
         if (sectionId) params.section_id = sectionId;
         axios.get(`${base}/articles`, { headers, params })
             .then((r) => setItems(r.data?.items || []))
             .catch((e) => toast(errText(e, 'Не удалось загрузить статьи'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, sectionId, query, toast]);
+    }, [base, headers, sectionId, query, scopeAll, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -231,22 +236,42 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
     }, [load, query]);
 
     useEffect(() => {
-        axios.get(`${base}/home`, { headers })
+        axios.get(`${base}/home`, { headers, params: scopeAll ? { scope: 'all' } : {} })
             .then((r) => setHome(r.data))
             .catch(() => setHome(null));
-    }, [base, headers]);
+    }, [base, headers, scopeAll]);
+
+    /* В дереве — только разделы своего периметра. Сервер отдаёт и чужие
+       (вкладке «Структура» они нужны), помечая их accessible=false; здесь,
+       на витрине чтения, они были бы ветками, которые открываются пустыми. */
+    const treeSections = useMemo(() => (
+        scopeAll ? sections : sections.filter((s) => s.accessible !== false)
+    ), [sections, scopeAll]);
 
     const tree = useMemo(() => {
+        const shown = new Set(treeSections.map((s) => s.id));
         const children = new Map();
-        sections.forEach((s) => {
-            const key = s.parent_section_id || `root:${s.space_id}`;
+        treeSections.forEach((s) => {
+            // Родитель скрыт — раздел поднимается в корень пространства, иначе
+            // доступная ветка потерялась бы под недоступной.
+            const key = (s.parent_section_id && shown.has(s.parent_section_id))
+                ? s.parent_section_id
+                : `root:${s.space_id}`;
             if (!children.has(key)) children.set(key, []);
             children.get(key).push(s);
         });
         const walk = (key, depth) => (children.get(key) || [])
             .flatMap((s) => [{ section: s, depth }, ...walk(s.id, depth + 1)]);
-        return spaces.map((space) => ({ space, rows: walk(`root:${space.id}`, 0) }));
-    }, [spaces, sections]);
+        return spaces
+            .map((space) => ({ space, rows: walk(`root:${space.id}`, 0) }))
+            .filter(({ rows }) => rows.length > 0);
+    }, [spaces, treeSections]);
+
+    /* Выключили «всё содержимое» — выбранный раздел мог оказаться за периметром.
+       Сбрасываем фильтр, иначе список молча остался бы пустым. */
+    useEffect(() => {
+        if (sectionId && !treeSections.some((s) => s.id === sectionId)) setSectionId(null);
+    }, [treeSections, sectionId]);
 
     if (editing) {
         return (
@@ -302,9 +327,34 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                 )}
             </div>
 
+            {/* Администратор доступов по умолчанию видит свой периметр, как все.
+                Всё содержимое портала — по явному нажатию: без него не найти
+                статью, которую попросили починить, а молча показывать чужие
+                отделы и черновики раздел не должен. */}
+            {canSeeEverything && (
+                <div className={`${iosCard} flex items-center gap-3 px-4 py-3`}>
+                    <IosToggle checked={scopeAll} onChange={setScopeAll} />
+                    {/* Подпись — отдельная кнопка, а не <label>: внутри IosToggle
+                        лежит <button>, а его метка не связывается с label. */}
+                    <button
+                        type="button"
+                        onClick={() => setScopeAll(!scopeAll)}
+                        className="min-w-0 flex-1 text-left"
+                    >
+                        <span className="block text-[13.5px] font-medium text-slate-900">
+                            Всё содержимое портала
+                        </span>
+                        <span className="block text-[12px] leading-snug text-slate-500">
+                            Статьи всех отделов, включая черновики и архив. Обычно
+                            здесь только то, к чему у вас есть доступ.
+                        </span>
+                    </button>
+                </div>
+            )}
+
             <div className="flex flex-col gap-5 lg:flex-row">
                 {/* Дерево разделов — внутренняя колонка, а не второй сайдбар портала. */}
-                {sections.length > 0 && (
+                {tree.length > 0 && (
                     <nav className="lg:w-60 lg:shrink-0">
                         <div className={`${iosGroupLabel} mb-1.5 flex items-center gap-1.5`}>
                             <FolderTree size={12} /> Разделы
@@ -337,9 +387,12 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                                             style={{ paddingLeft: `${14 + depth * 14}px` }}
                                         >
                                             <span className="min-w-0 flex-1 truncate">{section.name}</span>
-                                            {section.articles_count > 0 && (
+                                            {/* Счётчик — по видимым статьям, а не по всем:
+                                                цифра рядом с названием обязана совпадать
+                                                с тем, что откроется по клику. */}
+                                            {(scopeAll ? section.articles_count : section.readable_count) > 0 && (
                                                 <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
-                                                    {section.articles_count}
+                                                    {scopeAll ? section.articles_count : section.readable_count}
                                                 </span>
                                             )}
                                         </button>

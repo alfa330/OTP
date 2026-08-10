@@ -88,6 +88,28 @@ def list_sections(cursor, space_id=None, include_archived=False):
     return [dict(zip(_SECTION_KEYS, row)) for row in cursor.fetchall()]
 
 
+def article_counts_by_section(cursor, article_ids):
+    """Сколько статей из переданного множества лежит в каждом разделе.
+
+    Нужен дереву разделов: счётчик рядом с названием обязан совпадать с тем,
+    что человек увидит, открыв раздел. Общий счётчик articles_count оставлен
+    вкладке «Структура» — там вопрос другой: сколько статей в разделе вообще.
+    """
+    ids = list(article_ids or ())
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT section_id, count(*)
+          FROM wiki_article_sections
+         WHERE article_id = ANY(%s)
+         GROUP BY section_id
+        """,
+        (ids,),
+    )
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
 def create_section(cursor, *, space_id, parent_section_id, name, slug, description,
                    icon, visibility_scope, owner_user_id, created_by):
     cursor.execute(

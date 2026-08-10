@@ -25,11 +25,14 @@ def _int_or_none(value):
 def register(bp, wiki_route, db, log_ip, gcs):
     """gcs — словарь с ключами signed_url и bucket_name (внедряются из bot_schedule2)."""
 
-    def _perimeter(cursor, ctx):
+    def _perimeter(cursor, ctx, *, master_key=True):
         """Субъекты, разрешённые разделы и видимые статьи — за один проход.
 
         Собрано в одну функцию, чтобы ни один эндпоинт не мог случайно
         посчитать периметр иначе, чем остальные.
+
+        master_key=False — личный периметр без мастер-ключа администратора
+        (см. шапку wiki/articles.py).
         """
         subjects = wiki_access.collect_subjects(
             user_id=ctx['user_id'], otp_role=ctx['otp_role'],
@@ -38,14 +41,29 @@ def register(bp, wiki_route, db, log_ip, gcs):
             direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
             wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
         )
-        sections = queries.allowed_section_ids(cursor, ctx, subjects)
-        visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections)
+        sections = queries.allowed_section_ids(cursor, ctx, subjects,
+                                               master_key=master_key)
+        visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections,
+                                                    master_key=master_key)
         return subjects, sections, visible
+
+    def _browse(cursor, ctx):
+        """Периметр ВИТРИНЫ: список, поиск, подсказки, главная раздела.
+
+        По умолчанию личный — человек видит то, к чему имеет отношение.
+        Администратор доступов может попросить показать всё содержимое портала
+        (?scope=all, переключатель в интерфейсе): без этого он не найдёт статью,
+        которую его же попросили починить. Просьба явная и от постороннего
+        ничего не открывает — способность проверяется здесь же.
+        """
+        wants_all = (str(request.args.get('scope') or '').strip().lower() == 'all'
+                     and bool(ctx['capabilities'].get('can_manage_access')))
+        return _perimeter(cursor, ctx, master_key=wants_all)
 
     # ── Список ───────────────────────────────────────────────────────────
     @wiki_route('/articles')
     def wiki_articles_list(cursor, ctx):
-        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        _subjects, _sections, visible = _browse(cursor, ctx)
         limit = min(max(_int_or_none(request.args.get('limit')) or 50, 1), 200)
         offset = max(_int_or_none(request.args.get('offset')) or 0, 0)
         items = wiki_articles.list_articles(
@@ -70,7 +88,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         if len(query) < 2:
             return jsonify({"items": [], "query": query})
 
-        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        _subjects, _sections, visible = _browse(cursor, ctx)
         limit = min(max(_int_or_none(request.args.get('limit')) or 20, 1), 50)
         items = wiki_search.search(
             cursor, visible, query,
@@ -86,7 +104,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         query = (request.args.get('q') or '').strip()
         if len(query) < 2:
             return jsonify({"items": []})
-        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        _subjects, _sections, visible = _browse(cursor, ctx)
         return jsonify({"items": wiki_search.suggest(
             cursor, visible, query,
             with_trigram=wiki_schema.trigram_available(cursor))})
@@ -95,7 +113,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
     @wiki_route('/home')
     def wiki_home(cursor, ctx):
         """Недавнее, популярное и избранное — строго в границах периметра."""
-        _subjects, _sections, visible = _perimeter(cursor, ctx)
+        _subjects, _sections, visible = _browse(cursor, ctx)
         return jsonify(wiki_articles.recent_and_popular(cursor, visible, ctx['user_id']))
 
     # ── Статья ───────────────────────────────────────────────────────────
