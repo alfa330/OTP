@@ -6,10 +6,11 @@
 1. Гейт уточнения живёт в КОДЕ. Замер: на «что с машиной» обе проверенные модели
    вместо вопроса выдали ответ про мойку кузова — правило в промпте не сработало
    ни у одной. Поэтому неоднозначность решается до вызова модели.
-2. Цитата из ЗАГОЛОВКА фрагмента считается подтверждённой слабо, а не негодной.
-   Пока метка фрагмента шла строкой с текстом, модель цитировала заголовок,
-   сверка падала, и защита превращала ВЕРНЫЙ ответ в отказ. Помощник, отрицающий
-   то, что знает, теряет доверие целиком — это дороже галлюцинации.
+2. Цитату извлекает СЕРВЕР, а модель называет только номера фрагментов. Так
+   стало после проверки на проде: сверка модельной цитаты срабатывала через раз и
+   выбрасывала ВЕРНЫЕ ответы — на «Офис Астана» кусок с адресом был найден, но
+   модель процитировала строку-метку. От выдумки защищает другая, устойчивая
+   проверка: числа ответа обязаны встречаться в переданных фрагментах.
 3. Пустой ответ провайдера — ошибка, а не результат. Модели с рассуждениями
    возвращают HTTP 200 с пустым content при finish_reason='length', а авторутер
    OpenRouter однажды вернул строку «User Safety: safe» вместо текста.
@@ -67,53 +68,90 @@ class ClarifyGateTest(unittest.TestCase):
 
 
 class SourcesTest(unittest.TestCase):
-    def test_split_sources(self):
-        body, claims = ai_answer.split_sources(
-            'Минимальный срок — 14 дней.\nИСТОЧНИКИ:\n[1] срок аренды — 14 дней')
+    def test_split_sources_takes_numbers(self):
+        body, cited = ai_answer.split_sources(
+            'Минимальный срок — 14 дней.\nИСТОЧНИКИ: [1] [3]')
         self.assertEqual('Минимальный срок — 14 дней.', body)
-        self.assertEqual([(1, 'срок аренды — 14 дней')], claims)
+        self.assertEqual([1, 3], cited)
 
     def test_split_without_block(self):
-        body, claims = ai_answer.split_sources('Просто ответ')
+        body, cited = ai_answer.split_sources('Просто ответ')
         self.assertEqual('Просто ответ', body)
-        self.assertEqual([], claims)
+        self.assertEqual([], cited)
 
-    def test_exact_quote_verifies(self):
-        sources = ai_answer.verify_sources([(1, 'срок аренды — 14 дней')], [chunk()])
+    def test_excerpt_comes_from_chunk_not_from_model(self):
+        text = ('Город: Астана; Адрес: Проспект Сарыарка, 31\n'
+                'Город: Алматы; Адрес: Жамбыла, 172')
+        excerpt = ai_answer.pick_excerpt(text, 'Офис в Астане на Сарыарка 31')
+        self.assertIn('Астана', excerpt)
+        self.assertIn(excerpt.rstrip('…'), text)
+
+    def test_excerpt_falls_back_to_first_line(self):
+        self.assertEqual('Единственная строка',
+                         ai_answer.pick_excerpt('Единственная строка', 'ничего общего'))
+
+    def test_sources_from_model_numbers(self):
+        sources = ai_answer.build_sources([1], [chunk()], 'срок 14 дней')
+        self.assertEqual(1, len(sources))
         self.assertTrue(sources[0]['ok'])
-        self.assertFalse(sources[0]['weak'])
+        self.assertFalse(sources[0]['attributed'])
 
-    def test_quote_ignores_whitespace_and_case(self):
-        sources = ai_answer.verify_sources(
-            [(1, '  МИНИМАЛЬНЫЙ   срок   аренды ')], [chunk()])
-        self.assertTrue(sources[0]['ok'])
+    def test_sources_attributed_when_model_named_none(self):
+        """Модель иногда не даёт номеров — источник выводится по пересечению."""
+        rows = [chunk(chunk_id=1, text='Минимальный срок аренды составляет 14 дней'),
+                chunk(chunk_id=2, article_id=11, text='Термопакет выдаётся в офисе')]
+        sources = ai_answer.build_sources([], rows, 'минимальный срок аренды 14 дней')
+        self.assertTrue(sources)
+        self.assertEqual(1, sources[0]['chunk_id'])
+        self.assertTrue(sources[0]['attributed'])
 
-    def test_heading_quote_is_weak_not_rejected(self):
-        sources = ai_answer.verify_sources([(1, 'Аренда транспорта')], [chunk()])
-        self.assertTrue(sources[0]['ok'])
-        self.assertTrue(sources[0]['weak'])
+    def test_bad_fragment_number_is_ignored(self):
+        sources = ai_answer.build_sources([7], [chunk()], 'срок аренды 14 дней')
+        for source in sources:
+            self.assertLessEqual(source['number'], 1)
 
-    def test_missing_quote_rejected(self):
-        sources = ai_answer.verify_sources(
-            [(1, 'минимальный срок аренды тридцать дней')], [chunk()])
-        self.assertFalse(sources[0]['ok'])
+    def test_numbers_must_be_grounded(self):
+        rows = [chunk(text='Минимальный срок аренды — 14 дней.')]
+        self.assertEqual([], ai_answer.ungrounded_numbers('Срок 14 дней', rows))
+        self.assertTrue(ai_answer.ungrounded_numbers('Залог 250000 тенге', rows))
 
-    def test_too_short_quote_rejected(self):
-        sources = ai_answer.verify_sources([(1, '14 дней')], [chunk()])
-        self.assertFalse(sources[0]['ok'])
+    def test_short_numbers_are_not_checked(self):
+        """Одиночные цифры — нумерация списка, а не факты."""
+        rows = [chunk(text='Порядок действий описан ниже.')]
+        self.assertEqual([], ai_answer.ungrounded_numbers(
+            '1. Позвонить 2. Уточнить', rows))
 
-    def test_bad_fragment_number(self):
-        sources = ai_answer.verify_sources([(7, 'что угодно длинное')], [chunk()])
-        self.assertFalse(sources[0]['ok'])
-        self.assertIn('нет такого фрагмента', sources[0]['reason'])
+    def test_number_from_question_is_not_invented(self):
+        rows = [chunk(text='Аренда возможна.')]
+        self.assertEqual([], ai_answer.ungrounded_numbers(
+            'Для 2026 года условия те же', rows, 'что будет в 2026 году'))
+
+    def test_phone_digits_compared_without_punctuation(self):
+        """Модель переставляет пробелы в номере — это не выдумка.
+
+        Сравниваются только цифры, поэтому «+7 700 000 01 10» из статьи и
+        «+77000000110» в ответе — одно и то же число.
+        """
+        rows = [chunk(text='Номер офиса: +7 700 000 01 10')]
+        self.assertEqual([], ai_answer.ungrounded_numbers(
+            'Звоните по номеру +77000000110', rows))
+
+    def test_wrong_phone_is_caught(self):
+        rows = [chunk(text='Номер офиса: +7 700 000 01 10')]
+        self.assertTrue(ai_answer.ungrounded_numbers(
+            'Звоните по номеру +77012345678', rows))
 
 
 class PromptTest(unittest.TestCase):
     def test_body_is_separated_from_label(self):
-        """Метка фрагмента обязана быть отделена от текста — см. шапку файла."""
         prompt = ai_answer.build_user_prompt('вопрос', [chunk()])
         self.assertIn('ТЕКСТ:', prompt)
         self.assertIn('Статья «Аренда транспорта», раздел «Аренда > Условия»', prompt)
+
+    def test_prompt_asks_for_numbers_only(self):
+        """Дословную цитату у модели больше не просим — она её не удерживает."""
+        self.assertIn('Только номера', ai_answer.SYSTEM_PROMPT)
+        self.assertNotIn('дословная цитата', ai_answer.SYSTEM_PROMPT)
 
     def test_language_rule_permits_translating_context(self):
         """Без явного разрешения перевода модель отвечала по-русски на казахский."""
@@ -143,22 +181,32 @@ class ComposeTest(unittest.TestCase):
         result = ai_answer.compose('что с машиной', rows, explode)
         self.assertEqual('clarify', result['kind'])
 
-    def test_answer_with_verified_source(self):
+    def test_answer_with_source(self):
         def fake(system, user):
-            return ('Минимальный срок — 14 дней.\nИСТОЧНИКИ:\n'
-                    '[1] срок аренды — 14 дней'), {'provider': 'test'}
+            return 'Минимальный срок — 14 дней.\nИСТОЧНИКИ: [1]', {'provider': 'test'}
 
         result = ai_answer.compose('какой минимальный срок аренды', [chunk()], fake)
         self.assertEqual('answer', result['kind'])
-        self.assertTrue(result['sources'][0]['ok'])
+        self.assertTrue(result['sources'])
+        self.assertIn('14 дней', result['sources'][0]['quote'])
 
-    def test_answer_without_any_verified_source_is_withheld(self):
+    def test_answer_survives_missing_sources_block(self):
+        """Забытый блок ИСТОЧНИКИ больше не повод придержать верный ответ."""
         def fake(system, user):
-            return 'Срок аренды 30 дней.', {'provider': 'test'}
+            return 'Минимальный срок аренды — 14 дней.', {'provider': 'test'}
 
         result = ai_answer.compose('какой минимальный срок аренды', [chunk()], fake)
+        self.assertEqual('answer', result['kind'])
+        self.assertTrue(result['sources'])
+
+    def test_invented_number_is_withheld(self):
+        def fake(system, user):
+            return 'Залог составляет 250000 тенге.\nИСТОЧНИКИ: [1]', {'provider': 'test'}
+
+        result = ai_answer.compose('какой залог', [chunk()], fake)
         self.assertEqual('no_answer', result['kind'])
-        self.assertIn('нет подтверждённых цитат', result['meta']['rejected'])
+        self.assertIn('числа не найдены', result['meta']['rejected'])
+        self.assertEqual([], result['sources'])
 
     def test_model_refusal_is_kept_as_refusal(self):
         def fake(system, user):
@@ -168,10 +216,18 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual('no_answer', result['kind'])
         self.assertIn('Спросите у СВ', result['text'])
 
+    def test_refusal_carries_no_sources(self):
+        """Список статей под фразой «этого нет» читается как противоречие."""
+        def fake(system, user):
+            return 'В доступных вам статьях этого нет. Спросите у СВ.', {}
+
+        result = ai_answer.compose('сколько отпускных', [chunk()], fake)
+        self.assertEqual('no_answer', result['kind'])
+        self.assertEqual([], result['sources'])
+
     def test_ack_note_added_for_required_chunk(self):
         def fake(system, user):
-            return ('Проговорить чек-лист.\nИСТОЧНИКИ:\n'
-                    '[1] срок аренды — 14 дней'), {}
+            return 'Проговорить чек-лист.\nИСТОЧНИКИ: [1]', {}
 
         result = ai_answer.compose('что проговорить водителю',
                                    [chunk(requires_ack=True)], fake)

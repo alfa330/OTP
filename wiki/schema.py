@@ -738,6 +738,10 @@ _AI_STATEMENTS = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_ai_message_sources_message "
     "ON wiki_ai_message_sources (message_id, ord);",
+    # Фрагмент назвала модель или сопоставил сервер по пересечению с ответом.
+    # Отдельной колонкой, чтобы пометка в истории совпадала со свежим ответом.
+    "ALTER TABLE wiki_ai_message_sources ADD COLUMN IF NOT EXISTS "
+    "attributed BOOLEAN NOT NULL DEFAULT FALSE;",
 ]
 
 # ── Векторы кусков ───────────────────────────────────────────────────────────

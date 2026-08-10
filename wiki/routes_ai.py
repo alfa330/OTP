@@ -255,7 +255,10 @@ def register(bp, wiki_route, db, log_ip):
                 'slug': source.get('slug'),
                 'heading_path': source.get('heading_path'),
                 'quote': source.get('quote'),
-                'quote_ok': bool(source.get('ok')),
+                # Цитату извлекает сервер, поэтому она дословна всегда, и флага
+                # «подтверждена» больше нет. Отдаём другое: указала ли фрагмент
+                # сама модель или сервер сопоставил его по пересечению с ответом.
+                'attributed': bool(source.get('attributed')),
                 'requires_ack': bool(source.get('requires_ack')),
             } for position, source in enumerate(result.get('sources') or [])],
             'provider': meta.get('provider'),

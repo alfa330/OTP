@@ -51,10 +51,10 @@ RETURNING id, created_at
 _INSERT_SOURCE = """
 INSERT INTO wiki_ai_message_sources
        (message_id, ord, article_id, chunk_id, chunk_text_hash, title, slug,
-        heading_path, quote, quote_ok, requires_ack)
+        heading_path, quote, quote_ok, requires_ack, attributed)
 VALUES (%(message_id)s, %(ord)s, %(article_id)s, %(chunk_id)s,
         %(chunk_text_hash)s, %(title)s, %(slug)s, %(heading_path)s, %(quote)s,
-        %(quote_ok)s, %(requires_ack)s)
+        %(quote_ok)s, %(requires_ack)s, %(attributed)s)
 """
 
 _TOUCH_CHAT = """
@@ -77,7 +77,7 @@ SELECT id, seq, role, kind, text, provider, model, elapsed_ms, feedback, created
 # «статья недоступна» появляется сразу после отзыва доступа, без переиндексации.
 _SOURCES = """
 SELECT s.message_id, s.ord, s.article_id, s.title, s.slug, s.heading_path,
-       s.quote, s.quote_ok, s.requires_ack,
+       s.quote, s.quote_ok, s.requires_ack, s.attributed,
        (s.article_id = ANY(%(visible)s)) AS available
   FROM wiki_ai_message_sources s
   JOIN wiki_ai_messages m ON m.id = s.message_id
@@ -160,7 +160,8 @@ def append_message(cursor, chat_id, *, role, text, kind='answer', provider=None,
             'heading_path': source.get('heading_path') or '',
             'quote': source.get('quote') or '',
             'quote_ok': bool(source.get('ok')),
-            'requires_ack': bool(source.get('requires_ack'))})
+            'requires_ack': bool(source.get('requires_ack')),
+            'attributed': bool(source.get('attributed'))})
     return {'id': message_id, 'seq': seq,
             'created_at': created_at.isoformat() if created_at else None}
 
@@ -186,7 +187,7 @@ def chat_messages(cursor, chat_id, *, visible_article_ids=()):
         message = by_id.get(row[0])
         if message is None:
             continue
-        available = bool(row[9])
+        available = bool(row[10])
         message['sources'].append({
             'ord': row[1], 'article_id': row[2],
             'title': row[3] if available else 'Статья недоступна',
@@ -196,7 +197,7 @@ def chat_messages(cursor, chat_id, *, visible_article_ids=()):
             # ответа, и снимок не должен становиться лазейкой.
             'quote': row[6] if available else '',
             'quote_ok': bool(row[7]), 'requires_ack': bool(row[8]),
-            'available': available})
+            'attributed': bool(row[9]), 'available': available})
     return messages
 
 
