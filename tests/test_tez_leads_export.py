@@ -6,8 +6,9 @@ import copy
 import io
 import os
 import re
+import sys
 import unittest
-from datetime import datetime, timedelta
+from datetime import date as dt_date, datetime, timedelta
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
@@ -17,6 +18,8 @@ from openpyxl.utils import get_column_letter
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 BOT_PATH = ROOT / "bot_schedule2.py"
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
 BOT_TREE = ast.parse(BOT_SOURCE)
@@ -168,6 +171,8 @@ class TezLeadsExcelExportTests(unittest.TestCase):
                 "PatternFill": PatternFill,
                 "Alignment": Alignment,
                 "BytesIO": io.BytesIO,
+                "datetime": datetime,
+                "dt_date": dt_date,
                 "timedelta": timedelta,
                 "send_file": send_file,
                 "get_column_letter": get_column_letter,
@@ -216,10 +221,10 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         )
         headers = [cell.value for cell in sheet[1]]
         self.assertIn("Источник", headers)
-        self.assertIn("Время разговора", headers)
+        self.assertIn("Время разговора в отчётном месяце", headers)
 
         source_column = headers.index("Источник") + 1
-        duration_column = headers.index("Время разговора") + 1
+        duration_column = headers.index("Время разговора в отчётном месяце") + 1
         self.assertEqual(sheet.cell(2, source_column).value, "Лиды Алматы июль.xlsx")
         # Длительность — число секунд, а не формат времени: отчёт считают и
         # фильтруют в секундах, в них же задан порог успешки.
@@ -232,7 +237,7 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         )
         headers = [cell.value for cell in sheet[1]]
         source_column = headers.index("Источник") + 1
-        duration_column = headers.index("Время разговора") + 1
+        duration_column = headers.index("Время разговора в отчётном месяце") + 1
 
         self.assertIsNone(sheet.cell(2, duration_column).value)
         self.assertIn(sheet.cell(2, source_column).value, (None, ""))
@@ -271,7 +276,7 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         self.assertEqual(cell.data_type, "s")
         self.assertEqual(cell.number_format, "@")
         # Длительность разговора — по-прежнему число, а не текст.
-        duration_column = headers.index("Время разговора") + 1
+        duration_column = headers.index("Время разговора в отчётном месяце") + 1
         self.assertEqual(sheet.cell(2, duration_column).number_format, "0")
 
     def test_phone_column_has_no_number_stored_as_text_warning(self):
@@ -301,6 +306,68 @@ class TezLeadsExcelExportTests(unittest.TestCase):
             sheet_xml = book.read("xl/worksheets/sheet1.xml").decode("utf-8")
         self.assertNotIn("<ignoredErrors", sheet_xml)
 
+    def _call_columns(self, sheet):
+        headers = [cell.value for cell in sheet[1]]
+        return {
+            "prev_call": headers.index("Звонок в прошлом месяце") + 1,
+            "prev_duration": headers.index("Время разговора в прошлом месяце") + 1,
+            "month_call": headers.index("Звонок в отчётном месяце") + 1,
+            "month_duration": headers.index("Время разговора в отчётном месяце") + 1,
+        }
+
+    def test_call_inside_reporting_month_fills_only_the_reporting_pair(self):
+        _, sheet = self._export(
+            [self._detail_row(call_at="2026-07-18T10:15:00", talk_duration_seconds=44)]
+        )
+        col = self._call_columns(sheet)
+
+        self.assertEqual(sheet.cell(2, col["month_call"]).value, "2026-07-18 10:15:00")
+        self.assertEqual(sheet.cell(2, col["month_duration"]).value, 44)
+        self.assertIsNone(sheet.cell(2, col["prev_call"]).value)
+        self.assertIsNone(sheet.cell(2, col["prev_duration"]).value)
+
+    def test_call_in_last_seven_days_of_previous_month_fills_only_the_previous_pair(self):
+        """Окно считается от конца месяца: в июне это 24–30, а не «после 24-го»."""
+        _, sheet = self._export(
+            [self._detail_row(call_at="2026-06-24T09:00:00", talk_duration_seconds=61)]
+        )
+        col = self._call_columns(sheet)
+
+        self.assertEqual(sheet.cell(2, col["prev_call"]).value, "2026-06-24 09:00:00")
+        self.assertEqual(sheet.cell(2, col["prev_duration"]).value, 61)
+        self.assertIsNone(sheet.cell(2, col["month_call"]).value)
+        self.assertIsNone(sheet.cell(2, col["month_duration"]).value)
+
+    def test_call_before_the_window_lands_in_neither_pair(self):
+        """23 июня — на день раньше окна, звонок успешку дать не может."""
+        _, sheet = self._export(
+            [
+                self._detail_row(
+                    call_at="2026-06-23T23:59:00",
+                    status="not_counted",
+                    status_rule="call_before_last7",
+                    talk_duration_seconds=300,
+                )
+            ]
+        )
+        col = self._call_columns(sheet)
+
+        for column in col.values():
+            self.assertIsNone(sheet.cell(2, column).value)
+        # Причина при этом остаётся видимой — иначе строка нечитаема.
+        headers = [cell.value for cell in sheet[1]]
+        rule_column = headers.index("Правило") + 1
+        self.assertIn("раньше", sheet.cell(2, rule_column).value)
+
+    def test_call_without_a_date_leaves_both_pairs_empty(self):
+        _, sheet = self._export(
+            [self._detail_row(call_at=None, talk_duration_seconds=None)]
+        )
+        col = self._call_columns(sheet)
+
+        for column in col.values():
+            self.assertIsNone(sheet.cell(2, column).value)
+
     def test_active_prev_month_exports_previous_reason_without_hiding_current_trip(self):
         _, sheet = self._export(
             [
@@ -324,6 +391,56 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         self.assertEqual(sheet.cell(2, previous_column).value, "2026-06-30 23:27:00")
         self.assertEqual(sheet.cell(2, current_column).value, "2026-07-03 22:47:00")
         self.assertIn("прошлом месяце", sheet.cell(2, rule_column).value)
+
+
+class TezLeadsCallBucketTests(unittest.TestCase):
+    """Раскладка звонка по месяцам считается тем же окном, что и успешка."""
+
+    def setUp(self):
+        self.bucket = _load_top_level_function(
+            "_tez_leads_call_bucket",
+            namespace={"datetime": datetime, "dt_date": dt_date},
+        )
+
+    def test_reporting_month(self):
+        self.assertEqual(self.bucket("2026-07-01T00:00:00", 2026, 7), "month")
+        self.assertEqual(self.bucket("2026-07-31T23:59:00", 2026, 7), "month")
+
+    def test_previous_month_window_is_counted_from_the_month_end(self):
+        # Июнь (30 дней) -> окно 24–30, февраль-2026 (28 дней) -> 22–28.
+        self.assertEqual(self.bucket("2026-06-24T00:00:00", 2026, 7), "prev")
+        self.assertIsNone(self.bucket("2026-06-23T23:59:00", 2026, 7))
+        self.assertEqual(self.bucket("2026-02-22T10:00:00", 2026, 3), "prev")
+        self.assertIsNone(self.bucket("2026-02-21T10:00:00", 2026, 3))
+
+    def test_january_looks_at_december_of_the_previous_year(self):
+        self.assertEqual(self.bucket("2025-12-25T08:00:00", 2026, 1), "prev")
+        self.assertIsNone(self.bucket("2025-12-24T08:00:00", 2026, 1))
+        self.assertEqual(self.bucket("2026-01-05T08:00:00", 2026, 1), "month")
+
+    def test_missing_or_broken_date_is_not_placed_anywhere(self):
+        self.assertIsNone(self.bucket(None, 2026, 7))
+        self.assertIsNone(self.bucket("", 2026, 7))
+        self.assertIsNone(self.bucket("не дата", 2026, 7))
+
+    def test_window_start_matches_the_success_rule(self):
+        """Окно не должно разъехаться с расчётом успешки — источник правды один."""
+        from tez_op_leads import call_window_for_period
+
+        for year, month in ((2026, 1), (2026, 3), (2026, 7), (2026, 12)):
+            start, _ = call_window_for_period(year, month)
+            self.assertEqual(
+                self.bucket(datetime.combine(start, datetime.min.time()).isoformat(),
+                            year, month),
+                "prev",
+                f"первый день окна {start} обязан попасть в прошлый месяц",
+            )
+            before = start - timedelta(days=1)
+            self.assertIsNone(
+                self.bucket(datetime.combine(before, datetime.min.time()).isoformat(),
+                            year, month),
+                f"день до окна {before} не должен попадать никуда",
+            )
 
 
 class TezLeadsDisplayFilenameTests(unittest.TestCase):

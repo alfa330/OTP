@@ -34761,6 +34761,32 @@ def _tez_leads_excel_text_cell(ws, row, column, value):
     return cell
 
 
+def _tez_leads_call_bucket(call_at, year, month):
+    """'month' | 'prev' | None — в какую пару колонок отчёта ложится звонок.
+
+    Звонок отчётного месяца идёт в «отчётные» колонки, звонок прошлого — только
+    если попал в окно последних 7 дней (то самое, по которому начисляется
+    успешка на стыке месяцев, см. call_window_for_period). Звонок раньше окна не
+    показываем нигде: успешку он дать не может, а в колонке читался бы как
+    основание для неё — почему именно он не прошёл, объясняет «Правило».
+    """
+    if not call_at:
+        return None
+    from tez_op_leads import call_window_for_period
+
+    try:
+        day = datetime.fromisoformat(str(call_at)).date()
+    except ValueError:
+        return None
+    year, month = int(year), int(month)
+    if (day.year, day.month) == (year, month):
+        return 'month'
+    window_start, _ = call_window_for_period(year, month)
+    if window_start <= day < dt_date(year, month, 1):
+        return 'prev'
+    return None
+
+
 def _excel_suppress_number_as_text_warning(stream, sqref,
                                            sheet_path='xl/worksheets/sheet1.xml'):
     """Убирает у диапазона зелёный уголок «Число сохранено как текст».
@@ -35145,7 +35171,10 @@ def tez_leads_export():
     ws.title = f'Лиды {month:02d}.{year}'[:31]
     headers = ['ФИО', 'Телефон', 'Источник', 'Статус', 'Правило', 'Загрузок',
                'Поездка в прошлом месяце', 'Поездка в отчётном месяце',
-               'Оператор', 'Звонок', 'Время разговора', 'Дата успешки']
+               'Оператор',
+               'Звонок в прошлом месяце', 'Время разговора в прошлом месяце',
+               'Звонок в отчётном месяце', 'Время разговора в отчётном месяце',
+               'Дата успешки']
     for col, title in enumerate(headers, start=1):
         cell = ws.cell(row=1, column=col, value=title)
         cell.font = Font(bold=True, color='FFFFFF')
@@ -35183,28 +35212,32 @@ def tez_leads_export():
             ).replace('T', ' ')[:19],
         )
         _tez_leads_excel_text_cell(ws, idx, 9, row['operator_name'])
-        _tez_leads_excel_text_cell(
-            ws, idx, 10, (row['call_at'] or '').replace('T', ' ')[:19]
-        )
-        # Длительность — обычное число секунд, а не формат времени: по решению
-        # владельца отчёт считают и фильтруют в секундах (порог успешки тоже
-        # задан в секундах), а «00:44» для этого пришлось бы конвертировать.
+        # Звонок один, но лежит он в паре колонок своего месяца: так по строке
+        # видно, привлечение это внутри месяца или на стыке с прошлым.
+        bucket = _tez_leads_call_bucket(row['call_at'], year, month)
+        call_text = (row['call_at'] or '').replace('T', ' ')[:19]
         duration_seconds = row.get('talk_duration_seconds')
-        duration_cell = ws.cell(
-            row=idx,
-            column=11,
-            value=(
-                max(int(duration_seconds), 0)
-                if duration_seconds is not None
-                else ''
-            ),
-        )
-        if duration_seconds is not None:
-            duration_cell.number_format = '0'
-        _tez_leads_excel_text_cell(ws, idx, 12, row['success_date'] or '')
+        for target, call_column in (('prev', 10), ('month', 12)):
+            matched = bucket == target
+            _tez_leads_excel_text_cell(
+                ws, idx, call_column, call_text if matched else ''
+            )
+            # Длительность — обычное число секунд, а не формат времени: по
+            # решению владельца отчёт считают и фильтруют в секундах (порог
+            # успешки тоже задан в секундах), а «00:44» пришлось бы
+            # конвертировать.
+            has_duration = matched and duration_seconds is not None
+            duration_cell = ws.cell(
+                row=idx,
+                column=call_column + 1,
+                value=max(int(duration_seconds), 0) if has_duration else '',
+            )
+            if has_duration:
+                duration_cell.number_format = '0'
+        _tez_leads_excel_text_cell(ws, idx, 14, row['success_date'] or '')
 
     for col, width in enumerate(
-        [34, 16, 34, 18, 40, 10, 24, 24, 28, 20, 18, 14],
+        [34, 16, 34, 18, 40, 10, 24, 24, 28, 22, 26, 22, 26, 14],
         start=1,
     ):
         ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = width
