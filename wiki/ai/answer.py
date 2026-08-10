@@ -95,6 +95,35 @@ SYSTEM_PROMPT = """Ты — справочный помощник корпора
 Если ответа нет или ты задаёшь уточняющий вопрос — строку ИСТОЧНИКИ не пиши."""
 
 
+_KZ_LETTERS = set('әғқңөұүһі')
+_KZ_MARKERS = ('керек', 'қалай', 'қанша', 'қандай', 'болса', 'үшін', 'мен ',
+               'бар ', 'жоқ', 'ма?', 'ме?', 'не істеу')
+
+
+def detect_language(question):
+    """Язык вопроса: 'kk' или 'ru'. Русский — язык по умолчанию.
+
+    Определяется КОДОМ, а не оставляется на усмотрение модели. Причина замерена:
+    на русском вопросе «Офис Астана» помощник отвечал по-казахски, и явное правило
+    в промпте («если язык определить нельзя — отвечай по-русски») модель
+    gemini-3.5-flash-lite игнорировала. Ровно как с уточняющим вопросом: то, что
+    обязано соблюдаться, задаётся кодом, а промпт лишь дублирует.
+    """
+    text = str(question or '').lower()
+    if _KZ_LETTERS & set(text):
+        return 'kk'
+    if any(marker in text for marker in _KZ_MARKERS):
+        return 'kk'
+    return 'ru'
+
+
+_LANGUAGE_DIRECTIVE = {
+    'ru': 'ОТВЕЧАЙ ТОЛЬКО ПО-РУССКИ. Язык вопроса — русский.',
+    'kk': 'ЖАУАПТЫ ТЕК ҚАЗАҚ ТІЛІНДЕ БЕР. Вопрос задан по-казахски: весь ответ '
+          'на казахском, содержание русских фрагментов переводи.',
+}
+
+
 def _squash(text):
     """Нормализация для дословной сверки: как в проверке цитат разбора чатов."""
     return ' '.join(str(text or '').split()).lower()
@@ -159,7 +188,11 @@ def build_user_prompt(question, chunks):
             label += f', раздел «{heading}»'
         blocks.append(f'[{number}] {label}\nТЕКСТ:\n{chunk["text"]}')
     context = '\n\n'.join(blocks) if blocks else '(подходящих фрагментов не найдено)'
-    return f'ФРАГМЕНТЫ СТАТЕЙ:\n{context}\n\nВОПРОС: {question}'
+    # Указание про язык идёт ПОСЛЕ вопроса: последняя строка запроса держится
+    # лучше, чем правило в середине системного промпта, которое flash-lite
+    # игнорировал на коротких вопросах.
+    directive = _LANGUAGE_DIRECTIVE[detect_language(question)]
+    return f'ФРАГМЕНТЫ СТАТЕЙ:\n{context}\n\nВОПРОС: {question}\n\n{directive}'
 
 
 def split_sources(text):
@@ -337,7 +370,22 @@ def compose(question, chunks, generate_fn):
                 'sources': [], 'notes': [],
                 'meta': {'reason': reason}}
 
+    wanted = detect_language(question)
     text, meta = generate_fn(SYSTEM_PROMPT, build_user_prompt(question, usable))
+    # Один повтор при несовпадении языка. Содержание модель находит верно, а язык
+    # на коротких вопросах угадывает: на русском «Офис Астана» отвечала
+    # по-казахски. Повтор стоит десятые доли секунды и делает поведение
+    # предсказуемым; если и он не помог — ответ отдаём как есть, потому что
+    # неудобно читать хуже, чем неверно по сути, но не настолько, чтобы молчать.
+    if wanted != detect_language(text):
+        try:
+            text, meta = generate_fn(
+                SYSTEM_PROMPT,
+                build_user_prompt(question, usable) + '\n\n'
+                + _LANGUAGE_DIRECTIVE[wanted]
+                + ' Предыдущая попытка была на другом языке — исправь.')
+        except Exception:
+            pass
     body, cited = split_sources(text)
 
     looks_like_refusal = 'в доступных вам статьях этого нет' in body.lower()
