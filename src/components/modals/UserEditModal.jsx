@@ -2,6 +2,7 @@
 import FaIcon from '../common/FaIcon';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
 import { departmentCodeHidesFrontOfficeTraining, departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';
+import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import CustomSelect from '../ui/CustomSelect';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
@@ -299,6 +300,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         ?? (isDeptScoped && Number(effectiveDeptId) === Number(requesterScopeDeptId) ? requesterScopeDeptCode : null);
     const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);
     const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);
+    // Город раньше вводили текстом: значение вне справочника не выбрасываем,
+    // а подмешиваем отдельной опцией — иначе сохранение стёрло бы его.
+    const currentCity = String(editedUser?.city ?? '').trim();
+    const cityOptions = React.useMemo(() => ([
+        { value: '', label: 'Не указано' },
+        ...(currentCity && !isKnownKazakhstanCity(currentCity)
+            ? [{ value: currentCity, label: currentCity, groupLabel: 'Введено вручную' }]
+            : []),
+        ...KAZAKHSTAN_CITY_OPTIONS,
+    ]), [currentCity]);
     const directionDeptOf = (dir) => dir?.department_id ?? dir?.departmentId ?? null;
     // Направления, доступные для выбранного отдела сотрудника (Этап 11):
     // показываем только направления отдела; если отдел не определён — все.
@@ -1352,12 +1363,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {showEmployeeCity && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Город</label>
-                        <input
-                        type="text"
+                        <CustomSelect
                         value={editedUser?.city || ""}
-                        onChange={(e) => setEditedUser({ ...editedUser, city: e.target.value })}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                        onChange={(v) => setEditedUser({ ...editedUser, city: v })}
                         disabled={isLoading || !!createdCredentials}
+                        placeholder="Не указано"
+                        searchable
+                        searchPlaceholder="Поиск по городам…"
+                        ariaLabel="Город"
+                        options={cityOptions}
                         />
                     </div>
                     )}
@@ -2025,12 +2039,15 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         {showEmployeeCity && (
                         <div>
                             <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Город</label>
-                            <input
-                            type="text"
+                            <CustomSelect
                             value={editedUser?.city || ""}
-                            onChange={(e) => setEditedUser({ ...editedUser, city: e.target.value })}
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
+                            onChange={(v) => setEditedUser({ ...editedUser, city: v })}
                             disabled={isLoading}
+                            placeholder="Не указано"
+                            searchable
+                            searchPlaceholder="Поиск по городам…"
+                            ariaLabel="Город"
+                            options={cityOptions}
                             />
                         </div>
                         )}

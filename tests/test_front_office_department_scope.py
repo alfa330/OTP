@@ -10,6 +10,7 @@ DATABASE_PATH = ROOT / "database.py"
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 APP_PATH = ROOT / "src" / "App.jsx"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
+CITIES_PATH = ROOT / "src" / "utils" / "kazakhstanCities.js"
 
 
 def _read(path):
@@ -228,6 +229,27 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         self.assertEqual(modal.count("{showEmployeeCity && ("), 2)
         self.assertEqual(modal.count("{showFrontOfficeTraining && ("), 2)
         self.assertEqual(modal.count("<span>Был во фронт офисе на обучении</span>"), 2)
+
+    def test_city_is_picked_from_the_shared_custom_select(self):
+        modal = _read(MODAL_PATH)
+        cities = _read(CITIES_PATH)
+
+        self.assertIn(
+            "import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity }"
+            " from '../../utils/kazakhstanCities';",
+            modal,
+        )
+        # Общий примитив проекта: поиск, клавиатура и группы уже внутри него.
+        self.assertEqual(modal.count('searchPlaceholder="Поиск по городам…"'), 2)
+        self.assertEqual(modal.count("options={cityOptions}"), 2)
+        self.assertNotIn("city: e.target.value", modal)
+
+        # Город, введённый текстом до справочника, сохранением не стирается.
+        self.assertIn("!isKnownKazakhstanCity(currentCity)", modal)
+        self.assertIn("groupLabel: 'Введено вручную'", modal)
+
+        self.assertIn("export const KAZAKHSTAN_CITY_OPTIONS", cities)
+        self.assertIn("'Астана', 'Алматы', 'Шымкент'", cities)
 
     def test_modal_falls_back_to_requester_department_code(self):
         # /api/admin/departments супервайзеру отдаёт 403 — без фолбэка у СВ

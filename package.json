@@ -14,7 +14,8 @@
     "test:wiki-search": "node --test tests/wiki_search_text.test.mjs",
     "test:wiki-car": "node --test tests/wiki_car_match.test.mjs",
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",
-    "test:telegram-text": "node --test tests/telegram_text.test.mjs"
+    "test:telegram-text": "node --test tests/telegram_text.test.mjs",
+    "test:kazakhstan-cities": "node --test tests/kazakhstan_cities.test.mjs"
   },
   "dependencies": {
     "@tiptap/extension-highlight": "^3.29.2",
