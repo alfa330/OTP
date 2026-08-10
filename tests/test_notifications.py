@@ -596,7 +596,12 @@ class TasksSourceRulesTest(unittest.TestCase):
         block = self._block()
         self.assertIn("t.status = 'accepted'", block)
         self.assertIn("AND t.assigned_to = %(user_id)s", block)
-        self.assertIn("r.kind <> 'accepted' OR r.seen_at < t.updated_at", block)
+        # Отметка ВЕЧНАЯ: сравнения с updated_at быть не должно, иначе правка
+        # отчёта воскресит приёмку недельной давности и колокол зазвонит снова.
+        self.assertIn("r.kind <> 'accepted'", block)
+        self.assertNotIn("r.kind <> 'accepted' OR r.seen_at < t.updated_at", block)
+        # Сам себе принял — уведомлять не о чем.
+        self.assertIn("COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %(user_id)s", block)
         self.assertIn("'accepted': 'Работу приняли'", self.SOURCE)
 
     def test_accepted_is_classified_before_the_deadline_check(self):

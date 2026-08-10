@@ -46668,7 +46668,11 @@ class Database:
                     COUNT(*) FILTER (
                         WHERE t.assigned_to = %s
                           AND t.status = 'accepted'
-                          AND (r.task_id IS NULL OR r.kind <> 'accepted' OR r.seen_at < t.updated_at)
+                          -- Сам себе принял — уведомлять не о чем.
+                          AND COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %s
+                          -- Отметка вечная: принятую задачу правка отчёта не
+                          -- должна воскрешать (в отличие от живых причин).
+                          AND (r.task_id IS NULL OR r.kind <> 'accepted')
                     )::INT
                 FROM tasks t
                 LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %s
@@ -46677,7 +46681,7 @@ class Database:
                 requester_id, now,
                 requester_id,
                 requester_id, now,
-                requester_id,
+                requester_id, requester_id,
                 requester_id
             ))
             row = cursor.fetchone() or (0, 0, 0, 0, 0)

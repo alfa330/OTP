@@ -313,10 +313,17 @@ def tasks(cursor, viewer, limit):
                     AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
                     AND (r.task_id IS NULL OR r.kind <> 'review' OR r.seen_at < t.updated_at))
                 -- Единственное уведомление «к сведению», а не «сделай»: работу
-                -- приняли. Гаснет просмотром, само по себе не протухает.
+                -- приняли. Два отличия от остальных причин, оба намеренные.
+                -- 1) Отметка о просмотре ВЕЧНАЯ (нет сравнения с updated_at):
+                --    «тронули — посмотри заново» верно для живой задачи, а
+                --    принятую правка отчёта или тега воскрешала бы снова и снова.
+                -- 2) Себе не сообщаем: если исполнитель и есть принимающий,
+                --    он сам нажал «Принять» — уведомлять его о своём же клике
+                --    незачем (так же поступают «Ивенты» и «4 You» с автором).
                 OR (t.status = 'accepted'
                     AND t.assigned_to = %(user_id)s
-                    AND (r.task_id IS NULL OR r.kind <> 'accepted' OR r.seen_at < t.updated_at))
+                    AND COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %(user_id)s
+                    AND (r.task_id IS NULL OR r.kind <> 'accepted'))
                 OR (t.assigned_to = %(user_id)s
                     AND t.is_backlog = FALSE
                     AND t.status IN ('assigned', 'in_progress', 'returned')

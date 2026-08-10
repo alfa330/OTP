@@ -42,13 +42,20 @@ export const ACTION_NEED_META = {
     dot: '#64748b',
   },
   /* Единственная причина «к сведению», а не «сделай»: делать с принятой
-     задачей нечего, поэтому она и стоит последней. Гаснет просмотром. */
+     задачей нечего, поэтому она и стоит последней. Гаснет просмотром.
+
+     terminal — она же единственная, у которой нет выхода: остальные четыре
+     пропадают, как только задача сдвинулась, а принятая не сдвинется уже
+     никогда. Поэтому просмотренную её из списка убирают (см.
+     collectTaskActionNeeds), иначе панель раздела за пару месяцев
+     превращается в кладбище закрытых задач. */
   accepted: {
     order: 4,
     title: 'Работу приняли',
     label: 'Принята',
     hint: 'Поручитель принял работу',
     dot: '#16a34a',
+    terminal: true,
   },
 };
 
@@ -78,9 +85,10 @@ export const taskActionNeed = (task, userId, now = Date.now()) => {
     return { kind: 'review', dueAt };
   }
 
-  // Раньше проверки бэклога и живых статусов: принятая задача из работы вышла,
-  // но исполнителю о приёмке сказать надо.
-  if (status === 'accepted' && isAssignee) {
+  /* Раньше проверки бэклога и живых статусов: принятая задача из работы вышла,
+     но исполнителю о приёмке сказать надо. Кроме случая, когда принимал он сам
+     (задача себе) — сообщать человеку о его же клике незачем. */
+  if (status === 'accepted' && isAssignee && reviewAuthorityId(task) !== personId) {
     return { kind: 'accepted', dueAt };
   }
 
@@ -106,8 +114,13 @@ export const isActionNeedSeen = (task, kind, localSeen = null) => {
   const seen = task?.action_seen;
   if (!seen || seen.kind !== kind || !seen.seen_at) return false;
   const seenAt = new Date(seen.seen_at).getTime();
-  const updatedAt = new Date(task?.updated_at || 0).getTime();
   if (Number.isNaN(seenAt)) return false;
+  /* У терминальной причины отметка вечная. «Задачу тронули — посмотри заново»
+     осмысленно, пока задача живая; принятую же правка отчёта или тега сдвигает
+     updated_at, и человек снова получал бы звон о приёмке, случившейся неделю
+     назад. */
+  if (ACTION_NEED_META[kind]?.terminal) return true;
+  const updatedAt = new Date(task?.updated_at || 0).getTime();
   return Number.isNaN(updatedAt) ? true : seenAt >= updatedAt;
 };
 
@@ -116,7 +129,13 @@ export const collectTaskActionNeeds = (tasks, userId, now = Date.now(), localSee
   const list = [];
   (Array.isArray(tasks) ? tasks : []).forEach((task) => {
     const need = taskActionNeed(task, userId, now);
-    if (need) list.push({ ...need, task, seen: isActionNeedSeen(task, need.kind, localSeen) });
+    if (!need) return;
+    const seen = isActionNeedSeen(task, need.kind, localSeen);
+    // Просмотренная терминальная причина уходит навсегда: задача закрыта и
+    // сдвинуться уже не может, так что иначе она осталась бы в списке до
+    // скончания века. Остальные причины исчезают сами, когда задача сдвинется.
+    if (seen && ACTION_NEED_META[need.kind]?.terminal) return;
+    list.push({ ...need, task, seen });
   });
   return list.sort((left, right) => {
     const byKind = ACTION_NEED_META[left.kind].order - ACTION_NEED_META[right.kind].order;

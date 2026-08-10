@@ -400,16 +400,23 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
 
         const onVisibility = () => {
             if (cancelled) return;
+            if (retryTimer) {
+                clearTimeout(retryTimer);
+                retryTimer = null;
+            }
             if (document.visibilityState === 'hidden') {
                 clearWatchdog();
                 abortController?.abort();
                 return;
             }
-            if (retryTimer) {
-                clearTimeout(retryTimer);
+            /* Небольшая пауза перед переподключением. Освобождение слота на
+               сервере отстаёт от разрыва (поток узнаёт о нём на ближайшей
+               записи в сокет), поэтому щёлканье вкладками без паузы копило бы
+               занятые слоты — при их исчерпании канал отдаёт 503 всем. */
+            retryTimer = setTimeout(() => {
                 retryTimer = null;
-            }
-            connect();
+                connect();
+            }, 400);
         };
         document.addEventListener('visibilitychange', onVisibility);
         connect();
@@ -520,7 +527,16 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const announce = useCallback(async (nextItems, nextCounts, hasMoreItems) => {
         const nextKeys = new Set(nextItems.map(notificationKey));
         const known = knownKeysRef.current;
-        knownKeysRef.current = nextKeys;
+        /* Пока часть уведомлений скрыта за порцией, память ДОПОЛНЯЕМ, а не
+           перезаписываем: в ответе видны только первые пять на источник, и
+           простая перезапись стирала бы выученный хвост на первой же перечитке
+           — а они идут на каждый тычок и на каждый возврат во вкладку. Тогда
+           следующее уведомление снова показывало бы в карточке давно лежащее.
+           Когда скрытого нет, состав известен целиком — можно и заменить,
+           заодно выбросив накопленное. */
+        knownKeysRef.current = hasMoreItems && known
+            ? new Set([...known, ...nextKeys])
+            : nextKeys;
 
         const nextTotal = Math.max(0, Number(nextCounts?.total) || 0);
         const prevTotal = totalRef.current;
@@ -572,7 +588,16 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         if (closing) return;
         // Открыли список — всплывающая карточка больше не нужна, она о том же.
         if (toast) closeToast();
-        if (open) close(); else setOpen(true);
+        if (open) {
+            close();
+            return;
+        }
+        setOpen(true);
+        /* Перечитываем под сброшенную порцию. Закрытие вернуло её к пяти, а
+           список на экране остался от догруженных (скажем, пятнадцати): без
+           этого он схлопнулся бы прямо под курсором при первой же догрузке,
+           а при совпадении длины — навсегда завис бы со спиннером внизу. */
+        load();
     };
 
     useEffect(() => {

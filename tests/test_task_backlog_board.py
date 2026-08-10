@@ -1003,7 +1003,12 @@ class ActionNeedsBadgeTests(unittest.TestCase):
 
         client = _read(self.ACTION_NEEDS_PATH)
         self.assertIn("'accepted'", client)
-        self.assertIn("if (status === 'accepted' && isAssignee)", client)
+        self.assertIn("if (status === 'accepted' && isAssignee && reviewAuthorityId(task) !== personId)", client)
+        # Терминальная причина: просмотренная уходит из списка навсегда, иначе
+        # панель раздела копит закрытые задачи (на проде было 92 против 13).
+        self.assertIn('terminal: true', client)
+        self.assertIn("if (seen && ACTION_NEED_META[need.kind]?.terminal) return;", client)
+        self.assertIn("if (ACTION_NEED_META[kind]?.terminal) return true;", client)
 
         bell = _read(ROOT / "notifications" / "sources.py")
         self.assertIn("'accepted': 'Работу приняли'", bell)
