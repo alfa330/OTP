@@ -31597,12 +31597,18 @@ def _amo_leads_alert_text(now=None, day=None):
         period=amo_leads.PERIOD_12H,
     )
     last = db.get_last_amo_lead_sync() or {}
+    failed = last.get('status') == 'error'
+    # Возраст цифр — по последней УДАЧНОЙ выгрузке: упавшая проставляет себе
+    # finished_at, но в таблицу ничего не пишет, и подпись «Данные обновлены»
+    # с её временем обещала бы свежесть, которой нет.
+    fresh = (db.get_last_amo_lead_sync(status='ok') or {}) if failed else last
     return amo_leads.render_alert_report(
         rows,
         window_label=windows["window_label"],
         base_label=windows["base_label"],
-        synced_at=last.get('finished_at'),
-        sync_error=last.get('error') if last.get('status') == 'error' else None,
+        synced_at=fresh.get('finished_at'),
+        sync_error=last.get('error') if failed else None,
+        failed_at=last.get('finished_at') if failed else None,
     )
 
 

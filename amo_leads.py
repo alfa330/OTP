@@ -16,7 +16,9 @@ Google (C3) и Звонков (C11) перенесены дословно, ос�
   * ошибка API больше не оставляет молча старые данные — сбой пишется в
     `amo_lead_syncs`, и отбивка показывает возраст данных;
   * пагинация идёт по `_links.next`, а не по «страница короче лимита»;
-  * дата сделки считается в Asia/Almaty явно, а не в часовом поясе книги.
+  * дата сделки считается в Asia/Almaty явно, а не в часовом поясе книги;
+  * обрыв соединения на середине выгрузки повторяется, а не выбрасывает все
+    восемь десятков уже вычитанных страниц.
 """
 
 import html
@@ -25,6 +27,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from http.client import RemoteDisconnected
 from zoneinfo import ZoneInfo
 
 import requests
@@ -60,6 +63,44 @@ REQUEST_PAUSE_SECONDS = float(os.getenv("AMO_REQUEST_PAUSE") or 0.2)
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+# Одна выгрузка — это ~86 запросов подряд минуты на полторы, и amoCRM время от
+# времени закрывает соединение на середине: на проде так упало 5 прогонов из 39
+# за 06–10.08, каждый раз через 12–13 с после старта, то есть примерно на десятой
+# странице. Ретрая не было, поэтому обрыв выбрасывал весь результат и отбивка
+# показывала «⚠️ Последняя выгрузка не удалась» до следующего синка через 3 часа.
+REQUEST_RETRIES = max(1, int(os.getenv("AMO_REQUEST_RETRIES") or 3))
+RETRY_BACKOFF_SECONDS = float(os.getenv("AMO_RETRY_BACKOFF") or 1.0)
+
+# Повторяем ТОЛЬКО обрыв уже установленного соединения: сервер закрыл сокет, не
+# начав отвечать, — значит запрос не выполнялся, и повтор безопасен. Таймауты и
+# отказ в соединении сюда не входят: это «сервис недоступен», и повтор тут только
+# добавит нагрузки. Такой же разбор причины есть у клиента Oktell
+# (`_oktell_dropped_keepalive` в bot_schedule2.py) — там keep-alive рвёт прокси.
+_DROPPED_CONNECTION_ERRORS = (
+    RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+
+def _dropped_connection(exc):
+    """Оборвалось ли соединение уже ПОСЛЕ установки.
+
+    Причину ищем по всей цепочке, а не по тексту сообщения: requests заворачивает
+    urllib3, urllib3 — http.client, и наружу выходит одинаковый на вид
+    `ConnectionError('Connection aborted.', ...)`.
+    """
+    stack = [exc]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _DROPPED_CONNECTION_ERRORS):
+            return True
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+        stack.extend(getattr(current, "args", ()) or ())
+    return False
 
 
 def is_configured() -> bool:
@@ -98,14 +139,33 @@ class AmoClient:
         self.session = session
         self._login()
 
+    def _request(self, method, url, **kwargs):
+        """Запрос к amoCRM с повтором на обрыве соединения.
+
+        Повтор безопасен для всего, что делает клиент: страницы читаются GET'ом, а
+        повторный вход просто выдаст ещё один токен. Всё остальное (таймаут, отказ
+        в соединении, любой HTTP-код) отдаём наверх как есть.
+        """
+        for attempt in range(1, REQUEST_RETRIES + 1):
+            try:
+                return self.session.request(method, url, **kwargs)
+            except requests.exceptions.RequestException as exc:
+                if attempt >= REQUEST_RETRIES or not _dropped_connection(exc):
+                    raise
+                logging.warning(
+                    "amoCRM: соединение оборвалось (%s), повтор %d из %d: %s",
+                    exc, attempt + 1, REQUEST_RETRIES, url)
+                time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
     def _login(self):
         if not (AMO_CRM_LOGIN and AMO_CRM_PASSWORD):
             raise RuntimeError("amoCRM: не заданы AMO_ACCESS_TOKEN и AMO_CRM_LOGIN/AMO_CRM_PASSWORD")
-        page = self.session.get(self.base + "/", timeout=REQUEST_TIMEOUT).text
+        page = self._request("GET", self.base + "/", timeout=REQUEST_TIMEOUT).text
         match = re.search(r'name="csrf_token"\s+value="([^"]+)"', page)
         if not match:
             raise RuntimeError("amoCRM: csrf_token не найден на странице входа")
-        response = self.session.post(
+        response = self._request(
+            "POST",
             self.base + "/oauth2/authorize",
             timeout=REQUEST_TIMEOUT,
             allow_redirects=False,
@@ -133,7 +193,7 @@ class AmoClient:
             self._login()
         url = path if path.startswith("http") else self.base + path
         for attempt in (1, 2):
-            response = self.session.get(url, params=params or None, timeout=REQUEST_TIMEOUT)
+            response = self._request("GET", url, params=params or None, timeout=REQUEST_TIMEOUT)
             if response.status_code == 401 and attempt == 1 and not AMO_ACCESS_TOKEN:
                 self._login()
                 continue
@@ -492,8 +552,15 @@ def _pct(value):
 
 
 def render_alert_report(rows, window_label="", base_label="",
-                        synced_at=None, sync_error=None):
-    """Текст отбивки: таблица с отклонениями и список того, что требует реакции."""
+                        synced_at=None, sync_error=None, failed_at=None):
+    """Текст отбивки: таблица с отклонениями и список того, что требует реакции.
+
+    `synced_at` — время последней УДАЧНОЙ выгрузки, то есть настоящий возраст
+    цифр; `failed_at` и `sync_error` — про упавшую попытку. Раньше сюда попадало
+    время последней завершённой выгрузки любой судьбы, и при сбое подпись
+    сообщала свежесть, которой нет: «Данные обновлены 09:10» рядом с ⚠️ о том,
+    что выгрузка 09:10 не удалась, а в таблице лежали цифры от 06:11.
+    """
     lines = ["<b>Лиды: проверка за %s</b>" % window_label]
     if base_label:
         lines.append("Сравнение с %s" % base_label)
@@ -528,8 +595,9 @@ def render_alert_report(rows, window_label="", base_label="",
     if synced_at:
         lines.append("Данные обновлены %s." % synced_at.astimezone(TZ).strftime("%H:%M"))
     if sync_error:
-        lines.append("⚠️ Последняя выгрузка не удалась: %s"
-                     % html.escape(str(sync_error)[:160]))
+        when = " (%s)" % failed_at.astimezone(TZ).strftime("%H:%M") if failed_at else ""
+        lines.append("⚠️ Последняя выгрузка%s не удалась: %s"
+                     % (when, html.escape(str(sync_error)[:160])))
     return "\n".join(lines)
 
 

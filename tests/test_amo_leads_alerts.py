@@ -107,6 +107,38 @@ def test_quiet_report_says_so():
     assert "Отклонений нет" in text
 
 
+def test_footer_shows_the_age_of_the_numbers_and_the_failed_attempt():
+    """При сбое подпись обязана разделять «когда цифры» и «когда упало».
+
+    Раньше сюда попадало время последней завершённой выгрузки любой судьбы, и
+    получатель читал «Данные обновлены 09:10» рядом с ⚠️ про сбой в 09:10, хотя
+    в таблице лежали цифры от 06:11.
+    """
+    import datetime
+
+    rows = amo_leads.analyze({"FB": 55, "Общее": 55}, {"FB": 100, "Общее": 100})
+    text = amo_leads.render_alert_report(
+        rows, window_label="10.08, 00:00–11:35",
+        synced_at=datetime.datetime(2026, 8, 10, 6, 11, tzinfo=amo_leads.TZ),
+        failed_at=datetime.datetime(2026, 8, 10, 9, 10, tzinfo=amo_leads.TZ),
+        sync_error="('Connection aborted.', RemoteDisconnected('Remote end closed"
+                   " connection without response'))")
+    assert "Данные обновлены 06:11." in text
+    assert "⚠️ Последняя выгрузка (09:10) не удалась" in text
+    assert "RemoteDisconnected" in text
+
+
+def test_footer_without_a_failure_says_nothing_about_one():
+    import datetime
+
+    rows = amo_leads.analyze({"FB": 100, "Общее": 100}, {"FB": 100, "Общее": 100})
+    text = amo_leads.render_alert_report(
+        rows, window_label="10.08 (сутки)",
+        synced_at=datetime.datetime(2026, 8, 10, 6, 11, tzinfo=amo_leads.TZ))
+    assert "Данные обновлены 06:11." in text
+    assert "⚠️" not in text
+
+
 def test_windows_compare_the_same_slice_a_week_apart():
     import datetime
 

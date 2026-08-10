@@ -5767,16 +5767,22 @@ class Database:
                 return None
             return dict(zip(("synced_at", "status", "total_rows", "error"), row))
 
-    def get_last_amo_lead_sync(self):
-        """Последняя завершённая выгрузка — для отметки о свежести в отбивке."""
+    def get_last_amo_lead_sync(self, status=None):
+        """Последняя завершённая выгрузка — для отметки о свежести в отбивке.
+
+        `status='ok'` даёт последнюю УДАЧНУЮ: возраст цифр надо считать по ней, а
+        не по последней попытке. Упавшая выгрузка тоже проставляет `finished_at`,
+        но в `amo_leads` ничего не пишет.
+        """
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT id, started_at, finished_at, status, leads_fetched, error
                 FROM amo_lead_syncs
                 WHERE finished_at IS NOT NULL
+                  AND (%s IS NULL OR status = %s)
                 ORDER BY finished_at DESC
                 LIMIT 1
-            """)
+            """, (status, status))
             row = cursor.fetchone()
             if not row:
                 return None
