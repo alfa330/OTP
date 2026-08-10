@@ -121,6 +121,19 @@ class DegradedModeTest(unittest.TestCase):
         self.assertEqual(0, found['branches']['dense'])
         self.assertEqual(1, len(found['rows']))
 
+    def test_empty_dense_result_is_not_degraded(self):
+        """Пустая плотная выдача — нормальный результат, а не поломка.
+
+        На проде это дало ложную тревогу: честный отказ («сколько мне отпускных»
+        — ни один кусок не прошёл порог близости) помечался как «поиск без
+        векторов», и по бейджу в интерфейсе выходило, что эмбеддинги сломаны.
+        """
+        cursor = _FakeCursor([])
+        found = search_hybrid(cursor, article_ids=[10], query='отпускные',
+                              query_vector=[0.1] * 8)
+        self.assertEqual(0, found['branches']['dense'])
+        self.assertFalse(found['degraded'])
+
     def test_empty_perimeter_short_circuits(self):
         class Exploding:
             def execute(self, *args, **kwargs):

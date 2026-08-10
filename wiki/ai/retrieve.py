@@ -288,9 +288,15 @@ def search_hybrid(cursor, *, article_ids, query, query_vector=None,
                              query_vector=query_vector, limit=candidates)
 
     rows = fuse(lexical, dense, limit=limit, per_article=per_article)
+    # degraded — про НЕДОСТУПНОСТЬ плотной ветки, а не про её пустую выдачу.
+    # Сначала здесь стояло `not dense`, и на проде это дало ложную тревогу:
+    # честный отказ («сколько мне отпускных» — ни один кусок не прошёл порог)
+    # помечался как «поиск без векторов», и админ решил бы, что эмбеддинги
+    # сломаны. Пустая плотная выдача — нормальный результат, отсутствие вектора —
+    # нет.
     return {'rows': rows,
             'branches': {'lexical': len(lexical), 'dense': len(dense)},
-            'degraded': not dense}
+            'degraded': query_vector is None}
 
 
 def search_chunks(cursor, *, article_ids, query, limit=8, per_article=3):
