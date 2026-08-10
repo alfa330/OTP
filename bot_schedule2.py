@@ -6699,6 +6699,31 @@ def api_group_late_bot_events():
         return jsonify({"error": str(error)}), 500
 
 
+@app.route('/api/group_late_bot/employees', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_group_late_bot_employees():
+    """Дисциплина по сотрудникам за период, разложенная по отделам Workpace."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    _, scope, err = _group_late_bot_guard()
+    if err:
+        return err
+    try:
+        result = db.get_group_late_employee_stats(
+            date_from=request.args.get('date_from'),
+            date_to=request.args.get('date_to'),
+            department=scope or request.args.get('department'),
+            search=request.args.get('q'),
+        )
+        result['status'] = 'success'
+        return jsonify(result), 200
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        logging.exception("group_late_bot employees failed")
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route('/api/group_late_bot/reports', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def api_group_late_bot_reports():

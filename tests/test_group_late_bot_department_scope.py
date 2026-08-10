@@ -162,6 +162,7 @@ class DbReadScopeTests(unittest.TestCase):
             "get_group_late_overview",
             "get_group_late_chats",
             "get_group_late_departments",
+            "get_group_late_employee_stats",
             "get_group_late_mutes",
             "get_group_late_reports",
             "get_group_late_report_file",
@@ -238,6 +239,7 @@ class EndpointScopeTests(unittest.TestCase):
         "api_group_late_bot_mutes": ["department=scope"],
         "api_group_late_bot_mute_item": ["department=scope"],
         "api_group_late_bot_events": ["department=scope or request.args.get('department')"],
+        "api_group_late_bot_employees": ["department=scope or request.args.get('department')"],
         "api_group_late_bot_reports": ["department=scope", "scope or str(payload.get('department')"],
         "api_group_late_bot_report_file": ["department=scope"],
     }

@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Activity, AlertCircle, AlertTriangle, Bell, BellOff, Building2, CalendarClock,
-    CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet, Loader2, LogOut,
-    MessageSquare, Moon, Plus, RefreshCw, Search, Send, ShieldAlert, Trash2,
-    UserX, X, Zap,
+    Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowUp, Bell, BellOff, Building2,
+    CalendarClock, CheckCircle2, ChevronDown, Clock, Download, FileSpreadsheet, Loader2,
+    LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send, ShieldAlert,
+    Trash2, Users, UserX, X, Zap,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -36,6 +36,7 @@ const MUTE_KIND_LABELS = { all: 'Все уведомления', user: 'Сотр
 
 const TABS = [
     { key: 'overview', label: 'Обзор', icon: Activity },
+    { key: 'employees', label: 'Сотрудники', icon: Users },
     { key: 'events', label: 'Отбивки', icon: Bell },
     { key: 'reports', label: 'Отчёты', icon: FileSpreadsheet },
     { key: 'chats', label: 'Чаты', icon: MessageSquare },
@@ -44,6 +45,17 @@ const TABS = [
 ];
 
 const EVENTS_PAGE = 60;
+
+/* Колонки таблицы дисциплины. `numeric` — и выравнивание, и то, что по такой
+ * колонке сортируем по убыванию с первого клика: интересны нарушители сверху. */
+const EMPLOYEE_COLUMNS = [
+    { key: 'employee_name', label: 'Сотрудник' },
+    { key: 'city', label: 'Город', cityOnly: true },
+    { key: 'late_count', label: 'Опозданий', numeric: true },
+    { key: 'late_minutes', label: 'Минут опоздания', numeric: true },
+    { key: 'early_out_minutes', label: 'Минут раннего ухода', numeric: true },
+    { key: 'suspicious_count', label: 'Подозрительных отметок', numeric: true },
+];
 
 const fmtInt = (value) => Number(value || 0).toLocaleString('ru-RU');
 
@@ -94,6 +106,49 @@ const daysAgo = (n) => {
     const d = new Date();
     d.setDate(d.getDate() - n);
     return isoDate(d);
+};
+
+const monthStart = () => {
+    const d = new Date();
+    d.setDate(1);
+    return isoDate(d);
+};
+
+const pluralRu = (n, one, few, many) => {
+    const value = Math.abs(Number(n) || 0);
+    const tail = value % 10;
+    const hundred = value % 100;
+    if (tail === 1 && hundred !== 11) return one;
+    if (tail >= 2 && tail <= 4 && (hundred < 12 || hundred > 14)) return few;
+    return many;
+};
+
+// Дисциплину смотрят помесячно, поэтому «Весь период» из пресетов по умолчанию
+// тут не нужен: за полгода истории таблица перестаёт читаться.
+const EMPLOYEE_DATE_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: 'Этот месяц', range: () => ({ from: monthStart(), to: isoDate(new Date()) }) },
+    { label: '30 дней', range: () => ({ from: daysAgo(29), to: isoDate(new Date()) }) },
+];
+
+/* Пустой город уходит вниз при любом направлении: прочерки в середине списка
+ * ломают чтение. Равные значения разводим по алфавиту — иначе порядок «пляшет». */
+const sortEmployees = (rows, { key, dir }) => {
+    const sign = dir === 'asc' ? 1 : -1;
+    const numeric = EMPLOYEE_COLUMNS.find((column) => column.key === key)?.numeric;
+    return rows.slice().sort((a, b) => {
+        if (numeric) {
+            const diff = (a[key] || 0) - (b[key] || 0);
+            if (diff) return diff * sign;
+        } else {
+            const left = String(a[key] || '');
+            const right = String(b[key] || '');
+            if (!left !== !right) return left ? -1 : 1;
+            const diff = left.localeCompare(right, 'ru');
+            if (diff) return diff * sign;
+        }
+        return String(a.employee_name || '').localeCompare(String(b.employee_name || ''), 'ru');
+    });
 };
 
 const errText = (error, fallback) => error?.response?.data?.error || error?.message || fallback;
@@ -195,6 +250,134 @@ const DailyBars = ({ data }) => {
                 <span>{fmtDay(data[data.length - 1]?.date)}</span>
             </div>
         </div>
+    );
+};
+
+/* Заголовок сортируемой колонки. Стрелка только у активной: шесть серых стрелок
+ * в шапке — шум, по которому непонятно, что сейчас работает. */
+const SortHeader = ({ column, sort, onSort, className = '' }) => {
+    const active = sort.key === column.key;
+    const align = column.numeric ? 'justify-end text-right' : 'justify-start text-left';
+    return (
+        <th className={`px-3 py-2.5 ${column.numeric ? 'text-right' : 'text-left'} ${className}`}>
+            <button type="button" onClick={() => onSort(column)}
+                    className={`inline-flex w-full items-center gap-1 ${align} text-[11px] font-semibold uppercase tracking-wider transition ${
+                        active ? 'text-slate-900' : 'text-slate-500 hover:text-slate-700'}`}>
+                {column.label}
+                {active && (sort.dir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />)}
+            </button>
+        </th>
+    );
+};
+
+const employeeNumber = (value) => (value
+    ? <span className="font-medium text-slate-900">{fmtInt(value)}</span>
+    : <span className="text-slate-300">—</span>);
+
+/* Отдел в таблице дисциплины: шапка с итогами и раскрывающаяся таблица по
+ * сотрудникам. Колонка «Город» есть только там, где город заполнен: его ведут
+ * отделам, чьи офисы стоят в разных городах (в Workpace это «Регионы»,
+ * у нас — «Фронт офисы»). Остальным пустая колонка не нужна. */
+const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle, onOpenEvents }) => {
+    const totals = department.totals || {};
+    const columns = EMPLOYEE_COLUMNS.filter((column) => !column.cityOnly || department.has_city);
+    const rows = useMemo(
+        () => sortEmployees(department.employees || [], sort),
+        [department.employees, sort],
+    );
+
+    return (
+        <section className={`${iosCard} overflow-hidden`}>
+            <button type="button" onClick={onToggle} aria-expanded={!collapsed}
+                    className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-50/70">
+                <span className="flex min-w-0 items-center gap-2">
+                    <ChevronDown size={15}
+                                 className={`shrink-0 text-slate-400 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+                    <span className="truncate text-[14px] font-semibold text-slate-900">
+                        {department.department_name}
+                    </span>
+                    <span className="shrink-0 text-[12px] text-slate-400">
+                        {fmtInt(totals.employees)} чел.
+                    </span>
+                </span>
+                <span className="flex flex-wrap items-center gap-1.5">
+                    {totals.late_count > 0 && (
+                        <IosBadge tone="red" title="Опозданий за период">
+                            <Clock size={11} /> {fmtInt(totals.late_count)} · {fmtInt(totals.late_minutes)} мин
+                        </IosBadge>
+                    )}
+                    {totals.early_out_minutes > 0 && (
+                        <IosBadge tone="amber" title="Ранних уходов за период">
+                            <LogOut size={11} /> {fmtInt(totals.early_out_count)} · {fmtInt(totals.early_out_minutes)} мин
+                        </IosBadge>
+                    )}
+                    {totals.suspicious_count > 0 && (
+                        <IosBadge tone="amber" title="Подозрительных отметок за период">
+                            <ShieldAlert size={11} /> {fmtInt(totals.suspicious_count)}
+                        </IosBadge>
+                    )}
+                </span>
+            </button>
+
+            {!collapsed && (
+                <div className="overflow-x-auto border-t border-slate-100">
+                    <table className="w-full text-[13px]">
+                        <thead className="bg-white/85 backdrop-blur-xl">
+                            <tr className="border-b border-slate-200/70">
+                                {columns.map((column) => (
+                                    <SortHeader key={column.key} column={column} sort={sort} onSort={onSort}
+                                                className={column.key === 'employee_name' ? 'pl-4' : ''} />
+                                ))}
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                            {rows.map((row) => (
+                                <tr key={row.employee_name} className="transition hover:bg-slate-50/80">
+                                    <td className="py-2.5 pl-4 pr-3 font-medium text-slate-900">
+                                        {row.employee_name}
+                                    </td>
+                                    {department.has_city && (
+                                        <td className="px-3 py-2.5 text-slate-600">
+                                            {row.city ? (
+                                                <span className="inline-flex items-center gap-1">
+                                                    <MapPin size={11} className="text-slate-400" /> {row.city}
+                                                </span>
+                                            ) : <span className="text-slate-300">—</span>}
+                                        </td>
+                                    )}
+                                    <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.late_count)}</td>
+                                    <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.late_minutes)}</td>
+                                    <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.early_out_minutes)}</td>
+                                    <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.suspicious_count)}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                        <tfoot>
+                            <tr className="border-t border-slate-200/70 bg-slate-50/60 text-[12.5px] font-semibold text-slate-700">
+                                <td className="py-2.5 pl-4 pr-3">Итого по отделу</td>
+                                {department.has_city && <td className="px-3 py-2.5" />}
+                                <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.late_count)}</td>
+                                <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.late_minutes)}</td>
+                                <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.early_out_minutes)}</td>
+                                <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.suspicious_count)}</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                    {department.other_only_employees > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 px-4 py-2.5 text-[11.5px] text-slate-500">
+                            Ещё {fmtInt(department.other_only_employees)}{' '}
+                            {pluralRu(department.other_only_employees,
+                                'сотрудник попал', 'сотрудника попали', 'сотрудников попали')} в
+                            отбивки только с неявками, поздним уходом или без отметки об уходе.
+                            <button type="button" onClick={onOpenEvents}
+                                    className="font-medium text-blue-600 hover:underline">
+                                Смотреть в отбивках
+                            </button>
+                        </div>
+                    )}
+                </div>
+            )}
+        </section>
     );
 };
 
@@ -303,6 +486,15 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     });
     const [eventSearch, setEventSearch] = useState('');
 
+    const [employees, setEmployees] = useState(null);
+    const [employeesError, setEmployeesError] = useState(null);
+    const [employeeFilters, setEmployeeFilters] = useState({
+        from: monthStart(), to: isoDate(new Date()), department: '', q: '',
+    });
+    const [employeeSearch, setEmployeeSearch] = useState('');
+    const [employeeSort, setEmployeeSort] = useState({ key: 'late_count', dir: 'desc' });
+    const [collapsedDepartments, setCollapsedDepartments] = useState(() => new Set());
+
     const [reports, setReports] = useState(null);
     const [reportsError, setReportsError] = useState(null);
 
@@ -312,7 +504,9 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [reportModal, setReportModal] = useState(null);
 
     const eventsRequest = useRef({ id: 0, controller: null });
+    const employeesRequest = useRef({ id: 0, controller: null });
     const searchDebounce = useRef(null);
+    const employeeSearchDebounce = useRef(null);
     const reportPoll = useRef(null);
 
     const scoped = Boolean(departmentScope);
@@ -394,6 +588,32 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         });
     }, [base, headers, events]);
 
+    const loadEmployees = useCallback((filters) => {
+        employeesRequest.current.controller?.abort();
+        const controller = new AbortController();
+        const requestId = employeesRequest.current.id + 1;
+        employeesRequest.current = { id: requestId, controller };
+        setEmployees(null);
+        setEmployeesError(null);
+        axios.get(`${base}/employees`, {
+            headers: headers(), signal: controller.signal,
+            params: {
+                date_from: filters.from || undefined,
+                date_to: filters.to || undefined,
+                department: filters.department || undefined,
+                q: filters.q || undefined,
+            },
+        }).then((r) => {
+            if (requestId !== employeesRequest.current.id) return;
+            setEmployees(r.data);
+        }).catch((e) => {
+            if (axios.isCancel?.(e) || e.name === 'CanceledError') return;
+            if (requestId !== employeesRequest.current.id) return;
+            setEmployees({ departments: [], totals: {} });
+            setEmployeesError(errText(e, 'Не удалось загрузить сводку по сотрудникам'));
+        });
+    }, [base, headers]);
+
     const loadReports = useCallback(() => {
         setReportsError(null);
         axios.get(`${base}/reports`, { headers: headers(), params: { limit: 60 } })
@@ -413,6 +633,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         // id === 0 — лента ещё ни разу не грузилась. Переход на вкладку из
         // «Обзора» уже запускает загрузку со своим фильтром, второй запрос лишний.
         if (tab === 'events' && eventsRequest.current.id === 0) loadEvents(eventFilters);
+        if (tab === 'employees' && employeesRequest.current.id === 0) loadEmployees(employeeFilters);
         if (tab === 'reports' && reports === null) loadReports();
         if (tab === 'mutes' && mutes === null) loadMutes();
         /* eslint-disable-next-line react-hooks/exhaustive-deps */
@@ -430,8 +651,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
 
     useEffect(() => () => {
         clearTimeout(searchDebounce.current);
+        clearTimeout(employeeSearchDebounce.current);
         clearInterval(reportPoll.current);
         eventsRequest.current.controller?.abort();
+        employeesRequest.current.controller?.abort();
     }, []);
 
     /* ─── действия ─────────────────────────────────────────────────────── */
@@ -520,6 +743,44 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         setEventSearch('');
         clearTimeout(searchDebounce.current);
         applyEventFilters({ type: '', department: '', chatId: '', q: '' });
+    };
+
+    const applyEmployeeFilters = (patch) => {
+        const next = { ...employeeFilters, ...patch };
+        setEmployeeFilters(next);
+        loadEmployees(next);
+    };
+
+    const onEmployeeSearch = (value) => {
+        setEmployeeSearch(value);
+        clearTimeout(employeeSearchDebounce.current);
+        employeeSearchDebounce.current = setTimeout(
+            () => applyEmployeeFilters({ q: value.trim() }), 350,
+        );
+    };
+
+    // Клик по той же колонке переключает направление, по новой — начинает с
+    // «интересного»: у чисел это убывание, у ФИО и города — алфавит.
+    const toggleEmployeeSort = (column) => setEmployeeSort((prev) => (
+        prev.key === column.key
+            ? { key: prev.key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+            : { key: column.key, dir: column.numeric ? 'desc' : 'asc' }
+    ));
+
+    const toggleDepartmentCard = (name) => setCollapsedDepartments((prev) => {
+        const next = new Set(prev);
+        if (next.has(name)) next.delete(name); else next.add(name);
+        return next;
+    });
+
+    const openEventsForDepartment = (name) => {
+        setTab('events');
+        setEventSearch('');
+        clearTimeout(searchDebounce.current);
+        applyEventFilters({
+            type: '', department: scoped ? '' : name, chatId: '', q: '',
+            from: employeeFilters.from, to: employeeFilters.to,
+        });
     };
 
     /* ─── вкладки ──────────────────────────────────────────────────────── */
@@ -863,6 +1124,133 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             )}
         </div>
     );
+
+    /* Дисциплина по сотрудникам: кто и на сколько опаздывал, уходил раньше и
+     * сколько раз отметился подозрительно. Данные — та же история отбивок, что
+     * во вкладке «Отбивки», поэтому цифры сходятся с «Обзором». */
+    const renderEmployees = () => {
+        const departments = employees?.departments || [];
+        const totals = employees?.totals || {};
+        const activeFilters = [employeeFilters.department, employeeFilters.q].filter(Boolean).length;
+        const allCollapsed = departments.length > 0
+            && departments.every((d) => collapsedDepartments.has(d.department_name));
+
+        return (
+            <div className="space-y-3">
+                <div className={`${iosCard} p-3`}>
+                    <div className="flex flex-wrap items-end gap-2.5">
+                        <FilterField label="Период">
+                            <IosDateRangePicker from={employeeFilters.from} to={employeeFilters.to}
+                                                max={isoDate(new Date())} presets={EMPLOYEE_DATE_PRESETS}
+                                                onChange={({ from, to }) => applyEmployeeFilters({ from, to })} />
+                        </FilterField>
+                        {!scoped && (
+                            <FilterField label="Отдел" className="w-[210px]">
+                                <CustomSelect
+                                    variant="ios"
+                                    searchable
+                                    value={employeeFilters.department}
+                                    onChange={(department) => applyEmployeeFilters({ department })}
+                                    options={[
+                                        { value: '', label: 'Все отделы' },
+                                        ...departmentNames.map((dept) => ({ value: dept.name, label: dept.name })),
+                                        ...(employeeFilters.department
+                                            && !departmentNames.some((dept) => dept.name === employeeFilters.department)
+                                            ? [{ value: employeeFilters.department, label: employeeFilters.department }]
+                                            : []),
+                                    ]}
+                                    searchPlaceholder="Поиск отдела…"
+                                    ariaLabel="Отдел"
+                                />
+                            </FilterField>
+                        )}
+                        <FilterField label="Поиск" className="min-w-[200px] flex-1">
+                            <div className="relative">
+                                <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                                <input value={employeeSearch} onChange={(e) => onEmployeeSearch(e.target.value)}
+                                       placeholder="Сотрудник, отдел или город…"
+                                       className={`${iosInput} py-2 pl-8 text-[13px]`} />
+                            </div>
+                        </FilterField>
+                        <div className="flex items-center gap-1 pb-0.5">
+                            {activeFilters > 0 && (
+                                <button onClick={() => {
+                                    setEmployeeSearch('');
+                                    clearTimeout(employeeSearchDebounce.current);
+                                    applyEmployeeFilters({ department: '', q: '' });
+                                }} className={iosBtnGhost}>
+                                    <X size={13} /> Сбросить{activeFilters > 1 ? ` (${activeFilters})` : ''}
+                                </button>
+                            )}
+                            {departments.length > 1 && (
+                                <button onClick={() => setCollapsedDepartments(allCollapsed
+                                    ? new Set()
+                                    : new Set(departments.map((d) => d.department_name)))}
+                                        className={iosBtnGhost}>
+                                    <ChevronDown size={13} className={allCollapsed ? '-rotate-90' : ''} />
+                                    {allCollapsed ? 'Развернуть все' : 'Свернуть все'}
+                                </button>
+                            )}
+                            <button onClick={() => loadEmployees(employeeFilters)} className={iosBtnGhost}>
+                                <RefreshCw size={13} /> Обновить
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                {employees && !employeesError && departments.length > 0 && (
+                    <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
+                        <StatTile label="Сотрудников" value={fmtInt(totals.employees)} icon={Users}
+                                  hint={`отделов: ${fmtInt(totals.departments)}`} />
+                        <StatTile label="Опозданий" value={fmtInt(totals.late_count)} icon={Clock}
+                                  tone={totals.late_count > 0 ? 'red' : 'slate'}
+                                  hint={`${fmtInt(totals.late_minutes)} мин суммарно`} />
+                        <StatTile label="Ранних уходов" value={fmtInt(totals.early_out_count)} icon={LogOut}
+                                  tone={totals.early_out_count > 0 ? 'amber' : 'slate'}
+                                  hint={`${fmtInt(totals.early_out_minutes)} мин суммарно`} />
+                        <StatTile label="Подозрительных отметок" value={fmtInt(totals.suspicious_count)} icon={ShieldAlert}
+                                  tone={totals.suspicious_count > 0 ? 'amber' : 'slate'}
+                                  hint="отметка не подтверждена терминалом" />
+                    </div>
+                )}
+
+                {employeesError ? <div className={iosCard}><ErrorBlock>{employeesError}</ErrorBlock></div>
+                    : employees === null ? <div className={iosCard}><LoadingBlock /></div>
+                        : departments.length === 0 ? (
+                            <div className={iosCard}>
+                                <EmptyBlock icon={Users}>
+                                    {activeFilters > 0
+                                        ? 'Под фильтры никто не подходит'
+                                        : 'За выбранный период опозданий, ранних уходов и подозрительных отметок не было'}
+                                </EmptyBlock>
+                            </div>
+                        ) : (
+                            <div className="space-y-2.5">
+                                {departments.map((department) => (
+                                    <EmployeeDepartmentCard
+                                        key={department.department_name}
+                                        department={department}
+                                        sort={employeeSort}
+                                        onSort={toggleEmployeeSort}
+                                        collapsed={collapsedDepartments.has(department.department_name)}
+                                        onToggle={() => toggleDepartmentCard(department.department_name)}
+                                        onOpenEvents={() => openEventsForDepartment(department.department_name)}
+                                    />
+                                ))}
+                            </div>
+                        )}
+
+                <p className="px-1 text-[11px] leading-relaxed text-slate-500">
+                    Считаем по найденным отбивкам за дату смены: опоздание и ранний уход — от
+                    порога бота, подозрительная отметка — та, что терминал не подтвердил.
+                    Город берём из кадровой карточки сотрудника, поэтому колонка есть у отделов,
+                    где офисы стоят в разных городах, — у «Регионов». Сотрудники, у которых за
+                    период были только неявки и отсутствие отметки об уходе, в таблицу не попадают:
+                    строка из одних нулей читалась бы как «нарушений нет».
+                </p>
+            </div>
+        );
+    };
 
     const renderReports = () => (
         <div className="space-y-3">
@@ -1444,6 +1832,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             )}
 
             {tab === 'overview' && renderOverview()}
+            {tab === 'employees' && renderEmployees()}
             {tab === 'events' && renderEvents()}
             {tab === 'reports' && renderReports()}
             {tab === 'chats' && renderChats()}

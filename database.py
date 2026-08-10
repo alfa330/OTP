@@ -48812,6 +48812,182 @@ class Database:
                 })
         return {'total': total, 'items': items, 'limit': limit_int, 'offset': offset_int}
 
+    # Workpace пишет ФИО как в удостоверении («ҚҰРМАНОВ ҚАЙРАТ»), у нас в карточке
+    # сотрудника — обиходное написание («Курманов Кайрат»). Складываем казахские
+    # буквы к близким русским и убираем мягкий/твёрдый знак: без этого город к
+    # сотруднику не подобрать, а транслитерация тут однозначная.
+    _GLB_NAME_FOLD = str.maketrans({
+        'ә': 'а', 'ғ': 'г', 'қ': 'к', 'ң': 'н', 'ө': 'о', 'ұ': 'у', 'ү': 'у',
+        'һ': 'х', 'і': 'и', 'ё': 'е', 'й': 'и', 'ь': '', 'ъ': '',
+    })
+
+    @classmethod
+    def _glb_name_keys(cls, value):
+        """(ключ по всему ФИО, ключ по «Фамилия Имя»).
+
+        Второй нужен, потому что отчество есть не везде: в Workpace
+        «Досанбаев Асан Тестович», у нас — «Досанбаев Асан»."""
+        text = re.sub(r'[^0-9a-zа-яёәғқңөұүһі\s]', ' ', str(value or '').strip().lower())
+        tokens = text.translate(cls._GLB_NAME_FOLD).split()
+        if not tokens:
+            return None, None
+        return ' '.join(tokens), (' '.join(tokens[:2]) if len(tokens) > 1 else None)
+
+    def _glb_city_lookup(self, cursor):
+        """{ключ ФИО: город} по кадровым карточкам.
+
+        Город заполняют только отделам, чьи офисы стоят в разных городах (сейчас —
+        «Фронт офисы», он же «Регионы» в Workpace), поэтому таблица маленькая и
+        читается целиком. Тёзкам с разными городами город не проставляем: угадать
+        нельзя, а показать чужой — хуже, чем прочерк."""
+        cursor.execute("""
+            SELECT u.name, btrim(u.city), (lower(COALESCE(u.status, '')) = 'fired') AS fired
+            FROM users u
+            WHERE u.city IS NOT NULL AND btrim(u.city) <> ''
+            ORDER BY fired, u.id
+        """)
+        by_full, by_short = {}, {}
+        for name, city, fired in cursor.fetchall():
+            full_key, short_key = self._glb_name_keys(name)
+            for store, key in ((by_full, full_key), (by_short, short_key)):
+                if not key:
+                    continue
+                if key not in store:
+                    store[key] = city
+                elif fired:
+                    continue          # уволенный тёзка не спорит с действующим
+                elif store[key] != city:
+                    store[key] = None
+        return by_full, by_short
+
+    def get_group_late_employee_stats(self, date_from=None, date_to=None, department=None,
+                                      search=None):
+        """Дисциплина по сотрудникам в разрезе отделов Workpace за период.
+
+        Считает по той же истории отбивок, что показывает вкладка «Отбивки»
+        (`glb_events`, дата смены), поэтому цифры сходятся с ней и с «Обзором».
+        Сотрудники, у которых за период были только неявки и отсутствие отметки
+        об уходе, в таблицу не попадают — их число возвращается отдельно, иначе
+        строка из одних нулей выглядела бы как «нарушений нет».
+
+        department — отдел Workpace, которым ограничен запрашивающий."""
+        from_date = self._glb_parse_date(date_from, 'date_from')
+        to_date = self._glb_parse_date(date_to, 'date_to')
+        if from_date and to_date and from_date > to_date:
+            raise ValueError("date_from is later than date_to")
+
+        where, params = [], []
+        if from_date:
+            where.append("e.event_date >= %s")
+            params.append(from_date)
+        if to_date:
+            where.append("e.event_date <= %s")
+            params.append(to_date)
+        dept = self._glb_department(department)
+        if dept:
+            where.append("lower(e.department_name) = lower(%s)")
+            params.append(dept)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT COALESCE(NULLIF(btrim(e.department_name), ''), 'Без отдела') AS dept,
+                       COALESCE(NULLIF(btrim(e.employee_name), ''), 'Без имени') AS employee,
+                       COUNT(*) FILTER (WHERE e.event_type = 'late') AS late_count,
+                       COALESCE(SUM(e.minutes) FILTER (WHERE e.event_type = 'late'), 0) AS late_minutes,
+                       COUNT(*) FILTER (WHERE e.event_type = 'early_out') AS early_out_count,
+                       COALESCE(SUM(e.minutes) FILTER (WHERE e.event_type = 'early_out'), 0) AS early_out_minutes,
+                       COUNT(*) FILTER (WHERE e.event_type = 'suspicious') AS suspicious_count,
+                       COUNT(*) FILTER (WHERE e.event_type = 'missing') AS missing_count,
+                       COUNT(*) AS events_total,
+                       MAX(e.event_date) AS last_event_date
+                FROM glb_events e
+                {where_sql}
+                GROUP BY 1, 2
+            """, params)
+            rows = cursor.fetchall()
+            by_full, by_short = self._glb_city_lookup(cursor)
+
+        search_text = str(search or '').strip().casefold()
+        grouped = {}
+        for row in rows:
+            department_name, employee_name = row[0], row[1]
+            full_key, short_key = self._glb_name_keys(employee_name)
+            # Полное совпадение ФИО главнее: если оно нашлось (пусть и спорным —
+            # None у тёзок), по «Фамилии Имени» уже не переспрашиваем.
+            if full_key in by_full:
+                city = by_full[full_key]
+            else:
+                city = by_short.get(short_key) if short_key else None
+            if search_text and not any(
+                search_text in field.casefold()
+                for field in (employee_name, department_name, city or '')
+            ):
+                continue
+
+            employee = {
+                'employee_name': employee_name,
+                'city': city,
+                'late_count': int(row[2] or 0),
+                'late_minutes': int(row[3] or 0),
+                'early_out_count': int(row[4] or 0),
+                'early_out_minutes': int(row[5] or 0),
+                'suspicious_count': int(row[6] or 0),
+                'missing_count': int(row[7] or 0),
+                'events_total': int(row[8] or 0),
+                'last_event_date': row[9].isoformat() if row[9] else None,
+            }
+            bucket = grouped.setdefault(department_name, {
+                'department_name': department_name,
+                'has_city': False,
+                'employees': [],
+                'other_only_employees': 0,
+                'totals': {'employees': 0, 'late_count': 0, 'late_minutes': 0,
+                           'early_out_count': 0, 'early_out_minutes': 0, 'suspicious_count': 0},
+            })
+            tracked = (employee['late_count'] + employee['early_out_count']
+                       + employee['suspicious_count'])
+            if not tracked:
+                bucket['other_only_employees'] += 1
+                continue
+            if city:
+                bucket['has_city'] = True
+            bucket['employees'].append(employee)
+            totals = bucket['totals']
+            totals['employees'] += 1
+            for field in ('late_count', 'late_minutes', 'early_out_count',
+                          'early_out_minutes', 'suspicious_count'):
+                totals[field] += employee[field]
+
+        overall = {'departments': 0, 'employees': 0, 'late_count': 0, 'late_minutes': 0,
+                   'early_out_count': 0, 'early_out_minutes': 0, 'suspicious_count': 0}
+        departments = []
+        for bucket in grouped.values():
+            if not bucket['employees']:
+                continue
+            bucket['employees'].sort(
+                key=lambda item: (-item['late_count'], -item['late_minutes'],
+                                  -item['suspicious_count'], item['employee_name']),
+            )
+            departments.append(bucket)
+            overall['departments'] += 1
+            for field in ('employees', 'late_count', 'late_minutes', 'early_out_count',
+                          'early_out_minutes', 'suspicious_count'):
+                overall[field] += bucket['totals'][field]
+        departments.sort(
+            key=lambda item: (-(item['totals']['late_count'] + item['totals']['early_out_count']
+                                + item['totals']['suspicious_count']),
+                              item['department_name']),
+        )
+
+        return {
+            'date_from': from_date.isoformat() if from_date else None,
+            'date_to': to_date.isoformat() if to_date else None,
+            'department': dept,
+            'totals': overall,
+            'departments': departments,
+        }
+
     def get_group_late_reports(self, date_from=None, date_to=None, status=None, source=None,
                                limit=50, offset=0, department=None):
         """department — отдел Workpace, которым ограничен запрашивающий: тогда в списке
