@@ -632,6 +632,47 @@ _AI_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_articles_ai_eligible "
     "ON wiki_articles (id) "
     "WHERE status = 'published' AND NOT strict_mode AND NOT ai_opt_out;",
+    # Что проиндексировано и не устарело ли. Признак изменения — sha256 текста,
+    # а НЕ updated_at и не version_number: правка только тегов или разделов до
+    # UPDATE статьи не доходит, а version_number растёт даже на пустом PATCH.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_ai_article_index (
+        article_id   INTEGER PRIMARY KEY REFERENCES wiki_articles(id) ON DELETE CASCADE,
+        content_hash CHAR(64) NOT NULL,
+        chunk_count  INTEGER NOT NULL DEFAULT 0,
+        indexed_at   TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    # Единица поиска помощника. heading_path — единственный источник контекста
+    # куска: колонка wiki_articles.toc на проде пуста у всех статей.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_ai_chunks (
+        id           BIGSERIAL PRIMARY KEY,
+        article_id   INTEGER NOT NULL REFERENCES wiki_articles(id) ON DELETE CASCADE,
+        chunk_idx    INTEGER NOT NULL,
+        heading_path TEXT NOT NULL DEFAULT '',
+        text         TEXT NOT NULL,
+        requires_ack BOOLEAN NOT NULL DEFAULT FALSE,
+        char_len     INTEGER NOT NULL DEFAULT 0,
+        text_hash    CHAR(64) NOT NULL,
+        created_at   TIMESTAMP NOT NULL DEFAULT %(now)s,
+        UNIQUE (article_id, chunk_idx)
+    );
+    """,
+    # Свёртка ё→е с обеих сторон и словарь 'russian' — ровно как у
+    # wiki_articles.search_vector, иначе запрос «отчет» не нашёл бы «отчёт».
+    # Путь заголовков весит выше текста: «Залог» в заголовке — сильный сигнал.
+    """
+    ALTER TABLE wiki_ai_chunks ADD COLUMN IF NOT EXISTS chunk_tsv tsvector
+        GENERATED ALWAYS AS (
+            setweight(to_tsvector('russian', translate(coalesce(heading_path, ''), 'ёЁ', 'еЕ')), 'B') ||
+            setweight(to_tsvector('russian', translate(coalesce(text, ''), 'ёЁ', 'еЕ')),         'D')
+        ) STORED;
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chunks_fts "
+    "ON wiki_ai_chunks USING GIN (chunk_tsv);",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chunks_article "
+    "ON wiki_ai_chunks (article_id, chunk_idx);",
 ]
 
 # Опечатки и префиксный поиск. Отдельно и под своим савпоинтом: расширение
@@ -758,10 +799,12 @@ def init_wiki_schema(cursor):
     for statement in _SEARCH_STATEMENTS:
         cursor.execute(statement)
 
-    # Рубильник ИИ — сразу после поисковых колонок: обе группы это ALTER по
-    # wiki_articles, и держать их рядом дешевле, чем искать по файлу.
+    # Рубильник ИИ и таблицы кусков — сразу после поисковых колонок: обе группы
+    # это ALTER по wiki_articles, и держать их рядом дешевле, чем искать по файлу.
+    # Подстановка даты через str.replace, как и выше: второй аргумент execute не
+    # передаётся, поэтому psycopg2 %(now)s сам не раскрыл бы.
     for statement in _AI_STATEMENTS:
-        cursor.execute(statement)
+        cursor.execute(statement.replace('%(now)s', _NOW))
 
     # Вместе с колонкой пересчитываются и search_aliases: нормализация запроса
     # (ё -> е кириллическая) изменилась, а сохранённые алиасы считались старой.
