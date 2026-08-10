@@ -83,7 +83,7 @@ import math
 import psycopg2
 from urllib.parse import quote, urlparse, parse_qs
 from zoneinfo import ZoneInfo
-from zipfile import ZipFile
+from zipfile import ZipFile, ZIP_DEFLATED
 from xml.etree import ElementTree as ET
 from ai_feed_back_service import generate_monthly_feedback_with_ai, generate_birthday_greeting_with_ai, generate_it_ticket_with_ai
 from recruiting_parser import crawl_resumes_as_dicts
@@ -34761,6 +34761,54 @@ def _tez_leads_excel_text_cell(ws, row, column, value):
     return cell
 
 
+def _excel_suppress_number_as_text_warning(stream, sqref,
+                                           sheet_path='xl/worksheets/sheet1.xml'):
+    """Убирает у диапазона зелёный уголок «Число сохранено как текст».
+
+    Телефоны намеренно лежат текстом (числом номер теряет ведущие нули и уезжает
+    в экспоненту), но Excel помечает такую ячейку как ошибку — на выгрузке это
+    значок на каждой строке. Гасим подсказку, а не формат: тег <ignoredErrors>
+    openpyxl писать не умеет (write_tail его пропускает), поэтому дописываем его
+    в уже сохранённый xlsx.
+    """
+    node = (
+        '<ignoredErrors><ignoredError sqref="%s" numberStoredAsText="1"/>'
+        '</ignoredErrors>' % sqref
+    )
+    # Узлы листа, которые по схеме OOXML идут ПОСЛЕ <ignoredErrors>: перед первым
+    # из них и вставляем, иначе Excel считает книгу повреждённой.
+    tags_after = (
+        '<smartTags', '<drawing', '<legacyDrawing', '<picture', '<oleObjects',
+        '<controls', '<webPublishItems', '<tableParts', '<extLst',
+    )
+    source = ZipFile(stream)
+    try:
+        patched = BytesIO()
+        with ZipFile(patched, 'w', ZIP_DEFLATED) as target:
+            for item in source.infolist():
+                data = source.read(item.filename)
+                if item.filename == sheet_path:
+                    xml = data.decode('utf-8')
+                    if '<ignoredErrors' not in xml:
+                        positions = [
+                            pos
+                            for pos in (xml.find(tag) for tag in tags_after)
+                            if pos != -1
+                        ]
+                        insert_at = (
+                            min(positions) if positions
+                            else xml.rfind('</worksheet>')
+                        )
+                        if insert_at != -1:
+                            xml = xml[:insert_at] + node + xml[insert_at:]
+                            data = xml.encode('utf-8')
+                target.writestr(item, data)
+    finally:
+        source.close()
+    patched.seek(0)
+    return patched
+
+
 def _tez_op_operator_resolver():
     """Колбэк resolve(employee_name, call_date) -> id оператора ОП либо None.
 
@@ -35164,6 +35212,11 @@ def tez_leads_export():
     stream = BytesIO()
     wb.save(stream)
     stream.seek(0)
+    if rows:
+        phone_letter = get_column_letter(headers.index('Телефон') + 1)
+        stream = _excel_suppress_number_as_text_warning(
+            stream, f'{phone_letter}2:{phone_letter}{len(rows) + 1}'
+        )
     return send_file(
         stream,
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

@@ -9,9 +9,11 @@ import re
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -145,7 +147,7 @@ class _FakeDatabase:
 
 
 class TezLeadsExcelExportTests(unittest.TestCase):
-    def _export(self, rows):
+    def _export_bytes(self, rows):
         db = _FakeDb(rows)
 
         def send_file(stream, **kwargs):
@@ -168,10 +170,17 @@ class TezLeadsExcelExportTests(unittest.TestCase):
                 "BytesIO": io.BytesIO,
                 "timedelta": timedelta,
                 "send_file": send_file,
+                "get_column_letter": get_column_letter,
+                "ZipFile": ZipFile,
+                "ZIP_DEFLATED": ZIP_DEFLATED,
             }
         )
         response = export()
-        workbook = load_workbook(io.BytesIO(response["content"]), data_only=True)
+        return db, response["content"]
+
+    def _export(self, rows):
+        db, content = self._export_bytes(rows)
+        workbook = load_workbook(io.BytesIO(content), data_only=True)
         return db, workbook.active
 
     @staticmethod
@@ -264,6 +273,33 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         # Длительность разговора — по-прежнему число, а не текст.
         duration_column = headers.index("Время разговора") + 1
         self.assertEqual(sheet.cell(2, duration_column).number_format, "0")
+
+    def test_phone_column_has_no_number_stored_as_text_warning(self):
+        """Текстовый формат не должен тащить за собой значок ошибки Excel.
+
+        Без <ignoredErrors> Excel рисует зелёный уголок «Число сохранено как
+        текст» на каждой строке телефона — формат при этом правильный, но
+        выгрузка выглядит битой.
+        """
+        _, content = self._export_bytes([self._detail_row(), self._detail_row()])
+        with ZipFile(io.BytesIO(content)) as book:
+            sheet_xml = book.read("xl/worksheets/sheet1.xml").decode("utf-8")
+
+        self.assertIn('numberStoredAsText="1"', sheet_xml)
+        self.assertIn('sqref="B2:B3"', sheet_xml)
+        # Узел обязан стоять после pageMargins — иначе Excel считает книгу битой.
+        self.assertLess(
+            sheet_xml.index("<pageMargins"), sheet_xml.index("<ignoredErrors")
+        )
+        # Файл после правки zip остаётся читаемым книгой, а не только текстом.
+        sheet = load_workbook(io.BytesIO(content), data_only=True).active
+        self.assertEqual(sheet.cell(2, 2).value, "77010000001")
+
+    def test_empty_export_is_not_patched(self):
+        _, content = self._export_bytes([])
+        with ZipFile(io.BytesIO(content)) as book:
+            sheet_xml = book.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertNotIn("<ignoredErrors", sheet_xml)
 
     def test_active_prev_month_exports_previous_reason_without_hiding_current_trip(self):
         _, sheet = self._export(
