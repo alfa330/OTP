@@ -252,6 +252,27 @@ class RosterTests(unittest.TestCase):
         self.assertEqual(department["employees"][0]["late_count"], 1)
         self.assertEqual(department["employees"][0]["suspicious_count"], 2)
 
+    def test_duplicate_workpace_card_is_one_row(self):
+        # В Workpace один и тот же человек бывает заведён дважды: два id, ФИО одно,
+        # нарушения приходят то под одним, то под другим. Строка должна быть одна.
+        result, _ = run_stats(
+            event_rows=[event_row("Тестбаева Дильназ", missing=4, suspicious=5,
+                                  ext_ids=["dup-a", "dup-b"])],
+            roster_rows=[roster_row("Тестбаева Дильназ", ext_id="dup-a"),
+                         roster_row("Тестбаева Дильназ", ext_id="dup-b")],
+        )
+        department = only_department(result)
+        self.assertEqual(department["totals"]["employees"], 1)
+        self.assertEqual(department["employees"][0]["missing_count"], 4)
+        self.assertEqual(department["employees"][0]["suspicious_count"], 5)
+
+    def test_namesakes_with_patronymic_stay_separate(self):
+        # Отчество различает людей — их не сливаем.
+        result, _ = run_stats(roster_rows=[
+            roster_row("Иванов Иван Петрович"), roster_row("Иванов Иван Сергеевич"),
+        ])
+        self.assertEqual(only_department(result)["totals"]["employees"], 2)
+
     def test_roster_meta_is_returned(self):
         result, _ = run_stats(roster_rows=[roster_row("Чистый Пётр")])
         self.assertEqual(result["roster_total"], 1)

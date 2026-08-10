@@ -48987,12 +48987,21 @@ class Database:
                 'department_name': department_name, 'by_key': {}, 'by_short': {},
                 'by_ext': {}, 'employees': [],
             })
-            entry = self._glb_stats_entry(employee_name)
-            entry['in_roster'] = True
-            bucket['employees'].append(entry)
             full_key, short_key = self._glb_name_keys(employee_name)
-            self._glb_index_put(bucket['by_key'], full_key, entry)
-            self._glb_index_put(bucket['by_short'], short_key, entry)
+            # Два одинаковых ФИО в отделе — это одна карточка, заведённая в Workpace
+            # дважды (так, например, живёт Тестбаева Дильназ): у неё два id, и
+            # нарушения приходят то под одним, то под другим. Строку не двоим —
+            # тем более что сами нарушения группируются по ФИО и всё равно легли бы
+            # в одну. Отчество различает однофамильцев, поэтому сливаем только по
+            # ПОЛНОМУ совпадению.
+            entry = bucket['by_key'].get(full_key) if full_key else None
+            if entry is None:
+                entry = self._glb_stats_entry(employee_name)
+                entry['in_roster'] = True
+                bucket['employees'].append(entry)
+                if full_key:
+                    bucket['by_key'][full_key] = entry
+                self._glb_index_put(bucket['by_short'], short_key, entry)
             for value in (ext_id, external_id):
                 if value:
                     bucket['by_ext'][str(value)] = entry
