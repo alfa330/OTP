@@ -122,19 +122,23 @@ def register(bp, wiki_route, db, log_ip):
             'branches': found['branches'],
             'degraded': found['degraded'],
             'vector_error': vector_error,
+            # Поля берутся только те, что реально возвращает fuse(). Раньше здесь
+            # стоял row['rrf'] — остаток от слияния по RRF, от которого отказались
+            # по замеру; ключа в строках больше нет, и витрина падала с 500.
+            # Регрессию закрывает тест на контракт строки (test_wiki_ai_fusion).
             'results': [{
+                'rank': position,
                 'chunk_id': row['chunk_id'],
                 'article_id': row['article_id'],
                 'title': row['title'],
                 'slug': row['slug'],
                 'heading_path': row['heading_path'],
                 'requires_ack': row['requires_ack'],
-                'rrf': round(row['rrf'], 6),
                 'score': row.get('score'),
                 'similarity': row.get('similarity'),
                 'found_by': row['found_by'],
                 'preview': row['text'][:400],
-            } for row in found['rows']],
+            } for position, row in enumerate(found['rows'], start=1)],
         })
 
     # ── Чат ──────────────────────────────────────────────────────────────────

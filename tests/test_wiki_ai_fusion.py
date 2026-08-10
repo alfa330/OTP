@@ -77,6 +77,35 @@ class FuseTest(unittest.TestCase):
         self.assertEqual([1, 2], [item['chunk_id'] for item in out])
 
 
+class RowContractTest(unittest.TestCase):
+    """Контракт строки выдачи: витрина /ai/search читает эти поля напрямую.
+
+    Тест появился по факту падения на проде. После отказа от RRF в строках не
+    стало ключа 'rrf', а витрина продолжала его читать — и отдавала 500. Ошибка
+    прошла незамеченной потому, что путь ответа (/ask) этого поля не касается, а
+    саму витрину я не вызвал ни разу, хотя именно её предложил для проверки.
+    """
+
+    REQUIRED = ('chunk_id', 'article_id', 'title', 'slug', 'heading_path',
+                'text', 'requires_ack', 'found_by')
+
+    def test_fuse_row_has_every_field_the_view_reads(self):
+        rows = fuse([row(2, 11)], [row(1, 10, similarity=0.8)], limit=5)
+        self.assertTrue(rows)
+        for item in rows:
+            for field in self.REQUIRED:
+                self.assertIn(field, item, f'{field} нет в строке выдачи')
+
+    def test_fuse_does_not_promise_rrf(self):
+        """Если ключ вернут — витрину надо править осознанно, а не случайно."""
+        rows = fuse([], [row(1, 10, similarity=0.8)], limit=5)
+        self.assertNotIn('rrf', rows[0])
+
+    def test_rrf_rows_do_carry_rrf(self):
+        rows = fuse_rrf([], [row(1, 10)], limit=5)
+        self.assertIn('rrf', rows[0])
+
+
 class RrfStillAvailableTest(unittest.TestCase):
     """RRF оставлен как инструмент для равноправных ветвей — он должен работать."""
 
