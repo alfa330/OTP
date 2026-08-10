@@ -675,6 +675,69 @@ _AI_STATEMENTS = [
     "ON wiki_ai_chunks (article_id, chunk_idx);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chunks_text_hash "
     "ON wiki_ai_chunks (text_hash);",
+    # ── История чатов ────────────────────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS wiki_ai_chats (
+        id              BIGSERIAL PRIMARY KEY,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title           VARCHAR(255) NOT NULL DEFAULT '',
+        message_count   INTEGER NOT NULL DEFAULT 0,
+        last_message_at TIMESTAMP,
+        deleted_at      TIMESTAMP,
+        deleted_by      INTEGER,
+        created_at      TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at      TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chats_user "
+    "ON wiki_ai_chats (user_id, last_message_at DESC) WHERE deleted_at IS NULL;",
+    # kind различает три исхода, и они РАЗНЫЕ для отчёта «о чём спрашивают, а в
+    # вике нет»: answer — ответили, no_answer — ответа в доступных статьях не
+    # нашлось, clarify — переспросили.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_ai_messages (
+        id            BIGSERIAL PRIMARY KEY,
+        chat_id       BIGINT NOT NULL REFERENCES wiki_ai_chats(id) ON DELETE CASCADE,
+        seq           INTEGER NOT NULL,
+        role          VARCHAR(16) NOT NULL,
+        kind          VARCHAR(16) NOT NULL DEFAULT 'answer',
+        text          TEXT NOT NULL,
+        provider      VARCHAR(32),
+        model         VARCHAR(128),
+        elapsed_ms    INTEGER,
+        input_tokens  INTEGER,
+        output_tokens INTEGER,
+        feedback      SMALLINT,
+        created_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        UNIQUE (chat_id, seq)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_ai_messages_chat "
+    "ON wiki_ai_messages (chat_id, seq);",
+    # Источники — СНИМОК момента ответа, а не ссылка на живой кусок. chunk_id
+    # обнулится при пересборке индекса (куски пересоздаются), поэтому текст
+    # цитаты, путь заголовков и хеш куска хранятся здесь и НЕ перепроверяются
+    # при показе истории: quote_ok означает «проверено при генерации».
+    # chunk_text_hash позволяет отличить устаревший якорь от живого.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_ai_message_sources (
+        id              BIGSERIAL PRIMARY KEY,
+        message_id      BIGINT NOT NULL REFERENCES wiki_ai_messages(id) ON DELETE CASCADE,
+        ord             SMALLINT NOT NULL,
+        article_id      INTEGER NOT NULL REFERENCES wiki_articles(id) ON DELETE CASCADE,
+        chunk_id        BIGINT,
+        chunk_text_hash CHAR(64),
+        title           VARCHAR(255) NOT NULL DEFAULT '',
+        slug            VARCHAR(255) NOT NULL DEFAULT '',
+        heading_path    TEXT NOT NULL DEFAULT '',
+        quote           TEXT NOT NULL DEFAULT '',
+        quote_ok        BOOLEAN NOT NULL DEFAULT FALSE,
+        requires_ack    BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at      TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_ai_message_sources_message "
+    "ON wiki_ai_message_sources (message_id, ord);",
 ]
 
 # ── Векторы кусков ───────────────────────────────────────────────────────────

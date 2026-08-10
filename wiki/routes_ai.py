@@ -26,9 +26,12 @@ can_manage_structure по всему индексу» — выглядит бе�
 from flask import jsonify, request
 
 from . import perimeter as wiki_perimeter
+from .ai import answer as ai_answer
 from .ai import embed as ai_embed
 from .ai import index as ai_index
+from .ai import providers as ai_providers
 from .ai import retrieve as ai_retrieve
+from .ai import store as ai_store
 
 
 def _int_arg(name, default, low, high):
@@ -133,3 +136,136 @@ def register(bp, wiki_route, db, log_ip):
                 'preview': row['text'][:400],
             } for row in found['rows']],
         })
+
+    # ── Чат ──────────────────────────────────────────────────────────────────
+    #
+    # Про удержание соединения из пула. Обработчик держит курсор всё время
+    # работы, включая вызов модели. Посчитано, а не отложено: основной провайдер
+    # отвечает 0,5-1,1 с, а его же минутный лимит (12 000 токенов на всю
+    # организацию, около 5 вопросов в минуту) ограничивает поток сверху. Пять
+    # вопросов по две секунды — это 10 секунд занятости соединения на минуту,
+    # то есть в среднем 0,17 соединения из 40. Даже десятикратный запас не
+    # приближается к пулу. Опасный сценарий из разведки («десять одновременных
+    # вопросов по 15 секунд») лимитами провайдера физически исключён. Пересмотреть
+    # придётся на этапе 7 вместе со стримингом: там вызов живёт дольше и роут
+    # надо будет объявлять вручную, вне wiki_route.
+
+    @wiki_route('/ai/chats')
+    def wiki_ai_chats(cursor, ctx):
+        limit = _int_arg('limit', 30, 1, 100)
+        offset = _int_arg('offset', 0, 0, 10000)
+        return jsonify({'chats': ai_store.list_chats(cursor, ctx['user_id'],
+                                                     limit=limit, offset=offset)})
+
+    @wiki_route('/ai/chats', methods=('POST',))
+    def wiki_ai_chat_create(cursor, ctx):
+        return jsonify({'chat': ai_store.create_chat(cursor, ctx['user_id'])})
+
+    @wiki_route('/ai/chats/<int:chat_id>')
+    def wiki_ai_chat_read(cursor, ctx, chat_id):
+        chat = ai_store.owned_chat(cursor, ctx['user_id'], chat_id)
+        if not chat:
+            return jsonify({'error': 'чат не найден'}), 404
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx)
+        messages = ai_store.chat_messages(
+            cursor, chat_id, visible_article_ids=scope['article_ids'])
+        return jsonify({'chat': chat, 'messages': messages})
+
+    @wiki_route('/ai/chats/<int:chat_id>', methods=('PATCH',))
+    def wiki_ai_chat_rename(cursor, ctx, chat_id):
+        payload = request.get_json(silent=True) or {}
+        title = str(payload.get('title') or '').strip()
+        if not title:
+            return jsonify({'error': 'нужно название'}), 400
+        if not ai_store.rename_chat(cursor, ctx['user_id'], chat_id, title[:120]):
+            return jsonify({'error': 'чат не найден'}), 404
+        return jsonify({'ok': True, 'title': title[:120]})
+
+    @wiki_route('/ai/chats/<int:chat_id>', methods=('DELETE',))
+    def wiki_ai_chat_delete(cursor, ctx, chat_id):
+        # Идемпотентно: повторный вызов тоже 200. Двойной клик не должен
+        # выглядеть ошибкой — та же логика, что в разборах ИИ после фикса.
+        ai_store.delete_chat(cursor, ctx['user_id'], chat_id)
+        return jsonify({'ok': True})
+
+    @wiki_route('/ai/chats/<int:chat_id>/ask', methods=('POST',))
+    def wiki_ai_ask(cursor, ctx, chat_id):
+        payload = request.get_json(silent=True) or {}
+        question = str(payload.get('question') or '').strip()
+        if not question:
+            return jsonify({'error': 'нужен вопрос'}), 400
+        if len(question) > 1000:
+            return jsonify({'error': 'вопрос слишком длинный'}), 400
+
+        chat = ai_store.owned_chat(cursor, ctx['user_id'], chat_id)
+        if not chat:
+            return jsonify({'error': 'чат не найден'}), 404
+
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx)
+        if not scope['article_ids']:
+            return jsonify({'error': 'нет доступных статей',
+                            'detail': 'помощнику не выдан доступ ни к одной статье'
+                                      ' — обратитесь к администратору вики'}), 409
+
+        query_vector = None
+        try:
+            query_vector = ai_embed.embed_query(question)
+        except Exception:
+            query_vector = None      # деградация до лексики, не отказ
+
+        found = ai_retrieve.search_hybrid(
+            cursor, article_ids=scope['article_ids'], query=question,
+            query_vector=query_vector, limit=8, per_article=3)
+
+        ai_store.append_message(cursor, chat_id, role='user', kind='question',
+                                text=question)
+        try:
+            result = ai_answer.compose(question, found['rows'],
+                                       ai_providers.generate)
+        except ai_providers.ProviderError as error:
+            return jsonify({'error': 'ИИ недоступен',
+                            'detail': str(error)[:300]}), 503
+
+        meta = result.get('meta') or {}
+        usage = meta.get('usage') or {}
+        stored = ai_store.append_message(
+            cursor, chat_id, role='assistant', kind=result['kind'],
+            text=result['text'], provider=meta.get('provider'),
+            model=meta.get('model'),
+            elapsed_ms=int((meta.get('elapsed') or 0) * 1000) or None,
+            input_tokens=usage.get('prompt_tokens'),
+            output_tokens=usage.get('completion_tokens'),
+            sources=result.get('sources') or ())
+        ai_store.touch_chat(cursor, ctx['user_id'], chat_id,
+                            first_question=question)
+
+        return jsonify({
+            'message_id': stored['id'],
+            'kind': result['kind'],
+            'text': result['text'],
+            'notes': result.get('notes') or [],
+            'sources': [{
+                'ord': position,
+                'article_id': source.get('article_id'),
+                'title': source.get('title'),
+                'slug': source.get('slug'),
+                'heading_path': source.get('heading_path'),
+                'quote': source.get('quote'),
+                'quote_ok': bool(source.get('ok')),
+                'requires_ack': bool(source.get('requires_ack')),
+            } for position, source in enumerate(result.get('sources') or [])],
+            'provider': meta.get('provider'),
+            'model': meta.get('model'),
+            'elapsed': meta.get('elapsed'),
+            'degraded_search': found['degraded'],
+        })
+
+    @wiki_route('/ai/messages/<int:message_id>/feedback', methods=('POST',))
+    def wiki_ai_feedback(cursor, ctx, message_id):
+        payload = request.get_json(silent=True) or {}
+        raw = payload.get('feedback')
+        if raw not in (1, -1, 0, '1', '-1', '0'):
+            return jsonify({'error': 'feedback должен быть 1, -1 или 0'}), 400
+        if not ai_store.set_feedback(cursor, ctx['user_id'], message_id, int(raw)):
+            return jsonify({'error': 'реплика не найдена'}), 404
+        return jsonify({'ok': True})
