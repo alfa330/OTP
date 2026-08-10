@@ -139,6 +139,88 @@ def test_footer_without_a_failure_says_nothing_about_one():
     assert "⚠️" not in text
 
 
+def test_window_is_clamped_to_what_is_actually_loaded():
+    """Неполный день нельзя сравнивать с полным.
+
+    Выгрузка идёт раз в три часа, поэтому «сегодня» в базе обрывается раньше
+    «сейчас». 10.08 в 11:53 при данных от 06:11 это давало минус по всем девяти
+    источникам и «Общее» -51% — падения, которого не было. Обрезаем оба отрезка.
+    """
+    import datetime
+
+    asked = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 10, 11, 53, tzinfo=amo_leads.TZ))
+    clamped = amo_leads.clamp_windows(
+        asked, datetime.datetime(2026, 8, 10, 6, 11, tzinfo=amo_leads.TZ))
+
+    assert clamped["current_end"] == datetime.datetime(2026, 8, 10, 6, 11,
+                                                       tzinfo=amo_leads.TZ)
+    assert clamped["base_end"] == datetime.datetime(2026, 8, 3, 6, 11,
+                                                    tzinfo=amo_leads.TZ)
+    # Длины отрезков совпали — только это и делает сравнение честным.
+    assert (clamped["current_end"] - clamped["current_start"]
+            == clamped["base_end"] - clamped["base_start"])
+    assert clamped["window_label"] == "10.08, 00:00–06:11"
+    assert clamped["base_label"] == "03.08, 00:00–06:11 (неделю назад)"
+
+
+def test_fresh_data_leaves_the_window_alone():
+    """Минутный зазор не режем: сама выгрузка идёт полторы минуты."""
+    import datetime
+
+    asked = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 10, 11, 53, tzinfo=amo_leads.TZ))
+    fresh = amo_leads.clamp_windows(
+        asked, datetime.datetime(2026, 8, 10, 11, 52, tzinfo=amo_leads.TZ))
+    assert fresh == asked
+    assert amo_leads.clamp_windows(asked, None) == asked
+
+
+def test_midnight_total_still_calls_itself_a_whole_day():
+    """Итог за сутки не должен превращаться в «00:00–23:58» из-за длины синка."""
+    import datetime
+
+    asked = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 10, 0, 0, tzinfo=amo_leads.TZ))
+    clamped = amo_leads.clamp_windows(
+        asked, datetime.datetime(2026, 8, 9, 23, 58, tzinfo=amo_leads.TZ))
+    assert clamped["window_label"] == "09.08 (сутки)"
+    assert clamped["current_end"] == asked["current_end"]
+
+
+def test_clamp_reads_the_sync_time_in_our_timezone():
+    """Время выгрузки приходит из Postgres в UTC — подпись всё равно алматинская."""
+    import datetime
+
+    asked = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 10, 11, 53, tzinfo=amo_leads.TZ))
+    clamped = amo_leads.clamp_windows(
+        asked, datetime.datetime(2026, 8, 10, 1, 11, tzinfo=datetime.timezone.utc))
+    assert clamped["window_label"] == "10.08, 00:00–06:11"
+
+
+def test_data_older_than_the_window_is_not_clamped():
+    """Обрезать до пустоты нельзя — за окно нечего показывать, зовущий досинкнет."""
+    import datetime
+
+    asked = amo_leads.alert_windows(
+        datetime.datetime(2026, 8, 10, 11, 53, tzinfo=amo_leads.TZ))
+    stale = amo_leads.clamp_windows(
+        asked, datetime.datetime(2026, 8, 9, 20, 0, tzinfo=amo_leads.TZ))
+    assert stale == asked
+
+
+def test_clamped_whole_day_stops_calling_itself_a_whole_day():
+    """Итог за сутки с недовыгруженным хвостом должен честно называться отрезком."""
+    import datetime
+
+    asked = amo_leads.day_windows(datetime.date(2026, 8, 9))
+    clamped = amo_leads.clamp_windows(
+        asked, datetime.datetime(2026, 8, 9, 21, 10, tzinfo=amo_leads.TZ))
+    assert clamped["window_label"] == "09.08, 00:00–21:10"
+    assert clamped["base_label"] == "02.08, 00:00–21:10 (неделю назад)"
+
+
 def test_windows_compare_the_same_slice_a_week_apart():
     import datetime
 

@@ -58,6 +58,9 @@ FIELD_ROBOT_CLOSED = int(os.getenv("AMO_FIELD_ROBOT_CLOSED") or 1068877)
 
 PAGE_LIMIT = 250
 REQUEST_TIMEOUT = 60
+# Насколько окно сравнения может отставать от выгруженных данных, чтобы его ещё
+# не обрезать (см. `clamp_windows`).
+CLAMP_TOLERANCE = timedelta(minutes=5)
 # amoCRM разрешает 7 запросов в секунду — на сотне страниц без паузы легко словить 429.
 REQUEST_PAUSE_SECONDS = float(os.getenv("AMO_REQUEST_PAUSE") or 0.2)
 
@@ -601,6 +604,57 @@ def render_alert_report(rows, window_label="", base_label="",
     return "\n".join(lines)
 
 
+def _window_labels(current_start, current_end, base_start, base_end):
+    """Подписи окна и базы. Полные сутки называем сутками, иначе — отрезком.
+
+    Отрезок базы показываем целиком: иначе непонятно, сравнили с целыми сутками
+    или с той же половиной дня.
+    """
+    whole_day = (current_end - current_start == timedelta(days=1)
+                 and current_start.timetz().replace(tzinfo=None) == datetime.min.time())
+    if whole_day:
+        return ("%s (сутки)" % current_start.strftime("%d.%m"),
+                "%s (сутки, неделю назад)" % base_start.strftime("%d.%m"))
+    return ("%s, %s–%s" % (current_start.strftime("%d.%m"),
+                           current_start.strftime("%H:%M"),
+                           current_end.strftime("%H:%M")),
+            "%s, %s–%s (неделю назад)" % (base_start.strftime("%d.%m"),
+                                          base_start.strftime("%H:%M"),
+                                          base_end.strftime("%H:%M")))
+
+
+def clamp_windows(windows, data_until):
+    """Обрезать окно сравнения по тому, что реально выгружено из amoCRM.
+
+    Днём «сегодня» сравнивается с тем же отрезком неделю назад, но в БД сегодня
+    доходит только до последней удачной выгрузки, а она идёт раз в три часа. Без
+    обрезки последние часы «сегодня» просто отсутствуют, и отбивка показывает
+    падение, которого нет: 10.08 в 11:53 (данные от 06:11) все девять источников
+    ушли в минус, у SEO и OLX встали нули, «Общее» дало -51%.
+
+    Обрезаем ОБА отрезка одинаково — сравнивать надо равные по длине куски.
+    `data_until` — время начала последней удачной выгрузки: всё, что создано
+    позже, могло в неё не попасть.
+    """
+    if not data_until:
+        return windows
+    data_until = data_until.astimezone(TZ)
+    # Мелкий зазор не трогаем: выгрузка идёт полторы минуты, и после неё окно и
+    # так отстаёт на эти полторы минуты. Обрезать по ним — значит превратить итог
+    # за сутки в «00:00–23:58» и потерять пару лидов из подписи ради ничего.
+    if data_until >= windows["current_end"] - CLAMP_TOLERANCE:
+        return windows
+    # Данных за окно нет вовсе — обрезать нечего, отвечает вызывающий (досинком).
+    if data_until <= windows["current_start"]:
+        return windows
+    current_end = data_until
+    base_end = windows["base_start"] + (current_end - windows["current_start"])
+    window_label, base_label = _window_labels(
+        windows["current_start"], current_end, windows["base_start"], base_end)
+    return {**windows, "current_end": current_end, "base_end": base_end,
+            "window_label": window_label, "base_label": base_label}
+
+
 def day_windows(day):
     """Окна для конкретных суток: сами сутки и те же сутки неделю назад.
 
@@ -609,11 +663,13 @@ def day_windows(day):
     """
     start = datetime.combine(day, datetime.min.time(), TZ)
     base_start = start - timedelta(days=7)
+    current_end = start + timedelta(days=1)
+    base_end = base_start + timedelta(days=1)
+    window_label, base_label = _window_labels(start, current_end, base_start, base_end)
     return {
-        "current_start": start, "current_end": start + timedelta(days=1),
-        "base_start": base_start, "base_end": base_start + timedelta(days=1),
-        "window_label": "%s (сутки)" % start.strftime("%d.%m"),
-        "base_label": "%s (сутки, неделю назад)" % base_start.strftime("%d.%m"),
+        "current_start": start, "current_end": current_end,
+        "base_start": base_start, "base_end": base_end,
+        "window_label": window_label, "base_label": base_label,
     }
 
 
@@ -629,24 +685,15 @@ def alert_windows(now=None):
     if now.hour == 0:
         current_end = midnight
         current_start = midnight - timedelta(days=1)
-        label = "%s (сутки)" % current_start.strftime("%d.%m")
     else:
         current_start = midnight
         current_end = now
-        label = "%s, %s–%s" % (now.strftime("%d.%m"),
-                               current_start.strftime("%H:%M"), now.strftime("%H:%M"))
     base_start = current_start - timedelta(days=7)
     base_end = current_end - timedelta(days=7)
-    # В подписи базы показываем и её отрезок: иначе непонятно, сравнили с целыми
-    # сутками или с той же половиной дня.
-    if now.hour == 0:
-        base_label = "%s (сутки, неделю назад)" % base_start.strftime("%d.%m")
-    else:
-        base_label = "%s, %s–%s (неделю назад)" % (base_start.strftime("%d.%m"),
-                                                   base_start.strftime("%H:%M"),
-                                                   base_end.strftime("%H:%M"))
+    window_label, base_label = _window_labels(current_start, current_end,
+                                              base_start, base_end)
     return {
         "current_start": current_start, "current_end": current_end,
         "base_start": base_start, "base_end": base_end,
-        "window_label": label, "base_label": base_label,
+        "window_label": window_label, "base_label": base_label,
     }

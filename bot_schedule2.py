@@ -31572,6 +31572,26 @@ def _amo_leads_broadcast_times():
     return times
 
 
+# Насколько старыми данными можно отвечать, не досинкивая, и как часто вообще
+# позволено дёргать выгрузку из-под запроса: одна выгрузка — это ~86 запросов к
+# amoCRM и полторы минуты, повторять её на каждый /leads незачем.
+AMO_LEADS_STALE_MINUTES = int(os.getenv('AMO_LEADS_STALE_MINUTES') or 30)
+AMO_LEADS_RESYNC_PAUSE_MINUTES = int(os.getenv('AMO_LEADS_RESYNC_PAUSE_MINUTES') or 10)
+
+
+def _amo_leads_journal():
+    """Последняя выгрузка, признак сбоя и последняя УДАЧНАЯ выгрузка.
+
+    Возраст цифр считается по удачной: упавшая проставляет себе finished_at, но в
+    таблицу ничего не пишет, и подпись «Данные обновлены» с её временем обещала бы
+    свежесть, которой нет.
+    """
+    last = db.get_last_amo_lead_sync() or {}
+    failed = last.get('status') == 'error'
+    fresh = (db.get_last_amo_lead_sync(status='ok') or {}) if failed else last
+    return last, failed, fresh
+
+
 def _amo_leads_alert_text(now=None, day=None):
     """Текст отбивки с анализом отклонений — по методике из «анализ_лидов_алерты».
 
@@ -31579,29 +31599,47 @@ def _amo_leads_alert_text(now=None, day=None):
     — время с начала суток до сейчас. С датой — полные указанные сутки. База в
     обоих случаях одна и та же: тот же отрезок ровно неделю назад.
     """
-    windows = amo_leads.day_windows(day) if day else amo_leads.alert_windows(now)
+    asked = amo_leads.day_windows(day) if day else amo_leads.alert_windows(now)
+    last, failed, fresh = _amo_leads_journal()
+    windows = amo_leads.clamp_windows(asked, fresh.get('started_at'))
     current = db.get_amo_leads_between(windows["current_start"], windows["current_end"])
-    if not current:
-        # Данных за окно ещё нет (первый запуск или рестарт) — тянем amoCRM
-        # сейчас. Но только если окно вообще попадает в глубину выгрузки: для
-        # более старых дат синк ничего не принесёт, и дёргать его бессмысленно.
-        horizon = datetime.now(amo_leads.TZ) - timedelta(days=amo_leads.SYNC_DAYS)
-        if windows["current_start"] >= horizon:
+
+    # Досинк перед ответом нужен в двух случаях: данных за окно нет вовсе (первый
+    # запуск, рестарт) или «сегодня» обрезано намного раньше «сейчас» — плановая
+    # выгрузка идёт раз в три часа, и без досинка ручной /leads сравнивал бы
+    # неполный день с полным. Оба раза — только если окно попадает в глубину
+    # выгрузки: для дат постарше синк ничего не принесёт. Повторно не дёргаем:
+    # если попытка была только что, второй заход ничего не изменит.
+    stale = windows["current_end"] < asked["current_end"] - timedelta(
+        minutes=AMO_LEADS_STALE_MINUTES)
+    attempted = last.get('started_at')
+    just_tried = bool(attempted) and (
+        datetime.now(amo_leads.TZ) - attempted
+        <= timedelta(minutes=AMO_LEADS_RESYNC_PAUSE_MINUTES))
+    horizon = datetime.now(amo_leads.TZ) - timedelta(days=amo_leads.SYNC_DAYS)
+    if ((not current or (day is None and stale))
+            and asked["current_start"] >= horizon and not just_tried):
+        try:
             amo_leads_sync()
-            current = db.get_amo_leads_between(
-                windows["current_start"], windows["current_end"])
+        except Exception as exc:
+            # Данные есть, просто несвежие — отвечаем тем, что есть: возраст цифр
+            # и текст сбоя видно в подписи. А вот когда за окно нет ничего,
+            # показывать нули нельзя: это читалось бы как «лидов не было».
+            if not current:
+                raise
+            logging.warning("Лиды: досинк перед ответом не удался: %s", exc)
+        else:
+            last, failed, fresh = _amo_leads_journal()
+            windows = amo_leads.clamp_windows(asked, fresh.get('started_at'))
+        current = db.get_amo_leads_between(
+            windows["current_start"], windows["current_end"])
+
     base = db.get_amo_leads_between(windows["base_start"], windows["base_end"])
     rows = amo_leads.analyze(
         amo_leads.count_by_source(current),
         amo_leads.count_by_source(base),
         period=amo_leads.PERIOD_12H,
     )
-    last = db.get_last_amo_lead_sync() or {}
-    failed = last.get('status') == 'error'
-    # Возраст цифр — по последней УДАЧНОЙ выгрузке: упавшая проставляет себе
-    # finished_at, но в таблицу ничего не пишет, и подпись «Данные обновлены»
-    # с её временем обещала бы свежесть, которой нет.
-    fresh = (db.get_last_amo_lead_sync(status='ok') or {}) if failed else last
     return amo_leads.render_alert_report(
         rows,
         window_label=windows["window_label"],
