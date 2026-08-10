@@ -4944,6 +4944,31 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_tez_successes_operator_period
                     ON tez_lead_successes(operator_id, year, month);
                 CREATE INDEX IF NOT EXISTS idx_tez_successes_date ON tez_lead_successes(success_date);
+                -- Один ответ /api/tez_leads/stats делает четыре прохода по
+                -- успешкам периода (счётчик, рейтинг, по дням, план отдела) —
+                -- без этого индекса все четыре шли Seq Scan'ом.
+                CREATE INDEX IF NOT EXISTS idx_tez_successes_period
+                    ON tez_lead_successes(year, month);
+
+                -- Страховка от двойного зачёта одной поездки. UNIQUE(lead_id)
+                -- её не даёт: один номер живёт отдельной строкой в базе каждого
+                -- месяца (UNIQUE(year, month, phone_norm)), и оба лида видят
+                -- один и тот же список звонков. Сегодня дубль невозможен по
+                -- построению правила, но как только лид обрабатывается дольше
+                -- одного месяца, защита нужна на уровне схемы.
+                -- Индекс создаём мягко: если дубли уже есть, приложение обязано
+                -- подняться и написать в лог, а не упасть на старте целиком.
+                DO $$
+                BEGIN
+                    BEGIN
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_tez_successes_phone_date
+                            ON tez_lead_successes(phone_norm, success_date);
+                    EXCEPTION WHEN unique_violation THEN
+                        RAISE WARNING 'uq_tez_successes_phone_date не создан: '
+                                      'в tez_lead_successes есть дубли (номер, дата поездки)';
+                    END;
+                END
+                $$;
 
                 -- ── Удаление загруженной базы с историей и откатом ──
                 -- Сама загрузка удаляется МЯГКО (deleted_at), а вот её лиды —
@@ -17742,26 +17767,45 @@ class Database:
         first_orders — dict phone_norm -> {'month': datetime|None, 'prev': datetime|None}.
         Проверенные, но ещё не выехавшие номера тоже помечаются (checked_at), иначе
         их не отличить от никогда не проверявшихся.
+
+        Пишем одним запросом: ответ TEZ APP приходит сразу по тысячам номеров
+        (3 259 за август, вдвое больше при обработке лидов прошлого месяца), и
+        построчный UPDATE превращал бы это в столько же round-trip'ов.
         """
+        rows = []
         found = 0
+        for phone_norm, dates in (first_orders or {}).items():
+            if not phone_norm:
+                continue
+            month_at = (dates or {}).get('month')
+            prev_at = (dates or {}).get('prev')
+            rows.append((phone_norm, int(year), int(month), month_at, prev_at))
+            if month_at is not None:
+                found += 1
+        if not rows:
+            return 0
+
         with self._get_cursor() as cursor:
             self._lock_tez_lead_period_tx(cursor, year, month)
-            for phone_norm, dates in (first_orders or {}).items():
-                month_at = (dates or {}).get('month')
-                prev_at = (dates or {}).get('prev')
-                cursor.execute(
-                    """
-                    UPDATE tez_leads
-                    SET month_first_order_at = COALESCE(month_first_order_at, %s),
-                        prev_month_first_order_at = %s,
-                        first_order_checked_at = CURRENT_TIMESTAMP,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE year = %s AND month = %s AND phone_norm = %s
-                    """,
-                    (month_at, prev_at, int(year), int(month), phone_norm)
-                )
-                if month_at is not None:
-                    found += 1
+            execute_values(
+                cursor,
+                """
+                UPDATE tez_leads l SET
+                    -- Первый заказ ВНУТРИ месяца уже не изменится, поэтому
+                    -- найденную дату не перетираем более поздним ответом.
+                    month_first_order_at = COALESCE(l.month_first_order_at, v.month_at),
+                    prev_month_first_order_at = v.prev_at,
+                    first_order_checked_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, prev_at)
+                WHERE l.year = v.lead_year
+                  AND l.month = v.lead_month
+                  AND l.phone_norm = v.phone_norm
+                """,
+                rows,
+                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz)",
+                page_size=500,
+            )
         return found
 
     def get_tez_phones_needing_calls(self, year, month):
@@ -17986,10 +18030,18 @@ class Database:
             )
         return len(deduped)
 
-    def get_tez_leads_for_recompute(self, year, month):
-        """Лиды месяца вместе с первой поездкой и всеми их звонками.
+    def get_tez_leads_for_recompute(self, year, month, min_billsec=None):
+        """Лиды месяца вместе с первой поездкой и их квалифицирующими звонками.
 
         Возвращает список dict'ов, готовых для compute_lead_outcome.
+
+        min_billsec — порог длительности разговора. Если он задан, звонки
+        отбираются тем же условием, что и в правиле успешки (исходящий,
+        разрезолвленный оператор ОП, billsec >= порога), то есть в Python
+        приезжает ровно то, что расчёт и так использует: на июльской базе это
+        6 668 строк вместо 25 766, и запрос ложится на частичный индекс
+        idx_tez_lead_calls_op_attempts. Без порога поведение прежнее — все
+        звонки номера за всю историю.
         """
         with self._get_cursor() as cursor:
             cursor.execute(
@@ -18018,16 +18070,22 @@ class Database:
             for lead in leads:
                 by_phone.setdefault(lead['phone_norm'], []).append(lead)
 
-            cursor.execute(
-                """
+            calls_sql = """
                 SELECT c.phone_norm, c.general_call_id, c.started_at, c.call_type,
                        c.billsec, c.operator_id, c.employee_name
                 FROM tez_lead_calls c
                 WHERE c.phone_norm = ANY(%s)
-                ORDER BY c.started_at
-                """,
-                (list(by_phone.keys()),)
-            )
+            """
+            calls_params = [list(by_phone.keys())]
+            if min_billsec is not None:
+                calls_sql += """
+                  AND c.call_type = 1
+                  AND c.operator_id IS NOT NULL
+                  AND c.billsec >= %s
+                """
+                calls_params.append(int(min_billsec))
+            calls_sql += " ORDER BY c.started_at"
+            cursor.execute(calls_sql, tuple(calls_params))
             for r in cursor.fetchall():
                 call = {
                     'general_call_id': r[1],
@@ -18048,68 +18106,112 @@ class Database:
         operator_id, operator_name, call_general_id, call_at, first_order_at,
         success_date. Операция идемпотентна: успешка привязана к лиду через
         UNIQUE(lead_id), а лид, переставший быть успешкой, свою запись теряет.
+
+        Пишем ТРЕМЯ запросами на весь пересчёт, а не двумя на каждый лид.
+        Построчный вариант делал ~14 400 round-trip'ов на июльской базе (7 195
+        лидов) и держал всё это время advisory-лок периода, который делит с
+        импортом базы; при обработке лидов прошлого месяца число удваивалось.
         """
-        stats = {'success': 0, 'already_working': 0, 'not_counted': 0, 'in_progress': 0, 'new': 0}
+        stats = {'success': 0, 'already_working': 0, 'not_counted': 0,
+                 'in_progress': 0, 'new': 0, 'skipped': 0}
+        # Ключ — канонический UUID в нижнем регистре: именно в таком виде id
+        # приходит обратно из RETURNING, и по нему мы находим исходный item.
+        by_id = {}
+        for item in outcomes or []:
+            if item.get('lead_id'):
+                by_id[str(item['lead_id']).lower()] = item
+        if not by_id:
+            return stats
+
+        rows = [
+            (
+                lead_id,
+                int(year),
+                int(month),
+                str(item.get('status') or 'new'),
+                item.get('rule'),
+                item.get('lead_version'),
+            )
+            for lead_id, item in by_id.items()
+        ]
+
         with self._get_cursor() as cursor:
             self._lock_tez_lead_period_tx(cursor, year, month)
-            for item in outcomes or []:
-                status = item.get('status') or 'new'
-                lead_version = item.get('lead_version')
-                if lead_version is None:
-                    # Совместимость с внутренними/тестовыми вызовами старого
-                    # контракта. Основной recompute всегда передаёт version.
-                    cursor.execute(
-                        """
-                        UPDATE tez_leads
-                        SET status = %s,
-                            status_rule = %s,
-                            archive_state_event_seq = 0,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s AND year = %s AND month = %s
-                        """,
-                        (status, item.get('rule'), item['lead_id'], int(year), int(month)),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        UPDATE tez_leads
-                        SET status = %s,
-                            status_rule = %s,
-                            archive_state_event_seq = 0,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                          AND year = %s
-                          AND month = %s
-                          -- xmin меняется при любом UPDATE и при delete+insert,
-                          -- даже если восстановлен тот же UUID. В отличие от
-                          -- timestamp он не может совпасть из-за точности часов.
-                          AND xmin::text = %s
-                        """,
-                        (
-                            status,
-                            item.get('rule'),
-                            item['lead_id'],
-                            int(year),
-                            int(month),
-                            lead_version,
-                        ),
-                    )
-                # Лид мог исчезнуть между read-фазой пересчёта и этой
-                # транзакцией. В таком случае нельзя вставлять успешку с битым FK.
-                if cursor.rowcount <= 0:
-                    continue
+            # RETURNING + fetch=True, а не rowcount: execute_values шлёт данные
+            # страницами, и rowcount знает только последнюю из них.
+            applied = execute_values(
+                cursor,
+                """
+                UPDATE tez_leads l SET
+                    status = v.status,
+                    status_rule = v.status_rule,
+                    archive_state_event_seq = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (VALUES %s) AS v(lead_id, lead_year, lead_month, status, status_rule, version)
+                WHERE l.id = v.lead_id
+                  AND l.year = v.lead_year
+                  AND l.month = v.lead_month
+                  -- Лид мог исчезнуть или измениться между read-фазой пересчёта
+                  -- и этой транзакцией: xmin меняется при любом UPDATE и при
+                  -- delete+insert, даже если восстановлен тот же UUID. В отличие
+                  -- от timestamp он не может совпасть из-за точности часов.
+                  -- NULL версии — вызовы старого контракта (внутренние и
+                  -- тестовые), они проверкой не гейтятся.
+                  AND (v.version IS NULL OR l.xmin::text = v.version)
+                RETURNING l.id::text, l.status
+                """,
+                rows,
+                template="(%s::uuid, %s::int, %s::int, %s, %s, %s)",
+                page_size=500,
+                fetch=True,
+            )
+
+            applied_status = {str(r[0]).lower(): r[1] for r in (applied or [])}
+            for status in applied_status.values():
                 stats[status] = stats.get(status, 0) + 1
+            stats['skipped'] = len(by_id) - len(applied_status)
+            if stats['skipped']:
+                # Раньше несовпадение версии проглатывалось молча, и «перенос не
+                # работает» выглядело как «успешек нет» без единой строки в логе.
+                logging.warning(
+                    'Успешки TEZ ОП %s-%02d: %s лидов пропущены при записи '
+                    '(лид удалён или изменился во время пересчёта)',
+                    int(year), int(month), stats['skipped'],
+                )
 
-                if status != 'success':
-                    cursor.execute("DELETE FROM tez_lead_successes WHERE lead_id = %s", (item['lead_id'],))
-                    continue
-
+            # Лиды, переставшие быть успешками, теряют свою запись. Успешка с
+            # битым FK невозможна: удаляем только по фактически применённым id.
+            doomed = [lid for lid, status in applied_status.items() if status != 'success']
+            if doomed:
                 cursor.execute(
+                    "DELETE FROM tez_lead_successes WHERE lead_id = ANY(%s::uuid[])",
+                    (doomed,),
+                )
+
+            success_rows = []
+            for lead_id, status in applied_status.items():
+                if status != 'success':
+                    continue
+                item = by_id[lead_id]
+                success_rows.append((
+                    lead_id, item.get('phone_norm'),
+                    int(item['operator_id']) if item.get('operator_id') else None,
+                    str(item.get('operator_name') or '')[:255],
+                    item.get('call_general_id'),
+                    item.get('call_at'), item.get('first_order_at'),
+                    item.get('success_date'),
+                    int(item.get('success_year') or year), int(item.get('success_month') or month),
+                    str(item.get('rule') or '')[:32],
+                    bool(item.get('is_late')),
+                ))
+            if success_rows:
+                execute_values(
+                    cursor,
                     """
                     INSERT INTO tez_lead_successes
                         (lead_id, phone_norm, operator_id, operator_name, call_general_id,
                          call_at, first_order_at, success_date, year, month, rule_code, is_late)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES %s
                     ON CONFLICT (lead_id) DO UPDATE SET
                         operator_id = EXCLUDED.operator_id,
                         operator_name = EXCLUDED.operator_name,
@@ -18123,17 +18225,8 @@ class Database:
                         is_late = EXCLUDED.is_late,
                         updated_at = CURRENT_TIMESTAMP
                     """,
-                    (
-                        item['lead_id'], item.get('phone_norm'),
-                        int(item['operator_id']) if item.get('operator_id') else None,
-                        str(item.get('operator_name') or '')[:255],
-                        item.get('call_general_id'),
-                        item.get('call_at'), item.get('first_order_at'),
-                        item.get('success_date'),
-                        int(item.get('success_year') or year), int(item.get('success_month') or month),
-                        str(item.get('rule') or '')[:32],
-                        bool(item.get('is_late')),
-                    )
+                    success_rows,
+                    page_size=500,
                 )
         return stats
 

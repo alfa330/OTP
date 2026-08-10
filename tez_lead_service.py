@@ -25,7 +25,9 @@ TEZ APP регулярно, пока он не выедет, поэтому пр
 import csv
 import io
 import logging
+import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time, timedelta
 
 from tez_op_leads import (
@@ -56,6 +58,27 @@ CALL_MIRROR_NIGHTLY_BUDGET = 900.0
 FIO_HEADERS = {'fio', 'фио', 'имя', 'name', 'full_name', 'водитель', 'driver'}
 PHONE_HEADERS = {'phone', 'телефон', 'номер', 'phone_number', 'msisdn', 'тел'}
 MAX_LEAD_ROWS = 50000
+
+# Ночная джоба и кнопка «Сверка» делают одно и то же и ходят в одни и те же
+# внешние API. Advisory-лок периода в БД защищает данные, но не лимиты: пока
+# один прогон ждёт лок, второй уже потратил запросы Binotel и TEZ APP заново.
+# Тот же приём, что в tez_op_productivity._SYNC_LOCK.
+_SYNC_LOCK = threading.Lock()
+
+
+class SyncBusy(RuntimeError):
+    """Сверка уже идёт. Второй параллельный прогон только удвоит расход лимитов."""
+
+
+@contextmanager
+def sync_lock():
+    """Пропускает внутрь только один прогон сверки на процесс."""
+    if not _SYNC_LOCK.acquire(blocking=False):
+        raise SyncBusy('Сверка уже выполняется — дождитесь её окончания')
+    try:
+        yield
+    finally:
+        _SYNC_LOCK.release()
 
 
 def _norm_header(value):
@@ -359,7 +382,10 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
     успешки, найденные после неё, помечаются is_late, чтобы поздняя загрузка
     базы задним числом была видна, а не всплывала в выплате молча.
     """
-    leads = db.get_tez_leads_for_recompute(year, month)
+    # Порог отдаём в выборку: расчёт всё равно отбрасывает всё, что ему не
+    # соответствует, а без фильтра запрос тянет весь трафик по номерам базы за
+    # всю историю (на июле 25 766 строк против 6 668 нужных).
+    leads = db.get_tez_leads_for_recompute(year, month, min_billsec=min_billsec)
     if not leads:
         return {'success': 0, 'already_working': 0, 'not_counted': 0, 'in_progress': 0, 'new': 0}
 
@@ -434,6 +460,21 @@ def run_nightly(db, first_orders_client, binotel_client, resolve_operator,
         prev_year, prev_month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
         periods.append((prev_year, prev_month))
 
+    try:
+        with sync_lock():
+            return _run_nightly_periods(db, periods, first_orders_client, binotel_client,
+                                        resolve_operator, today=today, min_billsec=min_billsec)
+    except SyncBusy:
+        # Ручную сверку не прерываем: она делает ровно то же самое, а джоба
+        # идемпотентна и наверстает всё следующей ночью. Изнутри тела цикла
+        # SyncBusy прилететь не может — каждый период там ловит свои ошибки сам.
+        log.warning('Ночная сверка успешек TEZ ОП пропущена: сверка уже идёт')
+        return {'skipped': 'locked'}
+
+
+def _run_nightly_periods(db, periods, first_orders_client, binotel_client, resolve_operator,
+                         today=None, min_billsec=DEFAULT_MIN_BILLSEC):
+    """Тело ночного цикла: по периоду за раз, ошибка одного не роняет остальные."""
     report = {}
     for year, month in periods:
         key = f"{year}-{month:02d}"

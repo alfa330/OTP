@@ -116,7 +116,7 @@ class FakeDb:
     def count_tez_successes(self, year, month):
         return self._successes_before
 
-    def get_tez_leads_for_recompute(self, year, month):
+    def get_tez_leads_for_recompute(self, year, month, min_billsec=None):
         return self._leads
 
     def apply_tez_lead_outcomes(self, year, month, outcomes):
@@ -671,6 +671,97 @@ class CloudflareDetectionTests(unittest.TestCase):
         self.assertIn('Cloudflare', msg)
         self.assertIn('1020', msg)
         self.assertIn('abc123-AKX', msg)   # CF-Ray попадает в диагностику
+
+
+class SyncLockTests(unittest.TestCase):
+    """Один прогон сверки на процесс: параллельный только удвоит расход лимитов."""
+
+    def test_second_entry_is_refused_not_queued(self):
+        with tez_lead_service.sync_lock():
+            with self.assertRaises(tez_lead_service.SyncBusy):
+                with tez_lead_service.sync_lock():
+                    self.fail('внутрь пустили второй прогон')
+
+    def test_lock_is_released_after_failure(self):
+        """Упавший прогон не имеет права оставить замок закрытым навсегда."""
+        with self.assertRaises(ValueError):
+            with tez_lead_service.sync_lock():
+                raise ValueError('шаг сверки упал')
+        with tez_lead_service.sync_lock():
+            pass
+
+    def test_nightly_skips_instead_of_waiting(self):
+        """Ночная джоба не прерывает ручную сверку и не встаёт в очередь."""
+        with tez_lead_service.sync_lock():
+            report = tez_lead_service.run_nightly(
+                db=None, first_orders_client=None, binotel_client=None,
+                resolve_operator=None, today=date(2026, 8, 10),
+            )
+        self.assertEqual(report, {'skipped': 'locked'})
+
+
+class RecomputeQueryTests(unittest.TestCase):
+    """Порог длительности уезжает в SQL, а не отбрасывается уже в Python."""
+
+    def test_recompute_asks_db_for_qualifying_calls_only(self):
+        seen = {}
+
+        class Db(FakeDb):
+            def get_tez_leads_for_recompute(self, year, month, min_billsec=None):
+                seen['min_billsec'] = min_billsec
+                return self._leads
+
+        tez_lead_service.recompute_outcomes(Db([]), 2026, 8, min_billsec=15)
+        self.assertEqual(seen['min_billsec'], 15)
+
+
+class BatchWriteTests(unittest.TestCase):
+    """Результат пересчёта пишется пачками, а не строкой на лид.
+
+    Построчный вариант делал два statement'а на лида (на июльской базе ~14 400
+    round-trip'ов) и держал всё это время advisory-лок периода, который делит с
+    импортом базы. Обработка лидов прошлого месяца удваивает число лидов.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+
+    def _body(self, name, size=4200):
+        start = self.src.index("def %s" % name)
+        return self.src[start:start + size]
+
+    def test_outcomes_are_written_with_execute_values(self):
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn('execute_values', body)
+        # Построчных запросов остаться не должно.
+        self.assertNotIn('DELETE FROM tez_lead_successes WHERE lead_id = %s', body)
+        self.assertIn('DELETE FROM tez_lead_successes WHERE lead_id = ANY(%s::uuid[])', body)
+
+    def test_optimistic_version_check_survived_the_rewrite(self):
+        """Проверка xmin — единственное, что не даёт перезаписать лид, изменившийся
+        между чтением и записью; при переходе на пачки её легко потерять."""
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn('v.version IS NULL OR l.xmin::text = v.version', body)
+
+    def test_skipped_leads_are_counted_not_swallowed(self):
+        """Раньше несовпадение версии проглатывалось молча, и «перенос не работает»
+        выглядело как «успешек нет» без единой строки в логе."""
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn("stats['skipped']", body)
+        self.assertIn('logging.warning', body)
+
+    def test_first_orders_are_written_with_execute_values(self):
+        body = self._body('save_tez_first_orders')
+        self.assertIn('execute_values', body)
+        # Найденная дата поездки не должна перетираться более поздним ответом.
+        self.assertIn('COALESCE(l.month_first_order_at, v.month_at)', body)
+
+    def test_successes_have_period_index_and_dupe_guard(self):
+        self.assertIn('idx_tez_successes_period', self.src)
+        self.assertIn('uq_tez_successes_phone_date', self.src)
+        # Дубли на проде обязаны дать WARNING, а не уронить старт приложения.
+        self.assertIn('EXCEPTION WHEN unique_violation THEN', self.src)
 
 
 if __name__ == "__main__":

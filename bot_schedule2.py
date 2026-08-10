@@ -35192,22 +35192,30 @@ def tez_leads_recompute():
 
     try:
         resolve_operator = _tez_op_operator_resolver()
-        orders = tez_lead_service.sync_first_orders(db, year, month, first_orders_client)
-        # Зеркало звонков ограничено по времени: за клик добираем сколько
-        # успеваем, остаток закроет ночная джоба (в ответе — сколько дней ещё
-        # не перекачано, чтобы это было видно, а не молча недосчитано).
-        mirror = tez_lead_service.sync_calls_for_period(
-            db, year, month, binotel_client, resolve_operator
-        )
-        calls = tez_lead_service.sync_calls_for_converted(
-            db, year, month, binotel_client, resolve_operator
-        )
-        # Локальный шаг без запросов в Binotel: возвращает привязку звонкам,
-        # у которых провайдер забыл сотрудника (удалён при увольнении).
-        restored = tez_lead_service.reattribute_calls_without_operator(
-            db, year, month, resolve_operator
-        )
-        outcomes = tez_lead_service.recompute_outcomes(db, year, month)
+        # Один прогон на процесс: параллельный клик (или клик во время ночной
+        # джобы) не сломал бы данные — их защищает advisory-лок периода, — но
+        # заново потратил бы лимиты Binotel и TEZ APP.
+        with tez_lead_service.sync_lock():
+            orders = tez_lead_service.sync_first_orders(db, year, month, first_orders_client)
+            # Зеркало звонков ограничено по времени: за клик добираем сколько
+            # успеваем, остаток закроет ночная джоба (в ответе — сколько дней ещё
+            # не перекачано, чтобы это было видно, а не молча недосчитано).
+            mirror = tez_lead_service.sync_calls_for_period(
+                db, year, month, binotel_client, resolve_operator
+            )
+            calls = tez_lead_service.sync_calls_for_converted(
+                db, year, month, binotel_client, resolve_operator
+            )
+            # Локальный шаг без запросов в Binotel: возвращает привязку звонкам,
+            # у которых провайдер забыл сотрудника (удалён при увольнении).
+            restored = tez_lead_service.reattribute_calls_without_operator(
+                db, year, month, resolve_operator
+            )
+            outcomes = tez_lead_service.recompute_outcomes(db, year, month)
+    except tez_lead_service.SyncBusy as exc:
+        # Отдельно от 502 ниже: это не сбой, а «уже идёт», и повторять запрос
+        # бессмысленно, пока прогон не закончится.
+        return jsonify({"error": str(exc)}), 409
     except RuntimeError as exc:
         # Понятные причины (Cloudflare-блок, нет токена и т.п.) показываем как есть.
         logging.warning('tez_leads: ручной пересчёт прерван: %s', exc)
