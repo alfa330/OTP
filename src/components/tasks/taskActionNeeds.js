@@ -10,7 +10,7 @@
  * Бэклог не трогаем — это очередь планирования, работы там ещё нет.
  */
 
-export const ACTION_NEED_KINDS = ['overdue', 'returned', 'review', 'fresh'];
+export const ACTION_NEED_KINDS = ['overdue', 'returned', 'review', 'fresh', 'accepted'];
 
 export const ACTION_NEED_META = {
   overdue: {
@@ -41,6 +41,15 @@ export const ACTION_NEED_META = {
     hint: 'Поручена, работа не начата',
     dot: '#64748b',
   },
+  /* Единственная причина «к сведению», а не «сделай»: делать с принятой
+     задачей нечего, поэтому она и стоит последней. Гаснет просмотром. */
+  accepted: {
+    order: 4,
+    title: 'Работу приняли',
+    label: 'Принята',
+    hint: 'Поручитель принял работу',
+    dot: '#16a34a',
+  },
 };
 
 const parseDueAt = (value) => {
@@ -67,6 +76,12 @@ export const taskActionNeed = (task, userId, now = Date.now()) => {
 
   if (status === 'completed' && reviewAuthorityId(task) === personId) {
     return { kind: 'review', dueAt };
+  }
+
+  // Раньше проверки бэклога и живых статусов: принятая задача из работы вышла,
+  // но исполнителю о приёмке сказать надо.
+  if (status === 'accepted' && isAssignee) {
+    return { kind: 'accepted', dueAt };
   }
 
   if (!isAssignee || task?.is_backlog) return null;

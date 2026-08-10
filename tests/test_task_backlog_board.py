@@ -989,6 +989,38 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         self.assertEqual(block.count("t.is_backlog = FALSE"), 3)
         self.assertIn("taskActionNeeds.js", block)
 
+    def test_acceptance_is_a_notice_in_all_three_copies(self):
+        """«Работу приняли» обязана совпасть в SQL бейджа, в клиенте и в колоколе."""
+        db_src = _read(DATABASE_PATH)
+        start = db_src.index("    def get_task_action_needs_summary(self, requester_id):")
+        block = db_src[start:db_src.index("    TASK_ACTION_NEED_KINDS", start)]
+        self.assertIn("t.status = 'accepted'", block)
+        self.assertIn('"accepted": int(row[4] or 0)', block)
+        self.assertIn(
+            "TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'review', 'fresh', 'accepted')",
+            db_src,
+        )
+
+        client = _read(self.ACTION_NEEDS_PATH)
+        self.assertIn("'accepted'", client)
+        self.assertIn("if (status === 'accepted' && isAssignee)", client)
+
+        bell = _read(ROOT / "notifications" / "sources.py")
+        self.assertIn("'accepted': 'Работу приняли'", bell)
+
+    def test_history_is_marked_seen_once_on_rollout(self):
+        """Иначе при первом запуске всплыла бы вся история принятых задач —
+        на боевой базе это 73 штуки у одного человека."""
+        db_src = _read(DATABASE_PATH)
+        start = db_src.index("    def _backfill_task_accepted_reads_tx(self, cursor):")
+        block = db_src[start:db_src.index("    def _init_bell_notify_schema_tx", start)]
+        # Идемпотентность по состоянию: отметка уже есть — бэкфилл не повторяем,
+        # иначе он гасил бы и новые принятия, ради которых всё делалось.
+        self.assertIn("SELECT 1 FROM task_action_reads WHERE kind = 'accepted' LIMIT 1", block)
+        self.assertIn("if cursor.fetchone() is not None:", block)
+        self.assertIn("INSERT INTO task_action_reads", block)
+        self.assertIn("self._backfill_task_accepted_reads_tx(cursor)", db_src)
+
     def test_endpoint_is_guarded_like_the_rest_of_the_section(self):
         src = _read(APP_PATH)
         self.assertIn("@app.route('/api/tasks/action_required', methods=['GET', 'OPTIONS'])", src)

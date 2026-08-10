@@ -41,9 +41,17 @@ test('возврат на доработку — причина для испо�
   assert.equal(taskActionNeed(task({ status: 'returned' }), ME, NOW)?.kind, 'returned');
 });
 
-test('бэклог и закрытые задачи никого не ждут', () => {
+test('бэклог никого не ждёт', () => {
   assert.equal(taskActionNeed(task({ is_backlog: true, due_at: PAST }), ME, NOW), null);
-  assert.equal(taskActionNeed(task({ status: 'accepted', due_at: PAST }), ME, NOW), null);
+});
+
+test('принятую работу показываем исполнителю — и не как просрочку', () => {
+  // Единственное уведомление «к сведению»: делать нечего, но узнать надо.
+  // Дедлайн у принятой задачи давно позади, поэтому важен порядок проверок.
+  const accepted = task({ status: 'accepted', due_at: PAST });
+  assert.equal(taskActionNeed(accepted, ME, NOW)?.kind, 'accepted');
+  // Посторонним она не приходит: приняли работу исполнителя, а не их.
+  assert.equal(taskActionNeed(accepted, 99, NOW), null);
 });
 
 test('сданную работу ждёт поручитель, а не исполнитель', () => {
@@ -92,8 +100,10 @@ test('список ждущих задач: сначала срочные, вн�
     task({ id: 16, assignee: { id: 99, name: 'Коллега' } }),
   ], ME, NOW);
 
-  assert.deepEqual(needs.map((need) => need.task.id), [14, 13, 11, 12, 10]);
-  assert.deepEqual(needs.map((need) => need.kind), ['overdue', 'overdue', 'returned', 'review', 'fresh']);
+  // Принятая (15) идёт последней: информация уступает делам.
+  assert.deepEqual(needs.map((need) => need.task.id), [14, 13, 11, 12, 10, 15]);
+  assert.deepEqual(needs.map((need) => need.kind),
+    ['overdue', 'overdue', 'returned', 'review', 'fresh', 'accepted']);
 });
 
 test('задача считается один раз — одна причина на задачу', () => {

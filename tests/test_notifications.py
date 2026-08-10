@@ -586,6 +586,31 @@ class TasksSourceRulesTest(unittest.TestCase):
                 "r.kind <> '%s' OR r.seen_at < t.updated_at" % kind, block,
             )
 
+    def test_acceptance_reaches_the_assignee(self):
+        """«Работу приняли» — единственное уведомление «к сведению».
+
+        Остальные четыре означают «сделай», и принятая задача в них не
+        помещалась: делать с ней нечего, поэтому раньше исполнитель о приёмке
+        не узнавал вовсе.
+        """
+        block = self._block()
+        self.assertIn("t.status = 'accepted'", block)
+        self.assertIn("AND t.assigned_to = %(user_id)s", block)
+        self.assertIn("r.kind <> 'accepted' OR r.seen_at < t.updated_at", block)
+        self.assertIn("'accepted': 'Работу приняли'", self.SOURCE)
+
+    def test_accepted_is_classified_before_the_deadline_check(self):
+        """У принятой задачи дедлайн давно позади — иначе она станет «просрочена»."""
+        block = self._block()
+        accepted_at = block.index("WHEN t.status = 'accepted' THEN 'accepted'")
+        overdue_at = block.index("THEN 'overdue'")
+        self.assertLess(accepted_at, overdue_at)
+
+    def test_accepted_is_last_in_order(self):
+        """Информация уступает делам: принятая уходит в конец списка."""
+        block = self._block()
+        self.assertIn("ARRAY['overdue', 'returned', 'review', 'fresh', 'accepted']", block)
+
     def test_now_is_process_clock_not_db_clock(self):
         """due_at хранится наивным во времени Алматы, база — в UTC.
 

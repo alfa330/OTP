@@ -274,6 +274,7 @@ _TASK_KIND_BODY = {
     'returned': 'Вернули на доработку',
     'review': 'Ждёт вашей приёмки',
     'fresh': 'Поручена, работа не начата',
+    'accepted': 'Работу приняли',
 }
 
 
@@ -299,6 +300,9 @@ def tasks(cursor, viewer, limit):
             SELECT t.id, t.subject, t.due_at, t.updated_at,
                    CASE
                        WHEN t.status = 'completed' THEN 'review'
+                       -- Строго раньше проверки дедлайна: у принятой задачи он
+                       -- давно позади, и она попала бы в «просрочена».
+                       WHEN t.status = 'accepted' THEN 'accepted'
                        WHEN t.due_at IS NOT NULL AND t.due_at < %(now)s THEN 'overdue'
                        WHEN t.status = 'returned' THEN 'returned'
                        ELSE 'fresh'
@@ -308,6 +312,11 @@ def tasks(cursor, viewer, limit):
              WHERE (t.status = 'completed'
                     AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
                     AND (r.task_id IS NULL OR r.kind <> 'review' OR r.seen_at < t.updated_at))
+                -- Единственное уведомление «к сведению», а не «сделай»: работу
+                -- приняли. Гаснет просмотром, само по себе не протухает.
+                OR (t.status = 'accepted'
+                    AND t.assigned_to = %(user_id)s
+                    AND (r.task_id IS NULL OR r.kind <> 'accepted' OR r.seen_at < t.updated_at))
                 OR (t.assigned_to = %(user_id)s
                     AND t.is_backlog = FALSE
                     AND t.status IN ('assigned', 'in_progress', 'returned')
@@ -318,7 +327,8 @@ def tasks(cursor, viewer, limit):
                          OR (t.status = 'assigned' AND (t.due_at IS NULL OR t.due_at >= %(now)s)
                              AND (r.task_id IS NULL OR r.kind <> 'fresh' OR r.seen_at < t.updated_at))))
           ) needs
-         ORDER BY array_position(ARRAY['overdue', 'returned', 'review', 'fresh']::text[], kind),
+         ORDER BY array_position(
+                      ARRAY['overdue', 'returned', 'review', 'fresh', 'accepted']::text[], kind),
                   due_at NULLS LAST, id DESC
          LIMIT %(limit)s
         """,

@@ -5176,10 +5176,37 @@ class Database:
             try:
                 cursor.execute("SAVEPOINT sp_bell_notify")
                 self._init_bell_notify_schema_tx(cursor)
+                self._backfill_task_accepted_reads_tx(cursor)
                 cursor.execute("RELEASE SAVEPOINT sp_bell_notify")
             except Exception as exc:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_bell_notify")
                 logging.error("bell notify triggers skipped: %s", exc, exc_info=True)
+
+    def _backfill_task_accepted_reads_tx(self, cursor):
+        """Одноразово помечаем уже принятые задачи просмотренными.
+
+        Уведомление «работу приняли» появилось позже самих задач, и без этого
+        при первом же запуске людям прилетела бы вся история разом: на боевой
+        базе это 73 принятые задачи у одного человека — колокол превратился бы
+        в свалку, а счётчик перестал бы что-либо значить.
+
+        Идемпотентность по состоянию, как у остальных сидингов: появилась хоть
+        одна отметка этого вида — значит бэкфилл уже отработал, и новые
+        принятия гасить нельзя, они и есть уведомления.
+        """
+        cursor.execute("SELECT 1 FROM task_action_reads WHERE kind = 'accepted' LIMIT 1")
+        if cursor.fetchone() is not None:
+            return
+
+        cursor.execute("""
+            INSERT INTO task_action_reads (user_id, task_id, kind, seen_at)
+            SELECT t.assigned_to, t.id, 'accepted',
+                   (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+              FROM tasks t
+             WHERE t.status = 'accepted' AND t.assigned_to IS NOT NULL
+            ON CONFLICT (user_id, task_id) DO UPDATE
+                SET kind = EXCLUDED.kind, seen_at = EXCLUDED.seen_at
+        """)
 
     def _init_bell_notify_schema_tx(self, cursor):
         """Триггеры мгновенных уведомлений: запись в таблицу источника — pg_notify.
@@ -46464,7 +46491,8 @@ class Database:
           overdue  — я исполнитель, дедлайн прошёл, задача не закрыта;
           returned — мне вернули на доработку;
           review   — я поручитель, исполнитель сдал работу и ждёт приёмки;
-          fresh    — мне поручили, к работе ещё не приступил.
+          fresh    — мне поручили, к работе ещё не приступил;
+          accepted — мою работу приняли (единственное «к сведению», а не «сделай»).
         Категории взаимоисключающие: одна задача считается один раз.
         Бэклог не трогаем — это очередь планирования, а не работа.
         Просмотренные уведомления (task_action_reads) в счётчик не идут — иначе
@@ -46501,6 +46529,11 @@ class Database:
                           AND t.status = 'assigned'
                           AND (t.due_at IS NULL OR t.due_at >= %s)
                           AND (r.task_id IS NULL OR r.kind <> 'fresh' OR r.seen_at < t.updated_at)
+                    )::INT,
+                    COUNT(*) FILTER (
+                        WHERE t.assigned_to = %s
+                          AND t.status = 'accepted'
+                          AND (r.task_id IS NULL OR r.kind <> 'accepted' OR r.seen_at < t.updated_at)
                     )::INT
                 FROM tasks t
                 LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %s
@@ -46509,19 +46542,21 @@ class Database:
                 requester_id, now,
                 requester_id,
                 requester_id, now,
+                requester_id,
                 requester_id
             ))
-            row = cursor.fetchone() or (0, 0, 0, 0)
+            row = cursor.fetchone() or (0, 0, 0, 0, 0)
 
         breakdown = {
             "overdue": int(row[0] or 0),
             "returned": int(row[1] or 0),
             "review": int(row[2] or 0),
-            "fresh": int(row[3] or 0)
+            "fresh": int(row[3] or 0),
+            "accepted": int(row[4] or 0)
         }
         return {"count": sum(breakdown.values()), "breakdown": breakdown}
 
-    TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'review', 'fresh')
+    TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'review', 'fresh', 'accepted')
 
     def mark_task_action_seen(self, requester_id, task_id, kind):
         """
