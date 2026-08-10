@@ -40,6 +40,9 @@ const SALES_HEAD_VIEWS = [
 // работы; сотрудники видят только свой профиль и «Мои смены» (без смен коллег).
 const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];
 const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedules'];
+// «Задачи» выданы только главе отдела: у СВ фронт-офисов набор разделов прежний
+// (в tez/op раздел есть у обеих ролей, здесь — по запросу владельца только глава).
+const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks'];
 
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
@@ -85,7 +88,7 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
     front_office: {
         operator: FRONT_OFFICE_OPERATOR_VIEWS,
         trainee: FRONT_OFFICE_OPERATOR_VIEWS,
-        head: FRONT_OFFICE_MANAGER_VIEWS,
+        head: FRONT_OFFICE_HEAD_VIEWS,
         sv: FRONT_OFFICE_MANAGER_VIEWS,
     },
 };
