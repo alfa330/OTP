@@ -22,6 +22,7 @@ from group_late.departments import (
     build_employee_department_lookup,
     count_departments,
     departments_allow,
+    employee_roster,
     resolve_department_name,
 )
 from group_late.helpers import (
@@ -239,12 +240,14 @@ def collect_events(db) -> dict:
         db.glb_finish_poll_run(run_id, ok=False, error=str(exc))
         return {"run_id": run_id, "ok": False, "error": str(exc), "events": []}
 
-    # Справочник отделов освежаем здесь же: сотрудники уже загружены, разделу на
-    # сайте это достаётся бесплатно.
+    # Справочник отделов и состав освежаем здесь же: сотрудники уже загружены,
+    # разделу на сайте это достаётся бесплатно. Состав нужен вкладке
+    # «Сотрудники»: без него в таблице видны только нарушители, а не весь отдел.
     try:
         db.glb_sync_departments(count_departments(employees))
+        db.glb_sync_employees(employee_roster(employees))
     except Exception:
-        logger.exception("group_late: не удалось обновить справочник отделов")
+        logger.exception("group_late: не удалось обновить справочники Workpace")
 
     employee_lookup = build_employee_department_lookup(employees)
     routing = db.glb_get_routing()

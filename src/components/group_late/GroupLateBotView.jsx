@@ -47,15 +47,23 @@ const TABS = [
 const EVENTS_PAGE = 60;
 
 /* Колонки таблицы дисциплины. `numeric` — и выравнивание, и то, что по такой
- * колонке сортируем по убыванию с первого клика: интересны нарушители сверху. */
+ * колонке сортируем по убыванию с первого клика: интересны нарушители сверху.
+ *
+ * «Неявок» в исходный список не входила, но в таблице теперь весь состав отдела:
+ * без неё строка из одних прочерков у того, кто вообще не выходил, читалась бы
+ * как «вопросов нет». */
 const EMPLOYEE_COLUMNS = [
     { key: 'employee_name', label: 'Сотрудник' },
     { key: 'city', label: 'Город', cityOnly: true },
     { key: 'late_count', label: 'Опозданий', numeric: true },
     { key: 'late_minutes', label: 'Минут опоздания', numeric: true },
     { key: 'early_out_minutes', label: 'Минут раннего ухода', numeric: true },
+    { key: 'missing_count', label: 'Неявок', numeric: true },
     { key: 'suspicious_count', label: 'Подозрительных отметок', numeric: true },
 ];
+
+const employeeViolations = (row) => (row.late_count || 0) + (row.early_out_count || 0)
+    + (row.missing_count || 0) + (row.suspicious_count || 0);
 
 const fmtInt = (value) => Number(value || 0).toLocaleString('ru-RU');
 
@@ -114,15 +122,6 @@ const monthStart = () => {
     return isoDate(d);
 };
 
-const pluralRu = (n, one, few, many) => {
-    const value = Math.abs(Number(n) || 0);
-    const tail = value % 10;
-    const hundred = value % 100;
-    if (tail === 1 && hundred !== 11) return one;
-    if (tail >= 2 && tail <= 4 && (hundred < 12 || hundred > 14)) return few;
-    return many;
-};
-
 // Дисциплину смотрят помесячно, поэтому «Весь период» из пресетов по умолчанию
 // тут не нужен: за полгода истории таблица перестаёт читаться.
 const EMPLOYEE_DATE_PRESETS = [
@@ -132,7 +131,9 @@ const EMPLOYEE_DATE_PRESETS = [
 ];
 
 /* Пустой город уходит вниз при любом направлении: прочерки в середине списка
- * ломают чтение. Равные значения разводим по алфавиту — иначе порядок «пляшет». */
+ * ломают чтение. При равенстве сначала те, к кому есть вопросы, потом алфавит:
+ * в таблице весь состав, и без этого чистые сотрудники перемешались бы с
+ * нарушителями, у которых по выбранной колонке тоже ноль. */
 const sortEmployees = (rows, { key, dir }) => {
     const sign = dir === 'asc' ? 1 : -1;
     const numeric = EMPLOYEE_COLUMNS.find((column) => column.key === key)?.numeric;
@@ -147,6 +148,8 @@ const sortEmployees = (rows, { key, dir }) => {
             const diff = left.localeCompare(right, 'ru');
             if (diff) return diff * sign;
         }
+        const byViolations = employeeViolations(b) - employeeViolations(a);
+        if (byViolations) return byViolations;
         return String(a.employee_name || '').localeCompare(String(b.employee_name || ''), 'ru');
     });
 };
@@ -274,11 +277,11 @@ const employeeNumber = (value) => (value
     ? <span className="font-medium text-slate-900">{fmtInt(value)}</span>
     : <span className="text-slate-300">—</span>);
 
-/* Отдел в таблице дисциплины: шапка с итогами и раскрывающаяся таблица по
- * сотрудникам. Колонка «Город» есть только там, где город заполнен: его ведут
+/* Отдел в таблице дисциплины: шапка с итогами и раскрывающаяся таблица по всему
+ * составу. Колонка «Город» есть только там, где город заполнен: его ведут
  * отделам, чьи офисы стоят в разных городах (в Workpace это «Регионы»,
  * у нас — «Фронт офисы»). Остальным пустая колонка не нужна. */
-const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle, onOpenEvents }) => {
+const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle }) => {
     const totals = department.totals || {};
     const columns = EMPLOYEE_COLUMNS.filter((column) => !column.cityOnly || department.has_city);
     const rows = useMemo(
@@ -298,6 +301,8 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle,
                     </span>
                     <span className="shrink-0 text-[12px] text-slate-400">
                         {fmtInt(totals.employees)} чел.
+                        {totals.employees_with_violations > 0
+                            && ` · с нарушениями ${fmtInt(totals.employees_with_violations)}`}
                     </span>
                 </span>
                 <span className="flex flex-wrap items-center gap-1.5">
@@ -311,10 +316,18 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle,
                             <LogOut size={11} /> {fmtInt(totals.early_out_count)} · {fmtInt(totals.early_out_minutes)} мин
                         </IosBadge>
                     )}
+                    {totals.missing_count > 0 && (
+                        <IosBadge tone="red" title="Неявок за период">
+                            <UserX size={11} /> {fmtInt(totals.missing_count)}
+                        </IosBadge>
+                    )}
                     {totals.suspicious_count > 0 && (
                         <IosBadge tone="amber" title="Подозрительных отметок за период">
                             <ShieldAlert size={11} /> {fmtInt(totals.suspicious_count)}
                         </IosBadge>
+                    )}
+                    {employeeViolations(totals) === 0 && (
+                        <IosBadge tone="green">нарушений нет</IosBadge>
                     )}
                 </span>
             </button>
@@ -332,9 +345,23 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle,
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                             {rows.map((row) => (
-                                <tr key={row.employee_name} className="transition hover:bg-slate-50/80">
-                                    <td className="py-2.5 pl-4 pr-3 font-medium text-slate-900">
-                                        {row.employee_name}
+                                <tr key={row.workpace_name || row.employee_name}
+                                    className="transition hover:bg-slate-50/80">
+                                    <td className="py-2.5 pl-4 pr-3">
+                                        <span className="font-medium text-slate-900"
+                                              title={row.matched && row.workpace_name !== row.employee_name
+                                                  ? `В Workpace: ${row.workpace_name}` : undefined}>
+                                            {row.employee_name}
+                                        </span>
+                                        {/* Отметка осмысленна только там, где отдел вообще
+                                            сопоставляется с нашим: иначе ею была бы усыпана
+                                            вся таблица чужих отделов. */}
+                                        {department.matched_department && !row.matched && (
+                                            <IosBadge tone="slate" className="ml-1.5 align-middle"
+                                                      title="ФИО не нашлось в нашей базе — город и написание остались из Workpace">
+                                                нет у нас
+                                            </IosBadge>
+                                        )}
                                     </td>
                                     {department.has_city && (
                                         <td className="px-3 py-2.5 text-slate-600">
@@ -348,6 +375,7 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle,
                                     <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.late_count)}</td>
                                     <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.late_minutes)}</td>
                                     <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.early_out_minutes)}</td>
+                                    <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.missing_count)}</td>
                                     <td className="px-3 py-2.5 text-right tabular-nums">{employeeNumber(row.suspicious_count)}</td>
                                 </tr>
                             ))}
@@ -359,22 +387,11 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle,
                                 <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.late_count)}</td>
                                 <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.late_minutes)}</td>
                                 <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.early_out_minutes)}</td>
+                                <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.missing_count)}</td>
                                 <td className="px-3 py-2.5 text-right tabular-nums">{fmtInt(totals.suspicious_count)}</td>
                             </tr>
                         </tfoot>
                     </table>
-                    {department.other_only_employees > 0 && (
-                        <div className="flex flex-wrap items-center gap-1.5 px-4 py-2.5 text-[11.5px] text-slate-500">
-                            Ещё {fmtInt(department.other_only_employees)}{' '}
-                            {pluralRu(department.other_only_employees,
-                                'сотрудник попал', 'сотрудника попали', 'сотрудников попали')} в
-                            отбивки только с неявками, поздним уходом или без отметки об уходе.
-                            <button type="button" onClick={onOpenEvents}
-                                    className="font-medium text-blue-600 hover:underline">
-                                Смотреть в отбивках
-                            </button>
-                        </div>
-                    )}
                 </div>
             )}
         </section>
@@ -773,16 +790,6 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         return next;
     });
 
-    const openEventsForDepartment = (name) => {
-        setTab('events');
-        setEventSearch('');
-        clearTimeout(searchDebounce.current);
-        applyEventFilters({
-            type: '', department: scoped ? '' : name, chatId: '', q: '',
-            from: employeeFilters.from, to: employeeFilters.to,
-        });
-    };
-
     /* ─── вкладки ──────────────────────────────────────────────────────── */
 
     const totals = overview?.totals || {};
@@ -1125,15 +1132,19 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         </div>
     );
 
-    /* Дисциплина по сотрудникам: кто и на сколько опаздывал, уходил раньше и
-     * сколько раз отметился подозрительно. Данные — та же история отбивок, что
-     * во вкладке «Отбивки», поэтому цифры сходятся с «Обзором». */
+    /* Дисциплина по всему составу отдела: кто и на сколько опаздывал, уходил
+     * раньше, не выходил и сколько раз отметился подозрительно. Состав — из кэша
+     * Workpace, нарушения — та же история отбивок, что во вкладке «Отбивки»,
+     * поэтому цифры сходятся с «Обзором». */
     const renderEmployees = () => {
         const departments = employees?.departments || [];
         const totals = employees?.totals || {};
         const activeFilters = [employeeFilters.department, employeeFilters.q].filter(Boolean).length;
         const allCollapsed = departments.length > 0
             && departments.every((d) => collapsedDepartments.has(d.department_name));
+        // Кэш состава наполняет опрос Workpace. Пока он не прошёл, в таблице
+        // окажутся только нарушители — молчать об этом нельзя.
+        const rosterMissing = employees && !employeesError && !employees.roster_total;
 
         return (
             <div className="space-y-3">
@@ -1198,19 +1209,33 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                     </div>
                 </div>
 
+                {rosterMissing && (
+                    <div className={`${iosCard} flex items-start gap-2.5 border-l-4 border-l-amber-400 px-4 py-3`}>
+                        <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-500" />
+                        <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-slate-600">
+                            Состав отделов ещё не приезжал из Workpace, поэтому в таблице только те,
+                            у кого за период были нарушения. Он подтянется с ближайшим опросом —
+                            или нажмите «Обновить из Workpace» на вкладке «Отделы».
+                        </div>
+                        <button onClick={() => setTab('departments')} className={`${iosBtnSecondary} shrink-0 py-1.5 text-[12.5px]`}>
+                            <Building2 size={12} /> К отделам
+                        </button>
+                    </div>
+                )}
+
                 {employees && !employeesError && departments.length > 0 && (
                     <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
                         <StatTile label="Сотрудников" value={fmtInt(totals.employees)} icon={Users}
-                                  hint={`отделов: ${fmtInt(totals.departments)}`} />
+                                  hint={`с нарушениями: ${fmtInt(totals.employees_with_violations)} · отделов: ${fmtInt(totals.departments)}`} />
                         <StatTile label="Опозданий" value={fmtInt(totals.late_count)} icon={Clock}
                                   tone={totals.late_count > 0 ? 'red' : 'slate'}
                                   hint={`${fmtInt(totals.late_minutes)} мин суммарно`} />
                         <StatTile label="Ранних уходов" value={fmtInt(totals.early_out_count)} icon={LogOut}
                                   tone={totals.early_out_count > 0 ? 'amber' : 'slate'}
                                   hint={`${fmtInt(totals.early_out_minutes)} мин суммарно`} />
-                        <StatTile label="Подозрительных отметок" value={fmtInt(totals.suspicious_count)} icon={ShieldAlert}
-                                  tone={totals.suspicious_count > 0 ? 'amber' : 'slate'}
-                                  hint="отметка не подтверждена терминалом" />
+                        <StatTile label="Неявок" value={fmtInt(totals.missing_count)} icon={UserX}
+                                  tone={totals.missing_count > 0 ? 'red' : 'slate'}
+                                  hint={`подозрительных отметок: ${fmtInt(totals.suspicious_count)}`} />
                     </div>
                 )}
 
@@ -1221,7 +1246,7 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                 <EmptyBlock icon={Users}>
                                     {activeFilters > 0
                                         ? 'Под фильтры никто не подходит'
-                                        : 'За выбранный период опозданий, ранних уходов и подозрительных отметок не было'}
+                                        : 'Состав отделов пуст и нарушений за период не было'}
                                 </EmptyBlock>
                             </div>
                         ) : (
@@ -1234,19 +1259,21 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                         onSort={toggleEmployeeSort}
                                         collapsed={collapsedDepartments.has(department.department_name)}
                                         onToggle={() => toggleDepartmentCard(department.department_name)}
-                                        onOpenEvents={() => openEventsForDepartment(department.department_name)}
                                     />
                                 ))}
                             </div>
                         )}
 
                 <p className="px-1 text-[11px] leading-relaxed text-slate-500">
-                    Считаем по найденным отбивкам за дату смены: опоздание и ранний уход — от
-                    порога бота, подозрительная отметка — та, что терминал не подтвердил.
-                    Город берём из кадровой карточки сотрудника, поэтому колонка есть у отделов,
-                    где офисы стоят в разных городах, — у «Регионов». Сотрудники, у которых за
-                    период были только неявки и отсутствие отметки об уходе, в таблицу не попадают:
-                    строка из одних нулей читалась бы как «нарушений нет».
+                    В таблице весь состав отдела из Workpace{employees?.roster_synced_at
+                        ? ` (обновлён ${fmtAgo(employees.roster_synced_at)})` : ''}, а не только
+                    нарушители: пустая строка значит, что вопросов к сотруднику за период нет.
+                    Нарушения — из тех же отбивок, что во вкладке «Отбивки», по дате смены:
+                    опоздание и ранний уход — от порога бота, подозрительная отметка — та, что
+                    терминал не подтвердил. Поздний уход и отсутствие отметки об уходе в таблицу
+                    не выносим — они остались в «Отбивках». ФИО и город подставляем из кадровой
+                    карточки там, где отдел Workpace сопоставлен с нашим («Регионы» — «Фронт
+                    офисы»); у остальных отделов пары нет, поэтому имя остаётся как в Workpace.
                 </p>
             </div>
         );

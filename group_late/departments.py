@@ -110,6 +110,27 @@ def count_departments(employees: Iterable[dict]) -> dict[str, int]:
     return counts
 
 
+def employee_roster(employees: Iterable[dict]) -> list[dict]:
+    """Состав отделов для кэша `glb_employees`: id, ФИО, отдел.
+
+    Оба идентификатора нужны потому, что в нарушения попадает то `employeeId`,
+    то `employeeExternalId` — по одному из них сотрудник не всегда находится."""
+    rows: list[dict] = []
+    for employee in employees:
+        ext_id = _clean(employee.get("id") or employee.get("employeeId"))
+        full_name = employee_full_name(employee)
+        if not ext_id or not full_name:
+            continue
+        rows.append({
+            "ext_id": ext_id,
+            "external_id": _clean(employee.get("externalId")
+                                  or employee.get("employeeExternalId")) or None,
+            "full_name": full_name,
+            "department_name": department_name_from_fields(employee) or NO_DEPARTMENT,
+        })
+    return rows
+
+
 def clean_department_filters(department_filters) -> list[str]:
     """Список отделов без пустых значений и регистрозависимых дублей.
     Строку режем по ';' и '|' — так их вводят в командах бота."""

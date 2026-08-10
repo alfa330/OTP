@@ -19,6 +19,7 @@ from group_late.departments import (
     count_departments,
     department_name_from_fields,
     departments_allow,
+    employee_roster,
     normalize_text,
     resolve_department_name,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "count_departments",
     "department_name_from_fields",
     "departments_allow",
+    "employee_roster",
     "finalize_deliveries",
     "generate_report",
     "messages",

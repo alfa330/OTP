@@ -5953,6 +5953,20 @@ class Database:
                 employees_count INTEGER NOT NULL DEFAULT 0,
                 synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
+            -- Кэш списка сотрудников Workpace. Нужен вкладке «Сотрудники»: без него
+            -- в таблице видны только те, у кого за период были нарушения, а нужен
+            -- весь состав отдела. Наполняет опрос (он и так тянет сотрудников),
+            -- архивных Workpace не отдаёт — они просто уходят из кэша.
+            CREATE TABLE IF NOT EXISTS glb_employees (
+                ext_id          TEXT PRIMARY KEY,
+                external_id     TEXT,
+                full_name       TEXT NOT NULL,
+                department_name TEXT,
+                synced_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_employees_dept
+                ON glb_employees(lower(department_name));
         """)
 
     def _stamp_orphan_group_ids_tx(self, cursor, operator_id=None):
@@ -48833,42 +48847,76 @@ class Database:
             return None, None
         return ' '.join(tokens), (' '.join(tokens[:2]) if len(tokens) > 1 else None)
 
-    def _glb_city_lookup(self, cursor):
-        """{ключ ФИО: город} по кадровым карточкам.
+    @staticmethod
+    def _glb_index_put(store, key, value, weak=False):
+        """Ключ ФИО → запись. Тёзки обнуляют ключ: показать чужого хуже, чем
+        не показать никого. `weak` — запись, которая не спорит за занятый ключ
+        (уволенный сотрудник против действующего)."""
+        if not key:
+            return
+        if key not in store:
+            store[key] = value
+        elif weak or store[key] is value:
+            return
+        else:
+            store[key] = None
 
-        Город заполняют только отделам, чьи офисы стоят в разных городах (сейчас —
-        «Фронт офисы», он же «Регионы» в Workpace), поэтому таблица маленькая и
-        читается целиком. Тёзкам с разными городами город не проставляем: угадать
-        нельзя, а показать чужой — хуже, чем прочерк."""
+    def _glb_user_lookup(self, cursor, department_ids):
+        """{id отдела: (по полному ФИО, по «Фамилия Имя»)} → наша карточка.
+
+        Читаем только отделы, у которых есть явная пара с отделом Workpace:
+        справочники не связаны, и матчить по всей базе нельзя — тёзка из
+        соседнего отдела подставил бы чужое имя и чужой город."""
+        lookup = {}
+        if not department_ids:
+            return lookup
         cursor.execute("""
-            SELECT u.name, btrim(u.city), (lower(COALESCE(u.status, '')) = 'fired') AS fired
+            SELECT u.department_id, btrim(u.name), btrim(COALESCE(u.city, '')),
+                   (lower(COALESCE(u.status, '')) = 'fired') AS fired
             FROM users u
-            WHERE u.city IS NOT NULL AND btrim(u.city) <> ''
+            WHERE u.department_id = ANY(%s) AND btrim(COALESCE(u.name, '')) <> ''
             ORDER BY fired, u.id
-        """)
-        by_full, by_short = {}, {}
-        for name, city, fired in cursor.fetchall():
+        """, (sorted(int(value) for value in department_ids),))
+        for department_id, name, city, fired in cursor.fetchall():
+            by_full, by_short = lookup.setdefault(int(department_id), ({}, {}))
+            card = {'name': name, 'city': city or None}
             full_key, short_key = self._glb_name_keys(name)
-            for store, key in ((by_full, full_key), (by_short, short_key)):
-                if not key:
-                    continue
-                if key not in store:
-                    store[key] = city
-                elif fired:
-                    continue          # уволенный тёзка не спорит с действующим
-                elif store[key] != city:
-                    store[key] = None
-        return by_full, by_short
+            self._glb_index_put(by_full, full_key, card, weak=fired)
+            self._glb_index_put(by_short, short_key, card, weak=fired)
+        return lookup
+
+    GLB_STATS_COUNTERS = ('late_count', 'late_minutes', 'early_out_count',
+                          'early_out_minutes', 'missing_count', 'suspicious_count')
+
+    @staticmethod
+    def _glb_stats_entry(workpace_name):
+        return {
+            'employee_name': workpace_name,     # заменим нашим ФИО, если совпадёт
+            'workpace_name': workpace_name,
+            'city': None,
+            'matched': False,
+            'in_roster': False,
+            'late_count': 0, 'late_minutes': 0,
+            'early_out_count': 0, 'early_out_minutes': 0,
+            'missing_count': 0, 'suspicious_count': 0,
+            'events_total': 0,
+            'last_event_date': None,
+        }
 
     def get_group_late_employee_stats(self, date_from=None, date_to=None, department=None,
-                                      search=None):
+                                      search=None, match_departments=None):
         """Дисциплина по сотрудникам в разрезе отделов Workpace за период.
 
-        Считает по той же истории отбивок, что показывает вкладка «Отбивки»
-        (`glb_events`, дата смены), поэтому цифры сходятся с ней и с «Обзором».
-        Сотрудники, у которых за период были только неявки и отсутствие отметки
-        об уходе, в таблицу не попадают — их число возвращается отдельно, иначе
-        строка из одних нулей выглядела бы как «нарушений нет».
+        В таблице ВЕСЬ состав отдела, а не только нарушители: состав берём из
+        кэша `glb_employees` (его наполняет опрос), нарушения — из `glb_events`
+        по дате смены, поэтому цифры сходятся с «Отбивками» и «Обзором».
+        Уволенный сотрудник из состава уже пропал, но, если за период у него
+        были нарушения, строка всё равно будет.
+
+        match_departments — {отдел Workpace: id нашего отдела}. Только в этих
+        отделах сотрудник ищется в нашей базе, и оттуда же берутся ФИО и город:
+        справочники не связаны, ключ — ФИО, и без явной пары тёзка из соседнего
+        отдела подставил бы чужие данные.
 
         department — отдел Workpace, которым ограничен запрашивающий."""
         from_date = self._glb_parse_date(date_from, 'date_from')
@@ -48889,6 +48937,12 @@ class Database:
             params.append(dept)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
+        match_map = {
+            str(name).strip().casefold(): int(department_id)
+            for name, department_id in (match_departments or {}).items()
+            if str(name or '').strip() and department_id is not None
+        }
+
         with self._get_cursor() as cursor:
             cursor.execute(f"""
                 SELECT COALESCE(NULLIF(btrim(e.department_name), ''), 'Без отдела') AS dept,
@@ -48897,96 +48951,157 @@ class Database:
                        COALESCE(SUM(e.minutes) FILTER (WHERE e.event_type = 'late'), 0) AS late_minutes,
                        COUNT(*) FILTER (WHERE e.event_type = 'early_out') AS early_out_count,
                        COALESCE(SUM(e.minutes) FILTER (WHERE e.event_type = 'early_out'), 0) AS early_out_minutes,
-                       COUNT(*) FILTER (WHERE e.event_type = 'suspicious') AS suspicious_count,
                        COUNT(*) FILTER (WHERE e.event_type = 'missing') AS missing_count,
+                       COUNT(*) FILTER (WHERE e.event_type = 'suspicious') AS suspicious_count,
                        COUNT(*) AS events_total,
-                       MAX(e.event_date) AS last_event_date
+                       MAX(e.event_date) AS last_event_date,
+                       array_remove(array_agg(DISTINCT e.employee_ext_id), NULL) AS ext_ids
                 FROM glb_events e
                 {where_sql}
                 GROUP BY 1, 2
             """, params)
-            rows = cursor.fetchall()
-            by_full, by_short = self._glb_city_lookup(cursor)
+            event_rows = cursor.fetchall()
+
+            roster_sql = "" if not dept else "WHERE lower(p.department_name) = lower(%s)"
+            cursor.execute(f"""
+                SELECT COALESCE(NULLIF(btrim(p.department_name), ''), 'Без отдела') AS dept,
+                       COALESCE(NULLIF(btrim(p.full_name), ''), 'Без имени') AS employee,
+                       p.ext_id, p.external_id
+                FROM glb_employees p
+                {roster_sql}
+                ORDER BY 1, 2
+            """, ([dept] if dept else []))
+            roster_rows = cursor.fetchall()
+
+            # Состав приезжает с опросом Workpace: пока он не прошёл ни разу,
+            # в таблице будут только нарушители — об этом честно говорим наверху.
+            cursor.execute("SELECT COUNT(*), MAX(synced_at) FROM glb_employees")
+            roster_total, roster_synced_at = cursor.fetchone()
+
+            user_lookup = self._glb_user_lookup(cursor, set(match_map.values()))
+
+        # Состав отдела: он задаёт строки таблицы, нарушения только наполняют их.
+        buckets = {}
+        for department_name, employee_name, ext_id, external_id in roster_rows:
+            bucket = buckets.setdefault(department_name, {
+                'department_name': department_name, 'by_key': {}, 'by_short': {},
+                'by_ext': {}, 'employees': [],
+            })
+            entry = self._glb_stats_entry(employee_name)
+            entry['in_roster'] = True
+            bucket['employees'].append(entry)
+            full_key, short_key = self._glb_name_keys(employee_name)
+            self._glb_index_put(bucket['by_key'], full_key, entry)
+            self._glb_index_put(bucket['by_short'], short_key, entry)
+            for value in (ext_id, external_id):
+                if value:
+                    bucket['by_ext'][str(value)] = entry
+
+        for row in event_rows:
+            department_name, employee_name = row[0], row[1]
+            bucket = buckets.setdefault(department_name, {
+                'department_name': department_name, 'by_key': {}, 'by_short': {},
+                'by_ext': {}, 'employees': [],
+            })
+            full_key, short_key = self._glb_name_keys(employee_name)
+            entry = next(
+                (bucket['by_ext'][str(value)] for value in (row[10] or [])
+                 if str(value) in bucket['by_ext']),
+                None,
+            )
+            if entry is None:
+                entry = (bucket['by_key'][full_key] if bucket['by_key'].get(full_key)
+                         else bucket['by_short'].get(short_key))
+            if entry is None:
+                # Уволенный или переведённый: в составе его уже нет, а нарушения
+                # за период есть — строку показываем всё равно.
+                entry = self._glb_stats_entry(employee_name)
+                bucket['employees'].append(entry)
+                self._glb_index_put(bucket['by_key'], full_key, entry)
+                self._glb_index_put(bucket['by_short'], short_key, entry)
+            for index, field in enumerate(self.GLB_STATS_COUNTERS, start=2):
+                entry[field] += int(row[index] or 0)
+            entry['events_total'] += int(row[8] or 0)
+            last_event = row[9].isoformat() if row[9] else None
+            if last_event and (not entry['last_event_date'] or last_event > entry['last_event_date']):
+                entry['last_event_date'] = last_event
 
         search_text = str(search or '').strip().casefold()
-        grouped = {}
-        for row in rows:
-            department_name, employee_name = row[0], row[1]
-            full_key, short_key = self._glb_name_keys(employee_name)
-            # Полное совпадение ФИО главнее: если оно нашлось (пусть и спорным —
-            # None у тёзок), по «Фамилии Имени» уже не переспрашиваем.
-            if full_key in by_full:
-                city = by_full[full_key]
-            else:
-                city = by_short.get(short_key) if short_key else None
-            if search_text and not any(
-                search_text in field.casefold()
-                for field in (employee_name, department_name, city or '')
-            ):
-                continue
-
-            employee = {
-                'employee_name': employee_name,
-                'city': city,
-                'late_count': int(row[2] or 0),
-                'late_minutes': int(row[3] or 0),
-                'early_out_count': int(row[4] or 0),
-                'early_out_minutes': int(row[5] or 0),
-                'suspicious_count': int(row[6] or 0),
-                'missing_count': int(row[7] or 0),
-                'events_total': int(row[8] or 0),
-                'last_event_date': row[9].isoformat() if row[9] else None,
-            }
-            bucket = grouped.setdefault(department_name, {
-                'department_name': department_name,
-                'has_city': False,
-                'employees': [],
-                'other_only_employees': 0,
-                'totals': {'employees': 0, 'late_count': 0, 'late_minutes': 0,
-                           'early_out_count': 0, 'early_out_minutes': 0, 'suspicious_count': 0},
-            })
-            tracked = (employee['late_count'] + employee['early_out_count']
-                       + employee['suspicious_count'])
-            if not tracked:
-                bucket['other_only_employees'] += 1
-                continue
-            if city:
-                bucket['has_city'] = True
-            bucket['employees'].append(employee)
-            totals = bucket['totals']
-            totals['employees'] += 1
-            for field in ('late_count', 'late_minutes', 'early_out_count',
-                          'early_out_minutes', 'suspicious_count'):
-                totals[field] += employee[field]
-
-        overall = {'departments': 0, 'employees': 0, 'late_count': 0, 'late_minutes': 0,
-                   'early_out_count': 0, 'early_out_minutes': 0, 'suspicious_count': 0}
+        overall = {'departments': 0, 'employees': 0, 'employees_with_violations': 0,
+                   'late_count': 0, 'late_minutes': 0, 'early_out_count': 0,
+                   'early_out_minutes': 0, 'missing_count': 0, 'suspicious_count': 0}
         departments = []
-        for bucket in grouped.values():
-            if not bucket['employees']:
+        for bucket in buckets.values():
+            department_id = match_map.get(bucket['department_name'].casefold())
+            by_full, by_short = user_lookup.get(department_id, ({}, {}))
+            totals = {'employees': 0, 'employees_with_violations': 0, 'late_count': 0,
+                      'late_minutes': 0, 'early_out_count': 0, 'early_out_minutes': 0,
+                      'missing_count': 0, 'suspicious_count': 0}
+            employees, has_city = [], False
+            for entry in bucket['employees']:
+                full_key, short_key = self._glb_name_keys(entry['workpace_name'])
+                # Полное совпадение ФИО главнее: если оно нашлось (пусть и спорным —
+                # None у тёзок), по «Фамилии Имени» уже не переспрашиваем.
+                card = (by_full[full_key] if full_key in by_full
+                        else (by_short.get(short_key) if short_key else None))
+                if card:
+                    entry['employee_name'] = card['name']
+                    entry['city'] = card['city']
+                    entry['matched'] = True
+                if search_text and not any(
+                    search_text in field.casefold() for field in (
+                        entry['employee_name'], entry['workpace_name'],
+                        bucket['department_name'], entry['city'] or '')
+                ):
+                    continue
+                if entry['city']:
+                    has_city = True
+                employees.append(entry)
+                totals['employees'] += 1
+                violations = 0
+                for field in self.GLB_STATS_COUNTERS:
+                    totals[field] += entry[field]
+                    if field.endswith('_count'):
+                        violations += entry[field]
+                if violations:
+                    totals['employees_with_violations'] += 1
+            if not employees:
                 continue
-            bucket['employees'].sort(
-                key=lambda item: (-item['late_count'], -item['late_minutes'],
-                                  -item['suspicious_count'], item['employee_name']),
-            )
-            departments.append(bucket)
+            employees.sort(key=self._glb_stats_sort_key)
+            departments.append({
+                'department_name': bucket['department_name'],
+                'has_city': has_city,
+                # Отдел с явной парой у нас: только там ФИО и город берутся из
+                # карточки, и только там «нет в нашей базе» о чём-то говорит.
+                'matched_department': department_id is not None,
+                'employees': employees,
+                'totals': totals,
+            })
             overall['departments'] += 1
-            for field in ('employees', 'late_count', 'late_minutes', 'early_out_count',
-                          'early_out_minutes', 'suspicious_count'):
-                overall[field] += bucket['totals'][field]
-        departments.sort(
-            key=lambda item: (-(item['totals']['late_count'] + item['totals']['early_out_count']
-                                + item['totals']['suspicious_count']),
-                              item['department_name']),
-        )
+            for field in ('employees', 'employees_with_violations') + self.GLB_STATS_COUNTERS:
+                overall[field] += totals[field]
+        departments.sort(key=lambda item: (
+            -(item['totals']['late_count'] + item['totals']['early_out_count']
+              + item['totals']['missing_count'] + item['totals']['suspicious_count']),
+            item['department_name'],
+        ))
 
         return {
             'date_from': from_date.isoformat() if from_date else None,
             'date_to': to_date.isoformat() if to_date else None,
             'department': dept,
+            'roster_total': int(roster_total or 0),
+            'roster_synced_at': roster_synced_at.isoformat() if roster_synced_at else None,
             'totals': overall,
             'departments': departments,
         }
+
+    @staticmethod
+    def _glb_stats_sort_key(entry):
+        """Сначала нарушители (по опозданиям), в конце — те, к кому нет вопросов."""
+        return (-entry['late_count'], -entry['late_minutes'],
+                -(entry['missing_count'] + entry['suspicious_count'] + entry['early_out_count']),
+                entry['employee_name'])
 
     def get_group_late_reports(self, date_from=None, date_to=None, status=None, source=None,
                                limit=50, offset=0, department=None):
@@ -49186,6 +49301,42 @@ class Database:
             # ним раздел покажет отдельно как «фильтр, которого нет в Workpace».
             cursor.execute("DELETE FROM glb_departments WHERE name <> ALL(%s)", (list(counts.keys()),))
         return len(counts)
+
+    def glb_sync_employees(self, rows):
+        """Кэш состава отделов Workpace для вкладки «Сотрудники».
+
+        Полная замена: Workpace отдаёт только действующих, поэтому уволенный
+        должен исчезнуть из состава. В таблице он всё равно останется, если за
+        период у него были нарушения, — их берём из glb_events."""
+        clean = []
+        seen = set()
+        for row in rows or []:
+            ext_id = str(row.get('ext_id') or '').strip()
+            full_name = str(row.get('full_name') or '').strip()
+            if not ext_id or not full_name or ext_id in seen:
+                continue
+            seen.add(ext_id)
+            clean.append((
+                ext_id[:128],
+                (str(row.get('external_id') or '').strip() or None),
+                full_name[:200],
+                (str(row.get('department_name') or '').strip() or None),
+            ))
+        if not clean:
+            return 0
+        with self._get_cursor() as cursor:
+            execute_values(cursor, """
+                INSERT INTO glb_employees (ext_id, external_id, full_name, department_name, synced_at)
+                VALUES %s
+                ON CONFLICT (ext_id) DO UPDATE SET
+                    external_id = EXCLUDED.external_id,
+                    full_name = EXCLUDED.full_name,
+                    department_name = EXCLUDED.department_name,
+                    synced_at = NOW()
+            """, clean, template="(%s, %s, %s, %s, NOW())")
+            cursor.execute("DELETE FROM glb_employees WHERE ext_id <> ALL(%s)",
+                           ([item[0] for item in clean],))
+        return len(clean)
 
     def glb_discover_chat(self, chat_id, title=None, chat_type=None):
         """Бота добавили в группу — запоминаем чат ВЫКЛЮЧЕННЫМ. Рассылку по нему

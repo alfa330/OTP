@@ -6600,7 +6600,10 @@ def api_group_late_bot_departments_sync():
     try:
         employees = group_late.workpace_client.get_employees()
         count = db.glb_sync_departments(group_late.count_departments(employees))
-        return jsonify({"status": "success", "departments": count}), 200
+        # Состав отделов освежаем той же кнопкой: вкладка «Сотрудники» показывает
+        # весь отдел, а не только нарушителей, и ждать опроса ради этого незачем.
+        staff = db.glb_sync_employees(group_late.employee_roster(employees))
+        return jsonify({"status": "success", "departments": count, "employees": staff}), 200
     except group_late.WorkpaceError as error:
         return jsonify({"error": f"Workpace недоступен: {error}"}), 502
     except Exception as error:
@@ -6714,6 +6717,12 @@ def api_group_late_bot_employees():
             date_to=request.args.get('date_to'),
             department=scope or request.args.get('department'),
             search=request.args.get('q'),
+            # Где сотрудника Workpace искать у нас: ровно там, где пара отделов
+            # объявлена вручную. Тот же справочник, что режет раздел главе отдела.
+            match_departments={
+                workpace_name: department_id
+                for department_id, workpace_name in _group_late_bot_scope_by_department_id().items()
+            },
         )
         result['status'] = 'success'
         return jsonify(result), 200
