@@ -122,6 +122,15 @@ const monthStart = () => {
     return isoDate(d);
 };
 
+const pluralRu = (n, one, few, many) => {
+    const value = Math.abs(Number(n) || 0);
+    const tail = value % 10;
+    const hundred = value % 100;
+    if (tail === 1 && hundred !== 11) return one;
+    if (tail >= 2 && tail <= 4 && (hundred < 12 || hundred > 14)) return few;
+    return many;
+};
+
 // Дисциплину смотрят помесячно, поэтому «Весь период» из пресетов по умолчанию
 // тут не нужен: за полгода истории таблица перестаёт читаться.
 const EMPLOYEE_DATE_PRESETS = [
@@ -349,17 +358,17 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle 
                                     className="transition hover:bg-slate-50/80">
                                     <td className="py-2.5 pl-4 pr-3">
                                         <span className="font-medium text-slate-900"
-                                              title={row.matched && row.workpace_name !== row.employee_name
+                                              title={row.workpace_name && row.workpace_name !== row.employee_name
                                                   ? `В Workpace: ${row.workpace_name}` : undefined}>
                                             {row.employee_name}
                                         </span>
-                                        {/* Отметка осмысленна только там, где отдел вообще
-                                            сопоставляется с нашим: иначе ею была бы усыпана
-                                            вся таблица чужих отделов. */}
-                                        {department.matched_department && !row.matched && (
+                                        {/* Не действующий оператор попал в таблицу только
+                                            из-за нарушений за период — без пометки строка
+                                            выглядела бы как обычная. */}
+                                        {department.matched_department && !row.in_roster && (
                                             <IosBadge tone="slate" className="ml-1.5 align-middle"
-                                                      title="ФИО не нашлось в нашей базе — город и написание остались из Workpace">
-                                                нет у нас
+                                                      title="Сейчас не действующий оператор отдела — в таблице из-за нарушений за период">
+                                                вне состава
                                             </IosBadge>
                                         )}
                                     </td>
@@ -392,6 +401,13 @@ const EmployeeDepartmentCard = ({ department, sort, onSort, collapsed, onToggle 
                             </tr>
                         </tfoot>
                     </table>
+                    {department.foreign_employees > 0 && (
+                        <div className="px-4 py-2.5 text-[11.5px] text-slate-500">
+                            В Workpace в этом отделе есть ещё {fmtInt(department.foreign_employees)}{' '}
+                            {pluralRu(department.foreign_employees, 'человек', 'человека', 'человек')} —
+                            их нет в iCore, поэтому в таблицу они не попадают.
+                        </div>
+                    )}
                 </div>
             )}
         </section>
@@ -1265,15 +1281,17 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         )}
 
                 <p className="px-1 text-[11px] leading-relaxed text-slate-500">
-                    В таблице весь состав отдела из Workpace{employees?.roster_synced_at
-                        ? ` (обновлён ${fmtAgo(employees.roster_synced_at)})` : ''}, а не только
-                    нарушители: пустая строка значит, что вопросов к сотруднику за период нет.
-                    Нарушения — из тех же отбивок, что во вкладке «Отбивки», по дате смены:
-                    опоздание и ранний уход — от порога бота, подозрительная отметка — та, что
-                    терминал не подтвердил. Поздний уход и отсутствие отметки об уходе в таблицу
-                    не выносим — они остались в «Отбивках». ФИО и город подставляем из кадровой
-                    карточки там, где отдел Workpace сопоставлен с нашим («Регионы» — «Фронт
-                    офисы»); у остальных отделов пары нет, поэтому имя остаётся как в Workpace.
+                    В таблице весь состав отдела, а не только нарушители: пустая строка значит,
+                    что вопросов к сотруднику за период нет. Там, где отдел Workpace сопоставлен
+                    с нашим («Регионы» — «Фронт офисы»), состав берём из iCore — действующих
+                    операторов отдела, с их ФИО и городом; сотрудников Workpace, которых в iCore
+                    нет, в таблице не показываем. У остальных отделов пары с iCore нет, поэтому
+                    состав и написание там как в Workpace{employees?.roster_synced_at
+                        ? ` (обновлён ${fmtAgo(employees.roster_synced_at)})` : ''}. Нарушения —
+                    из тех же отбивок, что во вкладке «Отбивки», по дате смены: опоздание и
+                    ранний уход — от порога бота, подозрительная отметка — та, что терминал не
+                    подтвердил. Поздний уход и отсутствие отметки об уходе в таблицу не выносим —
+                    они остались в «Отбивках».
                 </p>
             </div>
         );

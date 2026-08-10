@@ -48861,41 +48861,68 @@ class Database:
         else:
             store[key] = None
 
-    def _glb_user_lookup(self, cursor, department_ids):
-        """{id отдела: (по полному ФИО, по «Фамилия Имя»)} → наша карточка.
+    def _glb_department_staff(self, cursor, department_ids):
+        """{id отдела: [карточка]} — наши сотрудники отделов с парой в Workpace.
 
-        Читаем только отделы, у которых есть явная пара с отделом Workpace:
-        справочники не связаны, и матчить по всей базе нельзя — тёзка из
-        соседнего отдела подставил бы чужое имя и чужой город."""
-        lookup = {}
+        Читаем только отделы, у которых пара объявлена: справочники не связаны,
+        ключ — ФИО, и по всей базе матчить нельзя — тёзка из соседнего отдела
+        подставил бы чужое имя и чужой город. `active` — действующий оператор:
+        такие задают состав таблицы, остальные (уволенные, руководители) попадут
+        в неё, только если за период у них были нарушения."""
+        staff = {}
         if not department_ids:
-            return lookup
+            return staff
         cursor.execute("""
             SELECT u.department_id, btrim(u.name), btrim(COALESCE(u.city, '')),
-                   (lower(COALESCE(u.status, '')) = 'fired') AS fired
+                   (lower(COALESCE(u.role, '')) = 'operator'
+                    AND lower(COALESCE(u.status, '')) <> 'fired') AS active
             FROM users u
             WHERE u.department_id = ANY(%s) AND btrim(COALESCE(u.name, '')) <> ''
-            ORDER BY fired, u.id
+            ORDER BY active DESC, u.name, u.id
         """, (sorted(int(value) for value in department_ids),))
-        for department_id, name, city, fired in cursor.fetchall():
-            by_full, by_short = lookup.setdefault(int(department_id), ({}, {}))
-            card = {'name': name, 'city': city or None}
-            full_key, short_key = self._glb_name_keys(name)
-            self._glb_index_put(by_full, full_key, card, weak=fired)
-            self._glb_index_put(by_short, short_key, card, weak=fired)
-        return lookup
+        for department_id, name, city, active in cursor.fetchall():
+            staff.setdefault(int(department_id), []).append(
+                {'name': name, 'city': city or None, 'active': bool(active)})
+        return staff
+
+    @staticmethod
+    def _glb_one_edit_apart(left, right):
+        """Слова различаются не больше чем одной буквой.
+
+        Нужно для «Сынакабаева» ↔ «УНГАРБАЕВА»: в Workpace фамилию завели с
+        опечаткой, а складыванием букв это не лечится."""
+        if left == right:
+            return True
+        if abs(len(left) - len(right)) > 1:
+            return False
+        if len(left) > len(right):
+            left, right = right, left
+        index_left = index_right = 0
+        edited = False
+        while index_left < len(left) and index_right < len(right):
+            if left[index_left] == right[index_right]:
+                index_left += 1
+                index_right += 1
+                continue
+            if edited:
+                return False
+            edited = True
+            if len(left) == len(right):
+                index_left += 1
+            index_right += 1
+        return True
 
     GLB_STATS_COUNTERS = ('late_count', 'late_minutes', 'early_out_count',
                           'early_out_minutes', 'missing_count', 'suspicious_count')
 
     @staticmethod
-    def _glb_stats_entry(workpace_name):
+    def _glb_stats_entry(name, city=None, matched=False, workpace_name=None, in_roster=False):
         return {
-            'employee_name': workpace_name,     # заменим нашим ФИО, если совпадёт
+            'employee_name': name,
             'workpace_name': workpace_name,
-            'city': None,
-            'matched': False,
-            'in_roster': False,
+            'city': city,
+            'matched': matched,
+            'in_roster': in_roster,
             'late_count': 0, 'late_minutes': 0,
             'early_out_count': 0, 'early_out_minutes': 0,
             'missing_count': 0, 'suspicious_count': 0,
@@ -48903,20 +48930,67 @@ class Database:
             'last_event_date': None,
         }
 
+    @classmethod
+    def _glb_resolve_entry(cls, bucket, full_key, short_key):
+        """Найти сотрудника отдела по ключам ФИО.
+
+        Порядок: полное ФИО → «Фамилия Имя» → фамилия с опечаткой в одну букву
+        при точно совпавшем имени. Последнее — про «Сынакабаева» ↔ «УНГАРБАЕВА»;
+        включается, только когда кандидат в отделе ровно один, иначе можно
+        приписать нарушения не тому."""
+        entry = bucket['by_key'].get(full_key) if full_key else None
+        if entry is None and short_key:
+            entry = bucket['by_short'].get(short_key)
+        if entry is not None or not short_key:
+            return entry
+
+        surname, _, first_name = short_key.partition(' ')
+        if len(surname) < 5:
+            return None
+        found = None
+        for candidate_key, candidate in bucket['by_short'].items():
+            if candidate is None:
+                continue
+            candidate_surname, _, candidate_first = candidate_key.partition(' ')
+            if candidate_first != first_name or len(candidate_surname) < 5:
+                continue
+            if not cls._glb_one_edit_apart(surname, candidate_surname):
+                continue
+            if found is not None and found is not candidate:
+                return None      # два похожих — угадывать нельзя
+            found = candidate
+        return found
+
+    @staticmethod
+    def _glb_new_bucket(department_name, paired=False):
+        return {
+            'department_name': department_name,
+            'paired': paired,
+            'by_key': {}, 'by_short': {}, 'by_ext': {},
+            'employees': [],        # строки таблицы
+            'reserve': [],          # наши, но не действующие операторы — только с нарушениями
+            'foreign': 0,           # в Workpace есть, в iCore нет
+        }
+
     def get_group_late_employee_stats(self, date_from=None, date_to=None, department=None,
                                       search=None, match_departments=None):
         """Дисциплина по сотрудникам в разрезе отделов Workpace за период.
 
-        В таблице ВЕСЬ состав отдела, а не только нарушители: состав берём из
-        кэша `glb_employees` (его наполняет опрос), нарушения — из `glb_events`
-        по дате смены, поэтому цифры сходятся с «Отбивками» и «Обзором».
-        Уволенный сотрудник из состава уже пропал, но, если за период у него
-        были нарушения, строка всё равно будет.
+        В таблице ВЕСЬ состав отдела, а не только нарушители, а нарушения берутся
+        из `glb_events` по дате смены — поэтому цифры сходятся с «Отбивками» и
+        «Обзором». Откуда состав, зависит от того, знаем ли мы отдел у себя:
 
-        match_departments — {отдел Workpace: id нашего отдела}. Только в этих
-        отделах сотрудник ищется в нашей базе, и оттуда же берутся ФИО и город:
-        справочники не связаны, ключ — ФИО, и без явной пары тёзка из соседнего
-        отдела подставил бы чужие данные.
+        * отдел с парой (match_departments) — состав из НАШЕЙ базы: действующие
+          операторы этого отдела. В Workpace числятся и другие компании холдинга,
+          и их сотрудников в таблице быть не должно; сколько таких, возвращаем
+          отдельным счётчиком `foreign_employees`. Уволенные и руководители
+          попадают в таблицу, только если за период у них были нарушения;
+        * остальные отделы — состав из кэша `glb_employees` (его наполняет опрос):
+          сверять не с чем, поэтому показываем всех, кого знает Workpace.
+
+        match_departments — {отдел Workpace: id нашего отдела}. Справочники не
+        связаны, ключ — ФИО, и без явной пары матчить нельзя: тёзка из соседнего
+        отдела подставил бы чужое имя и чужой город.
 
         department — отдел Workpace, которым ограничен запрашивающий."""
         from_date = self._glb_parse_date(date_from, 'date_from')
@@ -48937,11 +49011,16 @@ class Database:
             params.append(dept)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
-        match_map = {
-            str(name).strip().casefold(): int(department_id)
-            for name, department_id in (match_departments or {}).items()
-            if str(name or '').strip() and department_id is not None
-        }
+        # Пары «отдел Workpace ↔ наш отдел». Ключ приводим к регистру, но исходное
+        # написание сохраняем: под ним отдел показывается и приходит в нарушениях.
+        pairs = {}
+        for name, department_id in (match_departments or {}).items():
+            clean_name = str(name or '').strip()
+            if not clean_name or department_id is None:
+                continue
+            if dept and clean_name.casefold() != dept.casefold():
+                continue
+            pairs[clean_name.casefold()] = (clean_name, int(department_id))
 
         with self._get_cursor() as cursor:
             cursor.execute(f"""
@@ -48978,15 +49057,47 @@ class Database:
             cursor.execute("SELECT COUNT(*), MAX(synced_at) FROM glb_employees")
             roster_total, roster_synced_at = cursor.fetchone()
 
-            user_lookup = self._glb_user_lookup(cursor, set(match_map.values()))
+            staff = self._glb_department_staff(
+                cursor, {department_id for _, department_id in pairs.values()})
 
-        # Состав отдела: он задаёт строки таблицы, нарушения только наполняют их.
         buckets = {}
+
+        # 1. Отделы с парой: состав берём У СЕБЯ. Кого нет в iCore, того в таблице
+        #    быть не должно — в Workpace числятся и чужие компании холдинга.
+        for pair_key, (workpace_name, department_id) in pairs.items():
+            bucket = buckets.setdefault(workpace_name, self._glb_new_bucket(workpace_name, True))
+            for card in staff.get(department_id, []):
+                full_key, short_key = self._glb_name_keys(card['name'])
+                if full_key and full_key in bucket['by_key']:
+                    continue                # полный тёзка у нас — вторую строку не заводим
+                entry = self._glb_stats_entry(card['name'], city=card['city'], matched=True,
+                                              in_roster=card['active'])
+                # Действующие операторы задают состав; уволенные и руководители
+                # попадут в таблицу, только если за период были нарушения.
+                (bucket['employees'] if card['active'] else bucket['reserve']).append(entry)
+                if full_key:
+                    bucket['by_key'][full_key] = entry
+                self._glb_index_put(bucket['by_short'], short_key, entry)
+
+        # 2. Остальные отделы: пары нет, сверять не с чем — берём состав Workpace.
         for department_name, employee_name, ext_id, external_id in roster_rows:
-            bucket = buckets.setdefault(department_name, {
-                'department_name': department_name, 'by_key': {}, 'by_short': {},
-                'by_ext': {}, 'employees': [],
-            })
+            if department_name.casefold() in pairs:
+                bucket = buckets[pairs[department_name.casefold()][0]]
+                full_key, short_key = self._glb_name_keys(employee_name)
+                entry = self._glb_resolve_entry(bucket, full_key, short_key)
+                if entry is None:
+                    # Считаем, скольких Workpace знает сверх нашей базы: строки для
+                    # них нет, но молча терять людей нельзя.
+                    bucket['foreign'] += 1
+                    continue
+                # Идентификаторы Workpace вешаем на нашу карточку: по ним нарушения
+                # найдут сотрудника даже там, где написание ФИО разошлось.
+                entry['workpace_name'] = entry['workpace_name'] or employee_name
+                for value in (ext_id, external_id):
+                    if value:
+                        bucket['by_ext'][str(value)] = entry
+                continue
+            bucket = buckets.setdefault(department_name, self._glb_new_bucket(department_name))
             full_key, short_key = self._glb_name_keys(employee_name)
             # Два одинаковых ФИО в отделе — это одна карточка, заведённая в Workpace
             # дважды (так, например, живёт Тестбаева Дильназ): у неё два id, и
@@ -48996,8 +49107,8 @@ class Database:
             # ПОЛНОМУ совпадению.
             entry = bucket['by_key'].get(full_key) if full_key else None
             if entry is None:
-                entry = self._glb_stats_entry(employee_name)
-                entry['in_roster'] = True
+                entry = self._glb_stats_entry(employee_name, workpace_name=employee_name,
+                                              in_roster=True)
                 bucket['employees'].append(entry)
                 if full_key:
                     bucket['by_key'][full_key] = entry
@@ -49006,28 +49117,32 @@ class Database:
                 if value:
                     bucket['by_ext'][str(value)] = entry
 
+        # 3. Нарушения наполняют строки.
         for row in event_rows:
             department_name, employee_name = row[0], row[1]
-            bucket = buckets.setdefault(department_name, {
-                'department_name': department_name, 'by_key': {}, 'by_short': {},
-                'by_ext': {}, 'employees': [],
-            })
+            pair = pairs.get(department_name.casefold())
+            bucket = (buckets[pair[0]] if pair
+                      else buckets.setdefault(department_name,
+                                              self._glb_new_bucket(department_name)))
             full_key, short_key = self._glb_name_keys(employee_name)
             entry = next(
                 (bucket['by_ext'][str(value)] for value in (row[10] or [])
                  if str(value) in bucket['by_ext']),
                 None,
-            )
-            if entry is None:
-                entry = (bucket['by_key'][full_key] if bucket['by_key'].get(full_key)
-                         else bucket['by_short'].get(short_key))
+            ) or self._glb_resolve_entry(bucket, full_key, short_key)
+            if entry is None and bucket['paired']:
+                continue        # нарушение чужого сотрудника: в iCore его нет
             if entry is None:
                 # Уволенный или переведённый: в составе его уже нет, а нарушения
                 # за период есть — строку показываем всё равно.
-                entry = self._glb_stats_entry(employee_name)
+                entry = self._glb_stats_entry(employee_name, workpace_name=employee_name)
                 bucket['employees'].append(entry)
                 self._glb_index_put(bucket['by_key'], full_key, entry)
                 self._glb_index_put(bucket['by_short'], short_key, entry)
+            if entry in bucket['reserve']:
+                bucket['reserve'].remove(entry)
+                bucket['employees'].append(entry)
+            entry['workpace_name'] = entry['workpace_name'] or employee_name
             for index, field in enumerate(self.GLB_STATS_COUNTERS, start=2):
                 entry[field] += int(row[index] or 0)
             entry['events_total'] += int(row[8] or 0)
@@ -49041,25 +49156,14 @@ class Database:
                    'early_out_minutes': 0, 'missing_count': 0, 'suspicious_count': 0}
         departments = []
         for bucket in buckets.values():
-            department_id = match_map.get(bucket['department_name'].casefold())
-            by_full, by_short = user_lookup.get(department_id, ({}, {}))
             totals = {'employees': 0, 'employees_with_violations': 0, 'late_count': 0,
                       'late_minutes': 0, 'early_out_count': 0, 'early_out_minutes': 0,
                       'missing_count': 0, 'suspicious_count': 0}
             employees, has_city = [], False
             for entry in bucket['employees']:
-                full_key, short_key = self._glb_name_keys(entry['workpace_name'])
-                # Полное совпадение ФИО главнее: если оно нашлось (пусть и спорным —
-                # None у тёзок), по «Фамилии Имени» уже не переспрашиваем.
-                card = (by_full[full_key] if full_key in by_full
-                        else (by_short.get(short_key) if short_key else None))
-                if card:
-                    entry['employee_name'] = card['name']
-                    entry['city'] = card['city']
-                    entry['matched'] = True
                 if search_text and not any(
                     search_text in field.casefold() for field in (
-                        entry['employee_name'], entry['workpace_name'],
+                        entry['employee_name'], entry['workpace_name'] or '',
                         bucket['department_name'], entry['city'] or '')
                 ):
                     continue
@@ -49080,9 +49184,9 @@ class Database:
             departments.append({
                 'department_name': bucket['department_name'],
                 'has_city': has_city,
-                # Отдел с явной парой у нас: только там ФИО и город берутся из
-                # карточки, и только там «нет в нашей базе» о чём-то говорит.
-                'matched_department': department_id is not None,
+                # Отдел с парой: состав из iCore, ФИО и город — из карточки.
+                'matched_department': bucket['paired'],
+                'foreign_employees': bucket['foreign'] if bucket['paired'] else 0,
                 'employees': employees,
                 'totals': totals,
             })

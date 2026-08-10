@@ -37,7 +37,10 @@ MEMBERS = (
     "_glb_department",
     "_glb_name_keys",
     "_glb_index_put",
-    "_glb_user_lookup",
+    "_glb_department_staff",
+    "_glb_one_edit_apart",
+    "_glb_resolve_entry",
+    "_glb_new_bucket",
     "_glb_stats_entry",
     "_glb_stats_sort_key",
     "get_group_late_employee_stats",
@@ -98,17 +101,18 @@ def roster_row(employee, department=WORKPACE_DEPARTMENT, ext_id=None, external_i
     return (department, employee.strip(), ext_id or f"id-{employee.strip()}", external_id)
 
 
-def user_row(name, city=None, department_id=OUR_DEPARTMENT_ID, fired=False):
-    return (department_id, name, city or "", fired)
+def staff_row(name, city=None, department_id=OUR_DEPARTMENT_ID, active=True):
+    """Наш сотрудник: active — действующий оператор, он и задаёт состав таблицы."""
+    return (department_id, name, city or "", active)
 
 
 class FakeCursor:
     """Раздаёт ответы по тому, из какой таблицы читает запрос."""
 
-    def __init__(self, event_rows, roster_rows, user_rows):
+    def __init__(self, event_rows, roster_rows, staff_rows):
         self.event_rows = event_rows
         self.roster_rows = roster_rows
-        self.user_rows = user_rows
+        self.staff_rows = staff_rows
         self.calls = []
         self._rows = []
         self._one = None
@@ -124,7 +128,7 @@ class FakeCursor:
             self._rows = []
             self._one = (len(self.roster_rows), datetime(2026, 8, 10, 11, 24))
         elif "FROM users" in flat:
-            self._rows, self._one = self.user_rows, None
+            self._rows, self._one = self.staff_rows, None
         else:
             self._rows, self._one = [], None
 
@@ -135,9 +139,9 @@ class FakeCursor:
         return self._one
 
 
-def run_stats(event_rows=(), roster_rows=(), user_rows=(), **kwargs):
+def run_stats(event_rows=(), roster_rows=(), staff_rows=(), **kwargs):
     db = StubDatabase()
-    cursor = FakeCursor(list(event_rows), list(roster_rows), list(user_rows))
+    cursor = FakeCursor(list(event_rows), list(roster_rows), list(staff_rows))
 
     @contextmanager
     def _get_cursor():
@@ -180,7 +184,7 @@ class NameKeyTests(unittest.TestCase):
 
 
 class RosterTests(unittest.TestCase):
-    """В таблице весь состав отдела, а не только нарушители."""
+    """Отдел без пары: состав берём из Workpace — сверять не с чем."""
 
     def test_employees_without_violations_are_listed(self):
         result, _ = run_stats(
@@ -279,13 +283,28 @@ class RosterTests(unittest.TestCase):
         self.assertTrue(result["roster_synced_at"].startswith("2026-08-10"))
 
 
-class MatchTests(unittest.TestCase):
-    """ФИО и город — из нашей карточки, но только в отделе с объявленной парой."""
+class PairedDepartmentTests(unittest.TestCase):
+    """Отдел с парой: состав из iCore, чужих в таблице нет."""
 
-    def test_our_spelling_replaces_the_workpace_one(self):
+    def test_roster_comes_from_our_base_not_from_workpace(self):
+        # В Workpace числятся и другие компании холдинга — их в таблице быть не должно.
         result, _ = run_stats(
-            roster_rows=[roster_row("ҚҰРМАНОВ ҚАЙРАТ ")],
-            user_rows=[user_row("Курманов Кайрат", "Талдыкорган")],
+            roster_rows=[roster_row("ҚҰРМАНОВ ҚАЙРАТ"), roster_row("ЖҮНІС Самат"),
+                         roster_row("МАҒАЖАНОВ ДЖАББАР")],
+            staff_rows=[staff_row("Курманов Кайрат", "Талдыкорган"),
+                        staff_row("Асанова Айдана", "Шымкент")],
+            match_departments=MATCH,
+        )
+        department = only_department(result)
+        self.assertEqual([e["employee_name"] for e in department["employees"]],
+                         ["Асанова Айдана", "Курманов Кайрат"])
+        self.assertEqual(department["foreign_employees"], 2)
+        self.assertTrue(department["matched_department"])
+
+    def test_our_spelling_and_city_win(self):
+        result, _ = run_stats(
+            roster_rows=[roster_row("ҚҰРМАНОВ ҚАЙРАТ")],
+            staff_rows=[staff_row("Курманов Кайрат", "Талдыкорган")],
             match_departments=MATCH,
         )
         entry = only_department(result)["employees"][0]
@@ -293,34 +312,88 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(entry["workpace_name"], "ҚҰРМАНОВ ҚАЙРАТ")
         self.assertEqual(entry["city"], "Талдыкорган")
         self.assertTrue(entry["matched"])
-        self.assertTrue(only_department(result)["matched_department"])
         self.assertTrue(only_department(result)["has_city"])
 
-    def test_patronymic_in_workpace_still_matches(self):
+    def test_violations_reach_our_card_through_the_workpace_spelling(self):
         result, _ = run_stats(
+            event_rows=[event_row("Досанбаев Асан Тестович", late=2, late_minutes=15)],
             roster_rows=[roster_row("Досанбаев Асан Тестович")],
-            user_rows=[user_row("Досанбаев Асан", "Актобе")],
-            match_departments=MATCH,
-        )
-        self.assertEqual(only_department(result)["employees"][0]["employee_name"],
-                         "Досанбаев Асан")
-
-    def test_employee_outside_our_base_keeps_the_workpace_name(self):
-        result, _ = run_stats(
-            roster_rows=[roster_row("ЖҮНІС Самат")],
-            user_rows=[user_row("Курманов Кайрат", "Талдыкорган")],
+            staff_rows=[staff_row("Досанбаев Асан", "Актобе")],
             match_departments=MATCH,
         )
         entry = only_department(result)["employees"][0]
-        self.assertEqual(entry["employee_name"], "ЖҮНІС Самат")
-        self.assertFalse(entry["matched"])
-        self.assertIsNone(entry["city"])
+        self.assertEqual(entry["employee_name"], "Досанбаев Асан")
+        self.assertEqual(entry["late_count"], 2)
 
-    def test_department_without_a_pair_is_not_matched_at_all(self):
+    def test_surname_typo_of_one_letter_still_matches(self):
+        # У нас «Сынакабаева», в Workpace «УНГАРБАЕВА» — иначе её нарушения потерялись бы.
+        result, _ = run_stats(
+            event_rows=[event_row("СЫНАКБАЕВА АЙГУЛЬ", late=1, late_minutes=8)],
+            roster_rows=[roster_row("СЫНАКБАЕВА АЙГУЛЬ")],
+            staff_rows=[staff_row("Сынакабаева Айгуль", "Туркестан")],
+            match_departments=MATCH,
+        )
+        department = only_department(result)
+        self.assertEqual(department["totals"]["employees"], 1)
+        self.assertEqual(department["employees"][0]["late_count"], 1)
+        self.assertEqual(department["foreign_employees"], 0)
+
+    def test_two_similar_surnames_are_not_guessed(self):
+        result, _ = run_stats(
+            roster_rows=[roster_row("Иваненко Иван")],
+            staff_rows=[staff_row("Иванченко Иван"), staff_row("Иващенко Иван")],
+            match_departments=MATCH,
+        )
+        self.assertEqual(only_department(result)["foreign_employees"], 1)
+
+    def test_short_surnames_are_not_fuzzy_matched(self):
+        # «Ким» и «Кин» — разные люди, одной буквой их путать нельзя.
+        result, _ = run_stats(
+            roster_rows=[roster_row("Кин Сергей")],
+            staff_rows=[staff_row("Ким Сергей")],
+            match_departments=MATCH,
+        )
+        self.assertEqual(only_department(result)["foreign_employees"], 1)
+
+    def test_employee_absent_from_workpace_is_still_listed(self):
+        # В iCore человек есть, в Workpace его не завели — строка с прочерками.
+        result, _ = run_stats(
+            roster_rows=[],
+            staff_rows=[staff_row("Асанова Айдана", "Шымкент")],
+            match_departments=MATCH,
+        )
+        self.assertEqual([e["employee_name"] for e in only_department(result)["employees"]],
+                         ["Асанова Айдана"])
+
+    def test_violations_of_a_stranger_are_dropped(self):
+        result, _ = run_stats(
+            event_rows=[event_row("ЖҮНІС Самат", missing=3)],
+            staff_rows=[staff_row("Курманов Кайрат", "Талдыкорган")],
+            match_departments=MATCH,
+        )
+        department = only_department(result)
+        self.assertEqual([e["employee_name"] for e in department["employees"]],
+                         ["Курманов Кайрат"])
+        self.assertEqual(department["totals"]["missing_count"], 0)
+
+    def test_fired_employee_appears_only_with_violations(self):
+        result, _ = run_stats(
+            event_rows=[event_row("Уволенный Пётр", late=2, late_minutes=20)],
+            staff_rows=[staff_row("Действующий Иван"),
+                        staff_row("Уволенный Пётр", active=False),
+                        staff_row("Уволенная Мария", active=False)],
+            match_departments=MATCH,
+        )
+        department = only_department(result)
+        self.assertEqual(sorted(e["employee_name"] for e in department["employees"]),
+                         ["Действующий Иван", "Уволенный Пётр"])
+        self.assertEqual(by_name(department)["Уволенный Пётр"]["late_count"], 2)
+
+    def test_department_without_a_pair_keeps_the_workpace_roster(self):
         # «КЦ 3» с нашими отделами не связан: тёзка из СЗоВ дал бы чужое имя.
         result, _ = run_stats(
             roster_rows=[roster_row("Досанова Дана", department="КЦ 3")],
-            user_rows=[user_row("Досанова Дана", "Алматы")],
+            staff_rows=[staff_row("Досанова Дана", "Алматы")],
             match_departments=MATCH,
         )
         department = only_department(result, "КЦ 3")
@@ -334,40 +407,57 @@ class MatchTests(unittest.TestCase):
         users_sql, params = next((c for c in cursor.calls if "FROM users" in c[0]), (None, None))
         self.assertIsNotNone(users_sql)
         self.assertIn("u.department_id = ANY(%s)", users_sql)
+        self.assertIn("lower(COALESCE(u.role, '')) = 'operator'", users_sql)
+        self.assertIn("lower(COALESCE(u.status, '')) <> 'fired'", users_sql)
         self.assertEqual(params, ([OUR_DEPARTMENT_ID],))
 
     def test_users_are_not_read_without_a_pair(self):
         _, cursor = run_stats(roster_rows=[roster_row("Кто-то")])
         self.assertFalse([c for c in cursor.calls if "FROM users" in c[0]])
 
-    def test_namesakes_in_our_base_are_not_guessed(self):
+    def test_department_filter_drops_a_foreign_pair(self):
+        # Глава отдела смотрит свой отдел — чужая пара не должна подмешаться.
         result, _ = run_stats(
-            roster_rows=[roster_row("Иванов Иван")],
-            user_rows=[user_row("Иванов Иван", "Алматы"), user_row("Иванов Иван", "Астана")],
-            match_departments=MATCH,
+            roster_rows=[roster_row("Досанова Дана", department="КЦ 3")],
+            staff_rows=[staff_row("Курманов Кайрат")],
+            match_departments=MATCH, department="КЦ 3",
         )
-        entry = only_department(result)["employees"][0]
-        self.assertFalse(entry["matched"])
-        self.assertIsNone(entry["city"])
+        self.assertEqual([d["department_name"] for d in result["departments"]], ["КЦ 3"])
 
-    def test_fired_namesake_does_not_override_the_working_one(self):
+    def test_namesakes_in_our_base_share_one_row(self):
+        # Полные тёзки в одном отделе: нарушения всё равно группируются по ФИО.
         result, _ = run_stats(
-            roster_rows=[roster_row("Иванов Иван")],
-            user_rows=[user_row("Иванов Иван", "Алматы"),
-                       user_row("Иванов Иван", "Астана", fired=True)],
+            staff_rows=[staff_row("Иванов Иван", "Алматы"), staff_row("Иванов Иван", "Астана")],
             match_departments=MATCH,
         )
-        self.assertEqual(only_department(result)["employees"][0]["city"], "Алматы")
+        self.assertEqual(only_department(result)["totals"]["employees"], 1)
 
     def test_matched_employee_without_a_city_leaves_the_column_off(self):
         result, _ = run_stats(
-            roster_rows=[roster_row("Тестбек Даурен")],
-            user_rows=[user_row("Тестбек Даурен", None)],
+            staff_rows=[staff_row("Тестбек Даурен", None)],
             match_departments=MATCH,
         )
         department = only_department(result)
         self.assertTrue(department["employees"][0]["matched"])
         self.assertFalse(department["has_city"])
+
+
+class OneEditApartTests(unittest.TestCase):
+    """Опечатка в одну букву — и только она."""
+
+    def apart(self, left, right):
+        return StubDatabase._glb_one_edit_apart(left, right)
+
+    def test_insert_delete_and_replace(self):
+        self.assertTrue(self.apart("сынакабаева", "сынакбаева"))   # пропущена буква
+        self.assertTrue(self.apart("иванов", "иванав"))            # заменена
+        self.assertTrue(self.apart("иванов", "ивановв"))           # лишняя
+        self.assertTrue(self.apart("иванов", "иванов"))
+
+    def test_two_differences_are_too_many(self):
+        self.assertFalse(self.apart("иванов", "иванава"))
+        self.assertFalse(self.apart("иванов", "петров"))
+        self.assertFalse(self.apart("иванов", "ива"))
 
 
 class TableTests(unittest.TestCase):
@@ -428,14 +518,14 @@ class TableTests(unittest.TestCase):
 
     def test_search_matches_our_name_workpace_name_and_city(self):
         rows = [roster_row("ҚҰРМАНОВ ҚАЙРАТ"), roster_row("Сынаков Назым")]
-        users = [user_row("Курманов Кайрат", "Талдыкорган"), user_row("Сынаков Назым", "Алматы")]
+        staff = [staff_row("Курманов Кайрат", "Талдыкорган"), staff_row("Сынаков Назым", "Алматы")]
         for query, expected in (
             ("курманов", ["Курманов Кайрат"]),          # наше написание
             ("ҚҰРМАНОВ", ["Курманов Кайрат"]),          # написание Workpace
             ("талдыкорган", ["Курманов Кайрат"]),         # город
             ("алматы", ["Сынаков Назым"]),
         ):
-            result, _ = run_stats(roster_rows=rows, user_rows=users,
+            result, _ = run_stats(roster_rows=rows, staff_rows=staff,
                                   match_departments=MATCH, search=query)
             self.assertEqual([e["employee_name"] for e in only_department(result)["employees"]],
                              expected, query)
@@ -550,8 +640,12 @@ class ViewTests(unittest.TestCase):
         self.assertIn("EMPLOYEE_COLUMNS.filter((column) => !column.cityOnly || department.has_city)",
                       VIEW_SRC)
 
-    def test_unmatched_employee_is_marked_only_in_paired_departments(self):
-        self.assertIn("department.matched_department && !row.matched", VIEW_SRC)
+    def test_out_of_roster_employee_is_marked_only_in_paired_departments(self):
+        self.assertIn("department.matched_department && !row.in_roster", VIEW_SRC)
+
+    def test_strangers_from_workpace_are_counted_under_the_table(self):
+        # Молча терять людей нельзя: их нет в таблице, но видно, что они есть.
+        self.assertIn("department.foreign_employees > 0", VIEW_SRC)
 
     def test_workpace_spelling_stays_reachable(self):
         # Подменили ФИО — исходное написание должно остаться в подсказке.
