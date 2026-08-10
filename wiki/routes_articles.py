@@ -10,6 +10,7 @@ from flask import jsonify, redirect, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
+from . import perimeter as wiki_perimeter
 from . import queries
 from . import schema as wiki_schema
 from . import search as wiki_search
@@ -25,27 +26,10 @@ def _int_or_none(value):
 def register(bp, wiki_route, db, log_ip, gcs):
     """gcs — словарь с ключами signed_url и bucket_name (внедряются из bot_schedule2)."""
 
-    def _perimeter(cursor, ctx, *, master_key=True):
-        """Субъекты, разрешённые разделы и видимые статьи — за один проход.
-
-        Собрано в одну функцию, чтобы ни один эндпоинт не мог случайно
-        посчитать периметр иначе, чем остальные.
-
-        master_key=False — личный периметр без мастер-ключа администратора
-        (см. шапку wiki/articles.py).
-        """
-        subjects = wiki_access.collect_subjects(
-            user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            department_id=ctx['department_id'],
-            headed_department_ids=ctx['headed_department_ids'],
-            direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
-            wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-        )
-        sections = queries.allowed_section_ids(cursor, ctx, subjects,
-                                               master_key=master_key)
-        visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections,
-                                                    master_key=master_key)
-        return subjects, sections, visible
+    # Цепочка «субъекты → разделы → статьи» живёт в wiki/perimeter.py: её же
+    # считает ИИ-помощник, и второй реализации быть не должно — именно на таком
+    # раздвоении сломалась исходная вика (см. шапку wiki/perimeter.py).
+    _perimeter = wiki_perimeter.read_perimeter
 
     def _browse(cursor, ctx):
         """Периметр ВИТРИНЫ: список, поиск, подсказки, главная раздела.

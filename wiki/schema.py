@@ -611,6 +611,29 @@ _SEARCH_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_articles_fts ON wiki_articles USING GIN (search_vector);",
 ]
 
+# ── Рубильник «во внешний ИИ не отправлять» ──────────────────────────────────
+#
+# Право прочитать статью на экране и право отправить её текст во внешний API —
+# РАЗНЫЕ права, и второе строго уже. Поэтому отдельный флаг, а не переиспользование
+# strict_mode или visibility_mode: те решают, кому показывать, а этот — что можно
+# выгружать наружу. По умолчанию выключен: помощник видит то же, что человек,
+# а владелец точечно помечает корпоративную информацию.
+#
+# Флаг есть и на разделе. Семантика СТРОГАЯ: статья выпадает, если помечен хотя
+# бы один её раздел (см. шапку wiki/perimeter.py — там же про ловушку all() по
+# пустому множеству, из-за которой статья без разделов исчезала бы молча).
+_AI_STATEMENTS = [
+    "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
+    "ai_opt_out BOOLEAN NOT NULL DEFAULT FALSE;",
+    "ALTER TABLE wiki_sections ADD COLUMN IF NOT EXISTS "
+    "ai_opt_out BOOLEAN NOT NULL DEFAULT FALSE;",
+    # Периметр помощника всегда сужает выборку этими тремя условиями сразу,
+    # поэтому индекс частичный и покрывает ровно пригодные статьи.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_articles_ai_eligible "
+    "ON wiki_articles (id) "
+    "WHERE status = 'published' AND NOT strict_mode AND NOT ai_opt_out;",
+]
+
 # Опечатки и префиксный поиск. Отдельно и под своим савпоинтом: расширение
 # требует прав, и если их нет — поиск обязан продолжить работать на одном FTS,
 # а не утащить за собой всю схему раздела.
@@ -733,6 +756,11 @@ def init_wiki_schema(cursor):
         cursor.execute('ALTER TABLE wiki_articles DROP COLUMN search_vector')
 
     for statement in _SEARCH_STATEMENTS:
+        cursor.execute(statement)
+
+    # Рубильник ИИ — сразу после поисковых колонок: обе группы это ALTER по
+    # wiki_articles, и держать их рядом дешевле, чем искать по файлу.
+    for statement in _AI_STATEMENTS:
         cursor.execute(statement)
 
     # Вместе с колонкой пересчитываются и search_aliases: нормализация запроса
