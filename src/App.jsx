@@ -44088,6 +44088,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 </button>
                                             </li>
                                             )}
+                                            {/* «Бот опозданий»: глава отдела из GROUP_LATE_BOT_HEAD_DEPARTMENT_CODES —
+                                                админы видят этот пункт в своей ветке выше. Границу отдела Workpace
+                                                держит бэкенд, здесь только видимость пункта. */}
+                                            {canAccessGroupLateBotSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'group_late_bot')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'group_late_bot' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-user-clock"></FaIcon> <span className="sidebar-text">Бот опозданий</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {canAccessSzovWallboardSection && (
                                             <li>
                                                 <button

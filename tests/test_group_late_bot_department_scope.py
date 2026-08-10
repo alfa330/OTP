@@ -298,6 +298,19 @@ class FrontendAccessTests(unittest.TestCase):
         # Глава ЧУЖОГО отдела с базовой admin-ролью по-прежнему не проходит.
         self.assertIn("return role === 'admin' && !isDepartmentHead(userLike);", block)
 
+    def test_menu_item_reaches_the_sidebar_branch_of_the_head(self):
+        # Глава отдела — «суженный» админ: isAdminLikeRole у него false (см.
+        # isScopedDepartmentHead), и сайдбар ему рисует ветка isDepartmentManager.
+        # Пункт, объявленный только в админской ветке, до главы не доезжает: доступ
+        # есть, раздел открывается прямым URL, а в меню его нет — так и было.
+        head_branch = APP_SRC.split("{isDepartmentManager && !isAdminLikeRole && (", 1)[1]
+        head_branch = head_branch.split("{(currentUserRole === 'operator'", 1)[0]
+        self.assertIn("{canAccessGroupLateBotSection && (", head_branch)
+        self.assertIn("handleSidebarViewNavigation(e, 'group_late_bot')", head_branch)
+        # И в админской ветке пункт остался: у пункта ровно две точки рендера,
+        # как у «Табло СЗоВ».
+        self.assertEqual(APP_SRC.count("handleSidebarViewNavigation(e, 'group_late_bot')"), 2)
+
     def test_allowlist_guard_does_not_redirect_the_head_away(self):
         # У front_office список разделов ограничен; раздел гейтится своим предикатом,
         # как «Табло СЗоВ» и «Чаты ChatApp», а не вписан в allowlist отдела.
