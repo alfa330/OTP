@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers,
-    Building2, Loader2, RefreshCw, ScrollText, ShieldCheck, Users,
+    Building2, Loader2, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge,
@@ -13,6 +13,7 @@ import WikiStructure from './WikiStructure';
 import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
+const WikiAssistant = lazy(() => import('./WikiAssistant'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import './wiki-theme.css';
 
@@ -103,6 +104,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
 
     const tabs = useMemo(() => ([
         { key: 'library', label: 'Статьи', icon: BookOpen, show: true },
+        // Показан всем: периметр считает сервер, и гейт по способности здесь
+        // был бы вреден — он мигал бы false во время загрузки ping, а эффект
+        // ниже выкидывал бы человека из открытого чата.
+        { key: 'assistant', label: 'Помощник', icon: Sparkles, show: true },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'parks', label: 'Парки', icon: Building2, show: true },
         { key: 'structure', label: 'Структура', icon: Layers, show: canManageStructure },
@@ -333,6 +338,28 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         searchTarget={searchTarget}
                         onSearchTargetConsumed={() => setSearchTarget(null)}
                     />
+                )}
+
+                {/* Помощник грузится лениво: у него свой чат-каркас и композер,
+                    а открывают вкладку далеко не всегда. Тот же приём, что у
+                    редактора статей и классификатора. */}
+                {tab === 'assistant' && (
+                    <Suspense fallback={(
+                        <div className={`${iosCard} flex items-center justify-center gap-2 py-16 text-slate-400`}>
+                            <Loader2 size={18} className="animate-spin" />
+                            <span className="text-[13px]">Загружаем помощника…</span>
+                        </div>
+                    )}>
+                        <WikiAssistant
+                            base={base}
+                            headers={headers}
+                            showToast={showToast}
+                            onOpenArticle={(slug, highlight) => {
+                                setTab('library');
+                                setSearchTarget({ slug, highlight });
+                            }}
+                        />
+                    </Suspense>
                 )}
 
                 {tab === 'parks' && (
