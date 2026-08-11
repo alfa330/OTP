@@ -59,6 +59,19 @@ class ClarifyGateTest(unittest.TestCase):
         need, _ = ai_answer.should_clarify('что с машиной', rows)
         self.assertFalse(need)
 
+    def test_exact_term_never_clarifies(self):
+        """Названную своим именем вещь переспрашивать не надо.
+
+        Замер на проде: «что за акция Лимонопад» — три слова, близость невысокая,
+        попадания в двух статьях, и гейт переспрашивал. Но «Лимонопад» встречается
+        ровно в одной статье: это не двусмысленность, а точный термин.
+        """
+        rows = [chunk(similarity=0.72, article_id=10),
+                chunk(chunk_id=2, similarity=0.71, article_id=11)]
+        rows[0]['strict_hit'] = True
+        need, _ = ai_answer.should_clarify('что за акция Лимонопад', rows)
+        self.assertFalse(need)
+
     def test_short_low_similarity_across_articles_clarifies(self):
         rows = [chunk(similarity=0.72, article_id=10),
                 chunk(chunk_id=2, similarity=0.71, article_id=11)]

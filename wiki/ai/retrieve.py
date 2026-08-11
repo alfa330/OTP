@@ -266,9 +266,15 @@ def fuse(lexical, dense, *, limit=8, per_article=3):
             merged.append({**row, 'found_by': [branch_index]})
     # Пометим куски, найденные обеими ветвями: полезно в витрине и в журнале.
     lexical_ids = {row['chunk_id'] for row in lexical}
+    # strict_hit приходит только из лексической ветки, а в слиянии верх занимает
+    # плотная — без переноса признак терялся ровно на самых точных попаданиях:
+    # кусок, найденный обеими ветками, выглядел бы как «только вектор».
+    strict_ids = {row['chunk_id'] for row in lexical if row.get('strict_hit')}
     for row in merged:
         if row['chunk_id'] in lexical_ids and row['chunk_id'] in dense_ids:
             row['found_by'] = [0, 1]
+        if row['chunk_id'] in strict_ids:
+            row['strict_hit'] = True
     return _cap_and_limit(merged, limit, per_article)
 
 

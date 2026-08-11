@@ -151,6 +151,13 @@ def should_clarify(question, chunks):
         return False, None
     if not chunks:
         return False, None
+    # ТОЧНОЕ СОВПАДЕНИЕ ТЕРМИНА снимает вопрос о двусмысленности. Замер на проде:
+    # «что за акция Лимонопад» — три слова и невысокая близость, гейт переспросил,
+    # хотя «Лимонопад» встречается ровно в одной статье и спрашивать тут не о чем.
+    # Уточняющий вопрос на однозначный запрос раздражает сильнее, чем помогает:
+    # человек уже назвал вещь своим именем.
+    if any(chunk.get('strict_hit') for chunk in chunks):
+        return False, None
     top = max((chunk.get('similarity') or 0) for chunk in chunks)
     if top >= CLARIFY_SIMILARITY:
         return False, None
