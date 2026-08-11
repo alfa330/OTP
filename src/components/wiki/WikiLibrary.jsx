@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     BookOpen, Eye, FileText, Loader2, Search, Sparkles, X,
@@ -121,7 +121,7 @@ const SearchHit = ({ article, onOpen }) => (
 
 export default function WikiLibrary({ base, headers, showToast, structure, counters,
                                       canCreate, canEdit = false,
-                                      canSeeEverything = false, createTick = 0,
+                                      canSeeEverything = false, createTick = 0, homeTick = 0,
                                       onOpenParks,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
@@ -177,13 +177,40 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         consumeSearchTarget();
     }, [searchTarget, consumeSearchTarget]);
 
-    /* «Новая статья» живёт в шапке раздела рядом с «Обновить» — там же, где
-       остальные действия экрана. Редактор при этом принадлежит витрине, поэтому
-       нажатие приходит сюда счётчиком: он меняется на каждое нажатие, и повторно
-       открыть редактор после закрытия можно без сброса флага в родителе. */
+    /* «Новая статья» и заголовок раздела живут в шапке, а состояние, которым они
+       управляют, — здесь. Нажатие приходит счётчиком: он меняется на каждое
+       нажатие, и повторно сработать можно без гашения флага в родителе.
+       Сравниваем со ЗНАЧЕНИЕМ НА МОМЕНТ МОНТИРОВАНИЯ, а не с нулём: вкладка
+       размонтируется при уходе на «Парки», и по возвращении ненулевой счётчик
+       иначе открыл бы редактор сам собой. */
+    const seenTicks = useRef({ create: createTick, home: homeTick });
+
     useEffect(() => {
-        if (createTick > 0) setEditing({});
+        if (createTick === seenTicks.current.create) return;
+        seenTicks.current.create = createTick;
+        setEditing({});
     }, [createTick]);
+
+    /* Возврат на главную витрины: закрываем статью, сбрасываем выбранный раздел
+       и поиск. editing намеренно не в зависимостях — он читается тем значением,
+       какое было в момент нажатия, а в deps заставил бы эффект сбрасывать
+       витрину каждый раз, когда открывают редактор. */
+    useEffect(() => {
+        if (homeTick === seenTicks.current.home) return;
+        seenTicks.current.home = homeTick;
+        // Редактор — единственное состояние, где есть что терять. Портал и так
+        // теряет правки при уходе в другой раздел, но заголовок стоит вплотную
+        // к полям ввода, и промахнуться по нему слишком легко.
+        if (editing && !window.confirm(
+            'Уйти на главную вики? Несохранённые правки статьи пропадут.')) return;
+        setOpenSlug(null);
+        setOpenHighlight(null);
+        setOpenPrefill(null);
+        setEditing(null);
+        setSectionId(null);
+        setQuery('');
+        setFound(null);
+    }, [homeTick]);
 
     /* Обычное открытие из списка — без подсветки: она осмысленна только когда
        известно, по какому слову статью нашли. */

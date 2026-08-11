@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers,
@@ -15,6 +15,7 @@ import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
+import { getScrollContainer } from './scrollContainer';
 import './wiki-theme.css';
 
 /* Раздел «Вики» — корпоративная база знаний.
@@ -80,6 +81,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        во вкладке со статьями. Счётчик, а не флаг: после закрытия редактора его
        не нужно гасить, чтобы кнопка сработала во второй раз. */
     const [createTick, setCreateTick] = useState(0);
+    // Тем же способом заголовок раздела возвращает витрину на главную.
+    const [homeTick, setHomeTick] = useState(0);
+    const rootRef = useRef(null);
 
     const loadPing = useCallback(() => {
         setLoading(true);
@@ -136,8 +140,19 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             .then(() => showToast?.('Обновлено', 'success'));
     };
 
+    /* Заголовок раздела работает как логотип сайта: возвращает на главную вики
+       из статьи, из выбранного раздела и с любой вкладки. Прокрутку сбрасываем
+       сами — скроллится .main-content портала, а не окно (scrollContainer.js). */
+    const goHome = () => {
+        setTab('library');
+        setSearchTarget(null);
+        setHomeTick((n) => n + 1);
+        getScrollContainer(rootRef.current)?.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+
     return (
         <div
+            ref={rootRef}
             className="wiki-scope min-h-full bg-slate-50 px-4 pb-10 pt-[68px] sm:px-6 min-[769px]:pt-8"
             style={{ fontFamily: APPLE_FONT }}
         >
@@ -151,7 +166,19 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 {/* Отступ сверху на мобильном — под фиксированный гамбургер портала
                     (44×44, z-index 60), иначе он накроет заголовок. */}
                 <header className="flex flex-wrap items-center gap-3">
-                    <div className="flex items-center gap-3">
+                    {/* Кликабельный заголовок — не <button>: внутри лежит <h1>, а
+                        заголовок внутри кнопки невалиден и теряется для screen
+                        reader'ов. Поэтому role/tabIndex и клавиши вручную. */}
+                    <div
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Вики: на главную раздела"
+                        onClick={goHome}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goHome(); }
+                        }}
+                        className="-m-1 flex cursor-pointer items-center gap-3 rounded-2xl p-1 transition hover:opacity-75 active:scale-[0.99]"
+                    >
                         <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-indigo-600 text-white shadow-sm">
                             <BookOpen size={21} />
                         </div>
@@ -366,6 +393,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         canEdit={canEdit}
                         canSeeEverything={canManageAccess}
                         createTick={createTick}
+                        homeTick={homeTick}
                         onOpenParks={() => setTab('parks')}
                         initialSlug={initialArticleSlug}
                         onInitialSlugConsumed={onInitialArticleConsumed}
