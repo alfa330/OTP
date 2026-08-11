@@ -13,6 +13,9 @@ tools_find_tdz.cjs
 .claude/worktrees/
 .claude/skills/task-daily-report/
 
+# Служебные файлы macOS (Finder создаёт их сам)
+.DS_Store
+
 # Выгрузки с персональными данными (ФИО/телефоны/записи разговоров) — не в git
 outputs/
 
