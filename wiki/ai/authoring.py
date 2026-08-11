@@ -51,6 +51,14 @@ from ..sanitize import sanitize_html, to_plain_text
 TABLE_TOKEN = '[[ТАБЛИЦА-%d]]'
 _TABLE_TOKEN_RE = re.compile(r'\[{1,2}\s*ТАБЛИЦА[\s-]*(\d+)\s*\]{1,2}', re.I)
 
+# Картинки защищаются ТАК ЖЕ, как таблицы, и по той же причине. Картинка из Word
+# уже загружена в хранилище и получила постоянный адрес /api/wiki/file/<uuid> —
+# воспроизвести его модель не может, а перечислить в ответе могла бы неверно.
+# Без маркера скриншот инструкции исчезал бы молча: файл в бакете лежит и место
+# занимает, а в статье его нет.
+IMAGE_TOKEN = '[[КАРТИНКА-%d]]'
+_IMAGE_TOKEN_RE = re.compile(r'\[{1,2}\s*КАРТИНКА[\s-]*(\d+)\s*\]{1,2}', re.I)
+
 # Теги, которые модели разрешено принести в теле статьи. Список узкий намеренно:
 # из него нельзя собрать ни оформительский мусор, ни вложенные контейнеры.
 _ALLOWED = {
@@ -93,10 +101,11 @@ SYSTEM_PROMPT = """Ты — редактор корпоративной вики
 ЖЁСТКИЕ ПРАВИЛА
 1. Название статьи в тело не дублируй: первым в теле идёт содержание, а не
    заголовок с тем же текстом.
-2. Маркеры вида [[ТАБЛИЦА-1]] — это вырезанные таблицы документа. Перенеси
-   каждый маркер в ответ ДОСЛОВНО, отдельным абзацем, в подходящем по смыслу
-   месте, и добавь перед ним заголовок или строку-подводку. Не пересказывай
-   содержимое таблицы словами, не выдумывай его и не меняй номер маркера.
+2. Маркеры вида [[ТАБЛИЦА-1]] и [[КАРТИНКА-1]] — это вырезанные таблицы и
+   картинки документа. Перенеси каждый маркер в ответ ДОСЛОВНО, отдельным
+   абзацем, в подходящем по смыслу месте, а перед таблицей добавь заголовок или
+   строку-подводку. Не пересказывай содержимое таблицы словами, не выдумывай его
+   и не меняй номера маркеров. Ни один маркер пропасть не должен.
 3. Ни одного числа, которого нет в документе. Не округляй, не пересчитывай, не
    переводи валюту.
 4. Язык статьи — язык документа.
@@ -141,19 +150,30 @@ def _envelope(text):
 
 
 def protect_tables(html):
-    """Вырезает таблицы, ставит маркеры. Возвращает (html, [таблицы]).
+    """Вырезает таблицы и картинки, ставит маркеры.
 
-    Таблица уходит из поля зрения модели целиком — вместе с объединёнными
-    ячейками, которые она почти наверняка потеряла бы (см. шапку).
+    Возвращает (html, [таблицы], [картинки]). Таблица уходит из поля зрения
+    модели целиком — вместе с объединёнными ячейками, которые она почти наверняка
+    потеряла бы (см. шапку); картинка — вместе со своим постоянным адресом.
     """
     soup = BeautifulSoup(str(html or ''), 'html.parser')
-    tables = []
+    tables, images = [], []
     for index, table in enumerate(soup.find_all('table'), start=1):
         tables.append(normalize_table(table))
         marker = soup.new_tag('p')
         marker.string = TABLE_TOKEN % index
         table.replace_with(marker)
-    return str(soup), tables
+    for image in soup.find_all('img'):
+        src = str(image.get('src') or '').strip()
+        if not src:
+            image.decompose()
+            continue
+        alt = str(image.get('alt') or '').strip().replace('"', '')
+        images.append('<img src="%s"%s>' % (src, (' alt="%s"' % alt) if alt else ''))
+        marker = soup.new_tag('p')
+        marker.string = IMAGE_TOKEN % len(images)
+        image.replace_with(marker)
+    return str(soup), tables, images
 
 
 def _table_caption(table_html, limit=120):
@@ -311,15 +331,18 @@ def _squash(text):
     return ' '.join(str(text or '').split()).lower()
 
 
-def restore_tables(html, tables):
-    """Вернуть таблицы на места маркеров. Потерянные — в конец, с предупреждением.
+def restore_tables(html, tables, images=()):
+    """Вернуть таблицы и картинки на места маркеров.
 
-    Возвращает (html, [номера потерянных]). Таблица не теряется НИ ПРИ КАКИХ
-    обстоятельствах: если модель проглотила маркер, таблица уезжает в конец
+    Возвращает (html, [номера потерянных таблиц]). Таблица не теряется НИ ПРИ
+    КАКИХ обстоятельствах: если модель проглотила маркер, таблица уезжает в конец
     статьи под отдельный заголовок. Тихо выбросить данные документа нельзя.
+
+    С картинками то же самое и по той же причине: файл уже лежит в хранилище, и
+    потерянная ссылка оставляет статью без иллюстрации, а бакет — с мусором.
     """
     text = str(html or '')
-    used = set()
+    used, used_images = set(), set()
 
     def substitute(match):
         index = int(match.group(1))
@@ -328,7 +351,15 @@ def restore_tables(html, tables):
             return tables[index - 1]
         return ''            # номер, которого не было — маркер просто убираем
 
+    def substitute_image(match):
+        index = int(match.group(1))
+        if 1 <= index <= len(images):
+            used_images.add(index)
+            return images[index - 1]
+        return ''
+
     text = _TABLE_TOKEN_RE.sub(substitute, text)
+    text = _IMAGE_TOKEN_RE.sub(substitute_image, text)
     # Маркер мог уехать внутрь абзаца — тогда после подстановки остаётся <p>
     # с таблицей внутри. Для браузера это ошибка вложенности, разворачиваем.
     soup = BeautifulSoup(text, 'html.parser')
@@ -345,10 +376,11 @@ def restore_tables(html, tables):
                 parent.decompose()
 
     lost = [i for i in range(1, len(tables) + 1) if i not in used]
-    if lost:
-        tail = ['<h1>Таблицы из документа</h1>']
-        for index in lost:
-            tail.append(tables[index - 1])
+    lost_images = [i for i in range(1, len(images) + 1) if i not in used_images]
+    if lost or lost_images:
+        tail = ['<h1>Из документа, не размещённое по разделам</h1>']
+        tail += [tables[index - 1] for index in lost]
+        tail += ['<p>%s</p>' % images[index - 1] for index in lost_images]
         soup.append(BeautifulSoup(''.join(tail), 'html.parser'))
     return str(soup).strip(), lost
 
@@ -414,13 +446,19 @@ def structure_warnings(*, source_html, source_text, result_html, lost_tables):
     return warnings
 
 
-def build_user_prompt(*, filename, kind, body_html, tables):
+def build_user_prompt(*, filename, kind, body_html, tables, images=()):
     """Запрос к модели по разобранному документу."""
     parts = ['ФАЙЛ: %s (%s)' % (filename or 'без имени', kind or 'документ')]
     hints = table_hints(tables)
     if hints:
         parts.append('ТАБЛИЦЫ, ВЫРЕЗАННЫЕ ИЗ ДОКУМЕНТА (переносить маркерами '
                      'дословно, содержимое не пересказывать):\n' + hints)
+    if images:
+        parts.append('КАРТИНОК В ДОКУМЕНТЕ: %d. Их маркеры (%s) тоже перенеси '
+                     'дословно, каждый на своём месте по смыслу.'
+                     % (len(images),
+                        ', '.join(IMAGE_TOKEN % i
+                                  for i in range(1, len(images) + 1))))
     parts.append('СОДЕРЖИМОЕ ДОКУМЕНТА:\n' + str(body_html or ''))
     return '\n\n'.join(parts)
 
@@ -445,20 +483,20 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
             'ФАЙЛ: %s (%s). Собери из него статью вики по правилам выше.'
             % (filename or 'без имени', kind or 'документ'),
             blob=blob, mime=mime, max_tokens=MAX_OUTPUT_TOKENS)
-        tables = []
+        tables, images = [], []
         protected = ''
     else:
-        protected, tables = protect_tables(source_html)
+        protected, tables, images = protect_tables(source_html)
         text, meta = generate_fn(
             SYSTEM_PROMPT,
             build_user_prompt(filename=filename, kind=kind, body_html=protected,
-                              tables=tables),
+                              tables=tables, images=images),
             max_tokens=MAX_OUTPUT_TOKENS)
 
     title, summary, body = _envelope(text)
     body = canonicalize(body)
     body = drop_leading_title(body, title)
-    body, lost = restore_tables(body, tables)
+    body, lost = restore_tables(body, tables, images)
     clean = sanitize_html(body)
 
     warnings = structure_warnings(

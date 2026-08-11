@@ -31,7 +31,7 @@ DOCX_LIKE = (
 
 class TableProtectionTest(unittest.TestCase):
     def test_table_is_replaced_by_marker(self):
-        html, tables = authoring.protect_tables(DOCX_LIKE)
+        html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         self.assertIn('[[ТАБЛИЦА-1]]', html)
         self.assertNotIn('<table', html)
         self.assertEqual(1, len(tables))
@@ -39,7 +39,7 @@ class TableProtectionTest(unittest.TestCase):
 
     def test_header_row_is_promoted(self):
         """mammoth <th> не даёт — шапку поднимаем сами, иначе индекс без имён полей."""
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         self.assertIn('<th>Парк</th>', tables[0])
         self.assertIn('<th>Комиссия, %</th>', tables[0])
 
@@ -49,21 +49,21 @@ class TableProtectionTest(unittest.TestCase):
         Наивное правило «в шапке нет цифр» на таком заголовке ломается — а он
         типовой: в корпусе колонки называются «Депозит, тг», «Комиссия, %».
         """
-        _html, tables = authoring.protect_tables(
+        _html, tables, _images = authoring.protect_tables(
             '<table><tr><td>Город</td><td>Депозит, тг</td></tr>'
             '<tr><td>Алматы</td><td>5000</td></tr></table>')
         self.assertIn('<th>Депозит, тг</th>', tables[0])
 
     def test_numeric_first_row_is_not_a_header(self):
         """Первая строка из чисел — данные. В выгрузках Excel так бывает."""
-        _html, tables = authoring.protect_tables(
+        _html, tables, _images = authoring.protect_tables(
             '<table><tr><td>2024</td><td>15</td></tr>'
             '<tr><td>2025</td><td>18</td></tr></table>')
         self.assertNotIn('<th>', tables[0])
 
     def test_merged_cells_survive(self):
         """colspan и rowspan — смысл, а не оформление: они обязаны выжить."""
-        _html, tables = authoring.protect_tables(
+        _html, tables, _images = authoring.protect_tables(
             '<table><tr><th rowspan="2">Город</th><th colspan="2">Депозит</th></tr>'
             '<tr><th>пакет</th><th>короб</th></tr>'
             '<tr><td>Алматы</td><td>5000</td><td>12000</td></tr></table>')
@@ -71,7 +71,7 @@ class TableProtectionTest(unittest.TestCase):
         self.assertIn('colspan="2"', tables[0])
 
     def test_presentation_attributes_are_dropped(self):
-        _html, tables = authoring.protect_tables(
+        _html, tables, _images = authoring.protect_tables(
             '<table style="width:600px" class="MsoTable">'
             '<colgroup><col width="200"></colgroup>'
             '<tr><td colwidth="120" style="font-size:8pt">Парк</td>'
@@ -82,11 +82,11 @@ class TableProtectionTest(unittest.TestCase):
         self.assertNotIn('colwidth', tables[0])
 
     def test_lone_paragraph_in_cell_is_unwrapped(self):
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         self.assertNotIn('<p>', tables[0])
 
     def test_hints_describe_each_table(self):
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         hints = authoring.table_hints(tables)
         self.assertIn('[[ТАБЛИЦА-1]]', hints)
         self.assertIn('Парк', hints)
@@ -94,7 +94,7 @@ class TableProtectionTest(unittest.TestCase):
 
 class RestoreTest(unittest.TestCase):
     def test_marker_is_replaced_by_original_table(self):
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         restored, lost = authoring.restore_tables(
             '<h1>Тарифы</h1><p>[[ТАБЛИЦА-1]]</p>', tables)
         self.assertEqual([], lost)
@@ -103,7 +103,7 @@ class RestoreTest(unittest.TestCase):
 
     def test_marker_survives_mangling(self):
         """Модель переставляет пробелы и теряет скобку — токен всё равно узнаём."""
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         for mangled in ('[[ТАБЛИЦА 1]]', '[ТАБЛИЦА-1]', '[[ ТАБЛИЦА-1 ]]'):
             restored, lost = authoring.restore_tables('<p>%s</p>' % mangled, tables)
             self.assertEqual([], lost, mangled)
@@ -115,14 +115,14 @@ class RestoreTest(unittest.TestCase):
         Тихо потерять данные документа нельзя: заметить пропавшую таблицу можно
         только зная, что она была.
         """
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         restored, lost = authoring.restore_tables('<p>Модель забыла маркер</p>', tables)
         self.assertEqual([1], lost)
         self.assertIn('Anytime', restored)
-        self.assertIn('Таблицы из документа', restored)
+        self.assertIn('не размещённое по разделам', restored)
 
     def test_invented_marker_is_dropped(self):
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         restored, _lost = authoring.restore_tables(
             '<p>[[ТАБЛИЦА-1]]</p><p>[[ТАБЛИЦА-7]]</p>', tables)
         self.assertNotIn('ТАБЛИЦА-7', restored)
@@ -133,12 +133,60 @@ class RestoreTest(unittest.TestCase):
         Обход добирается до таблицы только через контейнеры, иначе она попадает в
         индекс потоком значений — «Алматы 5% Астана 7%» вместо «Город: Алматы».
         """
-        _html, tables = authoring.protect_tables(DOCX_LIKE)
+        _html, tables, _images = authoring.protect_tables(DOCX_LIKE)
         for wrapper in ('li', 'blockquote', 'p'):
             restored, _lost = authoring.restore_tables(
                 '<%s>[[ТАБЛИЦА-1]]</%s>' % (wrapper, wrapper), tables)
             self.assertNotIn('<%s><table' % wrapper, restored)
             self.assertIn('<table', restored)
+
+
+class ImageProtectionTest(unittest.TestCase):
+    """Картинки защищены тем же приёмом и по той же причине, что таблицы.
+
+    Картинка из Word уже загружена в хранилище и получила постоянный адрес
+    /api/wiki/file/<uuid>. Модель такой адрес не воспроизведёт, а canonicalize
+    выбрасывает тег img целиком — без маркеров скриншоты инструкции исчезали бы
+    молча: файл в бакете лежит и место занимает, а в статье его нет.
+    """
+
+    WITH_IMAGE = ('<p>До</p><img src="/api/wiki/file/abc" alt="Схема">'
+                  '<p>После</p>')
+
+    def test_image_becomes_a_marker(self):
+        html, _tables, images = authoring.protect_tables(self.WITH_IMAGE)
+        self.assertIn('[[КАРТИНКА-1]]', html)
+        self.assertNotIn('<img', html)
+        self.assertEqual(1, len(images))
+        self.assertIn('/api/wiki/file/abc', images[0])
+
+    def test_alt_is_kept(self):
+        _html, _tables, images = authoring.protect_tables(self.WITH_IMAGE)
+        self.assertIn('alt="Схема"', images[0])
+
+    def test_image_without_src_is_dropped(self):
+        html, _tables, images = authoring.protect_tables('<p>Т</p><img alt="пусто">')
+        self.assertEqual([], images)
+        self.assertNotIn('КАРТИНКА', html)
+
+    def test_image_returns_to_its_marker(self):
+        _html, _tables, images = authoring.protect_tables(self.WITH_IMAGE)
+        restored, _lost = authoring.restore_tables(
+            '<h1>Как сделать</h1><p>[[КАРТИНКА-1]]</p>', [], images)
+        self.assertIn('/api/wiki/file/abc', restored)
+
+    def test_lost_image_is_not_thrown_away(self):
+        _html, _tables, images = authoring.protect_tables(self.WITH_IMAGE)
+        restored, _lost = authoring.restore_tables('<h1>Х</h1><p>Текст</p>', [], images)
+        self.assertIn('/api/wiki/file/abc', restored)
+        self.assertIn('не размещённое по разделам', restored)
+
+    def test_prompt_mentions_image_markers(self):
+        prompt = authoring.build_user_prompt(
+            filename='a.docx', kind='Word', body_html='<p>[[КАРТИНКА-1]]</p>',
+            tables=[], images=['<img src="/api/wiki/file/abc">'])
+        self.assertIn('[[КАРТИНКА-1]]', prompt)
+        self.assertIn('КАРТИНОК В ДОКУМЕНТЕ: 1', prompt)
 
 
 class CanonTest(unittest.TestCase):
