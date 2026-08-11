@@ -223,6 +223,44 @@ class ArticleCreateStatusTest(_RouteHarness, unittest.TestCase):
         self.assertEqual('draft', response.get_json()['status'])
         self.assertEqual([], self.updates)
 
+    def test_saving_refreshes_the_assistant_index(self):
+        """Публикация обязана обновлять индекс помощника — иначе он статьи не видит.
+
+        Именно на этом споткнулся владелец: статья «Реестр акций таксопарка
+        iGroup» была опубликована и входила в периметр помощника, но кусков у неё
+        было ноль — индекс наполнялся только вручную, и со стороны это выглядело
+        как «ИИ игнорирует статью».
+        """
+        from unittest.mock import patch
+
+        from wiki.ai import embed as ai_embed
+        from wiki.ai import index as ai_index
+
+        client = self._client(can_publish=True)
+        with patch.object(ai_index, 'reindex_article',
+                          return_value={'action': 'indexed', 'chunks': 7}) as reindex,              patch.object(ai_embed, 'embed_missing',
+                          return_value={'embedded': 7}) as embed:
+            response = client.post('/api/wiki/articles',
+                                   json={'title': 'Реестр акций', 'status': 'published'})
+        self.assertEqual(1, reindex.call_count)
+        self.assertEqual(1, embed.call_count)
+        self.assertEqual('indexed', response.get_json()['ai_index']['action'])
+
+    def test_index_failure_does_not_lose_the_article(self):
+        """Недоступный эмбеддер не должен стоить человеку правки."""
+        from unittest.mock import patch
+
+        from wiki.ai import index as ai_index
+
+        client = self._client(can_publish=True)
+        with patch.object(ai_index, 'reindex_article',
+                          side_effect=RuntimeError('эмбеддер недоступен')):
+            response = client.post('/api/wiki/articles',
+                                   json={'title': 'Реестр акций', 'status': 'published'})
+        self.assertEqual(201, response.status_code)
+        self.assertEqual('published', response.get_json()['status'])
+        self.assertEqual('failed', response.get_json()['ai_index']['action'])
+
     def test_draft_creation_does_not_touch_status(self):
         client = self._client(can_publish=True)
         response = client.post('/api/wiki/articles', json={'title': 'Реестр акций'})

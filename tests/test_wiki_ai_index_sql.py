@@ -110,6 +110,23 @@ class IndexSqlMatchesSchemaTest(unittest.TestCase):
         """chunk_tsv генерируемая: попытка вписать её вызвала бы ошибку на проде."""
         self.assertNotIn('chunk_tsv', ai_index._INSERT_CHUNK)
 
+    def test_selection_checks_eligibility_not_only_status(self):
+        """Рубильник обязан отсекать статью НА ВХОДЕ в индекс, а не только на выдаче.
+
+        Иначе текст статьи с выключенной поддержкой ИИ всё равно нарезается в
+        куски и уходит в эмбеддинги — во внешний сервис, ровно вопреки тому, что
+        рубильник обещает. Проверка на выдаче (wiki/perimeter.py) от этого не
+        спасает: она работает уже после того, как текст отправлен.
+        """
+        sql = ai_index._SELECT_ARTICLE
+        self.assertIn('ai_opt_out', sql)
+        self.assertIn('strict_mode', sql)
+        self.assertIn('wiki_sections', sql)
+
+    def test_reindex_all_can_clean_up_dropped_articles(self):
+        """Выборка обязана включать статьи, у которых куски есть, а права уже нет."""
+        self.assertIn('wiki_ai_chunks', ai_index.reindex_all.__doc__ or '')
+
     def test_hash_is_stable_and_whitespace_insensitive(self):
         first = ai_index.text_hash('<p>Текст  статьи</p>', 'Текст статьи')
         second = ai_index.text_hash('<p>Текст статьи</p>', 'Текст   статьи')

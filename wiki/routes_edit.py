@@ -12,6 +12,8 @@ from . import access as wiki_access
 from . import articles as wiki_articles
 from . import edit as wiki_edit
 from . import queries
+from .ai import embed as ai_embed
+from .ai import index as ai_index
 from .routes_structure import PERMISSION_FIELDS, _clean, _int_or_none, _slugify
 
 ARTICLE_TYPES = ('general', 'job_description', 'regulation', 'instruction', 'tool_description')
@@ -23,8 +25,45 @@ def _body():
     return request.get_json(silent=True) or {}
 
 
+# Сколько кусков досчитываем векторами прямо в обработчике сохранения. Предел
+# есть, и он важен: эмбеддинги считает внешний сервис, а обработчик всё это
+# время держит соединение из пула на 40, общего с SSE аукциона и колокола.
+# Средняя статья корпуса — 8 кусков, то есть один пакетный вызов на секунду;
+# остаток (после массового импорта) досчитает следующее сохранение или ручной
+# /ai/embed. Лучше слегка отстающий индекс, чем занятый пул.
+_EMBED_ON_SAVE = 32
+
+
 def register(bp, wiki_route, db, log_ip, session_id_provider):
     """session_id_provider — _current_session_id_from_access_token из bot_schedule2."""
+
+    def _sync_ai_index(cursor, article_id):
+        """Обновить индекс помощника под только что сохранённую статью.
+
+        До этого индекс не обновлялся НИКОГДА и наполнялся вручную: владелец
+        опубликовал статью «Реестр акций таксопарка iGroup» — она попала в
+        периметр помощника, но кусков у неё было ноль, и помощник её не видел.
+        Со стороны это выглядит как «ИИ игнорирует статью», хотя дело в том, что
+        её просто нет в индексе.
+
+        Ошибка индексации НЕ роняет сохранение: статья уже записана, и потерять
+        правку из-за недоступного эмбеддера было бы худшим обменом. Помощник
+        подхватит её при следующем сохранении или ручной пересборке.
+        """
+        result = {'action': 'skipped'}
+        try:
+            result = ai_index.reindex_article(cursor, article_id)
+        except Exception as error:                       # noqa: BLE001
+            return {'action': 'failed', 'error': str(error)[:200]}
+        if result.get('action') != 'indexed':
+            return result
+        try:
+            result['embedded'] = ai_embed.embed_missing(
+                cursor, limit=_EMBED_ON_SAVE).get('embedded', 0)
+        except Exception as error:                       # noqa: BLE001
+            # Без векторов помощник ищет лексикой — хуже, но не слепой.
+            result['embed_error'] = str(error)[:200]
+        return result
 
     def _session_id():
         try:
@@ -129,15 +168,19 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             else:
                 status = 'draft'
 
+        indexed = _sync_ai_index(cursor, article_id)
+
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.create',
                            entity_type='article', entity_id=article_id,
                            details={'title': title, 'slug': slug,
-                                    'status': status or 'draft'},
+                                    'status': status or 'draft',
+                                    'ai_index': indexed.get('action')},
                            ip_address=log_ip())
         # Статус возвращается ВСЕГДА: интерфейс должен говорить о том, что
         # получилось, а не о том, что просили.
         return jsonify({"id": article_id, "slug": slug,
-                        "status": status or 'draft'}), 201
+                        "status": status or 'draft',
+                        "ai_index": indexed}), 201
 
     # ── Обновление и архивирование ───────────────────────────────────────
     @wiki_route('/articles/<int:article_id>', methods=('PATCH', 'DELETE'))
@@ -153,6 +196,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                     "code": "WIKI_FORBIDDEN", "required": "can_delete",
                 }), 403
             wiki_edit.delete_article(cursor, article_id)
+            # Снятая с публикации статья не должна кормить ответы помощника.
+            _sync_ai_index(cursor, article_id)
             queries.log_action(cursor, actor_id=ctx['user_id'], action='article.archive',
                                entity_type='article', entity_id=article_id,
                                details={'title': article['title']}, ip_address=log_ip())
@@ -227,12 +272,17 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             from . import ack as wiki_ack
             wiki_ack.supersede_older_versions(cursor, article_id)
 
+        # Индекс трогаем на ЛЮБОЙ правке: текст меняет куски, статус и рубильник
+        # решают, быть им вообще, а разделы — попадает ли статья под отказ раздела.
+        indexed = _sync_ai_index(cursor, article_id)
+
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.update',
                            entity_type='article', entity_id=article_id,
                            details={'fields': sorted(fields.keys()),
-                                    'title': article['title']},
+                                    'title': article['title'],
+                                    'ai_index': indexed.get('action')},
                            ip_address=log_ip())
-        return jsonify({"status": "ok"})
+        return jsonify({"status": "ok", "ai_index": indexed})
 
     # ── Версии ───────────────────────────────────────────────────────────
     @wiki_route('/articles/<int:article_id>/versions')

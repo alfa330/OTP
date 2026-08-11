@@ -17,8 +17,13 @@ import hashlib
 from .chunker import chunk_article
 
 _SELECT_ARTICLE = """
-SELECT status, coalesce(content, ''), coalesce(content_plain, '')
-  FROM wiki_articles WHERE id = %(article_id)s
+SELECT a.status, coalesce(a.content, ''), coalesce(a.content_plain, ''),
+       (a.status = 'published' AND NOT a.strict_mode AND NOT a.ai_opt_out
+        AND NOT EXISTS (SELECT 1
+                          FROM wiki_article_sections s
+                          JOIN wiki_sections sec ON sec.id = s.section_id
+                         WHERE s.article_id = a.id AND sec.ai_opt_out)) AS eligible
+  FROM wiki_articles a WHERE a.id = %(article_id)s
 """
 
 _SELECT_HASH = """
@@ -74,13 +79,19 @@ def reindex_article(cursor, article_id, *, force=False):
     if not row:
         return {'article_id': article_id, 'action': 'missing', 'chunks': 0}
 
-    status, html, plain = row
-    if status != 'published':
+    status, html, plain, eligible = row
+    # ПРИГОДНОСТЬ, а не просто статус. Раньше здесь стояло `status != 'published'`,
+    # и этого мало: рубильник ai_opt_out и строгий режим отсекались только на
+    # выдаче (wiki/perimeter.py), то есть текст такой статьи всё равно нарезался
+    # в куски и уходил в ЭМБЕДДИНГИ — во внешний сервис. А рубильник обещает
+    # ровно обратное. Обещание, которое нарушается там, где этого не видно,
+    # хуже отсутствующего, поэтому проверка теперь стоит и на входе в индекс.
+    if not eligible:
         cursor.execute(_DELETE_CHUNKS, params)
         removed = cursor.rowcount or 0
         cursor.execute(_DELETE_INDEX, params)
         return {'article_id': article_id, 'action': 'removed', 'chunks': 0,
-                'deleted': removed}
+                'deleted': removed, 'status': status}
 
     fresh_hash = text_hash(html, plain)
     if not force:
@@ -110,12 +121,21 @@ def reindex_article(cursor, article_id, *, force=False):
 def reindex_all(cursor, *, force=False):
     """Пересобрать всё, что помощнику вообще позволено читать.
 
-    Берём только опубликованные: периметр помощника всё равно отбрасывает
-    черновики и архив (wiki/perimeter.py), и держать их куски в индексе значило
-    бы платить за текст, который никогда не попадёт в ответ. Плюс чистим куски
-    статей, выпавших из этого набора.
+    Берём опубликованные плюс всё, у чего куски уже есть в wiki_ai_chunks:
+    периметр помощника всё равно отбрасывает черновики и архив
+    (wiki/perimeter.py), и держать их куски в индексе значило бы платить за
+    текст, который никогда не попадёт в ответ. Второе слагаемое нужно для
+    уборки: статья, у которой сняли публикацию или выключили поддержку ИИ,
+    обязана уйти из индекса, а по одному лишь списку опубликованных её уже не
+    найти.
     """
-    cursor.execute("SELECT id FROM wiki_articles WHERE status = 'published' ORDER BY id")
+    # Берём ВСЕ статьи, а не только опубликованные: reindex_article сам решает,
+    # индексировать или вычистить, и статья, у которой только что выключили
+    # рубильник, обязана из индекса уйти.
+    cursor.execute("""SELECT id FROM wiki_articles
+                       WHERE status = 'published'
+                          OR id IN (SELECT article_id FROM wiki_ai_chunks)
+                       ORDER BY id""")
     published = [row[0] for row in cursor.fetchall()]
 
     summary = {'indexed': 0, 'unchanged': 0, 'removed': 0, 'chunks': 0}
