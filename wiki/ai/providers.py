@@ -5,16 +5,20 @@
 попытки на модель, четыре кейса: точный факт, перефразировка, казахский, отказ).
 Каждая исключённая модель исключена по конкретной причине.
 
-ПОРЯДОК (первым — самый быстрый и точный):
-  1. groq:llama-3.3-70b-versatile        0,5-1,1 с. Потолок МИНУТНЫЙ: 12 000
+ПОРЯДОК (первым — самый точный, дальше бесплатный резерв):
+  1. vertex:gemini-3-flash-preview       1,6-4,1 с. ЕДИНСТВЕННАЯ ПЛАТНАЯ, включена
+     владельцем: качество ответа важнее секунды задержки. Считает тот же проект
+     Google Cloud, что уже платит за бакеты и эмбеддинги, — постоплатой.
+  2. groq:llama-3.3-70b-versatile        0,5-1,1 с. Потолок МИНУТНЫЙ: 12 000
      токенов/мин на всю организацию, то есть ~5 вопросов в минуту.
-  2. gemini:gemini-3.5-flash-lite        1,0-2,0 с, «мышления» нет вовсе.
-  3. gemini:gemini-2.5-flash             1,1-3,6 с, мышление гасится и это работает.
-  4. cloudflare:llama-3.3-70b-fp8-fast   1,8-9,6 с. Потолок СУТОЧНЫЙ: 10 000
+  3. gemini:gemini-3.5-flash-lite        1,0-2,0 с, «мышления» нет вовсе.
+  4. gemini:gemini-2.5-flash             1,1-3,6 с, мышление гасится и это работает.
+  5. cloudflare:llama-3.3-70b-fp8-fast   1,8-9,6 с. Потолок СУТОЧНЫЙ: 10 000
      нейронов/день, замерено 75-100 нейронов на вопрос → ~100-130 вопросов.
-  5. cloudflare:mistral-small-3.1-24b    2,8-9,7 с, дешевле по нейронам.
-Минутное и суточное ведра дополняют друг друга: Groq держит всплеск, Cloudflare
-добавляет объём.
+  6. cloudflare:mistral-small-3.1-24b    2,8-9,7 с, дешевле по нейронам.
+Бесплатные остаются резервом и покрывают друг друга по типу лимита: Groq держит
+минутный всплеск, Cloudflare добавляет суточный объём. Вернуться к бесплатной
+цепочке — переменной WIKI_AI_CHAIN, код менять не нужно.
 
 ИСКЛЮЧЕНЫ:
   * openrouter/free (авторутер) — на русский вопрос ответил исковерканным
@@ -41,6 +45,17 @@ import time
 
 # Порядок по умолчанию. Переопределяется WIKI_AI_CHAIN='groq:модель,gemini:модель'.
 _DEFAULT_CHAIN = (
+    # ПЛАТНАЯ и первая. Счёт идёт в тот же проект Google Cloud, которым уже
+    # оплачиваются бакеты и эмбеддинги — постоплатой, без отдельного биллинга.
+    # Замер на боевых вопросах (гашение мышления обязательно, см. _call_vertex):
+    # 1,6-4,1 с, вход ~1630 токенов, выход 22-290. Отвечает заметно лучше
+    # бесплатных: на «а для новичков» перечислила именно новичковые акции с
+    # парками и сроками, на «Офис Астана» дала оба офиса с адресами и графиком,
+    # тогда как бесплатная переспрашивала.
+    # gemini-3.1-pro в цепочку НЕ взята: с погашенным мышлением она осторожничает
+    # до бесполезности — на том же вопросе про новичков ответила «нет информации»,
+    # хотя информация есть. Дороже втрое и хуже.
+    ('vertex', 'gemini-3-flash-preview'),
     ('groq', 'llama-3.3-70b-versatile'),
     ('gemini', 'gemini-3.5-flash-lite'),
     ('gemini', 'gemini-2.5-flash'),
@@ -60,10 +75,6 @@ _THINK_BLOCK = re.compile(
 _ORPHAN_OPEN = re.compile(r'<(think|thinking|reasoning)\b[^>]*>.*\Z', re.S | re.I)
 _LEADING_META = re.compile(r'^\s*(?:User Safety:\s*\w+|Here\'s a thinking process:)\s*',
                            re.I)
-# Markdown: рендерера в проекте нет, ответ рисуется как обычный текст.
-_MD_BOLD = re.compile(r'\*\*(.+?)\*\*', re.S)
-_MD_BULLET = re.compile(r'^[ \t]*[*+-][ \t]+', re.M)
-_MD_HEADING = re.compile(r'^[ \t]*#{1,6}[ \t]+', re.M)
 
 
 class ProviderError(RuntimeError):
@@ -82,18 +93,16 @@ def normalize_answer(text):
     рассуждения прямо в ответ, а авторутер OpenRouter однажды вернул
     «User Safety: safe» вместо текста. Оператор такого видеть не должен.
 
-    Markdown снимается потому, что рендерера его в проекте НЕТ: ответ рисуется
-    как обычный текст (whitespace-pre-wrap), как во всех чатах продукта. Модели
-    поумнее форматируют охотнее — gemini-3-flash отвечает списками с **жирным**, —
-    и без этой чистки оператор видел бы звёздочки как символы. Списки приводятся к
-    единому маркеру, а не выбрасываются: структура ответа полезна.
+    Markdown здесь НЕ трогаем. Сначала я его сглаживал, потому что рендерера в
+    проекте не было и звёздочки доходили до оператора символами. Теперь ответ
+    рисуется полноценно (src/components/ui/markdown.jsx: marked + DOMPurify),
+    включая таблицы — а таблицы в вики главный формат справочных данных: город,
+    цена, срок, парк. Сглаживание такую таблицу разрушало бы ровно там, где она
+    нужнее всего.
     """
     cleaned = _THINK_BLOCK.sub('', str(text or ''))
     cleaned = _ORPHAN_OPEN.sub('', cleaned)
     cleaned = _LEADING_META.sub('', cleaned)
-    cleaned = _MD_BOLD.sub(r'\1', cleaned)
-    cleaned = _MD_BULLET.sub('• ', cleaned)
-    cleaned = _MD_HEADING.sub('', cleaned)
     return cleaned.strip()
 
 
@@ -118,6 +127,9 @@ def available_chain():
         'cloudflare': bool(os.getenv('CLOUDFLARE_WORKER_AI_KEY')
                            and os.getenv('CLOUDFLARE_ACCOUNT_ID')),
         'openrouter': bool(os.getenv('OPEN_ROUTER_API_KEY')),
+        # Vertex ходит сервисным аккаунтом — тем же, что подписывает ссылки на
+        # файлы вики и считает эмбеддинги. Отдельного ключа у него нет.
+        'vertex': bool(os.getenv('GOOGLE_APPLICATION_CREDENTIALS_CONTENT')),
     }
     return tuple((p, m) for p, m in _chain() if keys.get(p))
 
@@ -263,8 +275,99 @@ def _call_gemini(model, system, user, history=()):
     raise last_error or ProviderError('gemini не ответил')
 
 
+# ── Vertex: платные Gemini на счёте, которым уже оплачиваются бакеты ─────────
+#
+# Отдельный провайдер, а не режим 'gemini', потому что различий три: авторизация
+# сервисным аккаунтом вместо ключа, свой адрес и отсутствие бесплатной квоты.
+#
+# Смысл в биллинге. Ключ AI Studio живёт на бесплатном тарифе, и самая умная
+# модель на нём просто недоступна: gemini-3.1-pro-preview отдавал 429 на ПЕРВОМ
+# запросе. Через Vertex тот же сервисный аккаунт, что подписывает ссылки на файлы
+# и считает эмбеддинги, открывает все модели, а расход попадает в общий счёт
+# Google Cloud проекта — постоплатой, вместе с хранилищем. Отдельный биллинг
+# заводить не нужно.
+VERTEX_REGION = os.getenv('WIKI_AI_VERTEX_REGION', 'global')
+
+_vertex_credentials = None
+
+
+def _vertex_token():
+    """Токен сервисного аккаунта. Обновляется сам, поэтому кредентиалы кешируем."""
+    global _vertex_credentials
+
+    if _vertex_credentials is None:
+        from google.oauth2 import service_account
+
+        from call_qa import config as qa_config
+
+        info = qa_config.google_sa_info()
+        if not info:
+            raise ProviderError('нет GOOGLE_APPLICATION_CREDENTIALS_CONTENT',
+                                retryable=False)
+        _vertex_credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/cloud-platform'])
+    if not _vertex_credentials.valid:
+        import google.auth.transport.requests as gtr
+
+        _vertex_credentials.refresh(gtr.Request())
+    return _vertex_credentials.token, _vertex_credentials.project_id
+
+
+def _call_vertex(model, system, user, history=()):
+    token, project = _vertex_token()
+    region = VERTEX_REGION
+    host = ('aiplatform.googleapis.com' if region == 'global'
+            else f'{region}-aiplatform.googleapis.com')
+    url = (f'https://{host}/v1/projects/{project}/locations/{region}'
+           f'/publishers/google/models/{model}:generateContent')
+
+    contents = []
+    for turn in history or ():
+        text = str(turn.get('text') or '').strip()
+        if text:
+            role = 'model' if turn.get('role') == 'assistant' else 'user'
+            contents.append({'role': role, 'parts': [{'text': text}]})
+    contents.append({'role': 'user', 'parts': [{'text': user}]})
+
+    # Гашение «мышления» здесь РАБОТАЕТ, в отличие от ключа AI Studio, где модели
+    # 3.x отвергают thinkingBudget с 400. Замер на Vertex: gemini-3.1-pro без
+    # гашения 7,9 с и 666 токенов мышления, с гашением 2,7 с и ноль; на реальных
+    # вопросах без него модель выжирала весь потолок вывода (2496 из 2500) и
+    # отвечала 17 секунд. Мышление тарифицируется как выход, поэтому это разом и
+    # скорость, и цена. Откат на запрос без параметра — на случай модели, которая
+    # его не примет.
+    payload = {
+        'system_instruction': {'parts': [{'text': system}]},
+        'contents': contents,
+        'generationConfig': {'temperature': 0.1, 'maxOutputTokens': MAX_TOKENS,
+                             'thinkingConfig': {'thinkingBudget': 0}},
+    }
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+    try:
+        body, elapsed = _post(url, payload, headers)
+    except ProviderError as error:
+        if error.status != 400:
+            raise
+        payload['generationConfig'].pop('thinkingConfig', None)
+        body, elapsed = _post(url, payload, headers)
+
+    candidates = body.get('candidates') or []
+    text, finish = '', None
+    if candidates:
+        finish = candidates[0].get('finishReason')
+        for part in ((candidates[0].get('content') or {}).get('parts') or []):
+            if part.get('text'):
+                text += part['text']
+    usage = body.get('usageMetadata') or {}
+    return {'text': text, 'finish': finish, 'elapsed': elapsed,
+            'usage': {'prompt_tokens': usage.get('promptTokenCount'),
+                      'completion_tokens': usage.get('candidatesTokenCount'),
+                      'thoughts_tokens': usage.get('thoughtsTokenCount')}}
+
+
 _ADAPTERS = {'groq': _call_groq, 'gemini': _call_gemini,
-             'cloudflare': _call_cloudflare, 'openrouter': _call_openrouter}
+             'cloudflare': _call_cloudflare, 'openrouter': _call_openrouter,
+             'vertex': _call_vertex}
 
 
 def generate(system, user, *, chain=None, history=()):

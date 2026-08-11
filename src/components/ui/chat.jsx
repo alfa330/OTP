@@ -23,7 +23,8 @@ import { CornerDownLeft, Loader2 } from 'lucide-react';
  */
 
 /** Пузырь сообщения. out=true — своё (справа, синее). */
-export const ChatBubble = ({ out = false, children, meta = null, tone = null }) => {
+export const ChatBubble = ({ out = false, children, meta = null, tone = null,
+                             plain = true }) => {
     const own = out
         ? 'rounded-br-md bg-blue-500 text-white'
         : 'rounded-bl-md bg-white text-slate-900 ring-1 ring-slate-200/60';
@@ -34,8 +35,17 @@ export const ChatBubble = ({ out = false, children, meta = null, tone = null }) 
             : own;
     return (
         <div className={`flex ${out ? 'justify-end' : 'justify-start'} px-4`}>
-            <div className={`max-w-[78%] rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${toned}`}>
-                <div className="whitespace-pre-wrap break-words">{children}</div>
+            {/* Размеченному пузырю дано больше ширины: 78 % — норма для реплики в
+                одну-две строки, но справочная таблица вики это 6-8 колонок (парк,
+                город, комиссия, аренда, депозит, срок, телефон), и на 78 % она
+                уезжает в прокрутку почти всегда. */}
+            <div className={`${plain ? 'max-w-[78%]' : 'max-w-[92%]'} rounded-2xl px-3 py-2 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.05)] ${toned}`}>
+                {/* plain=false — содержимое уже размечено (ответ ИИ рендерится
+                    как markdown). whitespace-pre-wrap там дал бы двойные отступы
+                    между абзацами и сломал бы таблицы. */}
+                <div className={plain ? 'whitespace-pre-wrap break-words' : 'break-words'}>
+                    {children}
+                </div>
                 {meta && (
                     <div className={`mt-1 flex items-center gap-1.5 text-[11px] ${out ? 'text-blue-100' : 'text-slate-400'}`}>
                         {meta}

@@ -10,6 +10,7 @@ import {
 import {
     ChatBubble, ChatComposer, ChatEmpty, useThreadAutoScroll,
 } from '../ui/chat';
+import Markdown from '../ui/markdown';
 import useStableCallback from './useStableCallback';
 
 /* Вкладка «Помощник» — чат по доступным пользователю статьям вики.
@@ -34,8 +35,10 @@ import useStableCallback from './useStableCallback';
  * ответом, а не назвала модель. Клик по чипу открывает статью с подсветкой —
  * плумбинг тот же, что у поиска раздела.
  *
- * Markdown-рендерера в проекте нет и не добавляется: ответ идёт как текст с
- * whitespace-pre-wrap, как в остальных чатах продукта.
+ * ОТВЕТ РЕНДЕРИТСЯ РАЗМЕТКОЙ, включая таблицы (src/components/ui/markdown.jsx).
+ * Таблица — главный формат справочных данных вики: город, цена, срок, парк; в
+ * корпусе их 63, и помощник отвечает такими же. Плоским текстом такая таблица
+ * разрушается ровно там, где она нужнее всего.
  */
 
 const fmtTime = (iso) => {
@@ -367,8 +370,12 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle 
                                                 )}
                                             </>
                                         )}
+                                        plain={false}
                                     >
-                                        {message.text}
+                                        {/* Ответ размечен: списки, выделения и
+                                            ТАБЛИЦЫ — главный формат справочных
+                                            данных вики (город, цена, срок, парк). */}
+                                        <Markdown text={message.text} />
                                     </ChatBubble>
 
                                     {/* Приписка про обязательное ознакомление выводится

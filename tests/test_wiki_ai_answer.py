@@ -259,19 +259,26 @@ class ProvidersTest(unittest.TestCase):
     def test_strips_classifier_artifact(self):
         self.assertEqual('', ai_providers.normalize_answer('User Safety: safe'))
 
-    def test_markdown_is_flattened(self):
-        """Рендерера markdown в проекте нет — звёздочки дошли бы как символы.
+    def test_markdown_is_preserved(self):
+        """Разметка НЕ сглаживается: её рендерит интерфейс, включая таблицы.
 
-        Модели поумнее форматируют охотнее: gemini-3-flash отвечает списками с
-        **жирным**. Структура списка сохраняется, разметка снимается.
+        Сначала я её вырезал — рендерера в проекте не было, и звёздочки доходили
+        до оператора символами. Теперь ответ рисуется через marked + DOMPurify, а
+        таблица это главный формат справочных данных вики (город, цена, срок,
+        парк): сглаживание разрушало бы её ровно там, где она нужнее всего.
         """
-        flat = ai_providers.normalize_answer(
-            '## Условия\n*   **Мото Байга** — для курьеров\n-   Быстрый старт')
-        self.assertNotIn('*', flat)
-        self.assertNotIn('#', flat)
-        self.assertIn('• Мото Байга — для курьеров', flat)
-        self.assertIn('• Быстрый старт', flat)
-        self.assertIn('Условия', flat)
+        table = ('| Город | Комиссия |\n'
+                 '|---|---|\n'
+                 '| Астана | 5% |')
+        kept = ai_providers.normalize_answer('**Тарифы**\n' + table)
+        self.assertIn('**Тарифы**', kept)
+        self.assertIn('| Астана | 5% |', kept)
+        self.assertIn('|---|---|', kept)
+
+    def test_service_blocks_still_stripped(self):
+        """Служебное вырезается по-прежнему — разметка тут ни при чём."""
+        self.assertEqual('Ответ', ai_providers.normalize_answer(
+            '<think>рассуждения</think>Ответ'))
 
     def test_chain_falls_through_on_error_and_empty(self):
         calls = []
