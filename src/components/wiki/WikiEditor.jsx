@@ -155,7 +155,16 @@ export default function WikiEditor({
         request
             .then((r) => {
                 setDirty(false);
-                showToast?.(status === 'published' ? 'Статья опубликована' : 'Сохранено', 'success');
+                // Говорим о том, ЧТО получилось, а не о том, что просили: у
+                // создания статус может не примениться, если нет права
+                // публикации в выбранном разделе.
+                const applied = r.data?.status || status;
+                showToast?.(
+                    applied === 'published' ? 'Статья опубликована'
+                        : status === 'published'
+                            ? 'Сохранено черновиком: нет права публиковать в этом разделе'
+                            : 'Сохранено',
+                    applied !== 'published' && status === 'published' ? 'info' : 'success');
                 onSaved?.(r.data?.slug || article?.slug);
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))

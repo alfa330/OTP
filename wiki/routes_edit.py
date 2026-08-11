@@ -106,11 +106,38 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             ai_opt_out=(not data['ai_support']) if 'ai_support' in data
                        else bool(data.get('ai_opt_out')),
         )
+        # СТАТУС ПРИ СОЗДАНИИ. Раньше он игнорировался молча: create_article
+        # всегда пишет 'draft', а кнопка «Опубликовать» в редакторе присылала
+        # status='published' — статья оставалась черновиком, но интерфейс
+        # рапортовал «Статья опубликована». Ложный успех хуже отказа: человек
+        # уходит уверенным, что дело сделано, и узнаёт правду случайно.
+        #
+        # Публикуем вторым шагом, а не параметром INSERT, ради права: can_publish
+        # считается по ЭФФЕКТИВНЫМ правам на конкретную статью, а их нельзя
+        # посчитать, пока статьи нет.
+        status = data.get('status')
+        if status == 'published':
+            _article, permissions, error = _load_with_permissions(cursor, ctx, article_id)
+            if error:
+                return error
+            if permissions.get('can_publish'):
+                wiki_edit.update_article(
+                    cursor, article_id, {'status': 'published'},
+                    editor_id=ctx['user_id'], session_id=_session_id(),
+                    comment='Публикация при создании')
+                status = 'published'
+            else:
+                status = 'draft'
+
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.create',
                            entity_type='article', entity_id=article_id,
-                           details={'title': title, 'slug': slug},
+                           details={'title': title, 'slug': slug,
+                                    'status': status or 'draft'},
                            ip_address=log_ip())
-        return jsonify({"id": article_id, "slug": slug}), 201
+        # Статус возвращается ВСЕГДА: интерфейс должен говорить о том, что
+        # получилось, а не о том, что просили.
+        return jsonify({"id": article_id, "slug": slug,
+                        "status": status or 'draft'}), 201
 
     # ── Обновление и архивирование ───────────────────────────────────────
     @wiki_route('/articles/<int:article_id>', methods=('PATCH', 'DELETE'))

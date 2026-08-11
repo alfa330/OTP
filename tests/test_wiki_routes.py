@@ -50,8 +50,13 @@ ADMIN_ROLE = {'id': 5, 'code': 'wiki_admin', 'can_read': True, 'can_create': Tru
               'can_manage_structure': True, 'can_manage_access': True}
 
 
-@unittest.skipIf(Flask is None, 'flask не установлен')
-class WikiRouteGuardTest(unittest.TestCase):
+class _RouteHarness:
+    """Поднимает блюпринт вики на подменённом курсоре. Общий для наборов ниже.
+
+    Вынесен из WikiRouteGuardTest намеренно: наследование от чужого TestCase
+    тянет за собой и все его тесты, и они начинают исполняться дважды.
+    """
+
     def build(self, context):
         cursor = MagicMock()
         cursor.fetchone.return_value = None
@@ -81,6 +86,9 @@ class WikiRouteGuardTest(unittest.TestCase):
         app.config['TESTING'] = True
         return app.test_client(), cursor
 
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class WikiRouteGuardTest(_RouteHarness, unittest.TestCase):
     # ── Оператор не должен уметь ничего из управления ────────────────────
     def test_operator_cannot_manage_structure(self):
         client, _ = self.build(make_context('operator'))
@@ -151,6 +159,75 @@ class WikiRouteGuardTest(unittest.TestCase):
         client, _ = self.build(make_context('operator'))
         for url in ('/api/wiki/audit', '/api/wiki/spaces', '/api/wiki/access/section-rules'):
             self.assertEqual(client.options(url).status_code, 204, url)
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class ArticleCreateStatusTest(_RouteHarness, unittest.TestCase):
+    """Создание статьи с публикацией. Раньше статус молча терялся.
+
+    create_article всегда пишет 'draft', а кнопка «Опубликовать» в редакторе
+    присылает status='published' — статья оставалась черновиком, но интерфейс
+    рапортовал «Статья опубликована». Ложный успех хуже отказа: человек уходит
+    уверенным, что дело сделано, и узнаёт правду случайно, как и вышло у
+    владельца со статьёй «Реестр акций».
+    """
+
+    def _client(self, *, can_publish):
+        from unittest.mock import patch
+
+        from wiki import articles as wiki_articles
+        from wiki import edit as wiki_edit
+        from wiki import queries as wiki_queries
+
+        client, _cursor = self.build(make_context('admin', wiki_roles=[ADMIN_ROLE]))
+        self.updates = []
+
+        patches = [
+            patch.object(wiki_edit, 'slug_is_free', return_value=True),
+            patch.object(wiki_edit, 'create_article', return_value=777),
+            patch.object(wiki_edit, 'update_article',
+                         side_effect=lambda _c, aid, fields, **kw:
+                             self.updates.append((aid, dict(fields))) or True),
+            patch.object(wiki_articles, 'visible_article_ids', return_value={777}),
+            patch.object(wiki_articles, 'get_article',
+                         return_value={'id': 777, 'slug': 'reestr', 'title': 'Реестр',
+                                       'visibility_mode': 'inherit', 'strict_mode': False,
+                                       'author_id': 42, 'owner_user_id': None,
+                                       'section_ids': []}),
+            patch.object(wiki_articles, 'article_rules_for_user', return_value={}),
+            patch.object(wiki_articles, 'effective_permissions',
+                         return_value={'can_edit': True, 'can_publish': can_publish}),
+            patch.object(wiki_queries, 'allowed_section_ids', return_value={1}),
+            patch.object(wiki_queries, 'section_rules_for_user', return_value={}),
+            patch.object(wiki_queries, 'log_action', return_value=None),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        return client
+
+    def test_published_request_actually_publishes(self):
+        client = self._client(can_publish=True)
+        response = client.post('/api/wiki/articles',
+                               json={'title': 'Реестр акций', 'status': 'published'})
+        self.assertEqual(201, response.status_code)
+        self.assertEqual('published', response.get_json()['status'])
+        self.assertEqual([(777, {'status': 'published'})], self.updates)
+
+    def test_without_publish_right_stays_draft_and_says_so(self):
+        """Отказ должен быть ВИДЕН: статус в ответе, а не тихий черновик."""
+        client = self._client(can_publish=False)
+        response = client.post('/api/wiki/articles',
+                               json={'title': 'Реестр акций', 'status': 'published'})
+        self.assertEqual(201, response.status_code)
+        self.assertEqual('draft', response.get_json()['status'])
+        self.assertEqual([], self.updates)
+
+    def test_draft_creation_does_not_touch_status(self):
+        client = self._client(can_publish=True)
+        response = client.post('/api/wiki/articles', json={'title': 'Реестр акций'})
+        self.assertEqual('draft', response.get_json()['status'])
+        self.assertEqual([], self.updates)
 
 
 class SlugTest(unittest.TestCase):

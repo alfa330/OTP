@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'rea
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    ArrowLeft, Clock, Eye, Link2, List, Loader2, Star, User,
+    ArrowLeft, Clock, Eye, Link2, List, Loader2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
@@ -96,7 +96,8 @@ const wrapTables = (html) => {
 };
 
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
-                                      highlightTerm = null, classifierPrefill = null }) {
+                                      highlightTerm = null, classifierPrefill = null,
+                                      onEdit = null }) {
     const isClassifier = slug === CLASSIFIER_SLUG;
     const [article, setArticle] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -259,9 +260,23 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
 
     return (
         <div className="space-y-4">
-            <button type="button" className={iosBtnSecondary} onClick={onBack}>
-                <ArrowLeft size={14} /> К списку
-            </button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <button type="button" className={iosBtnSecondary} onClick={onBack}>
+                    <ArrowLeft size={14} /> К списку
+                </button>
+                {/* Правка открывается ОТСЮДА, и до сих пор её здесь не было:
+                    единственным входом в редактор была кнопка «Новая статья»,
+                    то есть существующую статью нельзя было открыть на правку
+                    вообще, даже администратору. Право берём из ответа сервера
+                    (permissions.can_edit), а не из роли: у статьи есть свои
+                    правила доступа, и роль их не описывает. */}
+                {onEdit && article.permissions?.can_edit && (
+                    <button type="button" className={iosBtnSecondary}
+                            onClick={() => onEdit(article)}>
+                        <Pencil size={14} /> Править
+                    </button>
+                )}
+            </div>
 
             {/* Панель ознакомления идёт ПЕРЕД статьёй: требование надо видеть
                 до чтения, а не найти под текстом. */}

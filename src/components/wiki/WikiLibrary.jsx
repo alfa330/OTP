@@ -395,6 +395,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                 classifierPrefill={openPrefill}
                 showToast={showToast}
                 onBack={() => { setOpenSlug(null); setOpenHighlight(null); setOpenPrefill(null); }}
+                /* Статья приходит с сервера целиком (content, разделы, флаги),
+                   поэтому редактору не нужен второй запрос — открываем прямо
+                   на том объекте, который человек сейчас читает. */
+                onEdit={(article) => setEditing(article)}
             />
         );
     }
