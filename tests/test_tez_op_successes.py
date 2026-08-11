@@ -23,7 +23,6 @@ from tez_op_leads import (  # noqa: E402
     REASON_GAP_TOO_SHORT,
     REASON_NO_CALL_AFTER_LAST_ORDER,
     REASON_NO_CALL_BEFORE_TRIP,
-    RULE_CARRIED_OVER,
     RULE_PREV_MONTH_LAST_DAYS,
     RULE_REACTIVATION,
     RULE_SAME_MONTH,
@@ -485,71 +484,54 @@ class ReactivationGapTests(unittest.TestCase):
 
 
 class CarriedOverTests(unittest.TestCase):
-    """Перенос: лид прошлого месяца дорабатывается ещё один месяц.
+    """Перенос лида НЕ расширяет окно звонка (требование владельца).
 
-    Окно звонка у него шире — весь месяц базы, а не только последние 7 дней,
-    — но живёт оно ПЕР-ЛИДОВО и в call_window_for_period не входит: та функция
-    считает ещё зеркало звонков и «Обзвонено», и её расширение задним числом
-    изменило бы цифры закрытых месяцев.
+    Перенесённый лид отличается ровно одним: мы продолжаем спрашивать, выехал ли
+    водитель. Звонок из прошлого месяца засчитывается только из его последних
+    семи дней — как и у обычного лида. Расширение окна на весь месяц базы было
+    моей самодеятельностью и снято.
     """
 
-    def test_call_in_the_middle_of_the_base_month_counts(self):
-        """Звонок 10 июля, поездка 5 августа: обычному лиду — мимо окна,
-        перенесённому — успешка."""
-        calls = [call(dt(2026, 7, 10), operator_id=3)]
-        carried = compute_lead_outcome(dt(2026, 8, 5), None, calls,
-                                       base_period=(2026, 7))
-        self.assertEqual(carried["status"], STATUS_SUCCESS)
-        self.assertEqual(carried["rule"], RULE_CARRIED_OVER)
-        self.assertEqual(carried["operator_id"], 3)
-
-        plain = compute_lead_outcome(dt(2026, 8, 5), None, calls)
-        self.assertEqual(plain["status"], STATUS_NOT_COUNTED)
-        self.assertEqual(plain["rule"], REASON_CALL_BEFORE_WINDOW)
-
-    def test_exactly_one_month_and_no_further(self):
-        """Поездка через ДВА месяца после базы переносом не засчитывается."""
-        out = compute_lead_outcome(dt(2026, 9, 5), None,
-                                   [call(dt(2026, 7, 10), operator_id=3)],
-                                   base_period=(2026, 7))
+    def test_call_in_the_middle_of_the_previous_month_never_counts(self):
+        """Звонок 10 июля, поездка 5 августа -> НЕ успешка, лид перенесён или нет."""
+        out = compute_lead_outcome(dt(2026, 8, 5), None,
+                                   [call(dt(2026, 7, 10), operator_id=3)])
         self.assertEqual(out["status"], STATUS_NOT_COUNTED)
         self.assertEqual(out["rule"], REASON_CALL_BEFORE_WINDOW)
 
-    def test_tail_call_keeps_the_paid_rule_code(self):
-        """Звонок в хвосте месяца базы подходит под ДВА правила. Приоритет
-        фиксирован: код остаётся prev_month_last7, иначе уже выплаченная
-        история переписалась бы новым кодом при первом же пересчёте."""
+    def test_middle_of_month_call_is_rejected_even_for_a_dormant_driver(self):
+        """Разрыв в 30 дней окно не отменяет: водитель год не работал, но звонок
+        из середины прошлого месяца успешку всё равно не даёт."""
         out = compute_lead_outcome(dt(2026, 8, 5), None,
-                                   [call(dt(2026, 7, 28), operator_id=3)],
-                                   base_period=(2026, 7))
+                                   [call(dt(2026, 7, 10), operator_id=3)],
+                                   last_order_before_at=dt(2025, 5, 11),
+                                   reactivation_gap_days=DEFAULT_REACTIVATION_GAP_DAYS)
+        self.assertEqual(out["status"], STATUS_NOT_COUNTED)
+        self.assertEqual(out["rule"], REASON_CALL_BEFORE_WINDOW)
+
+    def test_tail_call_of_the_previous_month_counts(self):
+        """Звонок 28 июля, поездка 5 августа -> успешка: это и есть окно 7 дней,
+        ради которого перенос лида и нужен."""
+        out = compute_lead_outcome(dt(2026, 8, 5), None,
+                                   [call(dt(2026, 7, 28), operator_id=3)])
         self.assertEqual(out["status"], STATUS_SUCCESS)
         self.assertEqual(out["rule"], RULE_PREV_MONTH_LAST_DAYS)
+        self.assertEqual(out["operator_id"], 3)
 
-    def test_same_month_call_still_wins(self):
+    def test_call_in_the_trip_month_counts(self):
+        """Перенесённому лиду позвонили уже в новом месяце — обычная успешка."""
         out = compute_lead_outcome(dt(2026, 8, 20), None,
                                    [call(dt(2026, 7, 10), operator_id=3),
-                                    call(dt(2026, 8, 2), operator_id=4, gid="g2")],
-                                   base_period=(2026, 7))
+                                    call(dt(2026, 8, 2), operator_id=4, gid="g2")])
         self.assertEqual(out["rule"], RULE_SAME_MONTH)
         self.assertEqual(out["operator_id"], 4)
 
-    def test_carry_does_not_bypass_the_gap_rule(self):
-        """Перенос не отменяет проверку разрыва: водитель, ездивший на днях,
-        успешкой не становится, даже если звонок был в месяце базы."""
-        out = compute_lead_outcome(dt(2026, 8, 5), None,
-                                   [call(dt(2026, 7, 10), operator_id=3)],
-                                   last_order_before_at=dt(2026, 7, 30),
-                                   reactivation_gap_days=DEFAULT_REACTIVATION_GAP_DAYS,
-                                   base_period=(2026, 7))
-        self.assertEqual(out["status"], STATUS_ALREADY_WORKING)
-        self.assertEqual(out["rule"], REASON_GAP_TOO_SHORT)
-
-    def test_base_period_none_keeps_old_behaviour(self):
-        """Без base_period расчёт обязан быть дословно прежним — на этом держится
-        неизменность закрытых месяцев."""
-        calls = [call(dt(2026, 7, 10), operator_id=3)]
-        self.assertEqual(compute_lead_outcome(dt(2026, 8, 5), None, calls),
-                         compute_lead_outcome(dt(2026, 8, 5), None, calls, base_period=None))
+    def test_no_base_period_argument_exists(self):
+        """Сторож: окно звонка не должно зависеть от месяца базы лида. Появится
+        такой параметр снова — тест напомнит, что владелец этого не просил."""
+        import inspect
+        params = set(inspect.signature(compute_lead_outcome).parameters)
+        self.assertNotIn("base_period", params)
 
 
 class RulesEffectiveFromTests(unittest.TestCase):

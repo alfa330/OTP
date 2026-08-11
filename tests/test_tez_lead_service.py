@@ -727,15 +727,26 @@ class CarryRecomputeTests(unittest.TestCase):
                 'billsec': 60, 'operator_id': operator_id, 'employee_name': 'Оператор'}
 
     def test_carried_lead_gets_success_in_the_trip_month(self):
-        """Звонок 10 июля, поездка 5 августа -> успешка августа по июльскому лиду."""
+        """Звонок 28 июля (последние 7 дней), поездка 5 августа -> успешка августа
+        по июльскому лиду. Именно за этим перенос и нужен: раньше про такого
+        водителя после 31 июля просто больше не спрашивали."""
         lead = self._carried('L1', datetime(2026, 8, 5, 12, tzinfo=ALMATY_TZ),
-                             [self._call(datetime(2026, 7, 10, 12, tzinfo=ALMATY_TZ))])
+                             [self._call(datetime(2026, 7, 28, 12, tzinfo=ALMATY_TZ))])
         db = FakeDb([lead])
         tez_lead_service.recompute_outcomes(db, 2026, 8)
         item = db.applied[0]
         self.assertEqual(item['status'], 'success')
         self.assertEqual((item['success_year'], item['success_month']), (2026, 8))
         self.assertEqual((item['lead_year'], item['lead_month']), (2026, 7))
+
+    def test_carried_lead_with_a_mid_month_call_is_not_counted(self):
+        """Звонок 10 июля, поездка 5 августа -> НЕ успешка. Перенос продлевает
+        поиск поездки, но окно звонка не расширяет."""
+        lead = self._carried('L1', datetime(2026, 8, 5, 12, tzinfo=ALMATY_TZ),
+                             [self._call(datetime(2026, 7, 10, 12, tzinfo=ALMATY_TZ))])
+        db = FakeDb([lead])
+        tez_lead_service.recompute_outcomes(db, 2026, 8)
+        self.assertEqual(db.applied[0]['status'], 'not_counted')
 
     def test_carried_lead_never_writes_its_own_status(self):
         """Иначе пересчёт месяца базы вернёт всё назад, и статус будет мигать."""

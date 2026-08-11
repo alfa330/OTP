@@ -433,11 +433,12 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
             # её воронке.
             trip_at = lead.get('carry_first_order_at')
             last_before = lead.get('carry_last_order_before_at')
-            base_period = (lead.get('lead_year', year), lead.get('lead_month', month))
         else:
             trip_at = lead['month_first_order_at']
             last_before = lead.get('last_order_before_at')
-            base_period = None
+        # Окно звонка у перенесённого лида ТО ЖЕ, что у обычного: месяц поездки
+        # либо последние 7 дней предыдущего. Перенос продлевает только поиск
+        # поездки, а не право засчитать старый звонок.
         outcome = compute_lead_outcome(
             trip_at,
             lead['prev_month_first_order_at'],
@@ -445,7 +446,6 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
             min_billsec=min_billsec,
             last_order_before_at=last_before,
             reactivation_gap_days=gap_days,
-            base_period=base_period,
         )
         item = {
             'lead_id': lead['id'],
