@@ -71,8 +71,14 @@ class AdjudicationValidationTests(unittest.TestCase):
                   subject_kind="call"):
         # A regression guard: neither the mutable projection nor the current
         # direction/criterion order may participate in adjudication.
+        # Гейт допустимых направлений ходит в БД (_ai_qa_allowed_direction_ids →
+        # config.connect_ro) и к предмету этих тестов не относится. Без заглушки
+        # тесты незаметно подключались к боевой базе там, где креды есть, и падали
+        # там, где их нет (CI: RuntimeError «нет настроек БД»).
         with patch.object(api.runtime_store, "get_adjudication_source",
                           return_value=source or _source()), \
+             patch.object(api, "_ai_qa_allowed_direction_ids",
+                          return_value=[direction_id]), \
              patch.object(api, "_cache_get", side_effect=AssertionError("mutable cache used")), \
              patch.object(api.criteria_mod, "load_direction",
                           side_effect=AssertionError("current scale used")):
