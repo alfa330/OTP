@@ -183,13 +183,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             <BookOpen size={21} />
                         </div>
                         <div>
-                            <h1 className="flex items-center gap-2 text-[22px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
+                            <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
                                 Вики
-                                {canManageAccess && (
-                                    <span className="rounded-md bg-indigo-600 px-1.5 py-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-white">
-                                        Админ
-                                    </span>
-                                )}
                             </h1>
                             <p className="text-[13px] text-slate-500">База знаний компании</p>
                         </div>
