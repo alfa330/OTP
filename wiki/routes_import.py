@@ -120,8 +120,16 @@ def register(bp, wiki_route, db, log_ip, gcs):
         words = re.findall(r'[^\W\d_]{4,}', str(plain or '').lower(), re.UNICODE)
         return list(dict.fromkeys(words))[:40]
 
-    def _duplicates(cursor, ctx, *, title, content, exclude_id=None):
+    def _duplicates(cursor, ctx, *, title, content, exclude_id=None,
+                    allow_vector=True):
         """Есть ли уже такая статья. Пустой ответ — не доказательство отсутствия.
+
+        allow_vector=False — смысловая ветка не считается ВООБЩЕ. Это не
+        оптимизация: вектор считает внешний сервис, то есть текст статьи уходит
+        наружу, а панель обещает ровно обратное, пока флажок «Поддержка ИИ»
+        выключен. Обещание, которое нарушается там, где этого не видно, хуже
+        отсутствующего. По названию и словам текста проверка при этом работает —
+        она целиком у нас в базе.
 
         Вектор считается по названию и НАЧАЛУ текста, а не по всей статье: у
         документа на 17 тысяч знаков (максимум корпуса) вектор целого текста
@@ -133,16 +141,20 @@ def register(bp, wiki_route, db, log_ip, gcs):
         probe = ('%s. %s' % (title or '', plain[:1200])).strip()
 
         vector = None
-        try:
-            vector = ai_embed.embed_query(probe)
-        except Exception:
-            vector = None          # лексика справится и одна, см. wiki/ai/similar.py
+        if allow_vector:
+            try:
+                vector = ai_embed.embed_query(probe)
+            except Exception:
+                vector = None      # лексика справится и одна, см. wiki/ai/similar.py
 
         found = ai_similar.find_duplicates(
             cursor, visible_ids=visible, indexed_ids=indexed,
             title=title, text_words=_document_words(plain), vector=vector,
             exclude_id=exclude_id)
-        found['degraded'] = vector is None
+        # degraded — про сбой эмбеддингов, а не про выключенный флажок: это
+        # разные причины неполноты, и смешивать их значит врать в обеих.
+        found['degraded'] = allow_vector and vector is None
+        found['ai_support'] = bool(allow_vector)
         return found
 
     @wiki_route('/import/ai', methods=('POST',), capability='can_create')
@@ -256,8 +268,10 @@ def register(bp, wiki_route, db, log_ip, gcs):
             exclude = int(exclude) if exclude else None
         except (TypeError, ValueError):
             exclude = None
+        # Флажок выключен — ищем только у себя в базе, наружу ничего не отдаём.
+        allow_vector = str(data.get('ai_support', True)).strip().lower() in _TRUE
         return jsonify(_duplicates(cursor, ctx, title=title, content=content,
-                                   exclude_id=exclude))
+                                   exclude_id=exclude, allow_vector=allow_vector))
 
     # ── Загрузка картинки из редактора ───────────────────────────────────
     @wiki_route('/upload', methods=('POST',), capability='can_create')
