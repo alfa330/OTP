@@ -1,0 +1,68 @@
+name: Тесты
+
+# Репозиторий ведут две машины, обе пушат прямо в main. Без этого прогона сломанный
+# main обнаруживается только когда об него спотыкается второй разработчик.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Системные библиотеки
+        # weasyprint — обёртка над pango/cairo: колесо ставится, а импорт без этих
+        # библиотек падает. Дешевле поставить их всегда, чем ловить красный прогон.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libpango-1.0-0 libpangoft2-1.0-0 libcairo2
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: pytest
+        # Тестам, которым нужна боевая база, она нужна только для чтения, и без
+        # DATABASE_URL они скипаются сами. Красный прогон = регресс в коде, а не сеть.
+        run: python -X utf8 -m pytest tests -q
+
+  node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: node --test
+        # Именно шаблоном в кавычках: `node --test tests/` пытается загрузить
+        # каталог как модуль и падает с MODULE_NOT_FOUND.
+        run: node --test "tests/*.test.mjs"
