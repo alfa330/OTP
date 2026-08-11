@@ -60,6 +60,10 @@ _THINK_BLOCK = re.compile(
 _ORPHAN_OPEN = re.compile(r'<(think|thinking|reasoning)\b[^>]*>.*\Z', re.S | re.I)
 _LEADING_META = re.compile(r'^\s*(?:User Safety:\s*\w+|Here\'s a thinking process:)\s*',
                            re.I)
+# Markdown: рендерера в проекте нет, ответ рисуется как обычный текст.
+_MD_BOLD = re.compile(r'\*\*(.+?)\*\*', re.S)
+_MD_BULLET = re.compile(r'^[ \t]*[*+-][ \t]+', re.M)
+_MD_HEADING = re.compile(r'^[ \t]*#{1,6}[ \t]+', re.M)
 
 
 class ProviderError(RuntimeError):
@@ -72,15 +76,24 @@ class ProviderError(RuntimeError):
 
 
 def normalize_answer(text):
-    """Убрать служебные блоки из текста ответа.
+    """Убрать служебные блоки и разметку из текста ответа.
 
     Нужен не «на всякий случай»: qwen3.6-27b и часть бесплатных моделей пишут
     рассуждения прямо в ответ, а авторутер OpenRouter однажды вернул
     «User Safety: safe» вместо текста. Оператор такого видеть не должен.
+
+    Markdown снимается потому, что рендерера его в проекте НЕТ: ответ рисуется
+    как обычный текст (whitespace-pre-wrap), как во всех чатах продукта. Модели
+    поумнее форматируют охотнее — gemini-3-flash отвечает списками с **жирным**, —
+    и без этой чистки оператор видел бы звёздочки как символы. Списки приводятся к
+    единому маркеру, а не выбрасываются: структура ответа полезна.
     """
     cleaned = _THINK_BLOCK.sub('', str(text or ''))
     cleaned = _ORPHAN_OPEN.sub('', cleaned)
     cleaned = _LEADING_META.sub('', cleaned)
+    cleaned = _MD_BOLD.sub(r'\1', cleaned)
+    cleaned = _MD_BULLET.sub('• ', cleaned)
+    cleaned = _MD_HEADING.sub('', cleaned)
     return cleaned.strip()
 
 

@@ -79,6 +79,18 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual('Просто ответ', body)
         self.assertEqual([], cited)
 
+    def test_inline_marker_is_stripped(self):
+        """Маркер бывает на одной строке с текстом, а не отдельным блоком.
+
+        Замер: gemini-3-flash закончил отказ фразой «…обращаться к руководителю
+        отдела. ИСТОЧНИКИ: [1]». Привязка к началу строки такое не ловила, и
+        служебный маркер уезжал оператору в ответ.
+        """
+        body, cited = ai_answer.split_sources(
+            'Обратитесь к руководителю отдела. ИСТОЧНИКИ: [1]')
+        self.assertEqual('Обратитесь к руководителю отдела.', body)
+        self.assertEqual([1], cited)
+
     def test_excerpt_comes_from_chunk_not_from_model(self):
         text = ('Город: Астана; Адрес: Проспект Сарыарка, 31\n'
                 'Город: Алматы; Адрес: Жамбыла, 172')
@@ -246,6 +258,20 @@ class ProvidersTest(unittest.TestCase):
 
     def test_strips_classifier_artifact(self):
         self.assertEqual('', ai_providers.normalize_answer('User Safety: safe'))
+
+    def test_markdown_is_flattened(self):
+        """Рендерера markdown в проекте нет — звёздочки дошли бы как символы.
+
+        Модели поумнее форматируют охотнее: gemini-3-flash отвечает списками с
+        **жирным**. Структура списка сохраняется, разметка снимается.
+        """
+        flat = ai_providers.normalize_answer(
+            '## Условия\n*   **Мото Байга** — для курьеров\n-   Быстрый старт')
+        self.assertNotIn('*', flat)
+        self.assertNotIn('#', flat)
+        self.assertIn('• Мото Байга — для курьеров', flat)
+        self.assertIn('• Быстрый старт', flat)
+        self.assertIn('Условия', flat)
 
     def test_chain_falls_through_on_error_and_empty(self):
         calls = []
