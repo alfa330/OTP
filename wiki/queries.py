@@ -288,15 +288,19 @@ def counters(cursor):
                (SELECT count(*) FROM wiki_sections WHERE status = 'active'),
                (SELECT count(*) FROM wiki_articles WHERE status = 'published'),
                (SELECT count(*) FROM wiki_articles),
-               (SELECT count(*) FROM wiki_roles)
+               (SELECT count(*) FROM wiki_roles),
+               (SELECT count(*) FROM wiki_articles WHERE status = 'draft')
         """
     )
-    row = cursor.fetchone() or (0, 0, 0, 0, 0)
-    spaces, sections, published, articles, roles = row
+    row = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
+    spaces, sections, published, articles, roles, drafts = row
     return {
         'spaces': spaces,
         'sections': sections,
         'articles_published': published,
         'articles_total': articles,
         'roles': roles,
+        # Черновики — отдельным числом, а не «всего минус опубликованные»:
+        # в разности сидит ещё и архив, а на витрине она подписана «Черновиков».
+        'articles_draft': drafts,
     }

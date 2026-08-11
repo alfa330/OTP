@@ -1,11 +1,13 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    BookOpen, ChevronRight, Clock, Eye, FileText, FolderTree, Loader2,
-    Plus, Search, Star, TrendingUp,
+    BookOpen, Eye, FileText, Loader2, Search, Sparkles, X,
 } from 'lucide-react';
-import { iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosToggle } from '../ui/ios';
+import { iosCard, iosGroupLabel, IosBadge, IosToggle } from '../ui/ios';
 import WikiArticle from './WikiArticle';
+import WikiHome from './WikiHome';
+import WikiIndexPanel from './WikiIndexPanel';
+import WikiParkRail from './WikiParkRail';
 import { markedWord } from './WikiSearch';
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import useStableCallback from './useStableCallback';
@@ -15,12 +17,19 @@ import { selectableSections } from './sectionPicker';
 // редактора, а не при входе в раздел.
 const WikiEditor = lazy(() => import('./WikiEditor'));
 
-/* Библиотека: дерево разделов слева, статьи справа, статья по клику.
+/* Витрина статей — три колонки, как в макете десктопа.
+ *
+ *   рельс парков │ центр: описание, поиск, «про меня» │ оглавление раздела
  *
  * Дерево — внутренняя колонка раздела, а не второй сайдбар приложения. В
  * исходной вике «книжный» сайдбар был фиксированной панелью с z-50 и менял
  * padding КОРНЯ приложения; у нас слева уже стоит сайдбар портала с тем же
  * z-index, и две панели наложились бы друг на друга.
+ *
+ * Разделение обязанностей между колонками: оглавление справа перечисляет ВЕСЬ
+ * периметр и не сужается выбором раздела, а центр показывает текущий выбор —
+ * статьи раздела карточками или выдачу поиска. Если бы обе колонки показывали
+ * один и тот же список, выбор раздела рисовал бы его дважды.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -110,32 +119,10 @@ const SearchHit = ({ article, onOpen }) => (
     </button>
 );
 
-const MiniList = ({ title, icon: Icon, items, onOpen, empty }) => (
-    <section className="space-y-1.5">
-        <div className={`${iosGroupLabel} flex items-center gap-1.5`}>
-            <Icon size={12} /> {title}
-        </div>
-        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-            {items.length === 0 && (
-                <div className="px-4 py-6 text-center text-[12.5px] text-slate-400">{empty}</div>
-            )}
-            {items.map((item) => (
-                <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => onOpen(item.slug)}
-                    className="flex w-full items-center gap-2 px-4 py-2.5 text-left transition hover:bg-slate-50"
-                >
-                    <span className="min-w-0 flex-1 truncate text-[13px] text-slate-800">{item.title}</span>
-                    <ChevronRight size={14} className="shrink-0 text-slate-300" />
-                </button>
-            ))}
-        </div>
-    </section>
-);
-
-export default function WikiLibrary({ base, headers, showToast, structure, canCreate,
-                                      canSeeEverything = false,
+export default function WikiLibrary({ base, headers, showToast, structure, counters,
+                                      canCreate, canEdit = false,
+                                      canSeeEverything = false, createTick = 0,
+                                      onOpenParks,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
@@ -152,14 +139,22 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
     const [editing, setEditing] = useState(null);   // null | {} | статья
     const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
-    const [items, setItems] = useState([]);
+    const [items, setItems] = useState([]);         // статьи выбранного раздела
+    const [index, setIndex] = useState([]);         // весь периметр — для оглавления
+    const [indexLoading, setIndexLoading] = useState(true);
     const [home, setHome] = useState(null);
+    const [homeLoading, setHomeLoading] = useState(true);
+    const [drafts, setDrafts] = useState([]);
+    const [parks, setParks] = useState([]);
+    const [parksCanManage, setParksCanManage] = useState(false);
     const [found, setFound] = useState(null);   // null = поиска не было
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);
     /* «Всё содержимое портала» — только для администратора доступов и только по
        его явному нажатию. По умолчанию раздел показывает личный периметр: то,
        к чему у человека есть отношение по правилам. */
     const [scopeAll, setScopeAll] = useState(false);
+
+    const isEditor = !!(canCreate || canEdit);
 
     /* Статья из уведомления открывается один раз: значение сразу гасится в
        App, иначе следующий заход в раздел снова открывал бы её поверх того,
@@ -182,6 +177,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         consumeSearchTarget();
     }, [searchTarget, consumeSearchTarget]);
 
+    /* «Новая статья» живёт в шапке раздела рядом с «Обновить» — там же, где
+       остальные действия экрана. Редактор при этом принадлежит витрине, поэтому
+       нажатие приходит сюда счётчиком: он меняется на каждое нажатие, и повторно
+       открыть редактор после закрытия можно без сброса флага в родителе. */
+    useEffect(() => {
+        if (createTick > 0) setEditing({});
+    }, [createTick]);
+
     /* Обычное открытие из списка — без подсветки: она осмысленна только когда
        известно, по какому слову статью нашли. */
     const openArticle = useCallback((slug) => {
@@ -202,15 +205,18 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
+    const scopeParams = useMemo(() => (scopeAll ? { scope: 'all' } : {}), [scopeAll]);
 
+    /* Центр: выдача поиска, статьи выбранного раздела — или ничего, когда
+       показываем витрину «про меня». Лишних запросов в третьем случае нет. */
     const load = useCallback(() => {
-        setLoading(true);
         const term = query.trim();
 
         // Короткий ввод — обычный список; от двух символов включается
         // полнотекстовый поиск со сниппетами, как в оригинале.
         if (term.length >= 2) {
-            const params = { q: term, ...(scopeAll ? { scope: 'all' } : {}) };
+            setLoading(true);
+            const params = { q: term, ...scopeParams };
             if (sectionId) params.section_id = sectionId;
             axios.get(`${base}/search`, { headers, params })
                 .then((r) => setFound(r.data?.items || []))
@@ -223,24 +229,60 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         }
 
         setFound(null);
-        const params = scopeAll ? { scope: 'all' } : {};
-        if (sectionId) params.section_id = sectionId;
-        axios.get(`${base}/articles`, { headers, params })
+        if (!sectionId) { setItems([]); return; }
+
+        setLoading(true);
+        axios.get(`${base}/articles`, { headers, params: { section_id: sectionId, ...scopeParams } })
             .then((r) => setItems(r.data?.items || []))
             .catch((e) => toast(errText(e, 'Не удалось загрузить статьи'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, sectionId, query, scopeAll, toast]);
+    }, [base, headers, sectionId, query, scopeParams, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
         return () => clearTimeout(timer);
     }, [load, query]);
 
-    useEffect(() => {
-        axios.get(`${base}/home`, { headers, params: scopeAll ? { scope: 'all' } : {} })
+    /* Оглавление — весь периметр разом. Потолок сервера 200 статей; на большем
+       содержимом список станет длинным, но не обрежется молча: разделы сверху
+       остаются рабочим способом сузить выборку. */
+    const loadIndex = useCallback(() => {
+        setIndexLoading(true);
+        return axios.get(`${base}/articles`, { headers, params: { limit: 200, ...scopeParams } })
+            .then((r) => setIndex(r.data?.items || []))
+            .catch(() => setIndex([]))
+            .finally(() => setIndexLoading(false));
+    }, [base, headers, scopeParams]);
+
+    const loadHome = useCallback(() => {
+        setHomeLoading(true);
+        return axios.get(`${base}/home`, { headers, params: scopeParams })
             .then((r) => setHome(r.data))
-            .catch(() => setHome(null));
-    }, [base, headers, scopeAll]);
+            .catch(() => setHome(null))
+            .finally(() => setHomeLoading(false));
+    }, [base, headers, scopeParams]);
+
+    const loadDrafts = useCallback(() => {
+        if (!isEditor) { setDrafts([]); return Promise.resolve(); }
+        return axios.get(`${base}/articles`, { headers, params: { status: 'draft', limit: 8, ...scopeParams } })
+            .then((r) => setDrafts(r.data?.items || []))
+            .catch(() => setDrafts([]));
+    }, [base, headers, isEditor, scopeParams]);
+
+    useEffect(() => { loadIndex(); }, [loadIndex]);
+    useEffect(() => { loadHome(); }, [loadHome]);
+    useEffect(() => { loadDrafts(); }, [loadDrafts]);
+
+    useEffect(() => {
+        axios.get(`${base}/parks`, { headers })
+            .then((r) => {
+                // Архивные парки сервер отдаёт управляющему справочником —
+                // в рельсе им не место, это витрина «куда звонить сейчас».
+                setParks((r.data?.items || []).filter((p) => p.status === 'active'));
+                setParksCanManage(!!r.data?.can_manage);
+            })
+            .catch(() => setParks([]));
+    }, [base, headers]);
 
     /* В дереве — только разделы своего периметра и только живые. Сервер отдаёт
        и чужие (вкладке «Структура» они нужны), помечая их accessible=false, и
@@ -271,6 +313,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
             .filter(({ rows }) => rows.length > 0);
     }, [spaces, treeSections]);
 
+    const activeSection = useMemo(
+        () => treeSections.find((s) => s.id === sectionId) || null,
+        [treeSections, sectionId],
+    );
+
     /* Выключили «всё содержимое» — выбранный раздел мог оказаться за периметром.
        Сбрасываем фильтр, иначе список молча остался бы пустым. */
     useEffect(() => {
@@ -292,12 +339,25 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
                     article={editing.id ? editing : null}
                     sections={sections}
                     onClose={() => setEditing(null)}
-                    onSaved={(slug) => { setEditing(null); load(); if (slug) setOpenSlug(slug); }}
+                    /* Сохранение меняет и центр, и правую колонку: новая статья
+                       обязана появиться в оглавлении и в черновиках сразу, иначе
+                       после сохранения кажется, что её нет. */
+                    onSaved={(slug) => {
+                        setEditing(null);
+                        load();
+                        loadIndex();
+                        loadDrafts();
+                        loadHome();
+                        if (slug) setOpenSlug(slug);
+                    }}
                 />
             </Suspense>
         );
     }
 
+    /* Статья и редактор занимают всю ширину раздела намеренно: справочные
+       таблицы вики — это шесть колонок и больше (см. ступени ширины в
+       WikiView), и отобранные у них 400px возвращают перенос по буквам. */
     if (openSlug) {
         return (
             <WikiArticle
@@ -312,179 +372,176 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
         );
     }
 
+    const searching = query.trim().length >= 2;
+    /* Между вводом и запросом лежит дебаунс в 250 мс. Без этого условия в
+       окне дебаунса found ещё null, а «идёт загрузка» уже false — и на первые
+       буквы запроса человек успевал увидеть «Ничего не найдено». */
+    const busy = loading || (searching && found === null);
+
     return (
-        <div className="space-y-5">
-            <div className="flex flex-wrap items-center gap-2">
-                <div className="relative min-w-[200px] flex-1">
-                    <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                        className={`${iosInput} pl-10`}
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Поиск по статьям — понимает опечатки и раскладку"
-                    />
-                </div>
-                {canCreate && (
-                    <button type="button" className={iosBtnPrimary} onClick={() => setEditing({})}>
-                        <Plus size={15} /> Новая статья
-                    </button>
-                )}
-            </div>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
+            <WikiParkRail parks={parks} canManage={parksCanManage} onOpenParks={onOpenParks} />
 
-            {/* Администратор доступов по умолчанию видит свой периметр, как все.
-                Всё содержимое портала — по явному нажатию: без него не найти
-                статью, которую попросили починить, а молча показывать чужие
-                отделы и черновики раздел не должен. */}
-            {canSeeEverything && (
-                <div className={`${iosCard} flex items-center gap-3 px-4 py-3`}>
-                    <IosToggle checked={scopeAll} onChange={setScopeAll} />
-                    {/* Подпись — отдельная кнопка, а не <label>: внутри IosToggle
-                        лежит <button>, а его метка не связывается с label. */}
-                    <button
-                        type="button"
-                        onClick={() => setScopeAll(!scopeAll)}
-                        className="min-w-0 flex-1 text-left"
-                    >
-                        <span className="block text-[13.5px] font-medium text-slate-900">
-                            Всё содержимое портала
-                        </span>
-                        <span className="block text-[12px] leading-snug text-slate-500">
-                            Статьи всех отделов, включая черновики и архив. Обычно
-                            здесь только то, к чему у вас есть доступ.
-                        </span>
-                    </button>
-                </div>
-            )}
+            <div className="flex min-w-0 flex-1 flex-col gap-3">
+                {/* Обложка витрины: где человек находится и одно поле, с которого
+                    начинается почти любой заход в базу знаний. */}
+                <section className={`${iosCard} px-5 py-6 text-center sm:px-8`}>
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-[10.5px] font-bold text-indigo-600">
+                        <Sparkles size={11} />
+                        {activeSection ? 'Раздел базы знаний' : isEditor ? 'Режим редактора' : 'База знаний компании'}
+                    </span>
 
-            <div className="flex flex-col gap-5 lg:flex-row">
-                {/* Дерево разделов — внутренняя колонка, а не второй сайдбар портала. */}
-                {tree.length > 0 && (
-                    <nav className="lg:w-60 lg:shrink-0">
-                        <div className={`${iosGroupLabel} mb-1.5 flex items-center gap-1.5`}>
-                            <FolderTree size={12} /> Разделы
-                        </div>
-                        <div className={`${iosCard} overflow-hidden`}>
+                    <h2 className="mx-auto mt-2.5 max-w-[520px] text-[26px] font-bold leading-[1.1] tracking-[-0.03em] text-slate-900 sm:text-[30px]">
+                        {activeSection
+                            ? activeSection.name
+                            : <>Все статьи вики<br className="hidden sm:block" /> в одном месте.</>}
+                    </h2>
+
+                    <p className="mx-auto mt-2 max-w-[500px] text-[12.5px] leading-relaxed text-slate-500">
+                        {activeSection
+                            ? (activeSection.description
+                                || 'Статьи раздела — ниже. Всё оглавление базы знаний остаётся справа.')
+                            : isEditor
+                                ? 'Статьи, разделы и парки: черновики, доступы и порядок публикаций — на одном экране.'
+                                : 'Поиск по содержимому статей, разделы по отделам и материалы таксопарков — без переходов между сервисами.'}
+                    </p>
+
+                    <div className="mx-auto mt-4 flex max-w-[560px] items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70">
+                        <Search size={16} className="shrink-0 text-slate-400" />
+                        <input
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            placeholder="Поиск по статьям — понимает опечатки и раскладку"
+                            className="w-full min-w-0 bg-transparent text-[13px] text-slate-900 placeholder-slate-400 focus:outline-none"
+                        />
+                        {query && (
                             <button
                                 type="button"
-                                onClick={() => setSectionId(null)}
-                                className={`w-full px-3.5 py-2 text-left text-[13px] transition hover:bg-slate-50 ${
-                                    !sectionId ? 'bg-blue-50 font-medium text-blue-700' : 'text-slate-700'
-                                }`}
+                                onClick={() => setQuery('')}
+                                aria-label="Очистить поиск"
+                                className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-200 text-slate-500 transition hover:bg-slate-300"
                             >
-                                Все статьи
+                                <X size={11} />
                             </button>
-                            {tree.map(({ space, rows }) => (
-                                <div key={space.id} className="border-t border-slate-100">
-                                    <div className="px-3.5 pb-1 pt-2.5 text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
-                                        {space.name}
-                                    </div>
-                                    {rows.map(({ section, depth }) => (
-                                        <button
-                                            key={section.id}
-                                            type="button"
-                                            onClick={() => setSectionId(section.id)}
-                                            className={`flex w-full items-center gap-1.5 py-2 pr-3 text-left text-[13px] transition hover:bg-slate-50 ${
-                                                sectionId === section.id
-                                                    ? 'bg-blue-50 font-medium text-blue-700'
-                                                    : 'text-slate-700'
-                                            }`}
-                                            style={{ paddingLeft: `${14 + depth * 14}px` }}
-                                        >
-                                            <span className="min-w-0 flex-1 truncate">{section.name}</span>
-                                            {/* Счётчик — по видимым статьям, а не по всем:
-                                                цифра рядом с названием обязана совпадать
-                                                с тем, что откроется по клику. */}
-                                            {(scopeAll ? section.articles_count : section.readable_count) > 0 && (
-                                                <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
-                                                    {scopeAll ? section.articles_count : section.readable_count}
-                                                </span>
-                                            )}
-                                        </button>
-                                    ))}
-                                </div>
-                            ))}
-                        </div>
-                    </nav>
+                        )}
+                    </div>
+
+                    {activeSection && (
+                        <button
+                            type="button"
+                            onClick={() => setSectionId(null)}
+                            className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[11.5px] font-medium text-slate-600 transition hover:bg-slate-200"
+                        >
+                            <X size={11} /> Показать всю базу знаний
+                        </button>
+                    )}
+                </section>
+
+                {/* Администратор доступов по умолчанию видит свой периметр, как все.
+                    Всё содержимое портала — по явному нажатию: без него не найти
+                    статью, которую попросили починить, а молча показывать чужие
+                    отделы и черновики раздел не должен. */}
+                {canSeeEverything && (
+                    <div className={`${iosCard} flex items-center gap-3 px-4 py-3`}>
+                        <IosToggle checked={scopeAll} onChange={setScopeAll} />
+                        {/* Подпись — отдельная кнопка, а не <label>: внутри IosToggle
+                            лежит <button>, а его метка не связывается с label. */}
+                        <button
+                            type="button"
+                            onClick={() => setScopeAll(!scopeAll)}
+                            className="min-w-0 flex-1 text-left"
+                        >
+                            <span className="block text-[13.5px] font-medium text-slate-900">
+                                Всё содержимое портала
+                            </span>
+                            <span className="block text-[12px] leading-snug text-slate-500">
+                                Статьи всех отделов, включая черновики и архив. Обычно
+                                здесь только то, к чему у вас есть доступ.
+                            </span>
+                        </button>
+                    </div>
                 )}
 
-                <div className="min-w-0 flex-1 space-y-5">
-                    {loading && (
-                        <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-slate-400`}>
-                            <Loader2 size={16} className="animate-spin" />
-                            <span className="text-[13px]">Загружаем…</span>
+                {busy && (
+                    <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-slate-400`}>
+                        <Loader2 size={16} className="animate-spin" />
+                        <span className="text-[13px]">Загружаем…</span>
+                    </div>
+                )}
+
+                {!busy && searching && (
+                    found.length > 0 ? (
+                        <div className="space-y-2.5">
+                            <div className={iosGroupLabel}>Найдено: {found.length}</div>
+                            {found.map((article) => (
+                                <SearchHit key={article.id} article={article}
+                                           onOpen={() => openHit(article)} />
+                            ))}
                         </div>
-                    )}
-
-                    {!loading && found !== null && (
-                        found.length > 0 ? (
-                            <div className="space-y-3">
-                                <div className={iosGroupLabel}>
-                                    Найдено: {found.length}
-                                </div>
-                                {found.map((article) => (
-                                    <SearchHit key={article.id} article={article}
-                                               onOpen={() => openHit(article)} />
-                                ))}
-                            </div>
-                        ) : (
-                            <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
-                                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
-                                    <Search size={22} />
-                                </div>
-                                <div className="text-[15px] font-semibold text-slate-900">Ничего не найдено</div>
-                                <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
-                                    Поиск понимает опечатки, латиницу и забытую раскладку —
-                                    попробуйте другое слово.
-                                </p>
-                            </div>
-                        )
-                    )}
-
-                    {!loading && found === null && items.length === 0 && (
+                    ) : (
                         <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                             <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
-                                <BookOpen size={22} />
+                                <Search size={22} />
                             </div>
-                            <div className="text-[15px] font-semibold text-slate-900">
-                                {query ? 'Ничего не найдено' : 'Здесь пока пусто'}
-                            </div>
+                            <div className="text-[15px] font-semibold text-slate-900">Ничего не найдено</div>
                             <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
-                                {query
-                                    ? 'Попробуйте изменить запрос. Полнотекстовый поиск по содержимому появится на следующем этапе.'
-                                    : 'Статьи появятся после переноса содержимого.'}
+                                Поиск понимает опечатки, латиницу и забытую раскладку —
+                                попробуйте другое слово.
                             </p>
                         </div>
-                    )}
+                    )
+                )}
 
-                    {!loading && found === null && items.length > 0 && (
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {!busy && !searching && activeSection && (
+                    items.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
                             {items.map((article) => (
                                 <ArticleCard key={article.id} article={article} onOpen={openArticle} />
                             ))}
                         </div>
-                    )}
-
-                    {!query && home && (
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                            <MiniList
-                                title="Избранное" icon={Star}
-                                items={home.favorites || []} onOpen={openArticle}
-                                empty="Пусто"
-                            />
-                            <MiniList
-                                title="Недавнее" icon={Clock}
-                                items={home.recent || []} onOpen={openArticle}
-                                empty="Пока не читали"
-                            />
-                            <MiniList
-                                title="Популярное" icon={TrendingUp}
-                                items={home.popular || []} onOpen={openArticle}
-                                empty="Пусто"
-                            />
+                    ) : (
+                        <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
+                            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                                <BookOpen size={22} />
+                            </div>
+                            <div className="text-[15px] font-semibold text-slate-900">В разделе пока пусто</div>
+                            <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
+                                Статьи появятся здесь после публикации.
+                            </p>
                         </div>
-                    )}
-                </div>
+                    )
+                )}
+
+                {/* Пока /home не ответил, витрину «про меня» не рисуем пустыми
+                    полками: «Пусто» и «Пока ничего не читали» — это утверждения,
+                    и до ответа сервера они неправда. */}
+                {!busy && !searching && !activeSection && (
+                    homeLoading ? (
+                        <div className={`${iosCard} h-[220px] overflow-hidden`}>
+                            <div className="sk-shimmer h-full w-full" />
+                        </div>
+                    ) : (
+                        <WikiHome
+                            isEditor={isEditor}
+                            counters={counters}
+                            parksCount={parks.length}
+                            drafts={drafts}
+                            home={home}
+                            onOpen={openArticle}
+                        />
+                    )
+                )}
             </div>
+
+            <WikiIndexPanel
+                tree={tree}
+                sectionId={sectionId}
+                onSection={setSectionId}
+                articles={index}
+                onOpen={openArticle}
+                loading={indexLoading}
+                scopeAll={scopeAll}
+            />
         </div>
     );
 }

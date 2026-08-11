@@ -2,10 +2,10 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from
 import axios from 'axios';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers,
-    Building2, Loader2, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
+    Building2, Loader2, Plus, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
-    APPLE_FONT, iosCard, iosGroupLabel, iosBtnSecondary, IosBadge,
+    APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import WikiLibrary from './WikiLibrary';
 import WikiParks from './WikiParks';
@@ -76,6 +76,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [structureLoading, setStructureLoading] = useState(true);
     const [tab, setTab] = useState('library');
     const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight}
+    /* Счётчик нажатий «Новая статья»: кнопка живёт в шапке раздела, редактор —
+       во вкладке со статьями. Счётчик, а не флаг: после закрытия редактора его
+       не нужно гасить, чтобы кнопка сработала во второй раз. */
+    const [createTick, setCreateTick] = useState(0);
 
     const loadPing = useCallback(() => {
         setLoading(true);
@@ -101,6 +105,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const subjects = state?.subjects || {};
     const canManageStructure = !!(capabilities.can_manage_structure || capabilities.can_manage_access);
     const canManageAccess = !!capabilities.can_manage_access;
+    const canEdit = !!(capabilities.can_edit || capabilities.can_publish);
 
     const tabs = useMemo(() => ([
         { key: 'library', label: 'Статьи', icon: BookOpen, show: true },
@@ -138,44 +143,66 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         >
             {/* Ширина растёт со экраном: на 5xl (1024px) справочная таблица из
                 шести колонок уже не помещалась и схлопывалась. Ступени, а не
-                «во всю ширину»: строка текста длиной в монитор нечитаема. */}
+                «во всю ширину»: строка текста длиной в монитор нечитаема.
+                Витрине статей эти же ступени дают три колонки: рельс парков,
+                центр и оглавление. */}
             <div className="mx-auto w-full max-w-5xl space-y-5 xl:max-w-6xl 2xl:max-w-[88rem]">
 
                 {/* Отступ сверху на мобильном — под фиксированный гамбургер портала
                     (44×44, z-index 60), иначе он накроет заголовок. */}
-                <header className="flex flex-wrap items-center justify-between gap-3">
+                <header className="flex flex-wrap items-center gap-3">
                     <div className="flex items-center gap-3">
                         <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-indigo-600 text-white shadow-sm">
                             <BookOpen size={21} />
                         </div>
                         <div>
-                            <h1 className="text-[22px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
+                            <h1 className="flex items-center gap-2 text-[22px] font-semibold leading-tight tracking-[-0.01em] text-slate-900">
                                 Вики
+                                {canManageAccess && (
+                                    <span className="rounded-md bg-indigo-600 px-1.5 py-1 text-[8.5px] font-bold uppercase tracking-[0.08em] text-white">
+                                        Админ
+                                    </span>
+                                )}
                             </h1>
                             <p className="text-[13px] text-slate-500">База знаний компании</p>
                         </div>
                     </div>
 
-                    {/* Поиск живёт прямо в шапке: поле растёт при фокусе, выдача
-                        выпадает под ним. Так он доступен с любой вкладки раздела. */}
-                    <WikiSearch
-                        base={base}
-                        headers={headers}
-                        onOpenArticle={(slug, highlight) => {
-                            setTab('library');
-                            setSearchTarget({ slug, highlight });
-                        }}
-                        onOpenClassifier={(prefill) => {
-                            // Классификатор — теперь статья этой же вики,
-                            // поэтому никуда из раздела не уходим.
-                            setTab('library');
-                            setSearchTarget({ slug: CLASSIFIER_SLUG, prefill });
-                        }}
-                    />
+                    <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+                        {/* Поиск живёт прямо в шапке: поле растёт при фокусе, выдача
+                            выпадает под ним. Так он доступен с любой вкладки раздела. */}
+                        <WikiSearch
+                            base={base}
+                            headers={headers}
+                            onOpenArticle={(slug, highlight) => {
+                                setTab('library');
+                                setSearchTarget({ slug, highlight });
+                            }}
+                            onOpenClassifier={(prefill) => {
+                                // Классификатор — теперь статья этой же вики,
+                                // поэтому никуда из раздела не уходим.
+                                setTab('library');
+                                setSearchTarget({ slug: CLASSIFIER_SLUG, prefill });
+                            }}
+                        />
 
-                    <button type="button" onClick={refresh} className={iosBtnSecondary}>
-                        <RefreshCw size={15} /> Обновить
-                    </button>
+                        <button type="button" onClick={refresh} className={iosBtnSecondary}>
+                            <RefreshCw size={15} /> Обновить
+                        </button>
+
+                        {/* Действие вкладки со статьями — в шапке рядом с «Обновить»,
+                            как в макете. На других вкладках его быть не должно:
+                            редактор принадлежит витрине статей. */}
+                        {tab === 'library' && capabilities.can_create && (
+                            <button
+                                type="button"
+                                onClick={() => setCreateTick((n) => n + 1)}
+                                className={iosBtnPrimary}
+                            >
+                                <Plus size={15} /> Новая статья
+                            </button>
+                        )}
+                    </div>
                 </header>
 
 
@@ -334,8 +361,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         headers={headers}
                         showToast={showToast}
                         structure={structure}
+                        counters={counters}
                         canCreate={!!capabilities.can_create}
+                        canEdit={canEdit}
                         canSeeEverything={canManageAccess}
+                        createTick={createTick}
+                        onOpenParks={() => setTab('parks')}
                         initialSlug={initialArticleSlug}
                         onInitialSlugConsumed={onInitialArticleConsumed}
                         searchTarget={searchTarget}
