@@ -1,0 +1,28 @@
+# Общие правила редактора для обеих машин (Windows + macOS).
+# Осознанно НЕ включены trim_trailing_whitespace и insert_final_newline:
+# в монолитах (src/App.jsx, database.py, bot_schedule2.py) 470–630 строк с
+# хвостовыми пробелами, и любая автоправка «по всему файлу» даёт диф на
+# десятки тысяч строк, после которого rebase между машинами конфликтует целиком.
+root = true
+
+[*]
+charset = utf-8
+indent_style = space
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+[*.py]
+indent_size = 4
+
+[*.{js,jsx,mjs,cjs,ts,tsx,json,css,html}]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.sh]
+indent_size = 2
+end_of_line = lf
+
+[*.md]
+indent_size = 2

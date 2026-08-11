@@ -32,7 +32,10 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        # Именно ci, а не install: install правит package-lock.json на бегу, и при
+        # двух машинах лок начинает дрейфовать и конфликтовать на пустом месте.
+        # ci ставит строго по локу и падает, если лок разошёлся с package.json.
+        run: npm ci
 
       - name: Build
         run: npm run build

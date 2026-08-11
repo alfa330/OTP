@@ -1,0 +1,32 @@
+# Единая истина по переносам строк: в индексе всегда LF.
+# Рабочую копию не форсим — Git for Windows держит core.autocrlf=true (системный
+# уровень) и отдаёт CRLF на диск, macOS отдаёт LF. Обе машины при этом коммитят LF.
+# Без этого файла достаточно одной перенастроенной машины, чтобы 50-тысячный
+# монолит уехал в CRLF одним дифом на весь файл.
+* text=auto
+
+# Скрипты исполняет Linux на Render: CRLF ломает shebang («\r: command not found»).
+*.sh text eol=lf
+
+# Бинарники — без нормализации и без попыток слить содержимое.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.svgz binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.xlsx binary
+*.xls binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.m4a binary
