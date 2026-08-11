@@ -536,11 +536,39 @@ class FirstOrdersContractTests(unittest.TestCase):
         self.assertEqual(row['month'].day, 3)
         self.assertEqual(row['prev'].day, 20)
 
+    def test_parses_last_order_before_at(self):
+        """Контракт от 11.08.2026: вместо первого заказа прошлого месяца приходит
+        последний заказ до начала запрошенного — на нём держится правило разрыва."""
+        payload = {'drivers': [{
+            'phone': '+77000000101',
+            'month_first_order_at': '2026-08-08T09:52:05+05:00',
+            'last_order_before_at': '2026-06-19T10:20:27+05:00',
+        }]}
+        client, _ = self._client_with_capture(payload)
+        row = client.fetch_first_orders(['77000000101'], month='2026-08')['77000000101']
+        self.assertEqual(row['month'].day, 8)
+        self.assertEqual((row['last_before'].month, row['last_before'].day), (6, 19))
+        self.assertIsNone(row['prev'])
+
+    def test_contract_loss_is_logged_not_swallowed(self):
+        """Пропажа last_order_before_at не даёт ни ошибки, ни пустого ответа —
+        успешки уснувшим просто перестанут начисляться. Ровно так 11.08.2026
+        незаметно исчезло previous_month_first_order_at."""
+        payload = {'drivers': [{
+            'phone': '+77000000101',
+            'month_first_order_at': '2026-08-08T09:52:05+05:00',
+        }]}
+        client, _ = self._client_with_capture(payload)
+        with self.assertLogs('tez_first_orders', level='WARNING') as logs:
+            client.fetch_first_orders(['77000000101'], month='2026-08')
+        self.assertTrue(any('last_order_before_at' in line for line in logs.output))
+
     def test_missing_driver_marked_checked(self):
         """Номер, которого нет в ответе, всё равно помечается проверенным."""
         client, _ = self._client_with_capture({'drivers': []})
         res = client.fetch_first_orders(['77000000101'], month='2026-07')
-        self.assertEqual(res['77000000101'], {'month': None, 'prev': None})
+        self.assertEqual(res['77000000101'],
+                         {'month': None, 'prev': None, 'last_before': None})
 
     def test_bad_number_does_not_sink_whole_batch(self):
         """400 из-за одного битого номера не должен терять остальные из батча:

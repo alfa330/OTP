@@ -38,6 +38,7 @@ from tez_op_leads import (
     call_window_for_period,
     compute_lead_outcome,
     normalize_kz_phone,
+    reactivation_gap_for_period,
 )
 
 log = logging.getLogger(__name__)
@@ -399,6 +400,10 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
         for call in lead['calls']:
             names_by_call[call.get('general_call_id')] = call.get('employee_name') or ''
 
+    # Рубеж вступления новых правил в силу: закрытые месяцы считаются прежней
+    # веткой, иначе пересчёт июля переписал бы уже выплаченное.
+    gap_days = reactivation_gap_for_period(year, month)
+
     outcomes = []
     for lead in leads:
         outcome = compute_lead_outcome(
@@ -406,6 +411,8 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
             lead['prev_month_first_order_at'],
             lead['calls'],
             min_billsec=min_billsec,
+            last_order_before_at=lead.get('last_order_before_at'),
+            reactivation_gap_days=gap_days,
         )
         item = {
             'lead_id': lead['id'],

@@ -4,8 +4,21 @@
   - авторизация: заголовок X-Integration-Token (JWT/X-Admin-Token не нужны)
   - тело: {"month": "YYYY-MM", "drivers": [{"full_name": ..., "phone": "+7701..."}]}
   - ответ: {"drivers": [{..., "month_first_order_at": ...|null,
-                              "previous_month_first_order_at": ...|null}]}
+                              "last_order_before_at": ...|null}]}
   - лимит: от 1 до 100 водителей в одном запросе
+
+СМЕНА КОНТРАКТА 11.08.2026 (проверено на живом API). Поле
+`previous_month_first_order_at` из ответа УБРАНО, вместо него приходит
+`last_order_before_at` — дата последнего завершённого заказа строго ДО 1-го
+числа запрошенного месяца (null, если заказов не было вовсе). Проверено на
+боевых номерах: month=2026-07 отдаёт последний заказ 30 июня, month=2026-08 по
+тому же водителю — последний заказ июля.
+
+Это ровно то, что нужно правилу «реактивации»: разрыв между последним и новым
+заказом считается как month_first_order_at − last_order_before_at. Старое поле
+показывало ПЕРВЫЙ заказ прошлого месяца, и разрыв по нему считался неверно.
+Старые периоды продолжают считаться по сохранённому в БД prev, поэтому парсер
+принимает оба поля: что пришло, то и отдаём (см. tez_op_leads.compute_lead_outcome).
 
 ВАЖНО (проверено на живом API):
   1. Поиск идёт ИСКЛЮЧИТЕЛЬНО по телефону. `full_name` сервер не валидирует и
@@ -229,7 +242,8 @@ class TezFirstOrdersClient:
         full_names — необязательный dict phone_norm -> ФИО (API его не проверяет,
         но с ним удобнее читать сырые ответы при разборе спорных случаев).
 
-        Возвращает dict phone_norm -> {'month': datetime|None, 'prev': datetime|None}.
+        Возвращает dict phone_norm -> {'month': datetime|None,
+        'prev': datetime|None, 'last_before': datetime|None}.
         Невалидные номера в результат не попадают — их отдаёт свойство
         `.last_invalid`.
         """
@@ -252,6 +266,7 @@ class TezFirstOrdersClient:
         names = full_names or {}
         out = {}
         rejected = []
+        seen_fields = set()
         total = len(normalized)
 
         def _fetch_chunk(chunk):
@@ -273,16 +288,21 @@ class TezFirstOrdersClient:
                 _fetch_chunk(chunk[mid:])
                 return
             for row in rows:
+                seen_fields.update(row.keys())
                 norm = normalize_kz_phone(row.get("phone"))
                 if norm:
                     out[norm] = {
                         "month": parse_first_order_at(row.get("month_first_order_at")),
+                        # Поле убрано из контракта 11.08.2026, но старые периоды
+                        # считаются по сохранённому значению — если вернётся,
+                        # примем; если нет, БД своё не затирает (COALESCE).
                         "prev": parse_first_order_at(row.get("previous_month_first_order_at")),
+                        "last_before": parse_first_order_at(row.get("last_order_before_at")),
                     }
             # Номера, которых почему-то не оказалось в ответе, тоже помечаем
             # проверенными — иначе они будут переспрашиваться каждую ночь.
             for p in chunk:
-                out.setdefault(p, {"month": None, "prev": None})
+                out.setdefault(p, {"month": None, "prev": None, "last_before": None})
 
         for start in range(0, total, MAX_BATCH_SIZE):
             chunk = normalized[start:start + MAX_BATCH_SIZE]
@@ -292,6 +312,19 @@ class TezFirstOrdersClient:
                 progress(min(start + len(chunk), total), total)
             if start + MAX_BATCH_SIZE < total:
                 time.sleep(BATCH_PAUSE)
+
+        # Правило «реактивации» целиком держится на last_order_before_at, и его
+        # пропажа не даёт ни ошибки, ни пустого ответа — успешки просто тихо
+        # перестанут начисляться уснувшим. Ровно так 11.08.2026 незаметно исчезло
+        # previous_month_first_order_at, поэтому смену контракта ловим явно.
+        if seen_fields and "last_order_before_at" not in seen_fields:
+            log.warning(
+                "TEZ APP не отдаёт last_order_before_at (пришли поля: %s). Правило "
+                "разрыва в 30 дней считать не на чем — успешки уснувшим водителям "
+                "начисляться не будут.",
+                ", ".join(sorted(seen_fields)),
+            )
+        self.last_fields = seen_fields
 
         # Номера, которые TEZ APP отверг как невалидные (прошли наш нормализатор,
         # но API их не принял) — добавляем к списку невалидных для отчёта.
@@ -315,11 +348,11 @@ def _main():
     result = client.fetch_first_orders(
         [p for p in args.phones.split(",") if p.strip()], month=args.month
     )
-    print(f"{'номер':<14}{'заказ в ' + args.month:<34}заказ в пред. месяце")
+    print(f"{'номер':<14}{'заказ в ' + args.month:<34}последний заказ до месяца")
     for phone, dates in sorted(result.items()):
         cur = dates["month"].isoformat() if dates["month"] else "—"
-        prev = dates["prev"].isoformat() if dates["prev"] else "—"
-        print(f"{phone:<14}{cur:<34}{prev}")
+        last = dates.get("last_before")
+        print(f"{phone:<14}{cur:<34}{last.isoformat() if last else '—'}")
     if client.last_invalid:
         print("невалидные номера:", ", ".join(str(x) for x in client.last_invalid))
 

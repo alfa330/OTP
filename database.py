@@ -4910,6 +4910,13 @@ class Database:
                 -- tez_drivers.first_order_at остаётся как реестр номеров/легаси.
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS month_first_order_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS prev_month_first_order_at TIMESTAMP WITH TIME ZONE;
+                -- Последний завершённый заказ водителя ДО 1-го числа месяца лида.
+                -- Пришло на смену prev_month_first_order_at (TEZ APP убрал его из
+                -- ответа 11.08.2026): по первому заказу прошлого месяца разрыв
+                -- между заказами посчитать нельзя, а всё правило «спал 30 дней»
+                -- держится именно на нём. Значение для (год, месяц) неизменно,
+                -- поэтому пишется через COALESCE и не перетирается.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS last_order_before_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS first_order_checked_at TIMESTAMP WITH TIME ZONE;
                 -- Отметка «звонки по этому лиду уже подняли из Binotel». Гейтить
                 -- докачку звонков статусом нельзя: лид со СТАРЫМ статусом
@@ -17817,7 +17824,8 @@ class Database:
                 continue
             month_at = (dates or {}).get('month')
             prev_at = (dates or {}).get('prev')
-            rows.append((phone_norm, int(year), int(month), month_at, prev_at))
+            last_before = (dates or {}).get('last_before')
+            rows.append((phone_norm, int(year), int(month), month_at, prev_at, last_before))
             if month_at is not None:
                 found += 1
         if not rows:
@@ -17829,19 +17837,26 @@ class Database:
                 cursor,
                 """
                 UPDATE tez_leads l SET
-                    -- Первый заказ ВНУТРИ месяца уже не изменится, поэтому
-                    -- найденную дату не перетираем более поздним ответом.
+                    -- Все три даты для пары (год, месяц) неизменны: первый заказ
+                    -- внутри месяца, первый заказ предыдущего и последний заказ
+                    -- до начала месяца задним числом не меняются. Поэтому пишем
+                    -- только пустое. Без COALESCE у prev была прямая потеря
+                    -- данных: 11.08.2026 TEZ APP убрал это поле из ответа, и
+                    -- каждая ночная проверка обнуляла бы уже сохранённую дату —
+                    -- вместе с ней у закрытого июля исчезла бы причина статуса
+                    -- «уже работающий».
                     month_first_order_at = COALESCE(l.month_first_order_at, v.month_at),
-                    prev_month_first_order_at = v.prev_at,
+                    prev_month_first_order_at = COALESCE(l.prev_month_first_order_at, v.prev_at),
+                    last_order_before_at = COALESCE(l.last_order_before_at, v.last_before),
                     first_order_checked_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, prev_at)
+                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, prev_at, last_before)
                 WHERE l.year = v.lead_year
                   AND l.month = v.lead_month
                   AND l.phone_norm = v.phone_norm
                 """,
                 rows,
-                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz)",
+                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz, %s::timestamptz)",
                 page_size=500,
             )
         return found
@@ -17849,13 +17864,19 @@ class Database:
     def get_tez_phones_needing_calls(self, year, month):
         """Номера, по которым пора поднять историю звонков из Binotel.
 
-        Это те, у кого заказ в месяце есть, а в прошлом месяце заказов НЕ было
-        (иначе привлечения не было и звонки не нужны) и по кому звонки ещё не
-        поднимали. Гейт именно по `calls_synced_at`, а НЕ по статусу: лид со
-        старым статусом (например already_working от прежней логики) иначе
-        никогда не получил бы звонки и навсегда остался бы без успешки.
-        Их единицы за ночь — отсюда один запрос в Binotel вместо зеркала
-        всех звонков компании.
+        Это те, у кого заказ в месяце есть и по кому звонки ещё не поднимали.
+        Гейт именно по `calls_synced_at`, а НЕ по статусу: лид со старым статусом
+        (например already_working от прежней логики) иначе никогда не получил бы
+        звонки и навсегда остался бы без успешки. Их единицы за ночь — отсюда
+        один запрос в Binotel вместо зеркала всех звонков компании.
+
+        Условия `prev_month_first_order_at IS NULL` здесь больше нет. Оно
+        отсекало ровно тех, ради кого сделано правило разрыва: по «уснувшему»
+        водителю история звонков не поднималась никогда, поэтому звонок,
+        которым его вернули, для расчёта не существовал. Замер на проде
+        11.08.2026: из 49 июльских лидов с разрывом >= 30 дней квалифицирующий
+        звонок был известен ровно у одного. Цена снятия — ~200 номеров в месяц,
+        то есть 8 пачек history-by-external-number, 0–1 запрос за ночь.
         """
         with self._get_cursor() as cursor:
             cursor.execute(
@@ -17864,7 +17885,6 @@ class Database:
                 FROM tez_leads l
                 WHERE l.year = %s AND l.month = %s
                   AND l.month_first_order_at IS NOT NULL
-                  AND l.prev_month_first_order_at IS NULL
                   AND l.calls_synced_at IS NULL
                 ORDER BY l.phone_norm
                 """,
@@ -18086,7 +18106,7 @@ class Database:
                 """
                 SELECT l.id, l.phone_norm, l.full_name,
                        l.month_first_order_at, l.prev_month_first_order_at,
-                       l.xmin::text
+                       l.xmin::text, l.last_order_before_at
                 FROM tez_leads l
                 WHERE l.year = %s AND l.month = %s
                 """,
@@ -18099,6 +18119,7 @@ class Database:
                 'month_first_order_at': r[3],
                 'prev_month_first_order_at': r[4],
                 'version': r[5],
+                'last_order_before_at': r[6],
                 'calls': [],
             } for r in cursor.fetchall()]
             if not leads:

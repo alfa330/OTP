@@ -7,8 +7,10 @@
 ни считали.
 
 Правила успешки (согласованы с владельцем, см. память tez-op-successes-project):
-  1. Водитель НЕ должен был выполнять заказы в прошлом месяце
-     (prev_month_first_order_at пуст) — иначе он уже работал, привлечения нет.
+  1. Водитель должен был НЕ РАБОТАТЬ не менее 30 дней перед новым заказом:
+     разрыв между last_order_before_at и month_first_order_at, и наш звонок
+     обязан лежать МЕЖДУ этими заказами. Если заказов раньше не было вовсе —
+     это новый водитель, разрыв не проверяется.
   2. В отчётном месяце заказ есть (month_first_order_at заполнен).
   3. Квалифицирующий звонок = исходящий, отвеченный, billsec >= 10 сек,
      сделанный оператором отдела ОП (operator_id должен быть уже разрезолвен).
@@ -25,10 +27,17 @@
 привязать звонок к поездке «через границу месяца», но операторы больше не теряют
 успешку из-за того, что водитель собрался выехать во второй половине месяца.
 
-TEZ APP отдаёт даты ОКНОМ на два месяца: `month_first_order_at` (первый заказ в
-запрошенном месяце) и `previous_month_first_order_at` (первый заказ в предыдущем).
-Поэтому дата привязана к месяцу базы лида, а не к водителю «за всё время»: один и
-тот же номер в июньской и июльской базе имеет разные даты и считается независимо.
+Правило 1 переписано 2026-08-11. Раньше успешку снимал ЛЮБОЙ заказ в прошлом
+месяце, потому что TEZ APP отдавал только `previous_month_first_order_at` —
+ПЕРВЫЙ заказ предыдущего месяца. По нему разрыв не считается: водитель, съездивший
+2 и 25 июня и выехавший 5 июля, по первому заказу выглядит «спавшим 33 дня».
+В тот же день TEZ APP заменил это поле на `last_order_before_at` (последний
+завершённый заказ строго до 1-го числа запрошенного месяца), и правило стало
+считаться честно. Периоды раньше RULES_EFFECTIVE_FROM по-прежнему считаются
+старой веткой: июль-2026 выплачен, и пересчёт не имеет права его переписать.
+
+Даты привязаны к месяцу базы лида, а не к водителю «за всё время»: один и тот же
+номер в июньской и июльской базе имеет разные даты и считается независимо.
 """
 
 import re
@@ -53,6 +62,16 @@ DEFAULT_MIN_BILLSEC = 10
 # поэтому фиксированного «после 24-го» тут быть не может.
 PREV_MONTH_WINDOW_DAYS = 7
 
+# Сколько водитель должен не работать, чтобы его возвращение считалось нашей
+# заслугой. Календарные дни по Алматы: у заказов произвольное время суток, и
+# сравнение по часам дало бы неразрешимые споры «29 дней 23 часа».
+DEFAULT_REACTIVATION_GAP_DAYS = 30
+
+# С какого периода действуют правила разрыва. Июль-2026 уже выплачен по старым
+# (202 успешки), и пересчёт не имеет права переписать выплаченное: для периодов
+# раньше этого месяца работает прежний гейт по prev_month_first_order_at.
+RULES_EFFECTIVE_FROM = (2026, 8)
+
 # callType в ответе Binotel: 0 = входящий, 1 = исходящий.
 CALL_TYPE_INCOMING = 0
 CALL_TYPE_OUTGOING = 1
@@ -68,9 +87,12 @@ STATUS_NOT_COUNTED = "not_counted"          # звонок был, но прав
 # чтобы оператору можно было объяснить решение, а не показывать «нет успешки»).
 RULE_SAME_MONTH = "same_month"                    # звонок в месяце поездки
 RULE_PREV_MONTH_LAST_DAYS = "prev_month_last7"    # звонок в последние 7 дней прошлого месяца
+RULE_REACTIVATION = "reactivated_30d"             # водитель спал >= 30 дней и вернулся после звонка
 REASON_NO_CALL_BEFORE_TRIP = "no_call_before_trip"
 REASON_CALL_BEFORE_WINDOW = "call_before_last7"   # звонок раньше окна (или ещё старше)
 REASON_ACTIVE_PREV_MONTH = "active_prev_month"    # были заказы в прошлом месяце
+REASON_GAP_TOO_SHORT = "gap_under_30d"            # заказ был меньше 30 дней назад — не уходил
+REASON_NO_CALL_AFTER_LAST_ORDER = "no_call_after_last_order"  # звонок был, но раньше последнего заказа
 
 # Коды прежнего правила (окно висело на стороне поездки). Новый расчёт их не
 # выдаёт, но на закрытых месяцах они остались в БД — лейблы для них живут в
@@ -177,18 +199,35 @@ def call_window_for_period(year, month, days=PREV_MONTH_WINDOW_DAYS):
     return start, end
 
 
+def reactivation_gap_for_period(year, month, gap_days=DEFAULT_REACTIVATION_GAP_DAYS):
+    """Порог разрыва для периода либо None, если период считается по-старому.
+
+    Отдельная функция, а не проверка внутри правила: рубеж вступления в силу —
+    это решение владельца, и оно должно быть видно одним местом, а не спрятано
+    в ветке расчёта.
+    """
+    return gap_days if (int(year), int(month)) >= RULES_EFFECTIVE_FROM else None
+
+
 def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
-                         min_billsec=DEFAULT_MIN_BILLSEC):
-    """Считает статус лида по оконным датам заказов и списку его звонков.
+                         min_billsec=DEFAULT_MIN_BILLSEC,
+                         last_order_before_at=None, reactivation_gap_days=None):
+    """Считает статус лида по датам заказов и списку его звонков.
 
     month_first_order_at — первый заказ в отчётном месяце либо None.
-    prev_month_first_order_at — первый заказ в предыдущем месяце либо None.
+    prev_month_first_order_at — первый заказ в предыдущем месяце либо None
+            (поле убрано из ответа TEZ APP 11.08.2026, живёт только на закрытых
+            периодах).
     calls — список dict'ов со started_at / call_type / billsec / operator_id
             (+ произвольные поля вроде general_call_id, они просто прокидываются).
+    last_order_before_at — последний заказ водителя ДО начала отчётного месяца.
+    reactivation_gap_days — порог разрыва в днях. None означает «период
+            считается по прежним правилам» (гейт по prev_month_first_order_at):
+            так закрытые месяцы не переписываются задним числом.
 
     Возвращает dict: status, rule, operator_id, call, call_at, first_order_at,
-    success_date. Для не-успешек operator_id остаётся None — успешка без
-    оператора невозможна по определению.
+    last_order_before_at, gap_days, success_date. Для не-успешек operator_id
+    остаётся None — успешка без оператора невозможна по определению.
     """
     result = {
         "status": STATUS_NEW,
@@ -197,6 +236,8 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
         "call": None,
         "call_at": None,
         "first_order_at": None,
+        "last_order_before_at": None,
+        "gap_days": None,
         "success_date": None,
     }
 
@@ -214,14 +255,18 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
 
     trip_at = as_almaty(month_first_order_at)
     prev_at = as_almaty(prev_month_first_order_at)
+    last_at = as_almaty(last_order_before_at)
+    result["last_order_before_at"] = last_at
 
-    # Водитель уже работал в прошлом месяце — привлечения не было, что бы ни
-    # показывал текущий месяц. Проверяем это ДО всего остального.
-    if prev_at is not None:
-        result["first_order_at"] = trip_at
-        result["status"] = STATUS_ALREADY_WORKING
-        result["rule"] = REASON_ACTIVE_PREV_MONTH
-        return result
+    if reactivation_gap_days is None:
+        # Прежние правила: любой заказ в прошлом месяце снимает успешку. Ветка
+        # оставлена ради закрытых периодов — пересчёт июля обязан давать те же
+        # 202 успешки с теми же кодами, что были выплачены.
+        if prev_at is not None:
+            result["first_order_at"] = trip_at
+            result["status"] = STATUS_ALREADY_WORKING
+            result["rule"] = REASON_ACTIVE_PREV_MONTH
+            return result
 
     if trip_at is None:
         result["status"] = STATUS_IN_PROGRESS if qualifying else STATUS_NEW
@@ -239,6 +284,27 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
     last_call = before_trip[-1]
     result["call"] = last_call
     result["call_at"] = last_call["started_at"]
+
+    # Реактивация: заслуга есть, только если водитель действительно уходил.
+    # Разрыв считаем от ПОСЛЕДНЕГО его заказа, а не от первого заказа прошлого
+    # месяца: водитель, отработавший 2 и 25 июня и выехавший 5 июля, по первому
+    # заказу выглядел бы «спавшим 33 дня», хотя не уходил вовсе.
+    reactivated = False
+    if reactivation_gap_days is not None and last_at is not None:
+        gap_days = (trip_at.date() - last_at.date()).days
+        result["gap_days"] = gap_days
+        if gap_days < int(reactivation_gap_days):
+            result["status"] = STATUS_ALREADY_WORKING
+            result["rule"] = REASON_GAP_TOO_SHORT
+            return result
+        if last_call["started_at"] <= last_at:
+            # Между последним заказом и новым нашего звонка не было — водитель
+            # вернулся сам. Это не «уже работающий»: оператор по нему работал,
+            # и такие случаи приходят оспаривать.
+            result["status"] = STATUS_NOT_COUNTED
+            result["rule"] = REASON_NO_CALL_AFTER_LAST_ORDER
+            return result
+        reactivated = True
 
     # Окно проверяем по ПОСЛЕДНЕМУ звонку и только по нему: более ранние звонки
     # не могут пройти окно, если не прошёл он (внутри месяца поездки успешка
@@ -258,7 +324,10 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
         return result
 
     result["status"] = STATUS_SUCCESS
-    result["rule"] = rule
+    # Код причины различает два вида успешки: привлекли того, кто никогда не
+    # работал (окно звонка), и разбудили уснувшего (разрыв в заказах). Оператору
+    # при разборе спора важно именно это, а не то, в каком месяце был звонок.
+    result["rule"] = RULE_REACTIVATION if reactivated else rule
     result["operator_id"] = last_call.get("operator_id")
     result["success_date"] = trip_at.date()
     return result

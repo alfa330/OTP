@@ -15,10 +15,16 @@ if str(ROOT) not in sys.path:
 
 from tez_op_leads import (  # noqa: E402
     ALMATY_TZ,
+    DEFAULT_REACTIVATION_GAP_DAYS,
+    RULES_EFFECTIVE_FROM,
     call_window_for_period,
     REASON_ACTIVE_PREV_MONTH,
     REASON_CALL_BEFORE_WINDOW,
+    REASON_GAP_TOO_SHORT,
+    REASON_NO_CALL_AFTER_LAST_ORDER,
+    REASON_NO_CALL_BEFORE_TRIP,
     RULE_PREV_MONTH_LAST_DAYS,
+    RULE_REACTIVATION,
     RULE_SAME_MONTH,
     STATUS_ALREADY_WORKING,
     STATUS_IN_PROGRESS,
@@ -28,6 +34,7 @@ from tez_op_leads import (  # noqa: E402
     compute_lead_outcome,
     normalize_kz_phone,
     parse_first_order_at,
+    reactivation_gap_for_period,
     to_e164,
 )
 
@@ -381,6 +388,151 @@ class CallWindowTests(unittest.TestCase):
         outside = compute_lead_outcome(trip, None, [call(dt(start.year, start.month, start.day - 1))])
         self.assertEqual(inside["status"], STATUS_SUCCESS)
         self.assertEqual(outside["status"], STATUS_NOT_COUNTED)
+
+
+class ReactivationGapTests(unittest.TestCase):
+    """Разрыв в 30 дней между последним и новым заказом (правило от 11.08.2026).
+
+    Считается от ПОСЛЕДНЕГО заказа водителя, а не от первого заказа прошлого
+    месяца: по первому заказу водитель, отработавший 2 и 25 июня и выехавший
+    5 июля, выглядел бы «спавшим 33 дня», хотя не уходил вовсе.
+    """
+
+    def _out(self, trip, last_before, calls, gap=DEFAULT_REACTIVATION_GAP_DAYS):
+        return compute_lead_outcome(trip, None, calls,
+                                    last_order_before_at=last_before,
+                                    reactivation_gap_days=gap)
+
+    def test_dormant_driver_returns_after_call(self):
+        """Последний заказ 19 июня, звонок 3 августа, поездка 8 августа -> успешка."""
+        out = self._out(dt(2026, 8, 8), dt(2026, 6, 19), [call(dt(2026, 8, 3), operator_id=7)])
+        self.assertEqual(out["status"], STATUS_SUCCESS)
+        self.assertEqual(out["rule"], RULE_REACTIVATION)
+        self.assertEqual(out["operator_id"], 7)
+        self.assertEqual(out["gap_days"], 50)
+
+    def test_gap_of_29_days_is_not_enough(self):
+        out = self._out(dt(2026, 8, 30), dt(2026, 8, 1), [call(dt(2026, 8, 20), operator_id=7)])
+        self.assertEqual(out["status"], STATUS_ALREADY_WORKING)
+        self.assertEqual(out["rule"], REASON_GAP_TOO_SHORT)
+        self.assertEqual(out["gap_days"], 29)
+        self.assertIsNone(out["operator_id"])
+
+    def test_gap_of_exactly_30_days_counts(self):
+        """Порог включительный: «расстояние 30 дней» на языке владельца значит
+        «месяц не работал», а 29 и 30 не должны отличаться на глаз."""
+        out = self._out(dt(2026, 8, 31), dt(2026, 8, 1), [call(dt(2026, 8, 20), operator_id=7)])
+        self.assertEqual(out["status"], STATUS_SUCCESS)
+        self.assertEqual(out["gap_days"], 30)
+
+    def test_call_before_the_last_order_does_not_count(self):
+        """Звонок был ДО последнего заказа — водитель вернулся сам, а не после нас.
+
+        Это не «уже работающий»: оператор по лиду работал, и такие случаи
+        приходят оспаривать, поэтому статус «не засчитана».
+        """
+        out = self._out(dt(2026, 8, 20), dt(2026, 7, 10), [call(dt(2026, 7, 5), operator_id=7)])
+        self.assertEqual(out["status"], STATUS_NOT_COUNTED)
+        self.assertEqual(out["rule"], REASON_NO_CALL_AFTER_LAST_ORDER)
+        self.assertIsNone(out["operator_id"])
+
+    def test_never_ordered_before_keeps_the_old_window_rules(self):
+        """Настоящий новичок: разрыв не проверяется, работают прежние правила окна."""
+        out = self._out(dt(2026, 8, 20), None, [call(dt(2026, 8, 3), operator_id=7)])
+        self.assertEqual(out["status"], STATUS_SUCCESS)
+        self.assertEqual(out["rule"], RULE_SAME_MONTH)
+        self.assertIsNone(out["gap_days"])
+
+    def test_window_still_applies_to_reactivation(self):
+        """Разрыв не отменяет окно звонка: звонок из позапрошлого месяца не годится."""
+        out = self._out(dt(2026, 8, 20), dt(2026, 4, 1), [call(dt(2026, 6, 10), operator_id=7)])
+        self.assertEqual(out["status"], STATUS_NOT_COUNTED)
+        self.assertEqual(out["rule"], REASON_CALL_BEFORE_WINDOW)
+
+    def test_self_returned_without_any_call(self):
+        out = self._out(dt(2026, 8, 20), dt(2026, 4, 1), [])
+        self.assertEqual(out["status"], STATUS_ALREADY_WORKING)
+        self.assertEqual(out["rule"], REASON_NO_CALL_BEFORE_TRIP)
+
+    def test_old_first_order_of_prev_month_no_longer_blocks(self):
+        """Тот самый кейс, ради которого правило и меняли.
+
+        Водитель заказывал 2 июня (первый заказ месяца) и больше не выезжал,
+        звонок 3 июля, поездка 5 июля. Старое правило видело «заказ в прошлом
+        месяце» и снимало успешку; новое считает разрыв от 2 июня = 33 дня.
+        """
+        out = compute_lead_outcome(dt(2026, 7, 5), dt(2026, 6, 2),
+                                   [call(dt(2026, 7, 3), operator_id=7)],
+                                   last_order_before_at=dt(2026, 6, 2),
+                                   reactivation_gap_days=DEFAULT_REACTIVATION_GAP_DAYS)
+        self.assertEqual(out["status"], STATUS_SUCCESS)
+        self.assertEqual(out["rule"], RULE_REACTIVATION)
+
+    def test_active_driver_is_rejected_even_with_a_call(self):
+        """Обратная сторона того же кейса: водитель ездил 2 и 25 июня.
+
+        По первому заказу прошлого месяца разрыв выглядел бы 33 дня и мы
+        заплатили бы за водителя, который никуда не уходил.
+        """
+        out = compute_lead_outcome(dt(2026, 7, 5), dt(2026, 6, 2),
+                                   [call(dt(2026, 7, 3), operator_id=7)],
+                                   last_order_before_at=dt(2026, 6, 25),
+                                   reactivation_gap_days=DEFAULT_REACTIVATION_GAP_DAYS)
+        self.assertEqual(out["status"], STATUS_ALREADY_WORKING)
+        self.assertEqual(out["rule"], REASON_GAP_TOO_SHORT)
+        self.assertEqual(out["gap_days"], 10)
+
+
+class RulesEffectiveFromTests(unittest.TestCase):
+    """Закрытые месяцы считаются прежней веткой — пересчёт не переписывает выплаты."""
+
+    def test_july_2026_uses_the_old_gate(self):
+        self.assertIsNone(reactivation_gap_for_period(2026, 7))
+
+    def test_august_2026_and_later_use_the_gap(self):
+        self.assertEqual(reactivation_gap_for_period(2026, 8), DEFAULT_REACTIVATION_GAP_DAYS)
+        self.assertEqual(reactivation_gap_for_period(2027, 1), DEFAULT_REACTIVATION_GAP_DAYS)
+
+    def test_effective_month_is_august_2026(self):
+        """Рубеж — решение владельца: июль уже выплачен (202 успешки)."""
+        self.assertEqual(RULES_EFFECTIVE_FROM, (2026, 8))
+
+    def test_closed_period_still_blocks_on_prev_month_order(self):
+        """Без порога работает старый гейт, даже если известен последний заказ."""
+        out = compute_lead_outcome(dt(2026, 7, 3), dt(2026, 6, 30),
+                                   [call(dt(2026, 7, 2), operator_id=5)],
+                                   last_order_before_at=dt(2026, 1, 1),
+                                   reactivation_gap_days=None)
+        self.assertEqual(out["status"], STATUS_ALREADY_WORKING)
+        self.assertEqual(out["rule"], REASON_ACTIVE_PREV_MONTH)
+
+
+class DormantCallsFetchTests(unittest.TestCase):
+    """По «уснувшим» водителям история звонков обязана подниматься.
+
+    Гейт `prev_month_first_order_at IS NULL` отсекал ровно тех, ради кого
+    правило разрыва и сделано: звонок, которым водителя вернули, для расчёта не
+    существовал (замер на проде 11.08.2026 — из 49 кандидатов звонок был известен
+    у одного).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+
+    def test_dormant_drivers_are_not_excluded_from_call_history(self):
+        start = self.src.index("def get_tez_phones_needing_calls")
+        body = self.src[start:start + 2200]
+        self.assertIn("l.calls_synced_at IS NULL", body)
+        self.assertNotIn("l.prev_month_first_order_at IS NULL", body)
+
+    def test_saved_order_dates_are_never_erased(self):
+        """TEZ APP убрал prev из ответа: без COALESCE каждая ночная проверка
+        обнуляла бы уже сохранённую дату закрытого месяца."""
+        start = self.src.index("def save_tez_first_orders")
+        body = self.src[start:start + 3000]
+        self.assertIn("COALESCE(l.prev_month_first_order_at, v.prev_at)", body)
+        self.assertIn("COALESCE(l.last_order_before_at, v.last_before)", body)
 
 
 class GroupFilterTests(unittest.TestCase):
