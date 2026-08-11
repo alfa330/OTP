@@ -136,7 +136,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             className="wiki-scope min-h-full bg-slate-50 px-4 pb-10 pt-[68px] sm:px-6 min-[769px]:pt-8"
             style={{ fontFamily: APPLE_FONT }}
         >
-            <div className="mx-auto w-full max-w-5xl space-y-5">
+            {/* Ширина растёт со экраном: на 5xl (1024px) справочная таблица из
+                шести колонок уже не помещалась и схлопывалась. Ступени, а не
+                «во всю ширину»: строка текста длиной в монитор нечитаема. */}
+            <div className="mx-auto w-full max-w-5xl space-y-5 xl:max-w-6xl 2xl:max-w-[88rem]">
 
                 {/* Отступ сверху на мобильном — под фиксированный гамбургер портала
                     (44×44, z-index 60), иначе он накроет заголовок. */}

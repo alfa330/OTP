@@ -134,6 +134,48 @@ export const IosSection = ({ title, hint, children, right = null }) => (
     </section>
 );
 
+/**
+ * Подсказка «i»: пояснение, которое нужно один раз, а место занимает всегда.
+ *
+ * Открывается и по наведению, и по клику — не для симметрии: на телефоне
+ * наведения не существует вовсе, и подсказка, живущая только на hover, там
+ * недоступна. Закрывается по уходу мыши, повторному клику и Escape.
+ *
+ * Тёмный пузырёк на светлой карточке выбран намеренно: белая подсказка поверх
+ * белой карточки читается как часть содержимого, а не как всплывающее пояснение.
+ */
+export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) => {
+    const [open, setOpen] = React.useState(false);
+    return (
+        <span
+            className="relative inline-flex"
+            onMouseEnter={() => setOpen(true)}
+            onMouseLeave={() => setOpen(false)}
+        >
+            <button
+                type="button"
+                aria-label={label}
+                aria-expanded={open}
+                onClick={(event) => { event.preventDefault(); setOpen((v) => !v); }}
+                onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}
+                className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full bg-slate-200/70 text-[11px] font-semibold leading-none text-slate-500 transition hover:bg-slate-300/80 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
+            >
+                i
+            </button>
+            {open && (
+                <span
+                    role="tooltip"
+                    className={`absolute top-[24px] z-30 w-64 rounded-xl bg-slate-900/95 px-3 py-2 text-[11.5px] font-normal leading-snug text-white shadow-lg backdrop-blur ${
+                        align === 'right' ? 'right-0' : 'left-0'
+                    }`}
+                >
+                    {text}
+                </span>
+            )}
+        </span>
+    );
+};
+
 const BADGE_TONES = {
     slate: 'bg-slate-100 text-slate-600',
     green: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100',

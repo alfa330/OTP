@@ -4,7 +4,7 @@ import {
     AlertTriangle, Check, FileUp, Loader2, Search, Sparkles,
 } from 'lucide-react';
 import {
-    iosCard, iosGroupLabel, iosBtnSecondary, IosBadge, IosToggle,
+    iosCard, iosGroupLabel, iosBtnSecondary, IosBadge, IosHint, IosToggle,
 } from '../ui/ios';
 
 /* Панель помощника в редакторе статьи: флажок, сборка из документа, проверка дублей.
@@ -35,6 +35,14 @@ const VERDICT_HINT = {
     похоже: 'Есть очень близкая статья — возможно, стоит дописать её, а не создавать новую',
     рядом: 'Есть статьи по той же теме',
 };
+
+const POWER_HINT = 'Помощник соберёт статью из загруженного документа и подскажет, '
+    + 'если такая статья уже есть. Пока флажок выключен, текст статьи и документы во '
+    + 'внешний сервис не отправляются, а сама статья не попадает в ответы помощника.';
+
+const FORMATS_HINT = 'Word, Excel, CSV, PDF, текст, фото или скан. Таблицы из Word и '
+    + 'Excel переносятся программой без участия модели, а PDF и снимок модель читает '
+    + 'сама — постранично, вместе с сеткой таблиц.';
 
 const percent = (score) => `${Math.round((Number(score) || 0) * 100)}%`;
 
@@ -114,18 +122,11 @@ export default function WikiAiDraft({
         <section className="space-y-1.5">
             <div className={iosGroupLabel}>Помощник</div>
             <div className={`${iosCard} divide-y divide-slate-100`}>
-                <div className="flex items-start justify-between gap-3 p-4">
-                    <div>
-                        <div className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900">
-                            <Sparkles size={15} className="text-indigo-500" />
-                            Поддержка ИИ
-                        </div>
-                        <p className="mt-0.5 text-[12px] leading-snug text-slate-500">
-                            Помощник соберёт статью из загруженного документа и подскажет,
-                            если такая статья уже есть. Пока флажок выключен, текст статьи
-                            и документы во внешний сервис не отправляются, а сама статья не
-                            попадает в ответы помощника.
-                        </p>
+                <div className="flex items-center justify-between gap-3 p-4">
+                    <div className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900">
+                        <Sparkles size={15} className="text-indigo-500" />
+                        Поддержка ИИ
+                        <IosHint text={POWER_HINT} label="Что делает поддержка ИИ" />
                     </div>
                     <IosToggle checked={enabled} onChange={onEnabledChange} />
                 </div>
@@ -149,6 +150,7 @@ export default function WikiAiDraft({
                                 onChange={(e) => { buildFromDocument(e.target.files?.[0]); e.target.value = ''; }}
                             />
                         </label>
+                        <IosHint text={FORMATS_HINT} label="Какие файлы понимает" />
                         <button
                             type="button"
                             className={iosBtnSecondary}
@@ -161,12 +163,6 @@ export default function WikiAiDraft({
                             Такая статья уже есть?
                         </button>
                     </div>
-
-                    <p className="text-[11px] leading-snug text-slate-400">
-                        Word, Excel, CSV, PDF, текст, фото или скан. Таблицы из Word и Excel
-                        переносятся программой без участия модели, а PDF и снимок модель
-                        читает сама — постранично, вместе с сеткой таблиц.
-                    </p>
 
                     {result && (
                         <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">

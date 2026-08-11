@@ -71,6 +71,30 @@ const SANITIZE_OPTIONS = {
     ],
 };
 
+/**
+ * Каждая таблица заворачивается в прокручиваемую обёртку.
+ *
+ * Обёртка нужна снаружи таблицы, а не на ней самой: display:block на table
+ * ломает вычисление ширин колонок, а без него прокрутке негде появиться. Тело
+ * статьи вставляется через dangerouslySetInnerHTML, то есть места навесить
+ * обёртку в разметке нет — делаем это здесь, ПОСЛЕ санитайзера.
+ *
+ * Порядок принципиален: обёртка добавляется к уже очищенному HTML, поэтому она
+ * не может протащить ничего мимо DOMPurify.
+ */
+const wrapTables = (html) => {
+    if (!html || html.indexOf('<table') === -1) return html;
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    parsed.body.querySelectorAll('table').forEach((table) => {
+        if (table.parentElement?.classList.contains('wiki-table-scroll')) return;
+        const box = parsed.createElement('div');
+        box.className = 'wiki-table-scroll';
+        table.replaceWith(box);
+        box.appendChild(table);
+    });
+    return parsed.body.innerHTML;
+};
+
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                       highlightTerm = null, classifierPrefill = null }) {
     const isClassifier = slug === CLASSIFIER_SLUG;
@@ -93,7 +117,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     }, [base, headers, slug]);
 
     const safeHtml = useMemo(
-        () => (article?.content ? DOMPurify.sanitize(article.content, SANITIZE_OPTIONS) : ''),
+        () => (article?.content ? wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS)) : ''),
         [article?.content],
     );
 

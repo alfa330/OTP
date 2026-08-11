@@ -229,9 +229,21 @@
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
-/* Таблицы. В контенте их много: 63 <table> и 1618 <td> на 46 статей. */
+/* Таблицы. В контенте их много: 63 <table> и 1618 <td> на 46 статей.
+ *
+ * width: 100% отсюда УБРАН, и это главное. Растянутая на всю ширину таблица
+ * делит место поровну между колонками, а колонок в справочных таблицах вики
+ * шесть и больше — в итоге «Акция» переносилась как «Акци/я», а «Дата запуска»
+ * рассыпалась по одной букве в строку. Таблица теперь занимает столько, сколько
+ * ей нужно, а если не влезает — прокручивается внутри своей обёртки.
+ *
+ * Обёртку .wiki-table-scroll ставит WikiArticle после санитайзера; в редакторе
+ * ту же роль играет .tableWrapper, который создаёт сам ProseMirror.
+ */
 .wiki-prose table {
-    width: 100%;
+    width: max-content;
+    min-width: 100%;
+    max-width: none;
     border-collapse: collapse;
     margin: 1.25rem 0;
     font-size: 0.9375rem;
@@ -242,6 +254,40 @@
     padding: 0.5rem 0.75rem;
     text-align: left;
     vertical-align: top;
+    /* Нижняя граница — против переноса по буквам в узких колонках; верхняя —
+       против таблицы в три экрана из-за одной клетки с абзацем текста. */
+    min-width: 6rem;
+    max-width: 30rem;
+}
+
+/* Прокрутка таблицы. Полоса ПОСТОЯННАЯ, а не по наведению: обрезанная по краю
+   таблица иначе выглядит просто обрезанной, и что её можно листать, человек не
+   догадывается. */
+.wiki-table-scroll,
+.wiki-prose .tableWrapper {
+    overflow-x: auto;
+    margin: 1.25rem 0;
+}
+
+.wiki-table-scroll > table,
+.wiki-prose .tableWrapper > table {
+    margin: 0;
+}
+
+.wiki-table-scroll::-webkit-scrollbar,
+.wiki-prose .tableWrapper::-webkit-scrollbar {
+    height: 8px;
+}
+
+.wiki-table-scroll::-webkit-scrollbar-thumb,
+.wiki-prose .tableWrapper::-webkit-scrollbar-thumb {
+    border-radius: 4px;
+    background: rgba(15, 23, 42, 0.22);
+}
+
+.wiki-table-scroll::-webkit-scrollbar-thumb:hover,
+.wiki-prose .tableWrapper::-webkit-scrollbar-thumb:hover {
+    background: rgba(15, 23, 42, 0.35);
 }
 
 .wiki-prose th {
@@ -390,11 +436,17 @@
         padding: 0.75rem;
     }
 
-    /* Широкие таблицы прокручиваются сами, а не растягивают страницу. */
-    .wiki-prose table {
-        display: block;
-        overflow-x: auto;
+    /* На узком экране прокрутка нужна почти любой таблице, поэтому инерция
+       обязательна. Сама прокрутка теперь живёт на обёртке и работает на всех
+       ширинах — здесь остаётся только поведение пальца и более плотные клетки. */
+    .wiki-table-scroll,
+    .wiki-prose .tableWrapper {
         -webkit-overflow-scrolling: touch;
-        white-space: nowrap;
+    }
+
+    .wiki-prose :is(th, td) {
+        min-width: 5rem;
+        max-width: 18rem;
+        padding: 0.4rem 0.55rem;
     }
 }
