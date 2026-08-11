@@ -4617,6 +4617,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return calculateWeightedChatAverage(scoreDays);
         };
 
+        // Месяц увольнения ('YYYY-MM') из dismissal_date бэкенда. null — даты нет
+        // (старый ответ/кэш), тогда вкладка определяется по показателям, как раньше.
+        const getDismissalMonth = (op) => {
+            const raw = String(op?.dismissal_date || '').trim();
+            return /^\d{4}-\d{2}/.test(raw) ? raw.slice(0, 7) : null;
+        };
+
+        const formatDismissalDate = (op) => {
+            const raw = String(op?.dismissal_date || '').trim();
+            if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return null;
+            const [y, m, d] = raw.slice(0, 10).split('-');
+            return `${d}.${m}.${y}`;
+        };
+
+        const isFiredLikeOperator = (op) => {
+            const status = String(op?.status || '').trim().toLowerCase();
+            return status === 'fired' || status === 'dismissal';
+        };
+
         const hasAnyHoursIndicators = (op) => {
             if (!op || typeof op !== 'object') return false;
 
@@ -4720,7 +4739,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const status = String(op?.status || '').trim().toLowerCase();
             const isFiredLike = status === 'fired' || status === 'dismissal';
             if (isFiredLike) {
-                if (hasAnyHoursIndicators(op)) {
+                // Уволенный остаётся в «Активных» только если увольнение пришлось на
+                // просматриваемый месяц или позже: месяц отработан частично и его нельзя
+                // потерять. Уволенный РАНЬШЕ весь месяц уже не работал — его место во
+                // вкладке «Уволенные», даже если импорт задним числом записал ему
+                // какие-то показатели. hasAnyHoursIndicators — фолбэк на случай, когда
+                // бэкенд не отдал dismissal_date (старый ответ/кэш): поведение прежнее.
+                const firedMonth = getDismissalMonth(op);
+                const keepInActive = firedMonth === null
+                    ? hasAnyHoursIndicators(op)
+                    : firedMonth >= month;
+                if (keepInActive) {
                 activeList.push(op);
                 continue;
                 }
@@ -4747,7 +4776,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             activeCount: activeList.length,
             firedCount: firedList.length
             };
-        }, [operators, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap]);
+        }, [operators, operatorsViewTab, selectedDirections, trainingsMap, technicalIssuesMap, offlineActivitiesMap, month]);
 
         // Group operators by direction (key fallbacks: direction, direction_name, direction_id)
         const groupedByDirection = useMemo(() => {
@@ -7686,6 +7715,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className={`${hoursOperatorColClass} text-sm font-medium sticky left-0 z-20 bg-white`}>
                                 <div className="flex items-center gap-1.5 min-w-0">
                                     <span className="truncate">{op.name}</span>
+                                    {isFiredLikeOperator(op) && (
+                                    <span
+                                        className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold leading-none border border-red-500 text-red-700 bg-red-50"
+                                        title={formatDismissalDate(op) ? `Уволен(а) с ${formatDismissalDate(op)}` : 'Уволен(а)'}
+                                    >
+                                        Уволен
+                                    </span>
+                                    )}
                                     {Array.isArray(op.group_segments) && op.group_segments.length > 1 && (
                                     <span
                                         className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-600"

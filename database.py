@@ -20915,6 +20915,62 @@ class Database:
 
         return {"month": month, "days_in_month": days_in_month, "operator": operator_obj}
 
+    def _load_dismissal_dates_tx(self, cursor, operator_ids):
+        """Дата увольнения операторов: {operator_id: date}. Приоритет — start_date периода
+        'dismissal' (фактическая дата), фолбэк — дата смены статуса на fired/dismissal в
+        user_history. Формула та же, что в отчёте по сотрудникам (dismissal_date_value).
+        Нужна «Учёту часов», чтобы отличать «уволен В этом месяце» (остаётся в активных,
+        месяц отработан частично) от «уволен РАНЬШЕ» (место во вкладке «Уволенные»)."""
+        ids = []
+        for _raw in (operator_ids or []):
+            try:
+                ids.append(int(_raw))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return {}
+        cursor.execute(
+            """
+            SELECT u.id, COALESCE(dp.start_date, dh.changed_at::date) AS dismissal_date
+            FROM users u
+            LEFT JOIN LATERAL (
+                SELECT p.start_date
+                FROM operator_schedule_status_periods p
+                WHERE p.operator_id = u.id
+                  AND p.status_code = 'dismissal'
+                ORDER BY
+                    COALESCE(p.end_date, DATE '9999-12-31') DESC,
+                    p.start_date DESC,
+                    p.id DESC
+                LIMIT 1
+            ) dp ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT uh.changed_at
+                FROM user_history uh
+                WHERE uh.user_id = u.id
+                  AND uh.field_changed = 'status'
+                  AND LOWER(TRIM(COALESCE(uh.new_value, ''))) IN ('fired', 'dismissal')
+                ORDER BY uh.changed_at DESC, uh.id DESC
+                LIMIT 1
+            ) dh ON TRUE
+            WHERE u.id = ANY(%s)
+            """,
+            (ids,),
+        )
+        dismissal_dates = {}
+        for _uid, _dismissed_on in cursor.fetchall() or []:
+            if _dismissed_on is not None:
+                dismissal_dates[int(_uid)] = _dismissed_on
+        return dismissal_dates
+
+    @staticmethod
+    def _dismissal_date_iso(dismissal_dates, operator_id):
+        """ISO-строка даты увольнения для payload (фронт сравнивает 'YYYY-MM' лексикографически)."""
+        value = (dismissal_dates or {}).get(int(operator_id))
+        if value is None:
+            return None
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
     def get_daily_hours_by_group_month(self, group_id, month):
         """Group-aware: часы операторов ГРУППЫ за месяц (членство пересекает месяц);
         модель и фильтр daily — по этой группе. Тонкая обёртка над
@@ -21059,6 +21115,9 @@ class Database:
                     _eff = _st_first_old.get(_uid)
                 if _eff:
                     status_as_of[int(_uid)] = _eff
+
+            # Дата увольнения — фронт по ней решает вкладку «Активные»/«Уволенные».
+            dismissal_dates = self._load_dismissal_dates_tx(cursor, op_ids)
 
             # Получаем daily_hours для этих операторов за месяц (с информацией о штрафах).
             # В group-aware режиме фильтруем по группе: дни этого оператора, отнесённые
@@ -21288,6 +21347,7 @@ class Database:
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status_as_of.get(op_id, status),
+                    "dismissal_date": self._dismissal_date_iso(dismissal_dates, op_id),
                     "hire_date": hire_date.isoformat() if hasattr(hire_date, "isoformat") else hire_date,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
@@ -21454,6 +21514,9 @@ class Database:
                 return {"month": month, "days_in_month": days, "operators": []}
 
             op_ids = [row[0] for row in operator_rows]
+
+            # Дата увольнения — фронт по ней решает вкладку «Активные»/«Уволенные».
+            dismissal_dates = self._load_dismissal_dates_tx(cursor, op_ids)
 
             cursor.execute("""
                 SELECT d.operator_id, d.day, d.work_time, d.break_time, d.talk_time, d.calls, d.efficiency,
@@ -21645,6 +21708,7 @@ class Database:
                     "supervisor_id": sup_id,
                     "rate": float(rate) if rate is not None else 0.0,
                     "status": status,
+                    "dismissal_date": self._dismissal_date_iso(dismissal_dates, op_id),
                     "hire_date": hire_date.isoformat() if hasattr(hire_date, "isoformat") else hire_date,
                     "norm_hours": float(norm_hours) if norm_hours is not None else 0.0,
                     "training_hours": round(float(training_hours), 2),
