@@ -6,8 +6,10 @@ QR-подтверждения доступа. Тесты стерегут обе
 """
 
 import ast
+import copy
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +18,7 @@ DB_PATH = ROOT / "database.py"
 
 
 def _bot_function(name):
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
     return next(
         node for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name == name
@@ -24,7 +26,7 @@ def _bot_function(name):
 
 
 def _db_method(name):
-    module = ast.parse(DB_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(DB_PATH.read_text(encoding="utf-8-sig"))
     database_class = next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"
@@ -39,7 +41,7 @@ def _load_operator_item():
     """Достаём чистые статические методы без импорта database.py целиком."""
     namespace = {}
     for name in ("_low_rating_extract_source_details", "_low_rating_operator_item"):
-        node = _db_method(name)
+        node = copy.deepcopy(_db_method(name))
         node.decorator_list = []
         exec(compile(ast.Module(body=[node], type_ignores=[]), "<db>", "exec"), namespace)
 

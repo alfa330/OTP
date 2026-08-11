@@ -12,6 +12,7 @@ import ast
 import textwrap
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,7 @@ def _read(path):
 
 def _database_method_source(name):
     source = _read(DATABASE_PATH)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node
         for node in module.body

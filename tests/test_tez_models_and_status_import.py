@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +37,7 @@ def _tez_status_import_namespace():
         "_status_import_parse_tez_csv",
         "_status_import_csv_text_is_tez",
     }
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
     selected = []
     for node in module.body:
         if isinstance(node, ast.Assign):

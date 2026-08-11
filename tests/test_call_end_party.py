@@ -5,6 +5,7 @@ import re
 import unittest
 from functools import lru_cache
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
@@ -35,7 +36,7 @@ def _source(path):
 
 @lru_cache(maxsize=None)
 def _tree(path):
-    return ast.parse(_source(path), filename=str(path))
+    return source_cache.parse(_source(path), filename=str(path))
 
 
 def _function_node(path, function_name, class_name=None):

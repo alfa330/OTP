@@ -3,6 +3,7 @@ import logging
 from contextlib import contextmanager
 from pathlib import Path
 import unittest
+from tests import source_cache
 
 
 DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
@@ -15,7 +16,7 @@ def _database_class():
         "cleanup_c2d_eval_data",
     }
     source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     source_class = next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"

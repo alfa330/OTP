@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
@@ -12,7 +13,7 @@ def _source(path):
 
 
 def _database_class():
-    module = ast.parse(_source(DATABASE_PATH))
+    module = source_cache.parse(_source(DATABASE_PATH))
     return next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"

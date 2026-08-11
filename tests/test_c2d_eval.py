@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from tests import source_cache
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
 
@@ -47,7 +48,7 @@ def _c2d_namespace():
         "_c2d_eval_normalize_quotes",
     }
 
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
     selected = []
     for node in module.body:
         if isinstance(node, ast.Assign):

@@ -18,6 +18,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "database.py"
@@ -26,9 +27,9 @@ APP_PATH = ROOT / "src" / "App.jsx"
 VIEW_PATH = ROOT / "src" / "components" / "group_late" / "GroupLateBotView.jsx"
 
 DB_SOURCE = DB_PATH.read_text(encoding="utf-8-sig")
-DB_TREE = ast.parse(DB_SOURCE)
+DB_TREE = source_cache.parse(DB_SOURCE)
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
-BOT_TREE = ast.parse(BOT_SOURCE)
+BOT_TREE = source_cache.parse(BOT_SOURCE)
 APP_SRC = APP_PATH.read_text(encoding="utf-8-sig")
 VIEW_SRC = VIEW_PATH.read_text(encoding="utf-8-sig")
 

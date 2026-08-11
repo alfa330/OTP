@@ -3,6 +3,7 @@ import re
 import textwrap
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,7 @@ BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 
 def _load_recompute_method():
     source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node
         for node in module.body

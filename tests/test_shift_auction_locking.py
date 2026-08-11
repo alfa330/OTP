@@ -1,13 +1,14 @@
 import ast
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
 
 
 def _database_class():
-    module = ast.parse(DATABASE_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(DATABASE_PATH.read_text(encoding="utf-8-sig"))
     return next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"

@@ -4,6 +4,7 @@ import textwrap
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +13,7 @@ DATABASE_PATH = ROOT / "database.py"
 
 def _database_method_source(name):
     source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node
         for node in module.body

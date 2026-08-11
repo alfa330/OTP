@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import unittest
 from zoneinfo import ZoneInfo
+from tests import source_cache
 
 
 DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
@@ -20,7 +21,7 @@ def _database_class():
         "_lock_operator_status_segments_tx",
         "append_operator_status_event",
     }
-    module = ast.parse(DATABASE_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(DATABASE_PATH.read_text(encoding="utf-8-sig"))
     source_class = next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"
@@ -33,7 +34,7 @@ def _database_class():
         missing = sorted(wanted_methods - {node.name for node in methods})
         raise AssertionError(f"Missing Database methods: {missing}")
 
-    constant = ast.parse(
+    constant = source_cache.parse(
         "STATUS_SEGMENT_OPERATOR_LOCK_NAMESPACE = 915904142"
     ).body[0]
     test_class = ast.ClassDef(

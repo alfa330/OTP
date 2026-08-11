@@ -11,6 +11,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,7 @@ def _read(path):
 
 
 def _load_function(path, name, namespace):
-    module = ast.parse(_read(path))
+    module = source_cache.parse(_read(path))
     node = next(
         item
         for item in module.body
@@ -199,7 +200,7 @@ class UsersReportEndpointScopeTests(unittest.TestCase):
 class UsersReportImplementationContractTests(unittest.TestCase):
     def test_database_query_applies_a_bound_department_filter(self):
         source = _read(DATABASE_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         database_class = next(
             node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Database"
         )
@@ -216,7 +217,7 @@ class UsersReportImplementationContractTests(unittest.TestCase):
 
     def test_database_query_applies_a_bound_supervisor_filter(self):
         source = _read(DATABASE_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         database_class = next(
             node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Database"
         )

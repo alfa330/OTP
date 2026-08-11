@@ -17,6 +17,7 @@ import re
 import textwrap
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ APP_PATH = ROOT / "src" / "App.jsx"
 VIEW_PATH = ROOT / "src" / "components" / "sip" / "SipSettingsView.jsx"
 
 DATABASE_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
-DATABASE_MODULE = ast.parse(DATABASE_SOURCE)
+DATABASE_MODULE = source_cache.parse(DATABASE_SOURCE)
 DATABASE_CLASS = next(
     node for node in DATABASE_MODULE.body
     if isinstance(node, ast.ClassDef) and node.name == "Database"
@@ -697,7 +698,7 @@ class SipEndpointTests(unittest.TestCase):
 
     def setUp(self):
         self.source = _read(BOT_PATH)
-        self.module = ast.parse(self.source)
+        self.module = source_cache.parse(self.source)
 
     def _function(self, name):
         node = next(

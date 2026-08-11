@@ -2,6 +2,7 @@ import ast
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from tests import source_cache
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
@@ -12,7 +13,7 @@ def _read_source():
 
 
 def _function_node(name):
-    module = ast.parse(_read_source())
+    module = source_cache.parse(_read_source())
     return next(
         node
         for node in module.body

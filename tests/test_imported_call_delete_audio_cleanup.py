@@ -12,6 +12,7 @@ import logging
 import unittest
 from functools import lru_cache
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,7 @@ def _source():
 
 @lru_cache(maxsize=None)
 def _tree():
-    return ast.parse(_source(), filename=str(BOT_PATH))
+    return source_cache.parse(_source(), filename=str(BOT_PATH))
 
 
 def _load_bot_functions(names, globals_dict):

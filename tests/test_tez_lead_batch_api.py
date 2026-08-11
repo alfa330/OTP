@@ -3,12 +3,13 @@ import copy
 import unittest
 import uuid
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
-BOT_TREE = ast.parse(BOT_SOURCE)
+BOT_TREE = source_cache.parse(BOT_SOURCE)
 
 
 def _load_functions(*names, namespace=None):

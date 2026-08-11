@@ -2,13 +2,14 @@ from pathlib import Path
 import ast
 from types import SimpleNamespace
 import unittest
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_function(source, function_name, namespace):
-    tree = ast.parse(source)
+    tree = source_cache.parse(source)
     node = next(
         item for item in tree.body
         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == function_name
@@ -118,7 +119,7 @@ class AiQaAccessControlTests(unittest.TestCase):
         }
         functions = {
             node.name: ast.get_source_segment(self.api_source, node)
-            for node in ast.parse(self.api_source).body
+            for node in source_cache.parse(self.api_source).body
             if isinstance(node, ast.FunctionDef) and node.name in target_names
         }
         for function_name in target_names:
@@ -129,14 +130,14 @@ class AiQaAccessControlTests(unittest.TestCase):
         guard_source = ast.get_source_segment(
             self.api_source,
             next(
-                node for node in ast.parse(self.api_source).body
+                node for node in source_cache.parse(self.api_source).body
                 if isinstance(node, ast.FunctionDef) and node.name == "_ai_qa_guard"
             ),
         )
         scope_source = ast.get_source_segment(
             self.api_source,
             next(
-                node for node in ast.parse(self.api_source).body
+                node for node in source_cache.parse(self.api_source).body
                 if isinstance(node, ast.FunctionDef) and node.name == "_ai_qa_direction_scope"
             ),
         )

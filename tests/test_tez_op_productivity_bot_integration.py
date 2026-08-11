@@ -14,10 +14,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import tez_op_productivity  # noqa: E402
+from tests import source_cache
 
 
 def _extract_function(name, namespace):
-    tree = ast.parse(BOT_SOURCE)
+    tree = source_cache.parse(BOT_SOURCE)
     node = next(
         item for item in tree.body
         if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))

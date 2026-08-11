@@ -1,12 +1,13 @@
 import ast
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = ROOT / "database.py"
 DATABASE_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
-MODULE = ast.parse(DATABASE_SOURCE)
+MODULE = source_cache.parse(DATABASE_SOURCE)
 DATABASE_CLASS = next(
     node
     for node in MODULE.body

@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ class CallEvaluationNotificationSchemaTests(unittest.TestCase):
 
     def test_recipients_are_scoped_by_operator_department(self):
         source = _read(DATABASE_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         func = next(
             node for node in module.body
             if isinstance(node, ast.ClassDef) and node.name == "Database"
@@ -46,7 +47,7 @@ class CallEvaluationNotificationBackendTests(unittest.TestCase):
 
     def test_send_evaluation_notification_uses_subscribers_not_admin_id(self):
         source = _read(BOT_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         func = next(
             node for node in module.body
             if isinstance(node, ast.FunctionDef) and node.name == "send_telegram_notification"

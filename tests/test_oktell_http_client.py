@@ -15,6 +15,7 @@ from http.client import RemoteDisconnected
 from pathlib import Path
 
 import requests
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _load_names(source, names, namespace, label="<oktell-http>"):
     """Исполняет в namespace перечисленные функции и присваивания модульного уровня."""
-    tree = ast.parse(source)
+    tree = source_cache.parse(source)
     wanted = set(names)
     body = []
     for node in tree.body:

@@ -15,6 +15,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 BOT_PATH = ROOT / "bot_schedule2.py"
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
-BOT_TREE = ast.parse(BOT_SOURCE)
+BOT_TREE = source_cache.parse(BOT_SOURCE)
 TOP_LEVEL_FUNCTIONS = {
     node.name: node
     for node in BOT_TREE.body
@@ -30,7 +31,7 @@ TOP_LEVEL_FUNCTIONS = {
 }
 DATABASE_PATH = ROOT / "database.py"
 DATABASE_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
-DATABASE_TREE = ast.parse(DATABASE_SOURCE)
+DATABASE_TREE = source_cache.parse(DATABASE_SOURCE)
 
 
 def _load_export_function(namespace):

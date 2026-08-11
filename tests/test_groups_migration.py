@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,7 @@ USER_MODAL = (ROOT / "src" / "components" / "modals" / "UserEditModal.jsx").read
 
 def _membership_edit_database_class():
     """Load only the membership-boundary code, without importing live DB setup."""
-    module = ast.parse(DB)
+    module = source_cache.parse(DB)
     database_class = next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"

@@ -6,6 +6,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from typing import List, Optional
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,7 @@ def _read(path):
 
 
 def _module_function_node(path, name):
-    module = ast.parse(_read(path))
+    module = source_cache.parse(_read(path))
     return next(
         node
         for node in module.body
@@ -35,7 +36,7 @@ def _module_function_source(path, name):
 
 def _database_method_source(name):
     source = _read(DATABASE_PATH)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node
         for node in module.body

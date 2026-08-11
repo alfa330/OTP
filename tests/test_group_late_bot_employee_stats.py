@@ -21,6 +21,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "database.py"
@@ -28,7 +29,7 @@ BOT_PATH = ROOT / "bot_schedule2.py"
 VIEW_PATH = ROOT / "src" / "components" / "group_late" / "GroupLateBotView.jsx"
 
 DB_SOURCE = DB_PATH.read_text(encoding="utf-8-sig")
-DB_TREE = ast.parse(DB_SOURCE)
+DB_TREE = source_cache.parse(DB_SOURCE)
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
 VIEW_SRC = VIEW_PATH.read_text(encoding="utf-8-sig")
 
@@ -617,7 +618,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("db.glb_sync_employees(group_late.employee_roster(employees))", BOT_SOURCE)
 
     def test_endpoint_passes_the_department_pairs(self):
-        node = next(n for n in ast.walk(ast.parse(BOT_SOURCE))
+        node = next(n for n in ast.walk(source_cache.parse(BOT_SOURCE))
                     if isinstance(n, ast.FunctionDef) and n.name == "api_group_late_bot_employees")
         source = ast.get_source_segment(BOT_SOURCE, node)
         self.assertIn("match_departments=", source)

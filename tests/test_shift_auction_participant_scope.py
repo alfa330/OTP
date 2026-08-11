@@ -2,13 +2,14 @@ import ast
 import re
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = ROOT / "database.py"
 FRONTEND_PATH = ROOT / "src" / "components" / "resources" / "ShiftAuctionView.jsx"
 DATABASE_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
-DATABASE_MODULE = ast.parse(DATABASE_SOURCE)
+DATABASE_MODULE = source_cache.parse(DATABASE_SOURCE)
 
 
 def _database_class():

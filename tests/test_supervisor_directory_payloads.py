@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
@@ -8,7 +9,7 @@ BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
 
 def _function_source(name):
     source = BOT_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     function = next(
         node for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name == name

@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +56,7 @@ class BatchCallFeedbackBackendTests(unittest.TestCase):
 
     def test_batch_creates_single_shared_training(self):
         source = _read(BOT_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         func = next(
             node for node in module.body
             if isinstance(node, ast.FunctionDef) and node.name == "create_call_feedback_batch"
@@ -71,7 +72,7 @@ class BatchCallFeedbackBackendTests(unittest.TestCase):
 
     def test_single_endpoint_is_share_aware(self):
         source = _read(BOT_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         func = next(
             node for node in module.body
             if isinstance(node, ast.FunctionDef) and node.name == "upsert_call_feedback"

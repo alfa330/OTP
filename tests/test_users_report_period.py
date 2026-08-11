@@ -21,6 +21,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils import get_column_letter
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,7 @@ DATABASE_PATH = ROOT / "database.py"
 
 def _load_users_report_builder():
     source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node
         for node in module.body

@@ -11,6 +11,7 @@ import textwrap
 import types
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
@@ -23,7 +24,7 @@ def _read(path):
 
 def _function_source(path, function_name):
     source = _read(path)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     node = next(
         n for n in module.body
         if isinstance(n, ast.FunctionDef) and n.name == function_name

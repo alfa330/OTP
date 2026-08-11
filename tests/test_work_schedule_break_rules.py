@@ -7,6 +7,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ BOT_PATH = ROOT / "bot_schedule2.py"
 @lru_cache(maxsize=None)
 def _parsed_module(path):
     source = path.read_text(encoding="utf-8-sig")
-    return source, ast.parse(source)
+    return source, source_cache.parse(source)
 
 
 @lru_cache(maxsize=None)

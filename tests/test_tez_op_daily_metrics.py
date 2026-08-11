@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time, timedelta
 from pathlib import Path
 from unittest import mock
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ DATABASE_PATH = ROOT / "database.py"
 
 def _database_method(method_name):
     source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"
@@ -154,7 +155,7 @@ class TezOpCallStorageTests(unittest.TestCase):
             "\n    def get_daily_hours_for_all_month(",
             start,
         )
-        method_module = ast.parse(textwrap.dedent(source[start:end]))
+        method_module = source_cache.parse(textwrap.dedent(source[start:end]))
         daily_sql = next(
             node.value.value
             for node in ast.walk(method_module)
@@ -288,7 +289,7 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
 
     def test_generic_rebuild_preserves_gap_between_authoritative_days(self):
         source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         database_class = next(
             node for node in module.body
             if isinstance(node, ast.ClassDef) and node.name == "Database"

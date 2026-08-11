@@ -19,6 +19,7 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from tests import source_cache
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
@@ -68,7 +69,7 @@ CONST_NAMES = (
 
 
 def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
     wanted = set(FUNCTION_NAMES)
     selected = [
         node for node in module.body
@@ -114,7 +115,7 @@ def _extract_namespace(oktell_query=None, page_size=1000, chunk_days=7):
 
 def _extract_database_method(method_name):
     source = DATABASE_PATH.read_text(encoding="utf-8-sig")
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     method = next(
         (
             node

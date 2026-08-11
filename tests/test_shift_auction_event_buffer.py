@@ -3,6 +3,7 @@ import collections
 import threading
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
@@ -15,7 +16,7 @@ HELPERS = {
 
 
 def _buffer_namespace(maxlen=3, fetch_limit=2):
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
     functions = [
         node for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name in HELPERS

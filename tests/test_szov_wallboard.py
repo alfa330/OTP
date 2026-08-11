@@ -19,6 +19,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _load_names(source, names, namespace, label="<szov-wallboard>"):
     """Исполняет в namespace перечисленные функции и присваивания модульного уровня."""
-    tree = ast.parse(source)
+    tree = source_cache.parse(source)
     wanted = set(names)
     body = []
     for node in tree.body:
@@ -1500,7 +1501,7 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-        tree = ast.parse(source)
+        tree = source_cache.parse(source)
         db_class = next(node for node in tree.body
                         if isinstance(node, ast.ClassDef) and node.name == "Database")
         wanted = {'save_szov_broadcast_chat', 'delete_szov_broadcast_chat',
@@ -1610,7 +1611,7 @@ class SzovShiftGroupingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-        tree = ast.parse(source)
+        tree = source_cache.parse(source)
         cls.db_class = next(node for node in tree.body
                             if isinstance(node, ast.ClassDef) and node.name == "Database")
 

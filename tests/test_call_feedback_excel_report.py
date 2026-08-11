@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import openpyxl
+from tests import source_cache
 
 try:
     import xlsxwriter
@@ -23,7 +24,7 @@ def _read(path):
 
 def _load_report_builder():
     source = _read(BOT_PATH)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     function = next(
         node for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name == "_build_call_feedback_report_xlsx"
@@ -141,7 +142,7 @@ class CallFeedbackExcelReportTests(unittest.TestCase):
 
     def test_scheduler_sends_one_excel_document(self):
         source = _read(BOT_PATH)
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         sender = next(
             node for node in module.body
             if isinstance(node, ast.FunctionDef) and node.name == "sync_send_weekly_call_feedback_report"

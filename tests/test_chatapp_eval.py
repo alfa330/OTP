@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 BOT_PATH = ROOT / "bot_schedule2.py"
 
 import chatapp_client  # noqa: E402
+from tests import source_cache
 
 
 def _chatapp_namespace(env=None):
@@ -35,7 +36,7 @@ def _chatapp_namespace(env=None):
         "_chatapp_direction_map",
         "_chatapp_normalize_snapshot_message",
     }
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
     selected = []
     for node in module.body:
         if isinstance(node, ast.Assign):
@@ -306,7 +307,7 @@ def _episode_builder():
     только нужные методы класса — тем же приёмом, что и для bot_schedule2.py."""
     wanted = {"build_chatapp_episodes", "_store_chatapp_episode_tx"}
     wanted_attrs = {"CHATAPP_EPISODE_LOCK_KEY", "_CHATAPP_HUMAN_OUT"}
-    module = ast.parse(DB_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(DB_PATH.read_text(encoding="utf-8-sig"))
     body = []
     for node in module.body:
         if isinstance(node, ast.ClassDef) and node.name == "Database":

@@ -11,6 +11,7 @@ import re
 import unittest
 from datetime import datetime
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +45,7 @@ def _survey_logic():
         "KNOWLEDGE_TEST_EVALUATION_PREFIX",
     }
 
-    module = ast.parse(_read(DATABASE_PATH))
+    module = source_cache.parse(_read(DATABASE_PATH))
     body = []
     for class_node in [node for node in module.body if isinstance(node, ast.ClassDef)]:
         for node in class_node.body:

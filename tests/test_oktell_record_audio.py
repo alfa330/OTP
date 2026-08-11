@@ -7,6 +7,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlparse
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +51,7 @@ def _oktell_audio_namespace(response=None):
         "_oktell_store_record",
         "_oktell_prepare_distribution_audio",
     }
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
     selected = [
         node for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -244,7 +245,7 @@ class OktellRecordAudioTests(unittest.TestCase):
 
     def test_distribution_database_import_persists_audio_path(self):
         source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-        module = ast.parse(source)
+        module = source_cache.parse(source)
         database_class = next(
             node for node in module.body
             if isinstance(node, ast.ClassDef) and node.name == "Database"

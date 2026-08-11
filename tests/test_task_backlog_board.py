@@ -7,6 +7,7 @@ import importlib.util
 import re
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1311,7 +1312,7 @@ class TaskQueryBuilderTests(unittest.TestCase):
 
     def setUp(self):
         import ast
-        tree = ast.parse(_read(DATABASE_PATH))
+        tree = source_cache.parse(_read(DATABASE_PATH))
         self.func = next(
             node for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef) and node.name == 'get_tasks_for_requester'

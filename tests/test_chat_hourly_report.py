@@ -15,6 +15,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +65,7 @@ class _FakeChat2Desk:
 
 
 def _namespace(fake_requests=None):
-    tree = ast.parse(SOURCE)
+    tree = source_cache.parse(SOURCE)
     body = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in NAMES:

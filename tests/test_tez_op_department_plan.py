@@ -14,6 +14,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -21,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 DB_PATH = ROOT / "database.py"
 DB_SOURCE = DB_PATH.read_text(encoding="utf-8-sig")
-DB_TREE = ast.parse(DB_SOURCE)
+DB_TREE = source_cache.parse(DB_SOURCE)
 APP_SRC = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 PANEL_SRC = (ROOT / "src" / "components" / "salary" / "TezOpPlanPanel.jsx").read_text(encoding="utf-8-sig")
 BOT_SRC = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
@@ -169,7 +170,7 @@ class DepartmentPlanSummaryTests(unittest.TestCase):
 
 def _load_endpoint():
     """Вытаскивает get_department_plan из bot_schedule2 без импорта приложения."""
-    tree = ast.parse(BOT_SRC)
+    tree = source_cache.parse(BOT_SRC)
     fn = next(
         n for n in tree.body
         if isinstance(n, ast.FunctionDef) and n.name == "get_department_plan"

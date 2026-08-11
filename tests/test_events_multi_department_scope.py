@@ -2,6 +2,7 @@ import ast
 import textwrap
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,7 @@ def _read(path):
 
 def _function_source(path, function_name, class_name=None):
     source = _read(path)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     body = module.body
     if class_name:
         class_node = next(

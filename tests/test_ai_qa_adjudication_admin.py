@@ -3,6 +3,7 @@
 пересчитывается при правке, валидация патча."""
 from pathlib import Path
 import ast
+import copy
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -11,6 +12,7 @@ from call_qa import api as call_qa_api
 from call_qa.api import _clean_adjudication_patch
 from call_qa.rag import knowledge
 from call_qa.rag import store
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -241,9 +243,10 @@ class AdminGuardBehaviorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-        tree = ast.parse(source)
+        tree = source_cache.parse(source)
         node = next(item for item in tree.body
                     if isinstance(item, ast.FunctionDef) and item.name == "_ai_qa_admin_guard")
+        node = copy.deepcopy(node)
         node.decorator_list = []
         cls.code = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                            str(ROOT / "bot_schedule2.py"), "exec")

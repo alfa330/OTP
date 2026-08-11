@@ -10,6 +10,7 @@ import ast
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ ROUTES_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 FRONTEND_SOURCE = (
     ROOT / "src" / "components" / "resources" / "ShiftAuctionView.jsx"
 ).read_text(encoding="utf-8-sig")
-DATABASE_MODULE = ast.parse(DATABASE_SOURCE)
+DATABASE_MODULE = source_cache.parse(DATABASE_SOURCE)
 
 
 def _database_class():

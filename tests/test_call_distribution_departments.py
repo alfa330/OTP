@@ -10,6 +10,7 @@ import textwrap
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,7 @@ def _read(path):
 
 def _function_source(path, function_name, class_name=None):
     source = _read(path)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     body = module.body
     if class_name:
         class_node = next(
@@ -41,7 +42,7 @@ def _function_source(path, function_name, class_name=None):
 
 def _load_functions(names, namespace):
     """Выполняет перечисленные функции bot_schedule2.py в подготовленном namespace."""
-    module = ast.parse(_read(BOT_PATH))
+    module = source_cache.parse(_read(BOT_PATH))
     for node in module.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
             exec(compile(ast.Module(body=[node], type_ignores=[]), "<bot>", "exec"), namespace)

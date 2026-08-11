@@ -12,13 +12,14 @@ import logging
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from tests import source_cache
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
 
 
 def _load_functions(*names, namespace=None):
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
     by_name = {
         node.name: node
         for node in module.body

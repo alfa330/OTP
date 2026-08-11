@@ -15,6 +15,7 @@ import ast
 import unittest
 from datetime import datetime, timedelta, date
 from pathlib import Path
+from tests import source_cache
 
 
 BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
@@ -26,7 +27,7 @@ CALCULATION_MODEL_TEZ_LINE = "tez_line"
 
 def _extract_functions(names):
     """Возвращает namespace с указанными функциями из bot_schedule2.py."""
-    module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8"))
     wanted = set(names)
     selected = [
         node for node in module.body

@@ -11,6 +11,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from typing import Dict, List, Optional
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = ROOT / "database.py"
@@ -21,7 +22,7 @@ def _read(path):
 
 
 def _module_function_source(source, name):
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     node = next(
         n for n in module.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name
@@ -31,7 +32,7 @@ def _module_function_source(source, name):
 
 def _database_method_source(name):
     source = _read(DATABASE_PATH)
-    module = ast.parse(source)
+    module = source_cache.parse(source)
     database_class = next(
         node for node in module.body
         if isinstance(node, ast.ClassDef) and node.name == "Database"
