@@ -48,6 +48,9 @@ const SimilarRow = ({ item }) => (
             {item.status && item.status !== 'published' && (
                 <IosBadge tone="slate">{item.status === 'draft' ? 'черновик' : item.status}</IosBadge>
             )}
+            {item.section && (
+                <span className="text-[11px] text-slate-500">в разделе «{item.section}»</span>
+            )}
             <span className="text-[11px] text-slate-400">нашлось по: {item.found_by}</span>
         </div>
         {item.excerpt && (

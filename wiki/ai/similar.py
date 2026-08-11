@@ -192,6 +192,36 @@ def by_vector(cursor, *, article_ids, vector, exclude_id=None, limit=5,
     return sorted(best.values(), key=lambda x: -x['score'])[:limit]
 
 
+_SECTIONS_SQL = """
+SELECT s.article_id, string_agg(sec.name, ', ' ORDER BY sec.name)
+  FROM wiki_article_sections s
+  JOIN wiki_sections sec ON sec.id = s.section_id
+ WHERE s.article_id = ANY(%(ids)s)
+ GROUP BY s.article_id
+"""
+
+
+def attach_sections(cursor, items):
+    """Дописать название раздела к находкам.
+
+    Нужно там, где без него не разобраться: на проде есть три пары статей с
+    ОДИНАКОВЫМИ названиями («Рабочие сайты», «Аренда транспорта», «Информация по
+    СМЗ»), и две строки «Рабочие сайты · дубль · 100%» подряд ничего редактору не
+    говорят. Раздел отвечает на вопрос «какая из них».
+
+    Отдельным запросом после сведения, а не join'ом в каждой ветке: веток три, и
+    у векторной статьи приходят из search_dense, где разделов нет вовсе.
+    """
+    ids = sorted({int(item['article_id']) for item in items})
+    if not ids:
+        return items
+    cursor.execute(_SECTIONS_SQL, {'ids': ids})
+    names = dict(cursor.fetchall())
+    for item in items:
+        item['section'] = names.get(item['article_id']) or ''
+    return items
+
+
 def find_duplicates(cursor, *, visible_ids, indexed_ids, title, text_words,
                     vector=None, exclude_id=None, limit=5):
     """Свести три ветки в один ответ редактору.
@@ -237,6 +267,7 @@ def find_duplicates(cursor, *, visible_ids, indexed_ids, title, text_words,
                    key=lambda x: -x['score'])[:limit]
     for item in items:
         item['verdict'] = _rank_label(item['score'])
+    attach_sections(cursor, items)
 
     verdict = items[0]['verdict'] if items else None
     return {

@@ -31,12 +31,28 @@ ARTICLES = [
      'баллы приоритета начисляются рейтинг активность выполненные заказы'),
 ]
 
+# Привязка статей к разделам: раздел показывается в панели и различает статьи с
+# одинаковыми названиями.
+SECTIONS = [(1, 10), (2, 20), (3, 10), (4, 20)]
+SECTION_NAMES = [(10, 'Работа с водителями'), (20, 'Кадры')]
+
+# Разделы тоже подменяем: без этого запрос названий разделов ушёл бы в боевые
+# таблицы, и тест зависел бы от того, как сейчас устроено дерево на проде.
 _STUB = """
 WITH wiki_articles AS (
     SELECT id, title, slug, status, summary, content_plain
       FROM unnest(%(a_id)s::int[], %(a_title)s::text[], %(a_slug)s::text[],
                   %(a_status)s::text[], %(a_summary)s::text[], %(a_plain)s::text[])
            AS t(id, title, slug, status, summary, content_plain)
+),
+wiki_article_sections AS (
+    SELECT article_id, section_id
+      FROM unnest(%(s_article)s::int[], %(s_section)s::int[])
+           AS t(article_id, section_id)
+),
+wiki_sections AS (
+    SELECT id, name
+      FROM unnest(%(sec_id)s::int[], %(sec_name)s::text[]) AS t(id, name)
 ),
 """
 
@@ -53,6 +69,10 @@ class _StubCursor:
             'a_status': [row[3] for row in ARTICLES],
             'a_summary': [row[4] for row in ARTICLES],
             'a_plain': [row[5] for row in ARTICLES],
+            's_article': [row[0] for row in SECTIONS],
+            's_section': [row[1] for row in SECTIONS],
+            'sec_id': [row[0] for row in SECTION_NAMES],
+            'sec_name': [row[1] for row in SECTION_NAMES],
         }
 
     def execute(self, sql, params=None):
@@ -184,6 +204,14 @@ class SimilarSqlTest(unittest.TestCase):
         item = next(row for row in found['items'] if row['article_id'] == 3)
         self.assertIn('название', item['found_by'])
         self.assertIn('текст', item['found_by'])
+
+    def test_section_name_distinguishes_same_titles(self):
+        """На проде три пары статей с одинаковыми названиями — раздел различает их."""
+        found = ai_similar.find_duplicates(
+            self.cursor, visible_ids=self.all_ids(), indexed_ids=[],
+            title='Термопакет', text_words=['термопакет', 'депозит'])
+        item = next(row for row in found['items'] if row['article_id'] == 3)
+        self.assertEqual('Работа с водителями', item['section'])
 
     def test_vector_coverage_is_reported_honestly(self):
         """«Похожего нет» при неполном покрытии значит меньше, чем кажется."""
