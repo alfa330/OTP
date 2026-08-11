@@ -214,15 +214,12 @@ def register(bp, wiki_route, db, log_ip):
         # История берётся ДО записи нового вопроса, иначе он попал бы в контекст
         # дважды — и как история, и как сам вопрос.
         history = ai_store.recent_turns(cursor, chat_id, limit=6)
-        previous_user = next((turn['text'] for turn in reversed(history)
-                              if turn['role'] == 'user'), '')
         after_clarify = bool(history) and history[-1].get('kind') == 'clarify'
 
-        # ПОИСК идёт по обогащённому запросу. Короткая реплика вроде «Taxi24» сама
-        # по себе ищется плохо, а после уточняющего вопроса именно такие и приходят.
-        search_query = question
-        if previous_user and len(ai_answer.meaningful_words(question)) <= 4:
-            search_query = f'{previous_user} {question}'
+        # ПОИСК идёт по обогащённому запросу: короткая реплика вроде «Taxi24» или
+        # «отправь ссылку» сама по себе не содержит темы. Правило целиком живёт в
+        # слое ответа — там же, где его замер и тесты.
+        search_query = ai_answer.enrich_query(question, history)
 
         query_vector = None
         try:

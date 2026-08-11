@@ -51,6 +51,37 @@ def _clean(text):
     return ' '.join(str(text or '').split())
 
 
+# Схемы, у которых адрес имеет смысл вне интерфейса портала. Относительные
+# ссылки (/api/wiki/file/...) сюда НЕ входят: ответ помощника открывается с
+# домена GitHub Pages, и такой адрес там указывал бы в никуда.
+_USEFUL_SCHEME = ('http://', 'https://', 'mailto:', 'tel:')
+
+
+def _inline_links(soup):
+    """Вписать адрес ссылки в текст: «ярлык (адрес)».
+
+    Без этого адрес до помощника не доходит ВООБЩЕ: куски строятся из текста, а
+    get_text() выбрасывает href. В корпусе 210 ссылок в 21 статье, и все они для
+    помощника выглядели как обычные слова — отсюда «прямой ссылки в статьях нет»
+    на вопрос, ответ на который в статье есть.
+
+    Адрес дописывается только когда он полезен получателю: пустые и «#» ссылки
+    пропускаются (в статье про акции такая ровно одна, и она именно «#»), как и
+    внутренние относительные адреса.
+    """
+    for anchor in soup.find_all('a'):
+        href = str(anchor.get('href') or '').strip()
+        if not href.lower().startswith(_USEFUL_SCHEME):
+            continue
+        label = ' '.join(anchor.get_text(' ', strip=True).split())
+        # У mailto/tel ярлык обычно и есть сам адрес — сравниваем без схемы,
+        # иначе выходит «help@itaxi.kz (mailto:help@itaxi.kz)».
+        bare = href.split(':', 1)[1] if href.lower().startswith(('mailto:', 'tel:')) else href
+        if href in label or bare in label:
+            continue
+        anchor.string = f'{label} ({href})' if label else href
+
+
 def parse_blocks(html):
     """HTML → плоская последовательность блоков в порядке документа.
 
@@ -59,6 +90,7 @@ def parse_blocks(html):
     Отдельный проход, чтобы нарезку можно было проверить без разбора HTML.
     """
     soup = BeautifulSoup(str(html or ''), 'html.parser')
+    _inline_links(soup)
     blocks = []
 
     def walk(node, ack):

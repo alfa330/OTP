@@ -80,6 +80,43 @@ class ClarifyGateTest(unittest.TestCase):
         self.assertIn('близость', reason)
 
 
+class FollowUpQueryTest(unittest.TestCase):
+    """Обогащение запроса продолжения. Нить рвалась на втором шаге."""
+
+    HISTORY = [
+        {'role': 'user', 'text': 'что за акция Лимонопад'},
+        {'role': 'assistant', 'text': 'Лимонопад — розыгрыш…'},
+        {'role': 'user', 'text': 'по подробнее, как участвовать'},
+        {'role': 'assistant', 'text': 'Участвуют все парки…'},
+    ]
+
+    def test_topic_survives_two_hops(self):
+        """Главный случай из живого диалога: на третьей реплике тема ещё нужна."""
+        query = ai_answer.enrich_query('отправь ссылку для регистрации', self.HISTORY)
+        self.assertIn('Лимонопад', query)
+        self.assertIn('отправь ссылку для регистрации', query)
+
+    def test_long_question_is_left_alone(self):
+        question = 'какие акции для новых водителей действуют в августе в Алматы'
+        self.assertEqual(question, ai_answer.enrich_query(question, self.HISTORY))
+
+    def test_five_word_followup_is_enriched(self):
+        """«отправь мне ссылку для регистрации» — пять слов и всё ещё отсылка."""
+        query = ai_answer.enrich_query('отправь мне ссылку для регистрации', self.HISTORY)
+        self.assertNotEqual('отправь мне ссылку для регистрации', query)
+
+    def test_first_question_has_nothing_to_enrich(self):
+        self.assertEqual('термопакет', ai_answer.enrich_query('термопакет', []))
+
+    def test_assistant_replies_are_not_glued_in(self):
+        """Подмешиваем СВОИ реплики человека, а не ответы помощника.
+
+        Ответ помощника длинный и уводит поиск в свою же формулировку.
+        """
+        query = ai_answer.enrich_query('а ссылка?', self.HISTORY)
+        self.assertNotIn('розыгрыш', query)
+
+
 class SourcesTest(unittest.TestCase):
     def test_split_sources_takes_numbers(self):
         body, cited = ai_answer.split_sources(
