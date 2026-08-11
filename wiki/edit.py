@@ -45,18 +45,18 @@ def _next_version(cursor, article_id):
 
 def create_article(cursor, *, slug, title, summary, content, article_type,
                    section_ids, tags, author_id, visibility_mode='inherit',
-                   strict_mode=False):
+                   strict_mode=False, ai_opt_out=False):
     clean = sanitize_html(content)
     cursor.execute(
         """
         INSERT INTO wiki_articles (slug, title, summary, content, content_plain,
                                    article_type, status, visibility_mode, strict_mode,
-                                   author_id, updated_by, owner_user_id)
-        VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s)
+                                   ai_opt_out, author_id, updated_by, owner_user_id)
+        VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (slug, title, summary, clean, to_plain_text(clean), article_type,
-         visibility_mode, strict_mode, author_id, author_id, author_id),
+         visibility_mode, strict_mode, ai_opt_out, author_id, author_id, author_id),
     )
     article_id = cursor.fetchone()[0]
     set_sections(cursor, article_id, section_ids)
@@ -71,7 +71,8 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
 
 
 _UPDATABLE = ('title', 'summary', 'article_type', 'status',
-              'visibility_mode', 'strict_mode', 'owner_user_id', 'review_due_at')
+              'visibility_mode', 'strict_mode', 'ai_opt_out', 'owner_user_id',
+              'review_due_at')
 
 
 def update_article(cursor, article_id, fields, *, editor_id, session_id, comment):

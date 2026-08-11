@@ -21,6 +21,7 @@ import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import WikiAiDraft from './WikiAiDraft';
 
 /* Редактор статьи на TipTap.
  *
@@ -80,6 +81,11 @@ export default function WikiEditor({
     const [saving, setSaving] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [importing, setImporting] = useState(false);
+    // Поддержка ИИ по умолчанию ВКЛЮЧЕНА: в базе рубильник называется ai_opt_out
+    // и по умолчанию false, то есть новая статья и так участвует в ответах
+    // помощника. Показать её выключенной значило бы соврать про текущее
+    // состояние, а сохранить в этом виде — молча выключить то, что включено.
+    const [aiSupport, setAiSupport] = useState(!article?.ai_opt_out);
 
     const editor = useEditor({
         extensions: [
@@ -131,6 +137,7 @@ export default function WikiEditor({
             content: editor.getHTML(),
             article_type: articleType,
             section_ids: sectionIds.map(Number).filter(Boolean),
+            ai_support: aiSupport,
         };
         if (status) payload.status = status;
 
@@ -147,8 +154,8 @@ export default function WikiEditor({
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
-    }, [editor, title, summary, articleType, sectionIds, isNew, base, headers,
-        article, showToast, onSaved]);
+    }, [editor, title, summary, articleType, sectionIds, aiSupport, isNew, base,
+        headers, article, showToast, onSaved]);
 
     const importDocument = (file) => {
         if (!file) return;
@@ -217,11 +224,14 @@ export default function WikiEditor({
                     {dirty && <IosBadge tone="amber">Есть несохранённые правки</IosBadge>}
                 </div>
                 <div className="flex items-center gap-2">
-                    <label className={`${iosBtnSecondary} cursor-pointer`}>
+                    <label
+                        className={`${iosBtnSecondary} cursor-pointer`}
+                        title="Разобрать формат документа без ИИ: ничего не уходит наружу"
+                    >
                         {importing
                             ? <Loader2 size={14} className="animate-spin" />
                             : <Upload size={14} />}
-                        Из документа
+                        Импорт как есть
                         <input
                             type="file"
                             className="hidden"
@@ -293,6 +303,25 @@ export default function WikiEditor({
                     </div>
                 </div>
             </section>
+
+            <WikiAiDraft
+                base={base}
+                headers={headers}
+                showToast={showToast}
+                enabled={aiSupport}
+                onEnabledChange={(value) => { setAiSupport(value); setDirty(true); }}
+                excludeId={article?.id || null}
+                getSnapshot={() => ({ title, content: editor?.getHTML() || '' })}
+                onDraft={(data) => {
+                    // Черновик ИИ ЗАМЕЩАЕТ поля, а не дописывает: он собран из
+                    // документа целиком, и смешивать его с прежним текстом
+                    // значило бы получить статью с двумя вступлениями.
+                    if (data.title) setTitle(data.title);
+                    if (data.summary) setSummary(data.summary);
+                    editor?.commands.setContent(data.content || '');
+                    setDirty(true);
+                }}
+            />
 
             <section className="space-y-1.5">
                 <div className={iosGroupLabel}>Текст</div>

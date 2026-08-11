@@ -207,7 +207,8 @@ def list_articles(cursor, visible_ids, *, section_id=None, status=None,
 
 
 _ARTICLE_KEYS = ('id', 'slug', 'title', 'summary', 'content', 'article_type', 'status',
-                 'visibility_mode', 'strict_mode', 'toc', 'views', 'author_id',
+                 'visibility_mode', 'strict_mode', 'ai_opt_out', 'toc', 'views',
+                 'author_id',
                  'author_name', 'owner_user_id', 'updated_by', 'updated_at',
                  'created_at', 'published_at', 'review_due_at', 'section_ids', 'tags')
 
@@ -216,7 +217,8 @@ def get_article(cursor, *, article_id=None, slug=None):
     cursor.execute(
         """
         SELECT a.id, a.slug, a.title, a.summary, a.content, a.article_type, a.status,
-               a.visibility_mode, a.strict_mode, a.toc, a.views, a.author_id, u.name,
+               a.visibility_mode, a.strict_mode, a.ai_opt_out, a.toc, a.views,
+               a.author_id, u.name,
                a.owner_user_id, a.updated_by, a.updated_at, a.created_at,
                a.published_at, a.review_due_at,
                COALESCE((SELECT array_agg(s.section_id) FROM wiki_article_sections s

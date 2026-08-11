@@ -158,6 +158,51 @@ class TableTest(unittest.TestCase):
         self.assertIn('<th>Тариф</th>', result['content'])
         self.assertIn('<td>Комфорт</td>', result['content'])
 
+    def test_xlsx_merged_header_survives(self):
+        """Двухуровневая шапка Excel обязана дойти до статьи целой.
+
+        Проверено на настоящем файле: потоковое чтение openpyxl не отдаёт
+        объединённые клетки вовсе (у ReadOnlyWorksheet нет merged_cells), и шапка
+        «Комиссия, %» над двумя колонками приезжала как
+        ('Парк', 'Комиссия, %', None, 'Аренда') — в таблице появлялась пустая
+        колонка, а подписи «парк»/«сервис» уезжали в данные и выглядели строкой
+        таблицы. То есть структура документа была понята неверно, молча.
+        """
+        import openpyxl
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = 'Тарифы'
+        sheet['A1'] = 'Парк'
+        sheet['B1'] = 'Комиссия, %'
+        sheet['D1'] = 'Аренда, тг'
+        sheet.merge_cells('B1:C1')
+        sheet['B2'] = 'парк'
+        sheet['C2'] = 'сервис'
+        sheet.append(['Anytime', 3.5, 7, 9500])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        content = convert('tarify.xlsx', buffer.getvalue())['content']
+        self.assertIn('<th colspan="2">Комиссия, %</th>', content)
+        # Подписи второго уровня — тоже шапка, а не данные.
+        self.assertIn('<th>сервис</th>', content)
+        # Данные при этом остались данными.
+        self.assertIn('<td>Anytime</td>', content)
+
+    def test_xlsx_trailing_empty_rows_are_dropped(self):
+        import openpyxl
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append(['Тариф', 'Цена'])
+        sheet.append(['Комфорт', 1500])
+        sheet.append([None, None])
+        sheet.append([None, None])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        content = convert('t.xlsx', buffer.getvalue())['content']
+        self.assertEqual(2, content.count('<tr>'))
+
     def test_csv_semicolon_and_cp1251(self):
         """Excel в русской локали сохраняет CSV именно так."""
         data = 'Марка;Модель\nHyundai;Solaris\n'.encode('cp1251')

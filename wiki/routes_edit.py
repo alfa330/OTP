@@ -99,6 +99,12 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             visibility_mode=('restricted' if data.get('visibility_mode') == 'restricted'
                              else 'inherit'),
             strict_mode=bool(data.get('strict_mode')),
+            # «Поддержка ИИ» приходит от редактора как ai_support, а в базе живёт
+            # обратным флагом-рубильником. Инверсия делается здесь, в одном месте:
+            # положительная формулировка нужна человеку («ИИ помогает с этой
+            # статьёй»), отрицательная — периметру, где по умолчанию разрешено.
+            ai_opt_out=(not data['ai_support']) if 'ai_support' in data
+                       else bool(data.get('ai_opt_out')),
         )
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.create',
                            entity_type='article', entity_id=article_id,
@@ -140,6 +146,15 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             fields['content'] = data['content'] or ''
         if data.get('article_type') in ARTICLE_TYPES:
             fields['article_type'] = data['article_type']
+        # Поддержка ИИ — право того, кто правит статью, а не администратора
+        # доступов: она не расширяет чтение, а только решает, уходит ли текст в
+        # индекс помощника. По умолчанию она и так включена, так что запрет здесь
+        # означал бы «выключить нельзя», а это ровно наоборот тому, зачем
+        # рубильник заводился.
+        if 'ai_support' in data:
+            fields['ai_opt_out'] = not data['ai_support']
+        elif 'ai_opt_out' in data:
+            fields['ai_opt_out'] = bool(data['ai_opt_out'])
         if 'owner_user_id' in data:
             fields['owner_user_id'] = _int_or_none(data['owner_user_id'])
 

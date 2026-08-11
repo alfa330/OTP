@@ -247,6 +247,32 @@ class ComposeTest(unittest.TestCase):
         self.assertIn('обязательное ознакомление', result['notes'][0])
 
 
+class DocumentProviderTest(unittest.TestCase):
+    """Файл целиком: отдельная цепочка, потому что текстовые провайдеры его не примут."""
+
+    def test_only_file_capable_providers_are_used(self):
+        chain = (('groq', 'llama'), ('cloudflare', 'mistral'), ('vertex', 'gemini-3-flash'),
+                 ('gemini', 'gemini-3.5-flash-lite'))
+        self.assertEqual((('vertex', 'gemini-3-flash'),
+                          ('gemini', 'gemini-3.5-flash-lite')),
+                         ai_providers.file_capable_chain(chain))
+
+    def test_unsupported_mime_fails_fast(self):
+        """DOCX моделью не читается — отказ должен быть внятным, а не 400 от API."""
+        with self.assertRaises(ai_providers.ProviderError) as caught:
+            ai_providers.generate_document(
+                'sys', 'user', blob=b'PK', mime='application/vnd.openxmlformats-'
+                'officedocument.wordprocessingml.document')
+        self.assertFalse(caught.exception.retryable)
+
+    def test_text_only_chain_fails_fast(self):
+        with self.assertRaises(ai_providers.ProviderError) as caught:
+            ai_providers.generate_document('sys', 'user', blob=b'%PDF',
+                                           mime='application/pdf',
+                                           chain=(('groq', 'llama'),))
+        self.assertIn('умеющего читать файл', str(caught.exception))
+
+
 class ProvidersTest(unittest.TestCase):
     def test_strips_think_block(self):
         self.assertEqual('Ответ', ai_providers.normalize_answer(
@@ -283,15 +309,15 @@ class ProvidersTest(unittest.TestCase):
     def test_chain_falls_through_on_error_and_empty(self):
         calls = []
 
-        def failing(model, system, user, history=()):
+        def failing(model, system, user, history=(), max_tokens=None):
             calls.append(('fail', model))
             raise ai_providers.ProviderError('нет связи')
 
-        def empty(model, system, user, history=()):
+        def empty(model, system, user, history=(), max_tokens=None):
             calls.append(('empty', model))
             return {'text': '<think>только мысли</think>', 'finish': 'length'}
 
-        def good(model, system, user, history=()):
+        def good(model, system, user, history=(), max_tokens=None):
             calls.append(('good', model))
             return {'text': 'Ответ', 'elapsed': 0.5, 'usage': {}}
 
@@ -310,7 +336,7 @@ class ProvidersTest(unittest.TestCase):
         self.assertEqual([('fail', 'm1'), ('empty', 'm2'), ('good', 'm3')], calls)
 
     def test_all_failed_raises(self):
-        def failing(model, system, user, history=()):
+        def failing(model, system, user, history=(), max_tokens=None):
             raise ai_providers.ProviderError('нет связи')
 
         original = dict(ai_providers._ADAPTERS)
@@ -380,7 +406,7 @@ class HistoryTest(unittest.TestCase):
     def test_provider_chain_passes_history(self):
         seen = {}
 
-        def adapter(model, system, user, history=()):
+        def adapter(model, system, user, history=(), max_tokens=None):
             seen['history'] = list(history)
             return {'text': 'Ответ', 'elapsed': 0.1, 'usage': {}}
 

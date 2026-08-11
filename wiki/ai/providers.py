@@ -161,8 +161,10 @@ def _messages(system, user, history):
     return out
 
 
-def _openai_shape(url, key, model, system, user, extra_headers=None, history=()):
-    payload = {'model': model, 'temperature': 0.1, 'max_tokens': MAX_TOKENS,
+def _openai_shape(url, key, model, system, user, extra_headers=None, history=(),
+                  max_tokens=None):
+    payload = {'model': model, 'temperature': 0.1,
+               'max_tokens': max_tokens or MAX_TOKENS,
                'messages': _messages(system, user, history)}
     headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
     headers.update(extra_headers or {})
@@ -176,20 +178,20 @@ def _openai_shape(url, key, model, system, user, extra_headers=None, history=())
             'usage': body.get('usage') or {}, 'elapsed': elapsed}
 
 
-def _call_groq(model, system, user, history=()):
+def _call_groq(model, system, user, history=(), max_tokens=None):
     return _openai_shape('https://api.groq.com/openai/v1/chat/completions',
                          os.environ['GROQ_API_KEY'], model, system, user,
-                         history=history)
+                         history=history, max_tokens=max_tokens)
 
 
-def _call_openrouter(model, system, user, history=()):
+def _call_openrouter(model, system, user, history=(), max_tokens=None):
     return _openai_shape('https://openrouter.ai/api/v1/chat/completions',
                          os.environ['OPEN_ROUTER_API_KEY'], model, system, user,
                          extra_headers={'X-Title': 'OTP wiki assistant'},
-                         history=history)
+                         history=history, max_tokens=max_tokens)
 
 
-def _call_cloudflare(model, system, user, history=()):
+def _call_cloudflare(model, system, user, history=(), max_tokens=None):
     """Cloudflare отдаёт ТРИ формы ответа — знать надо все.
 
     Парсер на одну форму даёт ложный «пустой ответ»: на этом я уже ошибся и
@@ -197,7 +199,7 @@ def _call_cloudflare(model, system, user, history=()):
     """
     account = os.environ['CLOUDFLARE_ACCOUNT_ID'].strip()
     url = f'https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}'
-    payload = {'temperature': 0.1, 'max_tokens': MAX_TOKENS,
+    payload = {'temperature': 0.1, 'max_tokens': max_tokens or MAX_TOKENS,
                'messages': _messages(system, user, history)}
     headers = {'Authorization': 'Bearer '
                                 + os.environ['CLOUDFLARE_WORKER_AI_KEY'].strip(),
@@ -223,7 +225,7 @@ def _call_cloudflare(model, system, user, history=()):
             'usage': result.get('usage') or {}, 'elapsed': elapsed}
 
 
-def _call_gemini(model, system, user, history=()):
+def _call_gemini(model, system, user, history=(), max_tokens=None):
     """Gemini с гашением «мышления» и обязательным откатом на 400.
 
     На моделях 3.x параметр thinkingConfig отдаёт 400 (он изменился), поэтому
@@ -243,7 +245,8 @@ def _call_gemini(model, system, user, history=()):
     base = {
         'system_instruction': {'parts': [{'text': system}]},
         'contents': contents,
-        'generationConfig': {'temperature': 0.1, 'maxOutputTokens': MAX_TOKENS},
+        'generationConfig': {'temperature': 0.1,
+                             'maxOutputTokens': max_tokens or MAX_TOKENS},
     }
     last_error = None
     for suppress_thinking in (True, False):
@@ -313,7 +316,7 @@ def _vertex_token():
     return _vertex_credentials.token, _vertex_credentials.project_id
 
 
-def _call_vertex(model, system, user, history=()):
+def _call_vertex(model, system, user, history=(), max_tokens=None):
     token, project = _vertex_token()
     region = VERTEX_REGION
     host = ('aiplatform.googleapis.com' if region == 'global'
@@ -339,7 +342,8 @@ def _call_vertex(model, system, user, history=()):
     payload = {
         'system_instruction': {'parts': [{'text': system}]},
         'contents': contents,
-        'generationConfig': {'temperature': 0.1, 'maxOutputTokens': MAX_TOKENS,
+        'generationConfig': {'temperature': 0.1,
+                             'maxOutputTokens': max_tokens or MAX_TOKENS,
                              'thinkingConfig': {'thinkingBudget': 0}},
     }
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
@@ -370,7 +374,140 @@ _ADAPTERS = {'groq': _call_groq, 'gemini': _call_gemini,
              'vertex': _call_vertex}
 
 
-def generate(system, user, *, chain=None, history=()):
+# ── Документ целиком: файл уходит в модель как есть ─────────────────────────
+#
+# Нужно ради ТАБЛИЦ. В PDF таблица — это не структура, а координаты: pypdf
+# выдаёт из неё поток слов, и разложить их обратно по колонкам из текста уже
+# нельзя. Скан вообще не даёт текстового слоя (importer на таком отказывает
+# прямым текстом). Gemini читает PDF и картинку постранично с разметкой, то есть
+# видит саму сетку — это единственный способ сдержать обещание «всегда корректно
+# понимает структуру документа».
+#
+# Из цепочки здесь годятся только vertex и gemini: Groq и Cloudflare принимают
+# лишь текст, и подсунуть им файл значит получить 400 на каждой попытке.
+_FILE_MIME = {
+    'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic',
+    'image/heif',
+}
+_FILE_CAPABLE = ('vertex', 'gemini')
+
+
+def file_capable_chain(chain=None):
+    """Цепочка, урезанная до провайдеров, принимающих файл."""
+    return tuple((p, m) for p, m in (chain or available_chain())
+                 if p in _FILE_CAPABLE)
+
+
+def _file_parts(system, user, blob, mime):
+    import base64
+
+    return {
+        'system_instruction': {'parts': [{'text': system}]},
+        'contents': [{'role': 'user', 'parts': [
+            {'inline_data': {'mime_type': mime,
+                             'data': base64.b64encode(blob).decode('ascii')}},
+            {'text': user},
+        ]}],
+    }
+
+
+def _read_gemini_body(body, elapsed):
+    candidates = body.get('candidates') or []
+    text, finish = '', None
+    if candidates:
+        finish = candidates[0].get('finishReason')
+        for part in ((candidates[0].get('content') or {}).get('parts') or []):
+            if part.get('text'):
+                text += part['text']
+    usage = body.get('usageMetadata') or {}
+    return {'text': text, 'finish': finish, 'elapsed': elapsed,
+            'usage': {'prompt_tokens': usage.get('promptTokenCount'),
+                      'completion_tokens': usage.get('candidatesTokenCount'),
+                      'thoughts_tokens': usage.get('thoughtsTokenCount')}}
+
+
+def _call_vertex_file(model, system, user, *, blob, mime, max_tokens=None):
+    token, project = _vertex_token()
+    region = VERTEX_REGION
+    host = ('aiplatform.googleapis.com' if region == 'global'
+            else f'{region}-aiplatform.googleapis.com')
+    url = (f'https://{host}/v1/projects/{project}/locations/{region}'
+           f'/publishers/google/models/{model}:generateContent')
+    payload = _file_parts(system, user, blob, mime)
+    payload['generationConfig'] = {
+        'temperature': 0.1, 'maxOutputTokens': max_tokens or MAX_TOKENS,
+        'thinkingConfig': {'thinkingBudget': 0},
+    }
+    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+    try:
+        body, elapsed = _post(url, payload, headers)
+    except ProviderError as error:
+        if error.status != 400:
+            raise
+        payload['generationConfig'].pop('thinkingConfig', None)
+        body, elapsed = _post(url, payload, headers)
+    return _read_gemini_body(body, elapsed)
+
+
+def _call_gemini_file(model, system, user, *, blob, mime, max_tokens=None):
+    url = ('https://generativelanguage.googleapis.com/v1beta/models/'
+           + model + ':generateContent')
+    payload = _file_parts(system, user, blob, mime)
+    payload['generationConfig'] = {'temperature': 0.1,
+                                   'maxOutputTokens': max_tokens or MAX_TOKENS}
+    body, elapsed = _post(url, payload, {'Content-Type': 'application/json'},
+                          params={'key': os.environ['GEMINI_API_KEY']})
+    return _read_gemini_body(body, elapsed)
+
+
+_FILE_ADAPTERS = {'vertex': _call_vertex_file, 'gemini': _call_gemini_file}
+
+
+def generate_document(system, user, *, blob, mime, chain=None, max_tokens=None):
+    """Ответ по ФАЙЛУ: сам файл уходит в модель, текст из него не извлекается.
+
+    Отдельная функция, а не флаг у generate: цепочка здесь другая (текстовые
+    провайдеры файл не примут), и молчаливое падение на них выглядело бы как
+    «ИИ недоступен», хотя недоступен ровно один способ вызова.
+    """
+    mime = str(mime or '').split(';')[0].strip().lower()
+    if mime not in _FILE_MIME:
+        raise ProviderError('этот тип файла модель не читает: %s' % (mime or '—'),
+                            retryable=False)
+
+    chain = file_capable_chain(chain)
+    if not chain:
+        raise ProviderError('нет провайдера, умеющего читать файл '
+                            '(нужен Vertex или ключ Gemini)', retryable=False)
+
+    attempts = []
+    for provider, model in chain:
+        adapter = _FILE_ADAPTERS.get(provider)
+        if adapter is None:
+            continue
+        try:
+            result = adapter(model, system, user, blob=blob, mime=mime,
+                             max_tokens=max_tokens)
+        except Exception as error:                    # noqa: BLE001
+            attempts.append({'provider': provider, 'model': model,
+                             'error': str(error)[:200]})
+            continue
+        text = normalize_answer(result.get('text'))
+        if not text:
+            attempts.append({'provider': provider, 'model': model,
+                             'error': 'пустой ответ',
+                             'finish': result.get('finish')})
+            continue
+        return text, {'provider': provider, 'model': model,
+                      'elapsed': round(result.get('elapsed') or 0, 3),
+                      'usage': result.get('usage') or {},
+                      'finish': result.get('finish'), 'attempts': attempts}
+
+    raise ProviderError('файл не прочитал ни один провайдер: '
+                        + json.dumps(attempts, ensure_ascii=False)[:500])
+
+
+def generate(system, user, *, chain=None, history=(), max_tokens=None):
     """Пройти цепочку до первого содержательного ответа.
 
     Возвращает (текст, метаданные). Пустой ответ — это ОШИБКА провайдера, а не
@@ -391,7 +528,8 @@ def generate(system, user, *, chain=None, history=()):
                              'error': 'неизвестный провайдер'})
             continue
         try:
-            result = adapter(model, system, user, history)
+            result = adapter(model, system, user, history,
+                             max_tokens=max_tokens)
         except Exception as error:                    # noqa: BLE001
             attempts.append({'provider': provider, 'model': model,
                              'error': str(error)[:200]})

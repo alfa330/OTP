@@ -73,7 +73,7 @@ def _paragraphs_to_html(text):
     return ''.join(blocks)
 
 
-def _title_from_filename(name):
+def title_from_filename(name):
     base = os.path.splitext(os.path.basename(str(name or '')))[0]
     base = re.sub(r'[_\-]+', ' ', base).strip()
     return base[:255] or 'Импортированный документ'
@@ -153,37 +153,111 @@ def _cell_to_text(value):
     return (text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
 
 
+# Порог, после которого книга читается потоком. Потоковый режим openpyxl не
+# отдаёт объединённые клетки вовсе (у ReadOnlyWorksheet нет merged_cells), то
+# есть двухуровневая шапка в нём разваливается — поэтому обычные файлы читаем
+# полностью, а потоком только большие, где иначе рискуем памятью процесса.
+_XLSX_STREAM_BYTES = 5 * 1024 * 1024
+
+
+def _merge_map(sheet):
+    """Карта объединённых клеток: (row, col) -> ('anchor', colspan, rowspan) | 'covered'.
+
+    Без неё объединённая шапка теряется молча и незаметно. Проверено на файле с
+    «Комиссия, %» над двумя колонками: потоковое чтение отдаёт
+    ('Парк', 'Комиссия, %', None, 'Аренда, тг'), в таблице появляется пустая
+    колонка, а вторая строка («парк», «сервис») уезжает в данные. То есть
+    двухуровневая шапка документа превращается в мусор, а именно её и надо было
+    понять.
+    """
+    anchors, covered = {}, set()
+    for merged in getattr(sheet, 'merged_cells', None) and sheet.merged_cells.ranges or ():
+        anchors[(merged.min_row, merged.min_col)] = (
+            merged.max_col - merged.min_col + 1, merged.max_row - merged.min_row + 1)
+        for row in range(merged.min_row, merged.max_row + 1):
+            for col in range(merged.min_col, merged.max_col + 1):
+                if (row, col) != (merged.min_row, merged.min_col):
+                    covered.add((row, col))
+    return anchors, covered
+
+
+def _header_depth(rows, anchors):
+    """Сколько первых строк — шапка. Двухуровневая шапка это норма, а не редкость.
+
+    Признак второго уровня: в первой строке есть клетка на две колонки и больше,
+    а во второй строке заполнено ровно под ней. Так выглядит «Комиссия, %» с
+    подписями «парк» и «сервис» под ней — и без этого правила подписи уходят в
+    данные, где выглядят строкой таблицы.
+    """
+    if len(rows) < 2:
+        return 1
+    wide = [(col, span) for (row, col), (span, _rspan) in anchors.items()
+            if row == 1 and span >= 2]
+    if not wide:
+        return 1
+    second = rows[1]
+    under = [col for col, span in wide for col in range(col, col + span)]
+    filled_under = any(second[col - 1] not in (None, '')
+                       for col in under if col - 1 < len(second))
+    filled_outside = any(value not in (None, '')
+                         for index, value in enumerate(second, start=1)
+                         if index not in under)
+    return 2 if filled_under and not filled_outside else 1
+
+
+def _sheet_to_html(sheet, rows, anchors, covered):
+    depth = _header_depth(rows, anchors)
+    html = ['<table><thead>']
+    for row_index, row in enumerate(rows, start=1):
+        if row_index == depth + 1:
+            html.append('</thead><tbody>')
+        cell_tag = 'th' if row_index <= depth else 'td'
+        html.append('<tr>')
+        for col_index, value in enumerate(row, start=1):
+            if (row_index, col_index) in covered:
+                continue          # клетку уже занял её якорь через colspan/rowspan
+            span_col, span_row = anchors.get((row_index, col_index), (1, 1))
+            attrs = ''
+            if span_col > 1:
+                attrs += ' colspan="%d"' % span_col
+            if span_row > 1:
+                attrs += ' rowspan="%d"' % span_row
+            html.append('<%s%s>%s</%s>' % (cell_tag, attrs, _cell_to_text(value), cell_tag))
+        html.append('</tr>')
+    html.append('</tbody></table>' if len(rows) > depth else '</thead></table>')
+    return ''.join(html)
+
+
 def _convert_xlsx(data):
     import openpyxl
 
-    workbook = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-    parts, plain, sheet_names = [], [], []
+    streamed = len(data) > _XLSX_STREAM_BYTES
+    workbook = openpyxl.load_workbook(io.BytesIO(data), data_only=True,
+                                      read_only=streamed)
+    parts, plain, warnings = [], [], []
+    if streamed:
+        warnings.append('Файл больше %d МБ — читаем потоком, объединённые клетки '
+                        'шапки могут не сохраниться'
+                        % (_XLSX_STREAM_BYTES // (1024 * 1024)))
 
     for sheet in workbook.worksheets:
-        rows = list(sheet.iter_rows(values_only=True))
+        rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+        # Полностью пустые хвостовые строки Excel отдаёт охотно — в таблице они
+        # выглядят пустыми строками.
+        while rows and all(value in (None, '') for value in rows[-1]):
+            rows.pop()
         if not rows:
             continue
-        sheet_names.append(sheet.title)
+        anchors, covered = ({}, set()) if streamed else _merge_map(sheet)
         parts.append('<h3>%s</h3>' % _cell_to_text(sheet.title))
-
-        head, body = rows[0], rows[1:]
-        html = ['<table><thead><tr>']
-        html += ['<th>%s</th>' % _cell_to_text(c) for c in head]
-        html.append('</tr></thead><tbody>')
-        for row in body:
-            html.append('<tr>')
-            html += ['<td>%s</td>' % _cell_to_text(c) for c in row]
-            html.append('</tr>')
-        html.append('</tbody></table>')
-        parts.append(''.join(html))
-
+        parts.append(_sheet_to_html(sheet, rows, anchors, covered))
         for row in rows:
             plain.append(' '.join(str(c) for c in row if c is not None))
 
     workbook.close()
     if not parts:
         raise ImportError_('Файл не содержит данных')
-    return ''.join(parts), '\n'.join(plain), [], []
+    return ''.join(parts), '\n'.join(plain), [], warnings
 
 
 def _convert_csv(data):
@@ -263,7 +337,7 @@ def convert(filename, data, *, store_image=None):
     summary = to_plain_text(clean, limit=280)
 
     return {
-        'title': _title_from_filename(filename),
+        'title': title_from_filename(filename),
         'content': clean,
         'summary': summary,
         'images': images,
