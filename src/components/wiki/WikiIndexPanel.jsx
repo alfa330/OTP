@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, Folder, Layers, Loader2, Search } from 'lucide-react';
 import { iosCard } from '../ui/ios';
+import { getScrollContainer } from './scrollContainer';
 
 /* Правая колонка витрины — оглавление раздела: разделы сверху, статьи снизу.
  *
@@ -10,6 +11,48 @@ import { iosCard } from '../ui/ios';
  * Два поля рядом оправданы только пока они делают разное, поэтому у местного
  * и подпись другая.
  */
+
+const DESKTOP = '(min-width: 1024px)';
+const GAP = 16;             // тот же отступ, что и sticky top-4
+const MIN_HEIGHT = 240;     // ниже этого панель бесполезна, лучше дать ей вылезти
+
+/* Панель обязана помещаться в экран, а не быть высотой 100vh.
+ *
+ * Липкая панель начинается НИЖЕ шапки раздела и вкладок, поэтому max-height в
+ * 100vh уводил её низ за нижний край окна: у человека появлялись две полосы
+ * прокрутки сразу — своя у панели и общая у страницы, и чтобы добраться до дна
+ * списка, приходилось сперва прокрутить сайт. Считаем высоту от фактического
+ * расстояния до низа окна.
+ *
+ * Стиль пишем прямо в DOM, без useState: пересчёт идёт на каждый кадр прокрутки,
+ * а перерисовывать из-за него всё дерево панели незачем.
+ */
+function useFitToViewport(ref) {
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return undefined;
+
+        const desktop = window.matchMedia(DESKTOP);
+        const apply = () => {
+            if (!desktop.matches) { el.style.maxHeight = ''; return; }
+            const top = el.getBoundingClientRect().top;
+            el.style.maxHeight = `${Math.max(MIN_HEIGHT, window.innerHeight - top - GAP)}px`;
+        };
+
+        apply();
+        // Прокручивается .main-content портала; window — только запасной путь,
+        // если раздел когда-нибудь окажется вне этого каркаса.
+        const scroller = getScrollContainer(el) || window;
+        scroller.addEventListener('scroll', apply, { passive: true });
+        window.addEventListener('resize', apply);
+        desktop.addEventListener('change', apply);
+        return () => {
+            scroller.removeEventListener('scroll', apply);
+            window.removeEventListener('resize', apply);
+            desktop.removeEventListener('change', apply);
+        };
+    }, [ref]);
+}
 
 const rowBase = 'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition';
 
@@ -40,9 +83,18 @@ export default function WikiIndexPanel({
 
     const draftCount = shownArticles.filter((a) => a.status !== 'published').length;
 
+    const boxRef = useRef(null);
+    useFitToViewport(boxRef);
+
     return (
-        <aside className="lg:w-[272px] lg:shrink-0 2xl:w-[306px]">
-            <div className={`${iosCard} flex flex-col overflow-hidden lg:sticky lg:top-4 lg:max-h-[calc(100vh-2.5rem)]`}>
+        /* self-stretch: без него колонка высотой в саму панель, и sticky
+           «отлипает», как только её низ уходит вверх. Растянутая на всю строку,
+           она даёт панели ездить до конца центральной колонки. */
+        <aside className="lg:w-[272px] lg:shrink-0 lg:self-stretch 2xl:w-[306px]">
+            <div
+                ref={boxRef}
+                className={`${iosCard} flex flex-col overflow-hidden lg:sticky lg:top-4 lg:max-h-[calc(100vh-2.5rem)]`}
+            >
                 <div className="flex items-center justify-between gap-2 px-3 pb-1 pt-2.5">
                     <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
                         <Layers size={11} /> Разделы и статьи
