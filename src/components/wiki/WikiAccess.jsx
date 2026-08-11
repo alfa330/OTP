@@ -8,6 +8,7 @@ import {
     IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { selectableSections, sectionOptionLabel } from './sectionPicker';
 import useStableCallback from './useStableCallback';
 
 /* Выдача доступов.
@@ -72,9 +73,13 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
     const [draft, setDraft] = useState(null);
     const [probe, setProbe] = useState(null);
 
+    // Первым по умолчанию встаёт живой раздел: выдавать права на архивный
+    // бессмысленно, а порядок разделов архив не отделяет.
+    const live = useMemo(() => selectableSections(sections), [sections]);
+
     useEffect(() => {
-        if (!sectionId && sections.length) setSectionId(String(sections[0].id));
-    }, [sections, sectionId]);
+        if (!sectionId && live.length) setSectionId(String(live[0].id));
+    }, [live, sectionId]);
 
     useEffect(() => {
         axios.get(`${base}/access/subjects`, { headers })
@@ -95,11 +100,11 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
 
     const sectionOptions = useMemo(() => {
         const spaceName = new Map(spaces.map((s) => [s.id, s.name]));
-        return sections.map((s) => ({
+        return selectableSections(sections, sectionId).map((s) => ({
             value: String(s.id),
-            label: `${spaceName.get(s.space_id) || '—'} · ${s.name}`,
+            label: sectionOptionLabel(s, spaceName.get(s.space_id) || '—'),
         }));
-    }, [sections, spaces]);
+    }, [sections, spaces, sectionId]);
 
     const currentSection = sections.find((s) => String(s.id) === String(sectionId));
 

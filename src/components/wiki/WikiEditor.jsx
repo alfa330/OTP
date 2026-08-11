@@ -21,6 +21,7 @@ import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { selectableSections, sectionOptionLabel } from './sectionPicker';
 import WikiAiDraft from './WikiAiDraft';
 
 /* Редактор статьи на TipTap.
@@ -120,9 +121,14 @@ export default function WikiEditor({
         return () => window.removeEventListener('beforeunload', handler);
     }, [dirty]);
 
+    // Архивный раздел выбрать нельзя (см. sectionPicker.js), но если статья
+    // уже лежит в нём — он остаётся в списке с пометкой, иначе поле выглядело
+    // бы пустым при заполненном section_ids.
     const sectionOptions = useMemo(
-        () => (sections || []).map((s) => ({ value: String(s.id), label: s.name })),
-        [sections],
+        () => selectableSections(sections, sectionIds[0]).map((s) => ({
+            value: String(s.id), label: sectionOptionLabel(s),
+        })),
+        [sections, sectionIds],
     );
 
     const save = useCallback((status) => {

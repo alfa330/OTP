@@ -8,6 +8,7 @@ import {
     IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { selectableSections, sectionOptionLabel } from './sectionPicker';
 
 /* Структура вики: пространства → разделы (дерево).
  *
@@ -363,9 +364,11 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 onChange={(v) => setSectionModal({ ...sectionModal, parent_section_id: v })}
                                 options={[
                                     { value: '', label: 'Верхний уровень' },
-                                    ...sections
+                                    // Вкладка целиком показывает и архив (он тут по делу),
+                                    // но вкладывать живой раздел в архивный нельзя.
+                                    ...selectableSections(sections, sectionModal.parent_section_id)
                                         .filter((s) => s.space_id === sectionModal.space_id && s.id !== sectionModal.id)
-                                        .map((s) => ({ value: String(s.id), label: s.name })),
+                                        .map((s) => ({ value: String(s.id), label: sectionOptionLabel(s) })),
                                 ]}
                                 ariaLabel="Родительский раздел"
                             />

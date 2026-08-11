@@ -9,6 +9,7 @@ import WikiArticle from './WikiArticle';
 import { markedWord } from './WikiSearch';
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import useStableCallback from './useStableCallback';
+import { selectableSections } from './sectionPicker';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
 // редактора, а не при входе в раздел.
@@ -241,12 +242,15 @@ export default function WikiLibrary({ base, headers, showToast, structure, canCr
             .catch(() => setHome(null));
     }, [base, headers, scopeAll]);
 
-    /* В дереве — только разделы своего периметра. Сервер отдаёт и чужие
-       (вкладке «Структура» они нужны), помечая их accessible=false; здесь,
-       на витрине чтения, они были бы ветками, которые открываются пустыми. */
-    const treeSections = useMemo(() => (
-        scopeAll ? sections : sections.filter((s) => s.accessible !== false)
-    ), [sections, scopeAll]);
+    /* В дереве — только разделы своего периметра и только живые. Сервер отдаёт
+       и чужие (вкладке «Структура» они нужны), помечая их accessible=false, и
+       архивные — здесь, на витрине чтения, первые были бы ветками, которые
+       открываются пустыми, а вторые — вторым экземпляром раздела рядом с живым
+       двойником: архивируют обычно дубль с тем же именем. */
+    const treeSections = useMemo(() => {
+        const live = selectableSections(sections);
+        return scopeAll ? live : live.filter((s) => s.accessible !== false);
+    }, [sections, scopeAll]);
 
     const tree = useMemo(() => {
         const shown = new Set(treeSections.map((s) => s.id));
