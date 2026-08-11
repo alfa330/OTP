@@ -701,6 +701,77 @@ class CloudflareDetectionTests(unittest.TestCase):
         self.assertIn('abc123-AKX', msg)   # CF-Ray попадает в диагностику
 
 
+class CarryRecomputeTests(unittest.TestCase):
+    """Перенос в пересчёте: только добавляет успешку и не задваивает поездку."""
+
+    def _carried(self, lead_id, carry_trip, calls, phone='77000000001'):
+        return {
+            'id': lead_id, 'phone_norm': phone, 'full_name': 'Перенос',
+            'month_first_order_at': None, 'prev_month_first_order_at': None,
+            'lead_year': 2026, 'lead_month': 7, 'is_carried': True,
+            'carry_first_order_at': carry_trip, 'carry_last_order_before_at': None,
+            'calls': calls,
+        }
+
+    def _own(self, lead_id, trip, calls, phone='77000000001'):
+        return {
+            'id': lead_id, 'phone_norm': phone, 'full_name': 'Свой',
+            'month_first_order_at': trip, 'prev_month_first_order_at': None,
+            'lead_year': 2026, 'lead_month': 8, 'is_carried': False,
+            'carry_first_order_at': None, 'carry_last_order_before_at': None,
+            'calls': calls,
+        }
+
+    def _call(self, when, operator_id=3, gid='c1'):
+        return {'general_call_id': gid, 'started_at': when, 'call_type': 1,
+                'billsec': 60, 'operator_id': operator_id, 'employee_name': 'Оператор'}
+
+    def test_carried_lead_gets_success_in_the_trip_month(self):
+        """Звонок 10 июля, поездка 5 августа -> успешка августа по июльскому лиду."""
+        lead = self._carried('L1', datetime(2026, 8, 5, 12, tzinfo=ALMATY_TZ),
+                             [self._call(datetime(2026, 7, 10, 12, tzinfo=ALMATY_TZ))])
+        db = FakeDb([lead])
+        tez_lead_service.recompute_outcomes(db, 2026, 8)
+        item = db.applied[0]
+        self.assertEqual(item['status'], 'success')
+        self.assertEqual((item['success_year'], item['success_month']), (2026, 8))
+        self.assertEqual((item['lead_year'], item['lead_month']), (2026, 7))
+
+    def test_carried_lead_never_writes_its_own_status(self):
+        """Иначе пересчёт месяца базы вернёт всё назад, и статус будет мигать."""
+        lead = self._carried('L1', None, [])
+        db = FakeDb([lead])
+        tez_lead_service.recompute_outcomes(db, 2026, 8)
+        self.assertFalse(db.applied[0]['write_status'])
+
+    def test_own_lead_still_writes_its_status(self):
+        lead = self._own('L2', None, [])
+        db = FakeDb([lead])
+        tez_lead_service.recompute_outcomes(db, 2026, 8)
+        self.assertTrue(db.applied[0]['write_status'])
+
+    def test_one_trip_gives_one_success_when_phone_is_in_both_bases(self):
+        """374 номера на проде есть и в июльской, и в августовской базе, и оба
+        лида видят ОДИН список звонков. UNIQUE(lead_id) от дубля не спасает."""
+        trip = datetime(2026, 8, 5, 12, tzinfo=ALMATY_TZ)
+        calls = [self._call(datetime(2026, 7, 10, 12, tzinfo=ALMATY_TZ)),
+                 self._call(datetime(2026, 8, 2, 12, tzinfo=ALMATY_TZ), operator_id=4, gid='c2')]
+        db = FakeDb([self._carried('L1', trip, calls), self._own('L2', trip, calls)])
+        tez_lead_service.recompute_outcomes(db, 2026, 8)
+        successes = [i for i in db.applied if i['status'] == 'success']
+        self.assertEqual(len(successes), 1)
+        # Побеждает лид того месяца, в котором поездка.
+        self.assertEqual(successes[0]['lead_id'], 'L2')
+
+    def test_losing_carried_lead_keeps_its_status_untouched(self):
+        """Проигравший дедуп перенесённый лид не должен получить чужой статус."""
+        trip = datetime(2026, 8, 5, 12, tzinfo=ALMATY_TZ)
+        calls = [self._call(datetime(2026, 8, 2, 12, tzinfo=ALMATY_TZ))]
+        db = FakeDb([self._carried('L1', trip, calls), self._own('L2', trip, calls)])
+        tez_lead_service.recompute_outcomes(db, 2026, 8)
+        self.assertNotIn('L1', [i['lead_id'] for i in db.applied])
+
+
 class SyncLockTests(unittest.TestCase):
     """Один прогон сверки на процесс: параллельный только удвоит расход лимитов."""
 
@@ -755,16 +826,46 @@ class BatchWriteTests(unittest.TestCase):
     def setUpClass(cls):
         cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
 
-    def _body(self, name, size=4200):
+    def _body(self, name, size=9000):
+        """Тело метода до следующего `def` — срез фиксированной длины выталкивал
+        бы искомое за границу при каждом росте функции."""
         start = self.src.index("def %s" % name)
-        return self.src[start:start + size]
+        nxt = self.src.find("\n    def ", start + 1)
+        end = min(nxt if nxt != -1 else len(self.src), start + size)
+        return self.src[start:end]
 
     def test_outcomes_are_written_with_execute_values(self):
         body = self._body('apply_tez_lead_outcomes')
         self.assertIn('execute_values', body)
         # Построчных запросов остаться не должно.
         self.assertNotIn('DELETE FROM tez_lead_successes WHERE lead_id = %s', body)
-        self.assertIn('DELETE FROM tez_lead_successes WHERE lead_id = ANY(%s::uuid[])', body)
+        self.assertIn('WHERE lead_id = ANY(%s::uuid[]) AND year = %s AND month = %s', body)
+
+    def test_success_removal_is_scoped_to_the_period(self):
+        """Успешка, забронированная переносом в следующем месяце, пересчёту
+        месяца базы не принадлежит — снести её он не имеет права."""
+        body = self._body('apply_tez_lead_outcomes')
+        delete_at = body.index('DELETE FROM tez_lead_successes')
+        self.assertIn('AND year = %s AND month = %s', body[delete_at:delete_at + 300])
+
+    def test_carried_lead_keeps_its_own_status(self):
+        """Статус перенесённого лида принадлежит месяцу его базы: перепиши его
+        отсюда — и пересчёт того месяца вернёт всё назад, статус будет мигать."""
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn('CASE WHEN v.write_status THEN v.status ELSE l.status END', body)
+
+    def test_period_comes_from_the_item_not_the_arguments(self):
+        """Иначе UPDATE перенесённого лида не найдёт строку (год/месяц чужие),
+        вернёт ноль строк — и перенос молча не работает."""
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn("int(item.get('lead_year') or year)", body)
+        self.assertIn('AND l.year = v.lead_year', body)
+
+    def test_locks_are_taken_in_a_deterministic_order(self):
+        """Два периода в одной транзакции: без сортировки будет дедлок с
+        параллельным импортом/удалением базы соседнего месяца."""
+        body = self._body('apply_tez_lead_outcomes')
+        self.assertIn('periods = sorted(', body)
 
     def test_optimistic_version_check_survived_the_rewrite(self):
         """Проверка xmin — единственное, что не даёт перезаписать лид, изменившийся

@@ -4917,6 +4917,14 @@ class Database:
                 -- держится именно на нём. Значение для (год, месяц) неизменно,
                 -- поэтому пишется через COALESCE и не перетирается.
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS last_order_before_at TIMESTAMP WITH TIME ZONE;
+                -- Перенос: лид, не ставший успешкой, дорабатывается ещё один
+                -- месяц. Ответ TEZ APP за СЛЕДУЮЩИЙ месяц кладём в отдельные
+                -- колонки, а не в основные: month_first_order_at защищён
+                -- COALESCE и застыл бы навсегда чужой датой, а воронка месяца
+                -- базы посчитала бы поездку следующего месяца своей.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_first_order_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_last_order_before_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS carry_checked_at TIMESTAMP WITH TIME ZONE;
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS first_order_checked_at TIMESTAMP WITH TIME ZONE;
                 -- Отметка «звонки по этому лиду уже подняли из Binotel». Гейтить
                 -- докачку звонков статусом нельзя: лид со СТАРЫМ статусом
@@ -17861,6 +17869,76 @@ class Database:
             )
         return found
 
+    def get_tez_carry_phones_pending_first_order(self, year, month):
+        """Номера ПЕРЕНЕСЁННЫХ лидов, по которым ещё не знаем поездку в этом месяце.
+
+        Перенос: лид прошлого месяца, не ставший успешкой, дорабатывается ещё
+        один месяц. Спрашиваем по нему TEZ APP за ЦЕЛЕВОЙ месяц, а ответ кладём
+        в carry_* колонки строки месяца базы.
+
+        Уже выехавшие выпадают отсюда навсегда: первый заказ внутри месяца не
+        изменится. Отбор ложится на idx_tez_leads_pending_order_check.
+        """
+        year, month = int(year), int(month)
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT DISTINCT l.phone_norm
+                FROM tez_leads l
+                WHERE l.year = %s AND l.month = %s
+                  AND l.status <> 'success'
+                  AND l.carry_first_order_at IS NULL
+                ORDER BY l.phone_norm
+                """,
+                (prev_year, prev_month)
+            )
+            return [r[0] for r in cursor.fetchall()]
+
+    def save_tez_carry_first_orders(self, year, month, first_orders):
+        """Ответ TEZ APP за ЦЕЛЕВОЙ месяц — на строки лидов месяца БАЗЫ.
+
+        year/month — целевой месяц (тот, за который спрашивали). Пишем в
+        carry_* колонки лидов предыдущего месяца: их собственные даты описывают
+        их собственный месяц, и подмена сломала бы воронку месяца базы.
+        """
+        year, month = int(year), int(month)
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
+        rows = []
+        found = 0
+        for phone_norm, dates in (first_orders or {}).items():
+            if not phone_norm:
+                continue
+            month_at = (dates or {}).get('month')
+            last_before = (dates or {}).get('last_before')
+            rows.append((phone_norm, prev_year, prev_month, month_at, last_before))
+            if month_at is not None:
+                found += 1
+        if not rows:
+            return 0
+
+        with self._get_cursor() as cursor:
+            self._lock_tez_lead_period_tx(cursor, prev_year, prev_month)
+            execute_values(
+                cursor,
+                """
+                UPDATE tez_leads l SET
+                    carry_first_order_at = COALESCE(l.carry_first_order_at, v.month_at),
+                    carry_last_order_before_at = COALESCE(l.carry_last_order_before_at, v.last_before),
+                    carry_checked_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, last_before)
+                WHERE l.year = v.lead_year
+                  AND l.month = v.lead_month
+                  AND l.phone_norm = v.phone_norm
+                  AND l.status <> 'success'
+                """,
+                rows,
+                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz)",
+                page_size=500,
+            )
+        return found
+
     def get_tez_phones_needing_calls(self, year, month):
         """Номера, по которым пора поднять историю звонков из Binotel.
 
@@ -18101,16 +18179,35 @@ class Database:
         idx_tez_lead_calls_op_attempts. Без порога поведение прежнее — все
         звонки номера за всю историю.
         """
+        year, month = int(year), int(month)
+        prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
         with self._get_cursor() as cursor:
+            # Две ветви через UNION ALL, а НЕ через OR: замер на проде даёт
+            # 3,6 мс Index Scan против 7,0 мс Seq Scan. Вторая ветвь — перенос:
+            # лид прошлого месяца, не ставший успешкой, дорабатывается в этом.
+            # «Ровно +1 месяц» тут инвариант запроса, а не флаг в данных:
+            # состояния «перенесён дважды» просто нечем выразить.
             cursor.execute(
                 """
                 SELECT l.id, l.phone_norm, l.full_name,
                        l.month_first_order_at, l.prev_month_first_order_at,
-                       l.xmin::text, l.last_order_before_at
+                       l.xmin::text, l.last_order_before_at,
+                       l.year, l.month, FALSE AS is_carried,
+                       NULL::timestamptz AS carry_first_order_at,
+                       NULL::timestamptz AS carry_last_order_before_at
                 FROM tez_leads l
                 WHERE l.year = %s AND l.month = %s
+                UNION ALL
+                SELECT l.id, l.phone_norm, l.full_name,
+                       l.month_first_order_at, l.prev_month_first_order_at,
+                       l.xmin::text, l.last_order_before_at,
+                       l.year, l.month, TRUE AS is_carried,
+                       l.carry_first_order_at, l.carry_last_order_before_at
+                FROM tez_leads l
+                WHERE l.year = %s AND l.month = %s
+                  AND l.status <> 'success'
                 """,
-                (int(year), int(month))
+                (year, month, prev_year, prev_month)
             )
             leads = [{
                 'id': str(r[0]),
@@ -18120,6 +18217,11 @@ class Database:
                 'prev_month_first_order_at': r[4],
                 'version': r[5],
                 'last_order_before_at': r[6],
+                'lead_year': int(r[7]),
+                'lead_month': int(r[8]),
+                'is_carried': bool(r[9]),
+                'carry_first_order_at': r[10],
+                'carry_last_order_before_at': r[11],
                 'calls': [],
             } for r in cursor.fetchall()]
             if not leads:
@@ -18166,13 +18268,25 @@ class Database:
         success_date. Операция идемпотентна: успешка привязана к лиду через
         UNIQUE(lead_id), а лид, переставший быть успешкой, свою запись теряет.
 
+        Период берётся из САМОГО item'а (lead_year/lead_month), а не из
+        аргументов: при переносе в прогоне участвуют лиды прошлого месяца, и
+        по году-месяцу функции их строки просто не нашлись бы — UPDATE вернул
+        бы ноль строк, а перенос молча не работал бы.
+
+        `write_status=False` (перенесённый лид) означает «успешку записать, а
+        статус лида не трогать»: свой статус он получил в собственном месяце, и
+        пересчёт того месяца иначе стирал бы результат переноса, а этот —
+        результат того. Успешки при этом удаляются ТОЛЬКО за обрабатываемый
+        период: успешка, забронированная в следующем месяце, пересчёту месяца
+        базы не принадлежит.
+
         Пишем ТРЕМЯ запросами на весь пересчёт, а не двумя на каждый лид.
         Построчный вариант делал ~14 400 round-trip'ов на июльской базе (7 195
         лидов) и держал всё это время advisory-лок периода, который делит с
         импортом базы; при обработке лидов прошлого месяца число удваивалось.
         """
         stats = {'success': 0, 'already_working': 0, 'not_counted': 0,
-                 'in_progress': 0, 'new': 0, 'skipped': 0}
+                 'in_progress': 0, 'new': 0, 'skipped': 0, 'carried_success': 0}
         # Ключ — канонический UUID в нижнем регистре: именно в таком виде id
         # приходит обратно из RETURNING, и по нему мы находим исходный item.
         by_id = {}
@@ -18185,28 +18299,38 @@ class Database:
         rows = [
             (
                 lead_id,
-                int(year),
-                int(month),
+                int(item.get('lead_year') or year),
+                int(item.get('lead_month') or month),
                 str(item.get('status') or 'new'),
                 item.get('rule'),
                 item.get('lead_version'),
+                bool(item.get('write_status', True)),
             )
             for lead_id, item in by_id.items()
         ]
+        # Лок берём на все затронутые периоды и строго по возрастанию: иначе
+        # прогон месяца и параллельный импорт/удаление базы соседнего встанут
+        # в дедлок, взяв те же два лока в разном порядке.
+        periods = sorted({(r[1], r[2]) for r in rows})
 
         with self._get_cursor() as cursor:
-            self._lock_tez_lead_period_tx(cursor, year, month)
+            for period_year, period_month in periods:
+                self._lock_tez_lead_period_tx(cursor, period_year, period_month)
             # RETURNING + fetch=True, а не rowcount: execute_values шлёт данные
             # страницами, и rowcount знает только последнюю из них.
             applied = execute_values(
                 cursor,
                 """
                 UPDATE tez_leads l SET
-                    status = v.status,
-                    status_rule = v.status_rule,
-                    archive_state_event_seq = 0,
+                    -- write_status = FALSE у перенесённого лида: его статус
+                    -- принадлежит месяцу базы, и трогать его отсюда нельзя.
+                    status = CASE WHEN v.write_status THEN v.status ELSE l.status END,
+                    status_rule = CASE WHEN v.write_status THEN v.status_rule ELSE l.status_rule END,
+                    archive_state_event_seq = CASE WHEN v.write_status THEN 0
+                                                   ELSE l.archive_state_event_seq END,
                     updated_at = CURRENT_TIMESTAMP
-                FROM (VALUES %s) AS v(lead_id, lead_year, lead_month, status, status_rule, version)
+                FROM (VALUES %s) AS v(lead_id, lead_year, lead_month, status, status_rule,
+                                      version, write_status)
                 WHERE l.id = v.lead_id
                   AND l.year = v.lead_year
                   AND l.month = v.lead_month
@@ -18217,18 +18341,27 @@ class Database:
                   -- NULL версии — вызовы старого контракта (внутренние и
                   -- тестовые), они проверкой не гейтятся.
                   AND (v.version IS NULL OR l.xmin::text = v.version)
-                RETURNING l.id::text, l.status
+                RETURNING l.id::text
                 """,
                 rows,
-                template="(%s::uuid, %s::int, %s::int, %s, %s, %s)",
+                template="(%s::uuid, %s::int, %s::int, %s, %s, %s, %s::boolean)",
                 page_size=500,
                 fetch=True,
             )
 
-            applied_status = {str(r[0]).lower(): r[1] for r in (applied or [])}
-            for status in applied_status.values():
-                stats[status] = stats.get(status, 0) + 1
-            stats['skipped'] = len(by_id) - len(applied_status)
+            # Считаем по НАМЕРЕНИЮ расчёта, а не по тому, что вернул UPDATE:
+            # у перенесённого лида в базе остался его собственный статус.
+            applied_ids = {str(r[0]).lower() for r in (applied or [])}
+            for lead_id in applied_ids:
+                item = by_id[lead_id]
+                status = str(item.get('status') or 'new')
+                if item.get('write_status', True):
+                    stats[status] = stats.get(status, 0) + 1
+                elif status == 'success':
+                    # Успешка переноса живёт в обрабатываемом месяце, а её лид —
+                    # в прошлом. В статусы периода она не входит, но в деньги да.
+                    stats['carried_success'] += 1
+            stats['skipped'] = len(by_id) - len(applied_ids)
             if stats['skipped']:
                 # Раньше несовпадение версии проглатывалось молча, и «перенос не
                 # работает» выглядело как «успешек нет» без единой строки в логе.
@@ -18238,20 +18371,25 @@ class Database:
                     int(year), int(month), stats['skipped'],
                 )
 
-            # Лиды, переставшие быть успешками, теряют свою запись. Успешка с
-            # битым FK невозможна: удаляем только по фактически применённым id.
-            doomed = [lid for lid, status in applied_status.items() if status != 'success']
+            # Лиды, переставшие быть успешками, теряют свою запись — но только
+            # за ОБРАБАТЫВАЕМЫЙ период: успешка, забронированная в следующем
+            # месяце переносом, пересчёту месяца базы не принадлежит.
+            doomed = [lid for lid in applied_ids
+                      if str(by_id[lid].get('status') or 'new') != 'success']
             if doomed:
                 cursor.execute(
-                    "DELETE FROM tez_lead_successes WHERE lead_id = ANY(%s::uuid[])",
-                    (doomed,),
+                    """
+                    DELETE FROM tez_lead_successes
+                    WHERE lead_id = ANY(%s::uuid[]) AND year = %s AND month = %s
+                    """,
+                    (doomed, int(year), int(month)),
                 )
 
             success_rows = []
-            for lead_id, status in applied_status.items():
-                if status != 'success':
-                    continue
+            for lead_id in applied_ids:
                 item = by_id[lead_id]
+                if str(item.get('status') or 'new') != 'success':
+                    continue
                 success_rows.append((
                     lead_id, item.get('phone_norm'),
                     int(item['operator_id']) if item.get('operator_id') else None,
@@ -18315,7 +18453,10 @@ class Database:
                     COUNT(*) AS leads_total,
                     COUNT(*) FILTER (WHERE l.month_first_order_at IS NOT NULL) AS went_online,
                     COUNT(*) FILTER (WHERE l.status = 'already_working') AS already_working,
-                    COUNT(*) FILTER (WHERE l.status = 'success') AS successes,
+                    -- Считается ниже по tez_lead_successes: успешка переноса
+                    -- книжится в месяц ПОЕЗДКИ, а её лид остаётся в месяце базы,
+                    -- и счёт по статусам лидов периода её потерял бы.
+                    0 AS successes,
                     COUNT(*) FILTER (WHERE l.status = 'not_counted') AS not_counted,
                     COUNT(*) FILTER (WHERE l.status = 'in_progress') AS in_progress,
                     COALESCE(SUM(l.upload_count) - COUNT(*), 0) AS duplicates,
@@ -18350,9 +18491,35 @@ class Database:
             )
             calls_row = cursor.fetchone() or (0, 0, 0)
 
+            # Успешки периода — по месяцу ПОЕЗДКИ, вместе с перенесёнными, плюс
+            # отдельно сколько из них дал перенос: для владельца это ответ на
+            # вопрос «что дало правило», а не строчка мелким шрифтом.
+            prev_year, prev_month = (int(year) - 1, 12) if int(month) == 1 else (int(year), int(month) - 1)
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS successes,
+                       COUNT(*) FILTER (WHERE l.year = %s AND l.month = %s) AS carried_in
+                FROM tez_lead_successes s
+                JOIN tez_leads l ON l.id = s.lead_id
+                WHERE s.year = %s AND s.month = %s
+                """,
+                (prev_year, prev_month, int(year), int(month))
+            )
+            succ_row = cursor.fetchone() or (0, 0)
+
+            # Сколько лидов ЭТОГО месяца сейчас дорабатываются в следующем.
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM tez_leads
+                WHERE year = %s AND month = %s AND status <> 'success'
+                """,
+                (int(year), int(month))
+            )
+            carried_out = int((cursor.fetchone() or [0])[0] or 0)
+
         leads_total = int(row[0] or 0)
         already_working = int(row[2] or 0)
-        successes = int(row[3] or 0)
+        successes = int(succ_row[0] or 0)
         # Владелец: конверсию считаем от рабочей части базы, а «уже работающих»
         # показываем отдельным числом как оценку качества самой базы.
         workable = max(leads_total - already_working, 0)
@@ -18371,6 +18538,12 @@ class Database:
             'in_progress': int(row[5] or 0),
             'not_counted': int(row[4] or 0),
             'successes': successes,
+            # Перенос: пришло из прошлого месяца / ушло дорабатываться в следующий.
+            # В leads_total и в знаменатель конверсии перенесённые НЕ входят —
+            # база месяца это то, что загрузил СВ, иначе конверсия августа
+            # обвалилась бы втрое без единой потерянной успешки.
+            'carried_in': int(succ_row[1] or 0),
+            'carried_out': carried_out,
             'workable': workable,
             'active_prev_month': int(row[7] or 0),
             'conversion': round(successes / workable * 100, 1) if workable else 0.0,

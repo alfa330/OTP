@@ -202,6 +202,26 @@ def sync_first_orders(db, year, month, first_orders_client):
     return {'checked': len(phones), 'found': found}
 
 
+def sync_carry_first_orders(db, year, month, first_orders_client):
+    """Шаг 1б: поездки ПЕРЕНЕСЁННЫХ лидов в отчётном месяце.
+
+    Лид прошлого месяца, не ставший успешкой, дорабатывается ещё один месяц:
+    спрашиваем по нему TEZ APP за отчётный месяц (тем же запросом, что и своих —
+    контракт одинаковый), а ответ кладём в carry_* колонки его строки.
+
+    Цена на проде (июль -> август): 6 993 кандидата, то есть +64 запроса
+    пачками по 100. Число убывает по мере того, как водители выезжают.
+    """
+    phones = db.get_tez_carry_phones_pending_first_order(year, month)
+    if not phones:
+        return {'checked': 0, 'found': 0}
+    first_orders = first_orders_client.fetch_first_orders(
+        phones, month=f"{int(year)}-{int(month):02d}"
+    )
+    found = db.save_tez_carry_first_orders(year, month, first_orders)
+    return {'checked': len(phones), 'found': found}
+
+
 def _prepare_calls(raw_calls, resolve_operator, min_billsec=DEFAULT_MIN_BILLSEC, wanted=None):
     """Нормализованные звонки Binotel -> строки для tez_lead_calls.
 
@@ -406,13 +426,26 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
 
     outcomes = []
     for lead in leads:
+        carried = bool(lead.get('is_carried'))
+        if carried:
+            # У перенесённого лида поездку ищем в ЦЕЛЕВОМ месяце, а его
+            # собственные даты не трогаем: они описывают месяц его базы и нужны
+            # её воронке.
+            trip_at = lead.get('carry_first_order_at')
+            last_before = lead.get('carry_last_order_before_at')
+            base_period = (lead.get('lead_year', year), lead.get('lead_month', month))
+        else:
+            trip_at = lead['month_first_order_at']
+            last_before = lead.get('last_order_before_at')
+            base_period = None
         outcome = compute_lead_outcome(
-            lead['month_first_order_at'],
+            trip_at,
             lead['prev_month_first_order_at'],
             lead['calls'],
             min_billsec=min_billsec,
-            last_order_before_at=lead.get('last_order_before_at'),
+            last_order_before_at=last_before,
             reactivation_gap_days=gap_days,
+            base_period=base_period,
         )
         item = {
             'lead_id': lead['id'],
@@ -420,6 +453,14 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
             # уже другое состояние. Database применит результат только к той
             # версии лида, на которой он был рассчитан.
             'lead_version': lead.get('version'),
+            'lead_year': lead.get('lead_year', year),
+            'lead_month': lead.get('lead_month', month),
+            # Перенос имеет право только ДОБАВИТЬ успешку. Свой статус лид
+            # получил в собственном месяце: перепиши его отсюда — и пересчёт
+            # того месяца тут же вернёт всё назад, а статус начнёт мигать
+            # между прогонами.
+            'write_status': not carried,
+            'is_carried': carried,
             'phone_norm': lead['phone_norm'],
             'status': outcome['status'],
             'rule': outcome['rule'],
@@ -441,13 +482,47 @@ def recompute_outcomes(db, year, month, min_billsec=DEFAULT_MIN_BILLSEC, month_c
                 'is_late': bool(month_closed_before and success_date < month_closed_before),
             })
         outcomes.append(item)
+
+    outcomes = _drop_duplicate_successes(outcomes)
     stats = db.apply_tez_lead_outcomes(year, month, outcomes)
     stats['successes_before'] = successes_before
-    if stats.get('success', 0) < successes_before:
+    # Сравнивать надо с тем, что реально забронировано за период: успешка
+    # перенесённого лида книжится в месяц поездки, а его статус остался в месяце
+    # базы. Считай мы только stats['success'], сторож кричал бы каждую ночь.
+    booked = stats.get('success', 0) + stats.get('carried_success', 0)
+    if booked < successes_before:
         log.warning('Успешки TEZ ОП %s-%02d УМЕНЬШИЛИСЬ: было %s, стало %s. '
                     'Проверьте, не потеряли ли звонки привязку к оператору.',
-                    int(year), int(month), successes_before, stats.get('success'))
+                    int(year), int(month), successes_before, booked)
     return stats
+
+
+def _drop_duplicate_successes(outcomes):
+    """Одна поездка — одна успешка, даже если номер есть в базах двух месяцев.
+
+    UNIQUE(lead_id) от этого не защищает: у номера отдельная строка в базе
+    каждого месяца, и оба лида видят ОДИН И ТОТ ЖЕ список звонков. На проде
+    11.08.2026 таких номеров 374, и у шести из них уже была августовская
+    успешка при живом июльском лиде.
+
+    Побеждает лид того месяца, в котором поездка: он «свой» для периода.
+    На деньги выбор не влияет — оба лида выбирают один и тот же последний
+    квалифицирующий звонок и того же оператора, — поэтому проигравшего просто
+    не пишем, а не помечаем отдельным статусом.
+    """
+    own = {(i['phone_norm'], i['success_date']) for i in outcomes
+           if i['status'] == STATUS_SUCCESS and not i.get('is_carried')}
+    if not own:
+        return outcomes
+    kept = []
+    for item in outcomes:
+        if (item.get('is_carried') and item['status'] == STATUS_SUCCESS
+                and (item['phone_norm'], item['success_date']) in own):
+            # Перенос ничего не добавляет — этот же водитель уже засчитан по
+            # строке своего месяца. Свой статус перенесённый лид сохраняет.
+            continue
+        kept.append(item)
+    return kept
 
 
 def run_nightly(db, first_orders_client, binotel_client, resolve_operator,
@@ -487,6 +562,7 @@ def _run_nightly_periods(db, periods, first_orders_client, binotel_client, resol
         key = f"{year}-{month:02d}"
         try:
             orders = sync_first_orders(db, year, month, first_orders_client)
+            carry = sync_carry_first_orders(db, year, month, first_orders_client)
             mirror = sync_calls_for_period(
                 db, year, month, binotel_client, resolve_operator, today=today,
                 min_billsec=min_billsec, time_budget=CALL_MIRROR_NIGHTLY_BUDGET,
@@ -497,14 +573,16 @@ def _run_nightly_periods(db, periods, first_orders_client, binotel_client, resol
                 db, year, month, resolve_operator, min_billsec=min_billsec
             )
             outcomes = recompute_outcomes(db, year, month, min_billsec=min_billsec)
-            report[key] = {'first_orders': orders, 'calls_mirror': mirror,
-                           'calls': calls, 'restored_calls': restored,
-                           'outcomes': outcomes}
-            log.info('Успешки TEZ ОП %s: проверено %s, выехали %s, дней зеркала %s '
-                     '(осталось %s), звонков %s, успешек %s',
+            report[key] = {'first_orders': orders, 'carry_first_orders': carry,
+                           'calls_mirror': mirror, 'calls': calls,
+                           'restored_calls': restored, 'outcomes': outcomes}
+            log.info('Успешки TEZ ОП %s: проверено %s, выехали %s, перенос %s/%s, '
+                     'дней зеркала %s (осталось %s), звонков %s, успешек %s (+%s переносом)',
                      key, orders.get('checked'), orders.get('found'),
+                     carry.get('found'), carry.get('checked'),
                      mirror.get('days'), mirror.get('days_left'),
-                     calls.get('calls'), outcomes.get('success'))
+                     calls.get('calls'), outcomes.get('success'),
+                     outcomes.get('carried_success'))
         except Exception as exc:
             log.error('Ночная сверка успешек TEZ ОП за %s упала: %s', key, exc, exc_info=True)
             report[key] = {'error': str(exc)}

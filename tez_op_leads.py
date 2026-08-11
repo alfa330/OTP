@@ -88,6 +88,7 @@ STATUS_NOT_COUNTED = "not_counted"          # звонок был, но прав
 RULE_SAME_MONTH = "same_month"                    # звонок в месяце поездки
 RULE_PREV_MONTH_LAST_DAYS = "prev_month_last7"    # звонок в последние 7 дней прошлого месяца
 RULE_REACTIVATION = "reactivated_30d"             # водитель спал >= 30 дней и вернулся после звонка
+RULE_CARRIED_OVER = "carried_over"                # лид перенесён: звонок в месяце базы, поездка в следующем
 REASON_NO_CALL_BEFORE_TRIP = "no_call_before_trip"
 REASON_CALL_BEFORE_WINDOW = "call_before_last7"   # звонок раньше окна (или ещё старше)
 REASON_ACTIVE_PREV_MONTH = "active_prev_month"    # были заказы в прошлом месяце
@@ -211,7 +212,8 @@ def reactivation_gap_for_period(year, month, gap_days=DEFAULT_REACTIVATION_GAP_D
 
 def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
                          min_billsec=DEFAULT_MIN_BILLSEC,
-                         last_order_before_at=None, reactivation_gap_days=None):
+                         last_order_before_at=None, reactivation_gap_days=None,
+                         base_period=None):
     """Считает статус лида по датам заказов и списку его звонков.
 
     month_first_order_at — первый заказ в отчётном месяце либо None.
@@ -224,6 +226,12 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
     reactivation_gap_days — порог разрыва в днях. None означает «период
             считается по прежним правилам» (гейт по prev_month_first_order_at):
             так закрытые месяцы не переписываются задним числом.
+    base_period — (год, месяц) базы лида, если он ПЕРЕНЕСЁН и обрабатывается в
+            следующем месяце. Тогда звонок засчитывается из любого дня месяца
+            базы, а не только из его последних семи. Окно пер-лидовое и в
+            call_window_for_period не входит: та функция — единая точка правды
+            для зеркала звонков и воронки, и её расширение задним числом
+            изменило бы цифры уже закрытых месяцев.
 
     Возвращает dict: status, rule, operator_id, call, call_at, first_order_at,
     last_order_before_at, gap_days, success_date. Для не-успешек operator_id
@@ -316,6 +324,15 @@ def compute_lead_outcome(month_first_order_at, prev_month_first_order_at, calls,
     elif call_month == _prev_month_key(trip_at) and _is_in_month_tail(last_call["started_at"]):
         # Звонок на стыке месяцев: день поездки внутри отчётного месяца не важен.
         rule = RULE_PREV_MONTH_LAST_DAYS
+    elif base_period is not None and call_month == tuple(base_period) \
+            and _prev_month_key(trip_at) == tuple(base_period):
+        # Перенесённый лид: звонок из любого дня месяца его базы. Проверка
+        # «месяц базы = месяц перед поездкой» и есть механическая гарантия
+        # «ровно +1 месяц» — поездка через два месяца сюда не проходит.
+        # Ветвь СТРОГО третья: у перенесённого лида со звонком в хвосте месяца
+        # код остаётся prev_month_last7, чтобы уже выплаченная история не
+        # переписывалась новым кодом.
+        rule = RULE_CARRIED_OVER
     else:
         # Оператор работал, но звонок вне окна — это НЕ «уже работающий»,
         # и смешивать их нельзя: именно такие случаи операторы оспаривают.

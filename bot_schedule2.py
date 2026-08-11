@@ -35727,6 +35727,7 @@ def tez_leads_export():
         'same_month': 'Звонок в месяце поездки',
         'prev_month_last7': 'Звонок в последние 7 дней прошлого месяца',
         'reactivated_30d': 'Не работал 30+ дней и вернулся после звонка',
+        'carried_over': 'Звонок в прошлом месяце, лид перенесён на этот',
         'no_call_before_trip': 'Нет звонка до поездки',
         'call_before_last7': 'Звонок раньше последних 7 дней прошлого месяца',
         'gap_under_30d': 'Заказ был меньше 30 дней назад — водитель не уходил',
@@ -35861,6 +35862,10 @@ def tez_leads_recompute():
         # заново потратил бы лимиты Binotel и TEZ APP.
         with tez_lead_service.sync_lock():
             orders = tez_lead_service.sync_first_orders(db, year, month, first_orders_client)
+            # Перенос: у лидов прошлого месяца спрашиваем поездку за этот.
+            carry = tez_lead_service.sync_carry_first_orders(
+                db, year, month, first_orders_client
+            )
             # Зеркало звонков ограничено по времени: за клик добираем сколько
             # успеваем, остаток закроет ночная джоба (в ответе — сколько дней ещё
             # не перекачано, чтобы это было видно, а не молча недосчитано).
@@ -35890,6 +35895,7 @@ def tez_leads_recompute():
 
     return jsonify({
         "first_orders": orders,
+        "carry_first_orders": carry,
         "calls_mirror": mirror,
         "calls": calls,
         "restored_calls": restored,
