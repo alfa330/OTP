@@ -73,6 +73,7 @@ const Divider = () => <span className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />
 
 export default function WikiEditor({
     base, headers, showToast, article, sections, onClose, onSaved,
+    pendingUpdateFile = null, onPendingUsed = null, onUpdateExisting = null,
 }) {
     const isNew = !article?.id;
     const [title, setTitle] = useState(article?.title || '');
@@ -327,6 +328,18 @@ export default function WikiEditor({
                 onEnabledChange={(value) => { setAiSupport(value); setDirty(true); }}
                 excludeId={article?.id || null}
                 getSnapshot={() => ({ title, content: editor?.getHTML() || '' })}
+                pendingUpdateFile={pendingUpdateFile}
+                onPendingUsed={onPendingUsed}
+                onUpdateExisting={onUpdateExisting}
+                onContent={(content) => {
+                    // Обновление и правка меняют ТОЛЬКО текст: название и
+                    // описание человек уже выверил, и перезаписывать их
+                    // машинным вариантом было бы потерей его работы.
+                    if (typeof content === 'string') {
+                        editor?.commands.setContent(content);
+                        setDirty(true);
+                    }
+                }}
                 onDraft={(data) => {
                     // Черновик ИИ ЗАМЕЩАЕТ поля, а не дописывает: он собран из
                     // документа целиком, и смешивать его с прежним текстом

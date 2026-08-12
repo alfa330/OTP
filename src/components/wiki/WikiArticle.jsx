@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'rea
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    ArrowLeft, Clock, Eye, Link2, List, Loader2, Pencil, Star, User,
+    Archive, ArrowLeft, Clock, Eye, Link2, List, Loader2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
@@ -97,7 +97,7 @@ const wrapTables = (html) => {
 
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                       highlightTerm = null, classifierPrefill = null,
-                                      onEdit = null }) {
+                                      onEdit = null, onArchived = null }) {
     const isClassifier = slug === CLASSIFIER_SLUG;
     const [article, setArticle] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -105,6 +105,25 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     const [toc, setToc] = useState([]);
     const [activeId, setActiveId] = useState('');
     const bodyRef = useRef(null);
+    const [archiving, setArchiving] = useState(false);
+
+    const archive = () => {
+        // Подтверждение обязательно: кнопка стоит рядом с «Править», а промах по
+        // соседней кнопке не должен уносить статью из витрины.
+        if (!window.confirm(`Убрать статью «${article?.title}» в архив?
+
+`
+            + 'Она пропадёт из списков и из ответов помощника. '
+            + 'Восстановить сможет администратор.')) return;
+        setArchiving(true);
+        axios.delete(`${base}/articles/${article.id}`, { headers })
+            .then(() => {
+                showToast?.('Статья убрана в архив', 'success');
+                onArchived?.(article);
+            })
+            .catch((e) => showToast?.(errText(e, 'Не удалось убрать в архив'), 'error'))
+            .finally(() => setArchiving(false));
+    };
 
     useEffect(() => {
         let cancelled = false;
@@ -270,12 +289,31 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     вообще, даже администратору. Право берём из ответа сервера
                     (permissions.can_edit), а не из роли: у статьи есть свои
                     правила доступа, и роль их не описывает. */}
-                {onEdit && article.permissions?.can_edit && (
-                    <button type="button" className={iosBtnSecondary}
-                            onClick={() => onEdit(article)}>
-                        <Pencil size={14} /> Править
-                    </button>
-                )}
+                <div className="flex items-center gap-2">
+                    {/* Удаление МЯГКОЕ: статья уходит в архив, потому что жёсткое
+                        снесло бы каскадом версии, просмотры, назначения на
+                        ознакомление и избранное. Кнопка так и называется — «В
+                        архив», чтобы не обещать того, чего не происходит. */}
+                    {onArchived && article.permissions?.can_delete
+                        && article.status !== 'archived' && (
+                        <button
+                            type="button"
+                            className={iosBtnSecondary}
+                            disabled={archiving}
+                            onClick={archive}
+                        >
+                            {archiving ? <Loader2 size={14} className="animate-spin" />
+                                : <Archive size={14} />}
+                            В архив
+                        </button>
+                    )}
+                    {onEdit && article.permissions?.can_edit && (
+                        <button type="button" className={iosBtnSecondary}
+                                onClick={() => onEdit(article)}>
+                            <Pencil size={14} /> Править
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* Панель ознакомления идёт ПЕРЕД статьёй: требование надо видеть

@@ -37,9 +37,11 @@ from . import importer as wiki_importer
 from . import perimeter as wiki_perimeter
 from . import queries
 from . import sanitize as wiki_sanitize
+from .routes_structure import _int_or_none
 from .ai import authoring as ai_authoring
 from .ai import embed as ai_embed
 from .ai import providers as ai_providers
+from .ai import revise as ai_revise
 from .ai import similar as ai_similar
 
 # Картинки и PDF модель читает сама — см. шапку wiki/ai/authoring.py про то,
@@ -254,6 +256,126 @@ def register(bp, wiki_route, db, log_ip, gcs):
             'provider': meta.get('provider'), 'model': meta.get('model'),
             'elapsed': meta.get('elapsed'),
         })
+
+    def _parse_upload(cursor, ctx, uploaded, data):
+        """Файл -> (html, текст, blob, mime, вид, картинки). Общая часть сборки и обновления."""
+        ext = os.path.splitext(str(uploaded.filename))[1].lower()
+        vision_mime = _VISION_MIME.get(ext)
+        if vision_mime and len(data) > _VISION_MAX_BYTES:
+            raise wiki_importer.ImportError_(
+                "Файл больше %d МБ — модель столько за раз не прочитает. "
+                "Разделите документ на части" % (_VISION_MAX_BYTES // (1024 * 1024)))
+        if not vision_mime:
+            parsed = wiki_importer.convert(
+                uploaded.filename, data,
+                store_image=lambda blob, content_type: _store_file(
+                    cursor, data=blob, filename="image", content_type=content_type,
+                    uploaded_by=ctx["user_id"]))
+            return (parsed["content"], wiki_sanitize.to_plain_text(parsed["content"]),
+                    None, None, parsed["kind"], parsed["images"])
+        text = ""
+        if ext == ".pdf":
+            try:
+                text = wiki_sanitize.to_plain_text(
+                    wiki_importer.convert(uploaded.filename, data)["content"])
+            except wiki_importer.ImportError_:
+                text = ""            # скан: сверять числа будет не с чем
+            kind = "PDF"
+        else:
+            kind = "Изображение"
+        return "", text, data, vision_mime, kind, []
+
+    # ── Обновление статьи новым документом ────────────────────────────────
+    @wiki_route("/articles/ai/update", methods=("POST",), capability="can_create")
+    def wiki_article_ai_update(cursor, ctx):
+        """Обновить текст статьи по новому документу.
+
+        Текст приходит ИЗ РЕДАКТОРА, а не из базы, и это осознанно: правка идёт
+        по тому, что человек сейчас видит на экране, включая несохранённое.
+        Ничего не записывается — результат уходит обратно в редактор, сохраняет
+        человек.
+        """
+        if str(request.form.get("ai_support") or "").strip().lower() not in _TRUE:
+            return jsonify({"error": "Включите «Поддержка ИИ», чтобы обновить статью",
+                            "code": "WIKI_AI_DISABLED"}), 400
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            return jsonify({"error": "Файл не выбран"}), 400
+        current = str(request.form.get("content") or "")
+        if not current.strip():
+            return jsonify({"error": "Нечего обновлять: статья пуста"}), 400
+
+        data = uploaded.read()
+        if not data:
+            return jsonify({"error": "Пустой файл"}), 400
+        if len(data) > wiki_importer.MAX_FILE_BYTES:
+            return jsonify({"error": "Файл больше %d МБ"
+                                     % (wiki_importer.MAX_FILE_BYTES // (1024 * 1024))}), 400
+        try:
+            doc_html, doc_text, blob, mime, kind, images = _parse_upload(
+                cursor, ctx, uploaded, data)
+        except wiki_importer.ImportError_ as exc:
+            return jsonify({"error": str(exc), "code": "WIKI_IMPORT_FAILED"}), 400
+
+        try:
+            result = ai_revise.update_from_document(
+                current_title=str(request.form.get("title") or ""),
+                current_html=current, document_html=doc_html,
+                document_text=doc_text, filename=uploaded.filename, kind=kind,
+                generate_fn=ai_providers.generate, blob=blob, mime=mime,
+                generate_file_fn=ai_providers.generate_document)
+        except ai_providers.ProviderError as error:
+            return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
+                            "code": "WIKI_AI_UNAVAILABLE"}), 503
+
+        meta = result.get("meta") or {}
+        queries.log_action(
+            cursor, actor_id=ctx["user_id"], action="article.ai_update",
+            entity_type="article", entity_id=_int_or_none(request.form.get("article_id")),
+            details={"file": uploaded.filename, "kind": kind,
+                     "changes": len(result["changes"]),
+                     "questions": len(result["questions"]),
+                     "model": meta.get("model")},
+            ip_address=log_ip())
+        return jsonify({"content": result["content"], "changes": result["changes"],
+                        "questions": result["questions"],
+                        "warnings": result["warnings"], "kind": kind,
+                        "images": images, "model": meta.get("model"),
+                        "elapsed": meta.get("elapsed")})
+
+    # ── Правка по указанию редактора ──────────────────────────────────────
+    @wiki_route("/articles/ai/edit", methods=("POST",), capability="can_create")
+    def wiki_article_ai_edit(cursor, ctx):
+        data = request.get_json(silent=True) or {}
+        if str(data.get("ai_support", True)).strip().lower() not in _TRUE:
+            return jsonify({"error": "Включите «Поддержка ИИ», чтобы править текст",
+                            "code": "WIKI_AI_DISABLED"}), 400
+        current = str(data.get("content") or "")
+        instruction = " ".join(str(data.get("instruction") or "").split())[:1000]
+        if not current.strip():
+            return jsonify({"error": "Нечего править: статья пуста"}), 400
+        if len(instruction) < 3:
+            return jsonify({"error": "Напишите, что поправить"}), 400
+
+        try:
+            result = ai_revise.edit_by_instruction(
+                current_title=str(data.get("title") or ""), current_html=current,
+                instruction=instruction, generate_fn=ai_providers.generate)
+        except ai_providers.ProviderError as error:
+            return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
+                            "code": "WIKI_AI_UNAVAILABLE"}), 503
+
+        meta = result.get("meta") or {}
+        queries.log_action(
+            cursor, actor_id=ctx["user_id"], action="article.ai_edit",
+            entity_type="article", entity_id=_int_or_none(data.get("article_id")),
+            details={"instruction": instruction[:200],
+                     "changes": len(result["changes"]), "model": meta.get("model")},
+            ip_address=log_ip())
+        return jsonify({"content": result["content"], "changes": result["changes"],
+                        "questions": result["questions"],
+                        "warnings": result["warnings"],
+                        "model": meta.get("model"), "elapsed": meta.get("elapsed")})
 
     # ── Проверка «такая статья уже есть?» без документа ───────────────────
     @wiki_route('/articles/similar', methods=('POST',), capability='can_create')

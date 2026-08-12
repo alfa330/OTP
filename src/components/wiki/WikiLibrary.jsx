@@ -137,6 +137,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     // Префилл для статьи-классификатора: пришли из поиска с готовой машиной.
     const [openPrefill, setOpenPrefill] = useState(null);
     const [editing, setEditing] = useState(null);   // null | {} | статья
+    // Документ, который надо применить к статье СРАЗУ после её открытия. Живёт
+    // здесь, а не в редакторе: путь начинается в проверке дублей на другой
+    // статье, и пережить смену открытого документа он обязан.
+    const [pendingUpdateFile, setPendingUpdateFile] = useState(null);
     const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
     const [items, setItems] = useState([]);         // статьи выбранного раздела
@@ -360,7 +364,21 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                     showToast={showToast}
                     article={editing.id ? editing : null}
                     sections={sections}
-                    onClose={() => setEditing(null)}
+                    pendingUpdateFile={pendingUpdateFile}
+                    onPendingUsed={() => setPendingUpdateFile(null)}
+                    /* Документ оказался новой версией другой статьи: открываем
+                       ТУ статью и несём файл с собой, чтобы человеку не искать
+                       его заново. Статью тянем целиком — редактору нужен её
+                       текст, а список отдаёт только карточку. */
+                    onUpdateExisting={(row, file) => {
+                        axios.get(`${base}/articles/${encodeURIComponent(row.slug)}`, { headers })
+                            .then((r) => {
+                                setPendingUpdateFile(file);
+                                setEditing(r.data);
+                            })
+                            .catch((e) => showToast?.(errText(e, 'Не удалось открыть статью'), 'error'));
+                    }}
+                    onClose={() => { setEditing(null); setPendingUpdateFile(null); }}
                     /* Сохранение меняет и центр, и правую колонку: новая статья
                        обязана появиться в оглавлении и в черновиках сразу, иначе
                        после сохранения кажется, что её нет. */
@@ -394,6 +412,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                    поэтому редактору не нужен второй запрос — открываем прямо
                    на том объекте, который человек сейчас читает. */
                 onEdit={(article) => setEditing(article)}
+                onArchived={() => {
+                    // Возвращаемся к списку: открытая статья только что ушла из
+                    // него, и оставлять её на экране значит показывать то, чего
+                    // в витрине уже нет.
+                    setOpenSlug(null);
+                    load();
+                    loadHome();
+                }}
             />
         );
     }
