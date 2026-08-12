@@ -92,14 +92,21 @@ class PrepareTest(unittest.TestCase):
 
 
 class UpdateTest(unittest.TestCase):
-    def test_model_never_sees_table_contents(self):
+    def test_model_never_rewrites_tables_only_marks_them(self):
+        """В ТЕЛЕ статьи таблиц нет — только маркеры.
+
+        Содержимое таблиц модель при этом видит, отдельным блоком: без него ей
+        нечего сверять с документом и нечем указать номер клетки. Разница
+        принципиальная — видеть можно, переписывать нельзя.
+        """
         seen = {}
         revise.update_from_document(
             current_title='Акции', current_html=ARTICLE, document_html=DOCUMENT,
             document_text='50п-5к 20 дней', filename='new.docx', kind='Word',
             generate_fn=stub('СТАТЬЯ:\n<h1>Акции</h1><p>[[ТАБЛИЦА-2]]</p>', seen))
-        self.assertNotIn('14 дней', seen['user'])
-        self.assertNotIn('20 дней', seen['user'])
+        body = seen['user'].split('СОДЕРЖИМОЕ ТАБЛИЦ')[0]
+        self.assertNotIn('<table', body)
+        self.assertNotIn('14 дней', body)
         self.assertIn('[[ТАБЛИЦА-1]]', seen['user'])
         self.assertIn('[[ТАБЛИЦА-2]]', seen['user'])
 
@@ -164,6 +171,70 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual('application/pdf', calls['mime'])
         self.assertIn('ЧИТАЕШЬ САМ', calls['system'])
         self.assertIn('14 дней', result['content'])
+
+
+class TablePatchIntegrationTest(unittest.TestCase):
+    """Правки клеток должны доходить до результата через обычный путь обновления."""
+
+    def test_cell_patch_changes_the_table(self):
+        result = revise.update_from_document(
+            current_title='Акции', current_html=ARTICLE, document_html=DOCUMENT,
+            document_text='50п-5к 20 дней', filename='new.docx', kind='Word',
+            generate_fn=stub('\n'.join([
+                'ПРАВКИ ТАБЛИЦ:',
+                '- Т1 С2 К2: 14 дней => 20 дней',
+                'ИЗМЕНЕНИЯ:',
+                '- срок обновлён',
+                'СТАТЬЯ:',
+                '<h1>Акции</h1><p>[[ТАБЛИЦА-1]]</p>'
+                '<h1>Завершённые</h1><p>Акция «Весна» завершена.</p>'])))
+        self.assertIn('20 дней', result['content'])
+        self.assertNotIn('14 дней', result['content'])
+        self.assertTrue(any('строка 2' in c for c in result['changes']))
+
+    def test_model_sees_table_contents_but_cannot_rewrite_them(self):
+        seen = {}
+        revise.update_from_document(
+            current_title='Акции', current_html=ARTICLE, document_html=DOCUMENT,
+            document_text='', filename='new.docx', kind='Word',
+            generate_fn=stub('СТАТЬЯ:\n<p>[[ТАБЛИЦА-1]]</p>', seen))
+        # Содержимое видно — иначе нечего сверять и нечем указать номер клетки.
+        self.assertIn('С2: К1=50п-5к', seen['user'])
+        # А в самом тексте статьи таблицы по-прежнему только маркерами.
+        body = seen['user'].split('СОДЕРЖИМОЕ ТАБЛИЦ')[0]
+        self.assertNotIn('<table', body)
+
+    def test_deletion_request_becomes_a_question(self):
+        result = revise.update_from_document(
+            current_title='Акции', current_html=ARTICLE, document_html=DOCUMENT,
+            document_text='', filename='new.docx', kind='Word',
+            generate_fn=stub('\n'.join([
+                'ПРАВКИ ТАБЛИЦ:',
+                '- Т1 -СТРОКА 2: нет в документе',
+                'ИЗМЕНЕНИЯ:',
+                '- сверено',
+                'СТАТЬЯ:',
+                '<h1>Акции</h1><p>[[ТАБЛИЦА-1]]</p>'
+                '<h1>Завершённые</h1><p>Акция «Весна» завершена.</p>'])))
+        self.assertIn('50п-5к', result['content'])
+        self.assertTrue(any('Удалить' in q for q in result['questions']))
+
+
+class DedupeTest(unittest.TestCase):
+    def test_near_identical_questions_collapse(self):
+        """Замер: про исчезнувшую акцию задавалось два почти одинаковых вопроса."""
+        lines = [
+            'Строку «Розыгрыш Elantra» (таблица 1, строка 17) ИИ предлагает удалить: '
+            'акции нет в новом документе. Удалить её?',
+            'Акция «Розыгрыш Elantra» (Таблица 1, строка 17) отсутствует в новом '
+            'документе. Нужно ли её удалить?',
+        ]
+        self.assertEqual(1, len(revise.dedupe(lines)))
+
+    def test_different_changes_are_kept(self):
+        """Спрятать настоящее изменение хуже, чем показать его дважды."""
+        lines = ['убран абзац про доставку', 'добавлен раздел про термопакеты']
+        self.assertEqual(2, len(revise.dedupe(lines)))
 
 
 class EditTest(unittest.TestCase):
