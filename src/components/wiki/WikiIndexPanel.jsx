@@ -19,6 +19,10 @@ import { getScrollContainer } from './scrollContainer';
  * карточками со сниппетами. Пока они делают разное, два поля рядом оправданы.
  */
 
+// Ключ свёрнутости для группы «Без раздела»: id пространств — числа, строка с
+// ними не пересечётся.
+const ORPHANS = 'orphans';
+
 const DESKTOP = '(min-width: 1024px)';
 const GAP = 16;             // тот же отступ, что и sticky top-4
 const MIN_HEIGHT = 240;     // ниже этого панель бесполезна, лучше дать ей вылезти
@@ -63,15 +67,37 @@ function useFitToViewport(ref) {
 
 const rowBase = 'flex w-full items-center gap-1.5 rounded-lg py-1.5 pr-2.5 text-left text-[12.5px] transition';
 
+/* Верхний уровень оглавления — отдел (или «Без раздела»). Карточка, а не мелкая
+   надпись: в исходной вике это самая заметная строка списка, по ней человек и
+   находит свою ветку. */
+const GroupCard = ({ title, closed, onToggle, children }) => (
+    <div className="mb-1.5">
+        <button
+            type="button"
+            aria-expanded={!closed}
+            onClick={onToggle}
+            className="flex w-full items-center gap-2 rounded-xl bg-white px-2.5 py-2 text-left shadow-sm ring-1 ring-slate-200/70 transition hover:ring-slate-300"
+        >
+            <Layers size={14} className="shrink-0 text-indigo-500" />
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-bold tracking-[-0.01em] text-slate-900">
+                {title}
+            </span>
+            <ChevronRight
+                size={13}
+                className={`shrink-0 text-slate-400 transition-transform ${closed ? '' : 'rotate-90'}`}
+            />
+        </button>
+        {!closed && <div className="mt-0.5 pl-1.5">{children}</div>}
+    </div>
+);
+
 const toggled = (set, key) => {
     const next = new Set(set);
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
 };
 
-export default function WikiIndexPanel({
-    tree, sectionId, onSection, articles, onOpen, loading,
-}) {
+export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
     const [filter, setFilter] = useState('');
     const [openSections, setOpenSections] = useState(() => new Set());
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
@@ -101,11 +127,6 @@ export default function WikiIndexPanel({
     }, [tree, articles]);
 
     const draftCount = articles.filter((a) => a.status !== 'published').length;
-
-    // Выбранный раздел раскрываем сами: иначе выбор в центре не виден в дереве.
-    useEffect(() => {
-        if (sectionId) setOpenSections((prev) => new Set(prev).add(sectionId));
-    }, [sectionId]);
 
     const boxRef = useRef(null);
     useFitToViewport(boxRef);
@@ -148,10 +169,10 @@ export default function WikiIndexPanel({
             key={`${article.id}-${depth}`}
             type="button"
             onClick={() => onOpen(article.slug)}
-            style={{ paddingLeft: `${16 + depth * 12}px` }}
-            className={`${rowBase} text-slate-600 hover:bg-slate-50`}
+            style={{ paddingLeft: `${18 + depth * 12}px` }}
+            className={`${rowBase} text-slate-600 hover:bg-white hover:shadow-sm hover:ring-1 hover:ring-slate-200/70`}
         >
-            <FileText size={12} className="shrink-0 text-slate-400" />
+            <FileText size={13} className="shrink-0 text-slate-400" />
             <span className="min-w-0 flex-1 truncate">{article.title}</span>
             {article.status === 'draft' && (
                 <span className="shrink-0 rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-700">
@@ -181,38 +202,32 @@ export default function WikiIndexPanel({
             // раздела, ни у его потомков.
             if (needle && !visibleSections.has(section.id)) { hideDeeperThan = depth; return; }
 
-            const active = sectionId === section.id;
             const count = own.length || section.readable_count || 0;
 
+            /* Нажатие ТОЛЬКО раскрывает раздел. Фильтровать им главный экран
+               было ошибкой: человек искал, какие статьи ему подходят, а вместо
+               списка получал перерисованный центр с теми же статьями. */
             body.push(
                 <button
                     key={section.id}
                     type="button"
                     aria-expanded={open}
-                    onClick={() => {
-                        setOpenSections((prev) => toggled(prev, section.id));
-                        onSection(active ? null : section.id);
-                    }}
+                    onClick={() => setOpenSections((prev) => toggled(prev, section.id))}
                     style={{ paddingLeft: `${6 + depth * 12}px` }}
-                    className={`${rowBase} ${
-                        active
-                            ? 'bg-indigo-50 font-semibold text-indigo-600'
-                            : 'text-slate-700 hover:bg-slate-50'
-                    }`}
+                    className={`${rowBase} font-semibold text-slate-800 hover:bg-white hover:shadow-sm hover:ring-1 hover:ring-slate-200/70`}
                 >
                     <ChevronRight
                         size={12}
-                        className={`shrink-0 transition-transform ${open ? 'rotate-90' : ''} ${
-                            active ? 'text-indigo-400' : 'text-slate-300'}`}
+                        className={`shrink-0 text-slate-400 transition-transform ${open ? 'rotate-90' : ''}`}
                     />
                     {open
-                        ? <FolderOpen size={13} className={`shrink-0 ${active ? 'text-indigo-500' : 'text-slate-400'}`} />
-                        : <Folder size={13} className={`shrink-0 ${active ? 'text-indigo-500' : 'text-slate-400'}`} />}
+                        ? <FolderOpen size={14} className="shrink-0 text-amber-500" />
+                        : <Folder size={14} className="shrink-0 text-amber-500" />}
                     <span className="min-w-0 flex-1 truncate">{section.name}</span>
                     {/* Счётчик — по видимым статьям: цифра рядом с названием
                         обязана совпасть с тем, что раскроется по нажатию. */}
                     {count > 0 && (
-                        <span className="shrink-0 text-[10.5px] tabular-nums text-slate-400">{count}</span>
+                        <span className="shrink-0 text-[11px] font-medium tabular-nums text-slate-400">({count})</span>
                     )}
                 </button>,
             );
@@ -224,21 +239,14 @@ export default function WikiIndexPanel({
         if (body.length === 0) return null;
 
         return (
-            <div key={space.id}>
-                <button
-                    type="button"
-                    aria-expanded={!spaceClosed}
-                    onClick={() => setClosedSpaces((prev) => toggled(prev, space.id))}
-                    className="flex w-full items-center gap-1 px-2.5 pb-1 pt-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.07em] text-slate-400 transition hover:text-slate-600"
-                >
-                    <ChevronRight
-                        size={11}
-                        className={`shrink-0 transition-transform ${spaceClosed ? '' : 'rotate-90'}`}
-                    />
-                    <span className="min-w-0 flex-1 truncate">{space.name}</span>
-                </button>
-                {!spaceClosed && body}
-            </div>
+            <GroupCard
+                key={space.id}
+                title={space.name}
+                closed={spaceClosed}
+                onToggle={() => setClosedSpaces((prev) => toggled(prev, space.id))}
+            >
+                {body}
+            </GroupCard>
         );
     };
 
@@ -281,21 +289,8 @@ export default function WikiIndexPanel({
                     />
                 </div>
 
-                <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
-                    <button
-                        type="button"
-                        onClick={() => onSection(null)}
-                        style={{ paddingLeft: '10px' }}
-                        className={`${rowBase} ${
-                            sectionId
-                                ? 'text-slate-700 hover:bg-slate-50'
-                                : 'bg-indigo-50 font-semibold text-indigo-600'
-                        }`}
-                    >
-                        <Folder size={13} className={sectionId ? 'text-slate-400' : 'text-indigo-500'} />
-                        <span className="truncate">Все статьи</span>
-                    </button>
-
+                {/* Серый фон, чтобы карточки отделов читались карточками. */}
+                <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50/70 px-1.5 py-1.5">
                     {loading && (
                         <div className="flex items-center justify-center gap-2 py-6 text-slate-400">
                             <Loader2 size={14} className="animate-spin" />
@@ -305,13 +300,17 @@ export default function WikiIndexPanel({
 
                     {!loading && spaces}
 
+                    {/* Статьи, не попавшие ни в один доступный раздел, — своей
+                        группой того же вида: иначе они висели бы без заголовка,
+                        как будто принадлежат последнему отделу в списке. */}
                     {!loading && shownOrphans.length > 0 && (
-                        <div>
-                            <div className="px-2.5 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.07em] text-slate-400">
-                                Вне разделов
-                            </div>
+                        <GroupCard
+                            title="Без раздела"
+                            closed={!needle && closedSpaces.has(ORPHANS)}
+                            onToggle={() => setClosedSpaces((prev) => toggled(prev, ORPHANS))}
+                        >
                             {shownOrphans.map((article) => renderArticle(article, 0))}
-                        </div>
+                        </GroupCard>
                     )}
 
                     {!loading && nothingFound && (

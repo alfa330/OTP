@@ -1,15 +1,12 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import {
-    BookOpen, Eye, FileText, Loader2, Search, Sparkles, X,
-} from 'lucide-react';
-import { iosCard, iosGroupLabel, IosBadge } from '../ui/ios';
+import { FileText, Loader2, Search, Sparkles, X } from 'lucide-react';
+import { iosCard, iosGroupLabel } from '../ui/ios';
 import WikiArticle from './WikiArticle';
 import WikiHome from './WikiHome';
 import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
 import { markedWord } from './WikiSearch';
-import { CLASSIFIER_SLUG } from './WikiArticle';
 import useStableCallback from './useStableCallback';
 import { selectableSections } from './sectionPicker';
 
@@ -26,56 +23,14 @@ const WikiEditor = lazy(() => import('./WikiEditor'));
  * padding КОРНЯ приложения; у нас слева уже стоит сайдбар портала с тем же
  * z-index, и две панели наложились бы друг на друга.
  *
- * Разделение обязанностей между колонками: оглавление справа перечисляет ВЕСЬ
- * периметр и не сужается выбором раздела, а центр показывает текущий выбор —
- * статьи раздела карточками или выдачу поиска. Если бы обе колонки показывали
- * один и тот же список, выбор раздела рисовал бы его дважды.
+ * Разделение обязанностей между колонками: оглавление справа — навигатор,
+ * нажатие на раздел там только раскрывает его статьи, а центр остаётся
+ * главным экраном (витрина «про меня» или выдача поиска). Раньше выбор раздела
+ * ещё и фильтровал центр — тогда одни и те же статьи показывались дважды,
+ * узким списком справа и карточками в центре.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
-
-const fmtDate = (iso) => (iso
-    ? new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })
-    : '');
-
-const ArticleCard = ({ article, onOpen }) => (
-    <button
-        type="button"
-        onClick={() => onOpen(article.slug)}
-        className={`${iosCard} group flex w-full flex-col items-start gap-1.5 p-4 text-left transition hover:ring-2 hover:ring-indigo-500/20`}
-    >
-        <div className="flex w-full items-start gap-3">
-            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
-                <FileText size={16} />
-            </div>
-            <div className="min-w-0 flex-1">
-                <div className="line-clamp-2 text-[14px] font-semibold leading-snug text-slate-900">
-                    {article.title}
-                </div>
-                {article.summary && (
-                    <p className="mt-1 line-clamp-2 text-[12.5px] leading-relaxed text-slate-500">
-                        {article.summary}
-                    </p>
-                )}
-            </div>
-        </div>
-        <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-12 text-[11.5px] text-slate-400">
-            {article.status !== 'published' && (
-                <IosBadge tone={article.status === 'draft' ? 'slate' : 'amber'}>
-                    {article.status === 'draft' ? 'Черновик' : article.status}
-                </IosBadge>
-            )}
-            {/* У классификатора собственный периметр (restricted), но правило в
-                нём одно: читать могут все роли. Бейдж на статье, открытой всем,
-                вводил бы в заблуждение — см. тот же гард в WikiArticle. */}
-            {article.visibility_mode === 'restricted' && article.slug !== CLASSIFIER_SLUG && (
-                <IosBadge tone="amber">Только по списку</IosBadge>
-            )}
-            <span className="flex items-center gap-1 tabular-nums"><Eye size={11} /> {article.views}</span>
-            <span className="tabular-nums">{fmtDate(article.updated_at)}</span>
-        </div>
-    </button>
-);
 
 /* Сниппет приходит с сервера уже с <mark>. Санитизация здесь не нужна и была
    бы вредна: ts_headline вставляет ровно те теги, что мы задали, а любой текст
@@ -141,9 +96,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     // здесь, а не в редакторе: путь начинается в проверке дублей на другой
     // статье, и пережить смену открытого документа он обязан.
     const [pendingUpdateFile, setPendingUpdateFile] = useState(null);
-    const [sectionId, setSectionId] = useState(null);
     const [query, setQuery] = useState('');
-    const [items, setItems] = useState([]);         // статьи выбранного раздела
     const [index, setIndex] = useState([]);         // весь периметр — для оглавления
     const [indexLoading, setIndexLoading] = useState(true);
     const [home, setHome] = useState(null);
@@ -191,8 +144,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         setEditing({});
     }, [createTick]);
 
-    /* Возврат на главную витрины: закрываем статью, сбрасываем выбранный раздел
-       и поиск. editing намеренно не в зависимостях — он читается тем значением,
+    /* Возврат на главную витрины: закрываем статью и сбрасываем поиск. editing намеренно не в зависимостях — он читается тем значением,
        какое было в момент нажатия, а в deps заставил бы эффект сбрасывать
        витрину каждый раз, когда открывают редактор. */
     useEffect(() => {
@@ -207,7 +159,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         setOpenHighlight(null);
         setOpenPrefill(null);
         setEditing(null);
-        setSectionId(null);
         setQuery('');
         setFound(null);
     }, [homeTick]);
@@ -233,36 +184,22 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
 
-    /* Центр: выдача поиска, статьи выбранного раздела — или ничего, когда
-       показываем витрину «про меня». Лишних запросов в третьем случае нет. */
+    /* Центр показывает выдачу поиска — или ничего, когда на экране витрина
+       «про меня». Короткий ввод поиска не запускает: от двух символов, как в
+       оригинале. */
     const load = useCallback(() => {
         const term = query.trim();
-
-        // Короткий ввод — обычный список; от двух символов включается
-        // полнотекстовый поиск со сниппетами, как в оригинале.
-        if (term.length >= 2) {
-            setLoading(true);
-            const params = { q: term };
-            if (sectionId) params.section_id = sectionId;
-            axios.get(`${base}/search`, { headers, params })
-                .then((r) => setFound(r.data?.items || []))
-                .catch((e) => {
-                    setFound([]);
-                    toast(errText(e, 'Поиск не сработал'), 'error');
-                })
-                .finally(() => setLoading(false));
-            return;
-        }
-
-        setFound(null);
-        if (!sectionId) { setItems([]); return; }
+        if (term.length < 2) { setFound(null); return; }
 
         setLoading(true);
-        axios.get(`${base}/articles`, { headers, params: { section_id: sectionId } })
-            .then((r) => setItems(r.data?.items || []))
-            .catch((e) => toast(errText(e, 'Не удалось загрузить статьи'), 'error'))
+        axios.get(`${base}/search`, { headers, params: { q: term } })
+            .then((r) => setFound(r.data?.items || []))
+            .catch((e) => {
+                setFound([]);
+                toast(errText(e, 'Поиск не сработал'), 'error');
+            })
             .finally(() => setLoading(false));
-    }, [base, headers, sectionId, query, toast]);
+    }, [base, headers, query, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -339,16 +276,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
             .filter(({ rows }) => rows.length > 0);
     }, [spaces, treeSections]);
 
-    const activeSection = useMemo(
-        () => treeSections.find((s) => s.id === sectionId) || null,
-        [treeSections, sectionId],
-    );
-
-    /* Раздел мог уйти за периметр между заходами: сбрасываем фильтр, иначе
-       список молча остался бы пустым. */
-    useEffect(() => {
-        if (sectionId && !treeSections.some((s) => s.id === sectionId)) setSectionId(null);
-    }, [treeSections, sectionId]);
 
     if (editing) {
         return (
@@ -440,22 +367,17 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                 <section className={`${iosCard} px-5 py-6 text-center sm:px-8`}>
                     <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-1 text-[10.5px] font-bold text-indigo-600">
                         <Sparkles size={11} />
-                        {activeSection ? 'Раздел базы знаний' : isEditor ? 'Режим редактора' : 'База знаний компании'}
+                        {isEditor ? 'Режим редактора' : 'База знаний компании'}
                     </span>
 
                     <h2 className="mx-auto mt-2.5 max-w-[520px] text-[26px] font-bold leading-[1.1] tracking-[-0.03em] text-slate-900 sm:text-[30px]">
-                        {activeSection
-                            ? activeSection.name
-                            : <>Все статьи вики<br className="hidden sm:block" /> в одном месте.</>}
+                        Все статьи вики<br className="hidden sm:block" /> в одном месте.
                     </h2>
 
                     <p className="mx-auto mt-2 max-w-[500px] text-[12.5px] leading-relaxed text-slate-500">
-                        {activeSection
-                            ? (activeSection.description
-                                || 'Статьи раздела — ниже. Всё оглавление базы знаний остаётся справа.')
-                            : isEditor
-                                ? 'Статьи, разделы и парки: черновики, доступы и порядок публикаций — на одном экране.'
-                                : 'Поиск по содержимому статей, разделы по отделам и материалы таксопарков — без переходов между сервисами.'}
+                        {isEditor
+                            ? 'Статьи, разделы и парки: черновики, доступы и порядок публикаций — на одном экране.'
+                            : 'Поиск по содержимому статей, разделы по отделам и материалы таксопарков — без переходов между сервисами.'}
                     </p>
 
                     <div className="mx-auto mt-4 flex max-w-[560px] items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70">
@@ -483,15 +405,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                         )}
                     </div>
 
-                    {activeSection && (
-                        <button
-                            type="button"
-                            onClick={() => setSectionId(null)}
-                            className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[11.5px] font-medium text-slate-600 transition hover:bg-slate-200"
-                        >
-                            <X size={11} /> Показать всю базу знаний
-                        </button>
-                    )}
                 </section>
 
 
@@ -525,30 +438,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                     )
                 )}
 
-                {!busy && !searching && activeSection && (
-                    items.length > 0 ? (
-                        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                            {items.map((article) => (
-                                <ArticleCard key={article.id} article={article} onOpen={openArticle} />
-                            ))}
-                        </div>
-                    ) : (
-                        <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
-                            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
-                                <BookOpen size={22} />
-                            </div>
-                            <div className="text-[15px] font-semibold text-slate-900">В разделе пока пусто</div>
-                            <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
-                                Статьи появятся здесь после публикации.
-                            </p>
-                        </div>
-                    )
-                )}
-
                 {/* Пока /home не ответил, витрину «про меня» не рисуем пустыми
                     полками: «Пусто» и «Пока ничего не читали» — это утверждения,
                     и до ответа сервера они неправда. */}
-                {!busy && !searching && !activeSection && (
+                {!busy && !searching && (
                     homeLoading ? (
                         <div className={`${iosCard} h-[220px] overflow-hidden`}>
                             <div className="sk-shimmer h-full w-full" />
@@ -568,8 +461,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
 
             <WikiIndexPanel
                 tree={tree}
-                sectionId={sectionId}
-                onSection={setSectionId}
                 articles={index}
                 onOpen={openArticle}
                 loading={indexLoading}
