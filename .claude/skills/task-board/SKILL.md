@@ -192,6 +192,9 @@ python -X utf8 scripts/task_board.py report 412 "Готово, вот итог" 
   для `completed` — `{"action":"completed","report":"...","spent_minutes":210}`
 - `GET|POST /api/tasks/<id>/reports` — журнал отчётов; POST `{"body":"...","spent_minutes":120,"kind":"progress"}`
 - `PATCH|DELETE /api/tasks/reports/<report_id>` — правка/удаление своего отчёта
+- `GET /api/tasks/export?mine=&person_id=&person_scope=` — xlsx, лист на колонку
+  доски. Параметры охвата те же, что у списка, и других нет: колонки в файле
+  все сразу. Пустой лист и пустая во всех строках колонка не выводятся.
 
 Реализация: роуты в `bot_schedule2.py` (`handle_tasks`, `handle_single_task`,
 `handle_tasks_board`, `handle_task_reports`, `handle_task_report_item`,
