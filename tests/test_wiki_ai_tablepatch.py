@@ -153,6 +153,21 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(1, len(changes))
 
 
+class DiffExcerptTest(unittest.TestCase):
+    def test_shows_where_values_differ(self):
+        """Иначе выходит бесполезное «было X → стало X»: различие сидело за обрезкой."""
+        before = '1.Участвуют только новые водители и не выполнявшие поездки. Срок 30 дней.'
+        after = '1.Участвуют только новые водители и не выполнявшие поездки. Срок 45 дней.'
+        was, now = tablepatch._diff_excerpt(before, after)
+        self.assertNotEqual(was, now)
+        self.assertIn('30 дней', was)
+        self.assertIn('45 дней', now)
+
+    def test_short_values_are_shown_as_is(self):
+        was, now = tablepatch._diff_excerpt('14 дней', '20 дней')
+        self.assertEqual(('14 дней', '20 дней'), (was, now))
+
+
 class LinkSurvivalTest(unittest.TestCase):
     """Ссылка в клетке обязана пережить правку.
 

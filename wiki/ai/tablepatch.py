@@ -246,6 +246,26 @@ def parse(text):
     return patches[:60]
 
 
+def _diff_excerpt(before, after, width=60):
+    """Показать в строке изменения именно то, ЧЕМ значения различаются.
+
+    Иначе выходит бесполезное «было X → стало X»: длинные клетки обрезались по
+    первым 60 знакам, а различие сидело дальше. Замер на проде это и выдал —
+    строка правки выглядела как замена на саму себя.
+    """
+    before, after = str(before or ''), str(after or '')
+    if before[:width] != after[:width]:
+        return before[:width], after[:width]
+    common = 0
+    while (common < min(len(before), len(after))
+           and before[common] == after[common]):
+        common += 1
+    start = max(0, common - width // 3)
+    prefix = '…' if start else ''
+    return (prefix + before[start:start + width],
+            prefix + after[start:start + width])
+
+
 def _column_count(rows):
     return max((len(_cells_of(row)) for row in rows), default=0)
 
@@ -308,9 +328,10 @@ def apply(tables, patches):
                     'В клетке (таблица %d, строка %d, колонка %d) была ссылка «%s» — '
                     'ИИ её не перенёс, она дописана в конец клетки. Проверьте место.'
                     % (patch['table'], patch['row'], patch['col'], label or href))
+            was_excerpt, now_excerpt = _diff_excerpt(current, patch['now'])
             changes.append('таблица %d, строка %d: «%s» → «%s»'
                            % (patch['table'], patch['row'],
-                              current[:60], patch['now'][:60]))
+                              was_excerpt, now_excerpt))
 
         elif patch['kind'] == 'add':
             width = _column_count(rows)

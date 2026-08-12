@@ -198,6 +198,17 @@ class SourcesTest(unittest.TestCase):
         self.assertEqual([], ai_answer.ungrounded_numbers(
             'Звоните по номеру +77000000110', rows))
 
+    def test_digits_inside_a_url_are_not_facts(self):
+        """Замер на проде: обломок идентификатора формы Google выдавался за выдумку.
+
+        «…1FAIpQLSeO-wSvqAZ992Z_LWPbo…» давал предупреждение «числа, которых нет
+        в документе: 992». Ложное предупреждение обесценивает все остальные.
+        """
+        rows = [chunk(text='Заполните заявку по форме.')]
+        self.assertEqual([], ai_answer.ungrounded_numbers(
+            'Заявка: https://docs.google.com/forms/d/e/1FAIpQLSeO-wSvqAZ992Z_LWPbo/viewform',
+            rows))
+
     def test_wrong_phone_is_caught(self):
         rows = [chunk(text='Номер офиса: +7 700 000 01 10')]
         self.assertTrue(ai_answer.ungrounded_numbers(
