@@ -103,13 +103,20 @@ def _load_database_method(name):
 
 
 class _FakeDb:
-    def __init__(self, rows):
+    """Выгрузка тянет ДВА периода: отчётный месяц и предыдущий (второй лист).
+
+    prev_rows задаётся отдельно, иначе один и тот же набор строк вернулся бы на
+    оба листа и тест не отличил бы их друг от друга.
+    """
+
+    def __init__(self, rows, prev_rows=None):
         self.rows = rows
+        self.prev_rows = [] if prev_rows is None else prev_rows
         self.calls = []
 
     def get_tez_leads_detail(self, year, month, **kwargs):
         self.calls.append((year, month, kwargs))
-        return self.rows
+        return self.rows if (year, month) == (2026, 7) else self.prev_rows
 
 
 class _QuietLogging:
@@ -151,8 +158,8 @@ class _FakeDatabase:
 
 
 class TezLeadsExcelExportTests(unittest.TestCase):
-    def _export_bytes(self, rows):
-        db = _FakeDb(rows)
+    def _export_bytes(self, rows, prev_rows=None):
+        db = _FakeDb(rows, prev_rows)
 
         def send_file(stream, **kwargs):
             return {
@@ -184,10 +191,14 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         response = export()
         return db, response["content"]
 
-    def _export(self, rows):
-        db, content = self._export_bytes(rows)
+    def _export(self, rows, prev_rows=None):
+        db, content = self._export_bytes(rows, prev_rows)
         workbook = load_workbook(io.BytesIO(content), data_only=True)
         return db, workbook.active
+
+    def _export_book(self, rows, prev_rows=None):
+        db, content = self._export_bytes(rows, prev_rows)
+        return db, load_workbook(io.BytesIO(content), data_only=True)
 
     @staticmethod
     def _detail_row(**overrides):
@@ -217,8 +228,8 @@ class TezLeadsExcelExportTests(unittest.TestCase):
 
         self.assertEqual(
             db.calls,
-            [(2026, 7, {"limit": 50000})],
-            "Excel должен строиться из полной выборки get_tez_leads_detail",
+            [(2026, 7, {"limit": 50000}), (2026, 6, {"limit": 50000})],
+            "Excel строится из полной выборки: отчётный месяц + база предыдущего",
         )
         headers = [cell.value for cell in sheet[1]]
         self.assertIn("Источник", headers)
@@ -231,6 +242,56 @@ class TezLeadsExcelExportTests(unittest.TestCase):
         # фильтруют в секундах, в них же задан порог успешки.
         self.assertEqual(sheet.cell(2, duration_column).value, 3723)
         self.assertEqual(sheet.cell(2, duration_column).number_format, "0")
+
+    # ── Второй лист: база прошлого месяца ───────────────────────────────────
+
+    def test_previous_month_base_goes_to_a_second_sheet(self):
+        """Владелец: в выгрузку текущего месяца добавить базу прошлого целиком,
+        отдельным листом и с пометкой, за какой месяц она действует."""
+        prev = self._detail_row(phone="77010000002", status="in_progress",
+                                status_rule=None, success_date=None,
+                                month_first_order_at=None, first_order_at=None)
+        db, book = self._export_book([self._detail_row()], [prev])
+
+        self.assertEqual(book.sheetnames, ["Лиды 07.2026", "База 06.2026"])
+        sheet = book["База 06.2026"]
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(headers[0], "Действие базы")
+        self.assertEqual(sheet.cell(2, 1).value, "Июнь 2026")
+        # Дальше идут те же колонки, что и на основном листе, но со сдвигом.
+        self.assertEqual(headers[1:], [cell.value for cell in book["Лиды 07.2026"][1]])
+        self.assertEqual(sheet.cell(2, headers.index("Телефон") + 1).value, "77010000002")
+
+    def test_successes_paid_in_the_previous_month_are_excluded(self):
+        """Успешки, засчитанные и выплаченные прошлым месяцем, в лист не идут."""
+        paid = self._detail_row(phone="77010000003", success_date="2026-06-15")
+        db, book = self._export_book([self._detail_row()], [paid])
+        self.assertEqual(book.sheetnames, ["Лиды 07.2026"])
+
+    def test_lead_counted_later_stays_in_the_previous_month_base(self):
+        """А вот лид прошлого месяца, ставший успешкой уже в этом (перенос),
+        остаётся: тем месяцем по нему не платили."""
+        carried = self._detail_row(phone="77010000004", success_date="2026-07-03")
+        db, book = self._export_book([self._detail_row()], [carried])
+        sheet = book["База 06.2026"]
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(sheet.cell(2, headers.index("Телефон") + 1).value, "77010000004")
+        self.assertEqual(sheet.cell(2, headers.index("Дата успешки") + 1).value, "2026-07-03")
+
+    def test_previous_month_sheet_buckets_calls_by_its_own_month(self):
+        """Звонок 25 июня на листе июня — это «в отчётном месяце», а не «в прошлом»:
+        иначе на втором листе все звонки уехали бы в чужую колонку."""
+        prev = self._detail_row(phone="77010000005", success_date=None,
+                                call_at="2026-06-25T10:00:00", talk_duration_seconds=61)
+        db, book = self._export_book([self._detail_row()], [prev])
+        sheet = book["База 06.2026"]
+        headers = [cell.value for cell in sheet[1]]
+        own = headers.index("Звонок в отчётном месяце") + 1
+        prev_col = headers.index("Звонок в прошлом месяце") + 1
+        self.assertEqual(sheet.cell(2, own).value, "2026-06-25 10:00:00")
+        # Пустая текстовая ячейка читается обратно как None.
+        self.assertFalse(sheet.cell(2, prev_col).value)
+        self.assertEqual(sheet.cell(2, own + 1).value, 61)
 
     def test_missing_talk_duration_is_an_empty_excel_cell(self):
         _, sheet = self._export(
