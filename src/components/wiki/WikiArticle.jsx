@@ -2,11 +2,12 @@ import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'rea
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    Archive, ArrowLeft, Clock, Eye, Link2, List, Loader2, Pencil, Star, User,
+    Archive, ArrowLeft, Clock, Eye, Link2, List, Loader2, Maximize2, Minimize2,
+    Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
-import { queryVariants } from './searchText';
+import { distinctiveTokens, queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
 
 /* Классификатор авто — статья вики с ПУСТЫМ телом: вместо текста рисуется
@@ -95,6 +96,40 @@ const wrapTables = (html) => {
     return parsed.body.innerHTML;
 };
 
+/** Пометить вхождения в текстовых узлах. Возвращает первую пометку или null. */
+const markNeedles = (nodes, needles, limit = 60) => {
+    let first = null;
+    let marked = 0;
+    for (const node of nodes) {
+        if (marked >= limit) break;      // защита от вырожденного запроса
+        const lower = (node.nodeValue || '').toLowerCase();
+        let index = -1;
+        let length = 0;
+        for (const needle of needles) {
+            const found = lower.indexOf(needle);
+            if (found !== -1 && (index === -1 || found < index)) {
+                index = found;
+                length = needle.length;
+            }
+        }
+        if (index === -1) continue;
+
+        const range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(node, index + length);
+        const mark = document.createElement('mark');
+        mark.className = 'wiki-search-hit';
+        try {
+            range.surroundContents(mark);
+        } catch {
+            continue;    // узел уже разрезан предыдущей пометкой
+        }
+        marked += 1;
+        if (!first) first = mark;
+    }
+    return first;
+};
+
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                       highlightTerm = null, classifierPrefill = null,
                                       onEdit = null, onArchived = null }) {
@@ -106,6 +141,26 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     const [activeId, setActiveId] = useState('');
     const bodyRef = useRef(null);
     const [archiving, setArchiving] = useState(false);
+    /* Чтение во весь экран. Нужно для широких статей: у «Все акции» одиннадцать
+       колонок, и таблице требуется около 2500px — в колонку раздела она не
+       влезает ни при какой вёрстке, поэтому единственный честный ответ это
+       отдать ей всю ширину окна. Оглавление при этом остаётся: без него длинная
+       статья на весь экран превращается в простыню. */
+    const [immersive, setImmersive] = useState(false);
+
+    /* Esc выходит из режима, а прокрутка страницы под ним замирает: иначе на
+       широкой статье получаются две полосы прокрутки, и человек тянет не ту. */
+    useEffect(() => {
+        if (!immersive) return undefined;
+        const onKey = (event) => { if (event.key === 'Escape') setImmersive(false); };
+        const previous = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        window.addEventListener('keydown', onKey);
+        return () => {
+            document.body.style.overflow = previous;
+            window.removeEventListener('keydown', onKey);
+        };
+    }, [immersive]);
 
     const archive = () => {
         // Подтверждение обязательно: кнопка стоит рядом с «Править», а промах по
@@ -195,34 +250,33 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         const textNodes = [];
         while (walker.nextNode()) textNodes.push(walker.currentNode);
 
-        let firstHit = null;
-        let marked = 0;
-        for (const node of textNodes) {
-            if (marked >= 60) break;      // защита от вырожденного запроса
-            const lower = (node.nodeValue || '').toLowerCase();
-            let index = -1;
-            let length = 0;
-            for (const needle of needles) {
-                const found = lower.indexOf(needle);
-                if (found !== -1 && (index === -1 || found < index)) {
-                    index = found;
-                    length = needle.length;
-                }
-            }
-            if (index === -1) continue;
+        let firstHit = markNeedles(textNodes, needles);
 
-            const range = document.createRange();
-            range.setStart(node, index);
-            range.setEnd(node, index + length);
-            const mark = document.createElement('mark');
-            mark.className = 'wiki-search-hit';
-            try {
-                range.surroundContents(mark);
-            } catch {
-                continue;    // узел уже разрезан предыдущей пометкой
+        /* Второй проход — по СЛОВАМ, а не по фразе. Нужен для источников
+           помощника: у него цитата длинная, а у табличных кусков она вообще
+           служебная сборка «Акция: Лимонопад; Условия: …», которой в тексте
+           статьи дословно нет никогда. Поиску первый проход подходит (там
+           короткий запрос), помощнику — нет, поэтому проходы именно два, а не
+           один универсальный. */
+        if (!firstHit && term.length >= 24) {
+            const tokens = distinctiveTokens(term);
+            if (tokens.length) {
+                let best = null;
+                let bestScore = 0;
+                for (const node of textNodes) {
+                    const lower = (node.nodeValue || '').toLowerCase();
+                    if (lower.trim().length < 3) continue;
+                    let score = 0;
+                    for (const token of tokens) if (lower.includes(token)) score += 1;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = node;
+                    }
+                }
+                // Одно случайное слово — не цитата. Двух совпадений достаточно:
+                // в служебной сборке таблицы это уже пара «поле + значение».
+                if (best && bestScore >= 2) firstHit = markNeedles([best], tokens);
             }
-            marked += 1;
-            if (!firstHit) firstHit = mark;
         }
 
         if (firstHit) {
@@ -278,7 +332,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     }
 
     return (
-        <div className="space-y-4">
+        <div className={immersive
+            ? 'wiki-immersive fixed inset-0 z-40 space-y-4 overflow-y-auto bg-slate-100 p-4 sm:p-6'
+            : 'space-y-4'}>
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <button type="button" className={iosBtnSecondary} onClick={onBack}>
                     <ArrowLeft size={14} /> К списку
@@ -307,6 +363,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             В архив
                         </button>
                     )}
+                    <button
+                        type="button"
+                        className={iosBtnSecondary}
+                        title={immersive ? 'Выйти из полноэкранного режима (Esc)'
+                            : 'Читать во весь экран: широкой таблице нужна вся ширина'}
+                        onClick={() => setImmersive((value) => !value)}
+                    >
+                        {immersive ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                        {immersive ? 'Свернуть' : 'Во весь экран'}
+                    </button>
                     {onEdit && article.permissions?.can_edit && (
                         <button type="button" className={iosBtnSecondary}
                                 onClick={() => onEdit(article)}>
