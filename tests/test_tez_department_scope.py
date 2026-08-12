@@ -125,12 +125,16 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         restore_effect_end = source.index("useEffect(() => {", restore_effect_start + 1)
         restore_effect = source[restore_effect_start:restore_effect_end]
         self.assertIn("if (isPlainTrainer) {", restore_effect)
+        self.assertIn(
+            "TRAINER_ALLOWED_VIEWS.includes(requestedViewFromUrl)",
+            restore_effect,
+        )
         self.assertNotIn("user.role === 'trainer'", restore_effect)
 
         redirect_start = source.index("// Do not touch view while authentication")
         redirect_end = source.index("}, [isAuthInitializing", redirect_start)
         redirect_guards = source[redirect_start:redirect_end]
-        self.assertIn("if (isPlainTrainer && ![", redirect_guards)
+        self.assertIn("if (isPlainTrainer && !TRAINER_ALLOWED_VIEWS.includes(view))", redirect_guards)
         self.assertGreaterEqual(
             redirect_guards.count("else if (isPlainTrainer) setView('surveys');"),
             4,

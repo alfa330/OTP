@@ -176,6 +176,21 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
 const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter', 'tez_line', 'tez_op']);
 const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez']);
 const TEZ_SALARY_CALCULATOR_TYPES = new Set(['tez_line', 'tez_op']);
+// Разделы «чистого» тренера (тренер-глава отдела ходит по правилам главы).
+// Список один на оба гарда — восстановление вида из URL и редирект при смене
+// вида: пока это были два литерала, раздел, добавленный в один, молча
+// выбрасывался вторым обратно в «Опросы». «Ивенты» тренер только читает —
+// право публикации даёт бэкенд (can_publish), у тренера его нет.
+const TRAINER_ALLOWED_VIEWS = Object.freeze([
+    'surveys',
+    'manage_operators',
+    'tasks',
+    'lms',
+    'shift_auction',
+    'work_schedules',
+    'wiki',
+    'events',
+]);
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
     ai_feedback: 'Dos AI',
@@ -38290,8 +38305,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const requestedViewFromUrl = requestedViewFromLocation;
                 if (isPlainTrainer) {
-                    const trainerAllowedViews = new Set(['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki']);
-                    if (requestedViewFromUrl && trainerAllowedViews.has(requestedViewFromUrl)) {
+                    if (requestedViewFromUrl && TRAINER_ALLOWED_VIEWS.includes(requestedViewFromUrl)) {
                         setView(requestedViewFromUrl);
                         return;
                     }
@@ -38336,7 +38350,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // null, and the subsequent URL sync effect rewrites the
                 // pathname, erasing the original LMS sub-path on reload.
                 if (isAuthInitializing || !user) return;
-                if (isPlainTrainer && !['surveys', 'manage_operators', 'tasks', 'lms', 'shift_auction', 'work_schedules', 'wiki'].includes(view)) {
+                if (isPlainTrainer && !TRAINER_ALLOWED_VIEWS.includes(view)) {
                     setView('surveys');
                 }
                 if (view === 'lms' && !canAccessLmsSection) {
