@@ -27102,7 +27102,7 @@ def _chat_report_build_operator_token_index():
 
 def _chat_report_tokens_match(report_tokens, op_tokens):
     """Каждый report-токен сопоставляется РАЗНОМУ op-токену (равен ИЛИ префикс op-токена).
-    Покрывает сокращения: «Оралхан Асан» → оператор «Омар» + фамилия на «Идр…»."""
+    Покрывает сокращения: «Оралхан Асан» → оператор «Оралхан» + фамилия на «Асан…»."""
     if not report_tokens:
         return False
     used = [False] * len(op_tokens)

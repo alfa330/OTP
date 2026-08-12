@@ -185,9 +185,9 @@ class ChatReportImportTests(unittest.TestCase):
 
     def test_tokens_match_prefix(self):
         match = self.ns["_chat_report_tokens_match"]
-        self.assertTrue(match(["омар", "асан"], ["асанов", "омар", "канатович"]))
-        self.assertTrue(match(["жанель", "н"], ["сынакова", "жанель", "болатовна"]))
-        self.assertFalse(match(["иван", "петр"], ["асанов", "омар", "канатович"]))
+        self.assertTrue(match(["оралхан", "асан"], ["асанов", "оралхан", "тестович"]))
+        self.assertTrue(match(["жанель", "с"], ["сынакова", "жанель", "тестовна"]))
+        self.assertFalse(match(["иван", "петр"], ["асанов", "оралхан", "тестович"]))
 
     def test_score_report_sum_and_count(self):
         parse = self.ns["_chat_report_parse"]
