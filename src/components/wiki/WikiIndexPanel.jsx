@@ -70,7 +70,7 @@ const toggled = (set, key) => {
 };
 
 export default function WikiIndexPanel({
-    tree, sectionId, onSection, articles, onOpen, loading, scopeAll,
+    tree, sectionId, onSection, articles, onOpen, loading,
 }) {
     const [filter, setFilter] = useState('');
     const [openSections, setOpenSections] = useState(() => new Set());
@@ -182,7 +182,7 @@ export default function WikiIndexPanel({
             if (needle && !visibleSections.has(section.id)) { hideDeeperThan = depth; return; }
 
             const active = sectionId === section.id;
-            const count = own.length || (scopeAll ? section.articles_count : section.readable_count) || 0;
+            const count = own.length || section.readable_count || 0;
 
             body.push(
                 <button
@@ -293,7 +293,7 @@ export default function WikiIndexPanel({
                         }`}
                     >
                         <Folder size={13} className={sectionId ? 'text-slate-400' : 'text-indigo-500'} />
-                        <span className="truncate">{scopeAll ? 'Всё содержимое' : 'Все статьи'}</span>
+                        <span className="truncate">Все статьи</span>
                     </button>
 
                     {loading && (

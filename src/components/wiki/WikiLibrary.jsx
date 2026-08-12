@@ -3,7 +3,7 @@ import axios from 'axios';
 import {
     BookOpen, Eye, FileText, Loader2, Search, Sparkles, X,
 } from 'lucide-react';
-import { iosCard, iosGroupLabel, IosBadge, IosToggle } from '../ui/ios';
+import { iosCard, iosGroupLabel, IosBadge } from '../ui/ios';
 import WikiArticle from './WikiArticle';
 import WikiHome from './WikiHome';
 import WikiIndexPanel from './WikiIndexPanel';
@@ -121,7 +121,7 @@ const SearchHit = ({ article, onOpen }) => (
 
 export default function WikiLibrary({ base, headers, showToast, structure, counters,
                                       canCreate, canEdit = false,
-                                      canSeeEverything = false, createTick = 0, homeTick = 0,
+                                      createTick = 0, homeTick = 0,
                                       onOpenParks,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
@@ -149,10 +149,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const [parksCanManage, setParksCanManage] = useState(false);
     const [found, setFound] = useState(null);   // null = поиска не было
     const [loading, setLoading] = useState(false);
-    /* «Всё содержимое портала» — только для администратора доступов и только по
-       его явному нажатию. По умолчанию раздел показывает личный периметр: то,
-       к чему у человека есть отношение по правилам. */
-    const [scopeAll, setScopeAll] = useState(false);
 
     const isEditor = !!(canCreate || canEdit);
 
@@ -232,7 +228,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
-    const scopeParams = useMemo(() => (scopeAll ? { scope: 'all' } : {}), [scopeAll]);
 
     /* Центр: выдача поиска, статьи выбранного раздела — или ничего, когда
        показываем витрину «про меня». Лишних запросов в третьем случае нет. */
@@ -243,7 +238,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         // полнотекстовый поиск со сниппетами, как в оригинале.
         if (term.length >= 2) {
             setLoading(true);
-            const params = { q: term, ...scopeParams };
+            const params = { q: term };
             if (sectionId) params.section_id = sectionId;
             axios.get(`${base}/search`, { headers, params })
                 .then((r) => setFound(r.data?.items || []))
@@ -259,11 +254,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         if (!sectionId) { setItems([]); return; }
 
         setLoading(true);
-        axios.get(`${base}/articles`, { headers, params: { section_id: sectionId, ...scopeParams } })
+        axios.get(`${base}/articles`, { headers, params: { section_id: sectionId } })
             .then((r) => setItems(r.data?.items || []))
             .catch((e) => toast(errText(e, 'Не удалось загрузить статьи'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, sectionId, query, scopeParams, toast]);
+    }, [base, headers, sectionId, query, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -275,26 +270,26 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
        остаются рабочим способом сузить выборку. */
     const loadIndex = useCallback(() => {
         setIndexLoading(true);
-        return axios.get(`${base}/articles`, { headers, params: { limit: 200, ...scopeParams } })
+        return axios.get(`${base}/articles`, { headers, params: { limit: 200 } })
             .then((r) => setIndex(r.data?.items || []))
             .catch(() => setIndex([]))
             .finally(() => setIndexLoading(false));
-    }, [base, headers, scopeParams]);
+    }, [base, headers]);
 
     const loadHome = useCallback(() => {
         setHomeLoading(true);
-        return axios.get(`${base}/home`, { headers, params: scopeParams })
+        return axios.get(`${base}/home`, { headers })
             .then((r) => setHome(r.data))
             .catch(() => setHome(null))
             .finally(() => setHomeLoading(false));
-    }, [base, headers, scopeParams]);
+    }, [base, headers]);
 
     const loadDrafts = useCallback(() => {
         if (!isEditor) { setDrafts([]); return Promise.resolve(); }
-        return axios.get(`${base}/articles`, { headers, params: { status: 'draft', limit: 8, ...scopeParams } })
+        return axios.get(`${base}/articles`, { headers, params: { status: 'draft', limit: 8 } })
             .then((r) => setDrafts(r.data?.items || []))
             .catch(() => setDrafts([]));
-    }, [base, headers, isEditor, scopeParams]);
+    }, [base, headers, isEditor]);
 
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
@@ -316,10 +311,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
        архивные — здесь, на витрине чтения, первые были бы ветками, которые
        открываются пустыми, а вторые — вторым экземпляром раздела рядом с живым
        двойником: архивируют обычно дубль с тем же именем. */
-    const treeSections = useMemo(() => {
-        const live = selectableSections(sections);
-        return scopeAll ? live : live.filter((s) => s.accessible !== false);
-    }, [sections, scopeAll]);
+    const treeSections = useMemo(
+        () => selectableSections(sections).filter((s) => s.accessible !== false),
+        [sections],
+    );
 
     const tree = useMemo(() => {
         const shown = new Set(treeSections.map((s) => s.id));
@@ -345,8 +340,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         [treeSections, sectionId],
     );
 
-    /* Выключили «всё содержимое» — выбранный раздел мог оказаться за периметром.
-       Сбрасываем фильтр, иначе список молча остался бы пустым. */
+    /* Раздел мог уйти за периметр между заходами: сбрасываем фильтр, иначе
+       список молча остался бы пустым. */
     useEffect(() => {
         if (sectionId && !treeSections.some((s) => s.id === sectionId)) setSectionId(null);
     }, [treeSections, sectionId]);
@@ -468,30 +463,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                     )}
                 </section>
 
-                {/* Администратор доступов по умолчанию видит свой периметр, как все.
-                    Всё содержимое портала — по явному нажатию: без него не найти
-                    статью, которую попросили починить, а молча показывать чужие
-                    отделы и черновики раздел не должен. */}
-                {canSeeEverything && (
-                    <div className={`${iosCard} flex items-center gap-3 px-4 py-3`}>
-                        <IosToggle checked={scopeAll} onChange={setScopeAll} />
-                        {/* Подпись — отдельная кнопка, а не <label>: внутри IosToggle
-                            лежит <button>, а его метка не связывается с label. */}
-                        <button
-                            type="button"
-                            onClick={() => setScopeAll(!scopeAll)}
-                            className="min-w-0 flex-1 text-left"
-                        >
-                            <span className="block text-[13.5px] font-medium text-slate-900">
-                                Всё содержимое портала
-                            </span>
-                            <span className="block text-[12px] leading-snug text-slate-500">
-                                Статьи всех отделов, включая черновики и архив. Обычно
-                                здесь только то, к чему у вас есть доступ.
-                            </span>
-                        </button>
-                    </div>
-                )}
 
                 {busy && (
                     <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-slate-400`}>
@@ -571,7 +542,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                 articles={index}
                 onOpen={openArticle}
                 loading={indexLoading}
-                scopeAll={scopeAll}
             />
         </div>
     );

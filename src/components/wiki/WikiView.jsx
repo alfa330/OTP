@@ -386,7 +386,6 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         counters={counters}
                         canCreate={!!capabilities.can_create}
                         canEdit={canEdit}
-                        canSeeEverything={canManageAccess}
                         createTick={createTick}
                         homeTick={homeTick}
                         onOpenParks={() => setTab('parks')}
