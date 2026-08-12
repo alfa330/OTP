@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers,
+    AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers, MapPin,
     Building2, Loader2, Plus, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
@@ -9,6 +9,7 @@ import {
 } from '../ui/ios';
 import WikiLibrary from './WikiLibrary';
 import WikiParks from './WikiParks';
+import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
 import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
@@ -119,6 +120,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         { key: 'assistant', label: 'Помощник', icon: Sparkles, show: true },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'parks', label: 'Парки', icon: Building2, show: true },
+        { key: 'offices', label: 'Офисы', icon: MapPin, show: true },
         { key: 'structure', label: 'Структура', icon: Layers, show: canManageStructure },
         { key: 'access', label: 'Доступы', icon: KeyRound, show: canManageAccess },
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
@@ -420,6 +422,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
 
                 {tab === 'parks' && (
                     <WikiParks base={base} headers={headers} showToast={showToast} />
+                )}
+
+                {tab === 'offices' && (
+                    <WikiOffices base={base} headers={headers} showToast={showToast} />
                 )}
 
                 {tab === 'structure' && (

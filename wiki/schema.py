@@ -583,6 +583,68 @@ _PARK_STATEMENTS = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Офисы
+#
+# Физический адрес — самостоятельная запись, а парки к нему привязываются.
+# В статье «Адреса офисов» модель была обратной: таблица на каждый парк, и один
+# и тот же адрес (Астана, Сарыарка 31) переписан в шести таблицах. Отсюда и
+# расхождения в проде — у Костаная, Павлодара, Тараза, Атырау и Кызылорды
+# телефон зависел от того, в чьей таблице его правили последним.
+#
+# Поэтому связь несёт переопределения: адрес и карта живут у офиса, а телефон
+# и график можно задать отдельно для конкретного парка. NULL в переопределении
+# означает «как у офиса» — это позволяет не размножать одинаковые значения.
+#
+# all_parks — «офис у всех таксопарков». Флаг, а не 15 строк связи: парки
+# заводят и архивируют, и список пришлось бы досыпать руками при каждом новом.
+# Строка связи при этом всё равно может существовать — как носитель
+# переопределения.
+# ─────────────────────────────────────────────────────────────────────────────
+_OFFICE_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_offices (
+        id            SERIAL PRIMARY KEY,
+        slug          VARCHAR(120) NOT NULL UNIQUE,
+        name          VARCHAR(255) NOT NULL,
+        city          VARCHAR(120),
+        address       TEXT,
+        address_note  TEXT,
+        phone         VARCHAR(64),
+        map_url       TEXT,
+        map_resolved_url TEXT,
+        lat           NUMERIC(9,6),
+        lon           NUMERIC(9,6),
+        map_checked_at TIMESTAMP,
+        schedule      JSONB,
+        is_online     BOOLEAN NOT NULL DEFAULT FALSE,
+        all_parks     BOOLEAN NOT NULL DEFAULT FALSE,
+        kind          VARCHAR(16) NOT NULL DEFAULT 'park'
+                      CHECK (kind IN ('park', 'partner')),
+        partner_label VARCHAR(120),
+        status        VARCHAR(16) NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'archived')),
+        position      INTEGER NOT NULL DEFAULT 0,
+        created_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at    TIMESTAMP NOT NULL DEFAULT %(now)s
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_offices_order ON wiki_offices(status, city, position, id);",
+    """
+    CREATE TABLE IF NOT EXISTS wiki_office_taxi_parks (
+        office_id INTEGER NOT NULL REFERENCES wiki_offices(id) ON DELETE CASCADE,
+        park_id   INTEGER NOT NULL REFERENCES wiki_taxi_parks(id) ON DELETE CASCADE,
+        phone     VARCHAR(64),
+        schedule  JSONB,
+        note      TEXT,
+        PRIMARY KEY (office_id, park_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_office_parks_park ON wiki_office_taxi_parks(park_id);",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Поиск
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -921,6 +983,10 @@ def init_wiki_schema(cursor):
         )
 
     for statement in _PARK_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Офисы — строго после парков: связь ссылается на wiki_taxi_parks.
+    for statement in _OFFICE_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
 
     # Выражение генерируемой колонки менять через ALTER нельзя — только
