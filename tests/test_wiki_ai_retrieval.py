@@ -21,17 +21,21 @@ from pathlib import Path
 
 from tests import prod_db
 from wiki import schema as wiki_schema
+from wiki.text import SQL_FOLD_FROM, SQL_FOLD_TO
 from wiki.ai.chunker import chunk_article
 from wiki.ai.retrieve import _SEARCH_CHUNKS_SQL, search_chunks
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'tests' / 'data' / 'wiki_ai_questions.json'
 
-# Выражение генерируемой колонки повторяется здесь дословно. Расхождение со
-# схемой ловит отдельный тест ниже — иначе заглушка могла бы считать иначе, чем
-# прод, и замер стал бы ложью.
-_TSV = ("setweight(to_tsvector('russian', translate(coalesce(heading_path, ''), 'ёЁ', 'еЕ')), 'B') || "
-        "setweight(to_tsvector('russian', translate(coalesce(text, ''), 'ёЁ', 'еЕ')), 'D')")
+# Выражение генерируемой колонки собирается ИЗ ТОГО ЖЕ правила свёртки, что и
+# схема (wiki/text.py), а не переписывается второй раз: дословная копия уже
+# разошлась со схемой, когда к ё→е добавились казахские буквы, и замер стал бы
+# ложью. Расхождение всё равно ловит тест ниже — но теперь ловить почти нечего.
+_FOLD = "'%s', '%s'" % (SQL_FOLD_FROM, SQL_FOLD_TO)
+_TSV = ("setweight(to_tsvector('russian', translate(coalesce(heading_path, ''), %s)), 'B') || "
+        "setweight(to_tsvector('russian', translate(coalesce(text, ''), %s)), 'D')"
+        % (_FOLD, _FOLD))
 
 _STUB = """
 WITH wiki_ai_chunks AS (
@@ -114,10 +118,9 @@ class RetrievalTest(unittest.TestCase):
     def test_stub_matches_schema_expression(self):
         """Заглушка обязана считать tsvector так же, как схема."""
         schema_sql = ' '.join(' '.join(wiki_schema._AI_STATEMENTS).split())
-        for fragment in ("translate(coalesce(heading_path, ''), 'ёЁ', 'еЕ')), 'B')",
-                         "translate(coalesce(text, ''), 'ёЁ', 'еЕ')),         'D')"):
-            self.assertIn(' '.join(fragment.split()).replace(' ', ''),
-                          schema_sql.replace(' ', ''))
+        for source in ('heading_path', 'text'):
+            fragment = "translate(coalesce(%s, ''), %s)" % (source, _FOLD)
+            self.assertIn(fragment.replace(' ', ''), schema_sql.replace(' ', ''))
 
     def test_corpus_is_not_empty(self):
         self.assertGreater(self.chunk_count, 100, 'корпус кусков подозрительно мал')

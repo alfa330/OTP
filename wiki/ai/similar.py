@@ -52,9 +52,9 @@ TITLE_HIT = 0.45
 _TITLE_SQL = """
 SELECT a.id, a.title, a.slug, a.status, left(coalesce(a.summary, ''), 200),
        GREATEST(
-           similarity(lower(a.title), lower(%(title)s)),
-           CASE WHEN lower(a.title) LIKE '%%' || lower(%(title)s) || '%%'
-                  OR lower(%(title)s) LIKE '%%' || lower(a.title) || '%%'
+           similarity(translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'), translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),
+           CASE WHEN translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
+                  OR translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
                 THEN 0.75 ELSE 0 END
        ) AS score
   FROM wiki_articles a
@@ -62,9 +62,9 @@ SELECT a.id, a.title, a.slug, a.status, left(coalesce(a.summary, ''), 200),
    AND (%(exclude_id)s::int IS NULL OR a.id <> %(exclude_id)s::int)
    AND length(btrim(a.title)) > 0
    AND GREATEST(
-           similarity(lower(a.title), lower(%(title)s)),
-           CASE WHEN lower(a.title) LIKE '%%' || lower(%(title)s) || '%%'
-                  OR lower(%(title)s) LIKE '%%' || lower(a.title) || '%%'
+           similarity(translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'), translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),
+           CASE WHEN translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
+                  OR translate(lower(%(title)s), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') LIKE '%%' || translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') || '%%'
                 THEN 0.75 ELSE 0 END
        ) >= %(floor)s
  ORDER BY score DESC
@@ -82,13 +82,13 @@ SELECT a.id, a.title, a.slug, a.status, left(coalesce(a.summary, ''), 200),
 # статья, совпавшая одним словом «аренда».
 _TEXT_SQL = """
 WITH words AS (
-    SELECT DISTINCT lower(w) AS word
+    SELECT DISTINCT translate(lower(w), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') AS word
       FROM unnest(%(words)s::text[]) AS w
 ),
 corpus AS (
     SELECT a.id, a.title, a.slug, a.status,
            left(coalesce(a.summary, ''), 200) AS excerpt,
-           lower(a.content_plain) AS body
+           translate(lower(a.content_plain), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') AS body
       FROM wiki_articles a
      WHERE a.id = ANY(%(article_ids)s)
        AND (%(exclude_id)s::int IS NULL OR a.id <> %(exclude_id)s::int)

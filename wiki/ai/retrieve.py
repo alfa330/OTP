@@ -40,15 +40,15 @@ from ..text import query_variants
 # которых у IDF нет. Полное совпадение всех слов запроса даёт множитель.
 _SEARCH_CHUNKS_SQL = """
 WITH variants AS (
-    SELECT DISTINCT translate(v, 'ёЁ', 'еЕ') AS txt
+    SELECT DISTINCT translate(v, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') AS txt
       FROM unnest(%(variants)s::text[]) AS v
      WHERE btrim(v) <> ''
 ),
 q AS (
     SELECT v.txt,
-           websearch_to_tsquery('russian', v.txt) AS tsq,
+           websearch_to_tsquery('russian', translate(v.txt, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')) AS tsq,
            (SELECT string_agg(quote_literal(lex), ' | ')
-              FROM unnest(tsvector_to_array(to_tsvector('russian', v.txt))) AS lex
+              FROM unnest(tsvector_to_array(to_tsvector('russian', translate(v.txt, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')))) AS lex
            ) AS loose_txt
       FROM variants v
 ),
@@ -61,7 +61,7 @@ qq AS (
 lexemes AS (
     SELECT DISTINCT lex
       FROM variants v,
-           unnest(tsvector_to_array(to_tsvector('russian', v.txt))) AS lex
+           unnest(tsvector_to_array(to_tsvector('russian', translate(v.txt, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')))) AS lex
 ),
 scope AS (
     SELECT count(*)::float AS n

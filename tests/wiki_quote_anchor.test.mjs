@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { distinctiveTokens } from '../src/components/wiki/searchText.js';
+import {
+    distinctiveTokens, foldKazakh, normalizeText, queryVariants,
+} from '../src/components/wiki/searchText.js';
 
 /* Переход по источнику ответа помощника прямо на текст.
  *
@@ -51,4 +53,22 @@ test('на пустой цитате не падает и ничего не вы
 test('латиница и цифробуквенные названия парков сохраняются', () => {
     const tokens = distinctiveTokens('Парки: все, кроме Eki Dongelek и Tenge');
     assert.ok(tokens.includes('dongelek'));
+});
+
+test('казахские буквы сворачиваются к русским двойникам', () => {
+    assert.equal(foldKazakh('Қазына'), 'Казына');
+    assert.equal(foldKazakh('Азаттық'), 'Азаттык');
+    assert.equal(foldKazakh('Тіркеуге'), 'Тиркеуге');
+    assert.equal(foldKazakh('отчёт'), 'отчет');
+    assert.equal(foldKazakh('Аренда 14 дней'), 'Аренда 14 дней');
+});
+
+test('свёрнутый вариант запроса есть в списке вариантов', () => {
+    /* normalizeText свёртку НЕ делает намеренно: следом идёт транслитерация, и
+       по оригиналу «Қарағанды» она даёт «qaraghandy». Свёртка живёт отдельным
+       вариантом — так же, как на сервере (wiki/text.py: query_variants). */
+    assert.equal(normalizeText('7 Қазына'), '7 қазына');
+    assert.ok(queryVariants('7 Қазына').includes('7 казына'),
+        'свёрнутый вариант обязан попасть в список');
+    assert.ok(queryVariants('7 Казына').includes('7 казына'));
 });

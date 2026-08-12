@@ -130,6 +130,27 @@ const SPACES = /\s+/g;
 const WORD_SPLIT = /[\s-]+/;
 
 /** Регистр, ё -> е (кириллическая — как в wiki/text.py), мусор -> пробел. */
+/* Свёртка казахских букв к русским двойникам — то же правило, что на сервере
+   (wiki/text.py: KAZAKH_FOLD). Люди набирают «Казына» вместо «Қазына», и без
+   свёртки подсветка найденного слова в статье не срабатывает: сервер нашёл
+   статью по свёрнутому запросу, а клиент ищет в тексте буквально.
+
+   Обе стороны обязаны сворачивать ОДИНАКОВО. Рассогласование здесь особенно
+   обидно: статья открылась, слово в ней есть, а подсветки нет. */
+const KAZAKH_PAIRS = [['ә', 'а'], ['ғ', 'г'], ['қ', 'к'], ['ң', 'н'], ['ө', 'о'],
+    ['ұ', 'у'], ['ү', 'у'], ['һ', 'х'], ['і', 'и'], ['ё', 'е']];
+/* Оба регистра, а не только строчный: заглавная «Қ» из «Қазына» иначе проходит
+   мимо, и свёртка молча не срабатывает на самом частом написании — с большой
+   буквы. Тест на этом и поймал первую версию. */
+const KAZAKH_FOLD = Object.fromEntries(KAZAKH_PAIRS.flatMap(([from, to]) => [
+    [from, to], [from.toUpperCase(), to.toUpperCase()],
+]));
+const KAZAKH_RE = new RegExp(`[${Object.keys(KAZAKH_FOLD).join('')}]`, 'g');
+
+export function foldKazakh(text) {
+    return String(text || '').replace(KAZAKH_RE, (letter) => KAZAKH_FOLD[letter] || letter);
+}
+
 export function normalizeText(text) {
     return String(text || '')
         .toLowerCase()
@@ -244,6 +265,10 @@ export function queryVariants(query) {
     add(query);
     const normalized = normalizeText(query);
     add(normalized);
+    // Свёрнутый вариант отдельным пунктом — ровно как на сервере
+    // (wiki/text.py: query_variants). Порядок вариантов обязан совпадать: по ним
+    // клиент открывает бар классификатора, и расхождение видно сразу.
+    add(foldKazakh(normalized));
     add(transliterateCyrillicToLatin(normalized));
     add(transliterateLatinToCyrillic(normalized));
 

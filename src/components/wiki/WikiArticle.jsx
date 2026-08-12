@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
-import { distinctiveTokens, queryVariants } from './searchText';
+import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
 
 /* Классификатор авто — статья вики с ПУСТЫМ телом: вместо текста рисуется
@@ -96,13 +96,21 @@ const wrapTables = (html) => {
     return parsed.body.innerHTML;
 };
 
-/** Пометить вхождения в текстовых узлах. Возвращает первую пометку или null. */
-const markNeedles = (nodes, needles, limit = 60) => {
+/** Пометить вхождения в текстовых узлах. Возвращает первую пометку или null.
+ *
+ * Текст узла и искомое сворачиваются ОДИНАКОВО (казахские буквы к русским
+ * двойникам): сервер находит статью по свёрнутому запросу, и без такой же
+ * свёртки здесь получалось бы «статья открылась, слово в ней есть, а подсветки
+ * нет». Свёртка посимвольная, один к одному, поэтому позиции вхождений не
+ * съезжают и разрезать текст можно по ним же.
+ */
+const markNeedles = (nodes, rawNeedles, limit = 60) => {
+    const needles = rawNeedles.map((needle) => foldKazakh(needle.toLowerCase()));
     let first = null;
     let marked = 0;
     for (const node of nodes) {
         if (marked >= limit) break;      // защита от вырожденного запроса
-        const lower = (node.nodeValue || '').toLowerCase();
+        const lower = foldKazakh((node.nodeValue || '').toLowerCase());
         let index = -1;
         let length = 0;
         for (const needle of needles) {
@@ -264,10 +272,10 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 let best = null;
                 let bestScore = 0;
                 for (const node of textNodes) {
-                    const lower = (node.nodeValue || '').toLowerCase();
+                    const lower = foldKazakh((node.nodeValue || '').toLowerCase());
                     if (lower.trim().length < 3) continue;
                     let score = 0;
-                    for (const token of tokens) if (lower.includes(token)) score += 1;
+                    for (const token of tokens) if (lower.includes(foldKazakh(token))) score += 1;
                     if (score > bestScore) {
                         bestScore = score;
                         best = node;

@@ -51,6 +51,8 @@
 
 import re
 
+from .text import fold_kazakh
+
 from . import text as wiki_text
 
 # Длиннее этого запрос не несёт смысла: восемь слов уже уходят в префиксный
@@ -62,8 +64,8 @@ MAX_QUERY_CHARS = 200
 # триграммной ветке этого никто не делал — и «учет» не дотягивал до порога по
 # «Учёт рабочего времени»: word_similarity 0.400 против 1.000 после свёртки.
 # lower() уже привёл Ё к ё, поэтому translate достаточно строчной буквы.
-_TITLE = "translate(lower(a.title), 'ё', 'е')"
-_ALIASES = "translate(lower(coalesce(a.search_aliases, '')), 'ё', 'е')"
+_TITLE = "translate(lower(a.title), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')"
+_ALIASES = "translate(lower(coalesce(a.search_aliases, '')), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')"
 
 # Веса ts_rank_cd задаются массивом {D, C, B, A}. Это даёт дешёвую проверку
 # «совпало именно в заголовке / в алиасах / в описании» по УЖЕ посчитанному
@@ -90,7 +92,8 @@ FRAGMENT_SEPARATOR = '@@F@@'
 # Подсказки поиска — такой же читающий путь, как список: без этого фильтра
 # закрытая статья утекла бы заголовком.
 #
-# translate(ё -> е) с обеих сторон: колонка search_vector строится по
+# Свёртка (ё→е и казахские буквы к русским двойникам, см. wiki/text.py) с обеих
+# сторон: колонка search_vector строится по
 # текстам со свёрнутой ё (см. schema.py), конфигурация 'russian' сама
 # ё и е НЕ склеивает — «отчет» без этого не находил «отчёт» в теле статьи.
 #
@@ -103,15 +106,15 @@ FRAGMENT_SEPARATOR = '@@F@@'
 # совпадении не подсветила бы ничего.
 _SEARCH_SQL = """
 WITH q AS (
-    SELECT websearch_to_tsquery('russian', translate(v.txt, 'ёЁ', 'еЕ'))          AS tsq,
+    SELECT websearch_to_tsquery('russian', translate(v.txt, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'))          AS tsq,
            CASE WHEN v.pref = '' THEN NULL
                 ELSE to_tsquery('russian', v.pref) END                            AS tsq_prefix,
            CASE WHEN v.loose = '' THEN NULL
                 ELSE to_tsquery('russian', v.loose) END                           AS tsq_loose,
            CASE WHEN v.loose = ''
-                THEN websearch_to_tsquery('russian', translate(v.txt, 'ёЁ', 'еЕ'))
+                THEN websearch_to_tsquery('russian', translate(v.txt, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'))
                 ELSE to_tsquery('russian', v.loose) END                           AS tsq_mark,
-           lower(translate(v.txt, 'ёЁ', 'еЕ'))                                    AS raw
+           lower(translate(v.txt, 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'))                                    AS raw
       FROM unnest(%(variants)s::text[], %(prefixes)s::text[], %(looses)s::text[])
            AS v(txt, pref, loose)
 ),
@@ -204,7 +207,9 @@ def prefix_tsquery(variant, joiner=' & '):
 
     Однобуквенные слова не берём: префикс «а:*» совпадает со всем подряд.
     """
-    lowered = str(variant or '').lower().replace('ё', 'е')
+    # Свёртка та же, что в SQL: иначе питоновская ветка нормализации и
+    # запрос к базе разошлись бы на казахских буквах.
+    lowered = fold_kazakh(str(variant or '').lower())
     words = [w for w in _PREFIX_WORD.findall(lowered) if len(w) >= 2]
     return joiner.join(word + ':*' for word in words[:8])
 

@@ -595,17 +595,60 @@ _PARK_STATEMENTS = [
 # девять, в Postgres их четыре (A-D) — разница есть, но алиасы забирают на себя
 # ровно тот слой, ради которого в оригинале держали отдельные searchable-поля.
 #
-# translate(ё -> е) на каждом источнике: конфигурация 'russian' НЕ склеивает
-# ё и е, поэтому без свёртки запрос «отчет» не находил «отчёт» в теле статьи.
-# Запрос сворачивается так же (wiki/search.py) — обе стороны согласованы.
+# Свёртка на каждом источнике: конфигурация 'russian' НЕ склеивает ни ё с е, ни
+# казахские буквы с их русскими двойниками. Без неё запрос «отчет» не находил
+# «отчёт», а «Казына» — акцию «Қазына» (замер на проде). Правило одно на весь
+# раздел и живёт в wiki/text.py; запрос сворачивается тем же (wiki/search.py) —
+# обе стороны обязаны быть согласованы, иначе становится хуже, а не лучше.
+#
+# Выражение колонки МЕНЯЕТСЯ ПРИ ОБНОВЛЕНИИ: генерируемую колонку нельзя
+# «доправить», её пересоздают. Миграция ниже сравнивает сохранённое выражение с
+# нужным и пересобирает колонку, только если правило разошлось.
+# Пересборка генерируемых колонок при смене правила свёртки.
+#
+# ADD COLUMN IF NOT EXISTS ничего не меняет у СУЩЕСТВУЮЩЕЙ колонки: выражение
+# генерации переписать нельзя, колонку пересоздают. Поэтому при изменении правила
+# (например когда к ё→е добавились казахские буквы) нужен явный шаг: сравнить
+# сохранённое в базе выражение с нужным и, если правило разошлось, снести колонку
+# вместе с индексом и собрать заново.
+#
+# Проверка идёт по подстроке правила, а не по всему выражению: постгрес хранит
+# его в своём нормализованном виде (кавычки, приведения типов), и сравнивать
+# тексты целиком значило бы пересобирать колонку на каждом запуске.
+def _regenerate_folded_columns(cursor):
+    """Вернуть список колонок, которые пришлось пересобрать."""
+    from .text import SQL_FOLD_FROM
+
+    rebuilt = []
+    for table, column in (('wiki_articles', 'search_vector'),
+                          ('wiki_ai_chunks', 'chunk_tsv')):
+        cursor.execute(
+            """
+            SELECT pg_get_expr(d.adbin, d.adrelid)
+              FROM pg_attrdef d
+              JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+             WHERE d.adrelid = %s::regclass AND a.attname = %s
+            """,
+            (table, column),
+        )
+        row = cursor.fetchone()
+        if not row:
+            continue                      # колонки ещё нет — её создаст ADD COLUMN
+        if SQL_FOLD_FROM in (row[0] or ''):
+            continue                      # правило уже актуальное
+        cursor.execute('ALTER TABLE %s DROP COLUMN %s' % (table, column))
+        rebuilt.append('%s.%s' % (table, column))
+    return rebuilt
+
+
 _SEARCH_STATEMENTS = [
     """
     ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS search_vector tsvector
         GENERATED ALWAYS AS (
-            setweight(to_tsvector('russian', translate(coalesce(title, ''), 'ёЁ', 'еЕ')),          'A') ||
-            setweight(to_tsvector('russian', translate(coalesce(search_aliases, ''), 'ёЁ', 'еЕ')), 'B') ||
-            setweight(to_tsvector('russian', translate(coalesce(summary, ''), 'ёЁ', 'еЕ')),        'C') ||
-            setweight(to_tsvector('russian', translate(coalesce(content_plain, ''), 'ёЁ', 'еЕ')),  'D')
+            setweight(to_tsvector('russian', translate(coalesce(title, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),          'A') ||
+            setweight(to_tsvector('russian', translate(coalesce(search_aliases, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')), 'B') ||
+            setweight(to_tsvector('russian', translate(coalesce(summary, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),        'C') ||
+            setweight(to_tsvector('russian', translate(coalesce(content_plain, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),  'D')
         ) STORED;
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_articles_fts ON wiki_articles USING GIN (search_vector);",
@@ -659,14 +702,15 @@ _AI_STATEMENTS = [
         UNIQUE (article_id, chunk_idx)
     );
     """,
-    # Свёртка ё→е с обеих сторон и словарь 'russian' — ровно как у
-    # wiki_articles.search_vector, иначе запрос «отчет» не нашёл бы «отчёт».
+    # Свёртка с обеих сторон и словарь 'russian' — ровно как у
+    # wiki_articles.search_vector: иначе запрос «отчет» не нашёл бы «отчёт», а
+    # «Казына» — «Қазына».
     # Путь заголовков весит выше текста: «Залог» в заголовке — сильный сигнал.
     """
     ALTER TABLE wiki_ai_chunks ADD COLUMN IF NOT EXISTS chunk_tsv tsvector
         GENERATED ALWAYS AS (
-            setweight(to_tsvector('russian', translate(coalesce(heading_path, ''), 'ёЁ', 'еЕ')), 'B') ||
-            setweight(to_tsvector('russian', translate(coalesce(text, ''), 'ёЁ', 'еЕ')),         'D')
+            setweight(to_tsvector('russian', translate(coalesce(heading_path, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')), 'B') ||
+            setweight(to_tsvector('russian', translate(coalesce(text, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')),         'D')
         ) STORED;
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_ai_chunks_fts "
@@ -880,23 +924,11 @@ def init_wiki_schema(cursor):
         cursor.execute(statement.replace('%(now)s', _NOW))
 
     # Выражение генерируемой колонки менять через ALTER нельзя — только
-    # пересоздать. Ловушка «ADD COLUMN IF NOT EXISTS молча оставляет старое
-    # определение» обходится явной проверкой выражения: старая версия без
-    # свёртки ё удаляется, и следующий блок создаёт колонку заново (35 строк
-    # на проде — пересчёт мгновенный).
-    cursor.execute(
-        """
-        SELECT pg_get_expr(d.adbin, d.adrelid)
-          FROM pg_attribute a
-          JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-         WHERE a.attrelid = 'wiki_articles'::regclass
-           AND a.attname = 'search_vector' AND NOT a.attisdropped
-        """
-    )
-    row = cursor.fetchone()
-    rebuilt_search_vector = bool(row and row[0] and 'translate' not in row[0])
-    if rebuilt_search_vector:
-        cursor.execute('ALTER TABLE wiki_articles DROP COLUMN search_vector')
+    # пересоздать; «ADD COLUMN IF NOT EXISTS» молча оставит старое определение.
+    # Проверка и пересборка вынесены в _regenerate_folded_columns: правило
+    # свёртки одно на обе колонки, и обновляться они обязаны вместе.
+    rebuilt_columns = _regenerate_folded_columns(cursor)
+    rebuilt_search_vector = 'wiki_articles.search_vector' in rebuilt_columns
 
     for statement in _SEARCH_STATEMENTS:
         cursor.execute(statement)
@@ -907,6 +939,10 @@ def init_wiki_schema(cursor):
     # передаётся, поэтому psycopg2 %(now)s сам не раскрыл бы.
     for statement in _AI_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Куски пересобирать не нужно: chunk_tsv генерируемая, и постгрес пересчитал
+    # её сам при создании колонки. Эмбеддинги к свёртке отношения не имеют — они
+    # считаются по тексту куска, а текст не менялся.
 
     # Векторы — под своим савпоинтом: без расширения помощник остаётся на
     # лексическом поиске, а схема раздела не откатывается целиком.
