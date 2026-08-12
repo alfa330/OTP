@@ -135,6 +135,7 @@ const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView')
 const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupChatsView'));
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
+const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
@@ -190,6 +191,7 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'work_schedules',
     'wiki',
     'events',
+    'crm_tickets',
 ]);
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
@@ -35011,6 +35013,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Бейдж «Задачи»: сколько задач ждут действия лично от пользователя.
             const [tasksActionRequiredCount, setTasksActionRequiredCount] = useState(0);
             const [eventsUnreadCount, setEventsUnreadCount] = useState(0);
+            /* «Обращения». Бейдж — непрочитанные ответы из Telegram-групп.
+               crmRealtimePulse — счётчик «тычков» колокола: раздел перечитывает
+               данные по нему, а не по таймеру. Своего SSE-канала раздел не
+               открывает намеренно: каждый поток занимает нить waitress, а тычок
+               о том, что у пользователя что-то изменилось, уже приходит колоколу.
+               crmFocusRequest — обращение, которое надо открыть сразу (переход из
+               колокола); requestId нужен, чтобы повторный клик по тому же
+               уведомлению снова открывал карточку. */
+            const [crmUnreadCount, setCrmUnreadCount] = useState(0);
+            const [crmRealtimePulse, setCrmRealtimePulse] = useState(0);
+            const [crmFocusRequest, setCrmFocusRequest] = useState(null);
             /* Статья, которую надо открыть сразу при входе в «Вики» — приходит
                из колокола (уведомление об обязательном ознакомлении). Раздел
                гасит значение, как только его использовал, иначе следующий вход
@@ -43376,6 +43389,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Что человек увидит ВНУТРИ, решают правила разделов и статей на бэкенде,
                 // а не этот гард: у раздела своя модель прав с точностью до статьи.
                 if (view === 'wiki') return;
+                // «Обращения» — как вики: заявку в рабочую Telegram-группу может
+                // завести любой сотрудник, поэтому allowlist отдела здесь не при чём.
+                // Что человек увидит ВНУТРИ (только свои / группы / отдел), решает
+                // периметр на бэкенде.
+                if (view === 'crm_tickets') return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
@@ -43617,6 +43635,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                    задачи (focusTaskRequest). В «Ивентах» и «Опросах» нужный
                    элемент и так наверху списка — им достаточно перехода. */
                 if (nextView === 'wiki' && target) setWikiInitialSlug(String(target));
+                if (nextView === 'crm_tickets' && Number(target)) {
+                    setCrmFocusRequest((prev) => ({
+                        ticketId: Number(target),
+                        requestId: Number(prev?.requestId || 0) + 1,
+                    }));
+                }
                 if (nextView === 'tasks' && Number(target)) {
                     setTaskFocusRequest((prev) => ({
                         taskId: Number(target),
@@ -43676,6 +43700,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if ('tasks' in counts && currentView !== 'tasks') {
                     setTasksActionRequiredCount(Math.max(0, Number(counts.tasks) || 0));
                 }
+                /* «Обращения» гасятся не заходом в раздел, а прочтением ответа
+                   в карточке, поэтому при открытом разделе бейдж не обнуляем —
+                   сервер и так вернёт актуальное число. */
+                if ('crm' in counts) {
+                    setCrmUnreadCount(Math.max(0, Number(counts.crm) || 0));
+                }
+                /* Пульс растёт на КАЖДОЙ доставленной сводке, а не только когда
+                   изменилось число: сводка перечитывается по тычку сервера, и
+                   это единственный сигнал «у тебя что-то произошло», который
+                   раздел может получить, не открывая второй поток. */
+                setCrmRealtimePulse((prev) => prev + 1);
             }, []);
 
             const sidebarTree = useMemo(() => {
@@ -44506,6 +44541,26 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     </li>
 
+                                    {/* «Обращения» — заявки в рабочие Telegram-группы. Пункт тоже
+                                        общий: обращение может завести любой сотрудник, а периметр
+                                        (свои / группы / отдел) считает бэкенд. Бейдж — число
+                                        непрочитанных ответов, его приносит колокол. */}
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'crm_tickets')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'crm_tickets' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-headset"></FaIcon>
+                                            <span className="sidebar-text">Обращения</span>
+                                            {crmUnreadCount > 0 && (
+                                                <span className="ml-auto inline-flex min-w-[20px] items-center justify-center rounded-full bg-white/90 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-blue-700">
+                                                    {crmUnreadCount}
+                                                </span>
+                                            )}
+                                        </button>
+                                    </li>
+
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
                                             <button
@@ -44678,6 +44733,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 tasksActionRequiredCount,
                 eventsUnreadCount,
                 fourYouUnreadCount,
+                crmUnreadCount,
                 bellReadSource,
                 mobileIncomingNonce,
                 selectedSvId,
@@ -45033,6 +45089,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
+                        {view === "crm_tickets" && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка обращений…</div>}>
+                                <CrmTicketsView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    realtimePulse={crmRealtimePulse}
+                                    onUnreadChange={setCrmUnreadCount}
+                                    focusRequest={crmFocusRequest}
                                 />
                             </Suspense>
                         )}

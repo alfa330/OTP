@@ -5199,6 +5199,7 @@ class Database:
             self._init_chat_hourly_schema_tx(cursor)
             self._init_reg_contest_schema_tx(cursor)
             self._init_wiki_schema_tx(cursor)
+            self._init_crm_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5333,6 +5334,15 @@ class Database:
                     END IF;
                 ELSIF TG_TABLE_NAME = 'task_action_reads' THEN
                     targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'crm_tickets' THEN
+                    -- У обращения ровно один адресат уведомлений — его автор:
+                    -- это он ждёт ответа из группы и отметки «выполнено».
+                    -- Остальные (СВ, глава отдела) видят раздел, но звонить им
+                    -- по чужой переписке было бы шумом.
+                    targets := ARRAY[NEW.created_by];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.created_by];
+                    END IF;
                 ELSIF TG_TABLE_NAME = 'tasks' THEN
                     -- Исполнитель и принимающий; при UPDATE — и прежние тоже:
                     -- переназначенная задача должна погаснуть у старого владельца.
@@ -5391,11 +5401,35 @@ class Database:
                        COALESCE(NEW.status IN ('superseded', 'cancelled'), FALSE)
                 )""",
             ),
+            # Обращения. INSERT не будим намеренно: в момент создания автору
+            # ещё нечего читать — он сам его и завёл. А вот WHEN обязателен,
+            # иначе каждое исходящее сообщение в нить (last_message_at) слало
+            # бы тычок, не меняя ничего в сводке.
+            (
+                'trg_bell_crm_tickets',
+                'crm_tickets',
+                'AFTER UPDATE OF author_unread_at, status, delivery_status',
+                """WHEN (
+                    OLD.author_unread_at IS DISTINCT FROM NEW.author_unread_at
+                    OR OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.delivery_status IS DISTINCT FROM NEW.delivery_status
+                )""",
+            ),
             ('trg_bell_tasks', 'tasks', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_task_reads', 'task_action_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_event_reads', 'event_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_four_you_reads', 'four_you_reads', 'AFTER INSERT OR UPDATE', ''),
         ):
+            # Таблицы разделов создаются выше в этой же транзакции, каждая под
+            # своим SAVEPOINT. Если схема раздела не применилась, его таблицы
+            # нет — и CREATE TRIGGER на ней уронил бы САВПОИНТ КОЛОКОЛА целиком,
+            # то есть один сломанный раздел лишил бы реалтайма все остальные.
+            cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (f'public.{table_name}',))
+            if not cursor.fetchone()[0]:
+                logging.warning(
+                    "Триггер колокола %s пропущен: таблицы %s нет", trigger_name, table_name,
+                )
+                continue
             cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name} ON {table_name};")
             cursor.execute(f"""
                 CREATE TRIGGER {trigger_name}
@@ -5667,6 +5701,33 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT wiki_schema")
+
+    def _init_crm_schema_tx(self, cursor):
+        """Схема раздела «Обращения» (таблицы crm_*).
+
+        DDL живёт в пакете crm/schema.py по той же причине, что и у вики:
+        держать пять таблиц раздела в файле на 50k строк незачем, а импорт
+        локальный — на уровне модуля он создал бы цикл.
+
+        SAVEPOINT — потому что весь _init_db идёт одной транзакцией: падение
+        здесь не должно ронять инициализацию всей базы. При отказе раздел
+        честно сообщает о себе через /api/crm/ping (schema_ready=false), а
+        остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT crm_schema")
+        try:
+            from crm.schema import init_crm_schema
+            init_crm_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT crm_schema")
+            logging.exception(
+                "Схема раздела «Обращения» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT crm_schema")
 
     def _init_reg_contest_schema_tx(self, cursor):
         """Конкурс «Топ по регистрациям» (данные из CRM yataxi).

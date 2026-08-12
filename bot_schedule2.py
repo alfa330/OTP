@@ -348,6 +348,27 @@ dp = Dispatcher(bot=bot, storage=storage)
 report_lock = threading.Lock()
 recruiting_parse_lock = threading.Lock()
 executor_pool = ThreadPoolExecutor(max_workers=4)
+# Раздел «Обращения» держит свой пул: приём ответа из группы — это запись в три
+# таблицы, и вставать в очередь за отчётами и выгрузками общего пула ей незачем
+# (сотрудник в чате ждёт расписку сразу).
+crm_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='crm')
+
+# ── Обработчики бота для раздела «Обращения» ────────────────────────────────
+# Регистрация ЗДЕСЬ, сразу после диспетчера, а не в конце файла — и это не
+# вкусовщина. aiogram 2 перебирает обработчики в порядке регистрации и
+# останавливается на первом подходящем, а ниже объявлены десятки
+# message_handler(regexp='…') без фильтра по типу чата: ответ в группе,
+# случайно совпавший с подписью кнопки, ушёл бы в личный сценарий супервайзера
+# вместо нити обращения. Свой фильтр раздела узкий (группа + реплай + не
+# команда), поэтому первым он ничего чужого не перехватывает.
+try:
+    import crm.bot as crm_bot  # noqa: E402
+
+    crm_bot.register(dp, db, crm_pool, types)
+except Exception:
+    # Раздел не должен уметь уронить бота при старте: без обработчиков
+    # обращения по-прежнему уходят в группы, просто ответы не возвращаются.
+    logging.exception("Раздел «Обращения»: обработчики бота НЕ подключены")
 auth_maintenance_executor = ThreadPoolExecutor(max_workers=1)
 # Контроль опозданий держит свой пул: опрос Workpace идёт каждые 2 минуты, а
 # отчёт за месяц собирается минутами — в общем пуле из 4 воркеров они бы
@@ -47419,6 +47440,23 @@ except Exception:
     # собрался — остальные 362 роута и бот работают штатно, а вики отвечает 404,
     # что фронт показывает как «Раздел недоступен».
     logging.exception("Раздел «Вики»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Обращения» (CRM поверх Telegram-групп) ───────────────────────────
+# Тот же приём, что у вики: Blueprint вместо десятка плоских роутов, зависимости
+# приходят аргументами (обратный импорт из crm.routes сюда был бы циклом).
+try:
+    from crm.routes import build_crm_blueprint  # noqa: E402
+
+    app.register_blueprint(build_crm_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
+except Exception:
+    logging.exception("Раздел «Обращения»: Blueprint НЕ подключён")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

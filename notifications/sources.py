@@ -30,7 +30,7 @@ from datetime import datetime
 # падает, а просто расходится числами на экране, поэтому все три сверяются
 # тестами: tests/test_notifications.py::TasksSourceRulesTest и
 # tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
-SOURCES = ('wiki_ack', 'tasks', 'lms', 'surveys', 'events', 'four_you')
+SOURCES = ('wiki_ack', 'tasks', 'crm', 'lms', 'surveys', 'events', 'four_you')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -357,9 +357,57 @@ def tasks(cursor, viewer, limit):
     } for row in rows]
 
 
+
+# ── Обращения ────────────────────────────────────────────────────────────────
+def crm(cursor, viewer, limit):
+    """Ответы и отметки «выполнено» по обращениям, которые зритель ещё не читал.
+
+    Адресат один — автор обращения: это он ждёт ответа из Telegram-группы.
+    Супервайзеру и главе отдела раздел виден целиком, но звонить им по чужой
+    переписке было бы шумом, поэтому здесь только своё.
+
+    Гасится не колоколом, а открытием карточки (как ознакомления вики):
+    «вам ответили» нельзя закрыть, просто заглянув в список — ответ нужно
+    прочитать. Поэтому у источника нет ветки в mark_seen.
+    """
+    total, rows = _crm_queries().unread_for_bell(cursor, viewer['user_id'], limit)
+    return total, [{
+        'source': 'crm',
+        'id': row[0],
+        'title': row[1],
+        'body': _CRM_UNREAD_LABELS.get(row[2], 'Обновление по обращению'),
+        'at': _iso(row[3]),
+        'view': 'crm_tickets',
+        'target': row[0],
+        # Тон предупреждения тут не нужен: ответ на обращение — это хорошая
+        # новость, а не просрочка. Цветом в колоколе помечается горящее.
+        'tone': 'default',
+    } for row in rows]
+
+
+# Что именно ждёт автора. Подписи короткие: в колоколе строка — не место для
+# пересказа переписки, детали человек увидит в карточке.
+_CRM_UNREAD_LABELS = {
+    'reply': 'Пришёл ответ',
+    'done': 'Обращение выполнено',
+    'progress': 'Взяли в работу',
+}
+
+
+def _crm_queries():
+    """Импорт SQL-слоя раздела откладываем до вызова.
+
+    На уровне модуля он тянул бы пакет crm в любой процесс, который трогает
+    уведомления, — включая тесты, которым раздел не нужен.
+    """
+    from crm import queries as crm_queries
+    return crm_queries
+
+
 _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
+    'crm': crm,
     'lms': lms,
     'surveys': surveys,
     'events': events,
