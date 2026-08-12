@@ -122,6 +122,21 @@ def register(bp, wiki_route, db, log_ip, gcs):
         words = re.findall(r'[^\W\d_]{4,}', str(plain or '').lower(), re.UNICODE)
         return list(dict.fromkeys(words))[:40]
 
+    def _document_links(ext, data):
+        """Ссылки документа. Для PDF их иначе не получить вовсе.
+
+        В PDF адрес лежит в аннотации страницы, а не в тексте: на странице видно
+        только «по ссылке» или «форму регистрации». Значит ни vision, ни
+        извлечённый текст его не содержат — и на боевом файле «Акции 24.07.2026»
+        так пропали все три адреса, включая форму регистрации в акциях.
+        """
+        if ext != '.pdf':
+            return []
+        try:
+            return wiki_importer.pdf_links(data)
+        except Exception:
+            return []      # битые аннотации не повод отказать в сборке статьи
+
     def _duplicates(cursor, ctx, *, title, content, exclude_id=None,
                     allow_vector=True):
         """Есть ли уже такая статья. Пустой ответ — не доказательство отсутствия.
@@ -190,6 +205,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         images, kind = [], wiki_importer.SUPPORTED.get(ext, 'Файл')
 
         source_html = source_text = ''
+        links = _document_links(ext, data)
         if not vision_mime:
             # Формат со сеткой внутри: разбираем программой, таблицы не отдаём модели.
             try:
@@ -221,7 +237,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 source_html=source_html, source_text=source_text,
                 generate_fn=ai_providers.generate,
                 blob=data if vision_mime else None, mime=vision_mime,
-                generate_file_fn=ai_providers.generate_document)
+                generate_file_fn=ai_providers.generate_document, links=links)
         except ai_providers.ProviderError as error:
             return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
                             "code": "WIKI_AI_UNAVAILABLE"}), 503
@@ -323,7 +339,9 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 current_html=current, document_html=doc_html,
                 document_text=doc_text, filename=uploaded.filename, kind=kind,
                 generate_fn=ai_providers.generate, blob=blob, mime=mime,
-                generate_file_fn=ai_providers.generate_document)
+                generate_file_fn=ai_providers.generate_document,
+                links=_document_links(
+                    os.path.splitext(str(uploaded.filename))[1].lower(), data))
         except ai_providers.ProviderError as error:
             return jsonify({"error": "ИИ недоступен", "detail": str(error)[:300],
                             "code": "WIKI_AI_UNAVAILABLE"}), 503

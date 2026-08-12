@@ -40,7 +40,8 @@ from bs4 import BeautifulSoup
 
 from .answer import ungrounded_numbers
 from . import tablepatch
-from .authoring import (MAX_OUTPUT_TOKENS, canonicalize, protect_tables,
+from .authoring import (MAX_OUTPUT_TOKENS, append_links, canonicalize,
+                        links_block, missing_links, protect_tables,
                         restore_tables, structure_warnings, table_hints,
                         truncation_warning)
 from ..sanitize import sanitize_html, to_plain_text
@@ -204,7 +205,7 @@ def _prepare(current_html, document_html):
 
 
 def _finish(text, *, current_html, tables, images, sources_text, meta,
-            allow_table_patches=True):
+            allow_table_patches=True, links=()):
     """Собрать результат правки и проверить его.
 
     sources_text обязан включать НАЗВАНИЕ статьи: на живом прогоне правка
@@ -231,6 +232,12 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
     body, lost = restore_tables(body, tables, images)
     clean = sanitize_html(body)
 
+    # Адрес, который модель не поставила, дописывается разделом в конец. Пустая
+    # подпись «по ссылке» без адреса бесполезна.
+    lost_links = missing_links(clean, links)
+    if lost_links:
+        clean = sanitize_html(append_links(clean, lost_links))
+
     warnings = structure_warnings(
         source_html=current_html, source_text=sources_text,
         result_html=clean, lost_tables=lost)
@@ -246,6 +253,13 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
     if before and after < before * 0.75:
         warnings.append('Статья стала заметно короче: было %d знаков, стало %d — '
                         'проверьте, не пропал ли раздел' % (before, after))
+    if lost_links:
+        warnings.append(
+            'ИИ не расставил %d ссылок документа (%s) — они добавлены разделом в '
+            'конец, перенесите их по смыслу'
+            % (len(lost_links),
+               ', '.join((item.get('label') or item['url'])[:40]
+                         for item in lost_links[:3])))
     if not changes:
         warnings.append('ИИ не перечислил изменения — сверьте текст сами')
 
@@ -255,7 +269,7 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
 
 def update_from_document(*, current_title, current_html, document_html='',
                          document_text='', filename='', kind='', generate_fn,
-                         blob=None, mime=None, generate_file_fn=None):
+                         blob=None, mime=None, generate_file_fn=None, links=()):
     """Обновить статью новым документом. Возвращает content/changes/questions/warnings."""
     body, doc_body, tables, images = _prepare(
         current_html, '' if blob is not None else document_html)
@@ -271,19 +285,24 @@ def update_from_document(*, current_title, current_html, document_html='',
         header += ('\n\nСОДЕРЖИМОЕ ТАБЛИЦ СТАТЬИ (править только через '
                    '«ПРАВКИ ТАБЛИЦ»):\n' + grid)
 
+    # Ссылки нового документа. Для PDF это единственный способ их получить:
+    # адрес там в аннотации, а не в тексте (см. importer.pdf_links).
+    block = links_block(links)
     if blob is not None:
         if generate_file_fn is None:
             raise ValueError('для файла нужен generate_file_fn')
         text, meta = generate_file_fn(
             UPDATE_PROMPT + FILE_EXTRA,
-            '%s\n\nНОВЫЙ ДОКУМЕНТ приложен файлом (%s). Обнови статью по нему.'
-            % (header, filename or kind or 'документ'),
+            '%s\n\nНОВЫЙ ДОКУМЕНТ приложен файлом (%s). Обнови статью по нему.%s'
+            % (header, filename or kind or 'документ',
+               ('\n\n' + block) if block else ''),
             blob=blob, mime=mime, max_tokens=MAX_OUTPUT_TOKENS)
     else:
         text, meta = generate_fn(
             UPDATE_PROMPT,
-            '%s\n\nНОВЫЙ ДОКУМЕНТ (%s):\n%s'
-            % (header, filename or kind or 'документ', doc_body),
+            '%s\n\nНОВЫЙ ДОКУМЕНТ (%s):\n%s%s'
+            % (header, filename or kind or 'документ', doc_body,
+               ('\n\n' + block) if block else ''),
             max_tokens=MAX_OUTPUT_TOKENS)
 
     # Числа сверяем с ОБОИМИ источниками: правка вправе принести новое число из
@@ -291,7 +310,7 @@ def update_from_document(*, current_title, current_html, document_html='',
     sources = '\n'.join(filter(None, [current_title, to_plain_text(current_html),
                                       document_text, to_plain_text(document_html)]))
     return _finish(text, current_html=current_html, tables=tables, images=images,
-                   sources_text=sources, meta=meta)
+                   sources_text=sources, meta=meta, links=links)
 
 
 def edit_by_instruction(*, current_title, current_html, instruction, generate_fn):

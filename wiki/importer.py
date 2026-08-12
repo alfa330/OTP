@@ -356,3 +356,71 @@ def blob_path_for(original_name, content_type=''):
         safe = 'file' + (safe or '')
     today = datetime.datetime.now().strftime('%Y/%m/%d')
     return 'wiki/files/%s/%s_%s' % (today, uuid.uuid4().hex, safe)
+
+
+def pdf_links(data, limit=40):
+    """Ссылки PDF: адрес + текст, на котором она стоит.
+
+    Отдельная функция, потому что в PDF адрес НЕ ЧАСТЬ ТЕКСТА. Он лежит в
+    аннотации страницы с прямоугольником, а на странице видно только слова «по
+    ссылке» или «форму регистрации». Отсюда следствие, ради которого всё это и
+    написано: модель, читающая PDF глазами, адрес увидеть не может физически —
+    ни vision, ни pypdf-текст его не содержат.
+
+    Замер на боевом файле «Акции 24.07.2026 - коррект.pdf»: 7 аннотаций, 3
+    уникальных адреса (форма регистрации в акциях, форма-редактор, админка
+    yataxi), и в собранной статье из них не оказалось НИ ОДНОГО — вместо ссылки
+    стоял пустой href="#". Для реестра акций это половина пользы: «добавить в
+    форму регистрации» без адреса формы делать нечего.
+
+    Ярлык ищется по попаданию текстовых кусков в прямоугольник аннотации.
+    Совпадение приблизительное (±4 пункта), потому что базовая линия строки и
+    рамка ссылки в PDF не совпадают никогда.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    found, seen = [], set()
+    for page_number, page in enumerate(reader.pages, start=1):
+        annotations = []
+        for raw in (page.get('/Annots') or []):
+            try:
+                annotation = raw.get_object()
+            except Exception:
+                continue
+            uri = (annotation.get('/A') or {}).get('/URI')
+            rect = annotation.get('/Rect')
+            if uri and rect:
+                try:
+                    annotations.append((str(uri), [float(v) for v in rect]))
+                except (TypeError, ValueError):
+                    continue
+        if not annotations:
+            continue
+
+        pieces = []
+
+        def visitor(text, _cm, tm, _font, _size, pieces=pieces):
+            value = (text or '').strip()
+            if value:
+                pieces.append((tm[4], tm[5], value))
+
+        try:
+            page.extract_text(visitor_text=visitor)
+        except Exception:
+            pieces = []
+
+        for uri, (x0, y0, x1, y1) in annotations:
+            key = uri.rstrip('/')
+            if key in seen:
+                continue
+            seen.add(key)
+            low_x, high_x = min(x0, x1), max(x0, x1)
+            low_y, high_y = min(y0, y1), max(y0, y1)
+            inside = [value for x, y, value in pieces
+                      if low_x - 2 <= x <= high_x + 2 and low_y - 4 <= y <= high_y + 4]
+            label = ' '.join(' '.join(inside).split()).strip(' ,;:')[:80]
+            found.append({'url': uri, 'label': label, 'page': page_number})
+            if len(found) >= limit:
+                return found
+    return found

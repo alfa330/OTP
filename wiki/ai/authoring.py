@@ -446,7 +446,49 @@ def structure_warnings(*, source_html, source_text, result_html, lost_tables):
     return warnings
 
 
-def build_user_prompt(*, filename, kind, body_html, tables, images=()):
+def links_block(links):
+    """Список ссылок документа для промпта: «ярлык → адрес».
+
+    Нужен для PDF: адрес там лежит в аннотации, а не в тексте, поэтому модель
+    его не видит ни глазами, ни через извлечённый текст (см. importer.pdf_links).
+    Без этого блока ссылки документа теряются полностью — на боевом файле
+    «Акции 24.07.2026» так пропали все три адреса.
+    """
+    rows = []
+    for item in links or ():
+        url = str(item.get('url') or '').strip()
+        if not url:
+            continue
+        label = str(item.get('label') or '').strip()
+        rows.append('- %s → %s' % (label or 'без подписи', url))
+    if not rows:
+        return ''
+    return ('ССЫЛКИ ДОКУМЕНТА (в PDF адрес не виден на странице, он приложен '
+            'отдельно — поставь каждый адрес на его подпись тегом '
+            '<a href="…">подпись</a>):\n' + '\n'.join(rows))
+
+
+def missing_links(html, links):
+    """Адреса документа, не попавшие в статью."""
+    text = str(html or '')
+    return [item for item in (links or ())
+            if str(item.get('url') or '').strip()
+            and str(item.get('url')).rstrip('/') not in text.replace('&amp;', '&')]
+
+
+def append_links(html, links):
+    """Дописать потерянные ссылки в конец — терять адрес нельзя."""
+    if not links:
+        return html
+    rows = ''.join(
+        '<li><a href="%s">%s</a></li>'
+        % (item['url'], (item.get('label') or item['url'])[:120])
+        for item in links)
+    return (str(html or '')
+            + '<h1>Ссылки из документа</h1><ul>%s</ul>' % rows)
+
+
+def build_user_prompt(*, filename, kind, body_html, tables, images=(), links=()):
     """Запрос к модели по разобранному документу."""
     parts = ['ФАЙЛ: %s (%s)' % (filename or 'без имени', kind or 'документ')]
     hints = table_hints(tables)
@@ -459,12 +501,15 @@ def build_user_prompt(*, filename, kind, body_html, tables, images=()):
                      % (len(images),
                         ', '.join(IMAGE_TOKEN % i
                                   for i in range(1, len(images) + 1))))
+    block = links_block(links)
+    if block:
+        parts.append(block)
     parts.append('СОДЕРЖИМОЕ ДОКУМЕНТА:\n' + str(body_html or ''))
     return '\n\n'.join(parts)
 
 
 def compose(*, filename, kind, source_html='', source_text='', generate_fn,
-            blob=None, mime=None, generate_file_fn=None):
+            blob=None, mime=None, generate_file_fn=None, links=()):
     """Документ -> черновик статьи.
 
     Две ветки, и различие между ними принципиальное:
@@ -478,10 +523,12 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
     if blob is not None:
         if generate_file_fn is None:
             raise ValueError('для файла нужен generate_file_fn')
+        block = links_block(links)
         text, meta = generate_file_fn(
             SYSTEM_PROMPT + FILE_PROMPT_EXTRA,
-            'ФАЙЛ: %s (%s). Собери из него статью вики по правилам выше.'
-            % (filename or 'без имени', kind or 'документ'),
+            ('ФАЙЛ: %s (%s). Собери из него статью вики по правилам выше.'
+             % (filename or 'без имени', kind or 'документ'))
+            + (('\n\n' + block) if block else ''),
             blob=blob, mime=mime, max_tokens=MAX_OUTPUT_TOKENS)
         tables, images = [], []
         protected = ''
@@ -490,7 +537,7 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
         text, meta = generate_fn(
             SYSTEM_PROMPT,
             build_user_prompt(filename=filename, kind=kind, body_html=protected,
-                              tables=tables, images=images),
+                              tables=tables, images=images, links=links),
             max_tokens=MAX_OUTPUT_TOKENS)
 
     title, summary, body = _envelope(text)
@@ -499,9 +546,22 @@ def compose(*, filename, kind, source_html='', source_text='', generate_fn,
     body, lost = restore_tables(body, tables, images)
     clean = sanitize_html(body)
 
+    # Ссылки документа: если модель не поставила адрес, дописываем блоком в
+    # конец. Пустая подпись «по ссылке» без адреса бесполезна, а тихо потерянный
+    # адрес формы регистрации стоит человеку рабочего дня.
+    lost_links = missing_links(clean, links)
+    if lost_links:
+        clean = sanitize_html(append_links(clean, lost_links))
+
     warnings = structure_warnings(
         source_html=source_html or protected, source_text=source_text,
         result_html=clean, lost_tables=lost)
+    if lost_links:
+        warnings.append(
+            'ИИ не расставил %d ссылок документа (%s) — они добавлены разделом в '
+            'конец статьи, перенесите их по смыслу'
+            % (len(lost_links),
+               ', '.join((item.get('label') or item['url'])[:40] for item in lost_links[:3])))
     cut = truncation_warning(meta)
     if cut:
         warnings.insert(0, cut)
