@@ -76,6 +76,9 @@ export default function WikiEditor({
     pendingUpdateFile = null, onPendingUsed = null, onUpdateExisting = null,
 }) {
     const isNew = !article?.id;
+    // Статус берём из статьи, а не из «новизны»: существующий черновик тоже
+    // должен уметь опубликоваться.
+    const isPublished = article?.status === 'published';
     const [title, setTitle] = useState(article?.title || '');
     const [summary, setSummary] = useState(article?.summary || '');
     const [articleType, setArticleType] = useState(article?.article_type || 'general');
@@ -255,23 +258,33 @@ export default function WikiEditor({
                             onChange={(e) => { importDocument(e.target.files?.[0]); e.target.value = ''; }}
                         />
                     </label>
+                    {/* «Опубликовать» показывается, пока статья НЕ опубликована.
+                        У опубликованной эта кнопка бессмысленна и только пугает:
+                        правка и так уходит читателям, статус менять не нужно.
+                        А вот у существующего ЧЕРНОВИКА она обязана быть —
+                        иначе черновик останется черновиком навсегда, и это
+                        ровно та ловушка, из которой недавно не выбиралась
+                        статья «Реестр акций». Поэтому условие про статус, а не
+                        про «новая или нет». */}
                     <button
                         type="button"
-                        className={iosBtnSecondary}
+                        className={isPublished ? iosBtnPrimary : iosBtnSecondary}
                         disabled={saving}
                         onClick={() => save(null)}
                     >
                         {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
                         Сохранить
                     </button>
-                    <button
-                        type="button"
-                        className={iosBtnPrimary}
-                        disabled={saving}
-                        onClick={() => save('published')}
-                    >
-                        Опубликовать
-                    </button>
+                    {!isPublished && (
+                        <button
+                            type="button"
+                            className={iosBtnPrimary}
+                            disabled={saving}
+                            onClick={() => save('published')}
+                        >
+                            Опубликовать
+                        </button>
+                    )}
                 </div>
             </div>
 
