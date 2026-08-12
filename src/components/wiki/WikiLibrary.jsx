@@ -434,11 +434,16 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
 
                     <div className="mx-auto mt-4 flex max-w-[560px] items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70">
                         <Search size={16} className="shrink-0 text-slate-400" />
+                        {/* wiki-focus-outside: правило доступности в wiki-theme.css
+                            рисует контур вокруг САМОГО input, а фокус здесь
+                            показывает кольцо всей строки — выходила двойная
+                            рамка. Индикация фокуса не теряется, она снаружи.
+                            Тот же приём, что у поиска в шапке раздела. */}
                         <input
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
                             placeholder="Поиск по статьям — понимает опечатки и раскладку"
-                            className="w-full min-w-0 bg-transparent text-[13px] text-slate-900 placeholder-slate-400 focus:outline-none"
+                            className="wiki-focus-outside w-full min-w-0 bg-transparent text-[13px] text-slate-900 placeholder-slate-400 focus:outline-none"
                         />
                         {query && (
                             <button
