@@ -27,6 +27,14 @@
   3. Число клеток в добавляемой строке приводится к числу колонок таблицы:
      лишние отбрасываются, недостающие добираются пустыми. Иначе браузер
      нарисует сетку с уехавшими колонками.
+  4. ССЫЛКИ переживают правку клетки. Раньше не переживали: замена значения
+     стирала содержимое клетки целиком, а вместе с ним тег <a>. В таблицах вики
+     ссылка это половина смысла — «ССЫЛКА НА ФОРМУ ДЛЯ ПОПОЛНЕНИЯ», «Добавить
+     водителя», форма Google на каждый парк; потеря такой ссылки превращает
+     строку в бесполезную. Теперь адреса собираются до правки и возвращаются
+     обратно: по совпадению ярлыка, а если ярлык модель переписала — ссылка
+     дописывается в конец клетки и об этом задаётся вопрос. Молча потерять
+     адрес нельзя, даже ценой неаккуратной клетки.
 """
 
 import re
@@ -64,6 +72,10 @@ PATCH_RULES = """
     из документа: решает человек.
 
 Если таблицы менять не нужно, напиши «ПРАВКИ ТАБЛИЦ: нет».
+
+ССЫЛКИ. В клетках они показаны как «ярлык (адрес)». Если правишь такую клетку,
+переноси ссылку в том же виде — «ярлык (адрес)»; менять адрес можно только когда
+новый адрес прямо дан в документе. Ярлык без адреса означает потерянную ссылку.
 """
 
 
@@ -77,6 +89,100 @@ def _cells_of(row):
 
 def _text(node):
     return ' '.join(node.get_text(' ', strip=True).split())
+
+
+def _text_with_links(node):
+    """Текст клетки, но со ссылками в виде «ярлык (адрес)».
+
+    Модель обязана ВИДЕТЬ адрес: без него она не знает, что в клетке ссылка, и
+    возвращает вместо неё простой текст. Форма записи та же, что у чанкера
+    индекса (wiki/ai/chunker.py) — одна привычка на весь раздел.
+    """
+    clone = BeautifulSoup(str(node), 'html.parser')
+    for anchor in clone.find_all('a'):
+        href = str(anchor.get('href') or '').strip()
+        label = ' '.join(anchor.get_text(' ', strip=True).split())
+        if href and href not in label:
+            anchor.string = '%s (%s)' % (label, href) if label else href
+    return ' '.join(clone.get_text(' ', strip=True).split())
+
+
+_URL_RE = re.compile(r'(https?://[^\s<>"\')\]]+|mailto:[^\s<>"\')\]]+)')
+
+
+def _anchors_of(cell):
+    """Ссылки клетки: (адрес, ярлык, все атрибуты) — до правки."""
+    out = []
+    for anchor in cell.find_all('a'):
+        href = str(anchor.get('href') or '').strip()
+        if href:
+            out.append((href, _text(anchor), dict(anchor.attrs)))
+    return out
+
+
+def _fill_cell(soup, cell, value, anchors):
+    """Записать новое значение клетки, сохранив ссылки.
+
+    Порядок: сначала адреса, которые модель написала прямо в тексте (в форме
+    «ярлык (адрес)» или просто адресом), затем ярлыки прежних ссылок. Возвращает
+    множество сохранённых адресов, чтобы вызывающий увидел потерянные.
+    """
+    cell.clear()
+    kept = set()
+
+    # «ярлык (адрес)» → ссылка с этим ярлыком; сам адрес из текста убираем.
+    text = str(value or '')
+    for href, label, _attrs in anchors:
+        text = text.replace('%s (%s)' % (label, href), label or href)
+    text = re.sub(r'\s*\((https?://[^)\s]+|mailto:[^)\s]+)\)', lambda m: ' ' + m.group(1), text)
+
+    known = {label.lower(): (href, attrs) for href, label, attrs in anchors if label}
+
+    def add_link(href, label, attrs=None):
+        anchor = soup.new_tag('a', href=href)
+        for name, val in (attrs or {}).items():
+            if name != 'href':
+                anchor[name] = val
+        anchor.string = label or href
+        cell.append(anchor)
+        kept.add(href)
+
+    # Разбираем текст на куски: голые адреса становятся ссылками.
+    position = 0
+    for match in _URL_RE.finditer(text):
+        before = text[position:match.start()]
+        if before:
+            cell.append(before)
+        href = match.group(0).rstrip('.,;')
+        label = next((lbl for lbl, (h, _a) in known.items() if h == href), '') or href
+        add_link(href, label, dict(known.get(label.lower(), ('', {}))[1] or {}))
+        position = match.end()
+    tail = text[position:]
+    if tail:
+        cell.append(tail)
+
+    # Прежние ссылки, ярлык которых остался в тексте: оборачиваем ярлык обратно.
+    for href, label, attrs in anchors:
+        if href in kept or not label:
+            continue
+        for node in list(cell.find_all(string=True)):
+            index = str(node).lower().find(label.lower())
+            if index == -1 or node.parent.name == 'a':
+                continue
+            raw = str(node)
+            node.replace_with(raw[:index])
+            anchor = soup.new_tag('a', href=href)
+            for name, val in attrs.items():
+                if name != 'href':
+                    anchor[name] = val
+            anchor.string = raw[index:index + len(label)]
+            cell.append(anchor)
+            rest = raw[index + len(label):]
+            if rest:
+                cell.append(rest)
+            kept.add(href)
+            break
+    return kept
 
 
 def _squash(value):
@@ -100,7 +206,7 @@ def serialize(tables, *, max_rows=60, max_cell=160):
         for row_index, row in enumerate(rows[:max_rows], start=1):
             cells = _cells_of(row)
             head = ' [шапка]' if cells and all(c.name == 'th' for c in cells) else ''
-            body = ' | '.join('К%d=%s' % (position, _text(cell)[:max_cell])
+            body = ' | '.join('К%d=%s' % (position, _text_with_links(cell)[:max_cell])
                               for position, cell in enumerate(cells, start=1))
             lines.append('  С%d%s: %s' % (row_index, head, body))
         if len(rows) > max_rows:
@@ -188,8 +294,20 @@ def apply(tables, patches):
                     % (patch['table'], patch['row'], patch['col'],
                        current[:60], patch['was'][:60]))
                 continue
-            cell.clear()
-            cell.append(patch['now'])
+            anchors = _anchors_of(cell)
+            kept = _fill_cell(soups[patch['table'] - 1], cell, patch['now'], anchors)
+            lost = [(href, label) for href, label, _a in anchors if href not in kept]
+            for href, label in lost:
+                # Ссылку не бросаем: дописываем в конец клетки и спрашиваем.
+                # Пустая клетка вместо формы Google дороже неаккуратной.
+                anchor = soups[patch['table'] - 1].new_tag('a', href=href)
+                anchor.string = label or href
+                cell.append(' ')
+                cell.append(anchor)
+                questions.append(
+                    'В клетке (таблица %d, строка %d, колонка %d) была ссылка «%s» — '
+                    'ИИ её не перенёс, она дописана в конец клетки. Проверьте место.'
+                    % (patch['table'], patch['row'], patch['col'], label or href))
             changes.append('таблица %d, строка %d: «%s» → «%s»'
                            % (patch['table'], patch['row'],
                               current[:60], patch['now'][:60]))
@@ -202,7 +320,9 @@ def apply(tables, patches):
             new_row = soups[patch['table'] - 1].new_tag('tr')
             for value in values:
                 cell = soups[patch['table'] - 1].new_tag('td')
-                cell.append(value)
+                # Адрес в новой строке тоже обязан стать ссылкой, иначе он
+                # приезжает текстом и по нему нельзя щёлкнуть.
+                _fill_cell(soups[patch['table'] - 1], cell, value, [])
                 new_row.append(cell)
             body = table.find('tbody') or table
             body.append(new_row)

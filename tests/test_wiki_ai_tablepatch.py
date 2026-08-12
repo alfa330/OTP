@@ -153,5 +153,98 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(1, len(changes))
 
 
+class LinkSurvivalTest(unittest.TestCase):
+    """Ссылка в клетке обязана пережить правку.
+
+    Дефект найден владельцем: «ИИ при редактировании таблицы некоторые ссылки
+    теряла». Причина была прямая — замена значения стирала содержимое клетки
+    целиком, вместе с тегом <a>, а модель адреса вообще не видела: в разметке для
+    неё клетка выглядела просто текстом «ДОБАВИТЬ ВОДИТЕЛЯ».
+
+    В таблицах вики ссылка это половина смысла: формы Google на каждый парк,
+    «ССЫЛКА НА ФОРМУ ДЛЯ ПОПОЛНЕНИЯ», проверка пополнений. Клетка без адреса
+    бесполезна, поэтому здесь три проверки на три пути сохранения.
+    """
+
+    LINKED = ('<table><tbody>'
+              '<tr><th>Парк</th><th>Ссылка на добавление</th></tr>'
+              '<tr><td>Честный</td><td><p><a target="_blank" '
+              'href="https://docs.google.com/forms/d/e/1FAI/formResponse" '
+              'rel="noopener noreferrer">ДОБАВИТЬ ВОДИТЕЛЯ</a></p></td></tr>'
+              '</tbody></table>')
+
+    def test_model_sees_the_address(self):
+        """Не видя адреса, модель возвращает вместо ссылки простой текст."""
+        text = tablepatch.serialize([self.LINKED])
+        self.assertIn('ДОБАВИТЬ ВОДИТЕЛЯ (https://docs.google.com/forms/d/e/1FAI/formResponse)',
+                      text)
+
+    def test_link_survives_edit_of_a_neighbour_cell(self):
+        tables, _c, questions, _r = tablepatch.apply(
+            [self.LINKED], [{'kind': 'cell', 'table': 1, 'row': 2, 'col': 1,
+                             'was': 'Честный', 'now': 'Честный (Адал)'}])
+        self.assertIn('docs.google.com', tables[0])
+        self.assertEqual([], questions)
+
+    def test_link_returns_when_model_kept_the_form(self):
+        """Модель вернула «ярлык (адрес)» — ссылка собирается обратно с атрибутами."""
+        tables, _c, questions, _r = tablepatch.apply(
+            [self.LINKED],
+            [{'kind': 'cell', 'table': 1, 'row': 2, 'col': 2,
+              'was': 'ДОБАВИТЬ ВОДИТЕЛЯ',
+              'now': 'ДОБАВИТЬ ВОДИТЕЛЯ ОБНОВЛЁННУЮ '
+                     '(https://docs.google.com/forms/d/e/1FAI/formResponse)'}])
+        self.assertIn('href="https://docs.google.com/forms/d/e/1FAI/formResponse"', tables[0])
+        self.assertIn('target="_blank"', tables[0])
+        self.assertIn('ОБНОВЛЁННУЮ', tables[0])
+        self.assertEqual([], questions)
+
+    def test_link_returns_by_label_when_address_omitted(self):
+        """Модель написала только ярлык — ссылку узнаём по нему."""
+        tables, _c, questions, _r = tablepatch.apply(
+            [self.LINKED], [{'kind': 'cell', 'table': 1, 'row': 2, 'col': 2,
+                             'was': 'ДОБАВИТЬ ВОДИТЕЛЯ',
+                             'now': 'ДОБАВИТЬ ВОДИТЕЛЯ — только для новых'}])
+        self.assertIn('docs.google.com', tables[0])
+        self.assertIn('<a href=', tables[0])
+        self.assertEqual([], questions)
+
+    def test_lost_link_is_appended_and_asked_about(self):
+        """Ярлык переписан целиком — адрес НЕ теряется, но об этом спрашивают."""
+        tables, _c, questions, _r = tablepatch.apply(
+            [self.LINKED], [{'kind': 'cell', 'table': 1, 'row': 2, 'col': 2,
+                             'was': 'ДОБАВИТЬ ВОДИТЕЛЯ',
+                             'now': 'Форма регистрации водителя'}])
+        self.assertIn('docs.google.com', tables[0])
+        self.assertTrue(any('была ссылка' in q for q in questions))
+
+    def test_new_row_url_becomes_a_link(self):
+        """Адрес в новой строке должен быть щёлкаемым, а не текстом."""
+        tables, _c, _q, _r = tablepatch.apply(
+            [self.LINKED], [{'kind': 'add', 'table': 1,
+                             'values': ['Осень', 'https://forms.gle/abc123']}])
+        self.assertIn('<a href="https://forms.gle/abc123"', tables[0])
+
+    def test_mailto_survives(self):
+        table = ('<table><tr><td>Поддержка</td>'
+                 '<td><a href="mailto:help@itaxi.kz">help@itaxi.kz</a></td></tr></table>')
+        tables, _c, _q, _r = tablepatch.apply(
+            [table], [{'kind': 'cell', 'table': 1, 'row': 1, 'col': 2,
+                       'was': 'help@itaxi.kz',
+                       'now': 'help@itaxi.kz (mailto:help@itaxi.kz)'}])
+        self.assertIn('mailto:help@itaxi.kz', tables[0])
+
+    def test_two_links_in_one_cell_both_survive(self):
+        table = ('<table><tr><td>'
+                 '<a href="https://a.example/add">Добавить</a> / '
+                 '<a href="https://b.example/check">Проверить</a></td></tr></table>')
+        tables, _c, _q, _r = tablepatch.apply(
+            [table], [{'kind': 'cell', 'table': 1, 'row': 1, 'col': 1,
+                       'was': 'Добавить / Проверить',
+                       'now': 'Добавить / Проверить (обновлено)'}])
+        self.assertIn('https://a.example/add', tables[0])
+        self.assertIn('https://b.example/check', tables[0])
+
+
 if __name__ == '__main__':
     unittest.main()

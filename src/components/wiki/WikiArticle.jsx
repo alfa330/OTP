@@ -332,9 +332,17 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     }
 
     return (
-        <div className={immersive
-            ? 'wiki-immersive fixed inset-0 z-40 space-y-4 overflow-y-auto bg-slate-100 p-4 sm:p-6'
-            : 'space-y-4'}>
+        <div
+            className={immersive
+                ? 'wiki-immersive fixed inset-y-0 right-0 z-40 space-y-4 overflow-y-auto bg-slate-100 p-4 sm:p-6'
+                : 'space-y-4'}
+            /* Слева окно начинается ПОСЛЕ сайдбара, а не от нуля: сайдбар
+               рисуется выше по слою и накрывал бы левый край статьи. Тот же
+               приём, что у полноэкранных окон доски задач — переменная
+               --app-sidebar-offset из :root (src/styles.css), она же
+               обнуляется на мобильном, где сайдбар скрыт. */
+            style={immersive ? { left: 'var(--app-sidebar-offset, 0px)' } : undefined}
+        >
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <button type="button" className={iosBtnSecondary} onClick={onBack}>
                     <ArrowLeft size={14} /> К списку
