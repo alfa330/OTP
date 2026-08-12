@@ -46911,6 +46911,9 @@ class Database:
 
     # Жёсткий потолок строк в одном ответе /api/tasks: защита от «отдай всё».
     TASKS_MAX_ROWS = 500
+    # У выгрузки потолок свой и выше: файл забирают целиком, страниц в нём нет.
+    # Строка выгрузки в разы легче карточки — без истории, вложений и чек-листа.
+    TASKS_EXPORT_MAX_ROWS = 5000
 
     def get_task_action_needs_summary(self, requester_id):
         """
@@ -47018,6 +47021,72 @@ class Database:
             """, (requester_id, task_id, kind_norm, self._task_now()))
         return self.get_task_action_needs_summary(requester_id)
 
+    def _task_scope_filters(self, requester_id, role, only_my=False, mine=None,
+                            person_id=None, person_scope=None):
+        """Кого пускаем к задачам и чья это доска — общая часть списка и выгрузки.
+
+        Вынесено из get_tasks_for_requester, чтобы Excel-выгрузка отбирала ровно
+        те же задачи, что видны в разделе: разъедься эти два места — в файл
+        уехало бы больше, чем человеку показывает доска.
+
+        Возвращает (conditions, params, person_board_id, person_id_rest), где
+        person_id_rest — сотрудник, которого ещё предстоит применить фильтром
+        (срезы «входящие»/«исходящие»), либо None, если роль задач не видит.
+        """
+        requester_id = int(requester_id)
+        only_my_flag = bool(only_my)
+        mine_norm = (mine or '').strip().lower() or None
+        person_scope_norm = (person_scope or '').strip().lower() or None
+
+        # mine='any' — это те же «мои», что и only_my: разными путями к одному условию.
+        if mine_norm == 'any':
+            only_my_flag = True
+            mine_norm = None
+        if mine_norm and mine_norm not in {'assignee', 'creator'}:
+            raise ValueError("INVALID_TASK_MINE_FILTER")
+        if person_scope_norm and person_scope_norm not in {'incoming', 'outgoing', 'any'}:
+            raise ValueError("INVALID_TASK_PERSON_SCOPE_FILTER")
+
+        if person_id is None or str(person_id).strip() == '':
+            person_id_norm = None
+        else:
+            person_id_norm = int(person_id)
+            if person_id_norm <= 0:
+                raise ValueError("INVALID_TASK_PERSON_ID_FILTER")
+
+        conditions = []
+        params = []
+        if role_has_min(role, 'admin'):
+            pass
+        elif role in ('sv', 'trainer'):
+            # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
+            conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            params.extend([requester_id, requester_id, requester_id])
+        else:
+            return None
+
+        if only_my_flag:
+            conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            params.extend([requester_id, requester_id, requester_id])
+
+        if mine_norm == 'assignee':
+            conditions.append("t.assigned_to = %s")
+            params.append(requester_id)
+        elif mine_norm == 'creator':
+            conditions.append("(t.created_by = %s OR t.requested_by_id = %s)")
+            params.extend([requester_id, requester_id])
+
+        person_board_id = None
+        if person_id_norm is not None and person_scope_norm == 'any':
+            # Доска сотрудника: фильтр уходит в базовые условия, чтобы summary считал
+            # именно его задачи, а не весь отдел.
+            conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+            params.extend([person_id_norm, person_id_norm])
+            person_board_id = person_id_norm
+            person_id_norm = None
+
+        return conditions, params, person_board_id, person_id_norm
+
     def get_tasks_for_requester(
             self,
             requester_id,
@@ -47054,21 +47123,6 @@ class Database:
         sort_norm = (sort or '').strip().lower() or 'freshness'
         if sort_norm not in {'freshness', 'importance'}:
             raise ValueError("INVALID_TASK_SORT")
-        # mine — доски раздела: 'any' (мои, как only_my), 'assignee' (на мне), 'creator' (я поручил).
-        mine_norm = (mine or '').strip().lower() or None
-        if mine_norm == 'any':
-            only_my_flag = True
-            mine_norm = None
-        if mine_norm and mine_norm not in {'assignee', 'creator'}:
-            raise ValueError("INVALID_TASK_MINE_FILTER")
-
-        if person_id is None or str(person_id).strip() == '':
-            person_id_norm = None
-        else:
-            person_id_norm = int(person_id)
-            if person_id_norm <= 0:
-                raise ValueError("INVALID_TASK_PERSON_ID_FILTER")
-
         for status_value in status_values:
             if status_value not in {'assigned', 'in_progress', 'completed', 'accepted', 'returned'}:
                 raise ValueError("INVALID_TASK_STATUS_FILTER")
@@ -47106,41 +47160,18 @@ class Database:
             "delegated": 0
         }
 
-        base_conditions = []
-        base_params = []
-        if role_has_min(role, 'admin'):
-            pass
-        elif role in ('sv', 'trainer'):
-            # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
-            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
-            base_params.extend([requester_id, requester_id, requester_id])
-        else:
+        scope = self._task_scope_filters(
+            requester_id, role,
+            only_my=only_my_flag, mine=mine, person_id=person_id, person_scope=person_scope
+        )
+        if scope is None:
             return {
                 "tasks": [],
                 "total_all": 0,
                 "total_filtered": 0,
                 "summary": summary_empty
             }
-
-        if only_my_flag:
-            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
-            base_params.extend([requester_id, requester_id, requester_id])
-
-        if mine_norm == 'assignee':
-            base_conditions.append("t.assigned_to = %s")
-            base_params.append(requester_id)
-        elif mine_norm == 'creator':
-            base_conditions.append("(t.created_by = %s OR t.requested_by_id = %s)")
-            base_params.extend([requester_id, requester_id])
-
-        person_board_id = None
-        if person_id_norm is not None and person_scope_norm == 'any':
-            # Доска сотрудника: фильтр уходит в базовые условия, чтобы summary считал
-            # именно его задачи, а не весь отдел.
-            base_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
-            base_params.extend([person_id_norm, person_id_norm])
-            person_board_id = person_id_norm
-            person_id_norm = None
+        base_conditions, base_params, person_board_id, person_id_norm = scope
 
         # Базовый набор собран — дальше идут фильтры выборки поверх него.
         filtered_conditions = list(base_conditions)
@@ -47487,6 +47518,91 @@ class Database:
             "total_filtered": int(total_filtered),
             "summary": summary
         }
+
+    def get_tasks_for_export(self, requester_id, requester_role, mine=None,
+                             person_id=None, person_scope=None):
+        """Плоский срез задач для выгрузки в Excel — тот же охват, что у доски.
+
+        Отдельный запрос, а не get_tasks_for_requester: выгрузке не нужны
+        история, вложения, чек-листы и журнал отчётов, и тянуть их на всю базу
+        значило бы четыре лишних запроса и мегабайты ради пяти листов.
+        Трудозатраты поэтому считаем агрегатом прямо здесь.
+
+        Порядок строк повторяет доску: бэклог — ручной очередью приоритезации,
+        остальные — свежие сверху.
+        """
+        role = normalize_role_value(requester_role)
+        scope = self._task_scope_filters(
+            requester_id, role, mine=mine, person_id=person_id, person_scope=person_scope
+        )
+        if scope is None:
+            return []
+        conditions, params, _person_board_id, person_id_rest = scope
+
+        person_scope_norm = (person_scope or '').strip().lower() or None
+        if person_id_rest is not None:
+            if person_scope_norm == 'incoming':
+                conditions.append("t.assigned_to = %s AND t.created_by = %s")
+                params.extend([int(requester_id), person_id_rest])
+            elif person_scope_norm == 'outgoing':
+                conditions.append("t.created_by = %s AND t.assigned_to = %s")
+                params.extend([int(requester_id), person_id_rest])
+            else:
+                conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+                params.extend([person_id_rest, person_id_rest])
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT
+                    t.id, t.subject, t.description, t.tag, t.status, t.priority,
+                    t.is_backlog, t.created_at, t.planned_start_at, t.started_at,
+                    t.due_at, t.completed_at, t.completion_summary,
+                    t.estimate_minutes, spent.total,
+                    assignee.name, creator.name,
+                    COALESCE(origin_user.name, t.requested_by_name, creator.name)
+                FROM tasks t
+                LEFT JOIN users assignee ON assignee.id = t.assigned_to
+                LEFT JOIN users creator ON creator.id = t.created_by
+                LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
+                LEFT JOIN LATERAL (
+                    SELECT SUM(r.spent_minutes)::INT AS total
+                    FROM task_reports r
+                    WHERE r.task_id = t.id
+                ) spent ON TRUE
+                {where_sql}
+                ORDER BY
+                    t.is_backlog DESC,
+                    CASE WHEN t.is_backlog THEN t.backlog_rank END ASC NULLS LAST,
+                    t.created_at DESC, t.id DESC
+                LIMIT %s
+            """, tuple(params) + (self.TASKS_EXPORT_MAX_ROWS,))
+            rows = cursor.fetchall()
+
+        return [{
+            "id": row[0],
+            "subject": row[1],
+            "description": row[2],
+            "tag": row[3],
+            "status": row[4],
+            "priority": row[5] or 'normal',
+            "is_backlog": bool(row[6]),
+            # Даты отдаём объектами: в Excel они должны лечь датой, а не текстом,
+            # иначе по ним не отсортировать и не отфильтровать.
+            "created_at": row[7],
+            "planned_start_at": row[8],
+            "started_at": row[9],
+            "due_at": row[10],
+            "completed_at": row[11],
+            "completion_summary": row[12],
+            "estimate_minutes": row[13],
+            "spent_minutes": row[14],
+            "assignee_name": row[15],
+            "creator_name": row[16],
+            # «Поручил» — источник задачи, а если его нет, то постановщик: пустая
+            # клетка тут читалась бы как «спросить не у кого».
+            "requested_by_name": row[17],
+        } for row in rows]
 
     def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None,
                            completion_attachments=None, spent_minutes=None):

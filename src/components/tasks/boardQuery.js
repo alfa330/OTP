@@ -27,6 +27,23 @@ export const normalizeBoardChunk = (value) => {
   return BOARD_CHUNK_SIZES.includes(parsed) ? parsed : DEFAULT_BOARD_CHUNK;
 };
 
+/**
+ * Чьи задачи просим: «Мои» / «На мне» / доска сотрудника («Все» — без фильтра).
+ * Общее у доски и выгрузки: в Excel должен уехать ровно тот же охват, что виден
+ * на экране, поэтому охват описан один раз.
+ */
+export const scopeQueryParams = (scope) => {
+  if (scope === 'my') return { mine: 'any' };
+  if (scope === 'assigned') return { mine: 'assignee' };
+  if (String(scope || '').startsWith('person:')) {
+    return {
+      person_id: Number(String(scope).slice('person:'.length) || 0),
+      person_scope: 'any',
+    };
+  }
+  return {};
+};
+
 export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, withSummary = true }) => {
   const params = { limit, offset };
   // Сводка стоит семи агрегатов по всей базе — просим её один раз на загрузку доски.
@@ -36,11 +53,5 @@ export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, wit
   if (sort === 'importance') params.sort = 'importance';
   if (column && BOARD_COLUMN_QUERY[column]) Object.assign(params, BOARD_COLUMN_QUERY[column]);
   else if (mode === 'backlog') params.backlog = 'only';
-  if (scope === 'my') params.mine = 'any';
-  else if (scope === 'assigned') params.mine = 'assignee';
-  else if (String(scope || '').startsWith('person:')) {
-    params.person_id = Number(String(scope).slice('person:'.length) || 0);
-    params.person_scope = 'any';
-  }
-  return params;
+  return Object.assign(params, scopeQueryParams(scope));
 };

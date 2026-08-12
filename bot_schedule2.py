@@ -18345,6 +18345,202 @@ def handle_single_task_note(note_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+# Колонки выгрузки задач: ключ -> (заголовок, ширина). Набор у каждого листа
+# свой — «Завершена» в листе «В работе» или «Итог» в бэклоге были бы колонкой,
+# пустой в каждой строке.
+TASK_EXPORT_COLUMNS = {
+    'id':          ('№', 7),
+    'subject':     ('Тема', 52),
+    'tag':         ('Тип', 14),
+    'priority':    ('Срочность', 13),
+    'assignee':    ('Исполнитель', 26),
+    'requester':   ('Поручил', 26),
+    'created':     ('Создана', 17),
+    'planned':     ('Плановый старт', 17),
+    'due':         ('Дедлайн', 17),
+    'estimate':    ('Оценка, ч', 11),
+    'started':     ('Начата', 17),
+    'spent':       ('Факт, ч', 10),
+    'completed':   ('Завершена', 17),
+    'summary':     ('Итог', 60),
+    'description': ('Описание', 60),
+}
+_TASK_EXPORT_BASE = ('id', 'subject', 'tag', 'priority', 'assignee', 'requester', 'created')
+# Лист на колонку доски, в том же порядке, что колонки в разделе.
+TASK_EXPORT_SHEETS = (
+    ('backlog',  'Бэклог',
+     _TASK_EXPORT_BASE + ('due', 'estimate', 'description')),
+    ('todo',     'К выполнению',
+     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'description')),
+    ('progress', 'В работе',
+     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'started', 'spent', 'description')),
+    ('review',   'На проверке',
+     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'description')),
+    ('done',     'Готово',
+     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'description')),
+)
+TASK_EXPORT_DATE_KEYS = frozenset({'created', 'planned', 'due', 'started', 'completed'})
+TASK_EXPORT_HOUR_KEYS = frozenset({'estimate', 'spent'})
+TASK_EXPORT_FIELD_BY_DATE_KEY = {
+    'created': 'created_at',
+    'planned': 'planned_start_at',
+    'due': 'due_at',
+    'started': 'started_at',
+    'completed': 'completed_at',
+}
+# Задача закрыта — просрочка по ней уже ничего не значит. Тот же список статусов,
+# по которому раздел считает «просрочено» в сводке.
+TASK_EXPORT_CLOSED_STATUSES = frozenset({'completed', 'accepted'})
+
+
+def _task_export_column_of(task):
+    """В какой лист ложится задача. Повторяет BOARD_COLUMN_QUERY во фронте."""
+    if task.get('is_backlog'):
+        return 'backlog'
+    status = (task.get('status') or '').strip().lower()
+    if status in ('in_progress', 'returned'):
+        return 'progress'
+    if status == 'completed':
+        return 'review'
+    if status == 'accepted':
+        return 'done'
+    return 'todo'
+
+
+def _task_export_hours(minutes):
+    """Минуты -> часы: по колонке в Excel считают суммы, «3ч 30м» так не сложить."""
+    if minutes is None:
+        return None
+    return round(int(minutes) / 60, 2)
+
+
+def _task_export_value(key, task):
+    if key == 'id':
+        return task.get('id')
+    if key == 'subject':
+        return task.get('subject') or ''
+    if key == 'tag':
+        return TASK_TAG_LABELS.get((task.get('tag') or 'task').strip().lower(), 'Задача')
+    if key == 'priority':
+        return TASK_PRIORITY_LABELS.get((task.get('priority') or 'normal').strip().lower(), 'Обычная')
+    if key == 'assignee':
+        return task.get('assignee_name') or ''
+    if key == 'requester':
+        return task.get('requested_by_name') or ''
+    if key == 'estimate':
+        return _task_export_hours(task.get('estimate_minutes'))
+    if key == 'spent':
+        return _task_export_hours(task.get('spent_minutes'))
+    if key == 'summary':
+        return task.get('completion_summary') or ''
+    if key == 'description':
+        return task.get('description') or ''
+    return task.get(TASK_EXPORT_FIELD_BY_DATE_KEY[key])
+
+
+def _task_export_fill_sheet(sheet, columns, tasks, now):
+    values = {key: [_task_export_value(key, task) for task in tasks] for key in columns}
+    # Колонку, пустую во ВСЕХ строках листа, не выводим вовсе: заголовок без
+    # единого значения — шум, из-за которого лист приходится листать вбок.
+    if tasks:
+        columns = [
+            key for key in columns
+            if any(value not in (None, '') for value in values[key])
+        ]
+
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill(fill_type='solid', fgColor='1F2937')
+    overdue_font = Font(color='B91C1C')
+    for col, key in enumerate(columns, start=1):
+        title, width = TASK_EXPORT_COLUMNS[key]
+        cell = sheet.cell(row=1, column=col, value=title)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        sheet.column_dimensions[get_column_letter(col)].width = width
+
+    for idx, task in enumerate(tasks, start=2):
+        # Красим только просроченный дедлайн: остальные состояния нейтральны, и
+        # цвет в них был бы шумом, а не подсказкой.
+        due_at = task.get('due_at')
+        is_overdue = bool(
+            due_at
+            and due_at < now
+            and (task.get('status') or '') not in TASK_EXPORT_CLOSED_STATUSES
+        )
+        for col, key in enumerate(columns, start=1):
+            cell = sheet.cell(row=idx, column=col, value=values[key][idx - 2])
+            if key in TASK_EXPORT_DATE_KEYS:
+                cell.number_format = 'DD.MM.YYYY HH:MM'
+                if key == 'due' and is_overdue:
+                    cell.font = overdue_font
+            elif key in TASK_EXPORT_HOUR_KEYS:
+                cell.number_format = '0.##'
+
+    # Шапка закреплена и с фильтром — по сотням строк иначе не поработать.
+    sheet.freeze_panes = 'A2'
+    last_column = get_column_letter(len(columns))
+    sheet.auto_filter.ref = 'A1:%s%d' % (last_column, max(len(tasks) + 1, 2))
+
+
+@app.route('/api/tasks/export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def export_tasks_excel():
+    """Выгрузка задач в Excel: колонка доски = отдельный лист.
+
+    Охват тот же, что у доски: сервер отбирает задачи теми же условиями, что и
+    список раздела, поэтому в файл не попадёт ничего, чего человек не видит.
+    """
+    requester_id, requester, guard_response, guard_status = _task_route_guard()
+    if guard_response is not None:
+        return guard_response, guard_status
+
+    requester_role = getattr(g, 'effective_task_role', requester[3])
+    try:
+        tasks = db.get_tasks_for_export(
+            requester_id=requester_id,
+            requester_role=requester_role,
+            mine=(request.args.get('mine') or '').strip() or None,
+            person_id=request.args.get('person_id'),
+            person_scope=(request.args.get('person_scope') or '').strip() or None,
+        )
+    except ValueError:
+        return jsonify({"error": "Invalid export filter"}), 400
+    except Exception:
+        logging.exception('tasks: выгрузка не удалась')
+        return jsonify({"error": "Internal server error"}), 500
+
+    by_column = collections.defaultdict(list)
+    for task in tasks:
+        by_column[_task_export_column_of(task)].append(task)
+
+    now = datetime.now()
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for column_id, sheet_title, columns in TASK_EXPORT_SHEETS:
+        # Пустую колонку листом не заводим: шапка без строк читается как «файл не
+        # сформировался», а не как «здесь пусто».
+        if not by_column.get(column_id):
+            continue
+        _task_export_fill_sheet(
+            workbook.create_sheet(sheet_title), columns, by_column[column_id], now
+        )
+    if not workbook.sheetnames:
+        _task_export_fill_sheet(
+            workbook.create_sheet('Задачи'), TASK_EXPORT_SHEETS[1][2], [], now
+        )
+
+    stream = BytesIO()
+    workbook.save(stream)
+    stream.seek(0)
+    return send_file(
+        stream,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name='Задачи_%s.xlsx' % now.strftime('%Y-%m-%d')
+    )
+
+
 @app.route('/api/tasks', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def handle_tasks():

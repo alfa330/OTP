@@ -5,6 +5,7 @@ import {
   BOARD_COLUMN_QUERY,
   boardQueryParams,
   normalizeBoardChunk,
+  scopeQueryParams,
 } from '../src/components/tasks/boardQuery.js';
 
 const columnParams = (column, extra = {}) =>
@@ -64,6 +65,22 @@ test('догрузка колонки просит следующий кусок
   assert.equal(more.offset, 40);
   assert.equal(more.limit, 20);
   assert.equal(more.status, 'assigned');
+});
+
+test('выгрузка просит тот же охват, что и доска — без колонок и порций', () => {
+  // Excel собирается по всем колонкам сразу, поэтому из запроса уходит всё,
+  // кроме «чьи задачи»: разъедься это с доской — в файл уехало бы лишнее.
+  ['my', 'assigned', 'all', 'person:57'].forEach((scope) => {
+    const board = boardQueryParams({ scope, mode: 'board', column: 'todo', limit: 20, offset: 0 });
+    const exportParams = scopeQueryParams(scope);
+    Object.entries(exportParams).forEach(([key, value]) => {
+      assert.equal(board[key], value, `${scope}: ${key}`);
+    });
+    assert.equal(exportParams.limit, undefined);
+    assert.equal(exportParams.status, undefined);
+    assert.equal(exportParams.backlog, undefined);
+  });
+  assert.deepEqual(scopeQueryParams('all'), {});
 });
 
 test('размер порции — закрытый список, чужое значение не проходит', () => {

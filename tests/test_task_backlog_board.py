@@ -112,10 +112,12 @@ class TaskDbLayerTests(unittest.TestCase):
         self.assertIn('"t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"', self.src)
 
     def test_global_admin_task_visibility_is_not_limited_to_own_tasks(self):
-        start = self.src.index("    def get_tasks_for_requester(")
-        block = self.src[start:self.src.index("    def update_task_status(", start)]
+        # Охват общий у списка раздела и у Excel-выгрузки — правило живёт в одном месте.
+        start = self.src.index("    def _task_scope_filters(")
+        block = self.src[start:self.src.index("    def get_tasks_for_requester(", start)]
         self.assertIn("if role_has_min(role, 'admin'):\n            pass", block)
         self.assertIn("if only_my_flag:", block)
+        self.assertIn("self._task_scope_filters(", self.src)
 
     def test_regulation_templates_skip_backlog(self):
         start = self.src.index("    def materialize_due_regulation_tasks(")
@@ -221,7 +223,7 @@ class WorkspaceFrontendTests(unittest.TestCase):
         self.assertIn("{isAdmin ? (", self.src)
         self.assertIn("value: `person:${person.id}`", self.src)
         # Выборку доски делает сервер, клиент её не фильтрует.
-        self.assertIn("params.person_scope = 'any';", _read(BOARD_QUERY_PATH))
+        self.assertIn("person_scope: 'any',", _read(BOARD_QUERY_PATH))
         self.assertIn('ariaLabel="Выбор доски сотрудника"', self.src)
 
     def test_board_sort_defaults_to_freshness_and_is_stable(self):
@@ -260,7 +262,7 @@ class TasksViewIntegrationTests(unittest.TestCase):
 
     def test_workspace_is_mounted_with_handlers(self):
         self.assertIn("import TaskBoardWorkspace from './TaskBoardWorkspace';", self.src)
-        self.assertIn("import { boardQueryParams } from './boardQuery';", self.src)
+        self.assertIn("boardQueryParams", self.src.split("from './boardQuery';")[0])
         self.assertIn("<TaskBoardWorkspace", self.src)
         for prop in (
             "onBoardUpdate={updateBoardItems}",
@@ -1174,20 +1176,23 @@ class BoardPaginationTests(unittest.TestCase):
 
     def test_board_query_is_scoped_per_board(self):
         src = _read(BOARD_QUERY_PATH)
-        start = src.index("export const boardQueryParams = (")
-        block = src[start:]
+        block = src[src.index("export const boardQueryParams = ("):]
         self.assertIn("if (mode === 'backlog') params.backlog = 'only';", block)
-        self.assertIn("if (scope === 'my') params.mine = 'any';", block)
-        self.assertIn("else if (scope === 'assigned') params.mine = 'assignee';", block)
-        self.assertIn("params.person_scope = 'any';", block)
         self.assertIn("const params = { limit, offset };", block)
+        # Охват («Мои»/«На мне»/доска сотрудника) описан один раз: им пользуются
+        # и доска, и выгрузка в Excel.
+        self.assertIn("scopeQueryParams(scope)", block)
+        scope_block = src[src.index("export const scopeQueryParams = ("):src.index("export const boardQueryParams = (")]
+        self.assertIn("if (scope === 'my') return { mine: 'any' };", scope_block)
+        self.assertIn("if (scope === 'assigned') return { mine: 'assignee' };", scope_block)
+        self.assertIn("person_scope: 'any',", scope_block)
 
     def test_chunk_sizes_are_a_closed_list(self):
         # Поведение проверяется в tests/board_query.test.mjs, здесь — что модуль на месте.
         src = _read(BOARD_QUERY_PATH)
         self.assertIn("export const BOARD_CHUNK_SIZES = [20, 40, 60];", src)
         self.assertIn("BOARD_CHUNK_SIZES.includes(parsed)", src)
-        self.assertIn("import { boardQueryParams } from './boardQuery';", _read(TASKS_VIEW_PATH))
+        self.assertIn("boardQueryParams", _read(TASKS_VIEW_PATH).split("from './boardQuery';")[0])
 
     def test_server_caps_page_size_and_unbounded_requests(self):
         app_src = _read(APP_PATH)
@@ -1204,7 +1209,7 @@ class BoardPaginationTests(unittest.TestCase):
     def test_mine_filter_covers_board_scopes(self):
         src = _read(DATABASE_PATH)
         self.assertIn("if mine_norm == 'assignee':", src)
-        self.assertIn('base_conditions.append("t.assigned_to = %s")', src)
+        self.assertIn('conditions.append("t.assigned_to = %s")', src)
         self.assertIn("elif mine_norm == 'creator':", src)
         self.assertIn("INVALID_TASK_MINE_FILTER", src)
         self.assertIn("INVALID_TASK_MINE_FILTER", _read(APP_PATH))
@@ -1346,8 +1351,10 @@ class TaskQueryBuilderTests(unittest.TestCase):
             'filtered_conditions.append("t.id = %s")',
         ):
             self.assertGreater(block.index(filter_marker), init_at, filter_marker)
-        # Доска сотрудника уходит в базовые условия до копирования.
-        self.assertLess(block.index("person_board_id = person_id_norm"), init_at)
+        # Базовые условия (в т.ч. доска сотрудника) приходят до копирования.
+        self.assertLess(block.index("self._task_scope_filters("), init_at)
+        helper = src[src.index("    def _task_scope_filters("):src.index("    def get_tasks_for_requester(")]
+        self.assertIn("person_board_id = person_id_norm", helper)
 
     def test_summary_is_optional(self):
         src = _read(DATABASE_PATH)

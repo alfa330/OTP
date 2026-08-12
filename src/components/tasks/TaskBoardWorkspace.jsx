@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Download, Maximize2, Minimize2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
@@ -1608,10 +1608,12 @@ const TaskBoardWorkspace = ({
   onStatusAction,
   onBoardUpdate,
   onCreateBacklogItem,
+  onExport,
   notify,
 }) => {
   const [scope, setScope] = useState('my');
   const [boardSort, setBoardSort] = useState('freshness');
+  const [isExporting, setIsExporting] = useState(false);
   const [overrides, setOverrides] = useState({});
   const [page, setPage] = useState(1);
   const [chunkSize, setChunkSize] = useState(() => {
@@ -1976,6 +1978,18 @@ const TaskBoardWorkspace = ({
     applyBoardPatch(task, patch);
   }, [applyBoardPatch]);
 
+  // Выгружаем ровно тот охват, что выбран рядом в «Мои/На мне/Все»: файл собирает
+  // сервер по всем колонкам сразу, поэтому вкладка на состав не влияет.
+  const handleExport = useCallback(async () => {
+    if (typeof onExport !== 'function' || isExporting) return;
+    setIsExporting(true);
+    try {
+      await onExport({ scope });
+    } finally {
+      setIsExporting(false);
+    }
+  }, [onExport, isExporting, scope]);
+
   if (isBoardMode ? (isColumnsLoading && !boardRows.length) : (isPageLoading && !pageTasks.length)) {
     return (
       <div className="space-y-2">
@@ -2034,11 +2048,25 @@ const TaskBoardWorkspace = ({
             onChange={changeChunkSize}
           />
         </div>
-        {mode === 'board' && (
-          <span className="text-[11.5px] text-slate-400">
-            Перетащите карточку между колонками, чтобы сменить статус
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {mode === 'board' && (
+            <span className="text-[11.5px] text-slate-400">
+              Перетащите карточку между колонками, чтобы сменить статус
+            </span>
+          )}
+          {typeof onExport === 'function' && (
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={isExporting}
+              title="Excel: лист на каждую колонку доски"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
+            >
+              <Download size={13} strokeWidth={2} />
+              {isExporting ? 'Готовлю…' : 'Выгрузка'}
+            </button>
+          )}
+        </div>
       </div>
 
       {focusPerson && focusStats && (

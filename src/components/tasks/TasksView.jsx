@@ -25,7 +25,7 @@ import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/ro
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
-import { boardQueryParams } from './boardQuery';
+import { boardQueryParams, scopeQueryParams } from './boardQuery';
 import {
   ACTION_NEED_META,
   actionNeedSeenKey,
@@ -6347,6 +6347,34 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders, notify]);
 
+  /* Выгрузка идёт blob'ом через axios: простая ссылка <a href> не несёт токен и
+     упирается в 401, потому что авторизация здесь bearer, а не кука. */
+  const exportBoardTasks = useCallback(async ({ scope }) => {
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/tasks/export`, {
+        headers: buildHeaders(),
+        params: scopeQueryParams(scope),
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      const today = new Date();
+      const stamp = [
+        today.getFullYear(),
+        String(today.getMonth() + 1).padStart(2, '0'),
+        String(today.getDate()).padStart(2, '0'),
+      ].join('-');
+      link.download = `Задачи_${stamp}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      notify('Не удалось сформировать выгрузку', 'error');
+    }
+  }, [apiBaseUrl, buildHeaders, notify]);
+
   useEffect(() => {
     if (!pinnedTaskId || typeof onPinnedTaskSync !== 'function') return;
     const latestPinnedTask = tasks.find((task) => Number(task?.id || 0) === Number(pinnedTaskId));
@@ -7324,6 +7352,7 @@ const TasksView = ({
             onStatusAction={handleBoardStatusAction}
             onBoardUpdate={updateBoardItems}
             onCreateBacklogItem={openBacklogCreate}
+            onExport={exportBoardTasks}
             notify={notify}
           />
         </div>
