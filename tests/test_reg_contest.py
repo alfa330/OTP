@@ -82,7 +82,7 @@ class MatchOperatorTests(unittest.TestCase):
     def test_prefix_match_crm_name_without_patronymic(self):
         # CRM хранит «Фамилия Имя», у нас — с отчеством.
         directory = [_user(4, "Сынакбай Алихан Тестулы")]
-        user, method = reg_contest.match_operator(None, "Бекзат Сынакбай", directory)
+        user, method = reg_contest.match_operator(None, "Сынакбай Алихан", directory)
         self.assertEqual(user["id"], 4)
         self.assertEqual(method, "name_prefix")
 

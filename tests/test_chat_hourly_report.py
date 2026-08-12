@@ -277,11 +277,11 @@ class ChatHourlyCollectTests(unittest.TestCase):
 
     ROWS = [
         _request(1, '2026-08-07 09:30:00', end='2026-08-07 09:40:00',
-                 operator='Алихан', reaction=10, replies=1, total=10),
+                 operator='Сынакбай', reaction=10, replies=1, total=10),
         _request(2, '2026-08-07 10:10:00', end='2026-08-07 10:20:00',
-                 operator='Алихан', reaction=20, replies=3, total=80),
-        _request(3, '2026-08-07 10:50:00', operator='Ерланов', reaction=30, replies=2, total=90),
-        _request(4, '2026-08-07 11:05:00', operator='Ерланов', reaction=40, replies=1, total=40),
+                 operator='Сынакбай', reaction=20, replies=3, total=80),
+        _request(3, '2026-08-07 10:50:00', operator='Тестбаев', reaction=30, replies=2, total=90),
+        _request(4, '2026-08-07 11:05:00', operator='Тестбаев', reaction=40, replies=1, total=40),
     ]
 
     def _collect(self, at='2026-08-07 11:00:00'):
@@ -304,35 +304,35 @@ class ChatHourlyCollectTests(unittest.TestCase):
     def test_operators_are_ranked_by_chats_with_the_hour_alongside(self):
         _ns, data = self._collect()
         self.assertEqual([(o['name'], o['chats'], o['chats_hour']) for o in data['operators']],
-                         [('Алихан', 2, 1), ('Ерланов', 2, 1)])
+                         [('Сынакбай', 2, 1), ('Тестбаев', 2, 1)])
 
     def test_response_times_are_computed_per_operator(self):
         """Время ответа по чатнику считается теми же формулами, что и итог."""
         _ns, data = self._collect()
         by_name = {o['name']: o for o in data['operators']}
-        # Алихан: заявки 1 и 2 → первый ответ (10+20)/2 = 15, внутри чата (80-20)/2 = 30
-        self.assertEqual(by_name['Алихан']['first_reply_day'], 15)
-        self.assertEqual(by_name['Алихан']['inner_reply_day'], 30)
-        # Ерланов: заявки 3 и 4 → (30+40)/2 = 35, внутри чата (90-30)/1 = 60
-        self.assertEqual(by_name['Ерланов']['first_reply_day'], 35)
-        self.assertEqual(by_name['Ерланов']['inner_reply_day'], 60)
-        # за час у Алихана только заявка 2
-        self.assertEqual(by_name['Алихан']['first_reply_hour'], 20)
+        # Сынакбай: заявки 1 и 2 → первый ответ (10+20)/2 = 15, внутри чата (80-20)/2 = 30
+        self.assertEqual(by_name['Сынакбай']['first_reply_day'], 15)
+        self.assertEqual(by_name['Сынакбай']['inner_reply_day'], 30)
+        # Тестбаев: заявки 3 и 4 → (30+40)/2 = 35, внутри чата (90-30)/1 = 60
+        self.assertEqual(by_name['Тестбаев']['first_reply_day'], 35)
+        self.assertEqual(by_name['Тестбаев']['inner_reply_day'], 60)
+        # за час у Сынакбайа только заявка 2
+        self.assertEqual(by_name['Сынакбай']['first_reply_hour'], 20)
 
     def test_operator_row_carries_status_and_open_chats(self):
         api = _FakeChat2Desk(self.ROWS, limit=10)
         ns = _namespace(fake_requests=api)
         ns['_chat_hourly_fetch_operators'] = lambda: [
-            {'first_name': 'Ерланов', 'last_name': '', 'status': 'enabled',
+            {'first_name': 'Тестбаев', 'last_name': '', 'status': 'enabled',
              'online': 1, 'offline_type': None, 'opened_dialogs': 12},
         ]
         now = datetime(2026, 8, 7, 11, 0, tzinfo=ZoneInfo('Asia/Almaty'))
         by_name = {o['name']: o for o in ns['_chat_hourly_collect'](now=now)['operators']}
-        self.assertEqual(by_name['Ерланов']['status'], 'онлайн')
-        self.assertEqual(by_name['Ерланов']['open_chats'], 12)
+        self.assertEqual(by_name['Тестбаев']['status'], 'онлайн')
+        self.assertEqual(by_name['Тестбаев']['open_chats'], 12)
         # у того, кого нет в Chat2Desk, статуса и открытых чатов просто нет
-        self.assertEqual(by_name['Алихан']['status'], '—')
-        self.assertIsNone(by_name['Алихан']['open_chats'])
+        self.assertEqual(by_name['Сынакбай']['status'], '—')
+        self.assertIsNone(by_name['Сынакбай']['open_chats'])
 
     def test_online_operator_without_chats_is_still_a_row(self):
         """Иначе «кто онлайн» пришлось бы держать отдельным списком рядом с таблицей."""
@@ -353,10 +353,10 @@ class ChatHourlyCollectTests(unittest.TestCase):
         api = _FakeChat2Desk(self.ROWS, limit=10)
         ns = _namespace(fake_requests=api)
         ns['_chat_hourly_fetch_operators'] = lambda: [
-            # у «Алихана» чатов больше, но он офлайн и обязан уехать вниз
-            {'first_name': 'Алихан', 'last_name': '', 'status': 'enabled',
+            # у «Сынакбайа» чатов больше, но он офлайн и обязан уехать вниз
+            {'first_name': 'Сынакбай', 'last_name': '', 'status': 'enabled',
              'online': 0, 'offline_type': None, 'opened_dialogs': 0},
-            {'first_name': 'Ерланов', 'last_name': '', 'status': 'enabled',
+            {'first_name': 'Тестбаев', 'last_name': '', 'status': 'enabled',
              'online': 1, 'offline_type': 'break', 'opened_dialogs': 3},
             {'first_name': 'Новичок', 'last_name': '', 'status': 'enabled',
              'online': 1, 'offline_type': None, 'opened_dialogs': 1},
@@ -364,7 +364,7 @@ class ChatHourlyCollectTests(unittest.TestCase):
         now = datetime(2026, 8, 7, 11, 0, tzinfo=ZoneInfo('Asia/Almaty'))
         data = ns['_chat_hourly_collect'](now=now)
         self.assertEqual([o['name'] for o in data['operators']],
-                         ['Новичок', 'Ерланов', 'Алихан'])
+                         ['Новичок', 'Тестбаев', 'Сынакбай'])
         self.assertEqual([o['presence'] for o in data['operators']],
                          ['online', 'status', 'offline'])
 
