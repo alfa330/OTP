@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     AlertCircle, ArrowLeft, CheckCircle2, ChevronRight, Inbox, Loader2,
-    MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
+    History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -52,6 +52,16 @@ const STATE_FILTERS = [
 ];
 
 const PAGE_SIZE = 40;
+
+// Подписи событий истории. Технические коды человеку не показываем.
+const EVENT_LABELS = {
+    created: 'Обращение создано',
+    sent: 'Отправлено в группу',
+    send_failed: 'Не удалось отправить',
+    reply_received: 'Ответ из группы',
+    reply_sent: 'Сообщение в группу',
+    status: 'Статус изменён',
+};
 
 const statusMeta = (code) => STATUS_META[code] || { label: code || '—', tone: null };
 
@@ -113,7 +123,7 @@ const LoadingBlock = () => (
 
 /* ─── Лента обращений ─────────────────────────────────────────────────────── */
 
-const TicketRow = ({ ticket, active, onSelect }) => {
+const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
     const status = statusMeta(ticket.status);
     const priority = priorityMeta(ticket.priority);
     const failed = ticket.delivery_status === 'failed';
@@ -164,7 +174,7 @@ const TicketRow = ({ ticket, active, onSelect }) => {
             </div>
         </button>
     );
-};
+});
 
 /* ─── Сообщение в переписке ───────────────────────────────────────────────── */
 
@@ -242,6 +252,11 @@ const TicketCard = ({
     const [reply, setReply] = useState('');
     const [sending, setSending] = useState(false);
     const [attachment, setAttachment] = useState(null);
+    // История действий не приезжает вместе с карточкой: она нужна изредка и
+    // почти вся повторяет то, что видно в переписке. Один запрос по кнопке
+    // вместо лишнего запроса на каждое открытие обращения.
+    const [events, setEvents] = useState(null);
+    const [eventsLoading, setEventsLoading] = useState(false);
     const fileRef = useRef(null);
     const threadRef = useRef(null);
 
@@ -299,6 +314,20 @@ const TicketCard = ({
             showToast?.(errorText(err, 'Сообщение не ушло'), 'error');
         } finally {
             setSending(false);
+        }
+    };
+
+    const toggleEvents = async () => {
+        if (events) { setEvents(null); return; }
+        setEventsLoading(true);
+        try {
+            const response = await axios.get(
+                `${apiBaseUrl}/api/crm/tickets/${ticketId}/events`, { headers: headers() });
+            setEvents(response.data.events || []);
+        } catch (err) {
+            showToast?.(errorText(err, 'Не удалось открыть историю'), 'error');
+        } finally {
+            setEventsLoading(false);
         }
     };
 
@@ -480,6 +509,10 @@ const TicketCard = ({
 
                 {permissions.can_change_status && (
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                        <button type="button" onClick={toggleEvents} className={iosBtnGhost}>
+                            {eventsLoading ? <Loader2 size={13} className="animate-spin" /> : <History size={13} />}
+                            История
+                        </button>
                         {!closed && (
                             <>
                                 <button type="button" onClick={() => changeStatus('resolved')}
@@ -498,6 +531,23 @@ const TicketCard = ({
                                 <RefreshCw size={14} /> Вернуть в работу
                             </button>
                         )}
+                    </div>
+                )}
+
+                {events && (
+                    <div className="mt-2.5 space-y-1 border-t border-slate-100 pt-2.5">
+                        {events.length === 0 && (
+                            <div className="text-[11.5px] text-slate-400">Событий нет</div>
+                        )}
+                        {events.map((event) => (
+                            <div key={event.id} className="flex items-baseline gap-2 text-[11.5px] text-slate-500">
+                                <span className="w-[86px] shrink-0 tabular-nums text-slate-400">
+                                    {fmtDateTime(event.created_at)}
+                                </span>
+                                <span>{EVENT_LABELS[event.kind] || event.kind}</span>
+                                {event.actor_name && <span className="text-slate-400">· {event.actor_name}</span>}
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>
@@ -929,7 +979,7 @@ export default function CrmTicketsView({
     const [queues, setQueues] = useState([]);
     const [tickets, setTickets] = useState([]);
     const [counters, setCounters] = useState({});
-    const [total, setTotal] = useState(0);
+    const [hasMore, setHasMore] = useState(false);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [selectedId, setSelectedId] = useState(null);
@@ -976,8 +1026,10 @@ export default function CrmTicketsView({
                 { headers: headers() });
             const items = response.data.items || [];
             setTickets((prev) => (nextOffset ? [...prev, ...items] : items));
-            setTotal(response.data.total || 0);
-            setCounters(response.data.counters || {});
+            setHasMore(Boolean(response.data.has_more));
+            // Права приезжают вместе со списком — они уже посчитаны на сервере
+            // для этого запроса, и отдельный поход за ними разделу не нужен.
+            if (response.data.capabilities) setCapabilities(response.data.capabilities);
             setOffset(nextOffset);
             setError(null);
         } catch (err) {
@@ -987,12 +1039,16 @@ export default function CrmTicketsView({
         }
     }, [apiBaseUrl, headers, stateFilter, queueFilter, mine, searchApplied]);
 
+    /* Один раз при входе: числа для шапки и признак, что схема развернулась.
+       Агрегаты по периметру считаются только здесь — на каждый фильтр и каждую
+       букву в поиске платить проходом по таблице незачем. */
     useEffect(() => {
         let cancelled = false;
         axios.get(`${apiBaseUrl}/api/crm/ping`, { headers: headers() })
             .then((response) => {
                 if (cancelled) return;
                 setCapabilities(response.data.capabilities || {});
+                setCounters(response.data.counters || {});
                 if (response.data.schema_ready === false) {
                     setError('Раздел разворачивается — обновите страницу через минуту');
                 }
@@ -1094,9 +1150,6 @@ export default function CrmTicketsView({
                                                 : 'text-slate-500 hover:text-slate-700'
                                         }`}>
                                     {item.label}
-                                    {item.key === 'answered' && counters.answered > 0 && (
-                                        <span className="ml-1 tabular-nums text-blue-600">{counters.answered}</span>
-                                    )}
                                 </button>
                             ))}
                         </div>
@@ -1168,7 +1221,7 @@ export default function CrmTicketsView({
                                                    active={ticket.id === selectedId}
                                                    onSelect={setSelectedId} />
                                     ))}
-                                    {tickets.length < total && (
+                                    {hasMore && (
                                         <button type="button"
                                                 onClick={() => loadTickets(offset + PAGE_SIZE)}
                                                 className="w-full py-3 text-[12.5px] font-semibold text-slate-500 transition hover:bg-slate-50">
@@ -1178,7 +1231,7 @@ export default function CrmTicketsView({
                                 </div>
                                 {!!tickets.length && (
                                     <div className="shrink-0 border-t border-slate-100 px-3.5 py-2 text-[11px] tabular-nums text-slate-400">
-                                        Показано {tickets.length} из {total}
+                                        Показано {tickets.length}{hasMore ? ' — есть ещё' : ''}
                                     </div>
                                 )}
                             </div>

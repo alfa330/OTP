@@ -27,7 +27,7 @@ WITH me AS (
      WHERE id = %(user_id)s
 ),
 headed AS (
-    SELECT d.id FROM departments d
+    SELECT d.id, d.code FROM departments d
      WHERE d.head_user_id = %(user_id)s AND d.is_active
 ),
 my_groups AS (
@@ -42,7 +42,9 @@ SELECT
     (SELECT name          FROM me),
     (SELECT role          FROM me),
     (SELECT department_id FROM me),
+    (SELECT d.code FROM departments d WHERE d.id = (SELECT department_id FROM me)),
     COALESCE((SELECT array_agg(id)       FROM headed),    '{}'),
+    COALESCE((SELECT array_agg(code)     FROM headed),    '{}'),
     COALESCE((SELECT array_agg(group_id) FROM my_groups), '{}')
 """
 
@@ -58,13 +60,15 @@ def load_access_context(cursor, user_id):
     row = cursor.fetchone()
     if not row or row[1] is None:
         return None
-    name, role, department_id, headed, groups = row
+    name, role, department_id, department_code, headed, headed_codes, groups = row
     return {
         'user_id': int(user_id),
         'name': name,
         'role': access.normalize_role(role),
         'department_id': department_id,
+        'department_code': department_code,
         'headed_department_ids': list(headed or []),
+        'headed_department_codes': list(headed_codes or []),
         'group_ids': list(groups or []),
     }
 
@@ -316,11 +320,20 @@ def _ticket_row(row, viewer_id=None):
 
 def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_only=False,
                  search=None, limit=50, offset=0):
-    """Список обращений в периметре пользователя + общее количество.
+    """Порция обращений в периметре + есть ли ещё. Возвращает (items, has_more).
 
-    total считается тем же запросом через COUNT(*) OVER (): раздел показывает
-    «показано N из M» и кнопку догрузки, а второй запрос ради числа удваивал бы
-    поход в базу на каждый фильтр.
+    Точного «всего N» здесь нет намеренно. И отдельный COUNT(*), и COUNT(*) OVER ()
+    в этом же запросе означают полный проход по периметру: для админа это вся
+    таблица, и платить за неё пришлось бы на каждый фильтр, каждую догрузку и
+    каждую букву в поиске. Признак has_more берётся из ОДНОЙ лишней запрошенной
+    строки, то есть достаётся бесплатно. Так же устроены порции колокола и
+    колонка «Готово» на доске задач.
+
+    Порядок — last_message_at DESC, id DESC, ровно под индексом: без COALESCE и
+    без выражений. «Непрочитанное наверху» отдельным условием в ORDER BY не нужно:
+    входящий ответ двигает last_message_at на «сейчас», и обращение с новым
+    ответом всплывает само. Выражение же в сортировке заставило бы базу
+    отсортировать весь отфильтрованный набор вместо чтения по индексу.
     """
     where, params = visibility_sql(ctx)
     clauses = [where]
@@ -336,34 +349,62 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
     if unread_only:
         clauses.append('t.author_unread_at IS NOT NULL AND t.created_by = %(viewer_id)s')
     if search:
-        params['search'] = '%%%s%%' % str(search).strip()
-        # Поиск по тексту (ТЗ #29). Номер обращения ищется отдельной веткой:
-        # «123» в теме встречается часто, а по номеру человек ждёт точного попадания.
-        clauses.append("""(
-            t.subject ILIKE %(search)s OR t.body ILIKE %(search)s
-            OR t.client_phone ILIKE %(search)s OR t.client_name ILIKE %(search)s
-            OR t.id::text = trim(%(search)s, '%%')
-        )""")
+        # Поиск (ТЗ #29) разделён на две ветки, и это не украшательство, а
+        # результат замера. Сначала было одно ИЛИ на пять условий сразу —
+        # тема, текст, телефон, имя клиента и номер. Планировщик на таком ИЛИ
+        # отказывается от индексов вовсе: он шёл по свежести и фильтровал, и
+        # на 200 тыс. обращений редкое слово искалось 270 мс, а слово, которого
+        # нет, — 187 мс (частое находилось за 0,6 мс просто потому, что 41
+        # совпадение попадалось в первых же строках — то есть «быстро по
+        # счастью»).
+        #
+        # Теперь ветки не смешиваются, и в каждой все условия проиндексированы,
+        # так что база может собрать их через BitmapOr:
+        #   цифры  → номер обращения (по первичному ключу) либо телефон клиента
+        #   слова  → тема / текст / имя клиента по триграммным индексам
+        #
+        # Человек ищет ровно одно из двух: номер-телефон или слово. Смешивать
+        # их в одном условии смысла не было и до замера.
+        needle = str(search).strip()
+        digits = needle.replace(' ', '').replace('+', '').replace('-', '')
+        if digits.isdigit():
+            params['search'] = '%%%s%%' % digits
+            # Номер приводим к int сами: t.id::text = ... не берёт индекс по id,
+            # потому что сравнивается выражение, а не столбец.
+            params['search_id'] = int(digits) if len(digits) < 10 else None
+            clauses.append("""(
+                (%(search_id)s IS NOT NULL AND t.id = %(search_id)s)
+                OR t.client_phone ILIKE %(search)s
+            )""")
+        else:
+            params['search'] = '%%%s%%' % needle
+            clauses.append("""(
+                t.subject ILIKE %(search)s
+                OR t.client_name ILIKE %(search)s
+                OR t.body ILIKE %(search)s
+            )""")
 
-    params['limit'] = max(1, min(int(limit), 200))
+    page = max(1, min(int(limit), 200))
+    # Просим на одну строку больше, чем покажем: она и есть ответ на вопрос
+    # «есть ли ещё», и стоит чтения одной строки, а не подсчёта всех.
+    params['limit'] = page + 1
     params['offset'] = max(0, int(offset))
 
     cursor.execute(
         """
-        SELECT %s, COUNT(*) OVER () AS total
+        SELECT %s
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
          WHERE %s
-         ORDER BY (t.author_unread_at IS NOT NULL AND t.created_by = %%(viewer_id)s) DESC,
-                  COALESCE(t.last_message_at, t.created_at) DESC, t.id DESC
+         ORDER BY t.last_message_at DESC, t.id DESC
          LIMIT %%(limit)s OFFSET %%(offset)s
         """ % (_TICKET_COLUMNS, ' AND '.join(clauses)),
         params,
     )
     rows = cursor.fetchall()
-    total = rows[0][-1] if rows else 0
-    return [_ticket_row(row, ctx['user_id']) for row in rows], int(total)
+    has_more = len(rows) > page
+    return [_ticket_row(row, ctx['user_id']) for row in rows[:page]], has_more
 
 
 def get_ticket(cursor, ticket_id, viewer_id=None):
@@ -455,17 +496,28 @@ def add_message(cursor, *, ticket_id, direction, body=None, author_user_id=None,
     return row[0] if row else None
 
 
-def list_messages(cursor, ticket_id):
+# Потолок на одну нить. Обращение — это несколько реплик, а не чат на тысячу
+# сообщений; но группа может «уйти в обсуждение», и тогда карточка тянула бы всю
+# переписку в браузер целиком. Берём последние MESSAGES_LIMIT и переворачиваем:
+# свежее важнее, а полная история всегда есть в самом Telegram.
+MESSAGES_LIMIT = 300
+
+
+def list_messages(cursor, ticket_id, limit=MESSAGES_LIMIT):
     cursor.execute(
         """
         SELECT id, direction, body, author_user_id, author_name,
                tg_from_name, tg_username, attachment_kind, attachment_name,
                attachment_mime, attachment_size, created_at, tg_message_id
-          FROM crm_ticket_messages
-         WHERE ticket_id = %s
+          FROM (
+            SELECT * FROM crm_ticket_messages
+             WHERE ticket_id = %s
+             ORDER BY created_at DESC, id DESC
+             LIMIT %s
+          ) recent
          ORDER BY created_at, id
         """,
-        (int(ticket_id),),
+        (int(ticket_id), int(limit)),
     )
     return [{
         'id': row[0],
@@ -668,33 +720,34 @@ def unread_for_bell(cursor, user_id, limit):
 
 
 def counters(cursor, ctx):
-    """Числа для шапки раздела: сколько в работе, сколько ждёт меня.
+    """Одно число для раздела: сколько обращений ждут ЛИЧНО этого человека.
 
-    Считается одним проходом по тому же периметру, что и список.
+    История этой функции — иллюстрация того, как счётчики дорожают незаметно.
+    Сначала здесь считалось шесть агрегатов (активные, ответили, непрочитано,
+    недоставленные, просроченные, всего) — четыре из них интерфейс не показывал
+    вовсе. Замер на 200 тыс. обращений: 60 мс проходом по таблице у админа.
+    Дальше осталось два, вынесенных в отдельные подзапросы под частичные
+    индексы, — уже index-only, но всё равно 13 мс: «сколько всего обращений с
+    ответом» приходится честно пересчитать по 33 тыс. записей.
+
+    А украшало это число подпись сегмента «Ответили», при том что сам список
+    обращений с ответом — один клик и он же показывает их точно. Поэтому число
+    убрано, а не оптимизировано дальше: то, что не показывают, считать не надо.
+
+    Осталось непрочитанное — оно нужно бейджу раздела и читается по частичному
+    индексу за десятые доли миллисекунды при любом объёме, потому что условие
+    «мой автор» отсекает всё остальное сразу.
     """
-    where, params = visibility_sql(ctx)
     cursor.execute(
         """
-        SELECT
-            COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'answered')) AS active,
-            COUNT(*) FILTER (WHERE t.status = 'answered')                            AS answered,
-            COUNT(*) FILTER (WHERE t.author_unread_at IS NOT NULL
-                                   AND t.created_by = %%(viewer_id)s)                AS unread,
-            COUNT(*) FILTER (WHERE t.delivery_status = 'failed')                     AS failed,
-            COUNT(*) FILTER (WHERE t.status IN ('open', 'in_progress', 'answered')
-                                   AND t.due_at IS NOT NULL AND t.due_at < %s)       AS overdue,
-            COUNT(*)                                                                 AS total
+        SELECT COUNT(*)
           FROM crm_tickets t
-          JOIN crm_queues q ON q.id = t.queue_id
-         WHERE %s
-        """ % (_NOW, where),
-        params,
+         WHERE t.created_by = %(viewer_id)s
+           AND t.author_unread_at IS NOT NULL
+        """,
+        {'viewer_id': ctx['user_id']},
     )
-    row = cursor.fetchone()
-    return {
-        'active': row[0], 'answered': row[1], 'unread': row[2],
-        'failed': row[3], 'overdue': row[4], 'total': row[5],
-    }
+    return {'unread': cursor.fetchone()[0]}
 
 
 def delivery_payload(cursor, ticket_id):

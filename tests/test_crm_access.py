@@ -18,13 +18,18 @@ from crm import access, queries, schema
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def ctx(role='operator', user_id=10, department_id=1, headed=(), groups=()):
+def ctx(role='operator', user_id=10, department_id=1, headed=(), groups=(),
+        department_code='szov', headed_codes=None):
+    """Портрет зрителя. По умолчанию — сотрудник СЗоВ: раздел выкатан на него."""
     return {
         'user_id': user_id,
         'name': 'Тест',
         'role': role,
         'department_id': department_id,
+        'department_code': department_code,
         'headed_department_ids': list(headed),
+        'headed_department_codes': (list(headed_codes) if headed_codes is not None
+                                    else (['szov'] if headed else [])),
         'group_ids': list(groups),
     }
 
@@ -83,11 +88,59 @@ class ScopeTest(unittest.TestCase):
             self.assertTrue(access.can_view_ticket(me, ticket(created_by=999)), role)
 
 
+class SectionGateTest(unittest.TestCase):
+    """Кого пускают в раздел на время выката: СЗоВ, админы и один пилот.
+
+    Проверяется отдельно от видимости обращений: это два разных вопроса —
+    «открыт ли раздел» и «что в нём видно».
+    """
+
+    def test_pilot_operator_is_let_in(self):
+        pilot = sorted(access.PILOT_USER_IDS)[0]
+        self.assertTrue(access.can_open_section(ctx(role='operator', user_id=pilot)))
+
+    def test_other_operators_are_not(self):
+        """Иначе раздел уехал бы на всю компанию до настройки очередей."""
+        self.assertFalse(access.can_open_section(ctx(role='operator', user_id=99999)))
+        self.assertFalse(access.can_open_section(
+            ctx(role='trainee', user_id=99999)))
+
+    def test_supervisor_of_the_department_is_let_in(self):
+        self.assertTrue(access.can_open_section(
+            ctx(role='sv', user_id=30, department_code='szov', groups=(1,))))
+
+    def test_supervisor_of_another_department_is_not(self):
+        """Граница отдела строгая — как у «Табло СЗоВ» и переписки ТЭЗ."""
+        self.assertFalse(access.can_open_section(
+            ctx(role='sv', user_id=31, department_code='tez', groups=(2,))))
+
+    def test_head_of_the_department_is_let_in(self):
+        self.assertTrue(access.can_open_section(
+            ctx(role='admin', user_id=1, headed=(1,), headed_codes=['szov'])))
+
+    def test_head_of_another_department_is_not(self):
+        self.assertFalse(access.can_open_section(
+            ctx(role='admin', user_id=2, headed=(560,), headed_codes=['tez'])))
+
+    def test_global_admins_are_let_in(self):
+        for role in ('super_admin', 'admin'):
+            self.assertTrue(access.can_open_section(
+                ctx(role=role, user_id=5, department_code=None)), role)
+
+    def test_creating_requires_the_section(self):
+        """Кнопку «Новое обращение» нельзя дать тому, кому раздел закрыт."""
+        self.assertFalse(access.can_create_ticket(ctx(role='operator', user_id=99999)))
+        self.assertTrue(access.can_create_ticket(
+            ctx(role='operator', user_id=sorted(access.PILOT_USER_IDS)[0])))
+
+    def test_capabilities_report_the_gate(self):
+        """Фронт рисует раздел по этой сводке, а не по роли."""
+        self.assertTrue(access.capabilities(ctx(role='super_admin'))['can_open'])
+        self.assertFalse(access.capabilities(
+            ctx(role='operator', user_id=99999))['can_open'])
+
+
 class ActionsTest(unittest.TestCase):
-    def test_everyone_can_create(self):
-        """Раздел затевался ровно ради этого: обращение заводит любой сотрудник."""
-        for role in ('operator', 'trainee', 'trainer', 'sv', 'admin', 'super_admin'):
-            self.assertTrue(access.can_create_ticket(ctx(role=role)), role)
 
     def test_only_global_admin_manages_queues(self):
         self.assertTrue(access.can_manage_queues(ctx(role='super_admin')))
@@ -193,6 +246,33 @@ class SchemaContractTest(unittest.TestCase):
         self.assertIn('idx_crm_tickets_unread', ddl)
         self.assertIn('WHERE author_unread_at IS NOT NULL', ddl)
 
+    def test_every_list_filter_has_an_index_with_the_sort_column(self):
+        """Индекс без столбца сортировки отдаёт строки, но база их всё равно сортирует."""
+        ddl = ' '.join(schema._STATEMENTS)
+        for index in ('idx_crm_tickets_author_recent', 'idx_crm_tickets_recent',
+                      'idx_crm_tickets_queue_recent', 'idx_crm_tickets_department_recent'):
+            self.assertIn(index, ddl, index)
+        self.assertEqual(ddl.count('last_message_at DESC, id DESC'), 4)
+
+    def test_search_index_covers_the_columns_the_query_names(self):
+        """Индекс по ВЫРАЖЕНИЮ (COALESCE) не подходит запросу по столбцу: замер
+        показал проход по таблице на 124 мс, пока в индексе стоял COALESCE."""
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertIn('idx_crm_tickets_search_trgm', ddl)
+        self.assertIn('client_name gin_trgm_ops', ddl)
+        self.assertNotIn("COALESCE(client_name, '') gin_trgm_ops", ddl)
+        self.assertIn('idx_crm_tickets_phone_trgm', ddl)
+
+    def test_trigram_indexes_survive_a_base_without_the_extension(self):
+        """На базе без pg_trgm раздел обязан развернуться, просто без ускорения."""
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertIn("pg_extension WHERE extname = 'pg_trgm'", ddl)
+
+    def test_sort_column_is_not_nullable(self):
+        """NULL заставил бы обернуть ORDER BY в COALESCE и потерять индекс."""
+        ddl = ' '.join(schema._STATEMENTS)
+        self.assertIn('last_message_at    TIMESTAMP NOT NULL', ddl)
+
     def test_queue_is_not_deleted_with_its_history(self):
         ddl = ' '.join(schema._STATEMENTS)
         self.assertIn('REFERENCES crm_queues(id) ON DELETE RESTRICT', ddl)
@@ -256,21 +336,51 @@ class FrontendContractTest(unittest.TestCase):
         labelled = set(re.findall(r'^\s{4}([a-z_]+):', block.group(1), re.M))
         self.assertEqual(set(schema.TICKET_PRIORITIES), labelled)
 
-    def test_section_is_reachable_for_every_role(self):
-        """Пункт меню объявлен в общей части сайдбара, а не в ролевой ветке.
+    def test_menu_item_is_declared_once_and_gated(self):
+        """Пункт объявлен ОДИН раз в общей части сайдбара и закрыт предикатом.
 
-        Раздел открыт всем сотрудникам, и продублировать пункт по ветвям
-        (админ / глава / СВ / оператор) значило бы четыре места, где его легко
-        забыть — в проекте это уже случалось: раздел выдан, а пункта нет.
+        Продублировать его по ролевым ветвям (админ / глава / СВ / оператор)
+        значило бы четыре места, где легко забыть — в проекте это уже случалось:
+        раздел выдан, а пункта в меню нет, открывается только по адресу.
         """
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
         self.assertEqual(app.count("handleSidebarViewNavigation(e, 'crm_tickets')"), 1)
-        # Гард видимости не должен выкидывать сотрудника отдела с allowlist'ом.
-        self.assertIn("if (view === 'crm_tickets') return;", app)
-        # Тренеру раздел тоже нужен, а он ходит по своему списку разделов.
+        self.assertIn('{canAccessCrmSection && (', app)
+        # Гард видимости пускает только допущенных, но и не выкидывает их
+        # allowlist'ом отдела (у оператора СЗоВ он есть).
+        self.assertIn("if (view === 'crm_tickets' && canAccessCrmSection) return;", app)
+        # Сам раздел тоже за предикатом: спрятанный пункт — это не доступ.
+        self.assertIn('view === "crm_tickets" && canAccessCrmSection', app)
+
+    def test_pilot_id_matches_the_backend(self):
+        """Два списка пилотов разошлись бы молча: пункт есть, а API отдаёт 403."""
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        block = re.search(r'CRM_PILOT_USER_IDS = new Set\(\[([^\]]*)\]\)', app)
+        self.assertIsNotNone(block, 'во фронте пропал список пилотов')
+        frontend = {int(x) for x in re.findall(r'\d+', block.group(1))}
+        self.assertEqual(frontend, set(access.PILOT_USER_IDS))
+
+    def test_department_code_matches_the_backend(self):
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        self.assertIn("CRM_SECTION_DEPARTMENT_CODE = '%s'" % access.SECTION_DEPARTMENT_CODE, app)
+
+    def test_trainer_list_does_not_carry_the_section(self):
+        """Тренер вне периметра выката, и в его списке разделов места ему нет."""
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
         trainer_block = re.search(r'TRAINER_ALLOWED_VIEWS = Object\.freeze\(\[(.*?)\]\)', app, re.S)
         self.assertIsNotNone(trainer_block)
-        self.assertIn("'crm_tickets'", trainer_block.group(1))
+        self.assertNotIn("'crm_tickets'", trainer_block.group(1))
+
+    def test_section_does_not_open_its_own_realtime_channel(self):
+        """Второй поток на пользователя занял бы ещё нить waitress — их считаные."""
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(encoding='utf-8')
+        self.assertNotIn('EventSource', view)
+        self.assertNotIn('/stream', view)
+        self.assertNotIn('setInterval', view)
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        # Раздел двигает пульс по ОТПЕЧАТКУ источника, а не по факту перечитки
+        # сводки: иначе широковещательный тычок дёргал бы всех разом.
+        self.assertIn('crmDigestRef', app)
 
 
 class RecordingCursor:
@@ -283,10 +393,12 @@ class RecordingCursor:
 
     def __init__(self):
         self.queries = []
+        self.params = None
         self.rowcount = 0
 
     def execute(self, sql, params=None):
         self.queries.append(sql)
+        self.params = params
         if params is None:
             if '%' in sql:
                 raise AssertionError('placeholder без параметров: %r' % sql[:120])
@@ -301,6 +413,72 @@ class RecordingCursor:
 
     def fetchone(self):
         return tuple([1] + [None] * 40)
+
+
+class ListContractTest(unittest.TestCase):
+    """Список отдаёт порцию и признак «есть ещё» — без точного количества.
+
+    Точное «всего N» означало бы полный проход по периметру на каждый фильтр и
+    каждую букву в поиске; на 200 тыс. обращений это измеримо дорого, а человеку
+    нужно только «показать ещё».
+    """
+
+    def test_asks_for_one_row_more_than_it_returns(self):
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), limit=40)
+        self.assertEqual(cursor.params['limit'], 41)
+
+    def test_no_count_over_in_the_query(self):
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), limit=40)
+        self.assertNotIn('COUNT(*) OVER', cursor.queries[0])
+
+    def test_order_is_plain_columns_so_the_index_can_serve_it(self):
+        """COALESCE или выражение в ORDER BY отменяют чтение по индексу."""
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), limit=40)
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('ORDER BY t.last_message_at DESC, t.id DESC', sql)
+        self.assertNotIn('COALESCE(t.last_message_at', sql)
+
+    def test_digits_search_looks_up_the_number_and_the_phone(self):
+        """t.id::text = ... не берёт индекс по id, поэтому номер приводим к числу."""
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), search='150000')
+        sql = cursor.queries[0]
+        self.assertIn('t.id = %(search_id)s', sql)
+        self.assertIn('t.client_phone ILIKE', sql)
+        self.assertNotIn('t.subject ILIKE', sql)
+        self.assertEqual(cursor.params['search_id'], 150000)
+
+    def test_long_digits_are_a_phone_not_a_ticket_number(self):
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), search='77001234567')
+        self.assertIsNone(cursor.params['search_id'])
+
+    def test_word_search_never_touches_the_number(self):
+        """Смешанное ИЛИ заставляло базу идти по таблице: замер 270 мс."""
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), search='бонус')
+        sql = cursor.queries[0]
+        self.assertIn('t.subject ILIKE', sql)
+        self.assertIn('t.body ILIKE', sql)
+        self.assertIn('t.client_name ILIKE', sql)
+        self.assertNotIn('t.id =', sql)
+
+    def test_thread_has_a_ceiling(self):
+        """Ушедшая в обсуждение группа не должна тянуть тысячу сообщений в браузер."""
+        cursor = RecordingCursor()
+        queries.list_messages(cursor, 1)
+        self.assertIn('LIMIT', cursor.queries[0])
+
+    def test_counters_left_only_what_is_displayed(self):
+        """Считать то, что не показывают, — прямая плата за ничего."""
+        cursor = RecordingCursor()
+        result = queries.counters(cursor, ctx(role='super_admin'))
+        self.assertEqual(set(result), {'unread'})
+        # Условие «мой автор» в WHERE — иначе частичный индекс не включится.
+        self.assertIn('t.created_by = %(viewer_id)s', cursor.queries[0])
 
 
 class SqlComposesTest(unittest.TestCase):

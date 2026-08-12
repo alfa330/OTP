@@ -147,7 +147,11 @@ _STATEMENTS = [
 
         due_at             TIMESTAMP,
         first_reply_at     TIMESTAMP,
-        last_message_at    TIMESTAMP,
+        -- NOT NULL не для порядка ради порядка: по этому столбцу идёт ORDER BY
+        -- каждого списка, и NULL заставил бы обернуть его в COALESCE — а
+        -- выражение в сортировке отменяет чтение по индексу. Значение
+        -- ставится при вставке и дальше только двигается вперёд.
+        last_message_at    TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
         last_inbound_at    TIMESTAMP,
 
         -- Непрочитанное автором: что именно произошло и когда. NULL = автор
@@ -165,26 +169,65 @@ _STATEMENTS = [
     )
     """ % {'now': _NOW},
 
+    # ── Индексы под ФАКТИЧЕСКИЕ запросы раздела ───────────────────────────
+    # Порядок столбцов везде: сначала то, по чему фильтруем (периметр), потом
+    # то, по чему сортируем. Иначе индекс отдаёт строки, но база всё равно их
+    # сортирует — а сортировка и есть то, что дорожает с ростом таблицы.
+
+    # Список «мои обращения» — самый частый запрос раздела: фильтр по автору,
+    # порядок по свежести переписки. Покрывает и оператора, и сегмент «Мои».
     """
-    CREATE INDEX IF NOT EXISTS idx_crm_tickets_author
-        ON crm_tickets(created_by, created_at DESC)
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_author_recent
+        ON crm_tickets(created_by, last_message_at DESC, id DESC)
     """,
+    # Список «все» у админа и глава/СВ после отбора периметра: тот же порядок,
+    # но без ведущего автора.
     """
-    CREATE INDEX IF NOT EXISTS idx_crm_tickets_queue_status
-        ON crm_tickets(queue_id, status, created_at DESC)
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_recent
+        ON crm_tickets(last_message_at DESC, id DESC)
+    """,
+    # Фильтр по очереди («Все группы» → конкретная группа).
+    """
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_queue_recent
+        ON crm_tickets(queue_id, last_message_at DESC, id DESC)
+    """,
+    # Периметр главы отдела.
+    """
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_department_recent
+        ON crm_tickets(department_id, last_message_at DESC, id DESC)
     """,
     # Колокол спрашивает ровно это: «что у меня непрочитано». Частичный индекс —
-    # непрочитанных единицы, а тикетов со временем будут десятки тысяч.
+    # непрочитанных единицы, а обращений со временем десятки тысяч, и полный
+    # индекс по столбцу, который почти весь NULL, был бы платой ни за что.
     """
     CREATE INDEX IF NOT EXISTS idx_crm_tickets_unread
         ON crm_tickets(created_by, author_unread_at DESC)
         WHERE author_unread_at IS NOT NULL
     """,
-    # Открытые обращения — рабочий список раздела, он же считается для бейджей.
+    # Поиск по тексту (ТЗ #29: «поиск по тексту»). ILIKE '%%слово%%' обычным
+    # индексом не ускоряется вообще — нужен триграммный GIN. В боевой базе
+    # расширение pg_trgm уже стоит (его использует вики), поэтому индекс
+    # создаётся; если расширения нет, оператор молча пропускается, и поиск
+    # остаётся рабочим, просто последовательным.
     """
-    CREATE INDEX IF NOT EXISTS idx_crm_tickets_active
-        ON crm_tickets(status, created_at DESC)
-        WHERE status IN ('open', 'in_progress', 'answered')
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
+            -- Один индекс на три столбца сразу: база собирает по нему BitmapOr,
+            -- когда условие поиска перечисляет их через ИЛИ. Отдельные индексы
+            -- дали бы то же самое, но втрое больше места на запись.
+            CREATE INDEX IF NOT EXISTS idx_crm_tickets_search_trgm
+                ON crm_tickets USING gin (
+                    subject gin_trgm_ops,
+                    body gin_trgm_ops,
+                    client_name gin_trgm_ops
+                );
+            -- Телефон ищут по фрагменту («последние четыре цифры»), поэтому
+            -- ему тоже нужен триграммный, а не обычный индекс.
+            CREATE INDEX IF NOT EXISTS idx_crm_tickets_phone_trgm
+                ON crm_tickets USING gin (client_phone gin_trgm_ops);
+        END IF;
+    END $$
     """,
 
     # ──────────────────────────────────────────────────────────────────────

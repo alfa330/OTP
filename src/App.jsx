@@ -191,7 +191,6 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'work_schedules',
     'wiki',
     'events',
-    'crm_tickets',
 ]);
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
@@ -1398,6 +1397,37 @@ const canAccessSzovWallboardForUser = (userLike) => {
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
+/* Раздел «Обращения» на время выката открыт не всем: отдел СЗоВ (глава и
+   супервайзеры), глобальные админы — и один оператор пилотом. Границу отдела
+   держим по КОДУ, а не по id: id СЗоВ засеян миграцией и в разных окружениях
+   разный, а /api/admin/departments оператору недоступен.
+
+   Пилот задан списком id, а не «ролью оператор в СЗоВ»: смысл выката в том,
+   чтобы обкатать механику на живых обращениях, не выдавая раздел сотне человек
+   до того, как настроены очереди. Ту же границу держит crm/access.py
+   (SECTION_DEPARTMENT_CODE + PILOT_USER_IDS) — там она и обязательная, а здесь
+   только про то, показывать ли пункт меню. */
+const CRM_SECTION_DEPARTMENT_CODE = 'szov';
+const CRM_PILOT_USER_IDS = new Set([20]);   // Хайрихан Шерзад Зуритдинулы
+
+const isCrmSectionDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).includes(CRM_SECTION_DEPARTMENT_CODE)
+);
+
+const canAccessCrmSectionForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
+    // отделов обращения СЗоВ не нужны (глава СЗоВ проходит проверкой ниже).
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    if (isCrmSectionDepartmentHead(userLike)) return true;
+    if (CRM_PILOT_USER_IDS.has(Number(userLike?.id))) return true;
+    return isSupervisorRole(role)
+        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+            === CRM_SECTION_DEPARTMENT_CODE;
+};
+
 const canManageSzovBroadcastForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
@@ -34963,6 +34993,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessAiQaSection = canAccessAiQaForUser(user);
             const canAccessChatAppSection = canAccessChatAppForUser(user);
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
+            const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
@@ -43389,17 +43420,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Что человек увидит ВНУТРИ, решают правила разделов и статей на бэкенде,
                 // а не этот гард: у раздела своя модель прав с точностью до статьи.
                 if (view === 'wiki') return;
-                // «Обращения» — как вики: заявку в рабочую Telegram-группу может
-                // завести любой сотрудник, поэтому allowlist отдела здесь не при чём.
-                // Что человек увидит ВНУТРИ (только свои / группы / отдел), решает
-                // периметр на бэкенде.
-                if (view === 'crm_tickets') return;
+                // «Обращения» — свой предикат, не allowlist отдела: раздел общий,
+                // но на время выката открыт СЗоВ, админам и пилотному оператору.
+                if (view === 'crm_tickets' && canAccessCrmSection) return;
                 // «Классификатор авто» — справочник для операторов, общий для всех отделов.
                 if (departmentAllowsView(user, view)) return;
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessSipSettings, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessSipSettings, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -43627,6 +43656,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => withAccessTokenHeader({ 'X-User-Id': sidebarLatestRef.current.userId }),
                 [],
             );
+            /* Отпечаток состава сводки по источникам. Раздел «Обращения»
+               перечитывается ровно тог, когда изменился ЕГО отпечаток: пришёл
+               ответ из группы, нажали «Выполнено», погасили непрочитанное в
+               другой вкладке. На чужие тычки раздел не реагирует. */
+            const crmDigestRef = useRef('');
+            const stableNotificationsDigest = useCallback((digest) => {
+                const next = String(digest?.crm || '');
+                if (next === crmDigestRef.current) return;
+                crmDigestRef.current = next;
+                setCrmRealtimePulse((prev) => prev + 1);
+            }, []);
+
             const stableNotificationsNavigate = useCallback((nextView, target) => {
                 if (!nextView) return;
                 /* Переход по target нужен по делу двум разделам: у вики статья
@@ -43706,11 +43747,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if ('crm' in counts) {
                     setCrmUnreadCount(Math.max(0, Number(counts.crm) || 0));
                 }
-                /* Пульс растёт на КАЖДОЙ доставленной сводке, а не только когда
-                   изменилось число: сводка перечитывается по тычку сервера, и
-                   это единственный сигнал «у тебя что-то произошло», который
-                   раздел может получить, не открывая второй поток. */
-                setCrmRealtimePulse((prev) => prev + 1);
+                /* Пульс раздела двигает НЕ сам факт перечитки сводки, а
+                   изменение её состава по источнику crm — см. handleBellDigest.
+                   Тычок бывает широковещательным (новый пост «Ивентов» будит все
+                   вкладки), и раздел, реагирующий на факт перечитки, дёргал бы
+                   сервер у каждого открытого клиента без всякой причины. */
             }, []);
 
             const sidebarTree = useMemo(() => {
@@ -43869,6 +43910,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         getHeaders={stableNotificationsHeaders}
                                         onNavigate={stableNotificationsNavigate}
                                         onCounts={stableNotificationsCounts}
+                                        onDigest={stableNotificationsDigest}
                                         readSource={bellReadSource}
                                         onIncoming={stableNotificationsIncoming}
                                         mobileMenuOpen={mobileMenuOpen}
@@ -44541,10 +44583,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     </li>
 
-                                    {/* «Обращения» — заявки в рабочие Telegram-группы. Пункт тоже
-                                        общий: обращение может завести любой сотрудник, а периметр
-                                        (свои / группы / отдел) считает бэкенд. Бейдж — число
-                                        непрочитанных ответов, его приносит колокол. */}
+                                    {/* «Обращения» — заявки в рабочие Telegram-группы.
+                                        На время выката пункт видят СЗоВ (глава и СВ), админы и
+                                        пилотный оператор; периметр внутри (свои / группы / отдел)
+                                        считает бэкенд. Бейдж — непрочитанные ответы, из колокола.
+                                        Пункт объявлен ОДИН раз в общей части меню, а не по ролевым
+                                        ветвям: иначе его легко забыть в одной из них. */}
+                                    {canAccessCrmSection && (
                                     <li>
                                         <button
                                             type="button"
@@ -44560,6 +44605,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             )}
                                         </button>
                                     </li>
+                                    )}
 
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
@@ -44734,6 +44780,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 eventsUnreadCount,
                 fourYouUnreadCount,
                 crmUnreadCount,
+                canAccessCrmSection,
                 bellReadSource,
                 mobileIncomingNonce,
                 selectedSvId,
@@ -45092,7 +45139,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
-                        {view === "crm_tickets" && (
+                        {view === "crm_tickets" && canAccessCrmSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка обращений…</div>}>
                                 <CrmTicketsView
                                     apiBaseUrl={API_BASE_URL}

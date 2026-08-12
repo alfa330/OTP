@@ -59,6 +59,14 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         ctx = queries.load_access_context(cursor, requester_id)
                     if not ctx:
                         return jsonify({"error": "Пользователь не найден"}), 404
+                    # Гейт раздела — здесь, до любого обработчика: спрятанный
+                    # пункт меню доступом не является, раздел открывается и
+                    # прямым адресом.
+                    if not access.can_open_section(ctx):
+                        return jsonify({
+                            "error": "Раздел «Обращения» вам не открыт",
+                            "code": "CRM_SECTION_CLOSED",
+                        }), 403
                     if manage and not access.can_manage_queues(ctx):
                         return jsonify({
                             "error": "Настраивать очереди может только администратор",
@@ -248,10 +256,22 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
     # ── Обращения ────────────────────────────────────────────────────────
     @crm_route('/tickets')
     def crm_tickets(ctx):
+        """Список обращений в периметре.
+
+        Здесь НЕТ ни точного «всего N», ни агрегатов по статусам, и это
+        осознанно. Оба стоят полного прохода по периметру (для админа — по всей
+        таблице) и считались бы на каждый фильтр, каждую догрузку и каждую букву
+        в поиске. Вместо счётчика — признак has_more, который берётся из лишней
+        запрошенной строки, то есть бесплатно. Числа для шапки отдаёт /ping один
+        раз при открытии раздела.
+
+        capabilities возвращаются здесь же: они уже посчитаны в декораторе, а
+        разделу иначе пришлось бы дёргать /ping ради них при каждом входе.
+        """
         args = request.args
         statuses = [s for s in (args.get('status') or '').split(',') if s]
         with db._get_cursor() as cursor:
-            items, total = queries.list_tickets(
+            items, has_more = queries.list_tickets(
                 cursor, ctx,
                 status=statuses or None,
                 queue_id=_int_or_none(args.get('queue_id')),
@@ -261,8 +281,11 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 limit=_int_or_none(args.get('limit')) or 50,
                 offset=_int_or_none(args.get('offset')) or 0,
             )
-            counters = queries.counters(cursor, ctx)
-        return jsonify({"items": items, "total": total, "counters": counters})
+        return jsonify({
+            "items": items,
+            "has_more": has_more,
+            "capabilities": access.capabilities(ctx),
+        })
 
     @crm_route('/tickets', methods=('POST',))
     def crm_ticket_create(ctx):
@@ -341,20 +364,33 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             if not access.can_view_ticket(ctx, ticket):
                 return jsonify({"error": "Обращение вне вашего доступа"}), 403
             messages = queries.list_messages(cursor, ticket_id)
-            events = queries.list_events(cursor, ticket_id)
             if queries.mark_seen_by_author(cursor, ticket_id, ctx['user_id']):
                 ticket['unread'] = False
                 ticket['unread_kind'] = None
+        # Историю действий карточка не тянет: она нужна изредка и почти вся
+        # повторяет то, что и так видно в переписке. Открывается отдельно
+        # (GET /tickets/<id>/events) — один запрос по кнопке вместо лишнего
+        # запроса на каждое открытие карточки.
         return jsonify({
             "item": ticket,
             "messages": messages,
-            "events": events,
             "permissions": {
                 "can_reply": access.can_reply(ctx, ticket),
                 "can_change_status": access.can_change_status(ctx, ticket),
                 "can_delete": access.can_delete_ticket(ctx, ticket),
             },
         })
+
+    @crm_route('/tickets/<int:ticket_id>/events')
+    def crm_ticket_events(ticket_id, ctx):
+        """История действий по обращению — по запросу из карточки."""
+        with db._get_cursor() as cursor:
+            ticket = queries.get_ticket(cursor, ticket_id, ctx['user_id'])
+            if not ticket:
+                return jsonify({"error": "Обращение не найдено"}), 404
+            if not access.can_view_ticket(ctx, ticket):
+                return jsonify({"error": "Обращение вне вашего доступа"}), 403
+            return jsonify({"events": queries.list_events(cursor, ticket_id)})
 
     @crm_route('/tickets/<int:ticket_id>/messages', methods=('POST',))
     def crm_ticket_reply(ticket_id, ctx):

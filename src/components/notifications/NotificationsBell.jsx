@@ -33,6 +33,21 @@ const SOURCE_META = {
 // снимаются действием — см. notifications/sources.py::mark_seen.
 const CLEARABLE = ['events', 'four_you', 'lms'];
 
+/* Отпечаток состава сводки по источникам: {source: 'id:at,id:at'}.
+   Раздел сравнивает свой отпечаток с предыдущим и перечитывает данные только
+   при изменении. Порядок элементов сохраняем как пришёл — он уже осмысленный
+   (важное сверху), а сортировка ради «стабильности» стёрла бы тот факт, что
+   наверх поднялось новое. */
+const sourceDigest = (items) => {
+    const digest = {};
+    for (const item of items) {
+        if (!item?.source) continue;
+        const mark = `${item.id}:${item.at || ''}`;
+        digest[item.source] = digest[item.source] ? `${digest[item.source]},${mark}` : mark;
+    }
+    return digest;
+};
+
 // Последняя страховка при возврате фокуса. Обычные изменения будит SSE, а
 // переходы по времени и редкие потери канала сверяет сам поток раз в минуту.
 const REFRESH_GAP_MS = 5 * 60 * 1000;
@@ -66,8 +81,14 @@ const fmtWhen = (iso) => {
    экран вместе с колоколом, поэтому звенеть и показывать карточку должен тот,
    кто виден: гамбургер. mobileMenuOpen говорит, открыто ли меню — при открытом
    карточка живёт на своём обычном месте, в сайдбаре. */
+/* onDigest — отпечаток состава сводки по источникам: {crm: 'id:at,id:at'}.
+   Нужен разделам, которые хотят обновляться «по событию», но НЕ на каждый тычок.
+   Тычок бывает широковещательным (новый пост «Ивентов» будит всех), и раздел,
+   реагирующий на сам факт перечитки, дёргал бы сервер у всех открытых вкладок
+   без всякой причины. Отпечаток меняется только когда изменилось то, что
+   касается этого пользователя, и достаётся бесплатно — из уже полученной сводки. */
 export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavigate,
-                                            onCounts, readSource, onIncoming,
+                                            onCounts, onDigest, readSource, onIncoming,
                                             mobileMenuOpen }) {
     const [open, setOpen] = useState(false);
     // Закрытие в два шага, как у дропдауна «Аккаунта»: сначала обратная
@@ -158,13 +179,14 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             // Бейджи разделов в сайдбаре берут числа отсюда же: раньше «Ивенты»
             // и «4 You» ходили за ними своими запросами, считая ровно то же.
             onCounts?.(nextCounts);
+            onDigest?.(sourceDigest(nextItems));
         } catch (e) {
             /* Сетевой сбой или 503 «сводку собрать не удалось». Ничего не
                трогаем: прежние числа честнее, чем нули, которых сервер не
                присылал. onCounts намеренно НЕ вызывается — иначе бейджи
                сайдбара погасли бы из-за недоступности базы. */
         }
-    }, [apiBaseUrl, getHeaders, onCounts, user?.id]);
+    }, [apiBaseUrl, getHeaders, onCounts, onDigest, user?.id]);
 
     // Сам gate живёт весь срок компонента, а ref подставляет ему актуальные
     // URL, токен и пользователя без сброса single-flight на каждом рендере.
