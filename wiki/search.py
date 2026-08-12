@@ -147,7 +147,23 @@ SELECT id, slug, title, summary, status, views, updated_at, rank_fts, rank_trgm,
                    coalesce(content_plain, ''),
                    tsq_mark,
                    'MaxFragments=3, MaxWords=26, MinWords=10, '
-                   'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet
+                   'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet,
+       -- Тот же отрывок, но по СВЁРНУТОМУ тексту. Нужен ровно для одного случая:
+       -- статья написана по-казахски («7 Қазына»), человек набрал по-русски
+       -- («7 Казына»). Статья находится (вектор и tsvector свёрнуты), а вот
+       -- подсветка по оригиналу не срабатывает — и в выдаче остаётся голый
+       -- заголовок, который читается как «не нашлось». Замер на проде: именно
+       -- так выглядела статья «Все акции» по запросу «7 казына».
+       --
+       -- Основной отрывок остаётся ПЕРВЫМ и берётся из оригинала: у русских
+       -- статей превью обязано быть дословным. Свёрнутый идёт в дело только
+       -- когда основной пуст, то есть ценой лишь одной подмены — казахская
+       -- буква в превью показывается русской.
+       ts_headline('russian',
+                   translate(coalesce(content_plain, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'),
+                   tsq_mark,
+                   'MaxFragments=3, MaxWords=26, MinWords=10, '
+                   'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet_folded
   FROM top
  ORDER BY tier ASC, score DESC, views DESC
 """
@@ -174,7 +190,7 @@ _TIER_TRIGRAM = [
 _TIER_FALLBACK = 8
 
 _KEYS = ('id', 'slug', 'title', 'summary', 'status', 'views', 'updated_at',
-         'rank_fts', 'rank_trgm', 'snippet')
+         'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded')
 
 # Буквы и цифры, из которых собирается префиксный tsquery. Всё прочее
 # (операторы tsquery, кавычки, дефисы) отбрасывается — слово из букв и цифр
@@ -290,6 +306,10 @@ def _rows_to_items(cursor):
     for row in cursor.fetchall():
         item = dict(zip(_KEYS, row))
         fragments = split_snippet(item['snippet'])
+        if not fragments:
+            # Основной отрывок пуст — пробуем свёрнутый (см. запрос выше).
+            fragments = split_snippet(item.get('snippet_folded'))
+        item.pop('snippet_folded', None)
         item['highlights'] = fragments
         item['snippet'] = fragments[0] if fragments else ''
         items.append(item)

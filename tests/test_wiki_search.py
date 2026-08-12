@@ -108,6 +108,33 @@ class AliasTest(unittest.TestCase):
                                 'группа %r: из %r не нашлись %r' % (group, word, expected - found))
 
 
+class KazakhSnippetTest(unittest.TestCase):
+    """Отрывок для статьи, написанной по-казахски, обязан быть непустым.
+
+    Замер на проде: по запросу «7 казына» статья «Все акции» (в ней «7 Қазына»)
+    находилась, но отрывка не получала — ts_headline искал по оригиналу. В выдаче
+    оставался голый заголовок, и это читается как «не нашлось».
+    """
+
+    def test_query_has_a_folded_fallback(self):
+        self.assertIn('snippet_folded', wiki_search._SEARCH_SQL)
+        self.assertIn('snippet_folded', wiki_search._KEYS)
+
+    def test_original_snippet_is_preferred(self):
+        """Свёрнутый отрывок — только запас: у русских статей превью дословное."""
+        source = wiki_search.__file__
+        with open(source, encoding='utf-8') as handle:
+            body = handle.read()
+        primary = body.index("split_snippet(item['snippet'])")
+        fallback = body.index("split_snippet(item.get('snippet_folded'))")
+        self.assertLess(primary, fallback, 'запас обязан идти ПОСЛЕ основного')
+
+    def test_service_key_is_not_leaked_to_client(self):
+        """snippet_folded — внутреннее поле, наружу уходить не должно."""
+        self.assertIn("item.pop('snippet_folded', None)",
+                      open(wiki_search.__file__, encoding='utf-8').read())
+
+
 class JsAliasSyncTest(unittest.TestCase):
     """Клиентский словарь (searchText.js) обязан совпадать с серверным.
 
