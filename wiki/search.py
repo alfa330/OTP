@@ -142,30 +142,47 @@ hit AS (
 top AS (
     SELECT * FROM hit ORDER BY tier ASC, score DESC, views DESC LIMIT %(limit)s
 )
-SELECT id, slug, title, summary, status, views, updated_at, rank_fts, rank_trgm,
+SELECT top.id, top.slug, top.title, top.summary, top.status, top.views,
+       top.updated_at, top.rank_fts, top.rank_trgm,
        ts_headline('russian',
-                   coalesce(content_plain, ''),
-                   tsq_mark,
+                   coalesce(top.content_plain, ''),
+                   top.tsq_mark,
                    'MaxFragments=3, MaxWords=26, MinWords=10, '
                    'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet,
-       -- Тот же отрывок, но по СВЁРНУТОМУ тексту. Нужен ровно для одного случая:
-       -- статья написана по-казахски («7 Қазына»), человек набрал по-русски
-       -- («7 Казына»). Статья находится (вектор и tsvector свёрнуты), а вот
-       -- подсветка по оригиналу не срабатывает — и в выдаче остаётся голый
-       -- заголовок, который читается как «не нашлось». Замер на проде: именно
-       -- так выглядела статья «Все акции» по запросу «7 казына».
+       -- Запасной отрывок для случая «статья по-казахски, запрос по-русски».
+       -- Статья находится (векторы и tsvector свёрнуты), а ts_headline
+       -- подсвечивает по ОРИГИНАЛУ — и по запросу «Казына» в тексте с «Қазына»
+       -- отрывка не получается вовсе. В выдаче остаётся голый заголовок, что
+       -- читается как «не нашлось».
        --
-       -- Основной отрывок остаётся ПЕРВЫМ и берётся из оригинала: у русских
-       -- статей превью обязано быть дословным. Свёрнутый идёт в дело только
-       -- когда основной пуст, то есть ценой лишь одной подмены — казахская
-       -- буква в превью показывается русской.
-       ts_headline('russian',
-                   translate(coalesce(content_plain, ''), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ'),
-                   tsq_mark,
-                   'MaxFragments=3, MaxWords=26, MinWords=10, '
-                   'StartSel=<mark>, StopSel=</mark>, FragmentDelimiter="@@F@@"') AS snippet_folded
+       -- Текст берётся ИЗ ОРИГИНАЛА, а позиция ищется по свёрнутому: свёртка
+       -- посимвольная, один к одному, поэтому смещения совпадают. Первая версия
+       -- отдавала сам свёрнутый текст — и подменяла в превью казахскую букву
+       -- русской, то есть показывала статью не такой, какая она есть. Здесь
+       -- подменять нечего: наружу уходит ровно то, что в статье.
+       CASE WHEN m.pos IS NULL THEN NULL ELSE
+            substring(a2.content_plain from GREATEST(m.pos - 70, 1)
+                      for m.pos - GREATEST(m.pos - 70, 1))
+            || '<mark>' || substring(a2.content_plain from m.pos for m.len) || '</mark>'
+            || substring(a2.content_plain from m.pos + m.len for 110)
+       END AS snippet_folded
   FROM top
- ORDER BY tier ASC, score DESC, views DESC
+  JOIN wiki_articles a2 ON a2.id = top.id
+  LEFT JOIN LATERAL (
+      -- Самое раннее вхождение любого варианта запроса, по свёрнутому тексту.
+      SELECT t.pos, t.len
+        FROM (
+            SELECT position(translate(lower(v), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ') IN
+                            translate(lower(coalesce(a2.content_plain, '')), 'әӘғҒқҚңҢөӨұҰүҮһҺіІёЁ', 'аАгГкКнНоОуУуУхХиИеЕ')) AS pos,
+                   length(v) AS len
+              FROM unnest(%(variants)s::text[]) AS v
+             WHERE length(btrim(v)) >= 3
+        ) t
+       WHERE t.pos > 0
+       ORDER BY t.pos
+       LIMIT 1
+  ) m ON TRUE
+ ORDER BY top.tier ASC, top.score DESC, top.views DESC
 """
 
 # Ступени повторяют getRelevanceRank оригинала: точный заголовок > заголовок >

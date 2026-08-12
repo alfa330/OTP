@@ -72,3 +72,13 @@ test('свёрнутый вариант запроса есть в списке 
         'свёрнутый вариант обязан попасть в список');
     assert.ok(queryVariants('7 Казына').includes('7 казына'));
 });
+
+test('прокрутка умеет догонять совпадение по горизонтали', async () => {
+    /* Совпадение в пятой колонке из одиннадцати остаётся за правым краем
+       прокручиваемой обёртки таблицы: вертикально страница доезжает до строки, а
+       подсвеченное слово человек не видит — и это читается как «нет перехода».
+       Проверяем, что функция для этого есть и экспортирована. */
+    const module = await import('../src/components/wiki/scrollContainer.js');
+    assert.equal(typeof module.getHorizontalScroller, 'function');
+    assert.equal(module.getHorizontalScroller(null), null);
+});

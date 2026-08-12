@@ -120,6 +120,21 @@ class KazakhSnippetTest(unittest.TestCase):
         self.assertIn('snippet_folded', wiki_search._SEARCH_SQL)
         self.assertIn('snippet_folded', wiki_search._KEYS)
 
+    def test_fallback_keeps_the_original_spelling(self):
+        """Отрывок не подменяет буквы: текст берётся из оригинала.
+
+        Первая версия отдавала свёрнутый текст, и в превью «Қазына» показывалась
+        как «Казына» — статья выглядела не такой, какая она есть. Позиция ищется
+        по свёрнутому (свёртка посимвольная, смещения совпадают), а вырезается
+        оригинал.
+        """
+        sql = wiki_search._SEARCH_SQL
+        self.assertIn('substring(a2.content_plain from m.pos for m.len)', sql)
+        self.assertIn('LEFT JOIN LATERAL', sql)
+        # Свёртка применяется только к ПОИСКУ позиции, не к выводимому тексту.
+        marked = sql[sql.index('CASE WHEN m.pos'):sql.index('END AS snippet_folded')]
+        self.assertNotIn('translate(', marked)
+
     def test_original_snippet_is_preferred(self):
         """Свёрнутый отрывок — только запас: у русских статей превью дословное."""
         source = wiki_search.__file__

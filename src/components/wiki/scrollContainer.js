@@ -36,22 +36,54 @@ export function getScrollContainer(node) {
     return null;
 }
 
+/** Ближайший предок, который прокручивается ПО ГОРИЗОНТАЛИ. */
+export function getHorizontalScroller(node) {
+    let current = node && node.parentElement;
+    while (current && current !== document.body) {
+        const { overflowX } = window.getComputedStyle(current);
+        if ((overflowX === 'auto' || overflowX === 'scroll')
+            && current.scrollWidth > current.clientWidth + 1) {
+            return current;
+        }
+        current = current.parentElement;
+    }
+    return null;
+}
+
 /**
  * Прокрутить контейнер так, чтобы элемент оказался под шапкой.
  * offset — сколько пикселей оставить сверху (высота липкой шапки раздела).
+ *
+ * Прокрутка ДВУМЕРНАЯ, и вторая половина появилась не для полноты: справочные
+ * таблицы вики прокручиваются внутри своей обёртки, и совпадение в пятой колонке
+ * из одиннадцати остаётся за правым краем. Вертикально страница доезжала до
+ * нужной строки, а подсвеченное слово человек не видел — и это читается как «нет
+ * перехода», хотя переход состоялся.
  */
 export function scrollToElement(target, offset = 88) {
     if (!target) return;
     const container = getScrollContainer(target);
     if (!container) {
         target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        return;
+    } else {
+        const top = target.getBoundingClientRect().top
+            - container.getBoundingClientRect().top
+            + container.scrollTop
+            - offset;
+        container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
     }
-    const top = target.getBoundingClientRect().top
-        - container.getBoundingClientRect().top
-        + container.scrollTop
-        - offset;
-    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+
+    const box = getHorizontalScroller(target);
+    if (!box) return;
+    const targetBox = target.getBoundingClientRect();
+    const boxBox = box.getBoundingClientRect();
+    const hidden = targetBox.left < boxBox.left + 8 || targetBox.right > boxBox.right - 8;
+    if (!hidden) return;
+    // Оставляем треть ширины слева: слово у самого края читается хуже, а у
+    // таблицы слева обычно стоит колонка-название, по которой человек и
+    // ориентируется.
+    const left = targetBox.left - boxBox.left + box.scrollLeft - box.clientWidth / 3;
+    box.scrollTo({ left: Math.max(0, left), behavior: 'smooth' });
 }
 
 /**
