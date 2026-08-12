@@ -5,7 +5,7 @@
 третьим по величине в разделе.
 """
 
-from flask import jsonify, request
+from flask import Response, jsonify, request
 
 from . import offices as wiki_offices
 from . import queries
@@ -186,3 +186,46 @@ def register(bp, wiki_route, db, log_ip):
         if 'error' in result:
             return jsonify(result), 400
         return jsonify(result)
+
+    # ── Тайлы карты ──────────────────────────────────────────────────────
+    #
+    # ЕДИНСТВЕННЫЙ роут раздела без авторизации, и это осознанно. Картинку
+    # нельзя запросить с заголовком Authorization: <img> его не отправляет, а
+    # куки до него доходят не всегда — в вебвью SameSite=None понижается до
+    # Lax (bot_schedule2.py), и карта молча ломалась бы у части сотрудников.
+    # Отдаём мы при этом чужие публичные тайлы, которые и так доступны любому
+    # напрямую у 2ГИС, — закрывать тут нечего.
+    #
+    # Прокси нужен не ради доступа: 2ГИС режет пачку запросов (замер 12.08 —
+    # четыре карты из пятнадцати пришли пустыми), а скачанный один раз тайл
+    # больше не меняется.
+    @bp.route('/map/tile/<int:z>/<int:x>/<int:y>.png', methods=('GET',))
+    def wiki_map_tile(z, x, y):
+        if not wiki_offices.tile_is_valid(z, x, y):
+            return jsonify({"error": "Тайл вне допустимых границ"}), 400
+
+        try:
+            with db._get_cursor() as cursor:
+                image = wiki_offices.read_tile(cursor, z, x, y)
+        except Exception:  # noqa: BLE001 — таблицы может ещё не быть
+            image = None
+
+        if image is None:
+            # Скачивание вынесено из-под курсора: соединение из общего пула не
+            # должно ждать чужую сеть (пул делится с SSE-аукционом).
+            image = wiki_offices.fetch_tile(z, x, y)
+            if image:
+                try:
+                    with db._get_cursor() as cursor:
+                        wiki_offices.store_tile(cursor, z, x, y, image)
+                except Exception:  # noqa: BLE001 — не смогли закэшировать, отдадим как есть
+                    pass
+
+        if not image:
+            # Пустой ответ, а не 500: клиент прячет такой тайл и оставляет фон.
+            return Response(status=204)
+
+        return Response(image, mimetype='image/png', headers={
+            # Тайл на конкретном зуме не меняется — кэшируем надолго.
+            'Cache-Control': 'public, max-age=2592000, immutable',
+        })

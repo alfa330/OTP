@@ -164,7 +164,7 @@ function MapField({ draft, setDraft, base, headers, showToast }) {
 
             {draft.lat != null && draft.lon != null && (
                 <div className="mt-2">
-                    <OfficeMap lat={draft.lat} lon={draft.lon} height={140} />
+                    <OfficeMap base={base} lat={draft.lat} lon={draft.lon} height={140} />
                     <div className="mt-1 px-1 text-[11.5px] tabular-nums text-slate-400">
                         {draft.lat.toFixed(6)}, {draft.lon.toFixed(6)}
                     </div>

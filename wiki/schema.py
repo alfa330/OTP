@@ -641,6 +641,25 @@ _OFFICE_STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_office_parks_park ON wiki_office_taxi_parks(park_id);",
+    # Кэш тайлов карты.
+    #
+    # Замер 12.08: 2ГИС отдаёт растровые тайлы без ключа, но пачку запросов
+    # режет — на странице с пятнадцатью офисами четыре карты приходили пустыми
+    # (204 с пустым телом, для <img> это ошибка). Тайл скачивается один раз и
+    # дальше отдаётся нами: и 2ГИС не долбим, и карта не зависит от того,
+    # сколько человек открыло раздел одновременно.
+    #
+    # Объём мал: пятнадцати офисам хватает шестидесяти тайлов, это ~2,5 МБ.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_map_tiles (
+        z          SMALLINT NOT NULL,
+        x          INTEGER NOT NULL,
+        y          INTEGER NOT NULL,
+        image      BYTEA NOT NULL,
+        fetched_at TIMESTAMP NOT NULL DEFAULT %(now)s,
+        PRIMARY KEY (z, x, y)
+    );
+    """,
 ]
 
 

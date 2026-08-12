@@ -71,7 +71,7 @@ const StatusBadge = ({ schedule, isOnline, tick }) => {
     );
 };
 
-const OfficeCard = ({ office, canManage, onEdit, onArchive, tick }) => {
+const OfficeCard = ({ base, office, canManage, onEdit, onArchive, tick }) => {
     const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
     const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
     const overrides = (office.parks || []).filter((link) => link.phone);
@@ -82,6 +82,7 @@ const OfficeCard = ({ office, canManage, onEdit, onArchive, tick }) => {
             <div className="flex flex-col sm:flex-row">
                 {office.lat != null && office.lon != null && (
                     <OfficeMap
+                        base={base}
                         lat={office.lat}
                         lon={office.lon}
                         url={office.map_url}
@@ -384,6 +385,7 @@ export default function WikiOffices({ base, headers, showToast }) {
                         {group.items.map((office) => (
                             <OfficeCard
                                 key={office.id}
+                                base={base}
                                 office={office}
                                 canManage={canManage}
                                 onEdit={(item) => setDraft(draftFrom(item))}

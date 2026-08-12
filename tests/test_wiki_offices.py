@@ -8,7 +8,9 @@
 
 import unittest
 
-from wiki.offices import DAY_CODES, normalize_schedule, parse_map_coords, resolve_map_link
+from wiki.offices import (
+    DAY_CODES, normalize_schedule, parse_map_coords, resolve_map_link, tile_is_valid,
+)
 
 
 # Реальный ответ go.2gis.com/xrzn2 (головной офис в Астане).
@@ -149,6 +151,32 @@ class NormalizeScheduleTest(unittest.TestCase):
                                      'holiday': {'from': '09:00', 'to': '19:00'}})
         self.assertEqual(result['mon'], {'from': '09:00', 'to': '19:00'})
         self.assertNotIn('holiday', result)
+
+
+class TileBoundsTest(unittest.TestCase):
+    """Границы тайла.
+
+    Роут тайлов — единственный без авторизации, и проверка границ у него
+    единственный ограничитель: без неё чужой запрос превращал бы наш сервер в
+    генератор обращений к 2ГИС с любыми номерами.
+    """
+
+    def test_real_tile_passes(self):
+        # Головной офис в Астане на зуме 16.
+        self.assertTrue(tile_is_valid(16, 45767, 21889))
+
+    def test_zoom_is_limited(self):
+        self.assertFalse(tile_is_valid(9, 100, 100))
+        self.assertFalse(tile_is_valid(19, 100, 100))
+        self.assertTrue(tile_is_valid(10, 100, 100))
+        self.assertTrue(tile_is_valid(18, 100, 100))
+
+    def test_coordinates_outside_the_grid(self):
+        self.assertFalse(tile_is_valid(16, -1, 0))
+        self.assertFalse(tile_is_valid(16, 0, -1))
+        self.assertFalse(tile_is_valid(16, 2 ** 16, 0))
+        self.assertFalse(tile_is_valid(16, 0, 2 ** 16))
+        self.assertTrue(tile_is_valid(16, 2 ** 16 - 1, 2 ** 16 - 1))
 
 
 if __name__ == '__main__':

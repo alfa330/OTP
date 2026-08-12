@@ -387,6 +387,68 @@ def set_office_parks(cursor, office_id, links):
         )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Тайлы карты
+# ─────────────────────────────────────────────────────────────────────────────
+
+TILE_MIN_ZOOM, TILE_MAX_ZOOM = 10, 18
+
+# Больше одновременных скачиваний 2ГИС и не примет (их и режет), а нам лишние
+# потоки стоили бы соединений из общего пула.
+_TILE_FETCH_SLOTS = None
+
+
+def tile_is_valid(z, x, y):
+    if not TILE_MIN_ZOOM <= z <= TILE_MAX_ZOOM:
+        return False
+    limit = 2 ** z
+    return 0 <= x < limit and 0 <= y < limit
+
+
+def read_tile(cursor, z, x, y):
+    cursor.execute('SELECT image FROM wiki_map_tiles WHERE z = %s AND x = %s AND y = %s',
+                   (z, x, y))
+    row = cursor.fetchone()
+    return bytes(row[0]) if row else None
+
+
+def store_tile(cursor, z, x, y, image):
+    cursor.execute(
+        'INSERT INTO wiki_map_tiles (z, x, y, image) VALUES (%s, %s, %s, %s) '
+        'ON CONFLICT (z, x, y) DO NOTHING',
+        (z, x, y, memoryview(image)),
+    )
+
+
+def fetch_tile(z, x, y, attempts=3):
+    """Скачивает тайл у 2ГИС, перебирая хосты.
+
+    Пустой ответ (204) — не ошибка сети, а отказ обслужить: повторяем с другого
+    хоста. Возвращает None, если не получилось ни разу.
+    """
+    global _TILE_FETCH_SLOTS
+    if _TILE_FETCH_SLOTS is None:
+        import threading
+        _TILE_FETCH_SLOTS = threading.Semaphore(4)
+
+    import requests
+    with _TILE_FETCH_SLOTS:
+        for attempt in range(attempts):
+            url = ('https://tile%d.maps.2gis.com/tiles?x=%d&y=%d&z=%d&v=1'
+                   % ((x + y + attempt) % 4, x, y, z))
+            try:
+                response = requests.get(
+                    url, timeout=8,
+                    headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                           'Chrome/126 Safari/537.36'})
+            except Exception:  # noqa: BLE001 — сеть, следующая попытка
+                continue
+            if response.status_code == 200 and response.content:
+                return response.content
+    return None
+
+
 def slug_is_free(cursor, slug, exclude_id=None):
     cursor.execute(
         'SELECT 1 FROM wiki_offices WHERE slug = %s AND (%s::int IS NULL OR id <> %s::int)',

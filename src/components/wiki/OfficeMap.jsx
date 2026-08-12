@@ -3,25 +3,44 @@ import { MapPin } from 'lucide-react';
 
 /* Мини-карта офиса: мозаика тайлов 2ГИС и точка в центре.
  *
- * Без библиотеки карт и без ключа API. Растровые тайлы 2ГИС отдаются с
- * Access-Control-Allow-Origin: * и без проверки Referer, кэш сутки — для
- * статичной картинки «где офис» этого достаточно, а MapGL потянул бы за собой
- * ключ, тарификацию запросов и 200 КБ скриптов ради двух десятков точек.
+ * Без библиотеки карт и без ключа API: MapGL потянул бы ключ, тарификацию
+ * запросов и 200 КБ скриптов ради двух десятков неподвижных точек.
+ *
+ * Тайлы идут через наш прокси (/api/wiki/map/tile/...), а не напрямую с
+ * tile*.maps.2gis.com. Прямая загрузка работает, но 2ГИС режет пачку запросов:
+ * на странице с пятнадцатью офисами четыре карты пришли пустыми. Прокси
+ * скачивает тайл один раз и дальше отдаёт из кэша.
  *
  * Карта намеренно неинтерактивна: клик открывает ту же точку в 2ГИС, где есть
  * маршруты и панорамы. Повторять их внутри портала незачем.
- *
- * Если понадобится официальный тариф (Raster Tiles API с ключом) — меняется
- * только tileUrl: остальная математика от источника тайлов не зависит.
  */
 
 const TILE = 256;
 
-const tileUrl = (x, y, z) => (
-    // Хосты чередуются по номеру тайла: браузер держит ограниченное число
-    // соединений на домен, и 4–6 картинок с одного хоста грузятся по очереди.
-    `https://tile${(x + y) % 4}.maps.2gis.com/tiles?x=${x}&y=${y}&z=${z}&v=1`
-);
+const TILE_RETRIES = 2;
+
+/* Тайл с повторами: первый заход мог прийтись на холодный кэш, когда 2ГИС как
+ * раз отказал. Повтор идёт с новым параметром — иначе браузер отдаст пустой
+ * ответ из своего кэша. Не вышло и со второго раза — убираем картинку совсем:
+ * серый фон мозаики честнее значка битой картинки. */
+const Tile = ({ base, x, y, z, left, top }) => {
+    const [attempt, setAttempt] = useState(0);
+    if (attempt > TILE_RETRIES) return null;
+    return (
+        <img
+            src={`${base}/map/tile/${z}/${x}/${y}.png${attempt ? `?r=${attempt}` : ''}`}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            loading="lazy"
+            width={TILE}
+            height={TILE}
+            onError={() => setAttempt((n) => n + 1)}
+            className="pointer-events-none absolute max-w-none select-none"
+            style={{ left, top }}
+        />
+    );
+};
 
 /** Координаты → мировые пиксели проекции Меркатора на данном зуме. */
 const project = (lat, lon, zoom) => {
@@ -33,7 +52,7 @@ const project = (lat, lon, zoom) => {
     };
 };
 
-export default function OfficeMap({ lat, lon, url, zoom = 16, height = 148, className = '' }) {
+export default function OfficeMap({ base, lat, lon, url, zoom = 16, height = 148, className = '' }) {
     const boxRef = useRef(null);
     const [width, setWidth] = useState(0);
 
@@ -63,7 +82,8 @@ export default function OfficeMap({ lat, lon, url, zoom = 16, height = 148, clas
                 if (y < 0 || y >= limit) continue;
                 result.push({
                     key: `${x}:${y}`,
-                    src: tileUrl(((x % limit) + limit) % limit, y, zoom),
+                    x: ((x % limit) + limit) % limit,
+                    y,
                     left: Math.round(x * TILE - left),
                     top: Math.round(y * TILE - top),
                 });
@@ -77,17 +97,14 @@ export default function OfficeMap({ lat, lon, url, zoom = 16, height = 148, clas
     const body = (
         <>
             {tiles.map((tile) => (
-                <img
+                <Tile
                     key={tile.key}
-                    src={tile.src}
-                    alt=""
-                    aria-hidden="true"
-                    draggable={false}
-                    loading="lazy"
-                    width={TILE}
-                    height={TILE}
-                    className="pointer-events-none absolute max-w-none select-none"
-                    style={{ left: tile.left, top: tile.top }}
+                    base={base}
+                    x={tile.x}
+                    y={tile.y}
+                    z={zoom}
+                    left={tile.left}
+                    top={tile.top}
                 />
             ))}
 
