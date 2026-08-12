@@ -5,7 +5,7 @@
 третьим по величине в разделе.
 """
 
-from flask import Response, jsonify, request
+from flask import Response, g, jsonify, request
 
 from . import offices as wiki_offices
 from . import queries
@@ -225,6 +225,10 @@ def register(bp, wiki_route, db, log_ip):
             # Пустой ответ, а не 500: клиент прячет такой тайл и оставляет фон.
             return Response(status=204)
 
+        # Флаг снимает общий no-store, который after_request вешает на всё
+        # под /api/ (bot_schedule2.py). Без него браузер перекачивал бы по
+        # четыре картинки на карточку при каждом открытии раздела.
+        g.allow_public_cache = True
         return Response(image, mimetype='image/png', headers={
             # Тайл на конкретном зуме не меняется — кэшируем надолго.
             'Cache-Control': 'public, max-age=2592000, immutable',

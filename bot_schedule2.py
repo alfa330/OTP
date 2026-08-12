@@ -4179,7 +4179,12 @@ def after_request(response):
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
 
-    if request.path.startswith('/api/'):
+    # no-store по умолчанию: под /api/ лежат данные сотрудников, и оставлять их
+    # в кэше браузера незачем. Исключение обработчик заявляет сам, флагом в g —
+    # так его видно в коде роута, а не только по заголовку ответа. Сейчас
+    # исключение одно: тайлы карты в разделе «Вики» (публичные картинки 2ГИС,
+    # которые не меняются и весят по 40 КБ).
+    if request.path.startswith('/api/') and not getattr(g, 'allow_public_cache', False):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
 
