@@ -288,7 +288,11 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 showToast={showToast}
             />
 
-            <article className={`${iosCard} overflow-hidden`}>
+            {/* overflow-CLIP, а не hidden. Обрезка углов нужна обоим, но hidden
+                делает карточку контейнером прокрутки, и position:sticky внутри
+                неё перестаёт работать: оглавление уезжало вместе со страницей.
+                clip обрезает, не создавая контейнера прокрутки. */}
+            <article className={`${iosCard} overflow-clip`}>
                 <header className="border-b border-slate-100 px-5 py-4 sm:px-7 sm:py-6">
                     <div className="mb-2 flex flex-wrap items-center gap-1.5">
                         <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
@@ -340,7 +344,10 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 <div className="flex flex-col gap-6 px-5 py-5 sm:px-7 sm:py-7 lg:flex-row-reverse">
                     {toc.length > 1 && (
                         <nav className="lg:w-56 lg:shrink-0">
-                            <div className="lg:sticky lg:top-4">
+                            {/* Длинное оглавление прокручивается само, а не
+                                вылезает за экран: закреплённый блок обязан
+                                помещаться в окно целиком. */}
+                            <div className="lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:pr-1">
                                 <div className={`${iosGroupLabel} mb-1.5 flex items-center gap-1.5`}>
                                     <List size={12} /> Содержание
                                 </div>
