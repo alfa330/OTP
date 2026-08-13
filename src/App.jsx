@@ -32542,8 +32542,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         };
 
         const REG_PLACE_MEDAL = { 1: 'medal-gold', 2: 'medal-silver', 3: 'medal-bronze' };
-        // Сколько строк рейтинга видно без «Показать всех» (Линия может
-        // дорасти до ~60 операторов СЗоВ — весь хвост на телефоне не нужен).
+        // Сколько мест показываем в группе (Линия может дорасти до ~60
+        // операторов СЗоВ — весь хвост не нужен ни на телефоне, ни админу).
         const REG_LIST_COLLAPSE = 10;
         // Тона лаврового венка по призовым местам: золото, серебро, бронза.
         const REG_WREATH_TONES = {
@@ -32756,17 +32756,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // Карточка группы: подиум призовых мест + полный список участников.
         // На модульном уровне (а не внутри панели), иначе каждый setState
         // панели пересоздавал бы тип компонента и ремоунтил обе карточки.
-        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, showRegistrations, canShowAll }) => {
-            const { useState } = React;
-            // Оператор видит строго топ-10, а свою строку — даже из хвоста,
-            // с реальным местом и счётом. Полный список — только у админов
-            // по кнопке «Показать всех».
-            const [showAll, setShowAll] = useState(false);
+        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, showRegistrations }) => {
+            // В группе показываем строго топ-10 — всем, включая админов: хвост
+            // из полусотни строк с одинаковым счётом ничего не сообщает.
+            // Исключение одно — своя строка: её видно даже из хвоста, с
+            // настоящим местом и счётом, иначе человек не понимает, где он.
             const leaderMax = items.length ? Math.max(...items.map(i => i.drivers || 0)) : 0;
             const overflow = items.length > REG_LIST_COLLAPSE;
-            const expanded = canShowAll && showAll;
-            const visibleItems = overflow && !expanded ? items.slice(0, REG_LIST_COLLAPSE) : items;
-            const hiddenMine = overflow && !expanded
+            const visibleItems = overflow ? items.slice(0, REG_LIST_COLLAPSE) : items;
+            const hiddenMine = overflow
                 ? items.slice(REG_LIST_COLLAPSE).find(i => i.user_id != null && i.user_id === currentUserId)
                 : null;
             // Порядок подиума: первое место в центре (классика 2-1-3);
@@ -32834,13 +32832,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {hiddenMine.place > REG_LIST_COLLAPSE + 1 && <div className="select-none text-center text-[13px] leading-none text-slate-300">···</div>}
                                     {renderRow(hiddenMine)}
                                 </>
-                            )}
-                            {canShowAll && overflow && (
-                                <button type="button" onClick={() => setShowAll(!showAll)}
-                                        className="flex w-full items-center justify-center gap-1.5 rounded-xl py-2.5 text-[13px] font-medium text-slate-500 transition-colors hover:bg-slate-50 md:py-2">
-                                    {expanded ? 'Свернуть' : `Показать всех (${items.length})`}
-                                    <FaIcon className={`fas fa-chevron-down text-[10px] transition-transform ${expanded ? 'rotate-180' : ''}`} />
-                                </button>
                             )}
                         </div>
                     )}
@@ -33044,8 +33035,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 prizes={contest?.prizes?.[groupKey] || []}
                                                 groupLabel={groupLabels[groupKey]}
                                                 currentUserId={currentUser?.id}
-                                                showRegistrations={showRegistrations}
-                                                canShowAll={isAdmin} />
+                                                showRegistrations={showRegistrations} />
                         ))}
                     </div>
 
