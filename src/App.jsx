@@ -32660,10 +32660,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             ];
             const fairPlay = [
                 { icon: 'fa-user-check', text: 'Один водитель — одному оператору: тому, кто зарегистрировал его первым. Повторные регистрации не считаются.' },
-                { icon: 'fa-stopwatch', text: 'При равном счёте выше тот, кто набрал свой результат раньше.' },
+                { icon: 'fa-stopwatch', text: 'При равном счёте выше тот, кто набрал свой результат раньше: у кого счёт засчитанных вырос до текущего первым.' },
             ];
             if (showRegistrations) {
-                fairPlay.push({ icon: 'fa-hourglass-half', text: '«Регистраций» — все твои водители за период, «засчитано» — те, кто уже совершил первую поездку.' });
+                fairPlay.push({ icon: 'fa-hourglass-half', text: 'Большая цифра — засчитанные водители, они и решают место. Подпись «из N рег.» — сколько всего водителей ты зарегистрировал за период.' });
             }
             const timeline = [
                 { date: contest.registered_from, label: 'Старт конкурса — регистрации открыты' },
@@ -32753,51 +32753,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-[12px] font-semibold text-slate-400 sm:h-8 sm:w-8 sm:text-[13px]">{place}</div>;
         };
 
-        const RegDriversDetail = ({ rows }) => (
-            <div className="mt-3 space-y-0.5 border-t border-slate-100 pt-2">
-                <div className="hidden gap-2 px-2 py-1 text-[11px] uppercase tracking-wide text-slate-400 md:grid md:grid-cols-12">
-                    <span className="col-span-4">Водитель</span>
-                    <span className="col-span-3">Телефон</span>
-                    <span className="col-span-2">Регистрация</span>
-                    <span className="col-span-2">Первая поездка</span>
-                    <span className="col-span-1 text-right">Поездок</span>
-                </div>
-                {rows.map((r, i) => (
-                    <div key={i} className="rounded-lg px-2 py-1.5 hover:bg-slate-50">
-                        <div className="md:hidden">
-                            <div className="flex items-center justify-between gap-2">
-                                <span className="min-w-0 truncate text-[13px] font-medium text-slate-700">{r.driver_name || '—'}</span>
-                                <span className="flex-shrink-0 text-[13px] tabular-nums text-slate-500">{r.driver_phone || '—'}</span>
-                            </div>
-                            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-slate-400">
-                                <span>рег. <span className="tabular-nums text-slate-500">{regFmtDateTime(r.registered_at)}</span></span>
-                                {r.first_trip_at ? (
-                                    <span>поездка <span className="tabular-nums text-slate-500">{regFmtDateTime(r.first_trip_at)}</span></span>
-                                ) : (
-                                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><FaIcon className="fas fa-hourglass-half text-[9px]" /> ждёт поездку</span>
-                                )}
-                            </div>
-                        </div>
-                        <div className="hidden gap-x-2 text-sm md:grid md:grid-cols-12">
-                            <span className="truncate font-medium text-slate-700 md:col-span-4">{r.driver_name || '—'}</span>
-                            <span className="tabular-nums text-slate-500 md:col-span-3">{r.driver_phone || '—'}</span>
-                            <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.registered_at)}</span>
-                            {r.first_trip_at ? (
-                                <span className="tabular-nums text-slate-500 md:col-span-2">{regFmtDateTime(r.first_trip_at)}</span>
-                            ) : (
-                                <span className="md:col-span-2"><span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"><FaIcon className="fas fa-hourglass-half text-[9px]" /> ждёт поездку</span></span>
-                            )}
-                            <span className="text-right tabular-nums text-slate-600 md:col-span-1">{r.trips_count ?? '—'}</span>
-                        </div>
-                    </div>
-                ))}
-            </div>
-        );
-
         // Карточка группы: подиум призовых мест + полный список участников.
         // На модульном уровне (а не внутри панели), иначе каждый setState
         // панели пересоздавал бы тип компонента и ремоунтил обе карточки.
-        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, expandedKey, onToggleExpand, showRegistrations, canShowAll }) => {
+        const RegLeaderboardCard = ({ groupKey, items, prizes, groupLabel, currentUserId, showRegistrations, canShowAll }) => {
             const { useState } = React;
             // Оператор видит строго топ-10, а свою строку — даже из хвоста,
             // с реальным местом и счётом. Полный список — только у админов
@@ -32814,14 +32773,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // для двух призов — просто слева направо.
             const podiumPlaces = prizes.length >= 3 ? [2, 1, 3] : [1, 2].slice(0, prizes.length);
 
+            // Строка не раскрывается: CRM больше не отдаёт водителей, показывать
+            // внутри нечего — остаётся счёт и подпись «из N рег.».
             const renderRow = (item) => {
                 const isMe = item.user_id != null && item.user_id === currentUserId;
                 const key = `${groupKey}:${item.place}`;
-                const canExpand = Array.isArray(item.rows) && item.rows.length > 0;
-                const isOpen = expandedKey === key;
                 return (
-                    <div key={key} className={`rounded-xl px-2 py-2.5 transition-all sm:px-3 ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'} ${canExpand ? 'cursor-pointer' : ''}`}
-                         onClick={() => canExpand && onToggleExpand(isOpen ? null : key)}>
+                    <div key={key} className={`rounded-xl px-2 py-2.5 transition-all sm:px-3 ${isMe ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'hover:bg-slate-50'}`}>
                         <div className="flex items-center gap-2 sm:gap-3">
                             <RegRankBadge place={item.place} hasScore={(item.drivers || 0) > 0} />
                             <RegContestAvatar item={item} sizeClass="h-8 w-8 sm:h-9 sm:w-9" />
@@ -32838,14 +32796,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className="text-base font-bold leading-none tabular-nums text-slate-900 sm:text-lg">{item.drivers}</div>
                                 <div className="mt-0.5 text-[11px] text-slate-400">{showRegistrations && item.registrations != null ? `из ${item.registrations} рег.` : regPluralDrivers(item.drivers)}</div>
                             </div>
-                            {canExpand && <FaIcon className={`fas fa-chevron-down text-xs text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />}
                         </div>
-                        {isOpen && canExpand && (
-                            <div onClick={(e) => e.stopPropagation()}>
-                                <p className="mt-2 text-[11px] text-slate-400">Последняя засчитанная поездка: {regFmtDateTime(item.last_trip_at)} — при равном счёте выше тот, у кого она раньше.</p>
-                                <RegDriversDetail rows={item.rows} />
-                            </div>
-                        )}
                     </div>
                 );
             };
@@ -32902,7 +32853,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(true);
             const [syncing, setSyncing] = useState(false);
-            const [expandedKey, setExpandedKey] = useState(null);
             const [showRules, setShowRules] = useState(false);
 
             // silent — фоновое автообновление: без скелетона и тостов об ошибке.
@@ -33094,8 +33044,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 prizes={contest?.prizes?.[groupKey] || []}
                                                 groupLabel={groupLabels[groupKey]}
                                                 currentUserId={currentUser?.id}
-                                                expandedKey={expandedKey}
-                                                onToggleExpand={setExpandedKey}
                                                 showRegistrations={showRegistrations}
                                                 canShowAll={isAdmin} />
                         ))}

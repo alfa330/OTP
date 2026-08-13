@@ -6,8 +6,9 @@ reg_contest.py — чистая логика без БД и Flask, поэтом�
 """
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -19,12 +20,17 @@ def _user(uid, name, email=None, direction="Основа", department="СЗоВ 
             "role": "operator", "direction_name": direction, "department_name": department}
 
 
-def _crm_row(login, name, driver_id, first_trip_at, registered_at="2026-08-10T10:00:00+05:00",
-             operator_id="1", trips=1):
+def _crm_op(login, name, successful, registrations=None, operator_id="1"):
+    """Строка CRM в текущем формате: оператор с двумя счётчиками."""
     return {"operator_id": operator_id, "operator_login": login, "operator_name": name,
-            "operator_group": None, "driver_id": driver_id, "driver_phone": "+77010000000",
-            "driver_name": "Водитель", "registered_at": registered_at,
-            "first_trip_at": first_trip_at, "trips_count": trips}
+            "operator_group": None,
+            "registrations_count": registrations if registrations is not None else successful,
+            "successful_registrations_count": successful}
+
+
+def _at(minutes):
+    """Отметка reached_at: чем меньше minutes, тем раньше набран результат."""
+    return datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc) + timedelta(minutes=minutes)
 
 
 class FoldNameTests(unittest.TestCase):
@@ -35,18 +41,6 @@ class FoldNameTests(unittest.TestCase):
 
     def test_case_and_spaces_normalized(self):
         self.assertEqual(reg_contest.fold_name("  ИВАНОВ   иван "), "иванов иван")
-
-
-class MaskPhoneTests(unittest.TestCase):
-    def test_only_last_four_digits_visible(self):
-        # Телефон — персональные данные: оператору отдаём только хвост.
-        self.assertEqual(reg_contest.mask_phone("+77011234567"), "••• 4567")
-        self.assertEqual(reg_contest.mask_phone("8 (701) 123-45-67"), "••• 4567")
-
-    def test_empty_phone_stays_empty(self):
-        self.assertIsNone(reg_contest.mask_phone(None))
-        self.assertIsNone(reg_contest.mask_phone(""))
-        self.assertIsNone(reg_contest.mask_phone("—"))
 
 
 class ClassifyGroupTests(unittest.TestCase):
@@ -103,38 +97,83 @@ class MatchOperatorTests(unittest.TestCase):
         self.assertEqual(method, "none")
 
 
+class FetchOperatorsTests(unittest.TestCase):
+    """Незнакомый формат обязан падать, а не превращаться в пустой срез.
+
+    13.08.2026 CRM убрала из ответа ключ rows, парсер прочитал ноль строк и
+    затёр рейтинг, отрапортовав «ok». Эти тесты держат исправленное поведение."""
+
+    def _client(self):
+        return reg_contest.RegContestClient("https://crm.example/contest", "token")
+
+    def _fetch(self, payload):
+        client = self._client()
+        with patch.object(client, "_post", return_value=payload):
+            return client.fetch_operators("2026-08-07", "2026-09-07", "2026-09-11")
+
+    def test_current_format_parsed(self):
+        payload = {"total_registrations": 5, "total_successful": 2,
+                   "operators": [_crm_op("a@x.kz", "Тестов Тест", 2, 5)]}
+        self.assertEqual(len(self._fetch(payload)), 1)
+
+    def test_empty_operator_list_is_not_an_error(self):
+        # Пустой список сам по себе законен (конкурс только стартовал);
+        # защиту «не затирать непустой срез» держит sync_reg_contest.
+        self.assertEqual(self._fetch({"total_registrations": 0, "operators": []}), [])
+
+    def test_missing_operators_key_raises(self):
+        # Ровно тот случай, что обнулил конкурс: старый ключ rows вместо operators.
+        with self.assertRaises(RuntimeError) as ctx:
+            self._fetch({"total": 12, "rows": [{"driver_id": "d1"}]})
+        self.assertIn("operators", str(ctx.exception))
+
+    def test_missing_successful_counter_raises(self):
+        # Промежуточный формат с одним счётчиком: считать по нему места нельзя.
+        payload = {"total": 209, "operators": [
+            {"operator_id": "1", "operator_login": "a@x.kz",
+             "operator_name": "Тестов Тест", "registrations_count": 37}]}
+        with self.assertRaises(RuntimeError) as ctx:
+            self._fetch(payload)
+        self.assertIn("successful_registrations_count", str(ctx.exception))
+
+
 class LeaderboardTests(unittest.TestCase):
-    def _entries(self):
-        directory = [
+    def _directory(self):
+        return [
             _user(10, "Чатовый Первый", email="chat1@yandextaxi.kz", direction="Чат менеджер"),
             _user(11, "Чатовый Второй", email="chat2@yandextaxi.kz", direction="Чат менеджер"),
             _user(20, "Линейный Один", email="line1@yandextaxi.kz", direction="Основа"),
             _user(30, "Верификатор Оп", email="verif@yandextaxi.kz",
                   direction="Верификатор", department="Отдел продаж"),
         ]
-        rows = [
-            # chat1 — 2 водителя, последняя поездка 10-го.
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00"),
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d2", "2026-08-10T12:00:00+05:00"),
-            # chat2 — тоже 2 водителя, но последняя поездка РАНЬШЕ (9-го утром)
-            # -> по правилу тай-брейка chat2 выше.
-            _crm_row("chat2@yandextaxi.kz", "Чатовый Второй", "d3", "2026-08-08T09:00:00+05:00"),
-            _crm_row("chat2@yandextaxi.kz", "Чатовый Второй", "d4", "2026-08-09T09:00:00+05:00"),
-            # линия — 1 водитель.
-            _crm_row("line1@yandextaxi.kz", "Линейный Один", "d5", "2026-08-11T15:00:00+05:00"),
-            # верификатор ОП — вне зачёта.
-            _crm_row("verif@yandextaxi.kz", "Верификатор Оп", "d6", "2026-08-11T16:00:00+05:00"),
-            # не сопоставленный оператор CRM — тоже вне зачёта, но виден.
-            _crm_row("ghost@yandextaxi.kz", "Призрак Пропавший", "d7", "2026-08-11T17:00:00+05:00"),
-        ]
-        return reg_contest.resolve_rows(rows, directory)
 
-    def test_tie_break_by_earlier_last_trip(self):
-        boards = reg_contest.build_leaderboards(self._entries())
-        chat = boards["chat"]
+    def _entries(self):
+        operators = [
+            _crm_op("chat1@yandextaxi.kz", "Чатовый Первый", 2, 4, operator_id="1"),
+            _crm_op("chat2@yandextaxi.kz", "Чатовый Второй", 2, 9, operator_id="2"),
+            _crm_op("line1@yandextaxi.kz", "Линейный Один", 1, 3, operator_id="3"),
+            _crm_op("verif@yandextaxi.kz", "Верификатор Оп", 40, 90, operator_id="4"),
+            _crm_op("ghost@yandextaxi.kz", "Призрак Пропавший", 5, 5, operator_id="5"),
+        ]
+        entries = reg_contest.resolve_operators(operators, self._directory())
+        # reached_at проставляет БД; chat2 набрал свои 2 раньше, чем chat1.
+        stamps = {"1": _at(60), "2": _at(10), "3": _at(30), "4": _at(5), "5": _at(5)}
+        for entry in entries:
+            entry["reached_at"] = stamps[entry["crm_operator_id"]]
+        return entries
+
+    def test_tie_break_by_earlier_reached_at(self):
+        chat = reg_contest.build_leaderboards(self._entries())["chat"]
         self.assertEqual([item["name"] for item in chat], ["Чатовый Второй", "Чатовый Первый"])
         self.assertEqual(chat[0]["place"], 1)
         self.assertEqual(chat[0]["drivers"], 2)
+
+    def test_registrations_do_not_outrank_successful(self):
+        # У «Первого» регистраций меньше, но тай-брейк смотрит только на время:
+        # общее число регистраций на место не влияет вовсе.
+        chat = reg_contest.build_leaderboards(self._entries())["chat"]
+        self.assertEqual(chat[0]["registrations"], 9)
+        self.assertEqual(chat[1]["registrations"], 4)
 
     def test_prizes_follow_places(self):
         boards = reg_contest.build_leaderboards(self._entries())
@@ -149,74 +188,41 @@ class LeaderboardTests(unittest.TestCase):
         ghost = next(i for i in boards["off"] if i["name"] == "Призрак Пропавший")
         self.assertEqual(ghost["match_method"], "none")
 
-    def test_rows_sorted_by_registration(self):
-        boards = reg_contest.build_leaderboards(self._entries())
-        rows = boards["chat"][0]["rows"]
-        self.assertEqual([r["driver_id"] for r in rows], ["d3", "d4"])
-
-    def test_datetime_values_from_db_are_supported(self):
-        # После чтения из Postgres даты — datetime, а не строки.
-        entries = self._entries()
-        for e in entries:
-            e["first_trip_at"] = datetime.fromisoformat(e["first_trip_at"]).astimezone(timezone.utc)
-            e["registered_at"] = datetime.fromisoformat(e["registered_at"]).astimezone(timezone.utc)
-        boards = reg_contest.build_leaderboards(entries)
-        self.assertEqual(boards["chat"][0]["name"], "Чатовый Второй")
-
-
-class PendingRegistrationsTests(unittest.TestCase):
-    """Регистрации без поездки (first_trip_at = null) — когда CRM начнёт
-    отдавать их по include_no_trip: считаются в registrations, но не в drivers."""
-
-    def _directory(self):
-        return [
-            _user(10, "Чатовый Первый", email="chat1@yandextaxi.kz", direction="Чат менеджер"),
-            _user(11, "Чатовый Второй", email="chat2@yandextaxi.kz", direction="Чат менеджер"),
+    def test_zero_successful_gets_no_prize_and_ranks_last(self):
+        # Одни регистрации без поездок призового места не занимают.
+        operators = [
+            _crm_op("chat1@yandextaxi.kz", "Чатовый Первый", 0, 12, operator_id="1"),
+            _crm_op("chat2@yandextaxi.kz", "Чатовый Второй", 1, 1, operator_id="2"),
         ]
-
-    def test_pending_rows_count_as_registrations_only(self):
-        rows = [
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00"),
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d2", None, trips=0),
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d3", None, trips=0),
-        ]
-        entries = reg_contest.resolve_rows(rows, self._directory())
-        item = reg_contest.build_leaderboards(entries)["chat"][0]
-        self.assertEqual(item["drivers"], 1)
-        self.assertEqual(item["registrations"], 3)
-        self.assertEqual(len(item["rows"]), 3)
-
-    def test_all_qualified_registrations_equal_drivers(self):
-        rows = [_crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00")]
-        entries = reg_contest.resolve_rows(rows, self._directory())
-        item = reg_contest.build_leaderboards(entries)["chat"][0]
-        self.assertEqual(item["registrations"], item["drivers"])
-
-    def test_pending_only_participant_ranks_below_and_gets_no_prize(self):
-        # Одни «ожидающие» регистрации не дают ни места в топе, ни приза.
-        rows = [
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", None, trips=0),
-            _crm_row("chat2@yandextaxi.kz", "Чатовый Второй", "d2", "2026-08-09T12:00:00+05:00"),
-        ]
-        entries = reg_contest.resolve_rows(rows, self._directory())
+        entries = reg_contest.resolve_operators(operators, self._directory())
+        for entry in entries:
+            entry["reached_at"] = _at(1)
         chat = reg_contest.build_leaderboards(entries)["chat"]
         self.assertEqual([i["name"] for i in chat], ["Чатовый Второй", "Чатовый Первый"])
         self.assertEqual(chat[0]["prize"], 40000)
         self.assertIsNone(chat[1]["prize"])
 
-    def test_pending_rows_do_not_touch_tie_break(self):
-        # Поздняя «ожидающая» регистрация не должна портить время последней
-        # засчитанной поездки при равном счёте.
-        rows = [
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d1", "2026-08-09T12:00:00+05:00"),
-            _crm_row("chat1@yandextaxi.kz", "Чатовый Первый", "d2", None,
-                     registered_at="2026-08-20T10:00:00+05:00", trips=0),
-            _crm_row("chat2@yandextaxi.kz", "Чатовый Второй", "d3", "2026-08-10T12:00:00+05:00"),
+    def test_missing_reached_at_sorts_after_stamped(self):
+        # Строка, которую синк ещё ни разу не переписывал, не должна ронять
+        # сортировку сравнением None с датой.
+        operators = [
+            _crm_op("chat1@yandextaxi.kz", "Чатовый Первый", 2, 2, operator_id="1"),
+            _crm_op("chat2@yandextaxi.kz", "Чатовый Второй", 2, 2, operator_id="2"),
         ]
-        entries = reg_contest.resolve_rows(rows, self._directory())
+        entries = reg_contest.resolve_operators(operators, self._directory())
+        entries[0]["reached_at"] = None
+        entries[1]["reached_at"] = _at(99)
         chat = reg_contest.build_leaderboards(entries)["chat"]
-        self.assertEqual(chat[0]["name"], "Чатовый Первый")
-        self.assertEqual(chat[0]["last_trip_at"], "2026-08-09T12:00:00+05:00")
+        self.assertEqual([i["name"] for i in chat], ["Чатовый Второй", "Чатовый Первый"])
+
+    def test_counters_survive_string_values_from_crm(self):
+        # CRM уже присылала числа строками — счёт не должен превращаться в 0.
+        operators = [{"operator_id": "1", "operator_login": "chat1@yandextaxi.kz",
+                      "operator_name": "Чатовый Первый", "operator_group": None,
+                      "registrations_count": "7", "successful_registrations_count": "3"}]
+        entries = reg_contest.resolve_operators(operators, self._directory())
+        item = reg_contest.build_leaderboards(entries)["chat"][0]
+        self.assertEqual((item["drivers"], item["registrations"]), (3, 7))
 
 
 if __name__ == "__main__":

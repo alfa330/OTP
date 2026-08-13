@@ -5732,13 +5732,17 @@ class Database:
     def _init_reg_contest_schema_tx(self, cursor):
         """Конкурс «Топ по регистрациям» (данные из CRM yataxi).
 
-        Строка reg_contest_entries = один засчитанный водитель (дедуп делает
-        CRM, driver_id уникален в рамках конкурса). Каждый синк полностью
-        заменяет строки конкурса: CRM отдаёт актуальный срез целиком, а
-        задним числом состав засчитанных водителей может меняться (поездка
-        появилась/фрод сняли) — инкремент тут только навредил бы."""
+        Строка reg_contest_operators = один оператор CRM с двумя счётчиками.
+        Раньше строка была водителем, но CRM убрала построчную выдачу и отдаёт
+        только агрегаты (см. docstring reg_contest.py).
+
+        reached_at — момент, когда мы ЗАСЕКЛИ смену счётчика successful. Это
+        наш собственный штамп: времени поездок CRM больше не присылает, а
+        тай-брейк конкурса — «выше тот, кто набрал результат раньше». Поэтому
+        синк не заменяет строки целиком, а обновляет их на месте: снести и
+        вставить заново значило бы потерять reached_at на каждом прогоне."""
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS reg_contest_entries (
+            CREATE TABLE IF NOT EXISTS reg_contest_operators (
                 id            SERIAL PRIMARY KEY,
                 contest_code  VARCHAR(64) NOT NULL,
                 crm_operator_id VARCHAR(64) NOT NULL,
@@ -5749,16 +5753,14 @@ class Database:
                 contest_group VARCHAR(10) NOT NULL DEFAULT 'off'
                     CHECK (contest_group IN ('chat', 'line', 'off')),
                 match_method  VARCHAR(20),
-                driver_id     VARCHAR(128) NOT NULL,
-                driver_phone  VARCHAR(50),
-                driver_name   VARCHAR(255),
-                registered_at TIMESTAMPTZ,
-                first_trip_at TIMESTAMPTZ,
-                trips_count   INTEGER,
-                UNIQUE (contest_code, driver_id)
+                registrations INTEGER NOT NULL DEFAULT 0,
+                successful    INTEGER NOT NULL DEFAULT 0,
+                reached_at    TIMESTAMPTZ,
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (contest_code, crm_operator_id)
             );
-            CREATE INDEX IF NOT EXISTS idx_reg_contest_entries_group
-                ON reg_contest_entries(contest_code, contest_group);
+            CREATE INDEX IF NOT EXISTS idx_reg_contest_operators_group
+                ON reg_contest_operators(contest_code, contest_group);
 
             CREATE TABLE IF NOT EXISTS reg_contest_syncs (
                 contest_code  VARCHAR(64) PRIMARY KEY,
@@ -5801,26 +5803,52 @@ class Database:
             """, (ids,))
             return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
 
-    def replace_reg_contest_entries(self, contest_code, entries):
-        """Полная замена строк конкурса свежим срезом CRM (одна транзакция:
-        читатели либо видят старый срез, либо новый — не пустоту)."""
+    def upsert_reg_contest_operators(self, contest_code, entries):
+        """Свежий срез CRM в строки операторов (одна транзакция).
+
+        Обновляем на месте, а не сносим-вставляем: reached_at — наш
+        собственный штамп времени тай-брейка, и полная замена стирала бы его
+        на каждом прогоне. Штамп двигаем, только когда счёт засчитанных
+        РЕАЛЬНО изменился; прочие поля (имя, группа, всего регистраций)
+        обновляются свободно и на очерёдность не влияют.
+
+        Операторов, пропавших из выдачи CRM, убираем — эндпоинт всегда
+        отдаёт полный список, так что пропажа означает «регистраций за период
+        больше не числится»."""
         with self._get_cursor() as cursor:
-            cursor.execute("DELETE FROM reg_contest_entries WHERE contest_code = %s",
-                           (contest_code,))
             if entries:
                 args = [(contest_code, e["crm_operator_id"], e["operator_login"],
                          e["operator_name"], e["user_id"], e["user_name"],
-                         e["contest_group"], e["match_method"], e["driver_id"],
-                         e["driver_phone"], e["driver_name"], e["registered_at"],
-                         e["first_trip_at"], e["trips_count"]) for e in entries]
+                         e["contest_group"], e["match_method"],
+                         e["registrations"], e["successful"]) for e in entries]
                 execute_values(cursor, """
-                    INSERT INTO reg_contest_entries (
+                    INSERT INTO reg_contest_operators (
                         contest_code, crm_operator_id, operator_login, operator_name,
                         user_id, user_name, contest_group, match_method,
-                        driver_id, driver_phone, driver_name,
-                        registered_at, first_trip_at, trips_count)
+                        registrations, successful, reached_at, updated_at)
                     VALUES %s
-                """, args)
+                    ON CONFLICT (contest_code, crm_operator_id) DO UPDATE SET
+                        operator_login = EXCLUDED.operator_login,
+                        operator_name  = EXCLUDED.operator_name,
+                        user_id        = EXCLUDED.user_id,
+                        user_name      = EXCLUDED.user_name,
+                        contest_group  = EXCLUDED.contest_group,
+                        match_method   = EXCLUDED.match_method,
+                        registrations  = EXCLUDED.registrations,
+                        successful     = EXCLUDED.successful,
+                        reached_at     = CASE
+                            WHEN reg_contest_operators.successful
+                                 IS DISTINCT FROM EXCLUDED.successful
+                            THEN NOW() ELSE reg_contest_operators.reached_at END,
+                        updated_at     = NOW()
+                """, args, template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW())")
+                cursor.execute("""
+                    DELETE FROM reg_contest_operators
+                    WHERE contest_code = %s AND crm_operator_id <> ALL(%s)
+                """, (contest_code, [e["crm_operator_id"] for e in entries]))
+            else:
+                cursor.execute("DELETE FROM reg_contest_operators WHERE contest_code = %s",
+                               (contest_code,))
             cursor.execute("""
                 INSERT INTO reg_contest_syncs (contest_code, synced_at, status, total_rows, error)
                 VALUES (%s, NOW(), 'ok', %s, NULL)
@@ -5840,20 +5868,18 @@ class Database:
                     status = 'error', error = EXCLUDED.error
             """, (contest_code, str(error)[:2000]))
 
-    def get_reg_contest_entries(self, contest_code):
+    def get_reg_contest_operators(self, contest_code):
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT crm_operator_id, operator_login, operator_name,
                        user_id, user_name, contest_group, match_method,
-                       driver_id, driver_phone, driver_name,
-                       registered_at, first_trip_at, trips_count
-                FROM reg_contest_entries
+                       registrations, successful, reached_at
+                FROM reg_contest_operators
                 WHERE contest_code = %s
             """, (contest_code,))
             keys = ("crm_operator_id", "operator_login", "operator_name",
                     "user_id", "user_name", "contest_group", "match_method",
-                    "driver_id", "driver_phone", "driver_name",
-                    "registered_at", "first_trip_at", "trips_count")
+                    "registrations", "successful", "reached_at")
             return [dict(zip(keys, row)) for row in cursor.fetchall()]
 
     def get_reg_contest_sync_state(self, contest_code):

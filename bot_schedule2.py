@@ -9855,11 +9855,13 @@ def api_average_scores():
 def sync_reg_contest(triggered_by='scheduler'):
     """Полный цикл: CRM -> матчинг с пользователями iCORE -> срез в БД.
 
-    CRM отдаёт зарегистрированных водителей уже дедуплицированными; каждый
-    синк просто заменяет срез целиком. Сейчас приходят только засчитанные
-    (с первой поездкой); в запросе стоит include_no_trip — когда CRM его
-    поддержит, в срез поедут и регистрации без поездки (first_trip_at NULL).
-    """
+    CRM отдаёт счётчики по операторам (все регистрации + засчитанные), срез
+    обновляется на месте ради reached_at — штампа тай-брейка.
+
+    Пустой ответ поверх непустого среза считаем аварией, а не результатом:
+    именно так конкурс уже обнулялся 13.08.2026, когда CRM сменила формат
+    ответа, а старый парсер молча прочитал ноль строк. Лучше показать админу
+    ошибку и оставить прошлый рейтинг."""
     contest = reg_contest.CONTEST
     config = reg_contest.get_config()
     if not reg_contest.api_ready(config):
@@ -9867,15 +9869,21 @@ def sync_reg_contest(triggered_by='scheduler'):
     started = time.monotonic()
     try:
         client = reg_contest.RegContestClient.from_config(config)
-        crm_rows = client.fetch_all_rows(contest["registered_from"],
-                                         contest["registered_to"],
-                                         contest["trip_deadline"])
+        crm_operators = client.fetch_operators(contest["registered_from"],
+                                               contest["registered_to"],
+                                               contest["trip_deadline"])
+        if not crm_operators:
+            previous = db.get_reg_contest_sync_state(contest["code"]) or {}
+            if previous.get("total_rows"):
+                raise RuntimeError(
+                    "CRM вернула пустой список операторов, а в срезе было "
+                    f"{previous['total_rows']} — рейтинг не затираем")
         directory = db.get_reg_contest_operator_directory()
-        entries = reg_contest.resolve_rows(crm_rows, directory)
-        total = db.replace_reg_contest_entries(contest["code"], entries)
+        entries = reg_contest.resolve_operators(crm_operators, directory)
+        total = db.upsert_reg_contest_operators(contest["code"], entries)
         unmatched = sum(1 for e in entries if e["match_method"] == "none")
         logging.info(
-            "reg_contest sync (%s): %s строк, %s не сопоставлено, %.1fs",
+            "reg_contest sync (%s): %s операторов, %s не сопоставлено, %.1fs",
             triggered_by, total, unmatched, time.monotonic() - started)
         return {"status": "success", "rows": total, "unmatched": unmatched}
     except Exception as exc:
@@ -9894,40 +9902,29 @@ def _reg_contest_iso(value):
     return str(value)
 
 
-def _reg_contest_public_item(item, include_rows, mask_phones, avatar_url=None):
-    """Строка рейтинга наружу; список водителей — только админам и владельцу.
+def _reg_contest_public_item(item, avatar_url=None):
+    """Строка рейтинга наружу.
 
-    Телефоны водителей — персональные данные: не-админам (оператор смотрит
-    собственный список) отдаём только последние 4 цифры."""
-    payload = {
+    Расшифровки по водителям больше нет: CRM отдаёт только счётчики, имена и
+    телефоны водителей из выдачи пропали (см. docstring reg_contest.py)."""
+    return {
         "place": item.get("place"),
         "user_id": item.get("user_id"),
         "name": item.get("name"),
         "drivers": item.get("drivers"),
         "registrations": item.get("registrations"),
         "prize": item.get("prize"),
-        "last_trip_at": _reg_contest_iso(item.get("last_trip_at")),
+        "reached_at": _reg_contest_iso(item.get("reached_at")),
         "avatar_url": avatar_url,
     }
-    if include_rows:
-        payload["rows"] = [{
-            "driver_name": row.get("driver_name"),
-            "driver_phone": (reg_contest.mask_phone(row.get("driver_phone"))
-                             if mask_phones else row.get("driver_phone")),
-            "registered_at": _reg_contest_iso(row.get("registered_at")),
-            "first_trip_at": _reg_contest_iso(row.get("first_trip_at")),
-            "trips_count": row.get("trips_count"),
-        } for row in item.get("rows") or []]
-    return payload
 
 
 @app.route('/api/reg_contest/results', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_reg_contest_results():
-    """Рейтинг конкурса. Операторам — таблицы групп и свои регистрации
-    (телефоны водителей замаскированы), админам — детали по каждому
-    участнику. «Вне зачёта» наружу намеренно не отдаём — требование
-    владельца: чужие отделы в конкурсе не показываются совсем."""
+    """Рейтинг конкурса: таблицы обеих групп со счётом каждого участника.
+    «Вне зачёта» наружу намеренно не отдаём — требование владельца: чужие
+    отделы в конкурсе не показываются совсем."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, requester, error = _resolve_requester()
@@ -9937,7 +9934,7 @@ def api_reg_contest_results():
     try:
         is_admin = _is_admin_role(_normalize_user_role(requester[3]))
         contest = reg_contest.CONTEST
-        entries = db.get_reg_contest_entries(contest["code"])
+        entries = db.get_reg_contest_operators(contest["code"])
         boards = reg_contest.build_leaderboards(entries)
         # Аватарки участников одной выборкой; подписанные URL кэшируются.
         participant_ids = [item["user_id"]
@@ -9951,10 +9948,7 @@ def api_reg_contest_results():
             for item in boards.get(group) or []:
                 bucket, blob = avatar_refs.get(item.get("user_id"), (None, None))
                 groups[group].append(_reg_contest_public_item(
-                    item,
-                    include_rows=is_admin or item.get("user_id") == requester_id,
-                    mask_phones=not is_admin,
-                    avatar_url=_build_avatar_signed_url(bucket, blob)))
+                    item, avatar_url=_build_avatar_signed_url(bucket, blob)))
         sync_state = db.get_reg_contest_sync_state(contest["code"])
         payload = {
             "status": "success",
@@ -9976,12 +9970,9 @@ def api_reg_contest_results():
             },
             "groups": groups,
             "can_sync": is_admin,
-            # CRM пока отдаёт только засчитанных водителей; когда начнёт
-            # присылать и регистрации без поездки (include_no_trip, допзапрос
-            # в API_REQ_TOP_REGISTRATIONS_2026-08-07.md), флаг включится и
-            # фронт покажет колонку «регистраций всего».
-            "registrations_supported": any(
-                e.get("first_trip_at") is None for e in entries),
+            # CRM отдаёт оба счётчика, поэтому под числом засчитанных фронт
+            # показывает «из N рег.» — сколько всего водителей оператор привёл.
+            "registrations_supported": True,
         }
         return jsonify(payload), 200
     except Exception:

@@ -4,30 +4,44 @@
   - метод: POST {CRM_API_URL} (= /api/partners/registrations-contest)
   - авторизация: заголовок X-Integration-Token
   - тело: {"registered_from": "YYYY-MM-DD", "registered_to": "YYYY-MM-DD",
-           "trip_deadline": "YYYY-MM-DD", "include_no_trip": true,
-           "page": N, "per_page": M}
-  - ответ: {"total", "page", "per_page", "has_more", "rows": [...]}
-    строка = один зарегистрированный водитель (дедуп делает CRM); поля строки:
+           "trip_deadline": "YYYY-MM-DD"}
+  - ответ: {"total_registrations", "total_successful", "operators": [...]}
+    строка = один оператор CRM с двумя счётчиками:
     operator_id / operator_login / operator_name / operator_group (null),
-    driver_id / driver_phone / driver_name,
-    registered_at / first_trip_at (ISO с +05:00), trips_count.
-    Водитель ЗАСЧИТАН (успешная регистрация), когда first_trip_at заполнен —
-    CRM отдаёт его только для завершённой поездки до trip_deadline.
-    include_no_trip просит CRM отдавать и регистрации без поездки
-    (first_trip_at = null): сейчас CRM флаг игнорирует (проверено живым API
-    2026-08-07 — неизвестные поля не ломают запрос), допзапрос в
-    API_REQ_TOP_REGISTRATIONS_2026-08-07.md; как только CRM его реализует,
-    счётчик «регистраций всего» оживёт без правок кода.
+    registrations_count (все регистрации за период),
+    successful_registrations_count (из них с завершённой поездкой — зачёт).
 
-ВАЖНО (проверено на живом API 2026-08-07):
-  1. operator_group CRM не заполняет — группу (Чаты/Линия) определяем сами по
+ВАЖНО. Контракт эндпоинта менялся дважды за неделю (проверено живым API):
+  * 07.08.2026 — строка на каждого водителя: {"total", "has_more", "rows": [...]}
+    с driver_id / driver_phone / registered_at / first_trip_at / trips_count.
+  * 13.08.2026 (утро) — {"total", "operators": [...]} с ОДНИМ счётчиком
+    registrations_count; ключ rows исчез. Старый парсер читал rows, получал
+    пусто и записывал нулевой срез — рейтинг у операторов опустел, а синк
+    при этом рапортовал «ok». Отсюда правило ниже.
+  * 13.08.2026 (день) — текущий формат с двумя счётчиками.
+
+ПРАВИЛО: незнакомый формат = ошибка синка, а не пустой срез. Мы лучше
+покажем админу «CRM отдала не то» и оставим прошлый рейтинг, чем молча
+обнулим конкурс. Поэтому fetch_operators() строго требует список operators.
+
+Чего в текущем формате НЕТ (и что из-за этого делаем сами):
+  1. operator_group CRM не заполняет — группу (Чаты/Линия) определяем по
      направлению нашего пользователя: «Чат менеджер» СЗоВ -> chat, остальные
-     направления СЗоВ -> line, всё прочее (ОП, фронт-офис) -> off («вне зачёта»).
-  2. operator_login CRM = users.email (корп. почта @yandextaxi.kz), но не у
+     направления СЗоВ -> line, всё прочее (ОП, фронт-офис) -> off.
+  2. Времени поездок больше нет, а тай-брейк конкурса — «выше тот, кто набрал
+     результат раньше». Момент смены счётчика засекаем сами: синк ходит раз в
+     полчаса и штампует reached_at, когда successful у оператора изменился
+     (см. Database.upsert_reg_contest_operators). Историю до первого синка на
+     новом формате восстановить нечем — у всех, кто с тех пор не изменился,
+     reached_at будет одинаковый.
+  3. Расшифровки по водителям нет совсем — ни имён, ни телефонов, ни дат.
+  4. operator_login CRM = users.email (корп. почта @yandextaxi.kz), но не у
      всех: часть операторов заведена у нас с личной почтой, поэтому фолбэк —
      матчинг по ФИО с фолдингом казахских букв (Нұрасыл == Нурасыл) и по
      префиксу (CRM хранит «Фамилия Имя», у нас часто ещё отчество).
-  3. Даты приходят с таймзоной (+05:00) — храним timestamptz как есть.
+
+Прочие особенности живого API: page/per_page игнорируются (список всегда
+полный), trip_deadline раньше registered_to роняет ответ в HTML с кодом 200.
 
 ENV (окружение или .env.codex.local):
     CRM_API_URL=https://backend.yataxi.kz/api/partners/registrations-contest
@@ -36,7 +50,6 @@ ENV (окружение или .env.codex.local):
 
 import logging
 import os
-import re
 import time
 from pathlib import Path
 
@@ -45,13 +58,11 @@ import requests
 log = logging.getLogger(__name__)
 
 HTTP_TIMEOUT = 60
-PER_PAGE = 500
-MAX_PAGES = 200          # предохранитель от бесконечного has_more
 MAX_RETRIES = 3
 RETRY_PAUSE = 2.0
 
 # Единственный активный конкурс. Новый конкурс = новый словарь с новым code:
-# строки в reg_contest_entries разделяются по contest_code.
+# строки в reg_contest_operators разделяются по contest_code.
 CONTEST = {
     "code": "top_registrations_2026_09",
     "title": "Топ по регистрациям",
@@ -103,7 +114,7 @@ def api_ready(config=None):
 
 
 class RegContestClient:
-    """Минимальный клиент POST {CRM_API_URL} с пагинацией."""
+    """Минимальный клиент POST {CRM_API_URL}."""
 
     def __init__(self, url, token, timeout=HTTP_TIMEOUT):
         if not url or not token:
@@ -133,6 +144,8 @@ class RegContestClient:
                 if resp.status_code != 200:
                     raise RuntimeError(
                         f"CRM HTTP {resp.status_code}: {resp.text[:300]}")
+                # На кривые параметры CRM отвечает HTML-страницей с кодом 200 —
+                # для нас это ошибка разбора, а не пустой ответ.
                 return resp.json()
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
@@ -142,27 +155,37 @@ class RegContestClient:
                     time.sleep(RETRY_PAUSE * attempt)
         raise RuntimeError(f"CRM недоступна после {MAX_RETRIES} попыток: {last_error}")
 
-    def fetch_all_rows(self, registered_from, registered_to, trip_deadline):
-        """Все страницы за период; возвращает список сырых строк CRM."""
-        rows = []
-        page = 1
-        while page <= MAX_PAGES:
-            data = self._post({
-                "registered_from": registered_from,
-                "registered_to": registered_to,
-                "trip_deadline": trip_deadline,
-                "include_no_trip": True,
-                "page": page,
-                "per_page": PER_PAGE,
-            })
-            batch = data.get("rows") or []
-            rows.extend(batch)
-            if not data.get("has_more") or not batch:
-                break
-            page += 1
-        else:
-            raise RuntimeError(f"CRM: не дошли до конца пагинации за {MAX_PAGES} страниц")
-        return rows
+    def fetch_operators(self, registered_from, registered_to, trip_deadline):
+        """Счётчики по операторам за период; формат проверяем строго.
+
+        Пагинации у эндпоинта нет — page/per_page он игнорирует и всегда
+        отдаёт полный список операторов."""
+        data = self._post({
+            "registered_from": registered_from,
+            "registered_to": registered_to,
+            "trip_deadline": trip_deadline,
+        })
+        operators = data.get("operators")
+        if not isinstance(operators, list):
+            raise RuntimeError(
+                "CRM отдала незнакомый формат: нет списка operators, "
+                f"ключи ответа = {sorted(data)[:10]}")
+        seen = set()
+        for row in operators:
+            if "successful_registrations_count" not in row:
+                raise RuntimeError(
+                    "CRM отдала операторов без successful_registrations_count, "
+                    f"поля = {sorted(row)[:10]}")
+            # Дубль operator_id означает, что счётчики оператора разъехались по
+            # двум строкам: какой из них верный — снаружи не решить, а «взять
+            # первый» тихо занизил бы человеку счёт в конкурсе. Падаем.
+            operator_id = str(row.get("operator_id") or "")
+            if operator_id in seen:
+                raise RuntimeError(
+                    f"CRM отдала оператора {operator_id} дважды — счётчики "
+                    "неоднозначны, срез не обновляем")
+            seen.add(operator_id)
+        return operators
 
 
 # ---------------------------------------------------------------------------
@@ -182,17 +205,6 @@ def fold_name(value):
     if not value:
         return ""
     return " ".join(str(value).lower().translate(_KZ_FOLD).split())
-
-
-def mask_phone(value):
-    """Телефон водителя для оператора: видны только последние 4 цифры.
-
-    Номера — персональные данные; полный номер отдаём только админам,
-    формат исходника не восстанавливаем — просто «••• 4567»."""
-    digits = re.sub(r"\D", "", str(value or ""))
-    if not digits:
-        return None
-    return f"••• {digits[-4:]}"
 
 
 def classify_group(direction_name, department_name):
@@ -238,10 +250,17 @@ def match_operator(crm_login, crm_name, directory):
     return None, "none"
 
 
-def resolve_rows(crm_rows, directory):
-    """Обогащение сырых строк CRM привязкой к пользователю и группе."""
+def _int_or_zero(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def resolve_operators(crm_operators, directory):
+    """Обогащение строк CRM привязкой к пользователю iCORE и группе."""
     resolved = []
-    for row in crm_rows:
+    for row in crm_operators:
         user, method = match_operator(row.get("operator_login"),
                                       row.get("operator_name"), directory)
         group = "off"
@@ -256,12 +275,8 @@ def resolve_rows(crm_rows, directory):
             "user_name": user.get("name") if user else None,
             "contest_group": group,
             "match_method": method,
-            "driver_id": str(row.get("driver_id") or ""),
-            "driver_phone": row.get("driver_phone"),
-            "driver_name": row.get("driver_name"),
-            "registered_at": row.get("registered_at"),
-            "first_trip_at": row.get("first_trip_at"),
-            "trips_count": row.get("trips_count"),
+            "registrations": _int_or_zero(row.get("registrations_count")),
+            "successful": _int_or_zero(row.get("successful_registrations_count")),
         })
     return resolved
 
@@ -271,68 +286,44 @@ def resolve_rows(crm_rows, directory):
 # ---------------------------------------------------------------------------
 
 def build_leaderboards(entries):
-    """Схлопывает строки-водители в рейтинги по группам конкурса.
+    """Раскладывает счётчики операторов по группам конкурса и расставляет места.
 
-    Правила из условий конкурса: место — по числу ЗАСЧИТАННЫХ водителей
-    (drivers = есть завершённая поездка, first_trip_at заполнен); при
-    равенстве выше тот, кто раньше достиг итога — сравниваем время
-    ПОСЛЕДНЕЙ засчитанной поездки (меньше = раньше = выше).
-    registrations — все зарегистрированные водители, включая ожидающих
-    первую поездку (first_trip_at = null, когда CRM их отдаёт).
+    Правила из условий конкурса: место — по числу ЗАСЧИТАННЫХ регистраций
+    (водитель совершил первую поездку); при равенстве выше тот, кто набрал
+    свой результат раньше — сравниваем reached_at, момент последней смены
+    счётчика (его штампует БД, см. модульный docstring, п. 2).
+    registrations — все регистрации оператора за период, включая ожидающих
+    первую поездку; на место не влияют, показываются подписью под счётом.
     Возвращает {"chat": [...], "line": [...], "off": [...]} — off отдельным
     списком, чтобы регистрации других отделов и несопоставленных операторов
     не пропадали молча (наружу off не отдаём — только для диагностики).
     """
-    buckets = {}
+    result = {"chat": [], "line": [], "off": []}
     for entry in entries:
         group = entry.get("contest_group") or "off"
-        # Ключ участника: наш пользователь, а без него — оператор CRM.
-        key = (group, entry.get("user_id") or f"crm:{entry.get('crm_operator_id')}")
-        agg = buckets.get(key)
-        if agg is None:
-            agg = buckets[key] = {
-                "user_id": entry.get("user_id"),
-                "name": entry.get("user_name") or entry.get("operator_name"),
-                "operator_login": entry.get("operator_login"),
-                "crm_operator_id": entry.get("crm_operator_id"),
-                "match_method": entry.get("match_method"),
-                "group": group,
-                "drivers": 0,
-                "registrations": 0,
-                "last_trip_at": None,
-                "rows": [],
-            }
-        agg["registrations"] += 1
-        trip_at = entry.get("first_trip_at")
-        if trip_at:
-            agg["drivers"] += 1
-            if agg["last_trip_at"] is None or trip_at > agg["last_trip_at"]:
-                agg["last_trip_at"] = trip_at
-        agg["rows"].append({
-            "driver_id": entry.get("driver_id"),
-            "driver_phone": entry.get("driver_phone"),
-            "driver_name": entry.get("driver_name"),
-            "registered_at": entry.get("registered_at"),
-            "first_trip_at": entry.get("first_trip_at"),
-            "trips_count": entry.get("trips_count"),
+        result.setdefault(group, []).append({
+            "user_id": entry.get("user_id"),
+            "name": entry.get("user_name") or entry.get("operator_name"),
+            "operator_login": entry.get("operator_login"),
+            "crm_operator_id": entry.get("crm_operator_id"),
+            "match_method": entry.get("match_method"),
+            "group": group,
+            "drivers": _int_or_zero(entry.get("successful")),
+            "registrations": _int_or_zero(entry.get("registrations")),
+            "reached_at": entry.get("reached_at"),
         })
 
-    result = {"chat": [], "line": [], "off": []}
-    for agg in buckets.values():
-        # Даты — строки ISO (свежий ответ CRM) либо datetime (чтение из БД);
-        # None по контракту не бывает, но сортировку от него страхуем флагом,
-        # чтобы не сравнивать None с датой.
-        agg["rows"].sort(key=lambda r: (r.get("registered_at") is None,
-                                        r.get("registered_at") or 0))
-        result.setdefault(agg["group"], []).append(agg)
     for group, items in result.items():
-        items.sort(key=lambda a: (-a["drivers"], a["last_trip_at"] is None,
-                                  a["last_trip_at"] or 0, fold_name(a["name"])))
+        # reached_at — datetime из БД; None бывает только у строки, которую
+        # ещё ни разу не переписывал синк, поэтому страхуем сортировку флагом,
+        # чтобы не сравнивать None с датой.
+        items.sort(key=lambda a: (-a["drivers"], a["reached_at"] is None,
+                                  a["reached_at"] or 0, fold_name(a["name"])))
         prizes = CONTEST["prizes"].get(group) or []
         for idx, item in enumerate(items):
             item["place"] = idx + 1
-            # Приз только за засчитанных водителей: одни «ожидающие поездку»
-            # регистрации призового места не занимают.
+            # Приз только за засчитанные регистрации: одни «ожидающие поездку»
+            # призового места не занимают.
             item["prize"] = (prizes[idx]
                              if idx < len(prizes) and item["drivers"] > 0 else None)
     return result
