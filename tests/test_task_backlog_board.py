@@ -18,6 +18,7 @@ TASKS_VIEW_PATH = ROOT / "src" / "components" / "tasks" / "TasksView.jsx"
 CUSTOM_SELECT_PATH = ROOT / "src" / "components" / "ui" / "CustomSelect.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
 BOARD_QUERY_PATH = ROOT / "src" / "components" / "tasks" / "boardQuery.js"
+DEPARTMENT_FILTER_PATH = ROOT / "src" / "components" / "tasks" / "departmentFilter.js"
 CLI_PATH = ROOT / "scripts" / "task_board.py"
 SKILL_PATH = ROOT / ".claude" / "skills" / "task-board" / "SKILL.md"
 
@@ -1179,13 +1180,14 @@ class BoardPaginationTests(unittest.TestCase):
         block = src[src.index("export const boardQueryParams = ("):]
         self.assertIn("if (mode === 'backlog') params.backlog = 'only';", block)
         self.assertIn("const params = { limit, offset };", block)
-        # Охват («Мои»/«На мне»/доска сотрудника) описан один раз: им пользуются
-        # и доска, и выгрузка в Excel.
-        self.assertIn("scopeQueryParams(scope)", block)
+        # Охват («Мои»/«На мне»/доска сотрудника плюс отдел) описан один раз:
+        # им пользуются и доска, и выгрузка в Excel.
+        self.assertIn("scopeQueryParams(scope, departmentId)", block)
         scope_block = src[src.index("export const scopeQueryParams = ("):src.index("export const boardQueryParams = (")]
-        self.assertIn("if (scope === 'my') return { mine: 'any' };", scope_block)
-        self.assertIn("if (scope === 'assigned') return { mine: 'assignee' };", scope_block)
+        self.assertIn("if (scope === 'my') return { ...params, mine: 'any' };", scope_block)
+        self.assertIn("if (scope === 'assigned') return { ...params, mine: 'assignee' };", scope_block)
         self.assertIn("person_scope: 'any',", scope_block)
+        self.assertIn("const params = departmentQueryParams(departmentId);", scope_block)
 
     def test_chunk_sizes_are_a_closed_list(self):
         # Поведение проверяется в tests/board_query.test.mjs, здесь — что модуль на месте.
@@ -1289,7 +1291,8 @@ class BoardPaginationTests(unittest.TestCase):
         # Любой сброс всё равно обязан привести к загрузке.
         self.assertIn("setColumnsResetToken((prev) => prev + 1);", src)
         self.assertIn(
-            "const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;",
+            "const boardReloadKey = "
+            "`${scope}|${departmentId}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;",
             src,
         )
         # На первом рендере сброс не нужен — колонки и так грузятся с нуля.
@@ -1374,7 +1377,10 @@ class TaskQueryBuilderTests(unittest.TestCase):
         block = src[start:src.index("  useEffect(() => {", start)]
         # Без column все пять запросов были одинаковыми, а колонки показывали одно и то же.
         self.assertIn("column", block.split(')')[0])
-        self.assertIn("boardQueryParams({ scope, mode, sort, column, limit, offset, withSummary })", block)
+        self.assertIn(
+            "boardQueryParams({ scope, departmentId, mode, sort, column, limit, offset, withSummary })",
+            block,
+        )
 
     def test_column_queries_are_covered_by_indexes(self):
         src = _read(DATABASE_PATH)
@@ -1609,6 +1615,124 @@ class SkillTests(unittest.TestCase):
         self.assertIn("только автор", src)
         # Агенту прямо запрещено выдумывать трудозатраты.
         self.assertIn("Выдумывать трудозатраты нельзя", src)
+
+
+class DepartmentSwitcherTests(unittest.TestCase):
+    """
+    Переключатель отделов в разделе «Задачи».
+
+    Своей колонки «отдел» у задачи нет: принадлежность выводим из членства того,
+    кто задачу поставил. Значит, единственное место, где это правило живёт, —
+    условие в _task_department_condition, и разъедься оно с фронтом, раздел
+    молча покажет не тот набор задач.
+    """
+
+    def setUp(self):
+        self.db_src = _read(DATABASE_PATH)
+        self.api_src = _read(APP_PATH)
+        self.view_src = _read(TASKS_VIEW_PATH)
+        self.workspace_src = _read(WORKSPACE_PATH)
+        self.filter_src = _read(DEPARTMENT_FILTER_PATH)
+
+    def test_department_is_read_from_the_task_author(self):
+        start = self.db_src.index("    def _task_department_condition(")
+        block = self.db_src[start:start + 1400]
+        # Именно created_by: «поручил» (requested_by_id) — это источник задачи, а не её отдел.
+        self.assertIn("task_dept_creator.id = t.created_by", block)
+        self.assertIn("task_dept_creator.department_id = %s", block)
+        self.assertNotIn("t.assigned_to", block)
+        # Подзапросом, а не JOIN'ом: те же условия уходят в сводку и счётчик, где users нет.
+        self.assertIn("EXISTS (SELECT 1 FROM users task_dept_creator", block)
+        # Постановщик без отдела и удалённый постановщик — один и тот же случай.
+        self.assertIn("NOT EXISTS (SELECT 1 FROM users task_dept_creator", block)
+
+    def test_bad_department_value_is_rejected_not_ignored(self):
+        start = self.db_src.index("    def _normalize_task_department_filter(")
+        block = self.db_src[start:start + 700]
+        self.assertIn('raise ValueError("INVALID_TASK_DEPARTMENT_FILTER")', block)
+        self.assertIn("if department_id <= 0:", block)
+        self.assertIn("if raw in ('none', 'null'):", block)
+        self.assertIn("Invalid department_id filter", self.api_src)
+
+    def test_department_narrows_the_base_scope_so_the_summary_matches(self):
+        start = self.db_src.index("    def _task_scope_filters(")
+        block = self.db_src[start:self.db_src.index("    def get_tasks_for_requester(", start)]
+        self.assertIn("department_id=None", block)
+        self.assertIn("department_sql, department_params = self._task_department_condition(department_filter)", block)
+        # Условие попадает в conditions/params, то есть в базовый охват, а не в
+        # фильтры поверх него: иначе цифры шапки считались бы по всем отделам.
+        self.assertIn("conditions.append(department_sql)", block)
+        self.assertIn("params.extend(department_params)", block)
+
+    def test_list_and_export_share_the_department(self):
+        for method in ("    def get_tasks_for_requester(", "    def get_tasks_for_export("):
+            start = self.db_src.index(method)
+            signature = self.db_src[start:self.db_src.index("):", start)]
+            self.assertIn("department_id", signature, method)
+        # В Excel должен уехать ровно тот же охват, что виден на экране.
+        export_start = self.api_src.index("def export_tasks_excel():")
+        export_block = self.api_src[export_start:export_start + 1200]
+        self.assertIn("department_id=(request.args.get('department_id') or '').strip() or None", export_block)
+
+    def test_departments_endpoint_lists_only_departments_with_tasks(self):
+        self.assertIn("@app.route('/api/tasks/departments', methods=['GET', 'OPTIONS'])", self.api_src)
+        start = self.db_src.index("    def get_task_departments(")
+        block = self.db_src[start:start + 1600]
+        # Считаем по видимым задачам, а не по справочнику отделов.
+        self.assertIn("FROM tasks t", block)
+        self.assertIn("LEFT JOIN users creator ON creator.id = t.created_by", block)
+        self.assertIn("LEFT JOIN departments d ON d.id = creator.department_id", block)
+        self.assertIn("self._task_scope_filters(requester_id, role)", block)
+
+    def test_default_department_never_opens_an_empty_section(self):
+        start = self.api_src.index("def get_task_departments():")
+        block = self.api_src[start:start + 1600]
+        # У главы отдела это возглавляемый отдел, а не строка в профиле.
+        self.assertIn("_department_scope_id_for_requester(requester_id)", block)
+        self.assertIn("default_department_id = None", block)
+        self.assertIn("item.get('id') == default_department_id", block)
+
+    def test_switcher_is_a_searchable_shared_select(self):
+        self.assertIn("import CustomSelect from '../ui/CustomSelect';", self.view_src)
+        start = self.view_src.index('ariaLabel="Отдел задач"')
+        block = self.view_src[start - 400:start + 400]
+        self.assertIn('variant="ios"', block)
+        self.assertIn("searchable", block)
+        self.assertIn('searchPlaceholder="Найти отдел…"', block)
+        self.assertIn("onChange={changeDepartmentFilter}", block)
+
+    def test_department_reaches_every_task_query_of_the_section(self):
+        # Список «Все задачи».
+        self.assertIn("...departmentQueryParams(departmentFilter)", self.view_src)
+        self.assertIn("departmentId={departmentFilter}", self.view_src)
+        # Доска: колонки, страница, окно статуса и выгрузка.
+        self.assertIn("await onExport({ scope, departmentId })", self.workspace_src)
+        self.assertIn("departmentId={departmentId}", self.workspace_src)
+        self.assertEqual(self.workspace_src.count("departmentId,\n        mode: 'board'"), 2)
+        self.assertIn("loadTasks({ scope, departmentId, mode,", self.workspace_src)
+
+    def test_my_tasks_and_notifications_are_not_narrowed_by_department(self):
+        # «Мои задачи» кормят счётчик уведомлений и закреплённую задачу: сузь их
+        # отделом — и колокол погас бы на чужих задачах, которые ждут человека.
+        start = self.view_src.index("  const fetchTasks = useCallback(")
+        block = self.view_src[start:self.view_src.index("  const loadBoardTasks", start)]
+        self.assertIn("params: { only_my: 1 }", block)
+        self.assertNotIn("department", block)
+
+    def test_section_waits_for_the_department_before_loading(self):
+        # Иначе первый экран показал бы все отделы и тут же перерисовался на свой.
+        self.assertIn("const isDepartmentResolved = departmentFilter !== null;", self.view_src)
+        self.assertIn("if (!user || !canAccessTasks || !isDepartmentResolved) return;", self.view_src)
+        self.assertIn("{workspaceTab !== 'overview' && isDepartmentResolved && (", self.view_src)
+
+    def test_stale_or_unknown_department_falls_back_instead_of_showing_nothing(self):
+        self.assertIn("export const resolveInitialDepartment =", self.filter_src)
+        start = self.filter_src.index("export const resolveInitialDepartment =")
+        block = self.filter_src[start:start + 900]
+        self.assertIn("if (stored && available.has(stored)) return stored;", block)
+        self.assertIn("return available.has(fallback) ? fallback : TASK_DEPARTMENT_ALL;", block)
+        # «Все отделы» — это отсутствие параметра, а не значение для сервера.
+        self.assertIn("return value === TASK_DEPARTMENT_ALL ? {} : { department_id: value };", self.filter_src)
 
 
 if __name__ == "__main__":

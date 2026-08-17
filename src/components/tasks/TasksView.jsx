@@ -24,8 +24,17 @@ import {
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
+import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
+import {
+  TASK_DEPARTMENT_ALL,
+  buildDepartmentOptions,
+  departmentQueryParams,
+  departmentStorageKey,
+  mergeSelectedDepartment,
+  resolveInitialDepartment,
+} from './departmentFilter';
 import {
   ACTION_NEED_META,
   actionNeedSeenKey,
@@ -99,7 +108,16 @@ styleTag.textContent = `
     color: var(--ink);
     margin: 0;
   }
+  .tv-topbar-lead { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .tv-topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+  /* Переключатель отделов — элемент дизайн-системы сайта, а не editorial-шрифт раздела.
+     Ширина под самое длинное название («СЗоВ — Служба заботы о водителях»): текущий
+     охват раздела нельзя показывать многоточием. */
+  .tv-dept-select { width: 264px; }
+  .tv-dept-select, .tv-dept-select * {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+  }
 
   /* ── Уведомления «задача ждёт вас» ── */
   .tv-inbox { position: relative; display: inline-flex; }
@@ -2532,6 +2550,8 @@ styleTag.textContent = `
     .tv-stats-strip { grid-template-columns: 1fr 1fr; gap: 8px; }
     .tv-stat-value { font-size: 22px; }
     .tv-topbar-title { font-size: 18px; }
+    .tv-topbar-lead { width: 100%; }
+    .tv-dept-select { flex: 1; width: auto; min-width: 0; }
   }
 `;
 document.head.appendChild(styleTag);
@@ -2721,6 +2741,18 @@ const formatSpentMinutes = (minutes) => {
 };
 
 const REPORT_KIND_LABEL = { progress: 'Промежуточный', completion: 'Итоговый' };
+
+/* Выбранный отдел переживает перезагрузку: это рабочий контекст человека, а не
+   разовый фильтр. Ключ привязан к пользователю — на общем компьютере чужой
+   выбор не должен подменять свой. */
+const readStoredDepartment = (userId) => {
+  try { return window.localStorage.getItem(departmentStorageKey(userId)) || ''; }
+  catch (error) { return ''; }
+};
+const writeStoredDepartment = (userId, value) => {
+  try { window.localStorage.setItem(departmentStorageKey(userId), String(value || '')); }
+  catch (error) { /* private mode */ }
+};
 
 const WORKSPACE_TAB_STORAGE_KEY = 'otp.tasks.workspaceTab';
 const WORKSPACE_TABS = [
@@ -6180,8 +6212,15 @@ const TasksView = ({
   const [pagedTasks,          setPagedTasks]          = useState([]);
   const [recipients,          setRecipients]          = useState([]);
   const [boardPeople,         setBoardPeople]         = useState([]);
+  /* Отдел раздела. Принадлежность задачи выводится из членства постановщика,
+     поэтому отдельного поля у задачи нет — см. departmentFilter.js.
+     null означает «ещё не знаем»: до ответа сервера ни один список не грузим,
+     иначе первый экран показал бы все отделы и тут же перерисовался на свой. */
+  const [departments,         setDepartments]         = useState([]);
+  const [departmentFilter,    setDepartmentFilter]    = useState(null);
   const [isTasksLoading,      setIsTasksLoading]      = useState(false);
-  const [isPagedTasksLoading, setIsPagedTasksLoading] = useState(false);
+  // Стартуем в «гружусь»: до ответа сервера пустой список читался бы как «задач нет».
+  const [isPagedTasksLoading, setIsPagedTasksLoading] = useState(true);
   const [isRecipientsLoading, setIsRecipientsLoading] = useState(false);
   const [isCreateLoading,     setIsCreateLoading]     = useState(false);
   const [actionLoadingKey,    setActionLoadingKey]    = useState('');
@@ -6248,6 +6287,21 @@ const TasksView = ({
     try { window.localStorage.setItem(WORKSPACE_TAB_STORAGE_KEY, tabId); } catch (error) { /* private mode */ }
   }, []);
 
+  const isDepartmentResolved = departmentFilter !== null;
+  const departmentOptions = useMemo(() => buildDepartmentOptions(departments), [departments]);
+  /* Обновление списка отделов не должно зависеть от выбранного значения: попади
+     оно в зависимости fetchDepartments — смена отдела перезапускала бы всю
+     загрузку раздела. Поэтому текущий выбор читаем через ref. */
+  const departmentFilterRef = useRef(null);
+  useEffect(() => { departmentFilterRef.current = departmentFilter; }, [departmentFilter]);
+
+  const changeDepartmentFilter = useCallback((next) => {
+    const value = String(next || TASK_DEPARTMENT_ALL);
+    setDepartmentFilter((prev) => (prev === value ? prev : value));
+    setAllTasksPage(1);
+    writeStoredDepartment(user?.id, value);
+  }, [user?.id]);
+
   useEffect(() => {
     const timer = setInterval(() => setActionNeedsNow(Date.now()), 60000);
     return () => clearInterval(timer);
@@ -6297,6 +6351,28 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders]);
 
+  /* Отделы для переключателя: сервер отдаёт только те, где есть видимые задачи,
+     и подсказывает отдел по умолчанию — у главы отдела это возглавляемый отдел,
+     а не строка в его профиле, так что вычислить это на клиенте нельзя.
+     Если запрос не удался, остаёмся на «Все отделы»: сузить выборку по отделу,
+     списка которого нет, значит показать пустой раздел без объяснения. */
+  const fetchDepartments = useCallback(async () => {
+    let list = [];
+    let serverDefault = null;
+    try {
+      const res = await axios.get(`${apiBaseUrl}/api/tasks/departments`, { headers: buildHeaders() });
+      list = Array.isArray(res?.data?.departments) ? res.data.departments : [];
+      serverDefault = res?.data?.default_department_id ?? null;
+    } catch (e) {
+      list = [];
+      serverDefault = null;
+    }
+    setDepartments((prev) => mergeSelectedDepartment(list, prev, departmentFilterRef.current));
+    setDepartmentFilter((prev) => (prev !== null
+      ? prev
+      : resolveInitialDepartment(list, serverDefault, readStoredDepartment(user?.id))));
+  }, [apiBaseUrl, buildHeaders, user?.id]);
+
   const fetchRecipients = useCallback(async () => {
     setIsRecipientsLoading(true);
     try {
@@ -6329,11 +6405,11 @@ const TasksView = ({
   /* Загрузчик страницы доски: доска сотрудника — только его задачи, общая —
      страница по количеству. Сводка нужна шапке доски, чтобы её счётчики
      считались по всей доске, а не по видимой странице. */
-  const loadBoardTasks = useCallback(async ({ scope, mode, sort, column, limit, offset, withSummary }) => {
+  const loadBoardTasks = useCallback(async ({ scope, departmentId, mode, sort, column, limit, offset, withSummary }) => {
     try {
       const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
         headers: buildHeaders(),
-        params: boardQueryParams({ scope, mode, sort, column, limit, offset, withSummary })
+        params: boardQueryParams({ scope, departmentId, mode, sort, column, limit, offset, withSummary })
       });
       const data = res?.data || {};
       return {
@@ -6349,11 +6425,11 @@ const TasksView = ({
 
   /* Выгрузка идёт blob'ом через axios: простая ссылка <a href> не несёт токен и
      упирается в 401, потому что авторизация здесь bearer, а не кука. */
-  const exportBoardTasks = useCallback(async ({ scope }) => {
+  const exportBoardTasks = useCallback(async ({ scope, departmentId }) => {
     try {
       const res = await axios.get(`${apiBaseUrl}/api/tasks/export`, {
         headers: buildHeaders(),
-        params: scopeQueryParams(scope),
+        params: scopeQueryParams(scope, departmentId),
         responseType: 'blob',
       });
       const url = window.URL.createObjectURL(new Blob([res.data]));
@@ -6402,7 +6478,8 @@ const TasksView = ({
     try {
       const params = {
         limit: TASKS_PAGE_SIZE,
-        offset: (allTasksPage - 1) * TASKS_PAGE_SIZE
+        offset: (allTasksPage - 1) * TASKS_PAGE_SIZE,
+        ...departmentQueryParams(departmentFilter)
       };
       if (debouncedSearchQuery) params.q = debouncedSearchQuery;
       if (filterStatus) params.status = filterStatus;
@@ -6439,6 +6516,7 @@ const TasksView = ({
     notify,
     allTasksPage,
     debouncedSearchQuery,
+    departmentFilter,
     filterStatus,
     filterTag,
     filterPriority,
@@ -6448,8 +6526,9 @@ const TasksView = ({
     if (!user || !canAccessTasks) return;
     fetchRecipients();
     fetchBoardPeople();
+    fetchDepartments();
     fetchTasks();
-  }, [user, canAccessTasks, fetchRecipients, fetchBoardPeople, fetchTasks]);
+  }, [user, canAccessTasks, fetchRecipients, fetchBoardPeople, fetchDepartments, fetchTasks]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -6459,9 +6538,9 @@ const TasksView = ({
   }, [searchQuery]);
 
   useEffect(() => {
-    if (!user || !canAccessTasks) return;
+    if (!user || !canAccessTasks || !isDepartmentResolved) return;
     fetchPagedTasks();
-  }, [user, canAccessTasks, fetchPagedTasks]);
+  }, [user, canAccessTasks, isDepartmentResolved, fetchPagedTasks]);
 
   // Keyboard: Ctrl/Cmd+K → focus search
   useEffect(() => {
@@ -6610,12 +6689,13 @@ const TasksView = ({
   ]);
 
   const refreshTasksData = useCallback(async () => {
-    const jobs = [fetchTasks(), fetchPagedTasks()];
+    // Список отделов живёт от задач: закрыли последнюю — отдел уходит из списка.
+    const jobs = [fetchTasks(), fetchPagedTasks(), fetchDepartments()];
     if (isPersonDrilldown) jobs.push(fetchPersonTasks());
     setBoardReloadToken((prev) => prev + 1);
     await Promise.all(jobs);
     setTaskPatches({});
-  }, [fetchTasks, fetchPagedTasks, fetchPersonTasks, isPersonDrilldown]);
+  }, [fetchTasks, fetchPagedTasks, fetchDepartments, fetchPersonTasks, isPersonDrilldown]);
 
   const patchTaskEverywhere = useCallback((taskId, updater) => {
     const normalizedTaskId = Number(taskId || 0);
@@ -7277,7 +7357,22 @@ const TasksView = ({
     <div className={`tv-root ${workspaceTab === 'overview' ? '' : 'is-board-mode'}`}>
       {/* Top bar */}
       <div className="tv-topbar">
-        <h1 className="tv-topbar-title">Задачи</h1>
+        <div className="tv-topbar-lead">
+          <h1 className="tv-topbar-title">Задачи</h1>
+          {/* Отдел задачи = отдел того, кто её поставил. «Мои задачи» этот
+              переключатель не сужает: там задачи и так всегда ваши. */}
+          <CustomSelect
+            className="tv-dept-select"
+            variant="ios"
+            ariaLabel="Отдел задач"
+            value={departmentFilter ?? TASK_DEPARTMENT_ALL}
+            options={departmentOptions}
+            onChange={changeDepartmentFilter}
+            disabled={!isDepartmentResolved}
+            searchable
+            searchPlaceholder="Найти отдел…"
+          />
+        </div>
         <div className="tv-topbar-actions">
           <TaskInbox
             needs={actionNeeds}
@@ -7334,11 +7429,24 @@ const TasksView = ({
         ))}
       </div>
 
-      {workspaceTab !== 'overview' && (
+      {workspaceTab !== 'overview' && !isDepartmentResolved && (
+        <div className="tv-section">
+          {/* Доску не монтируем, пока не знаем отдел: иначе она успела бы
+              сходить за всеми задачами и тут же перезагрузиться на свой отдел. */}
+          <div className="space-y-2">
+            {[0, 1, 2].map((index) => (
+              <div key={index} className="h-14 animate-pulse rounded-2xl bg-slate-100" />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {workspaceTab !== 'overview' && isDepartmentResolved && (
         <div className="tv-section">
           <TaskBoardWorkspace
             mode={workspaceTab}
             people={boardPeople}
+            departmentId={departmentFilter}
             loadTasks={loadBoardTasks}
             reloadToken={boardReloadToken}
             taskPatches={taskPatches}

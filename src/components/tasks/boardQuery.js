@@ -6,6 +6,10 @@
  * и ошибка в нём выглядит как «во всех колонках одно и то же».
  */
 
+// Расширение в пути обязательно: этот модуль гоняется тестами через node --test,
+// а там ESM не достраивает '.js' сам, в отличие от сборки Vite.
+import { departmentQueryParams } from './departmentFilter.js';
+
 /** Колонка доски = свой срез статусов. Порядок ключей совпадает с BOARD_COLUMNS. */
 export const BOARD_COLUMN_QUERY = {
   backlog:  { backlog: 'only' },
@@ -28,23 +32,26 @@ export const normalizeBoardChunk = (value) => {
 };
 
 /**
- * Чьи задачи просим: «Мои» / «На мне» / доска сотрудника («Все» — без фильтра).
+ * Чьи задачи просим: «Мои» / «На мне» / доска сотрудника («Все» — без фильтра)
+ * и в каком отделе.
  * Общее у доски и выгрузки: в Excel должен уехать ровно тот же охват, что виден
  * на экране, поэтому охват описан один раз.
  */
-export const scopeQueryParams = (scope) => {
-  if (scope === 'my') return { mine: 'any' };
-  if (scope === 'assigned') return { mine: 'assignee' };
+export const scopeQueryParams = (scope, departmentId = null) => {
+  const params = departmentQueryParams(departmentId);
+  if (scope === 'my') return { ...params, mine: 'any' };
+  if (scope === 'assigned') return { ...params, mine: 'assignee' };
   if (String(scope || '').startsWith('person:')) {
     return {
+      ...params,
       person_id: Number(String(scope).slice('person:'.length) || 0),
       person_scope: 'any',
     };
   }
-  return {};
+  return params;
 };
 
-export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, withSummary = true }) => {
+export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, departmentId = null, withSummary = true }) => {
   const params = { limit, offset };
   // Сводка стоит семи агрегатов по всей базе — просим её один раз на загрузку доски.
   if (!withSummary) params.summary = 0;
@@ -53,5 +60,5 @@ export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, wit
   if (sort === 'importance') params.sort = 'importance';
   if (column && BOARD_COLUMN_QUERY[column]) Object.assign(params, BOARD_COLUMN_QUERY[column]);
   else if (mode === 'backlog') params.backlog = 'only';
-  return Object.assign(params, scopeQueryParams(scope));
+  return Object.assign(params, scopeQueryParams(scope, departmentId));
 };

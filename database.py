@@ -45496,6 +45496,42 @@ class Database:
             for row in rows
         ]
 
+    def get_task_departments(self, requester_id, requester_role):
+        """Отделы для переключателя раздела «Задачи».
+
+        Отдел задачи — это отдел того, кто её поставил: своей колонки у задачи
+        нет. Считаем по видимым задачам, а не по справочнику отделов: пункт без
+        единой задачи — заведомо пустой экран, в который человек кликает зря.
+        Строка с id = None — задачи постановщиков без отдела.
+        """
+        role = normalize_role_value(requester_role)
+        scope = self._task_scope_filters(requester_id, role)
+        if scope is None:
+            return []
+        conditions, params, _person_board_id, _person_id_rest = scope
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT d.id, d.name, COUNT(*)::INT AS task_count
+                FROM tasks t
+                LEFT JOIN users creator ON creator.id = t.created_by
+                LEFT JOIN departments d ON d.id = creator.department_id
+                {where_sql}
+                GROUP BY d.id, d.name
+                ORDER BY d.name ASC NULLS LAST
+            """, tuple(params))
+            rows = cursor.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "task_count": int(row[2] or 0),
+            }
+            for row in rows
+        ]
+
     def _task_now(self):
         return datetime.now()
 
@@ -47112,8 +47148,48 @@ class Database:
             """, (requester_id, task_id, kind_norm, self._task_now()))
         return self.get_task_action_needs_summary(requester_id)
 
+    @staticmethod
+    def _normalize_task_department_filter(value):
+        """'' / None / 'all' → без фильтра, 'none' → без отдела, иначе id отдела."""
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if raw in ('', 'all'):
+            return None
+        if raw in ('none', 'null'):
+            return 'none'
+        try:
+            department_id = int(raw)
+        except Exception:
+            raise ValueError("INVALID_TASK_DEPARTMENT_FILTER")
+        if department_id <= 0:
+            raise ValueError("INVALID_TASK_DEPARTMENT_FILTER")
+        return department_id
+
+    def _task_department_condition(self, department_filter):
+        """Условие «задача принадлежит отделу» для WHERE по таблице tasks.
+
+        Своей колонки у задачи нет: принадлежность выводим из членства того, кто
+        задачу поставил (created_by). Подзапросом, а не JOIN'ом — эти же условия
+        уходят в сводку, в счётчик и в выгрузку, где таблицы users в запросе нет.
+        """
+        if department_filter is None:
+            return None, []
+        if department_filter == 'none':
+            # Сюда же попадают задачи, чей постановщик удалён: отдела у них нет.
+            return (
+                "NOT EXISTS (SELECT 1 FROM users task_dept_creator "
+                "WHERE task_dept_creator.id = t.created_by "
+                "AND task_dept_creator.department_id IS NOT NULL)"
+            ), []
+        return (
+            "EXISTS (SELECT 1 FROM users task_dept_creator "
+            "WHERE task_dept_creator.id = t.created_by "
+            "AND task_dept_creator.department_id = %s)"
+        ), [department_filter]
+
     def _task_scope_filters(self, requester_id, role, only_my=False, mine=None,
-                            person_id=None, person_scope=None):
+                            person_id=None, person_scope=None, department_id=None):
         """Кого пускаем к задачам и чья это доска — общая часть списка и выгрузки.
 
         Вынесено из get_tasks_for_requester, чтобы Excel-выгрузка отбирала ровно
@@ -47138,6 +47214,8 @@ class Database:
         if person_scope_norm and person_scope_norm not in {'incoming', 'outgoing', 'any'}:
             raise ValueError("INVALID_TASK_PERSON_SCOPE_FILTER")
 
+        department_filter = self._normalize_task_department_filter(department_id)
+
         if person_id is None or str(person_id).strip() == '':
             person_id_norm = None
         else:
@@ -47155,6 +47233,14 @@ class Database:
             params.extend([requester_id, requester_id, requester_id])
         else:
             return None
+
+        # Отдел — часть базового охвата, а не фильтр поверх него: иначе сводка
+        # раздела и счётчик бэклога считались бы по всем отделам сразу, и цифры
+        # в шапке не сходились бы с тем, что видно в списке.
+        department_sql, department_params = self._task_department_condition(department_filter)
+        if department_sql:
+            conditions.append(department_sql)
+            params.extend(department_params)
 
         if only_my_flag:
             conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
@@ -47195,6 +47281,7 @@ class Database:
             mine=None,
             task_id=None,
             sort=None,
+            department_id=None,
             include_summary=True
     ):
         requester_id = int(requester_id)
@@ -47253,7 +47340,8 @@ class Database:
 
         scope = self._task_scope_filters(
             requester_id, role,
-            only_my=only_my_flag, mine=mine, person_id=person_id, person_scope=person_scope
+            only_my=only_my_flag, mine=mine, person_id=person_id, person_scope=person_scope,
+            department_id=department_id
         )
         if scope is None:
             return {
@@ -47611,7 +47699,7 @@ class Database:
         }
 
     def get_tasks_for_export(self, requester_id, requester_role, mine=None,
-                             person_id=None, person_scope=None):
+                             person_id=None, person_scope=None, department_id=None):
         """Плоский срез задач для выгрузки в Excel — тот же охват, что у доски.
 
         Отдельный запрос, а не get_tasks_for_requester: выгрузке не нужны
@@ -47624,7 +47712,8 @@ class Database:
         """
         role = normalize_role_value(requester_role)
         scope = self._task_scope_filters(
-            requester_id, role, mine=mine, person_id=person_id, person_scope=person_scope
+            requester_id, role, mine=mine, person_id=person_id, person_scope=person_scope,
+            department_id=department_id
         )
         if scope is None:
             return []

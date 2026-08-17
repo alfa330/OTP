@@ -888,6 +888,7 @@ const COLUMN_BROWSER_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';
 const ColumnBrowser = ({
   column,
   scope,
+  departmentId,
   sort,
   loadTasks,
   actionNeedOf,
@@ -922,6 +923,7 @@ const ColumnBrowser = ({
     try {
       result = await loadTasks({
         scope,
+        departmentId,
         mode: 'board',
         sort,
         column: column.id,
@@ -944,7 +946,7 @@ const ColumnBrowser = ({
       ? incoming
       // Страницы могли сдвинуться, пока листали, — склеиваем по id.
       : [...new Map([...prev, ...incoming].map((task) => [task.id, task])).values()]));
-  }, [loadTasks, scope, sort, column.id]);
+  }, [loadTasks, scope, departmentId, sort, column.id]);
 
   useEffect(() => { loadPage(0); }, [loadPage]);
 
@@ -1595,6 +1597,9 @@ const emptyColumnState = () => Object.fromEntries(
 const TaskBoardWorkspace = ({
   mode,
   people = [],
+  /* Отдел выбран на уровне раздела и уходит в каждый запрос доски: колонки,
+     страницу, окно статуса и выгрузку. */
+  departmentId = null,
   loadTasks,
   reloadToken = 0,
   taskPatches = null,
@@ -1652,6 +1657,7 @@ const TaskBoardWorkspace = ({
     try {
       result = await loadTasks({
         scope,
+        departmentId,
         mode: 'board',
         sort: boardSort,
         column: columnId,
@@ -1680,9 +1686,9 @@ const TaskBoardWorkspace = ({
       },
     }));
     if (columnId === BOARD_COLUMNS[0].id) setBoardSummary(result.summary || null);
-  }, [loadTasks, scope, boardSort]);
+  }, [loadTasks, scope, departmentId, boardSort]);
 
-  const boardReloadKey = `${scope}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;
+  const boardReloadKey = `${scope}|${departmentId}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;
   useEffect(() => {
     if (!isBoardMode) return;
     // В колонке всегда ровно одна порция: остальное смотрят в окне статуса.
@@ -1706,7 +1712,7 @@ const TaskBoardWorkspace = ({
     pageRequestIdRef.current = requestId;
     let cancelled = false;
     setIsPageLoading(true);
-    loadTasks({ scope, mode, sort: boardSort, limit: chunkSize, offset: (page - 1) * chunkSize })
+    loadTasks({ scope, departmentId, mode, sort: boardSort, limit: chunkSize, offset: (page - 1) * chunkSize })
       .then((result) => {
         if (cancelled || pageRequestIdRef.current !== requestId) return;
         setPageTasks(Array.isArray(result?.tasks) ? result.tasks : []);
@@ -1717,7 +1723,7 @@ const TaskBoardWorkspace = ({
         if (!cancelled && pageRequestIdRef.current === requestId) setIsPageLoading(false);
       });
     return () => { cancelled = true; };
-  }, [isBoardMode, loadTasks, scope, mode, boardSort, page, chunkSize, reloadToken]);
+  }, [isBoardMode, loadTasks, scope, departmentId, mode, boardSort, page, chunkSize, reloadToken]);
 
   // Смена вкладки (бэклог/доска/таймлайн) меняет выборку — начинаем сначала.
   // На первом рендере не сбрасываем: колонки и так грузятся с нуля.
@@ -1728,6 +1734,16 @@ const TaskBoardWorkspace = ({
     setPage(1);
     resetColumns();
   }, [mode, resetColumns]);
+
+  /* Смена отдела меняет всю выборку. Колонки перезагрузятся сами (отдел входит в
+     boardReloadKey), а вот страницу надо вернуть в начало: третья страница
+     прежнего отдела в новом почти наверняка за концом списка. */
+  const previousDepartmentRef = useRef(departmentId);
+  useEffect(() => {
+    if (previousDepartmentRef.current === departmentId) return;
+    previousDepartmentRef.current = departmentId;
+    setPage(1);
+  }, [departmentId]);
 
   // Повторный выбор того же значения — не работа: ничего не сбрасываем и не грузим.
   const changeScope = useCallback((next) => {
@@ -1978,17 +1994,18 @@ const TaskBoardWorkspace = ({
     applyBoardPatch(task, patch);
   }, [applyBoardPatch]);
 
-  // Выгружаем ровно тот охват, что выбран рядом в «Мои/На мне/Все»: файл собирает
-  // сервер по всем колонкам сразу, поэтому вкладка на состав не влияет.
+  // Выгружаем ровно тот охват, что выбран рядом в «Мои/На мне/Все» и в отделе
+  // раздела: файл собирает сервер по всем колонкам сразу, поэтому вкладка на
+  // состав не влияет.
   const handleExport = useCallback(async () => {
     if (typeof onExport !== 'function' || isExporting) return;
     setIsExporting(true);
     try {
-      await onExport({ scope });
+      await onExport({ scope, departmentId });
     } finally {
       setIsExporting(false);
     }
-  }, [onExport, isExporting, scope]);
+  }, [onExport, isExporting, scope, departmentId]);
 
   if (isBoardMode ? (isColumnsLoading && !boardRows.length) : (isPageLoading && !pageTasks.length)) {
     return (
@@ -2110,6 +2127,7 @@ const TaskBoardWorkspace = ({
         <ColumnBrowser
           column={browsedColumn}
           scope={scope}
+          departmentId={departmentId}
           sort={boardSort}
           loadTasks={loadTasks}
           actionNeedOf={actionNeedOf}

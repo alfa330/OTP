@@ -403,10 +403,10 @@ class TaskExportApiTests(unittest.TestCase):
 
 class TaskExportFrontendTests(unittest.TestCase):
     def test_scope_is_described_once_for_board_and_export(self):
-        self.assertIn("export const scopeQueryParams = (scope)", BOARD_QUERY_SOURCE)
+        self.assertIn("export const scopeQueryParams = (scope, departmentId = null)", BOARD_QUERY_SOURCE)
         board_params = BOARD_QUERY_SOURCE[BOARD_QUERY_SOURCE.index("export const boardQueryParams"):]
-        self.assertIn("scopeQueryParams(scope)", board_params)
-        self.assertIn("scopeQueryParams(scope)", TASKS_VIEW_SOURCE)
+        self.assertIn("scopeQueryParams(scope, departmentId)", board_params)
+        self.assertIn("scopeQueryParams(scope, departmentId)", TASKS_VIEW_SOURCE)
 
     def test_download_goes_through_axios_with_headers(self):
         # Ссылка <a href> не несёт bearer-токен и упёрлась бы в 401.
@@ -421,7 +421,7 @@ class TaskExportFrontendTests(unittest.TestCase):
     def test_button_exports_the_selected_scope(self):
         handler = WORKSPACE_SOURCE[WORKSPACE_SOURCE.index("const handleExport"):]
         handler = handler[:handler.index("}, [onExport")]
-        self.assertIn("onExport({ scope })", handler)
+        self.assertIn("onExport({ scope, departmentId })", handler)
         self.assertIn("setIsExporting(true)", handler)
         self.assertIn("Выгрузка", WORKSPACE_SOURCE)
         self.assertIn("disabled={isExporting}", WORKSPACE_SOURCE)

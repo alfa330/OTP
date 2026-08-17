@@ -18167,6 +18167,41 @@ def get_task_board_people():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/tasks/departments', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_task_departments():
+    """Отделы для переключателя раздела + отдел, выбранный по умолчанию.
+
+    Принадлежность задачи отделу выводится из членства того, кто её поставил.
+    Значение по умолчанию считает сервер: у главы отдела это возглавляемый
+    отдел, а не строка в его профиле, — на клиенте это не вычислить.
+    """
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = getattr(g, 'effective_task_role', requester[3])
+        departments = db.get_task_departments(requester_id, requester_role)
+
+        default_department_id = _department_scope_id_for_requester(requester_id)
+        # Отдел без единой видимой задачи по умолчанию не выбираем: раздел
+        # открылся бы пустым, и это читалось бы как «задачи пропали».
+        if default_department_id is not None and not any(
+            item.get('id') == default_department_id for item in departments
+        ):
+            default_department_id = None
+
+        return jsonify({
+            "status": "success",
+            "departments": departments,
+            "default_department_id": default_department_id
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in get_task_departments: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/tasks/action_required', methods=['GET', 'OPTIONS'])
 @require_api_key
 def get_task_action_required_count():
@@ -18520,6 +18555,7 @@ def export_tasks_excel():
             mine=(request.args.get('mine') or '').strip() or None,
             person_id=request.args.get('person_id'),
             person_scope=(request.args.get('person_scope') or '').strip() or None,
+            department_id=(request.args.get('department_id') or '').strip() or None,
         )
     except ValueError:
         return jsonify({"error": "Invalid export filter"}), 400
@@ -18614,6 +18650,8 @@ def handle_tasks():
             mine_filter = (request.args.get('mine') or '').strip().lower() or None
             task_id_filter = (request.args.get('task_id') or '').strip() or None
             sort_order = (request.args.get('sort') or '').strip().lower() or None
+            # Отдел задачи = отдел её постановщика; 'none' — постановщики без отдела.
+            department_filter = (request.args.get('department_id') or '').strip().lower() or None
             # summary=0 — не считать сводку: колонки доски просят её один раз на загрузку.
             include_summary = (request.args.get('summary') or '').strip().lower() not in {'0', 'false', 'no'}
             person_id_raw = request.args.get('person_id')
@@ -18662,6 +18700,7 @@ def handle_tasks():
                     mine=mine_filter,
                     task_id=task_id_filter,
                     sort=sort_order,
+                    department_id=department_filter,
                     include_summary=include_summary
                 )
             except ValueError as e:
@@ -18688,6 +18727,8 @@ def handle_tasks():
                     return jsonify({"error": "Invalid task_id filter"}), 400
                 if error_code == 'INVALID_TASK_SORT':
                     return jsonify({"error": "Invalid sort (use freshness|importance)"}), 400
+                if error_code == 'INVALID_TASK_DEPARTMENT_FILTER':
+                    return jsonify({"error": "Invalid department_id filter"}), 400
                 raise
 
             tasks = payload.get("tasks") or []
@@ -18741,7 +18782,8 @@ def handle_tasks():
                     "person_scope": person_scope,
                     "backlog": backlog_filter,
                     "mine": mine_filter,
-                    "sort": sort_order
+                    "sort": sort_order,
+                    "department_id": department_filter
                 }
             }), 200
 

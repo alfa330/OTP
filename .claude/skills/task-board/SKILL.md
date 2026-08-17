@@ -184,6 +184,9 @@ python -X utf8 scripts/task_board.py report 412 "Готово, вот итог" 
 ## Прямой API (если нужен нестандартный запрос)
 
 - `GET /api/tasks?backlog=only|exclude&status=&tag=&priority=&limit=&offset=`
+- `department_id=<id>|none` — отдел задачи, а он выводится из членства того, кто
+  задачу поставил (`created_by`), своего поля у задачи нет. Сужает и сводку, а не
+  только список. Список отделов и отдел по умолчанию — `GET /api/tasks/departments`.
 - `POST /api/tasks` (multipart) — поля `is_backlog`, `estimate_minutes`, `due_at`, `planned_start_at`
 - `PATCH /api/tasks/<id>` (json) — `due_at`, `estimate_minutes`, `planned_start_at` + прежние поля
 - `POST /api/tasks/board` (json) — батч планирующих правок:
@@ -192,7 +195,7 @@ python -X utf8 scripts/task_board.py report 412 "Готово, вот итог" 
   для `completed` — `{"action":"completed","report":"...","spent_minutes":210}`
 - `GET|POST /api/tasks/<id>/reports` — журнал отчётов; POST `{"body":"...","spent_minutes":120,"kind":"progress"}`
 - `PATCH|DELETE /api/tasks/reports/<report_id>` — правка/удаление своего отчёта
-- `GET /api/tasks/export?mine=&person_id=&person_scope=` — xlsx, лист на колонку
+- `GET /api/tasks/export?mine=&person_id=&person_scope=&department_id=` — xlsx, лист на колонку
   доски. Параметры охвата те же, что у списка, и других нет: колонки в файле
   все сразу. Пустой лист и пустая во всех строках колонка не выводятся.
 
