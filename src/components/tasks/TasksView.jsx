@@ -27,6 +27,7 @@ import FullscreenSheet from '../common/FullscreenSheet';
 import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
+import { planTaskFocus, shouldOpenFetchedTask } from './taskFocus';
 import {
   TASK_DEPARTMENT_ALL,
   buildDepartmentOptions,
@@ -6260,7 +6261,9 @@ const TasksView = ({
   const searchRef              = useRef(null);
   const pagedRequestIdRef      = useRef(0);
   const personTasksRequestIdRef = useRef(0);
+  // Ссылка отработана — карточку открыли; запрос ушёл — второй раз не идём.
   const handledFocusRequestRef = useRef(0);
+  const fetchedFocusRequestRef = useRef(0);
   const hasSyncedDrawerUrlRef   = useRef(false);
   const [form, setForm] = useState(() => buildEmptyTaskForm());
   const [notesOpen, setNotesOpen] = useState(false);
@@ -6801,29 +6804,50 @@ const TasksView = ({
     fetchPersonTasks();
   }, [user, canAccessTasks, isPersonDrilldown, fetchPersonTasks]);
 
+  /* Переход по ссылке на задачу. Эффект перезапускается на каждый ответ раздела
+     («мои», страница списка, задачи сотрудника), поэтому «ссылка отработана» —
+     это КАРТОЧКА ОТКРЫТА, а не «мы что-то предприняли». Раньше первый же такой
+     перезапуск гасил своим cleanup'ом уже улетевший запрос за задачей и при этом
+     считал ссылку отработанной — карточка не открывалась ни ответом на запрос,
+     ни догрузившимся набором. На «Обзоре» это почти всегда успевало отработать,
+     а на «Доске», где к тем же ответам добавляется по запросу на колонку и ответ
+     по ссылке приходит последним, задача не открывалась вообще. */
   useEffect(() => {
-    const requestId = Number(focusTaskRequest?.requestId || 0);
-    const taskId = Number(focusTaskRequest?.taskId || 0);
-    if (!requestId || !taskId || handledFocusRequestRef.current === requestId) return;
-    const nextTask = [...tasks, ...pagedTasks, ...personTasks]
-      .find((task) => Number(task?.id || 0) === taskId);
-    if (nextTask) {
-      handledFocusRequestRef.current = requestId;
-      setDrawerTask(nextTask);
+    const plan = planTaskFocus({
+      request: focusTaskRequest,
+      handledRequestId: handledFocusRequestRef.current,
+      fetchedRequestId: fetchedFocusRequestRef.current,
+      pools: [tasks, pagedTasks, personTasks],
+    });
+    if (plan.kind === 'idle') return;
+    if (plan.kind === 'open') {
+      handledFocusRequestRef.current = plan.requestId;
+      setDrawerTask(plan.task);
       return;
     }
     /* Задачи может не быть в загруженных наборах: раздел держит только «мои»,
-       а ссылка (Telegram, закреплённая задача) ведёт на любую доступную. */
-    handledFocusRequestRef.current = requestId;
-    let cancelled = false;
-    axios.get(`${apiBaseUrl}/api/tasks`, { headers: buildHeaders(), params: { task_id: taskId, limit: 1 } })
+       а ссылка (Telegram, закреплённая задача) ведёт на любую доступную.
+       summary=0 обязателен: из этого ответа берётся одна задача, а сводка стоит
+       семи агрегатов по всей базе — с ней запрос за одной строкой приезжал
+       последним из всех запросов раздела. */
+    fetchedFocusRequestRef.current = plan.requestId;
+    axios.get(`${apiBaseUrl}/api/tasks`, {
+      headers: buildHeaders(),
+      params: { task_id: plan.taskId, limit: 1, summary: 0 },
+    })
       .then((res) => {
         const found = (Array.isArray(res?.data?.tasks) ? res.data.tasks : [])
-          .find((task) => Number(task?.id || 0) === taskId);
-        if (!cancelled && found) setDrawerTask(found);
+          .find((task) => Number(task?.id || 0) === plan.taskId);
+        if (!shouldOpenFetchedTask({
+          task: found,
+          requestId: plan.requestId,
+          handledRequestId: handledFocusRequestRef.current,
+          fetchedRequestId: fetchedFocusRequestRef.current,
+        })) return;
+        handledFocusRequestRef.current = plan.requestId;
+        setDrawerTask(found);
       })
       .catch(() => { /* ссылка на удалённую или недоступную задачу — молча игнорируем */ });
-    return () => { cancelled = true; };
   }, [focusTaskRequest, tasks, pagedTasks, personTasks, apiBaseUrl, buildHeaders]);
 
   /* Цифры «Обзора» — серверная сводка по всем видимым задачам: считать их
