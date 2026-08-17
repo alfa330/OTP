@@ -18,7 +18,8 @@
     "test:wiki-office-schedule": "node --test tests/wiki_office_schedule.test.mjs",
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",
     "test:telegram-text": "node --test tests/telegram_text.test.mjs",
-    "test:kazakhstan-cities": "node --test tests/kazakhstan_cities.test.mjs"
+    "test:kazakhstan-cities": "node --test tests/kazakhstan_cities.test.mjs",
+    "test:crm-wizard": "node --test tests/crm_wizard_rules.test.mjs"
   },
   "dependencies": {
     "@tiptap/extension-highlight": "^3.29.2",

@@ -229,6 +229,22 @@ class SignErrorTest(unittest.TestCase):
             self.assertEqual(result['outcome'], sc.BLOCKED, field)
             self.assertIn(word, result['message'], field)
 
+    def test_error_gone_after_the_actions_closes_without_sending(self):
+        """ТЗ, «когда не отправляет» п.1: «Ошибка исчезла после очистки кэша,
+        смены браузера, перезапуска приложений или проверки с другого устройства».
+
+        Правило было потеряно при переносе ТЗ: вопроса о РЕЗУЛЬТАТЕ действий не
+        было вовсе, и обращение уходило в группу даже когда проблема решилась.
+        """
+        result = verdict(self.KEY, self.ok(error_persists='no'))
+        self.assertEqual(result['outcome'], sc.CLOSE)
+        self.assertIn('исчезла', result['message'])
+
+    def test_solved_problem_wins_over_an_unfinished_check(self):
+        """Если всё уже работает, возвращать к невыполненной проверке незачем."""
+        result = verdict(self.KEY, self.ok(error_persists='no', cache_cleared='no'))
+        self.assertEqual(result['outcome'], sc.CLOSE)
+
     def test_one_off_error_closes_without_sending(self):
         result = verdict(self.KEY, self.ok(error_repeats='Возникла один раз'))
         self.assertEqual(result['outcome'], sc.CLOSE)
@@ -327,8 +343,27 @@ class ServiceErrorTest(unittest.TestCase):
             result = verdict(self.KEY, self.ok(**{field: 'no'}))
             self.assertEqual(result['outcome'], sc.BLOCKED, field)
 
+    def test_local_cause_sends_the_operator_to_fix_it_first(self):
+        """ТЗ, «когда не отправляет» п.3: «Проблема вызвана интернет-соединением
+        или устройством водителя — оператору предлагается устранить локальную
+        причину». Спрашивать только ФАКТ проверок было недостаточно: правило
+        оказалось нечем решать, и оно никогда не срабатывало."""
+        result = verdict(self.KEY, self.ok(local_cause_excluded='no'))
+        self.assertEqual(result['outcome'], sc.BLOCKED)
+        self.assertIn('локальн', result['message'].lower())
+
     def test_service_recovered_closes_without_sending(self):
         result = verdict(self.KEY, self.ok(error_persists='no'))
+        self.assertEqual(result['outcome'], sc.CLOSE)
+
+    def test_recovered_service_wins_over_unfinished_checks(self):
+        """В ТЗ «сервис заработал» — ПЕРВЫЙ пункт среди причин не отправлять.
+
+        Раньше правило стояло последним, и оператор, ответивший «повторный вход —
+        нет» (незачем, всё уже работает), получал блокировку вместо закрытия.
+        """
+        result = verdict(self.KEY, self.ok(error_persists='no', relogin_done='no',
+                                           waited_5min='no'))
         self.assertEqual(result['outcome'], sc.CLOSE)
 
     def test_several_drivers_raise_the_mass_outage_flag(self):
@@ -432,6 +467,58 @@ class CatalogForUiTest(unittest.TestCase):
     def test_unknown_scenario_is_not_ready(self):
         result = sc.evaluate('нет такого', {}, has_attachment=True, checks_confirmed=True)
         self.assertEqual(result['outcome'], sc.INCOMPLETE)
+
+
+class RulesAreDecidableTest(unittest.TestCase):
+    """Каждое правило должно опираться на существующий вопрос.
+
+    Правило, ссылающееся на ключ, которого нет в steps, — мёртвый текст: оно
+    выглядит как перенесённое требование ТЗ, но не срабатывает никогда. Именно
+    так потерялись «ошибка исчезла» в тематике 2 и «локальная причина» в
+    тематике 5 — обе прошли ревью глазами и обе не работали.
+    """
+
+    def test_every_rule_references_an_existing_step(self):
+        for scenario in sc.SCENARIOS:
+            keys = {step['key'] for step in scenario['steps']}
+            for item in scenario.get('rules', []):
+                self.assertIn(item['when'][0], keys,
+                              '%s: правило по несуществующему вопросу %s'
+                              % (scenario['key'], item['when'][0]))
+
+    def test_every_rule_value_is_reachable(self):
+        """Значение в правиле должно быть таким, какое вопрос вообще может дать."""
+        for scenario in sc.SCENARIOS:
+            steps = {step['key']: step for step in scenario['steps']}
+            for item in scenario.get('rules', []):
+                key, expected = item['when']
+                step = steps[key]
+                if step['kind'] in (sc.YESNO, sc.YESNO_DATE):
+                    self.assertIn(expected, ('yes', 'no'), '%s/%s' % (scenario['key'], key))
+                elif step['kind'] == sc.CHOICE:
+                    self.assertIn(expected, step['options'], '%s/%s' % (scenario['key'], key))
+
+    def test_every_flag_references_an_existing_step(self):
+        for scenario in sc.SCENARIOS:
+            keys = {step['key'] for step in scenario['steps']}
+            for item in scenario.get('flags', []):
+                self.assertIn(item['when'][0], keys, scenario['key'])
+
+    def test_switch_targets_exist(self):
+        for scenario in sc.SCENARIOS:
+            for item in scenario.get('rules', []):
+                if item.get('switch_to'):
+                    self.assertIsNotNone(sc.get(item['switch_to']),
+                                         '%s → %s' % (scenario['key'], item['switch_to']))
+
+    def test_attachment_step_exists_where_it_is_required(self):
+        """И наоборот: требуешь вложение — спроси его шагом, иначе мастеру нечего показать."""
+        for scenario in sc.SCENARIOS:
+            kinds = [step['kind'] for step in scenario['steps']]
+            if scenario['attachment'] == sc.ATTACH_NONE:
+                self.assertNotIn(sc.ATTACHMENT, kinds, scenario['key'])
+            else:
+                self.assertIn(sc.ATTACHMENT, kinds, scenario['key'])
 
 
 if __name__ == '__main__':

@@ -9,6 +9,10 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import {
+    MISSING_ATTACHMENT, MISSING_CHECKS, answerValue, carryOver, isAnswered,
+    localVerdict, missingTarget, stepIsComplete, stepIsVisible, visibleSteps,
+} from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
  *
@@ -31,46 +35,12 @@ const OUTCOME = {
     INCOMPLETE: 'incomplete',
 };
 
-// Общие поля, которые переносим при переходе между тематиками: переспрашивать
-// ИИН и период после «это другая тематика» — гарантированное раздражение.
-const CARRY_OVER = ['iin', 'period', 'park', 'device', 'browser'];
-
 const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
     'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 
 const errorText = (error, fallback) => (
     error?.response?.data?.error || error?.message || fallback
 );
-
-const answerValue = (answers, key) => {
-    const raw = answers[key];
-    return raw && typeof raw === 'object' ? raw.value : raw;
-};
-
-/* Локальная проверка правил — ровно та же таблица, что у сервера: он присылает
-   её вместе со сценарием. Нужна, чтобы «переводим в другую тематику» появлялось
-   сразу при ответе, а не после похода на сервер. Решение о самой отправке всё
-   равно принимает сервер: правило, которое можно обойти, отключив JavaScript,
-   защитой не является. */
-const localVerdict = (scenario, answers) => {
-    for (const rule of scenario.rules || []) {
-        const [key, expected] = rule.when;
-        if (answerValue(answers, key) === expected) return rule;
-    }
-    return null;
-};
-
-const isAnswered = (raw) => {
-    if (raw === null || raw === undefined) return false;
-    if (typeof raw === 'string') return raw.trim().length > 0;
-    if (typeof raw === 'object') return Boolean(raw.value);
-    return true;
-};
-
-const stepIsVisible = (step, answers) => {
-    if (!step.depends_on) return true;
-    return answerValue(answers, step.depends_on[0]) === step.depends_on[1];
-};
 
 /* ─── Поле одного шага ────────────────────────────────────────────────────── */
 
@@ -235,15 +205,7 @@ const OutcomeScreen = ({ verdict, scenario, onBack, onSwitch, onClose }) => {
                     <ArrowLeft size={14} /> Вернуться к вопросам
                 </button>
             </div>
-            {closing && scenario?.status_glossary?.length > 0 && (
-                <div className="mt-3 w-full max-w-[460px] rounded-xl bg-slate-50 p-3 text-left">
-                    {scenario.status_glossary.map((row) => (
-                        <div key={row.status} className="text-[12px] leading-relaxed text-slate-600">
-                            <b>{row.status}</b> — {row.meaning}
-                        </div>
-                    ))}
-                </div>
-            )}
+
         </div>
     );
 };
@@ -269,10 +231,7 @@ export default function TicketWizard({
         [catalog, scenarioKey],
     );
 
-    const steps = useMemo(() => {
-        if (!scenario) return [];
-        return scenario.steps.filter((step) => stepIsVisible(step, answers));
-    }, [scenario, answers]);
+    const steps = useMemo(() => visibleSteps(scenario, answers), [scenario, answers]);
 
     const reset = useCallback(() => {
         setScenarioKey(''); setPhase('pick'); setStepIndex(0); setAnswers({});
@@ -292,11 +251,7 @@ export default function TicketWizard({
 
     // Переход в другую тематику: общие ответы переносим, остальное спрашиваем заново.
     const switchScenario = (key) => {
-        const carried = {};
-        for (const field of CARRY_OVER) {
-            if (answers[field] !== undefined) carried[field] = answers[field];
-        }
-        setAnswers(carried);
+        setAnswers(carryOver(answers));
         setChecksConfirmed(false);
         setAttachment(null);
         if (fileRef.current) fileRef.current.value = '';
@@ -349,12 +304,21 @@ export default function TicketWizard({
                 setVerdict(null);
                 setPhase('preview');
             } else if (data.outcome === OUTCOME.INCOMPLETE) {
-                // Возвращаем к первому незаполненному шагу — это точнее, чем
-                // общая надпись «заполните всё».
+                /* Возвращаем ровно туда, где не хватает данных. Синтетические
+                   ключи сервера («нет вложения», «не подтверждены проверки») не
+                   соответствуют ни одному шагу — без их разбора мастер молчал:
+                   поиск по ключам шагов давал -1, и оператор видел серую кнопку
+                   без единого объяснения. */
                 const missing = data.missing || {};
-                const index = steps.findIndex((s) => missing[s.key]);
-                if (index >= 0) setStepIndex(index);
-                setVerdict({ outcome: OUTCOME.INCOMPLETE, missing, message: data.message });
+                const target = missingTarget(steps, missing);
+                if (target.phase === 'checks') {
+                    setChecksConfirmed(false);
+                    setPhase('checks');
+                } else if (target.stepIndex !== null) {
+                    setStepIndex(target.stepIndex);
+                }
+                setVerdict({ outcome: OUTCOME.INCOMPLETE, missing,
+                             message: target.message || data.message });
             } else {
                 setVerdict(data);
             }
@@ -427,7 +391,10 @@ export default function TicketWizard({
         }
         if (verdict && verdict.outcome !== OUTCOME.INCOMPLETE) return null;
         const last = stepIndex + 1 >= steps.length;
-        const answered = currentStep && (isAnswered(answers[currentStep.key]) || currentStep.optional);
+        // Шаг вложения проходится выбранным файлом, а не записью в ответах.
+        // Пока это условие отсутствовало, четыре тематики из шести нельзя было
+        // отправить вообще: кнопка оставалась серой навсегда.
+        const answered = stepIsComplete(currentStep, { answers, attachment, scenario });
         return (
             <>
                 <button type="button" onClick={goBack} className={iosBtnSecondary}>
@@ -514,6 +481,22 @@ export default function TicketWizard({
                                 </div>
                             ))}
                         </div>
+                        {/* Расшифровка статусов — здесь, на разборе тематики: оператор
+                            читает её ДО обращения и потом одинаково объясняет водителю.
+                            В экране исхода ей было не место — тематика «Проверить статус»
+                            не имеет закрывающих правил и туда просто не попадает. */}
+                        {scenario.status_glossary?.length > 0 && (
+                            <div className={`${iosCard} p-4`}>
+                                <div className={iosGroupLabel}>Что означают статусы</div>
+                                <div className="mt-2 space-y-1.5">
+                                    {scenario.status_glossary.map((row) => (
+                                        <div key={row.status} className="text-[12.5px] leading-relaxed text-slate-600">
+                                            <b className="text-slate-800">{row.status}</b> — {row.meaning}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                         <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-blue-50/60 px-3.5 py-3">
                             <input type="checkbox" checked={checksConfirmed}
                                    onChange={(e) => setChecksConfirmed(e.target.checked)}
@@ -593,9 +576,11 @@ export default function TicketWizard({
                                        onSubmit={goNext} />
                         )}
 
-                        {missingNow[currentStep.key] && (
+                        {(missingNow[currentStep.key]
+                          || (currentStep.kind === 'attachment' && missingNow[MISSING_ATTACHMENT])) && (
                             <div className="flex items-center gap-1.5 px-1 text-[12px] text-rose-600">
-                                <XCircle size={13} /> {missingNow[currentStep.key]}
+                                <XCircle size={13} />
+                                {missingNow[currentStep.key] || missingNow[MISSING_ATTACHMENT]}
                             </div>
                         )}
 
