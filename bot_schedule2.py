@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 import group_late
 import amo_leads
 import reg_contest
+import front_office_calls
 from database import (
     db,
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
@@ -32263,6 +32264,119 @@ async def amo_leads_broadcast_job():
             logging.error("Отбивка по лидам: чат %s не получил сообщение: %s", chat_id, exc)
 
 
+# --- Обзвон фронт-офиса: утренняя отбивка по плану ----------------------------------------------
+
+FRONT_OFFICE_CALLS_TZ = ZoneInfo('Asia/Almaty')
+# Отчёт за прошедшие сутки уходит утром, до планёрки. Время меняется переменной,
+# а не правкой кода: просили 08:00, но час может съехать.
+FRONT_OFFICE_CALLS_BROADCAST_TIME = (
+    os.getenv('FRONT_OFFICE_CALLS_BROADCAST_TIME') or '08:00').strip()
+# Период запроса руками ограничен: за полгода отчёт по дневному плану
+# бессмыслен, а сообщение всё равно упрётся в лимит Telegram.
+FRONT_OFFICE_CALLS_MAX_DAYS = 31
+
+
+def _front_office_calls_broadcast_time():
+    """(час, минута) из FRONT_OFFICE_CALLS_BROADCAST_TIME."""
+    match = re.fullmatch(r'([01]?\d|2[0-3]):([0-5]\d)',
+                         FRONT_OFFICE_CALLS_BROADCAST_TIME or '')
+    if not match:
+        logging.warning("Обзвон фронт-офиса: не понял время отбивки %r, беру 08:00",
+                        FRONT_OFFICE_CALLS_BROADCAST_TIME)
+        return 8, 0
+    return int(match.group(1)), int(match.group(2))
+
+
+def _front_office_calls_report(date_from, date_to=None):
+    """Сводка по обзвону за период: реестр отдела + числа CRM + план.
+
+    Блокирующая (HTTP + БД) — вызывать через executor_pool.
+    """
+    client = front_office_calls.RegionCallStatsClient.from_config()
+    managers = client.fetch_managers(date_from, date_to or date_from)
+    roster = db.get_front_office_call_roster()
+    plan = db.get_front_office_call_plan()
+    return front_office_calls.build_report(
+        roster, managers, date_from, date_to or date_from, plan_per_day=plan)
+
+
+def _front_office_calls_access_allowed(user):
+    """Смотреть обзвон могут админы, глава отдела «Фронт офисы» и его СВ."""
+    if not user:
+        return False
+    if _is_admin_role(_normalize_user_role(user[3])):
+        return True
+    department_id = db.get_front_office_department_id()
+    if department_id is None:
+        return False
+    if db.headed_department_id_for_user(user[0]) == department_id:
+        return True
+    return (_is_supervisor_role(_normalize_user_role(user[3]))
+            and db.get_user_department_id(user[0]) == department_id)
+
+
+def _front_office_calls_manage_allowed(user):
+    """Менять норму — только админы и глава отдела: это управленческое решение."""
+    if not user:
+        return False
+    if _is_admin_role(_normalize_user_role(user[3])):
+        return True
+    department_id = db.get_front_office_department_id()
+    return (department_id is not None
+            and db.headed_department_id_for_user(user[0]) == department_id)
+
+
+async def front_office_calls_broadcast_job():
+    """Утренняя отбивка: кто вчера не выполнил план по обзвону.
+
+    Молчим в трёх случаях — так просил постановщик задачи и так чат остаётся
+    читаемым: никто не подписан, план не задан, план выполнили все. Отдельно
+    молчим, когда за день не было НИ ОДНОГО звонка: это выходной или сбой
+    выгрузки на стороне CRM, а не провал всего отдела — смен фронт-офиса в
+    iCORE нет, отличить одно от другого нечем.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        subscriptions = await loop.run_in_executor(
+            executor_pool, db.get_front_office_call_subscriptions)
+    except Exception as exc:
+        logging.error("Обзвон фронт-офиса: не удалось получить подписки: %s",
+                      exc, exc_info=True)
+        return
+    if not subscriptions:
+        return
+
+    day = front_office_calls.yesterday(datetime.now(FRONT_OFFICE_CALLS_TZ).date())
+    try:
+        report = await loop.run_in_executor(
+            executor_pool, functools.partial(_front_office_calls_report, day))
+    except Exception as exc:
+        logging.error("Обзвон фронт-офиса: не удалось собрать сводку за %s: %s",
+                      day, exc, exc_info=True)
+        return
+
+    if not report['plan_total']:
+        logging.info("Обзвон фронт-офиса: план не задан, отбивку не шлём")
+        return
+    if not front_office_calls.has_data(report):
+        logging.info("Обзвон фронт-офиса: за %s звонков нет, отбивку не шлём", day)
+        return
+    if not report['missing']:
+        logging.info("Обзвон фронт-офиса: за %s план выполнили все", day)
+        return
+
+    text = front_office_calls.render_report(report, only_missing=True)
+    for subscription in subscriptions:
+        chat_id = subscription['chat_id']
+        try:
+            await bot.send_message(chat_id, text, parse_mode='HTML')
+            await loop.run_in_executor(
+                executor_pool, db.mark_front_office_call_subscription_sent, chat_id)
+        except Exception as exc:
+            logging.error("Обзвон фронт-офиса: чат %s не получил сообщение: %s",
+                          chat_id, exc)
+
+
 # --- Настройка отбивки: эндпоинты --------------------------------------------------------------
 
 @app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
@@ -38209,6 +38323,164 @@ async def amo_leads_unsubscribe_command(message: types.Message):
     await message.reply("Отписал этот чат от отбивки по лидам."
                         if removed else "Этот чат и не был подписан.")
 
+
+
+@dp.message_handler(commands=['obzvon'])
+async def front_office_calls_command(message: types.Message):
+    """/obzvon [дата] [дата] — обзвон фронт-офиса за день или период.
+
+    Без аргументов — вчера, то есть ровно то, о чём утренняя отбивка.
+    Показывает всех менеджеров отдела, включая тех, кто не звонил вовсе.
+    Доступно администраторам, главе отдела «Фронт офисы» и его СВ."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not user:
+        await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
+        return
+    if not await loop.run_in_executor(
+            executor_pool, _front_office_calls_access_allowed, user):
+        await message.reply("Обзвон фронт-офиса доступен администраторам, "
+                            "главе отдела и его супервайзерам.")
+        return
+
+    period = front_office_calls.parse_period(
+        message.get_args(), datetime.now(FRONT_OFFICE_CALLS_TZ).date())
+    if not period:
+        await message.reply("Формат: /obzvon 16.08.2026 — за день, "
+                            "/obzvon 10.08 12.08 — за период. Без даты — за вчера.")
+        return
+    date_from, date_to = period
+    if (date_to - date_from).days + 1 > FRONT_OFFICE_CALLS_MAX_DAYS:
+        await message.reply("Период слишком длинный: не больше %d дней."
+                            % FRONT_OFFICE_CALLS_MAX_DAYS)
+        return
+
+    await message.reply("Считаю обзвон…")
+    try:
+        report = await loop.run_in_executor(
+            executor_pool,
+            functools.partial(_front_office_calls_report, date_from, date_to))
+    except Exception as exc:
+        logging.error("Команда /obzvon: не удалось собрать сводку: %s", exc, exc_info=True)
+        await message.reply("Не удалось собрать обзвон — CRM не ответила.")
+        return
+
+    text = front_office_calls.render_report(report)
+    if not report['plan_total']:
+        text += "\n\n" + front_office_calls.render_no_plan_hint()
+    await message.reply(text, parse_mode='HTML')
+
+
+@dp.message_handler(commands=['obzvon_plan'])
+async def front_office_calls_plan_command(message: types.Message):
+    """/obzvon_plan [N] — показать или задать дневную норму звонков.
+
+    Ноль снимает норму: утренняя отбивка тогда замолкает."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not user:
+        await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
+        return
+
+    argument = (message.get_args() or '').strip()
+    if not argument:
+        if not await loop.run_in_executor(
+                executor_pool, _front_office_calls_access_allowed, user):
+            await message.reply("Обзвон фронт-офиса доступен администраторам, "
+                                "главе отдела и его супервайзерам.")
+            return
+        plan = await loop.run_in_executor(executor_pool, db.get_front_office_call_plan)
+        if not plan:
+            await message.reply(front_office_calls.render_no_plan_hint(),
+                                parse_mode='HTML')
+            return
+        await message.reply("Дневной план: %d звонков на менеджера." % plan)
+        return
+
+    if not await loop.run_in_executor(
+            executor_pool, _front_office_calls_manage_allowed, user):
+        await message.reply("Менять норму может администратор или глава отдела.")
+        return
+    if argument.lower() in ('off', 'выкл', 'нет'):
+        argument = '0'
+    if not re.fullmatch(r'\d{1,4}', argument):
+        await message.reply("Формат: /obzvon_plan 10 — норма звонков в день. "
+                            "/obzvon_plan 0 — снять норму.")
+        return
+
+    try:
+        saved = await loop.run_in_executor(
+            executor_pool, db.set_front_office_call_plan, int(argument), user[0])
+    except Exception as exc:
+        logging.error("Команда /obzvon_plan: не удалось сохранить норму: %s",
+                      exc, exc_info=True)
+        await message.reply("Не удалось сохранить норму, попробуйте ещё раз.")
+        return
+
+    hour, minute = _front_office_calls_broadcast_time()
+    if saved:
+        await message.reply(
+            "Дневной план: %d звонков на менеджера.\n"
+            "В %02d:%02d пришлю тех, кто вчера его не выполнил." % (saved, hour, minute))
+    else:
+        await message.reply("Норму снял — утренняя отбивка по обзвону молчит.")
+
+
+@dp.message_handler(commands=['obzvon_subscribe'])
+async def front_office_calls_subscribe_command(message: types.Message):
+    """/obzvon_subscribe — присылать утреннюю отбивку по обзвону в этот чат."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not await loop.run_in_executor(
+            executor_pool, _front_office_calls_manage_allowed, user):
+        await message.reply("Подписка на обзвон доступна администраторам "
+                            "и главе отдела «Фронт офисы».")
+        return
+
+    def _subscribe():
+        return db.add_front_office_call_subscription(
+            message.chat.id,
+            title=(message.chat.title or message.chat.full_name or None),
+            chat_type=message.chat.type,
+            user_id=user[0],
+        )
+
+    try:
+        is_new = await loop.run_in_executor(executor_pool, _subscribe)
+        plan = await loop.run_in_executor(executor_pool, db.get_front_office_call_plan)
+    except Exception as exc:
+        logging.error("Подписка на обзвон: не удалось сохранить: %s", exc, exc_info=True)
+        await message.reply("Не удалось оформить подписку, попробуйте ещё раз.")
+        return
+
+    hour, minute = _front_office_calls_broadcast_time()
+    text = ("Подписал этот чат на отбивку по обзвону." if is_new
+            else "Этот чат уже подписан.")
+    text += ("\nПрисылаю в %02d:%02d за прошлый день и только тех, "
+             "кто не выполнил план." % (hour, minute))
+    if not plan:
+        text += "\n\n" + front_office_calls.render_no_plan_hint()
+    await message.reply(text, parse_mode='HTML')
+
+
+@dp.message_handler(commands=['obzvon_unsubscribe'])
+async def front_office_calls_unsubscribe_command(message: types.Message):
+    """/obzvon_unsubscribe — перестать присылать отбивку по обзвону в этот чат."""
+    loop = asyncio.get_event_loop()
+    user = await loop.run_in_executor(
+        executor_pool, lambda: db.get_user(telegram_id=message.from_user.id))
+    if not await loop.run_in_executor(
+            executor_pool, _front_office_calls_manage_allowed, user):
+        await message.reply("Подписка на обзвон доступна администраторам "
+                            "и главе отдела «Фронт офисы».")
+        return
+    removed = await loop.run_in_executor(
+        executor_pool, db.remove_front_office_call_subscription, message.chat.id)
+    await message.reply("Отписал этот чат от отбивки по обзвону."
+                        if removed else "Этот чат и не был подписан.")
 
 
 @dp.message_handler(commands=['chats'])
@@ -49836,6 +50108,23 @@ if __name__ == '__main__':
         logging.warning(
             "⏰ Лиды amoCRM выключены: не заданы AMO_ACCESS_TOKEN "
             "или AMO_CRM_LOGIN / AMO_CRM_PASSWORD")
+
+    # Обзвон фронт-офиса: отчёт за прошедшие сутки утром (задача #159).
+    # Данные тянем только если кто-то подписан — см. саму джобу.
+    if front_office_calls.is_configured():
+        _fo_hour, _fo_minute = _front_office_calls_broadcast_time()
+        scheduler.add_job(
+            front_office_calls_broadcast_job,
+            CronTrigger(hour=_fo_hour, minute=_fo_minute,
+                        timezone=FRONT_OFFICE_CALLS_TZ),
+            id='front_office_calls_broadcast',
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Обзвон фронт-офиса: отбивка в %02d:%02d", _fo_hour, _fo_minute)
+    else:
+        logging.warning("⏰ Обзвон фронт-офиса выключен: не задан токен CRM")
 
     scheduler.start()
 

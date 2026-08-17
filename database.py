@@ -89,6 +89,9 @@ SHIFT_AUCTION_DIRECTION_NAME = 'Основа'
 SHIFT_AUCTION_DEPARTMENT_CODE = 'szov'
 SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS = 'working'
 
+# Отдел, чьи менеджеры считаются в обзвоне регионов (задача #159).
+FRONT_OFFICE_DEPARTMENT_CODE = 'front_office'
+
 PROXY_STATUS_VALUES = ('lost', 'returned_to_hr', 'not_received', 'on_hand')
 
 
@@ -5198,6 +5201,7 @@ class Database:
             self._init_amo_leads_schema_tx(cursor)
             self._init_chat_hourly_schema_tx(cursor)
             self._init_reg_contest_schema_tx(cursor)
+            self._init_front_office_calls_schema_tx(cursor)
             self._init_wiki_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
@@ -5667,6 +5671,141 @@ class Database:
             cursor.execute(
                 "UPDATE chat_hourly_subscriptions SET last_sent_at = NOW() WHERE chat_id = %s",
                 (str(chat_id),))
+
+    def _init_front_office_calls_schema_tx(self, cursor):
+        """Обзвон фронт-офиса: дневной план и подписки на утреннюю отбивку.
+
+        Порядок строго CREATE TABLE → CREATE INDEX: на боевой базе иначе
+        падает вся инициализация разом (см. историю с crm_queues).
+
+        План хранится строкой на отдел, а не константой в коде: норму задаёт
+        глава отдела командой в боте, и менять её не должен деплой. Ключ —
+        departments.id, чтобы та же механика досталась второму отделу без
+        миграции схемы."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS front_office_call_plans (
+                department_id INTEGER PRIMARY KEY
+                    REFERENCES departments(id) ON DELETE CASCADE,
+                calls_per_day INTEGER NOT NULL CHECK (calls_per_day > 0),
+                updated_by    INTEGER,
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            -- Подписки: чат подписывает себя сам командой, как у лидов и
+            -- почасового отчёта по чатам. Отдельный реестр не нужен.
+            CREATE TABLE IF NOT EXISTS front_office_call_subscriptions (
+                chat_id       TEXT PRIMARY KEY,
+                title         TEXT,
+                chat_type     TEXT,
+                subscribed_by BIGINT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_sent_at  TIMESTAMPTZ
+            );
+        """)
+
+    def get_front_office_department_id(self):
+        """id отдела «Фронт офисы». Хардкодить нельзя — отдел заведён данными."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id FROM departments
+                WHERE code = %s AND COALESCE(is_active, TRUE) = TRUE
+                ORDER BY id LIMIT 1
+            """, (FRONT_OFFICE_DEPARTMENT_CODE,))
+            r = cursor.fetchone()
+            return r[0] if r else None
+
+    def get_front_office_call_roster(self):
+        """Менеджеры, на которых распространяется план по обзвону.
+
+        Реестр наш, а не CRM: CRM присылает только звонивших, и менеджер с
+        нулём звонков — тот самый, кого отбивка обязана назвать. Уволенных
+        отсекаем: их ноль ничего не значит."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.email
+                FROM users u
+                JOIN departments d ON d.id = u.department_id
+                WHERE d.code = %s
+                  AND LOWER(COALESCE(u.role, '')) IN ('operator', 'trainee')
+                  AND LOWER(COALESCE(u.status, '')) <> 'fired'
+                ORDER BY u.name
+            """, (FRONT_OFFICE_DEPARTMENT_CODE,))
+            return [{"id": r[0], "name": r[1], "email": r[2]}
+                    for r in cursor.fetchall()]
+
+    def get_front_office_call_plan(self):
+        """Дневная норма звонков на менеджера; None — план не задан."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT p.calls_per_day
+                FROM front_office_call_plans p
+                JOIN departments d ON d.id = p.department_id
+                WHERE d.code = %s
+            """, (FRONT_OFFICE_DEPARTMENT_CODE,))
+            r = cursor.fetchone()
+            return r[0] if r else None
+
+    def set_front_office_call_plan(self, calls_per_day, user_id=None):
+        """Задать норму (или снять её нулём/None). Возвращает новое значение."""
+        department_id = self.get_front_office_department_id()
+        if department_id is None:
+            raise ValueError("Отдел «Фронт офисы» не найден")
+        with self._get_cursor() as cursor:
+            if not calls_per_day:
+                cursor.execute(
+                    "DELETE FROM front_office_call_plans WHERE department_id = %s",
+                    (department_id,))
+                return None
+            cursor.execute("""
+                INSERT INTO front_office_call_plans (department_id, calls_per_day, updated_by)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (department_id) DO UPDATE SET
+                    calls_per_day = EXCLUDED.calls_per_day,
+                    updated_by    = EXCLUDED.updated_by,
+                    updated_at    = NOW()
+                RETURNING calls_per_day
+            """, (department_id, int(calls_per_day), user_id))
+            return cursor.fetchone()[0]
+
+    def add_front_office_call_subscription(self, chat_id, title=None, chat_type=None,
+                                           user_id=None):
+        """Подписать чат на утреннюю отбивку. Повтор просто обновляет данные чата."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO front_office_call_subscriptions
+                    (chat_id, title, chat_type, subscribed_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    chat_type = EXCLUDED.chat_type,
+                    subscribed_by = EXCLUDED.subscribed_by
+                RETURNING (xmax = 0) AS is_new
+            """, (str(chat_id), title, chat_type, user_id))
+            return bool(cursor.fetchone()[0])
+
+    def remove_front_office_call_subscription(self, chat_id):
+        """Отписать чат. Возвращает True, если подписка была."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM front_office_call_subscriptions WHERE chat_id = %s",
+                (str(chat_id),))
+            return cursor.rowcount > 0
+
+    def get_front_office_call_subscriptions(self):
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT chat_id, title, chat_type
+                FROM front_office_call_subscriptions
+                ORDER BY created_at
+            """)
+            return [{"chat_id": r[0], "title": r[1], "chat_type": r[2]}
+                    for r in cursor.fetchall()]
+
+    def mark_front_office_call_subscription_sent(self, chat_id):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE front_office_call_subscriptions SET last_sent_at = NOW() "
+                "WHERE chat_id = %s", (str(chat_id),))
 
     def _init_wiki_schema_tx(self, cursor):
         """Схема раздела «Вики» (таблицы wiki_*).
