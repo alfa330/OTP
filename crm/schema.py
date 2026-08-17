@@ -343,13 +343,35 @@ _SEED_QUEUES = [
 ]
 
 
+def _is_table(statement):
+    return 'CREATE TABLE' in statement.upper()
+
+
 def init_crm_schema(cursor):
     """Разворачивает схему раздела. Курсор приходит из _init_db, транзакцией
-    управляет вызывающий."""
+    управляет вызывающий.
+
+    Порядок — таблицы, потом ALTER'ы, и только потом индексы. Он не для
+    красоты: на пустой базе всё равно, а на уже развёрнутой индекс по новому
+    столбцу создаётся раньше, чем этот столбец появляется, — и падает. Падение
+    внутри SAVEPOINT отката ждать не заставляет: откатывается ВЕСЬ разворот
+    схемы, включая миграции, и раздел молча остаётся на старой структуре.
+    Именно так и случилось при выкате сценариев 17.08.2026: индекс
+    uq_crm_queues_code выполнился до ALTER TABLE ADD COLUMN code, и прод отдавал
+    500 «column q.code does not exist».
+
+    Разбор по типу оператора, а не двумя отдельными списками, сознательно:
+    список один, добавить в него оператор можно куда угодно, и порядок всё
+    равно останется правильным.
+    """
     for statement in _STATEMENTS:
-        cursor.execute(statement)
+        if _is_table(statement):
+            cursor.execute(statement)
     for statement in _MIGRATIONS:
         cursor.execute(statement)
+    for statement in _STATEMENTS:
+        if not _is_table(statement):
+            cursor.execute(statement)
     for code, title, description, sort_order in _SEED_QUEUES:
         cursor.execute(
             """

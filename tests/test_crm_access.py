@@ -537,5 +537,71 @@ class SqlComposesTest(unittest.TestCase):
         self.assertGreater(len(cursor.queries), 20)
 
 
+class SchemaOrderTest(unittest.TestCase):
+    """Порядок разворота схемы: таблицы → ALTER'ы → индексы.
+
+    Стоит здесь не из любви к порядку. 17.08.2026 выкат сценариев положил раздел
+    на проде: индекс uq_crm_queues_code выполнился РАНЬШЕ, чем ALTER TABLE добавил
+    столбец code. Внутри SAVEPOINT это откатило весь разворот схемы вместе с
+    миграциями, и API отдавал 500 «column q.code does not exist». На пустой базе
+    (и в любом тесте, который просто вызывает init) ошибка не воспроизводится —
+    поэтому проверяется именно ПОРЯДОК.
+    """
+
+    class OrderCursor:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append(' '.join(str(sql).split()))
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return []
+
+    def _run(self):
+        cursor = self.OrderCursor()
+        schema.init_crm_schema(cursor)
+        return cursor.statements
+
+    def test_columns_are_added_before_indexes_that_use_them(self):
+        statements = self._run()
+        added = {}
+        for index, sql in enumerate(statements):
+            match = re.search(r'ADD COLUMN IF NOT EXISTS (\w+)', sql)
+            if match:
+                added.setdefault(match.group(1), index)
+        self.assertTrue(added, 'миграции столбцов пропали из разворота схемы')
+
+        for index, sql in enumerate(statements):
+            if 'CREATE INDEX' not in sql.upper() and 'CREATE UNIQUE INDEX' not in sql.upper():
+                continue
+            for column, added_at in added.items():
+                # Ищем столбец как отдельное слово: 'code' не должен ловиться
+                # внутри 'scenario_key' или названия индекса.
+                if re.search(r'\(\s*%s|,\s*%s' % (column, column), sql):
+                    self.assertLess(
+                        added_at, index,
+                        'индекс создаётся раньше столбца %s: %s' % (column, sql[:90]))
+
+    def test_tables_come_first(self):
+        statements = self._run()
+        last_table = max(i for i, sql in enumerate(statements) if 'CREATE TABLE' in sql.upper())
+        first_alter = min((i for i, sql in enumerate(statements) if sql.startswith('ALTER TABLE')),
+                          default=len(statements))
+        self.assertLess(last_table, first_alter,
+                        'ALTER раньше CREATE TABLE — на чистой базе это падение')
+
+    def test_seed_queues_match_the_scenarios(self):
+        """Сценарий ищет очередь по коду: разойдутся — тематика «не настроена»."""
+        from crm import scenarios
+        seeded = {code for code, _title, _descr, _order in schema._SEED_QUEUES}
+        needed = {item['queue_code'] for item in scenarios.SCENARIOS}
+        self.assertEqual(needed - seeded, set(),
+                         'у сценария нет засеянной очереди: %s' % (needed - seeded))
+
+
 if __name__ == '__main__':
     unittest.main()
