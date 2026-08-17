@@ -221,7 +221,13 @@ const MessageBubble = ({ message, apiBaseUrl, ticketId, headers, showToast }) =>
                         {message.author_name}
                     </div>
                 )}
-                {message.body && <div className="whitespace-pre-wrap break-words">{message.body}</div>}
+                {message.body
+                    ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
+                    : (!message.attachment && (
+                        // Вложение уходит отдельным сообщением с пустым телом —
+                        // без этого в переписке висел бы пустой пузырь.
+                        <div className="text-[12px] italic opacity-70">без текста</div>
+                    ))}
                 {message.attachment && (
                     <button
                         type="button"

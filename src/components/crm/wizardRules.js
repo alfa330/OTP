@@ -114,3 +114,47 @@ export const carryOver = (answers) => {
     }
     return carried;
 };
+
+/* ─── Экраны вместо отдельных вопросов ────────────────────────────────────── */
+
+/* Порядок экранов приходит с сервера (scenario.groups): он одинаков во всех
+ * тематиках, чтобы оператор не искал каждый раз, с чего тут начинают. */
+export const groupsOf = (scenario, answers) => {
+    const present = new Set(visibleSteps(scenario, answers).map((step) => step.group));
+    return ((scenario && scenario.groups) || []).filter((name) => present.has(name));
+};
+
+export const stepsOfGroup = (scenario, group, answers) => (
+    visibleSteps(scenario, answers).filter((step) => step.group === group)
+);
+
+/* Экран пройден, когда пройдены все его вопросы. Кнопка «Далее» смотрит сюда,
+ * а не на один текущий вопрос. */
+export const groupIsComplete = (scenario, group, { answers = {}, attachment = null } = {}) => (
+    stepsOfGroup(scenario, group, answers)
+        .every((step) => stepIsComplete(step, { answers, attachment, scenario }))
+);
+
+/* На какой экран вернуть, когда сервер сказал «не хватает данных».
+ * Возвращает {phase, group, message}. */
+export const missingGroup = (scenario, answers, missing) => {
+    const problems = missing || {};
+    if (problems[MISSING_CHECKS]) {
+        return { phase: 'checks', group: null, message: problems[MISSING_CHECKS] };
+    }
+    const steps = visibleSteps(scenario, answers);
+    if (problems[MISSING_ATTACHMENT]) {
+        const step = steps.find((item) => item.kind === 'attachment');
+        return {
+            phase: 'form',
+            group: step ? step.group : null,
+            message: problems[MISSING_ATTACHMENT],
+        };
+    }
+    const step = steps.find((item) => problems[item.key]);
+    return {
+        phase: 'form',
+        group: step ? step.group : null,
+        message: step ? problems[step.key] : null,
+    };
+};

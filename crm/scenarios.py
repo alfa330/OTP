@@ -391,6 +391,116 @@ PARCEL_LOCATION = {
     'rules': [],
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Экраны мастера
+#
+# ТЗ требует задавать вопросы ПОСЛЕДОВАТЕЛЬНО — и это про порядок и про ранний
+# выход, а не про «по одному на экран». Поштучно выходило до восемнадцати
+# экранов на тематику: восемнадцать нажатий «Далее» во время разговора с
+# водителем. Порядок вопросов сохранён ровно как в ТЗ, правила по-прежнему
+# срабатывают сразу на ответе — но показываются вопросы смысловыми блоками.
+#
+# Группа задаётся по ключу вопроса, а не в каждом объявлении: один и тот же
+# вопрос в разных тематиках относится к одному и тому же блоку, и держать это
+# в шести местах значило бы шесть шансов разойтись.
+STEP_GROUPS = {
+    # Кто и за какой период
+    'iin': 'Водитель и период',
+    'period': 'Водитель и период',
+    'park': 'Водитель и период',
+
+    # Суть обращения
+    'trips_in_park': 'Что происходит',
+    'commission_charged': 'Что происходит',
+    'park_commission_charged': 'Что происходит',
+    'corp_or_bonus': 'Что происходит',
+    'provider_changed': 'Что происходит',
+    'docs_visible': 'Что происходит',
+    'payment_shown': 'Что происходит',
+    'payment_is_sapar_signing': 'Что происходит',
+    'error_type': 'Что происходит',
+    'error_stage': 'Что происходит',
+    'error_text': 'Что происходит',
+    'where': 'Что происходит',
+    'what_to_check': 'Что происходит',
+    'contact_number': 'Что происходит',
+    'parcel_description': 'Что происходит',
+    'city': 'Что происходит',
+    'order_date': 'Что происходит',
+    'notified': 'Что происходит',
+
+    # Техника — только у технических тематик
+    'device': 'Устройство и время',
+    'browser': 'Устройство и время',
+    'last_try_at': 'Устройство и время',
+
+    # Что оператор уже сделал и с каким результатом
+    'relogin_done': 'Что уже сделали',
+    'docs_after_relogin': 'Что уже сделали',
+    'cache_cleared': 'Что уже сделали',
+    'other_browser': 'Что уже сделали',
+    'other_browser_checked': 'Что уже сделали',
+    'apps_restarted': 'Что уже сделали',
+    'other_device': 'Что уже сделали',
+    'waited_5min': 'Что уже сделали',
+    'internet_checked': 'Что уже сделали',
+    'local_cause_excluded': 'Что уже сделали',
+    'sapar_related': 'Что уже сделали',
+    'signing_related': 'Что уже сделали',
+    'error_persists': 'Что уже сделали',
+    'error_repeats': 'Что уже сделали',
+    'multiple_drivers': 'Что уже сделали',
+
+    # Вложение всегда отдельным экраном: там своя механика выбора файла
+    'screenshot': 'Вложение',
+}
+
+DEFAULT_GROUP = 'Подробности'
+
+
+def _assign_groups(scenarios):
+    """Проставляет группу каждому шагу. Общие шаги (STEP_IIN и другие) —
+    один объект на все тематики, поэтому присваивание идемпотентно."""
+    for scenario in scenarios:
+        for item in scenario['steps']:
+            item['group'] = STEP_GROUPS.get(item['key'], DEFAULT_GROUP)
+
+
+# Порядок экранов ОДИН для всех тематик: оператор запоминает одну форму, а не
+# шесть разных. Внутри экрана вопросы идут ровно в порядке ТЗ.
+#
+# Здесь единственное сознательное отступление от буквы ТЗ: там у «Ошибки в
+# работе Sapar» первым вопросом стоит тип ошибки, а ИИН и парк — вторым и
+# третьим. Сгруппировав, мы поднимаем «кто и за какой период» наверх во всех
+# тематиках. Смысл интервью это не меняет (набор и обязательность вопросов те
+# же), а разнобой в начале — меняет: оператор каждый раз ищет, с чего тут
+# начинают.
+GROUP_ORDER = [
+    'Водитель и период',
+    'Что происходит',
+    'Устройство и время',
+    'Что уже сделали',
+    'Подробности',
+    'Вложение',
+]
+
+
+def groups_of(scenario, answers=None):
+    """Экраны тематики: канонический порядок, только реально нужные."""
+    present = {item['group'] for item in visible_steps(scenario, answers or {})}
+    ordered = [name for name in GROUP_ORDER if name in present]
+    # Группа, которой нет в каноне (добавили новый вопрос и забыли порядок), —
+    # не теряется, а уходит в конец: лучше внизу, чем нигде.
+    ordered += sorted(present - set(GROUP_ORDER))
+    return ordered
+
+
+def steps_of_group(scenario, group, answers=None):
+    """Вопросы одного экрана — в порядке ТЗ."""
+    return [item for item in visible_steps(scenario, answers or {})
+            if item['group'] == group]
+
+
 SCENARIOS = [
     SAPAR_DOCS_MISSING,
     SAPAR_SIGN_ERROR,
@@ -399,6 +509,8 @@ SCENARIOS = [
     SAPAR_SERVICE_ERROR,
     PARCEL_LOCATION,
 ]
+
+_assign_groups(SCENARIOS)
 
 BY_KEY = {item['key']: item for item in SCENARIOS}
 
@@ -625,6 +737,7 @@ def public_catalog():
         'attachment_hint': item.get('attachment_hint'),
         'checks': item.get('checks', []),
         'steps': item['steps'],
+        'groups': groups_of(item),
         'rules': [{'when': list(r['when']), 'outcome': r['outcome'], 'message': r['message'],
                    'switch_to': r.get('switch_to')} for r in item.get('rules', [])],
         'status_glossary': [{'status': s, 'meaning': m}

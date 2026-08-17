@@ -2,30 +2,36 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
     AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronRight, Loader2,
-    Paperclip, Send, ShieldCheck, X, XCircle,
+    Paperclip, Send, ShieldCheck, X,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
-    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal,
+    iosBtnPrimary, iosBtnSecondary, IosBadge, IosModal,
 } from '../ui/ios';
+import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
-    MISSING_ATTACHMENT, MISSING_CHECKS, answerValue, carryOver, isAnswered,
-    localVerdict, missingTarget, stepIsComplete, stepIsVisible, visibleSteps,
+    MISSING_ATTACHMENT, answerValue, carryOver, groupIsComplete, groupsOf,
+    localVerdict, missingGroup, stepIsComplete, stepsOfGroup,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
  *
- * Почему вопросы задаются ПО ОДНОМУ, а не одной длинной формой. Это не про
- * красоту: в тематике «ошибка при подписании» шестнадцать вопросов, и половина
- * из них не понадобится, если на четвёртом выяснится, что документы вообще не
- * отображаются — тогда обращение уходит в другую тематику. Плоская форма
- * заставила бы оператора заполнить всё и только потом узнать, что заполнял зря.
- * Последовательный проход даёт ранний выход ровно там, где его задумало ТЗ.
+ * Вопросы задаются экранами, а не по одному. ТЗ требует последовательности — и
+ * это про порядок и про ранний выход, а не про «один вопрос на экран»: поштучно
+ * выходило до восемнадцати нажатий «Далее» во время разговора с водителем.
+ * Порядок сохранён, правила срабатывают сразу на ответе, но спрашиваем блоками:
+ * кто и за какой период → что происходит → устройство → что уже сделали →
+ * вложение. Блоки одинаковы во всех тематиках, чтобы оператор не искал каждый
+ * раз, с чего тут начинают.
  *
- * Текст обращения оператор не пишет и не правит: его собирает сервер и
- * показывает в предпросмотре. Это тоже требование ТЗ, а не наша строгость —
- * специалист в группе должен читать один и тот же формат от всех операторов. */
+ * Исход, который не заканчивает сценарий (вернуть к проверке, перевести в другую
+ * тематику), показывается ПОЛОСОЙ прямо под вопросами. Раньше он подменял собой
+ * весь экран, и оператора будто выбрасывало из работы. Полноэкранным остался
+ * только тот случай, когда сценарий действительно закончился.
+ *
+ * Пояснения живут под «i». Их много и они длинные — постоянно на экране это шум,
+ * из-за которого не видно самих вопросов. */
 
 const OUTCOME = {
     READY: 'ready',
@@ -42,186 +48,191 @@ const errorText = (error, fallback) => (
     error?.response?.data?.error || error?.message || fallback
 );
 
-/* ─── Поле одного шага ────────────────────────────────────────────────────── */
+/* ─── Поле одного вопроса ─────────────────────────────────────────────────── */
 
-const StepField = ({ step, value, onChange, onSubmit }) => {
+const Field = ({ step, value, onChange, autoFocus, problem }) => {
     const raw = value;
     const current = raw && typeof raw === 'object' ? raw.value : raw;
     const detail = raw && typeof raw === 'object' ? raw.detail : '';
     const inputRef = useRef(null);
 
-    // Фокус на поле при каждом шаге: оператор говорит с водителем и печатает,
-    // лишний клик мышью здесь — прямая потеря секунд.
-    useEffect(() => { inputRef.current?.focus(); }, [step.key]);
+    useEffect(() => { if (autoFocus) inputRef.current?.focus(); }, [autoFocus, step.key]);
 
-    const enterSubmits = (event) => {
-        if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); onSubmit(); }
-    };
-
-    if (step.kind === 'yesno' || step.kind === 'yesno_date') {
-        return (
-            <div className="space-y-3">
-                <div className="flex gap-2">
-                    {[['yes', 'Да'], ['no', 'Нет']].map(([code, label]) => (
-                        <button key={code} type="button"
-                                onClick={() => onChange(step.kind === 'yesno_date'
-                                    ? { value: code, detail: code === 'yes' ? detail || '' : '' }
-                                    : code)}
-                                className={`flex-1 rounded-xl px-4 py-3 text-[14px] font-semibold transition-all active:scale-[0.98] ${
-                                    current === code
-                                        ? 'bg-blue-600 text-white shadow-sm'
-                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                }`}>
-                            {label}
-                        </button>
-                    ))}
-                </div>
-                {step.kind === 'yesno_date' && current === 'yes' && (
-                    <div>
-                        <div className={iosGroupLabel}>{step.date_label || 'Уточните'}</div>
+    const control = (() => {
+        if (step.kind === 'yesno' || step.kind === 'yesno_date') {
+            return (
+                <div className="space-y-2">
+                    <div className="flex gap-2">
+                        {[['yes', 'Да'], ['no', 'Нет']].map(([code, label]) => (
+                            <button key={code} type="button"
+                                    onClick={() => onChange(step.kind === 'yesno_date'
+                                        ? { value: code, detail: code === 'yes' ? detail || '' : '' }
+                                        : code)}
+                                    className={`min-w-[84px] rounded-xl px-4 py-2 text-[13.5px] font-semibold transition-all active:scale-[0.98] ${
+                                        current === code
+                                            ? 'bg-blue-600 text-white shadow-sm'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}>
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                    {step.kind === 'yesno_date' && current === 'yes' && (
                         <input ref={inputRef}
                                type={step.date_kind === 'text' ? 'text' : 'date'}
                                value={detail || ''}
+                               placeholder={step.date_label || 'Уточните'}
                                onChange={(e) => onChange({ value: 'yes', detail: e.target.value })}
-                               onKeyDown={enterSubmits}
-                               className={`mt-1.5 ${iosInput}`} />
-                    </div>
-                )}
-            </div>
-        );
-    }
-
-    if (step.kind === 'choice') {
+                               className={iosInput} />
+                    )}
+                </div>
+            );
+        }
+        if (step.kind === 'choice') {
+            return (
+                <div className="flex flex-wrap gap-1.5">
+                    {(step.options || []).map((option) => (
+                        <button key={option} type="button" onClick={() => onChange(option)}
+                                className={`rounded-xl px-3 py-1.5 text-[12.5px] font-medium transition-all active:scale-[0.98] ${
+                                    current === option
+                                        ? 'bg-blue-600 text-white shadow-sm'
+                                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                }`}>
+                            {option}
+                        </button>
+                    ))}
+                </div>
+            );
+        }
+        if (step.kind === 'period') {
+            const [year, month] = String(current || '').split('-');
+            const now = new Date();
+            const years = [now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2];
+            return (
+                <div className="flex gap-2">
+                    <CustomSelect className="flex-1" variant="ios" value={month || ''}
+                                  onChange={(next) => onChange(`${year || now.getFullYear()}-${next}`)}
+                                  options={MONTHS.map((label, index) => ({
+                                      value: String(index + 1).padStart(2, '0'), label }))}
+                                  placeholder="Месяц" ariaLabel="Месяц отчётного периода" />
+                    <CustomSelect className="w-28" variant="ios" value={year || ''}
+                                  onChange={(next) => onChange(`${next}-${month || '01'}`)}
+                                  options={years.map((y) => ({ value: String(y), label: String(y) }))}
+                                  placeholder="Год" ariaLabel="Год отчётного периода" />
+                </div>
+            );
+        }
+        if (step.kind === 'longtext') {
+            return (
+                <textarea ref={inputRef} value={current || ''} rows={3}
+                          onChange={(e) => onChange(e.target.value)}
+                          className={`${iosInput} resize-y`} />
+            );
+        }
+        if (step.kind === 'datetime') {
+            return (
+                <input ref={inputRef} type={step.date_only ? 'date' : 'datetime-local'}
+                       value={current || ''} onChange={(e) => onChange(e.target.value)}
+                       className={iosInput} />
+            );
+        }
         return (
-            <div className="space-y-1.5">
-                {(step.options || []).map((option) => (
-                    <button key={option} type="button" onClick={() => onChange(option)}
-                            className={`flex w-full items-center gap-2.5 rounded-xl px-3.5 py-2.5 text-left text-[13.5px] transition-all active:scale-[0.99] ${
-                                current === option
-                                    ? 'bg-blue-600 text-white shadow-sm'
-                                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                            }`}>
-                        <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full border-2 ${
-                            current === option ? 'border-white' : 'border-slate-400'
-                        }`}>
-                            {current === option && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                        </span>
-                        {option}
-                    </button>
-                ))}
-            </div>
+            <input ref={inputRef} type="text" value={current || ''}
+                   inputMode={step.kind === 'iin' ? 'numeric' : undefined}
+                   maxLength={step.kind === 'iin' ? 12 : undefined}
+                   onChange={(e) => onChange(step.kind === 'iin'
+                       ? e.target.value.replace(/\D/g, '') : e.target.value)}
+                   className={`${iosInput} ${step.kind === 'iin' ? 'tabular-nums tracking-wider' : ''}`} />
         );
-    }
-
-    if (step.kind === 'period') {
-        const [year, month] = String(current || '').split('-');
-        const now = new Date();
-        const years = [now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2];
-        return (
-            <div className="flex gap-2">
-                <CustomSelect className="flex-1" variant="ios"
-                              value={month || ''}
-                              onChange={(next) => onChange(`${year || now.getFullYear()}-${next}`)}
-                              options={MONTHS.map((label, index) => ({
-                                  value: String(index + 1).padStart(2, '0'), label }))}
-                              placeholder="Месяц" ariaLabel="Месяц отчётного периода" />
-                <CustomSelect className="w-32" variant="ios"
-                              value={year || ''}
-                              onChange={(next) => onChange(`${next}-${month || '01'}`)}
-                              options={years.map((y) => ({ value: String(y), label: String(y) }))}
-                              placeholder="Год" ariaLabel="Год отчётного периода" />
-            </div>
-        );
-    }
-
-    if (step.kind === 'longtext') {
-        return (
-            <textarea ref={inputRef} value={current || ''} rows={4}
-                      onChange={(e) => onChange(e.target.value)}
-                      className={`${iosInput} resize-y`} />
-        );
-    }
-
-    if (step.kind === 'datetime') {
-        return (
-            <input ref={inputRef} type={step.date_only ? 'date' : 'datetime-local'}
-                   value={current || ''} onChange={(e) => onChange(e.target.value)}
-                   onKeyDown={enterSubmits} className={iosInput} />
-        );
-    }
-
-    // iin и text
-    return (
-        <input ref={inputRef} type="text" value={current || ''}
-               inputMode={step.kind === 'iin' ? 'numeric' : undefined}
-               maxLength={step.kind === 'iin' ? 12 : undefined}
-               onChange={(e) => onChange(step.kind === 'iin'
-                   ? e.target.value.replace(/\D/g, '') : e.target.value)}
-               onKeyDown={enterSubmits}
-               className={`${iosInput} ${step.kind === 'iin' ? 'tabular-nums tracking-wider' : ''}`} />
-    );
-};
-
-/* ─── Экран исхода: закрыли, перевели или вернули к проверке ──────────────── */
-
-const OutcomeScreen = ({ verdict, scenario, onBack, onSwitch, onClose }) => {
-    const closing = verdict.outcome === OUTCOME.CLOSE;
-    const switching = verdict.outcome === OUTCOME.SWITCH;
-    const Icon = closing ? CheckCircle2 : switching ? ChevronRight : AlertTriangle;
-    const tone = closing ? 'text-emerald-600 bg-emerald-50'
-        : switching ? 'text-blue-600 bg-blue-50' : 'text-amber-600 bg-amber-50';
+    })();
 
     return (
-        <div className="flex flex-col items-center gap-3 py-6 text-center">
-            <span className={`grid h-12 w-12 place-items-center rounded-full ${tone}`}>
-                <Icon size={22} />
-            </span>
-            <div className="text-[15px] font-semibold text-slate-900">
-                {closing ? 'Обращение в группу не отправляем'
-                    : switching ? 'Это другая тематика'
-                        : 'Сначала выполните проверку'}
+        <div>
+            <div className="mb-1.5 flex items-center gap-1.5">
+                <span className="text-[13px] font-medium leading-snug text-slate-800">
+                    {step.label}
+                </span>
+                {/* Подсказка под «i»: она нужна раз в жизни, а место занимала бы всегда. */}
+                {step.hint && <InfoHint side="left">{step.hint}</InfoHint>}
+                {step.optional && (
+                    <span className="text-[11px] text-slate-400">необязательно</span>
+                )}
             </div>
-            <p className="max-w-[420px] text-[13px] leading-relaxed text-slate-600">
-                {verdict.message}
-            </p>
-            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-                {closing && (
-                    <button type="button" onClick={onClose} className={iosBtnPrimary}>
-                        Понятно, закрыть
-                    </button>
-                )}
-                {switching && (
-                    <button type="button" onClick={() => onSwitch(verdict.switch_to)}
-                            className={iosBtnPrimary}>
-                        Перейти: {verdict.switch_title}
-                    </button>
-                )}
-                {verdict.outcome === OUTCOME.BLOCKED && (
-                    <button type="button" onClick={onBack} className={iosBtnPrimary}>
-                        <ShieldCheck size={14} /> Проверил — продолжить
-                    </button>
-                )}
-                <button type="button" onClick={onBack} className={iosBtnSecondary}>
-                    <ArrowLeft size={14} /> Вернуться к вопросам
-                </button>
-            </div>
-
+            {control}
+            {problem && (
+                <div className="mt-1 text-[11.5px] text-rose-600">{problem}</div>
+            )}
         </div>
     );
 };
 
-/* ─── Мастер целиком ──────────────────────────────────────────────────────── */
+/* ─── Полоса исхода: не заканчивает сценарий, значит не занимает экран ────── */
+
+const OutcomeBar = ({ verdict, onDismiss, onSwitch }) => {
+    const switching = verdict.outcome === OUTCOME.SWITCH;
+    return (
+        <div className={`rounded-2xl px-3.5 py-3 ring-1 ${
+            switching ? 'bg-blue-50/70 ring-blue-100' : 'bg-amber-50/70 ring-amber-100'
+        }`}>
+            <div className="flex items-start gap-2.5">
+                <span className={`mt-[1px] shrink-0 ${switching ? 'text-blue-600' : 'text-amber-600'}`}>
+                    {switching ? <ChevronRight size={16} /> : <AlertTriangle size={16} />}
+                </span>
+                <div className="min-w-0 flex-1">
+                    <div className="text-[13px] leading-relaxed text-slate-700">
+                        {verdict.message}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                        {switching ? (
+                            <button type="button" onClick={() => onSwitch(verdict.switch_to)}
+                                    className={iosBtnPrimary}>
+                                Перейти: {verdict.switch_title}
+                            </button>
+                        ) : (
+                            <button type="button" onClick={onDismiss} className={iosBtnPrimary}>
+                                <ShieldCheck size={14} /> Проверил — продолжить
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/* ─── Сценарий закончился: единственный случай, когда занимаем весь экран ── */
+
+const ClosedScreen = ({ verdict, onClose }) => (
+    <div className="flex flex-col items-center gap-3 py-8 text-center">
+        <span className="grid h-12 w-12 place-items-center rounded-full bg-emerald-50 text-emerald-600">
+            <CheckCircle2 size={22} />
+        </span>
+        <div className="text-[15px] font-semibold text-slate-900">
+            Обращение в группу не отправляем
+        </div>
+        <p className="max-w-[420px] text-[13px] leading-relaxed text-slate-600">
+            {verdict.message}
+        </p>
+        <button type="button" onClick={onClose} className={`mt-1 ${iosBtnPrimary}`}>
+            Понятно
+        </button>
+    </div>
+);
+
+/* ─── Мастер ──────────────────────────────────────────────────────────────── */
 
 export default function TicketWizard({
     open, onClose, catalog, apiBaseUrl, headers, showToast, onCreated,
 }) {
     const [scenarioKey, setScenarioKey] = useState('');
-    const [phase, setPhase] = useState('pick');   // pick | checks | steps | preview
-    const [stepIndex, setStepIndex] = useState(0);
+    const [phase, setPhase] = useState('pick');   // pick | checks | form | preview | closed
+    const [groupIndex, setGroupIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [checksConfirmed, setChecksConfirmed] = useState(false);
     const [attachment, setAttachment] = useState(null);
     const [verdict, setVerdict] = useState(null);
+    const [dismissed, setDismissed] = useState(null);
+    const [missing, setMissing] = useState({});
     const [preview, setPreview] = useState(null);
     const [busy, setBusy] = useState(false);
     const fileRef = useRef(null);
@@ -230,26 +241,53 @@ export default function TicketWizard({
         () => (catalog || []).find((item) => item.key === scenarioKey) || null,
         [catalog, scenarioKey],
     );
-
-    const steps = useMemo(() => visibleSteps(scenario, answers), [scenario, answers]);
+    const groups = useMemo(() => groupsOf(scenario, answers), [scenario, answers]);
+    const group = groups[groupIndex] || null;
+    const groupSteps = useMemo(
+        () => (scenario && group ? stepsOfGroup(scenario, group, answers) : []),
+        [scenario, group, answers],
+    );
 
     const reset = useCallback(() => {
-        setScenarioKey(''); setPhase('pick'); setStepIndex(0); setAnswers({});
-        setChecksConfirmed(false); setAttachment(null); setVerdict(null); setPreview(null);
+        setScenarioKey(''); setPhase('pick'); setGroupIndex(0); setAnswers({});
+        setChecksConfirmed(false); setAttachment(null); setVerdict(null);
+        setDismissed(null); setMissing({}); setPreview(null);
         if (fileRef.current) fileRef.current.value = '';
     }, []);
 
     useEffect(() => { if (open) reset(); }, [open, reset]);
 
+    /* Правила проверяются на КАЖДОМ ответе, а не по кнопке «Далее»: смысл
+       раннего выхода в том, чтобы оператор узнал «этого делать не нужно» сразу,
+       а не пройдя ещё десяток вопросов. Отклонённую полосу не показываем
+       повторно, пока ответ не изменится. */
+    useEffect(() => {
+        if (!scenario || phase !== 'form') return;
+        const hit = localVerdict(scenario, answers);
+        if (!hit) { setVerdict(null); return; }
+        const signature = `${hit.when[0]}:${hit.when[1]}`;
+        if (hit.outcome === OUTCOME.CLOSE) {
+            setVerdict({ ...hit, signature });
+            setPhase('closed');
+            return;
+        }
+        setVerdict(dismissed === signature ? null : {
+            ...hit,
+            signature,
+            switch_title: (catalog || []).find((s) => s.key === hit.switch_to)?.title,
+        });
+    }, [answers, scenario, phase, dismissed, catalog]);
+
     const startScenario = (key) => {
-        setScenarioKey(key);
-        setStepIndex(0);
-        setVerdict(null);
         const next = (catalog || []).find((item) => item.key === key);
-        setPhase(next?.checks?.length ? 'checks' : 'steps');
+        setScenarioKey(key);
+        setGroupIndex(0);
+        setVerdict(null);
+        setDismissed(null);
+        setMissing({});
+        setPhase(next?.checks?.length ? 'checks' : 'form');
     };
 
-    // Переход в другую тематику: общие ответы переносим, остальное спрашиваем заново.
     const switchScenario = (key) => {
         setAnswers(carryOver(answers));
         setChecksConfirmed(false);
@@ -259,37 +297,26 @@ export default function TicketWizard({
     };
 
     const setAnswer = (key, value) => {
+        setMissing((prev) => (prev[key] ? { ...prev, [key]: undefined } : prev));
         setAnswers((prev) => ({ ...prev, [key]: value }));
     };
 
-    const currentStep = steps[stepIndex] || null;
+    const canLeaveGroup = scenario && group
+        && groupIsComplete(scenario, group, { answers, attachment });
 
     const goNext = () => {
-        if (!currentStep) return;
-        // Правило могло сработать именно на этом ответе — показываем исход сразу.
-        const hit = localVerdict(scenario, answers);
-        if (hit) {
-            setVerdict({
-                outcome: hit.outcome, message: hit.message,
-                switch_to: hit.switch_to,
-                switch_title: (catalog || []).find((s) => s.key === hit.switch_to)?.title,
-            });
-            return;
-        }
-        if (stepIndex + 1 < steps.length) { setStepIndex(stepIndex + 1); return; }
+        if (groupIndex + 1 < groups.length) { setGroupIndex(groupIndex + 1); return; }
         askServer();
     };
 
     const goBack = () => {
         setVerdict(null);
-        if (phase === 'preview') { setPhase('steps'); setStepIndex(Math.max(0, steps.length - 1)); return; }
-        if (stepIndex > 0) { setStepIndex(stepIndex - 1); return; }
+        if (phase === 'preview') { setPhase('form'); setGroupIndex(groups.length - 1); return; }
+        if (groupIndex > 0) { setGroupIndex(groupIndex - 1); return; }
         if (scenario?.checks?.length) { setPhase('checks'); return; }
         reset();
     };
 
-    /* Последнее слово — за сервером: он пересчитывает те же правила и собирает
-       текст обращения. Клиентская подсветка до этого момента — только подсказка. */
     const askServer = async () => {
         setBusy(true);
         try {
@@ -301,24 +328,21 @@ export default function TicketWizard({
             const data = response.data;
             if (data.outcome === OUTCOME.READY) {
                 setPreview(data.preview);
-                setVerdict(null);
+                setMissing({});
                 setPhase('preview');
             } else if (data.outcome === OUTCOME.INCOMPLETE) {
-                /* Возвращаем ровно туда, где не хватает данных. Синтетические
-                   ключи сервера («нет вложения», «не подтверждены проверки») не
-                   соответствуют ни одному шагу — без их разбора мастер молчал:
-                   поиск по ключам шагов давал -1, и оператор видел серую кнопку
-                   без единого объяснения. */
-                const missing = data.missing || {};
-                const target = missingTarget(steps, missing);
+                const target = missingGroup(scenario, answers, data.missing || {});
+                setMissing(data.missing || {});
                 if (target.phase === 'checks') {
                     setChecksConfirmed(false);
                     setPhase('checks');
-                } else if (target.stepIndex !== null) {
-                    setStepIndex(target.stepIndex);
+                } else if (target.group) {
+                    setGroupIndex(Math.max(0, groups.indexOf(target.group)));
                 }
-                setVerdict({ outcome: OUTCOME.INCOMPLETE, missing,
-                             message: target.message || data.message });
+                showToast?.(target.message || data.message || 'Заполнены не все данные', 'error');
+            } else if (data.outcome === OUTCOME.CLOSE) {
+                setVerdict(data);
+                setPhase('closed');
             } else {
                 setVerdict(data);
             }
@@ -340,13 +364,10 @@ export default function TicketWizard({
             const response = await axios.post(`${apiBaseUrl}/api/crm/tickets`, form,
                 { headers: headers() });
             const created = response.data;
-            if (created.delivered) {
-                showToast?.(`Обращение №${created.item.id} отправлено в «${created.item.queue_title}»`,
-                    'success');
-            } else {
-                showToast?.(`Обращение №${created.item.id} сохранено, но не ушло в Telegram: ${created.delivery_error}`,
-                    'error');
-            }
+            showToast?.(created.delivered
+                ? `Обращение №${created.item.id} отправлено в «${created.item.queue_title}»`
+                : `Обращение №${created.item.id} сохранено, но не ушло в Telegram: ${created.delivery_error}`,
+            created.delivered ? 'success' : 'error');
             onCreated?.(created.item.id);
             onClose();
         } catch (error) {
@@ -356,20 +377,16 @@ export default function TicketWizard({
         }
     };
 
-    const needsFile = scenario && scenario.attachment !== 'none';
-    const missingNow = verdict?.outcome === OUTCOME.INCOMPLETE ? (verdict.missing || {}) : {};
-
-    /* ── Шапка и футер модалки зависят от фазы ──────────────────────────── */
     const footer = (() => {
-        if (phase === 'pick') {
-            return <button type="button" onClick={onClose} className={iosBtnSecondary}>Отмена</button>;
+        if (phase === 'pick' || phase === 'closed') {
+            return <button type="button" onClick={onClose} className={iosBtnSecondary}>Закрыть</button>;
         }
         if (phase === 'checks') {
             return (
                 <>
                     <button type="button" onClick={reset} className={iosBtnSecondary}>Назад</button>
                     <button type="button" disabled={!checksConfirmed}
-                            onClick={() => { setPhase('steps'); setStepIndex(0); }}
+                            onClick={() => { setPhase('form'); setGroupIndex(0); }}
                             className={iosBtnPrimary}>
                         <ShieldCheck size={14} /> Проверил — продолжить
                     </button>
@@ -380,7 +397,7 @@ export default function TicketWizard({
             return (
                 <>
                     <button type="button" onClick={goBack} className={iosBtnSecondary}>
-                        <ArrowLeft size={14} /> Изменить ответы
+                        <ArrowLeft size={14} /> Изменить
                     </button>
                     <button type="button" onClick={submit} disabled={busy} className={iosBtnPrimary}>
                         {busy ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
@@ -389,72 +406,59 @@ export default function TicketWizard({
                 </>
             );
         }
-        if (verdict && verdict.outcome !== OUTCOME.INCOMPLETE) return null;
-        const last = stepIndex + 1 >= steps.length;
-        // Шаг вложения проходится выбранным файлом, а не записью в ответах.
-        // Пока это условие отсутствовало, четыре тематики из шести нельзя было
-        // отправить вообще: кнопка оставалась серой навсегда.
-        const answered = stepIsComplete(currentStep, { answers, attachment, scenario });
+        const last = groupIndex + 1 >= groups.length;
         return (
             <>
                 <button type="button" onClick={goBack} className={iosBtnSecondary}>
                     <ArrowLeft size={14} /> Назад
                 </button>
-                <button type="button" onClick={goNext} disabled={busy || !answered}
+                <button type="button" onClick={goNext} disabled={busy || !canLeaveGroup}
                         className={iosBtnPrimary}>
                     {busy ? <Loader2 size={14} className="animate-spin" />
                         : last ? <CheckCircle2 size={14} /> : <ArrowRight size={14} />}
-                    {last ? 'К предпросмотру' : 'Далее'}
+                    {last ? 'Проверить и отправить' : 'Далее'}
                 </button>
             </>
         );
     })();
 
+    const subtitle = phase === 'pick' ? 'Выберите тематику — дальше система задаст вопросы'
+        : phase === 'checks' ? 'Проверьте это до обращения'
+            : phase === 'preview' ? 'Так обращение увидят в группе'
+                : phase === 'closed' ? null
+                    : `${group} · шаг ${groupIndex + 1} из ${groups.length}`;
+
     return (
-        <IosModal
-            open={open}
-            onClose={onClose}
-            title={scenario ? scenario.title : 'Новое обращение'}
-            subtitle={phase === 'pick' ? 'Выберите тематику — дальше система задаст вопросы'
-                : phase === 'checks' ? 'Обязательные проверки перед обращением'
-                    : phase === 'preview' ? 'Так обращение увидят в группе'
-                        : `Вопрос ${Math.min(stepIndex + 1, steps.length)} из ${steps.length}`}
-            maxWidth="max-w-xl"
-            footer={footer}
-        >
+        <IosModal open={open} onClose={onClose}
+                  title={scenario ? scenario.title : 'Новое обращение'}
+                  subtitle={subtitle} maxWidth="max-w-xl" footer={footer}>
             <div style={{ fontFamily: APPLE_FONT }}>
-                {/* Полоса прогресса: без неё шестнадцать вопросов ощущаются бесконечными. */}
-                {phase === 'steps' && !verdict && steps.length > 1 && (
+                {phase === 'form' && groups.length > 1 && (
                     <div className="mb-4 h-1 w-full overflow-hidden rounded-full bg-slate-100">
                         <div className="h-full rounded-full bg-blue-500 transition-all"
-                             style={{ width: `${((stepIndex + 1) / steps.length) * 100}%` }} />
+                             style={{ width: `${((groupIndex + 1) / groups.length) * 100}%` }} />
                     </div>
                 )}
 
                 {phase === 'pick' && (
-                    <div className="space-y-2">
+                    <div className="space-y-1.5">
                         {(catalog || []).map((item) => (
-                            <button key={item.key} type="button"
-                                    disabled={!item.is_ready}
+                            <button key={item.key} type="button" disabled={!item.is_ready}
                                     onClick={() => startScenario(item.key)}
-                                    title={item.is_ready ? undefined
-                                        : 'Для этой тематики администратор ещё не привязал Telegram-группу'}
-                                    className={`w-full rounded-2xl px-4 py-3 text-left transition-all ${
+                                    className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
                                         item.is_ready
                                             ? 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
                                             : 'cursor-not-allowed bg-slate-50/60 opacity-60'
                                     }`}>
-                                <div className="flex items-center justify-between gap-2">
-                                    <span className="text-[14px] font-semibold text-slate-900">
-                                        {item.title}
-                                    </span>
-                                    {item.is_ready
-                                        ? <ChevronRight size={16} className="shrink-0 text-slate-400" />
-                                        : <IosBadge tone="amber">Не настроена</IosBadge>}
-                                </div>
-                                <div className="mt-1 text-[12px] leading-snug text-slate-500">
-                                    {item.when_to_use}
-                                </div>
+                                <span className="min-w-0 flex-1 text-[14px] font-medium text-slate-900">
+                                    {item.title}
+                                </span>
+                                {/* «Когда используется» — под «i»: в списке из шести
+                                    тематик шесть абзацев мешают выбирать. */}
+                                <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
+                                {item.is_ready
+                                    ? <ChevronRight size={15} className="shrink-0 text-slate-400" />
+                                    : <IosBadge tone="amber">Нет группы</IosBadge>}
                             </button>
                         ))}
                         {!(catalog || []).length && (
@@ -467,10 +471,6 @@ export default function TicketWizard({
 
                 {phase === 'checks' && scenario && (
                     <div className="space-y-3">
-                        <p className="text-[13px] leading-relaxed text-slate-600">
-                            Прежде чем обращаться в группу, выполните проверки. Если вопрос
-                            решится по ходу — обращение отправлять не нужно.
-                        </p>
                         <div className={`${iosCard} divide-y divide-slate-100`}>
                             {scenario.checks.map((check, index) => (
                                 <div key={check} className="flex gap-2.5 px-4 py-2.5">
@@ -481,13 +481,16 @@ export default function TicketWizard({
                                 </div>
                             ))}
                         </div>
-                        {/* Расшифровка статусов — здесь, на разборе тематики: оператор
-                            читает её ДО обращения и потом одинаково объясняет водителю.
-                            В экране исхода ей было не место — тематика «Проверить статус»
-                            не имеет закрывающих правил и туда просто не попадает. */}
+
                         {scenario.status_glossary?.length > 0 && (
                             <div className={`${iosCard} p-4`}>
-                                <div className={iosGroupLabel}>Что означают статусы</div>
+                                <div className="flex items-center gap-1.5">
+                                    <span className={iosGroupLabel}>Что означают статусы</span>
+                                    <InfoHint side="left">
+                                        Пригодится, когда специалист ответит: чтобы всем водителям
+                                        объясняли одинаково.
+                                    </InfoHint>
+                                </div>
                                 <div className="mt-2 space-y-1.5">
                                     {scenario.status_glossary.map((row) => (
                                         <div key={row.status} className="text-[12.5px] leading-relaxed text-slate-600">
@@ -497,126 +500,93 @@ export default function TicketWizard({
                                 </div>
                             </div>
                         )}
+
                         <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-blue-50/60 px-3.5 py-3">
                             <input type="checkbox" checked={checksConfirmed}
                                    onChange={(e) => setChecksConfirmed(e.target.checked)}
                                    className="mt-0.5 h-4 w-4 rounded accent-blue-600" />
                             <span className="text-[13px] leading-snug text-slate-700">
-                                Подтверждаю, что выполнил все проверки выше
+                                Подтверждаю, что выполнил проверки
                             </span>
+                            <InfoHint side="left">
+                                Если вопрос решился по ходу проверок — обращение отправлять не нужно,
+                                просто закройте это окно.
+                            </InfoHint>
                         </label>
                     </div>
                 )}
 
-                {phase === 'steps' && verdict && verdict.outcome !== OUTCOME.INCOMPLETE && (
-                    <OutcomeScreen verdict={verdict} scenario={scenario}
-                                   onBack={() => setVerdict(null)}
-                                   onSwitch={switchScenario}
-                                   onClose={onClose} />
+                {phase === 'closed' && verdict && (
+                    <ClosedScreen verdict={verdict} onClose={onClose} />
                 )}
 
-                {phase === 'steps' && (!verdict || verdict.outcome === OUTCOME.INCOMPLETE)
-                    && currentStep && (
-                    <div className="space-y-3">
-                        <div>
-                            <div className="text-[15px] font-semibold leading-snug text-slate-900">
-                                {currentStep.label}
-                                {currentStep.optional && (
-                                    <span className="ml-2 text-[11.5px] font-normal text-slate-400">
-                                        необязательно
-                                    </span>
-                                )}
-                            </div>
-                            {currentStep.hint && (
-                                <div className="mt-1 text-[12px] leading-snug text-slate-500">
-                                    {currentStep.hint}
-                                </div>
-                            )}
-                        </div>
+                {phase === 'form' && scenario && (
+                    <div className="space-y-4">
+                        {verdict && (
+                            <OutcomeBar verdict={verdict}
+                                        onDismiss={() => { setDismissed(verdict.signature); setVerdict(null); }}
+                                        onSwitch={switchScenario} />
+                        )}
 
-                        {currentStep.kind === 'attachment' ? (
-                            <div className="space-y-2">
-                                <button type="button" onClick={() => fileRef.current?.click()}
-                                        className={`${iosCard} flex w-full items-center gap-3 px-4 py-4 text-left transition hover:bg-slate-50`}>
-                                    <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
-                                        <Paperclip size={16} />
-                                    </span>
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-[13.5px] font-medium text-slate-800">
+                        {groupSteps.map((step, index) => (
+                            step.kind === 'attachment' ? (
+                                <div key={step.key}>
+                                    <div className="mb-1.5 flex items-center gap-1.5">
+                                        <span className="text-[13px] font-medium text-slate-800">
+                                            {step.label}
+                                        </span>
+                                        {scenario.attachment_hint && (
+                                            <InfoHint side="left">{scenario.attachment_hint}</InfoHint>
+                                        )}
+                                    </div>
+                                    <button type="button" onClick={() => fileRef.current?.click()}
+                                            className={`${iosCard} flex w-full items-center gap-3 px-4 py-3.5 text-left transition hover:bg-slate-50`}>
+                                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500">
+                                            <Paperclip size={16} />
+                                        </span>
+                                        <span className="min-w-0 flex-1 truncate text-[13.5px] text-slate-800">
                                             {attachment ? attachment.name : 'Выбрать файл'}
                                         </span>
-                                        <span className="block text-[11.5px] text-slate-500">
-                                            {scenario.attachment_hint}
-                                        </span>
-                                    </span>
-                                    {attachment && (
-                                        <X size={15} className="shrink-0 text-slate-400"
-                                           onClick={(e) => {
-                                               e.stopPropagation();
-                                               setAttachment(null);
-                                               if (fileRef.current) fileRef.current.value = '';
-                                           }} />
+                                        {attachment && (
+                                            <X size={15} className="shrink-0 text-slate-400"
+                                               onClick={(e) => {
+                                                   e.stopPropagation();
+                                                   setAttachment(null);
+                                                   if (fileRef.current) fileRef.current.value = '';
+                                               }} />
+                                        )}
+                                    </button>
+                                    <input ref={fileRef} type="file" className="hidden"
+                                           accept={scenario.attachment === 'image'
+                                               ? 'image/*' : 'image/*,video/*'}
+                                           onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
+                                    {!attachment && (
+                                        <div className="mt-1 text-[11.5px] text-amber-600">
+                                            {missing[MISSING_ATTACHMENT] || 'Без вложения обращение отправить нельзя'}
+                                        </div>
                                     )}
-                                </button>
-                                <input ref={fileRef} type="file" className="hidden"
-                                       accept={scenario.attachment === 'image'
-                                           ? 'image/*' : 'image/*,video/*'}
-                                       onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
-                                {!attachment && (
-                                    <div className="flex items-start gap-1.5 px-1 text-[11.5px] text-amber-600">
-                                        <AlertTriangle size={12} className="mt-[2px] shrink-0" />
-                                        Без вложения обращение отправить нельзя
-                                    </div>
-                                )}
-                            </div>
-                        ) : (
-                            <StepField step={currentStep}
-                                       value={answers[currentStep.key]}
-                                       onChange={(value) => setAnswer(currentStep.key, value)}
-                                       onSubmit={goNext} />
-                        )}
-
-                        {(missingNow[currentStep.key]
-                          || (currentStep.kind === 'attachment' && missingNow[MISSING_ATTACHMENT])) && (
-                            <div className="flex items-center gap-1.5 px-1 text-[12px] text-rose-600">
-                                <XCircle size={13} />
-                                {missingNow[currentStep.key] || missingNow[MISSING_ATTACHMENT]}
-                            </div>
-                        )}
-
-                        {/* Уже отвеченное — свёрнутой лентой: оператор видит, что
-                            накопилось, и может вернуться, не теряя место. */}
-                        {stepIndex > 0 && (
-                            <div className="mt-4 border-t border-slate-100 pt-3">
-                                <div className={iosGroupLabel}>Уже ответили</div>
-                                <div className="mt-1.5 space-y-1">
-                                    {steps.slice(0, stepIndex).map((item, index) => (
-                                        <button key={item.key} type="button"
-                                                onClick={() => { setVerdict(null); setStepIndex(index); }}
-                                                className="flex w-full items-baseline gap-2 rounded-lg px-1 py-0.5 text-left text-[11.5px] transition hover:bg-slate-50">
-                                            <span className="truncate text-slate-500">{item.label}</span>
-                                            <span className="ml-auto shrink-0 font-medium text-slate-700">
-                                                {item.kind === 'yesno' || item.kind === 'yesno_date'
-                                                    ? (answerValue(answers, item.key) === 'yes' ? 'да' : 'нет')
-                                                    : String(answerValue(answers, item.key) || '—').slice(0, 28)}
-                                            </span>
-                                        </button>
-                                    ))}
                                 </div>
-                            </div>
-                        )}
+                            ) : (
+                                <Field key={step.key} step={step} value={answers[step.key]}
+                                       autoFocus={index === 0}
+                                       problem={missing[step.key]}
+                                       onChange={(value) => setAnswer(step.key, value)} />
+                            )
+                        ))}
                     </div>
                 )}
 
                 {phase === 'preview' && preview && (
                     <div className="space-y-3">
-                        <div className="flex items-start gap-2 rounded-xl bg-blue-50/70 px-3.5 py-2.5 text-[12px] leading-snug text-slate-600">
-                            <ShieldCheck size={14} className="mt-[1px] shrink-0 text-blue-600" />
-                            Текст собран системой по вашим ответам и вручную не редактируется —
-                            так специалист получает одинаковую выжимку от всех операторов.
-                        </div>
                         <div>
-                            <div className={iosGroupLabel}>Тема</div>
+                            <div className="flex items-center gap-1.5">
+                                <span className={iosGroupLabel}>Тема</span>
+                                <InfoHint side="left">
+                                    Текст собирает система по вашим ответам и вручную он не
+                                    редактируется — так специалист получает одинаковую выжимку
+                                    от всех операторов.
+                                </InfoHint>
+                            </div>
                             <div className="mt-1.5 rounded-xl bg-slate-100 px-3.5 py-2.5 text-[13.5px] font-medium text-slate-800">
                                 {preview.subject}
                             </div>

@@ -521,5 +521,68 @@ class RulesAreDecidableTest(unittest.TestCase):
                 self.assertIn(sc.ATTACHMENT, kinds, scenario['key'])
 
 
+class ScreensTest(unittest.TestCase):
+    """Вопросы разложены по экранам — но ни один не потерялся.
+
+    Группировка появилась после замечания владельца: восемнадцать вопросов по
+    одному — это восемнадцать нажатий «Далее» во время разговора с водителем.
+    Риск группировки ровно один: вопрос, попавший мимо экранов, исчезает с глаз,
+    оставаясь обязательным, — и оператор упирается в кнопку, не понимая почему.
+    """
+
+    def test_every_step_belongs_to_a_screen(self):
+        for scenario in sc.SCENARIOS:
+            for item in scenario['steps']:
+                self.assertTrue(item.get('group'), '%s/%s' % (scenario['key'], item['key']))
+
+    def test_no_question_is_lost_or_duplicated(self):
+        """Порядок группировка меняет осознанно, а вот состав — обязана сохранить."""
+        for scenario in sc.SCENARIOS:
+            shown = []
+            for group in sc.groups_of(scenario):
+                shown += [item['key'] for item in sc.steps_of_group(scenario, group)]
+            expected = [item['key'] for item in sc.visible_steps(scenario, {})]
+            self.assertEqual(sorted(shown), sorted(expected), scenario['key'])
+            self.assertEqual(len(shown), len(set(shown)),
+                             '%s: вопрос попал на два экрана' % scenario['key'])
+
+    def test_inside_a_screen_questions_keep_the_specification_order(self):
+        """Переставлять вопросы внутри блока ТЗ не просило — и мы не переставляем."""
+        for scenario in sc.SCENARIOS:
+            order = [item['key'] for item in scenario['steps']]
+            for group in sc.groups_of(scenario):
+                keys = [item['key'] for item in sc.steps_of_group(scenario, group)]
+                self.assertEqual(keys, sorted(keys, key=order.index),
+                                 '%s/%s' % (scenario['key'], group))
+
+    def test_screens_follow_one_order_everywhere(self):
+        """Разный порядок экранов в тематиках заставлял бы искать, с чего начать."""
+        for scenario in sc.SCENARIOS:
+            groups = sc.groups_of(scenario)
+            positions = [sc.GROUP_ORDER.index(name) for name in groups]
+            self.assertEqual(positions, sorted(positions), scenario['key'])
+
+    def test_grouping_actually_shortens_the_walk(self):
+        """Смысл правки: экранов должно стать заметно меньше, чем вопросов."""
+        for scenario in sc.SCENARIOS:
+            if len(scenario['steps']) < 8:
+                continue
+            self.assertLessEqual(len(sc.groups_of(scenario)), 5, scenario['key'])
+
+    def test_attachment_has_its_own_screen(self):
+        """У выбора файла своя механика — мешать его с вопросами незачем."""
+        for scenario in sc.SCENARIOS:
+            for item in scenario['steps']:
+                if item['kind'] == sc.ATTACHMENT:
+                    self.assertEqual(item['group'], 'Вложение', scenario['key'])
+                else:
+                    self.assertNotEqual(item['group'], 'Вложение', scenario['key'])
+
+    def test_catalog_carries_screen_order(self):
+        for item in sc.public_catalog():
+            self.assertTrue(item['groups'], item['key'])
+            self.assertEqual(item['groups'], sc.groups_of(sc.get(item['key'])))
+
+
 if __name__ == '__main__':
     unittest.main()
