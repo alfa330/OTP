@@ -500,7 +500,7 @@ export const OSNOVA_BEST_OPERATOR_PREMIUM = 50000; // I12 — премия лу�
 // Норма часов на 1 FTE для месяца: раб. дни × 8, где раб. дни = округл(дни ÷ 7 × 5).
 // Тот же счёт, что у плана ОП TEZ (31 д → 22 → 176 ч; 30 д → 21 → 168 ч) — ровно
 // как в презентации владельца.
-export function osnovaNormHoursForMonth(month = '') {
+export function opFteNormHoursForMonth(month = '') {
     const [yStr, mStr] = String(month || '').split('-');
     const year = parseInt(yStr, 10);
     const monthNum = parseInt(mStr, 10);
@@ -624,6 +624,151 @@ export function calculateOsnovaSalary({
         qualityWithheld,
         fines: finesV,
         bonuses: bonusesV,
+        hoursWorked: hours,
+        hoursNorm: norm,
+        hoursPercentage: norm > 0 ? (hours / norm) * 100 : 0,
+        finalSalary,
+    };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// МОДЕЛЬ ОП «ПОТОК» (op_potok).
+// Перенесена из файла владельца «Поток_калькулятор_зарплаты.xlsx» (лист «Поток»)
+// и сверена с презентацией отдела продаж (слайды «Из чего состоит твоя зарплата»,
+// «Точные цифры», «Детализация переменного KPI»):
+//   Сумма за часы = отработанные часы × ставка (700 ₸/ч)        (G28 = F28×E28)
+//   Итог продаж   = Отток + Фокус                               (D5)
+//   План продаж   = план_1FTE ÷ норма_1FTE × отработанные часы   (F5), новичку ×0,8 (F6)
+//   % плана       = итог продаж ÷ план — ОДИН на оба потока      (G5)
+//   Цена сделки   — своя ступень у «Оттока» и у «Фокуса»        (H28 / J28)
+//   Бонусы        = продажи потока × его цену сделки            (I28 / K28)
+//   Итого         = часы + бонус Отток + бонус Фокус − штрафы − удержано 50%  (N28)
+// Качество звонков в этой модели на выплату не влияет (в отличие от «Основы»).
+// ──────────────────────────────────────────────────────────────────────────
+export const POTOK_HOURLY_RATE = 700;        // F28 «Ставка, ₸/час» + слайд «Гарантированный оклад»
+export const POTOK_NORM_HOURS_FTE = 176;     // ставка 1,0 = 22 раб. дня × 8 ч
+export const POTOK_PLAN_PER_FTE = 150;       // J4 «План» на 1 FTE
+export const POTOK_NEWBIE_COEF = 0.8;        // F6 — план новичка ×0,8
+
+// Ступени цены сделки. В файле это INDEX/MATCH по массиву порогов, поэтому
+// границы берём из массива формулы, а не из подписей столбца.
+const potokPriceFromLadder = (ladder, planRatio) => {
+    const r = parseFloat(planRatio) || 0;
+    let price = ladder[0][1];
+    for (const [threshold, value] of ladder) {
+        if (r >= threshold) price = value;
+        else break;
+    }
+    return price;
+};
+
+// «Отток»: MATCH(%, {0;0,7;0,8;0,9;1;1,2;1,5;2}) → E13:E20.
+const POTOK_CHURN_LADDER = [
+    [0, 200], [0.7, 300], [0.8, 400], [0.9, 450], [1, 500], [1.2, 550], [1.5, 600], [2, 800],
+];
+
+// «Фокус»: MATCH(%, {0;0,7;0,8;0,9;1;1,2;1,4;1,6;1,8;2;2,2}) → B13:B23.
+// ВАЖНО: в файле последний порог задан как 2 (дубль предыдущего), из-за чего
+// ступень 1400 ₸ недостижима и при 200% сразу платится 1600 ₸. В презентации
+// таблица читается однозначно: 200% → 1400, 220% → 1600 — берём её.
+const POTOK_FOCUS_LADDER = [
+    [0, 700], [0.7, 750], [0.8, 800], [0.9, 850], [1, 900], [1.2, 950],
+    [1.4, 1000], [1.6, 1100], [1.8, 1200], [2, 1400], [2.2, 1600],
+];
+
+export function potokChurnDealPrice(planRatio) {
+    return potokPriceFromLadder(POTOK_CHURN_LADDER, planRatio);
+}
+
+export function potokFocusDealPrice(planRatio) {
+    return potokPriceFromLadder(POTOK_FOCUS_LADDER, planRatio);
+}
+
+/**
+ * Индивидуальный план продаж за месяц, модель ОП «Поток».
+ * Как и в «Основе», план растёт от ФАКТИЧЕСКИ отработанных часов (F5), поэтому
+ * ставка сотрудника отдельно не участвует.
+ */
+export function calculatePotokMonthlyPlan({
+    planPerFte = POTOK_PLAN_PER_FTE,
+    normHoursFte = POTOK_NORM_HOURS_FTE,
+    hoursWorked = 0,
+    newbie = false,
+} = {}) {
+    const planFte = Math.max(0, parseFloat(planPerFte) || 0);
+    const normFte = parseFloat(normHoursFte) || POTOK_NORM_HOURS_FTE;
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const newbieCoef = newbie ? POTOK_NEWBIE_COEF : 1;
+    const plan = normFte > 0 ? (planFte / normFte) * hours * newbieCoef : 0;
+    return {
+        plan,
+        planPerFte: planFte,
+        normHoursFte: normFte,
+        hoursWorked: hours,
+        isNewbie: Boolean(newbie),
+        newbieCoef,
+    };
+}
+
+/**
+ * Зарплата оператора ОП «Поток» за месяц.
+ * Проценты выполнения плана считаются по СУММЕ обоих потоков продаж, а цена
+ * сделки после этого берётся по своей ступени для «Оттока» и для «Фокуса».
+ */
+export function calculatePotokSalary({
+    hoursWorked = 0,
+    hoursNorm = 0,
+    churnSales = 0,
+    focusSales = 0,
+    hourlyRate = POTOK_HOURLY_RATE,
+    planTarget = null,
+    planPerFte = POTOK_PLAN_PER_FTE,
+    normHoursFte = POTOK_NORM_HOURS_FTE,
+    newbie = false,
+    fines = 0,
+    withholding = 0,
+} = {}) {
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const norm = Math.max(0, parseFloat(hoursNorm) || 0);
+    const churn = Math.max(0, parseFloat(churnSales) || 0);
+    const focus = Math.max(0, parseFloat(focusSales) || 0);
+    const rate = parseFloat(hourlyRate);
+    const rateV = Number.isFinite(rate) ? rate : POTOK_HOURLY_RATE;
+
+    const planInfo = calculatePotokMonthlyPlan({ planPerFte, normHoursFte, hoursWorked: hours, newbie });
+    const parsedTarget = planTarget === null || planTarget === '' ? null : parseFloat(planTarget);
+    const target = Number.isFinite(parsedTarget) ? Math.max(0, parsedTarget) : planInfo.plan;
+
+    const totalSales = churn + focus;
+    const oklad = hours * rateV;
+    const planPercent = target > 0 ? totalSales / target : 0;
+    const churnPrice = potokChurnDealPrice(planPercent);
+    const focusPrice = potokFocusDealPrice(planPercent);
+    const bonusChurn = churn * churnPrice;
+    const bonusFocus = focus * focusPrice;
+    const finesV = parseFloat(fines) || 0;
+    const withholdingV = parseFloat(withholding) || 0;
+    const finalSalary = oklad + bonusChurn + bonusFocus - finesV - withholdingV;
+
+    return {
+        model: 'op_potok',
+        hourlyRate: rateV,
+        oklad,
+        churnSales: churn,
+        focusSales: focus,
+        totalSales,
+        planTarget: target,
+        planPercent,                       // доля: 1 = 100%
+        planPerFte: planInfo.planPerFte,
+        normHoursFte: planInfo.normHoursFte,
+        isNewbie: planInfo.isNewbie,
+        churnPrice,
+        focusPrice,
+        bonusChurn,
+        bonusFocus,
+        bonusDeals: bonusChurn + bonusFocus,
+        fines: finesV,
+        withholding: withholdingV,
         hoursWorked: hours,
         hoursNorm: norm,
         hoursPercentage: norm > 0 ? (hours / norm) * 100 : 0,

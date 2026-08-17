@@ -22,7 +22,8 @@
     "test:telegram-text": "node --test tests/telegram_text.test.mjs",
     "test:kazakhstan-cities": "node --test tests/kazakhstan_cities.test.mjs",
     "test:crm-wizard": "node --test tests/crm_wizard_rules.test.mjs",
-    "test:salary-osnova": "node --test tests/salary_osnova.test.mjs"
+    "test:salary-osnova": "node --test tests/salary_osnova.test.mjs",
+    "test:salary-potok": "node --test tests/salary_potok.test.mjs"
   },
   "dependencies": {
     "@tiptap/extension-highlight": "^3.29.2",

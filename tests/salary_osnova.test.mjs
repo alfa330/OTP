@@ -7,7 +7,7 @@ import {
     calculateOsnovaMonthlyPlan,
     calculateOsnovaSalary,
     osnovaDealPrice,
-    osnovaNormHoursForMonth,
+    opFteNormHoursForMonth,
     osnovaQualityWithholdRate,
 } from '../src/utils/salaryFormula.js';
 
@@ -115,11 +115,11 @@ test('ночная смена делит план на 1 FTE пополам (H6 
 });
 
 test('норма часов на 1 FTE зависит от месяца: 31 день → 176 ч, 30 → 168 ч', () => {
-    assert.equal(osnovaNormHoursForMonth('2026-07'), 176); // 31 день → 22 р.д.
-    assert.equal(osnovaNormHoursForMonth('2026-06'), 168); // 30 дней → 21 р.д.
-    assert.equal(osnovaNormHoursForMonth('2026-02'), 160); // 28 дней → 20 р.д.
-    assert.equal(osnovaNormHoursForMonth(''), OSNOVA_NORM_HOURS_FTE);
-    assert.equal(osnovaNormHoursForMonth('мусор'), OSNOVA_NORM_HOURS_FTE);
+    assert.equal(opFteNormHoursForMonth('2026-07'), 176); // 31 день → 22 р.д.
+    assert.equal(opFteNormHoursForMonth('2026-06'), 168); // 30 дней → 21 р.д.
+    assert.equal(opFteNormHoursForMonth('2026-02'), 160); // 28 дней → 20 р.д.
+    assert.equal(opFteNormHoursForMonth(''), OSNOVA_NORM_HOURS_FTE);
+    assert.equal(opFteNormHoursForMonth('мусор'), OSNOVA_NORM_HOURS_FTE);
 });
 
 test('штрафы вычитаются из итога, премия прибавляется', () => {

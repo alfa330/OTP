@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { TEZ_NORM_HOURS, TEZ_LINE_OKLAD, TEZ_OP_OKLAD, OSNOVA_HOURLY_RATE } from '../../utils/salaryFormula';
+import { TEZ_NORM_HOURS, TEZ_LINE_OKLAD, TEZ_OP_OKLAD, OSNOVA_HOURLY_RATE, POTOK_HOURLY_RATE } from '../../utils/salaryFormula';
 
 const num = (v) => {
     const n = Number(v);
@@ -511,6 +511,165 @@ const OsnovaCalculationResult = ({ salaryResult, label }) => {
     );
 };
 
+/**
+ * Карточка результата для модели ОП «Поток»: часы по ставке плюс два потока
+ * продаж со своими ступенями цены сделки. Качество на выплату не влияет.
+ * Формулы — calculatePotokSalary (таблица владельца «Поток_калькулятор_зарплаты»).
+ */
+const PotokCalculationResult = ({ salaryResult, label }) => {
+    const hoursWorked = num(salaryResult.hoursWorked);
+    const hoursNorm = num(salaryResult.hoursNorm);
+    const hoursPercentage = num(salaryResult.hoursPercentage);
+    const hourlyRate = num(salaryResult.hourlyRate) || POTOK_HOURLY_RATE;
+    const oklad = num(salaryResult.oklad);
+    const churnSales = num(salaryResult.churnSales);
+    const focusSales = num(salaryResult.focusSales);
+    const totalSales = num(salaryResult.totalSales);
+    const planTarget = num(salaryResult.planTarget);
+    const planPercent = num(salaryResult.planPercent) * 100;
+    const churnPrice = num(salaryResult.churnPrice);
+    const focusPrice = num(salaryResult.focusPrice);
+    const bonusChurn = num(salaryResult.bonusChurn);
+    const bonusFocus = num(salaryResult.bonusFocus);
+    const fines = num(salaryResult.fines);
+    const withholding = num(salaryResult.withholding);
+    const finalSalary = num(salaryResult.finalSalary);
+    const planValue = planTarget > 0 ? simple(Math.round(planTarget * 10) / 10) : '—';
+
+    return (
+        <CardShell subtitle="Сводка по часам и двум потокам продаж" finalSalary={finalSalary}>
+            {/* Сводка */}
+            <div className="bg-white p-4 rounded border border-gray-100">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <SummaryTile title="Направление" value={label || 'Оператор ОП Поток'} />
+                    <SummaryTile
+                        title="План продаж"
+                        value={planValue}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Индивидуальный план</div>
+                                <div className="text-xs text-gray-600">
+                                    План на 1 FTE ÷ норму 1 FTE × отработанные часы.
+                                    {salaryResult.isNewbie ? ' Новичок — ×0,8.' : ''}
+                                </div>
+                            </>
+                        )}
+                    />
+                    <SummaryTile
+                        title="Факт продаж"
+                        value={simple(totalSales)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Оба потока вместе</div>
+                                <div className="text-xs text-gray-600">
+                                    Отток {simple(churnSales)} + Фокус {simple(focusSales)}. Процент плана считается
+                                    по сумме, а цена сделки — по своей ступени для каждого потока.
+                                </div>
+                            </>
+                        )}
+                    />
+                    <SummaryTile title="% плана" value={pct(planPercent)} />
+                </div>
+            </div>
+
+            {/* Компоненты выплаты */}
+            <div className="bg-white p-4 rounded border border-gray-100">
+                <h4 className="text-sm font-semibold text-gray-700 mb-3">Компоненты выплаты</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <ComponentTile
+                        title="Сумма за часы"
+                        value={money(oklad)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Формула</div>
+                                <div className="text-xs text-gray-600 mb-2">Часы × ставка {fmtNum(hourlyRate)} ₸/ч</div>
+                                <div className="text-sm font-semibold">
+                                    Подстановка: {fmtNum(hoursWorked)} × {fmtNum(hourlyRate)} = <b>{fmtNum(oklad)}</b>
+                                </div>
+                            </>
+                        )}
+                    />
+                    <ComponentTile
+                        title={`Бонус «Отток» (${fmtNum(churnPrice)} ₸)`}
+                        value={money(bonusChurn)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Ступени по % плана</div>
+                                <div className="text-xs text-gray-600 mb-2">
+                                    &lt;70% → 200 ₸, 70–80% → 300 ₸, 80–90% → 400 ₸, 90–100% → 450 ₸,
+                                    100–120% → 500 ₸, 120–150% → 550 ₸, 150–200% → 600 ₸, от 200% → 800 ₸
+                                </div>
+                                <div className="text-sm font-semibold">
+                                    Подстановка: {simple(churnSales)} × {fmtNum(churnPrice)} = <b>{fmtNum(bonusChurn)}</b>
+                                </div>
+                            </>
+                        )}
+                    />
+                    <ComponentTile
+                        title={`Бонус «Фокус» (${fmtNum(focusPrice)} ₸)`}
+                        value={money(bonusFocus)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Ступени по % плана</div>
+                                <div className="text-xs text-gray-600 mb-2">
+                                    &lt;70% → 700 ₸, 70% → 750 ₸, 80% → 800 ₸, 90% → 850 ₸, 100% → 900 ₸,
+                                    120% → 950 ₸, 140% → 1000 ₸, 160% → 1100 ₸, 180% → 1200 ₸,
+                                    200% → 1400 ₸, 220% → 1600 ₸
+                                </div>
+                                <div className="text-sm font-semibold">
+                                    Подстановка: {simple(focusSales)} × {fmtNum(focusPrice)} = <b>{fmtNum(bonusFocus)}</b>
+                                </div>
+                            </>
+                        )}
+                    />
+                </div>
+            </div>
+
+            <TotalBlock
+                finalSalary={finalSalary}
+                hoursNorm={hoursNorm}
+                hoursPercentage={hoursPercentage}
+                extra={(
+                    <div className="mt-1">% плана: <span className="font-medium text-gray-800 sm:ml-1">{pct(planPercent)}</span></div>
+                )}
+            />
+
+            {/* Детали расчёта */}
+            <div className="bg-white p-4 rounded border border-gray-100">
+                <h4 className="text-sm font-semibold text-gray-700 mb-3">Детали расчёта</h4>
+
+                <DetailGroup title="Часы & план">
+                    <DetailRow label="Норма часов" value={hoursNorm.toFixed(2)} />
+                    <DetailRow alt label="Отработанные часы" value={hoursWorked.toFixed(2)} />
+                    <DetailRow label="Выполнение нормы" value={pct(hoursPercentage)} />
+                    <DetailRow alt label="Ставка, ₸/час" value={money(hourlyRate)} />
+                    <DetailRow label="План на 1 FTE" value={num(salaryResult.planPerFte) > 0 ? simple(num(salaryResult.planPerFte)) : '—'} />
+                    <DetailRow alt label="Норма часов на 1 FTE" value={simple(num(salaryResult.normHoursFte))} />
+                    <DetailRow label={`План продаж${salaryResult.isNewbie ? ' (новичок ×0,8)' : ''}`} value={planValue} />
+                    <DetailRow alt label="% плана" value={pct(planPercent)} />
+                </DetailGroup>
+
+                <DetailGroup title="Продажи по потокам">
+                    <DetailRow label="Отток, шт" value={simple(churnSales)} />
+                    <DetailRow alt label="Цена за продажу «Отток»" value={money(churnPrice)} />
+                    <DetailRow label="Фокус, шт" value={simple(focusSales)} />
+                    <DetailRow alt label="Цена за продажу «Фокус»" value={money(focusPrice)} />
+                    <DetailRow label="Итог продаж, шт" value={simple(totalSales)} />
+                </DetailGroup>
+
+                <DetailGroup title="Компоненты выплаты">
+                    <DetailRow label="Сумма за часы" value={money(oklad)} />
+                    <DetailRow alt label="Бонус «Отток»" value={money(bonusChurn)} />
+                    <DetailRow label="Бонус «Фокус»" value={money(bonusFocus)} />
+                    <DetailRow alt label="Штрафы" value={`− ${money(fines)}`} />
+                    <DetailRow label="Удержано 50%" value={`− ${money(withholding)}`} />
+                    <DetailRow strong label="Итого к выплате" value={money(finalSalary)} />
+                </DetailGroup>
+            </div>
+        </CardShell>
+    );
+};
+
 const SalaryCalculationResult = ({ salaryResult, label }) => {
         if (!salaryResult) return null;
 
@@ -523,6 +682,11 @@ const SalaryCalculationResult = ({ salaryResult, label }) => {
         // ОП «Основа»: часы × 600 + сделки × цена сделки − удержание по качеству.
         if (salaryResult.model === 'op_osnova') {
             return <OsnovaCalculationResult salaryResult={salaryResult} label={label} />;
+        }
+
+        // ОП «Поток»: часы × ставку + два потока продаж со своими ступенями.
+        if (salaryResult.model === 'op_potok') {
+            return <PotokCalculationResult salaryResult={salaryResult} label={label} />;
         }
 
         // --- Входные данные (с устойчивыми нэйминг-фоллбэками) ---

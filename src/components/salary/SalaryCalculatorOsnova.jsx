@@ -6,7 +6,7 @@ import {
   OSNOVA_HOURLY_RATE,
   calculateOsnovaMonthlyPlan,
   calculateOsnovaSalary,
-  osnovaNormHoursForMonth,
+  opFteNormHoursForMonth,
 } from '../../utils/salaryFormula';
 
 const Field = ({ label, icon, iconColor, children }) => (
@@ -43,7 +43,7 @@ const fmtPlan = (v) => {
  * month: 'YYYY-MM' — от него зависит норма часов на 1 FTE (176 / 168 / 160).
  */
 const SalaryCalculatorOsnova = ({ prefill = null, prefillNonce = 0, month = '' }) => {
-  const monthNormFte = osnovaNormHoursForMonth(month);
+  const monthNormFte = opFteNormHoursForMonth(month);
   const [hoursNorm, setHoursNorm] = useState(String(monthNormFte));
   const [hoursWorked, setHoursWorked] = useState('');
   const [deals, setDeals] = useState('');

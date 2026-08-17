@@ -123,13 +123,15 @@ class OpSalesOperatorHoursAccessTests(unittest.TestCase):
         self.assertIn("trainee: SALES_OPERATOR_VIEWS,", block)
 
 
-class OpOsnovaSalaryCalculatorWiringTests(unittest.TestCase):
-    """Калькулятор ОП «Основа»: формулы в salaryFormula.js проверяет
-    tests/salary_osnova.test.mjs, здесь — что раздел до него вообще доходит."""
+class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
+    """Калькуляторы ОП «Основа» и «Поток»: сами формулы проверяют
+    tests/salary_osnova.test.mjs и tests/salary_potok.test.mjs, здесь — что
+    раздел до них вообще доходит."""
 
     def setUp(self):
         self.app = _read(APP_PATH)
         self.calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorOsnova.jsx")
+        self.potok_calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorPotok.jsx")
         self.result_card = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculationResult.jsx")
 
     def test_sales_department_has_a_calculator(self):
@@ -155,38 +157,65 @@ class OpOsnovaSalaryCalculatorWiringTests(unittest.TestCase):
         # Пока часы не загрузились, модель неизвестна — подменять раздел заглушкой
         # нельзя, иначе оператор видит «скоро» на каждом входе.
         self.assertIn("const isOwnCalculationModelKnown = Boolean(ownHoursRow);", self.app)
-        gate = self.app[self.app.index("const showOsnovaCalculator = isOpSalaryDept"):]
+        gate = self.app[self.app.index("const showOpCalculator = isOpSalaryDept"):]
         gate = gate[:gate.index(";") + 1]
         self.assertIn("!isOwnCalculationModelKnown", gate)
-        self.assertIn("ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL", gate)
+        self.assertIn("isOwnOpModelSupported", gate)
 
     def test_own_hours_are_prefilled_without_visiting_hours_section(self):
-        self.assertIn("const osnovaAutoPrefillKeyRef = useRef('');", self.app)
-        effect = self.app[self.app.index("const osnovaAutoPrefillKeyRef = useRef('');"):]
-        effect = effect[:effect.index("}, [view, showOsnovaCalculator")]
+        self.assertIn("const opAutoPrefillKeyRef = useRef('');", self.app)
+        effect = self.app[self.app.index("const opAutoPrefillKeyRef = useRef('');"):]
+        effect = effect[:effect.index("}, [view, showOpCalculator")]
         # Один раз на месяц — иначе перезапрос часов затирал бы введённое руками.
-        self.assertIn("if (osnovaAutoPrefillKeyRef.current === prefillKey) return;", effect)
-        self.assertIn("setOsnovaCalculatorPrefillNonce", effect)
+        self.assertIn("if (opAutoPrefillKeyRef.current === prefillKey) return;", effect)
+        self.assertIn("setOpCalculatorPrefillNonce", effect)
         for field in ("hoursNorm:", "hoursWorked:", "quality:", "fines:", "bonuses:"):
             self.assertIn(field, effect)
 
-    def test_only_osnova_model_gets_the_calculator(self):
-        # Оператору ОП другого направления формула «Основы» не подходит —
-        # ему остаётся заглушка, а СВ и главе калькулятор доступен.
-        self.assertIn("const OP_SALARY_CALCULATOR_MODEL = 'op_osnova';", self.app)
-        self.assertIn("const showOsnovaCalculator = isOpSalaryDept", self.app)
-        self.assertIn("ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL", self.app)
-        self.assertIn("isOpSalaryDept && !showOsnovaCalculator", self.app)
+    def test_only_supported_models_get_a_calculator(self):
+        # Верификатору и Яндекс-регистрации формулы ОП не подходят — им остаётся
+        # заглушка, а СВ и главе доступны обе вкладки.
+        self.assertIn("const OP_SALARY_CALCULATOR_MODELS = new Set(['op_osnova', 'op_potok']);", self.app)
+        self.assertIn("const showOpCalculator = isOpSalaryDept", self.app)
+        self.assertIn("isOpSalaryDept && !showOpCalculator", self.app)
 
-    def test_hours_button_opens_osnova_before_generic_branches(self):
-        # Ветка op_osnova обязана стоять раньше isTezModel и общей: иначе оператор
-        # «Основы» молча уезжает в калькулятор СЗоВ.
+    def test_operator_sees_his_own_model_without_tabs(self):
+        # Вкладку модели оператор не выбирает: в своей зарплате ошибиться нельзя.
+        self.assertIn("const opSalaryModel = (isOwnSalaryOperator && isOwnOpModelSupported)", self.app)
+        self.assertIn("? ownCalculationModelCode", self.app)
+        self.assertIn("!(isOwnSalaryOperator && isOwnOpModelSupported) && (", self.app)
+        # Коды моделей должны переживать нормализацию сохранённой вкладки.
+        start = self.app.index("const SALARY_CALCULATOR_TYPES = new Set(")
+        types = self.app[start:self.app.index(")", start)]
+        self.assertIn("'op_osnova'", types)
+        self.assertIn("'op_potok'", types)
+
+    def test_potok_calculator_is_wired(self):
+        self.assertIn("import('./components/salary/SalaryCalculatorPotok')", self.app)
+        self.assertIn("opSalaryModel === 'op_potok' ? (", self.app)
+        self.assertIn("salaryResult.model === 'op_potok'", self.result_card)
+        self.assertIn("PotokCalculationResult", self.result_card)
+        # Оба потока продаж и обе удерживаемые суммы должны вводиться.
+        for state in ("setChurnSales", "setFocusSales", "setHourlyRate", "setFines", "setWithholding", "setIsNewbie"):
+            self.assertIn(state, self.potok_calculator)
+
+    def test_hours_section_knows_potok_model(self):
+        self.assertIn("const isPotokModel = !hasMixedCalculationModels && calculationModelCode === 'op_potok';", self.app)
+        self.assertIn("const isOpSalesModel = isOsnovaModel || isPotokModel;", self.app)
+        self.assertIn("Открыть калькулятор «Поток»", self.app)
+        # Переход из часов работает для обеих моделей ОП одной веткой.
+        handler = self.app[self.app.index("const openSalaryCalculatorWithHours = () => {"):]
+        self.assertIn("if (isOpSalesModel) {", handler[:4000])
+
+    def test_hours_button_opens_op_calculator_before_generic_branches(self):
+        # Ветка моделей ОП обязана стоять раньше isTezModel и общей: иначе оператор
+        # «Основы»/«Потока» молча уезжает в калькулятор СЗоВ.
         handler = self.app[self.app.index("const openSalaryCalculatorWithHours = () => {"):]
         handler = handler[:handler.index("const estimatedSalaryHint")] if "const estimatedSalaryHint" in handler else handler[:8000]
-        osnova_at = handler.index("if (isOsnovaModel) {")
+        osnova_at = handler.index("if (isOpSalesModel) {")
         self.assertLess(osnova_at, handler.index("if (isTezModel) {"))
         self.assertLess(osnova_at, handler.index("if (isChatModel) {"))
-        self.assertIn("setOsnovaCalculatorPrefillNonce", handler)
+        self.assertIn("setOpCalculatorPrefillNonce", handler)
 
     def test_result_card_dispatches_osnova_model(self):
         self.assertIn("salaryResult.model === 'op_osnova'", self.result_card)
@@ -196,7 +225,7 @@ class OpOsnovaSalaryCalculatorWiringTests(unittest.TestCase):
         self.assertIn("import('./components/salary/SalaryCalculatorOsnova')", self.app)
         # Норма на 1 FTE зависит от месяца (176/168/160) — месяц обязан доезжать.
         self.assertIn("month={selectedMonth}", self.app)
-        self.assertIn("osnovaNormHoursForMonth(month)", self.calculator)
+        self.assertIn("opFteNormHoursForMonth(month)", self.calculator)
 
     def test_calculator_inputs_cover_every_formula_argument(self):
         for state in (
