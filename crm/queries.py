@@ -115,7 +115,7 @@ def visibility_sql(ctx):
 
 _QUEUE_COLUMNS = """
     q.id, q.title, q.description, q.chat_id, q.chat_title, q.department_id,
-    q.sla_minutes, q.sort_order, q.is_active, q.created_at
+    q.sla_minutes, q.sort_order, q.is_active, q.created_at, q.code
 """
 
 
@@ -132,6 +132,9 @@ def _queue_row(row, expose_chat_id=False):
         # Очередь без привязанной группы не может принять обращение — оператору
         # она показывается недоступной, а не «работающей, но молча теряющей».
         'is_ready': row[3] is not None,
+        # Код связывает очередь со сценарием; переименование очереди эту связь
+        # не рвёт, поэтому он отдаётся всем, а не только настройщикам.
+        'code': row[10],
     }
     if expose_chat_id:
         # chat_id — служебный идентификатор чужого чата, обычному сотруднику он
@@ -271,7 +274,8 @@ _TICKET_COLUMNS = """
     t.due_at, t.first_reply_at, t.last_message_at, t.last_inbound_at,
     t.author_unread_at, t.author_unread_kind,
     t.resolved_at, t.resolved_by_name,
-    t.created_at, t.updated_at, q.department_id
+    t.created_at, t.updated_at, q.department_id,
+    t.scenario_key, t.answers, t.flags
 """
 
 
@@ -315,6 +319,9 @@ def _ticket_row(row, viewer_id=None):
         'created_at': _iso(row[27]),
         'updated_at': _iso(row[28]),
         'queue_department_id': row[29],
+        'scenario_key': row[30],
+        'answers': row[31] or {},
+        'flags': row[32] or [],
     }
 
 
@@ -436,19 +443,62 @@ def get_ticket(cursor, ticket_id, viewer_id=None):
 
 def create_ticket(cursor, *, queue_id, topic_id, subject, body, priority, source,
                   client_name, client_phone, created_by, created_by_name,
-                  department_id, due_at=None):
+                  department_id, due_at=None, scenario_key=None, answers=None, flags=None):
     cursor.execute(
         """
         INSERT INTO crm_tickets (queue_id, topic_id, subject, body, priority, source,
                                  client_name, client_phone, created_by, created_by_name,
-                                 department_id, due_at, last_message_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, {now})
+                                 department_id, due_at, last_message_at,
+                                 scenario_key, answers, flags)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, {now},
+                %s, %s::jsonb, %s::jsonb)
         RETURNING id
         """.format(now=_NOW),
         (int(queue_id), topic_id, subject, body, priority, source,
-         client_name, client_phone, created_by, created_by_name, department_id, due_at),
+         client_name, client_phone, created_by, created_by_name, department_id, due_at,
+         scenario_key,
+         json.dumps(answers or {}, ensure_ascii=False),
+         json.dumps(list(flags or []), ensure_ascii=False)),
     )
     return cursor.fetchone()[0]
+
+
+def queue_by_code(cursor, code):
+    """Очередь сценария. None, если её ещё не завели или выключили."""
+    cursor.execute(
+        'SELECT %s FROM crm_queues q WHERE q.code = %%s AND q.is_active' % _QUEUE_COLUMNS,
+        (str(code),),
+    )
+    row = cursor.fetchone()
+    return _queue_row(row, expose_chat_id=True) if row else None
+
+
+def scenario_breakdown(cursor, ctx, days=30):
+    """Разбивка обращений по тематикам за период — отчёт из ТЗ #29.
+
+    Считается по частичному индексу idx_crm_tickets_scenario и только по
+    периметру зрителя.
+    """
+    where, params = visibility_sql(ctx)
+    params['days'] = int(days)
+    cursor.execute(
+        """
+        SELECT t.scenario_key,
+               COUNT(*)                                                   AS total,
+               COUNT(*) FILTER (WHERE t.status = 'resolved')              AS resolved,
+               COUNT(*) FILTER (WHERE t.flags @> '["mass_outage"]'::jsonb) AS mass_outage
+          FROM crm_tickets t
+          JOIN crm_queues q ON q.id = t.queue_id
+         WHERE t.scenario_key IS NOT NULL
+           AND t.created_at >= (%s - make_interval(days => %%(days)s))
+           AND %s
+         GROUP BY t.scenario_key
+         ORDER BY total DESC
+        """ % (_NOW, where),
+        params,
+    )
+    return [{'scenario_key': r[0], 'total': r[1], 'resolved': r[2], 'mass_outage': r[3]}
+            for r in cursor.fetchall()]
 
 
 def set_delivery(cursor, ticket_id, *, status, chat_id=None, message_id=None, error=None):

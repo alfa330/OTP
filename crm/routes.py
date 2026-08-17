@@ -23,7 +23,7 @@ from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, queries, schema, service, telegram, transport
+from . import access, queries, scenarios, schema, service, telegram, transport
 
 # Вложение к обращению. Предел Telegram для загрузки ботом — 20 МБ, больше не
 # примет ни при каких условиях, поэтому отсекаем на входе с понятным текстом.
@@ -287,55 +287,139 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "capabilities": access.capabilities(ctx),
         })
 
+    # ── Сценарии обращений ───────────────────────────────────────────────
+    @crm_route('/scenarios')
+    def crm_scenarios(ctx):
+        """Каталог тематик с вопросами, проверками и правилами.
+
+        Сюда же — готова ли очередь сценария: если Telegram-группа к ней не
+        привязана, тематику нельзя предлагать оператору, иначе он пройдёт
+        шестнадцать вопросов и упрётся в «отправлять некуда».
+        """
+        catalog = scenarios.public_catalog()
+        with db._get_cursor() as cursor:
+            ready = {}
+            for item in catalog:
+                queue = queries.queue_by_code(cursor, item['queue_code'])
+                ready[item['queue_code']] = {
+                    'queue_id': (queue or {}).get('id'),
+                    'queue_title': (queue or {}).get('title'),
+                    'is_ready': bool(queue and queue.get('is_ready')),
+                }
+        for item in catalog:
+            item.update(ready.get(item['queue_code'], {'is_ready': False}))
+        return jsonify({"items": catalog})
+
+    @crm_route('/scenarios/<key>/evaluate', methods=('POST',))
+    def crm_scenario_evaluate(key, ctx):
+        """Что будет с обращением при текущих ответах — решает СЕРВЕР.
+
+        Клиент подсвечивает последствия сам, но право сказать «отправляем» есть
+        только здесь: проверка, которую можно обойти, отключив JavaScript, — не
+        проверка, а весь смысл ТЗ в том, что без выполненных проверок обращение
+        в группу не уходит.
+        """
+        data = _payload()
+        answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
+        verdict = scenarios.evaluate(
+            key, answers,
+            has_attachment=_bool(data.get('has_attachment')),
+            checks_confirmed=_bool(data.get('checks_confirmed')),
+        )
+        # Предпросмотр показываем только когда отправлять действительно можно:
+        # иначе оператор редактирует в голове текст, который никуда не пойдёт.
+        if verdict['outcome'] == scenarios.READY:
+            verdict['preview'] = {
+                'subject': scenarios.render_subject(key, answers),
+                'body': scenarios.render_body(key, answers, flags=verdict.get('flags', [])),
+            }
+        return jsonify(verdict)
+
+    @crm_route('/reports/scenarios')
+    def crm_scenario_report(ctx):
+        """Разбивка обращений по тематикам (ТЗ #29)."""
+        days = _int_or_none(request.args.get('days')) or 30
+        with db._get_cursor() as cursor:
+            rows = queries.scenario_breakdown(cursor, ctx, days=max(1, min(days, 365)))
+        titles = {s['key']: s['title'] for s in scenarios.SCENARIOS}
+        for row in rows:
+            row['title'] = titles.get(row['scenario_key'], row['scenario_key'])
+        return jsonify({"items": rows, "days": days})
+
     @crm_route('/tickets', methods=('POST',))
     def crm_ticket_create(ctx):
+        """Создание обращения — ТОЛЬКО через пройденный сценарий.
+
+        Свободного «напишите текст сами» здесь нет и не должно быть: первый же
+        пункт ТЗ #160 требует, чтобы оператор выбирал готовую тематику, а не
+        сочинял сообщение. Текст в группу собирает сервер (render_body) —
+        поэтому его нельзя ни подменить с клиента, ни отредактировать руками.
+        """
         if not access.can_create_ticket(ctx):
             return jsonify({"error": "Недостаточно прав"}), 403
         data = _payload()
-        subject = str(data.get('subject') or '').strip()
-        body = str(data.get('body') or '').strip()
-        queue_id = _int_or_none(data.get('queue_id'))
-        if not subject:
-            return jsonify({"error": "Укажите тему обращения"}), 400
-        if not body:
-            return jsonify({"error": "Опишите вопрос"}), 400
-        if not queue_id:
-            return jsonify({"error": "Выберите, куда направить обращение"}), 400
+
+        scenario_key = str(data.get('scenario_key') or '').strip()
+        scenario = scenarios.get(scenario_key)
+        if not scenario:
+            return jsonify({"error": "Выберите тематику обращения"}), 400
+
+        answers = data.get('answers')
+        if isinstance(answers, str):
+            try:
+                answers = json.loads(answers or '{}')
+            except (TypeError, ValueError):
+                answers = {}
+        if not isinstance(answers, dict):
+            answers = {}
 
         attachment, attach_error = _attachment()
         if attach_error:
             return jsonify({"error": attach_error}), 400
 
-        priority = str(data.get('priority') or 'normal').lower()
-        if priority not in schema.TICKET_PRIORITIES:
-            priority = 'normal'
-        source = str(data.get('source') or 'manual').lower()
-        if source not in schema.TICKET_SOURCES:
-            source = 'manual'
+        # Пересчитываем вердикт на сервере по тем же правилам, что показывал
+        # предпросмотр: между предпросмотром и отправкой ответы могли измениться.
+        verdict = scenarios.evaluate(
+            scenario_key, answers,
+            has_attachment=attachment is not None,
+            checks_confirmed=_bool(data.get('checks_confirmed')),
+        )
+        if verdict['outcome'] != scenarios.READY:
+            return jsonify({
+                "error": verdict.get('message') or 'Обращение пока нельзя отправить',
+                "code": 'CRM_SCENARIO_' + verdict['outcome'].upper(),
+                "verdict": verdict,
+            }), 409
 
         with db._get_cursor() as cursor:
-            queue = queries.get_queue(cursor, queue_id)
-            if not queue or not queue['is_active']:
-                return jsonify({"error": "Очередь недоступна"}), 400
+            queue = queries.queue_by_code(cursor, scenario['queue_code'])
+            if not queue:
+                return jsonify({
+                    "error": "Очередь «%s» не настроена — обратитесь к администратору"
+                             % scenario['queue_code'],
+                }), 400
             if not queue['is_ready']:
                 return jsonify({
                     "error": "У очереди «%s» не привязана Telegram-группа" % queue['title'],
                 }), 400
-            topic_id = _int_or_none(data.get('topic_id'))
+            flags = verdict.get('flags', [])
             ticket_id = queries.create_ticket(
                 cursor,
-                queue_id=queue_id, topic_id=topic_id,
-                subject=subject[:300], body=body,
-                priority=priority, source=source,
-                client_name=(str(data.get('client_name') or '').strip() or None),
-                client_phone=(str(data.get('client_phone') or '').strip() or None),
+                queue_id=queue['id'], topic_id=None,
+                subject=scenarios.render_subject(scenario_key, answers)[:300],
+                body=scenarios.render_body(scenario_key, answers, flags=flags),
+                priority='normal', source='manual',
+                client_name=None,
+                client_phone=(str(answers.get('contact_number') or '').strip() or None),
                 created_by=ctx['user_id'], created_by_name=ctx['name'],
                 department_id=ctx.get('department_id'),
                 due_at=service.compute_due_at(queue.get('sla_minutes')),
+                scenario_key=scenario_key, answers=answers, flags=flags,
             )
             queries.add_event(cursor, ticket_id=ticket_id, kind='created',
                               actor_user_id=ctx['user_id'], actor_name=ctx['name'],
-                              payload={'queue': queue['title']})
+                              payload={'queue': queue['title'], 'scenario': scenario['title'],
+                                       'flags': flags})
 
         # Отправка — уже вне транзакции: сеть не должна держать соединение пула.
         # Обращение существует в любом случае, отказ Telegram лишь помечает

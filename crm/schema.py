@@ -64,6 +64,10 @@ _STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS crm_queues (
         id             SERIAL PRIMARY KEY,
+        -- Код, по которому сценарий находит свою очередь (crm/scenarios.py).
+        -- Название очереди админ может переименовать хоть завтра, а привязка
+        -- сценария к адресу переживать переименования обязана.
+        code           VARCHAR(64),
         title          VARCHAR(160) NOT NULL,
         description    TEXT,
         chat_id        BIGINT,
@@ -83,6 +87,10 @@ _STATEMENTS = [
     """
     CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_queues_chat
         ON crm_queues(chat_id) WHERE chat_id IS NOT NULL
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_crm_queues_code
+        ON crm_queues(code) WHERE code IS NOT NULL
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_crm_queues_active
@@ -132,6 +140,16 @@ _STATEMENTS = [
                            CHECK (status IN ('open', 'in_progress', 'answered', 'resolved', 'cancelled')),
         source             VARCHAR(16) NOT NULL DEFAULT 'manual',
 
+        -- Пройденный сценарий и ответы на его вопросы. Хранятся не «на всякий
+        -- случай»: по ним строится разбивка обращений по тематикам (ТЗ #29), а
+        -- в карточке видно, что именно оператор проверил, — специалист в группе
+        -- получил ту же выжимку, но в чате её через месяц уже не найти.
+        scenario_key       VARCHAR(64),
+        answers            JSONB NOT NULL DEFAULT '{}'::jsonb,
+        -- Метки вроде «Возможный массовый сбой»: не блокируют отправку, но
+        -- видны и в группе, и в списке.
+        flags              JSONB NOT NULL DEFAULT '[]'::jsonb,
+
         client_name        VARCHAR(255),
         client_phone       VARCHAR(64),
 
@@ -176,6 +194,12 @@ _STATEMENTS = [
 
     # Список «мои обращения» — самый частый запрос раздела: фильтр по автору,
     # порядок по свежести переписки. Покрывает и оператора, и сегмент «Мои».
+    # Разбивка обращений по тематикам — отчёт из ТЗ #29.
+    """
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_scenario
+        ON crm_tickets(scenario_key, created_at DESC)
+        WHERE scenario_key IS NOT NULL
+    """,
     """
     CREATE INDEX IF NOT EXISTS idx_crm_tickets_author_recent
         ON crm_tickets(created_by, last_message_at DESC, id DESC)
@@ -300,11 +324,41 @@ _STATEMENTS = [
 ]
 
 
+# Столбцы, появившиеся после первого выката. CREATE TABLE IF NOT EXISTS на
+# существующей таблице ничего не добавляет, поэтому догоняем их отдельно.
+_MIGRATIONS = [
+    "ALTER TABLE crm_queues  ADD COLUMN IF NOT EXISTS code VARCHAR(64)",
+    "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS scenario_key VARCHAR(64)",
+    "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '{}'::jsonb",
+    "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS flags JSONB NOT NULL DEFAULT '[]'::jsonb",
+]
+
+# Очереди, которые нужны сценариям. Заводятся сами и БЕЗ Telegram-группы:
+# админу остаётся только привязать чат. Так убирается целый класс ошибок
+# «завёл очередь с другим названием — сценарий её не нашёл».
+_SEED_QUEUES = [
+    ('itaxi_sapar', 'iTaxi Sapar', 'Вопросы по закрывающим документам Sapar: '
+                                   'документы, подписание, оплата, статусы, ошибки сервиса.', 10),
+    ('parcels', 'Посылки', 'Уточнение местонахождения посылок.', 20),
+]
+
+
 def init_crm_schema(cursor):
     """Разворачивает схему раздела. Курсор приходит из _init_db, транзакцией
     управляет вызывающий."""
     for statement in _STATEMENTS:
         cursor.execute(statement)
+    for statement in _MIGRATIONS:
+        cursor.execute(statement)
+    for code, title, description, sort_order in _SEED_QUEUES:
+        cursor.execute(
+            """
+            INSERT INTO crm_queues (code, title, description, sort_order)
+            SELECT %s, %s, %s, %s
+             WHERE NOT EXISTS (SELECT 1 FROM crm_queues WHERE code = %s)
+            """,
+            (code, title, description, sort_order, code),
+        )
 
 
 def schema_is_ready(cursor):

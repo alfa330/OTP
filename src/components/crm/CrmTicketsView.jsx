@@ -9,6 +9,7 @@ import {
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import TicketWizard from './TicketWizard';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
  *
@@ -168,6 +169,9 @@ const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
                         )}
                         {priority.tone && (
                             <IosBadge tone={priority.tone} className="!py-0.5 !text-[10.5px]">{priority.label}</IosBadge>
+                        )}
+                        {(ticket.flags || []).includes('mass_outage') && (
+                            <IosBadge tone="red" className="!py-0.5 !text-[10.5px]">Массовый сбой</IosBadge>
                         )}
                     </div>
                 </div>
@@ -555,206 +559,6 @@ const TicketCard = ({
     );
 };
 
-/* ─── Создание обращения ──────────────────────────────────────────────────── */
-
-/* Форма показывает только обязательное, остальное открывается чипами. Это то
- * же правило, что в постановке задач: вываленные разом восемь полей заставляют
- * читать форму целиком, чтобы понять, что из них нужно. */
-const TicketComposer = ({ open, onClose, queues, apiBaseUrl, headers, showToast, onCreated }) => {
-    const [queueId, setQueueId] = useState('');
-    const [topicId, setTopicId] = useState('');
-    const [subject, setSubject] = useState('');
-    const [body, setBody] = useState('');
-    const [priority, setPriority] = useState('normal');
-    const [clientName, setClientName] = useState('');
-    const [clientPhone, setClientPhone] = useState('');
-    const [attachment, setAttachment] = useState(null);
-    const [extras, setExtras] = useState({ priority: false, client: false });
-    const [saving, setSaving] = useState(false);
-    const fileRef = useRef(null);
-
-    useEffect(() => {
-        if (!open) return;
-        setQueueId(''); setTopicId(''); setSubject(''); setBody('');
-        setPriority('normal'); setClientName(''); setClientPhone('');
-        setAttachment(null); setExtras({ priority: false, client: false });
-    }, [open]);
-
-    const ready = queues.filter((q) => q.is_ready);
-    const queue = ready.find((q) => String(q.id) === String(queueId));
-    const topics = (queue?.topics || []).filter((t) => t.is_active);
-
-    const submit = async () => {
-        if (!queueId || !subject.trim() || !body.trim()) return;
-        setSaving(true);
-        try {
-            const form = new FormData();
-            form.append('queue_id', queueId);
-            if (topicId) form.append('topic_id', topicId);
-            form.append('subject', subject.trim());
-            form.append('body', body.trim());
-            form.append('priority', priority);
-            if (clientName.trim()) form.append('client_name', clientName.trim());
-            if (clientPhone.trim()) form.append('client_phone', clientPhone.trim());
-            if (attachment) form.append('attachment', attachment);
-            const response = await axios.post(`${apiBaseUrl}/api/crm/tickets`, form,
-                { headers: headers() });
-            const created = response.data;
-            if (created.delivered) {
-                showToast?.(`Обращение №${created.item.id} отправлено в «${created.item.queue_title}»`, 'success');
-            } else {
-                // Обращение создано в любом случае — врать «не получилось» нельзя,
-                // но и молчать про недоставку тоже.
-                showToast?.(`Обращение №${created.item.id} сохранено, но не ушло в Telegram: ${created.delivery_error}`, 'error');
-            }
-            onCreated?.(created.item.id);
-            onClose();
-        } catch (err) {
-            showToast?.(errorText(err, 'Не удалось создать обращение'), 'error');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    const canSubmit = queueId && subject.trim() && body.trim() && !saving;
-
-    return (
-        <IosModal
-            open={open}
-            onClose={onClose}
-            title="Новое обращение"
-            subtitle="Уйдёт в рабочую Telegram-группу, ответ вернётся сюда"
-            maxWidth="max-w-xl"
-            footer={(
-                <>
-                    <button type="button" onClick={onClose} className={iosBtnSecondary}>Отмена</button>
-                    <button type="button" onClick={submit} disabled={!canSubmit} className={iosBtnPrimary}>
-                        {saving ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-                        Отправить
-                    </button>
-                </>
-            )}
-        >
-            <div className="space-y-3.5">
-                <div>
-                    <div className={iosGroupLabel}>Куда направить</div>
-                    <CustomSelect
-                        className="mt-1.5"
-                        variant="ios"
-                        value={queueId}
-                        onChange={(value) => { setQueueId(value); setTopicId(''); }}
-                        options={ready.map((q) => ({ value: String(q.id), label: q.title }))}
-                        placeholder="Выберите группу"
-                        ariaLabel="Очередь обращения"
-                    />
-                    {queue?.description && (
-                        <div className="mt-1.5 px-1 text-[11.5px] leading-snug text-slate-500">
-                            {queue.description}
-                        </div>
-                    )}
-                    {!ready.length && (
-                        <div className="mt-1.5 px-1 text-[11.5px] text-amber-600">
-                            Ни одна очередь не привязана к Telegram-группе — обратитесь к администратору.
-                        </div>
-                    )}
-                </div>
-
-                {topics.length > 0 && (
-                    <div>
-                        <div className={iosGroupLabel}>Тематика</div>
-                        <CustomSelect
-                            className="mt-1.5"
-                            variant="ios"
-                            value={topicId}
-                            onChange={setTopicId}
-                            options={topics.map((t) => ({ value: String(t.id), label: t.title }))}
-                            placeholder="Не указана"
-                            ariaLabel="Тематика обращения"
-                        />
-                    </div>
-                )}
-
-                <div>
-                    <div className={iosGroupLabel}>Тема</div>
-                    <input value={subject} onChange={(e) => setSubject(e.target.value)}
-                           maxLength={300}
-                           placeholder="Коротко о сути"
-                           className={`mt-1.5 ${iosInput}`} />
-                </div>
-
-                <div>
-                    <div className={iosGroupLabel}>Вопрос</div>
-                    <textarea value={body} onChange={(e) => setBody(e.target.value)}
-                              rows={5}
-                              placeholder="Что нужно уточнить или сделать. Укажите детали, по которым коллеги смогут ответить сразу."
-                              className={`mt-1.5 ${iosInput} resize-y`} />
-                </div>
-
-                {/* Необязательное — за чипами: на виду только то, без чего
-                    обращение не отправить. */}
-                <div className="flex flex-wrap items-center gap-2">
-                    {!extras.priority && (
-                        <button type="button" onClick={() => setExtras((p) => ({ ...p, priority: true }))}
-                                className={iosBtnGhost}>
-                            <Plus size={13} /> Приоритет
-                        </button>
-                    )}
-                    {!extras.client && (
-                        <button type="button" onClick={() => setExtras((p) => ({ ...p, client: true }))}
-                                className={iosBtnGhost}>
-                            <Plus size={13} /> Клиент
-                        </button>
-                    )}
-                    <button type="button" onClick={() => fileRef.current?.click()} className={iosBtnGhost}>
-                        <Paperclip size={13} /> {attachment ? attachment.name : 'Файл'}
-                    </button>
-                    <input ref={fileRef} type="file" className="hidden"
-                           onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
-                    {attachment && (
-                        <button type="button" onClick={() => { setAttachment(null); if (fileRef.current) fileRef.current.value = ''; }}
-                                className="text-slate-400 transition hover:text-slate-600">
-                            <X size={13} />
-                        </button>
-                    )}
-                </div>
-
-                {extras.priority && (
-                    <div>
-                        <div className={iosGroupLabel}>Приоритет</div>
-                        <div className="mt-1.5 flex rounded-xl bg-slate-100 p-1">
-                            {['low', 'normal', 'high', 'critical'].map((code) => (
-                                <button key={code} type="button" onClick={() => setPriority(code)}
-                                        className={`flex-1 rounded-[9px] px-2 py-1.5 text-[12.5px] font-semibold transition-all ${
-                                            priority === code
-                                                ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
-                                                : 'text-slate-500 hover:text-slate-700'
-                                        }`}>
-                                    {priorityMeta(code).label}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                )}
-
-                {extras.client && (
-                    <div className="grid gap-2 sm:grid-cols-2">
-                        <div>
-                            <div className={iosGroupLabel}>Клиент</div>
-                            <input value={clientName} onChange={(e) => setClientName(e.target.value)}
-                                   placeholder="Имя" className={`mt-1.5 ${iosInput}`} />
-                        </div>
-                        <div>
-                            <div className={iosGroupLabel}>Телефон</div>
-                            <input value={clientPhone} onChange={(e) => setClientPhone(e.target.value)}
-                                   placeholder="+7 …" className={`mt-1.5 ${iosInput}`} />
-                        </div>
-                    </div>
-                )}
-            </div>
-        </IosModal>
-    );
-};
-
 /* ─── Настройка очередей (админ) ──────────────────────────────────────────── */
 
 const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, onReload }) => {
@@ -977,6 +781,7 @@ export default function CrmTicketsView({
     const [tab, setTab] = useState('tickets');
     const [capabilities, setCapabilities] = useState(null);
     const [queues, setQueues] = useState([]);
+    const [scenarioCatalog, setScenarioCatalog] = useState([]);
     const [tickets, setTickets] = useState([]);
     const [counters, setCounters] = useState({});
     const [hasMore, setHasMore] = useState(false);
@@ -1000,6 +805,20 @@ export default function CrmTicketsView({
         searchTimer.current = setTimeout(() => setSearchApplied(search.trim()), 350);
         return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
     }, [search]);
+
+    /* Каталог тематик: вопросы, обязательные проверки и правила приходят с
+       сервера вместе с признаком «очередь готова». Тематику без привязанной
+       Telegram-группы оператору предлагать нельзя — он пройдёт все вопросы и
+       упрётся в «отправлять некуда». */
+    const loadScenarios = useCallback(async () => {
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/crm/scenarios`,
+                { headers: headers() });
+            setScenarioCatalog(response.data.items || []);
+        } catch (err) {
+            setScenarioCatalog([]);
+        }
+    }, [apiBaseUrl, headers]);
 
     const loadQueues = useCallback(async () => {
         try {
@@ -1055,8 +874,9 @@ export default function CrmTicketsView({
             })
             .catch((err) => { if (!cancelled) setError(errorText(err, 'Раздел недоступен')); });
         loadQueues();
+        loadScenarios();
         return () => { cancelled = true; };
-    }, [apiBaseUrl, headers, loadQueues]);
+    }, [apiBaseUrl, headers, loadQueues, loadScenarios]);
 
     useEffect(() => { loadTickets(0); }, [loadTickets]);
 
@@ -1086,7 +906,10 @@ export default function CrmTicketsView({
     }, [focusRequest?.requestId]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const canManage = !!capabilities?.can_manage_queues;
-    const readyQueues = useMemo(() => queues.filter((q) => q.is_active && q.is_ready), [queues]);
+    const readyScenarios = useMemo(
+        () => scenarioCatalog.filter((item) => item.is_ready),
+        [scenarioCatalog],
+    );
 
     const refreshAfterChange = useCallback(() => {
         loadTickets(0, true);
@@ -1121,8 +944,9 @@ export default function CrmTicketsView({
                     )}
                     {tab === 'tickets' && (
                         <button type="button" onClick={() => setComposerOpen(true)}
-                                disabled={!readyQueues.length}
-                                title={readyQueues.length ? undefined : 'Нет ни одной настроенной очереди'}
+                                disabled={!readyScenarios.length}
+                                title={readyScenarios.length ? undefined
+                                    : 'Ни к одной тематике не привязана Telegram-группа'}
                                 className={iosBtnPrimary}>
                             <Plus size={14} /> Новое обращение
                         </button>
@@ -1265,10 +1089,10 @@ export default function CrmTicketsView({
                 </>
             )}
 
-            <TicketComposer
+            <TicketWizard
                 open={composerOpen}
                 onClose={() => setComposerOpen(false)}
-                queues={queues.filter((q) => q.is_active)}
+                catalog={scenarioCatalog}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}
                 showToast={showToast}
