@@ -15,6 +15,10 @@ const TEZ_MANAGER_VIEWS = [
 ];
 const TEZ_SUPERVISOR_VIEWS = TEZ_MANAGER_VIEWS.filter((view) => view !== 'monitoring_scale');
 
+// Операторы ОП: Зарплата, Профиль, Мои часы, Мои смены, Мои оценки, Опросы.
+// «Зарплата» остаётся первой — это раздел по умолчанию (firstAllowedView).
+const SALES_OPERATOR_VIEWS = ['salary', 'profile', 'hours', 'work_schedules', 'evaluation', 'surveys'];
+
 const SALES_SUPERVISOR_VIEWS = [
     'manage_operators',
     'qr_access',
@@ -78,9 +82,8 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
         sv: TEZ_SUPERVISOR_VIEWS,
     },
     op: {
-        // Операторы ОП: Профиль, Зарплата + Мои смены, Мои оценки, Опросы
-        operator: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
-        trainee: ['salary', 'profile', 'work_schedules', 'evaluation', 'surveys'],
+        operator: SALES_OPERATOR_VIEWS,
+        trainee: SALES_OPERATOR_VIEWS,
         // Супервайзеры продаж: их рабочий набор разделов
         head: SALES_HEAD_VIEWS,
         sv: SALES_SUPERVISOR_VIEWS,

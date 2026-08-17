@@ -101,6 +101,28 @@ class OpSalesSupervisorHoursAccessTests(unittest.TestCase):
         self.assertGreaterEqual(head.index("sv_hours"), 4)
 
 
+class OpSalesOperatorHoursAccessTests(unittest.TestCase):
+    """«Мои часы» (hours) открыт операторам и стажёрам отдела продаж."""
+
+    def setUp(self):
+        src = _read(DEPARTMENT_VIEWS_PATH)
+        start = src.index("const SALES_OPERATOR_VIEWS = [")
+        self.views = re.findall(r"'([a-z_]+)'", src[start:src.index("];", start)])
+        self.src = src
+
+    def test_operator_allowlist_has_hours(self):
+        self.assertIn("hours", self.views)
+
+    def test_salary_stays_first(self):
+        # firstAllowedView берёт allow[0]: раздел по умолчанию не должен съехать.
+        self.assertEqual(self.views[0], "salary")
+
+    def test_operator_and_trainee_share_the_list(self):
+        block = self.src[self.src.index("    op: {"):self.src.index("    front_office: {")]
+        self.assertIn("operator: SALES_OPERATOR_VIEWS,", block)
+        self.assertIn("trainee: SALES_OPERATOR_VIEWS,", block)
+
+
 class OpSalesDirectionsEditorTests(unittest.TestCase):
     """Редактор направлений (шкала мониторинга) знает коды моделей ОП —
     иначе normalizeCalculationModelCode сбрасывал бы их в operator при сохранении."""
