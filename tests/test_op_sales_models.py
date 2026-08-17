@@ -138,6 +138,38 @@ class OpOsnovaSalaryCalculatorWiringTests(unittest.TestCase):
         block = self.app[start:self.app.index(")", start)]
         self.assertIn("'op'", block)
 
+    def test_salary_view_loads_hours_for_own_model(self):
+        # Модель оператора живёт в часах месяца. Раздел «Зарплата» их не запрашивал,
+        # поэтому модель откатывалась в 'operator' и оператору ОП «Основа»
+        # показывалась заглушка «калькулятор скоро» — в «Зарплату» он попадает
+        # сразу при входе, минуя «Мои часы».
+        self.assertIn("if (view === 'salary' && (isOpSalaryDept || isTezSalaryDept)) {", self.app)
+        effect = self.app[self.app.index("if (view === 'salary' && (isOpSalaryDept || isTezSalaryDept)) {"):]
+        self.assertIn("fetchHoursData();", effect[:400])
+        # Флаги отдела обязаны быть в зависимостях: иначе эффект не перезапустится,
+        # когда список отделов доедет и isOpSalaryDept станет true.
+        deps = effect[:effect.index("useEffect(", 1)] if "useEffect(" in effect[1:] else effect[:3000]
+        self.assertIn("view, isOpSalaryDept, isTezSalaryDept]", deps)
+
+    def test_unknown_model_does_not_fall_back_to_the_stub(self):
+        # Пока часы не загрузились, модель неизвестна — подменять раздел заглушкой
+        # нельзя, иначе оператор видит «скоро» на каждом входе.
+        self.assertIn("const isOwnCalculationModelKnown = Boolean(ownHoursRow);", self.app)
+        gate = self.app[self.app.index("const showOsnovaCalculator = isOpSalaryDept"):]
+        gate = gate[:gate.index(";") + 1]
+        self.assertIn("!isOwnCalculationModelKnown", gate)
+        self.assertIn("ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL", gate)
+
+    def test_own_hours_are_prefilled_without_visiting_hours_section(self):
+        self.assertIn("const osnovaAutoPrefillKeyRef = useRef('');", self.app)
+        effect = self.app[self.app.index("const osnovaAutoPrefillKeyRef = useRef('');"):]
+        effect = effect[:effect.index("}, [view, showOsnovaCalculator")]
+        # Один раз на месяц — иначе перезапрос часов затирал бы введённое руками.
+        self.assertIn("if (osnovaAutoPrefillKeyRef.current === prefillKey) return;", effect)
+        self.assertIn("setOsnovaCalculatorPrefillNonce", effect)
+        for field in ("hoursNorm:", "hoursWorked:", "quality:", "fines:", "bonuses:"):
+            self.assertIn(field, effect)
+
     def test_only_osnova_model_gets_the_calculator(self):
         # Оператору ОП другого направления формула «Основы» не подходит —
         # ему остаётся заглушка, а СВ и главе калькулятор доступен.

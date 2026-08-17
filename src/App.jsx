@@ -35152,18 +35152,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // по умолчанию на вкладку «Линия TEZ». Как только вкладку выбрали руками,
             // автоподстановка отключается до конца сессии.
             const tezCalculatorTypePickedRef = useRef(false);
-            const ownCalculationModelCode = useMemo(() => {
+            const ownHoursRow = useMemo(() => {
                 const list = Array.isArray(hoursData?.operators) ? hoursData.operators : [];
-                const own = list.find((o) => Number(o?.operator_id) === Number(user?.id)) || list[0] || null;
-                return resolveWorkHoursMonthModelInfo(own).modelCode;
+                return list.find((o) => Number(o?.operator_id) === Number(user?.id)) || list[0] || null;
             }, [hoursData, user?.id]);
+            const ownCalculationModelCode = useMemo(
+                () => resolveWorkHoursMonthModelInfo(ownHoursRow).modelCode,
+                [ownHoursRow]
+            );
+            // Часы месяца ещё не приехали — модель считать НЕ по чему: resolveWorkHours…
+            // молча отдаёт 'operator'. Отличать «модель другая» от «модель неизвестна»
+            // обязательно, иначе раздел подменяется заглушкой на время загрузки.
+            const isOwnCalculationModelKnown = Boolean(ownHoursRow);
             // Отдел продаж считает по своей модели «Основа» (часы × 600 + бонус за
             // сделки). Оператору/стажёру ОП другого направления формула не подходит —
             // ему остаётся заглушка; СВ и главе калькулятор нужен для ручного расчёта.
             const isOpSalaryDept = normalizeDepartmentCode(salaryDepartment.code) === 'op';
             const isOwnSalaryOperator = currentUserRole === 'operator' || currentUserRole === 'trainee';
             const showOsnovaCalculator = isOpSalaryDept
-                && (!isOwnSalaryOperator || ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL);
+                && (
+                    !isOwnSalaryOperator
+                    || !isOwnCalculationModelKnown
+                    || ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL
+                );
+            // Оператор ОП «Основа» заходит сразу в «Зарплату», минуя «Мои часы», поэтому
+            // его собственные часы/норму/штрафы/качество подставляем сами — один раз на
+            // месяц, чтобы не затирать то, что он уже ввёл руками.
+            const osnovaAutoPrefillKeyRef = useRef('');
+            useEffect(() => {
+                if (view !== 'salary' || !showOsnovaCalculator || !ownHoursRow) return;
+                const prefillKey = `${user?.id || ''}:${selectedMonth}`;
+                if (osnovaAutoPrefillKeyRef.current === prefillKey) return;
+                osnovaAutoPrefillKeyRef.current = prefillKey;
+
+                const accountedHours = Number(ownHoursRow.worked_hours_used ?? ownHoursRow.accounted_hours);
+                const workedHours = Number.isFinite(accountedHours)
+                    ? accountedHours
+                    : Number(ownHoursRow.aggregates?.regular_hours ?? 0) || 0;
+                const monthFines = Number(ownHoursRow.fines ?? 0) || 0;
+                const monthBonuses = Object.values(
+                    (ownHoursRow.daily && typeof ownHoursRow.daily === 'object' && !Array.isArray(ownHoursRow.daily))
+                        ? ownHoursRow.daily
+                        : {}
+                ).reduce((total, dayData) => (
+                    total + (Array.isArray(dayData?.bonuses)
+                        ? dayData.bonuses.reduce((sum, bonus) => sum + (Number(bonus?.amount || 0) || 0), 0)
+                        : 0)
+                ), 0);
+                const { quality: monthQuality, available: hasMonthQuality } =
+                    resolveMonthlySalaryQuality(ownHoursRow.salary_metrics, selectedMonth);
+
+                setOsnovaCalculatorPrefill({
+                    hoursNorm: (Number(ownHoursRow.norm_hours ?? 0) || 0).toFixed(2),
+                    hoursWorked: (Number(workedHours) || 0).toFixed(2),
+                    quality: hasMonthQuality ? monthQuality.toFixed(2) : '',
+                    fines: monthFines > 0 ? monthFines.toFixed(2) : '',
+                    bonuses: monthBonuses > 0 ? monthBonuses.toFixed(2) : '',
+                });
+                setOsnovaCalculatorPrefillNonce((n) => n + 1);
+            }, [view, showOsnovaCalculator, ownHoursRow, selectedMonth, user?.id]);
             useEffect(() => {
                 if (!isTezSalaryDept || tezCalculatorTypePickedRef.current) return;
                 const own = TEZ_SALARY_CALCULATOR_TYPES.has(ownCalculationModelCode)
@@ -43431,11 +43478,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     return;
                 }
 
+                // «Зарплата» отделов со своими моделями: часы нужны и здесь — из них
+                // берётся модель расчёта самого оператора. Без запроса модель
+                // откатывалась в 'operator', и оператор ОП «Основа» видел заглушку
+                // «калькулятор скоро» вместо своего расчёта (в «Зарплату» он попадает
+                // сразу при входе — это первый разрешённый ему раздел).
+                if (view === 'salary' && (isOpSalaryDept || isTezSalaryDept)) {
+                    fetchHoursData();
+                    return;
+                }
+
                 if (view === 'evaluation') {
                     fetchOperatorData();
                     fetchSensitiveAccessStatus();
                 }
-            }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view]);
+            }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept]);
 
             useEffect(() => {
                 if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead) return;
