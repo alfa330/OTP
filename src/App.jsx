@@ -182,8 +182,41 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
     periodMonth: '',
     departmentId: ''
 };
-const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter', 'tez_line', 'tez_op', 'op_osnova', 'op_potok']);
-const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez', 'op']);
+// Каталог калькуляторов зарплаты: отдел → модели расчёта, у которых он готов.
+// Один источник правды для вкладок раздела, списка «готовых» отделов и набора
+// допустимых значений вкладки: админ ходит по всем отделам, СВ и глава отдела —
+// по моделям своего, оператор видит расчёт своего направления.
+const SALARY_CALCULATOR_CATALOG = [
+    {
+        code: 'szov',
+        label: 'СЗоВ',
+        models: [
+            { key: 'call', label: 'Линия' },
+            { key: 'chat', label: 'Чат' },
+            { key: 'converter', label: 'Конвертер' },
+        ],
+    },
+    {
+        code: 'tez',
+        label: 'ТЭЗ',
+        models: [
+            { key: 'tez_line', label: 'Линия TEZ' },
+            { key: 'tez_op', label: 'ОП TEZ' },
+        ],
+    },
+    {
+        code: 'op',
+        label: 'Отдел продаж',
+        models: [
+            { key: 'op_osnova', label: 'Основа' },
+            { key: 'op_potok', label: 'Поток' },
+        ],
+    },
+];
+const SALARY_CALCULATOR_TYPES = new Set(
+    SALARY_CALCULATOR_CATALOG.flatMap((entry) => entry.models.map((model) => model.key))
+);
+const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(SALARY_CALCULATOR_CATALOG.map((entry) => entry.code));
 const TEZ_SALARY_CALCULATOR_TYPES = new Set(['tez_line', 'tez_op']);
 // Отдел продаж: расчёт есть у «Основы» и «Потока». Оператору ОП другой модели
 // (Верификатор / Яндекс Регистрация) по-прежнему показываем заглушку «скоро».
@@ -371,6 +404,10 @@ const resolveSalaryDepartment = (user, departments = []) => {
 const departmentHasSalaryCalculator = (departmentCode) => {
     const code = normalizeDepartmentCode(departmentCode);
     return !code || SALARY_CALCULATOR_READY_DEPARTMENT_CODES.has(code);
+};
+const salaryCatalogEntry = (departmentCode) => {
+    const code = normalizeDepartmentCode(departmentCode);
+    return SALARY_CALCULATOR_CATALOG.find((entry) => entry.code === code) || null;
 };
 const normalizeAnalyticsToken = (value) =>
     String(value || '')
@@ -35186,6 +35223,59 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 : (OP_SALARY_CALCULATOR_MODELS.has(calculatorType)
                     ? calculatorType
                     : OP_DEFAULT_SALARY_CALCULATOR_MODEL);
+
+            // Раздел «Зарплата» по отделам: админ (не глава отдела) переключает отделы
+            // и видит все готовые расчёты; СВ и глава отдела — модели только своего
+            // отдела; оператор ОП — свою модель без вкладок.
+            const canPickSalaryDepartment = isAdminLikeRole;
+            const [salaryDeptCode, setSalaryDeptCode] = useState(
+                () => normalizeDepartmentCode(getStoredValue('salaryDeptCode', ''))
+            );
+            const ownSalaryDeptCode = normalizeDepartmentCode(salaryDepartment.code);
+            const activeSalaryDeptCode = canPickSalaryDepartment
+                ? (
+                    salaryCatalogEntry(salaryDeptCode)?.code
+                    || salaryCatalogEntry(ownSalaryDeptCode)?.code
+                    || SALARY_CALCULATOR_CATALOG[0].code
+                )
+                : ownSalaryDeptCode;
+            const activeSalaryCatalogEntry = salaryCatalogEntry(activeSalaryDeptCode);
+            const salaryDeptOptions = canPickSalaryDepartment
+                ? SALARY_CALCULATOR_CATALOG
+                : (activeSalaryCatalogEntry ? [activeSalaryCatalogEntry] : []);
+            const salaryModelOptions = activeSalaryCatalogEntry?.models || [];
+            // Модель активной вкладки. У ОП и TEZ свои правила выбора (замок на
+            // собственной модели оператора и автоподстановка), у СЗоВ — сама вкладка;
+            // неизвестное значение (осталось от другого отдела) откатывается на первую.
+            const activeSalaryModel = activeSalaryDeptCode === 'op'
+                ? opSalaryModel
+                : activeSalaryDeptCode === 'tez'
+                ? tezSalaryModel
+                : (salaryModelOptions.some((model) => model.key === calculatorType)
+                    ? calculatorType
+                    : (salaryModelOptions[0]?.key || 'call'));
+            // Вкладки моделей прячем только у оператора ОП: он считает себе.
+            const showSalaryModelTabs = salaryModelOptions.length > 1
+                && !(activeSalaryDeptCode === 'op' && isOwnSalaryOperator && isOwnOpModelSupported);
+            // Админу заглушка не нужна: у него всегда есть выбор отдела.
+            const salaryStubShown = !canPickSalaryDepartment
+                && (!hasSalaryCalculatorForDepartment || (isOpSalaryDept && !showOpCalculator));
+            const pickSalaryDepartment = (code) => {
+                const entry = salaryCatalogEntry(code);
+                if (!entry) return;
+                setSalaryDeptCode(entry.code);
+                try {
+                    localStorage.setItem('salaryDeptCode', entry.code);
+                } catch (e) {
+                    /* приватный режим — просто не запоминаем выбор */
+                }
+                // Вкладка модели могла остаться от прошлого отдела — переводим на первую
+                // модель нового, иначе раздел показал бы чужой калькулятор.
+                if (!entry.models.some((model) => model.key === calculatorType)) {
+                    if (entry.code === 'tez') tezCalculatorTypePickedRef.current = true;
+                    setCalculatorType(entry.models[0].key);
+                }
+            };
             // Оператор ОП заходит сразу в «Зарплату», минуя «Мои часы», поэтому его
             // собственные часы/норму/штрафы/качество подставляем сами — один раз на
             // месяц, чтобы не затирать то, что он уже ввёл руками.
@@ -50125,46 +50215,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
                                                     <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
-                                                {!hasSalaryCalculatorForDepartment || (isOpSalaryDept && !showOpCalculator) ? (
+                                                {salaryStubShown ? (
                                                     <SalaryComingSoon departmentName={salaryDepartment.name} />
-                                                ) : isOpSalaryDept ? (
-                                                    <>
-                                                        {/* Вкладки — только тем, кто считает не себе: оператор
-                                                            видит расчёт своего направления без выбора. */}
-                                                        {!(isOwnSalaryOperator && isOwnOpModelSupported) && (
-                                                            <div className="grid grid-cols-2 gap-2 mb-4 sm:flex sm:flex-wrap">
-                                                                <button
-                                                                    className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${opSalaryModel === 'op_osnova' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                    onClick={() => setCalculatorType('op_osnova')}
-                                                                >
-                                                                    Основа
-                                                                </button>
-                                                                <button
-                                                                    className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${opSalaryModel === 'op_potok' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                    onClick={() => setCalculatorType('op_potok')}
-                                                                >
-                                                                    Поток
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        <Suspense fallback={null}>
-                                                            {opSalaryModel === 'op_potok' ? (
-                                                                <SalaryCalculatorPotok
-                                                                    prefill={opCalculatorPrefill}
-                                                                    prefillNonce={opCalculatorPrefillNonce}
-                                                                    month={selectedMonth}
-                                                                />
-                                                            ) : (
-                                                                <SalaryCalculatorOsnova
-                                                                    prefill={opCalculatorPrefill}
-                                                                    prefillNonce={opCalculatorPrefillNonce}
-                                                                    month={selectedMonth}
-                                                                />
-                                                            )}
-                                                        </Suspense>
-                                                    </>
                                                 ) : (
                                                     <>
+                                                {/* Отделы — админу: сразу видно, какие расчёты вообще есть.
+                                                    У СВ и главы отдела вариант один, и строка не рендерится. */}
+                                                {salaryDeptOptions.length > 1 && (
+                                                    <div className="mb-4 flex flex-wrap items-center gap-2">
+                                                        <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">Отдел</span>
+                                                        {salaryDeptOptions.map((entry) => (
+                                                            <button
+                                                                key={entry.code}
+                                                                onClick={() => pickSalaryDepartment(entry.code)}
+                                                                className={`px-3 py-1.5 rounded-full text-sm font-medium ring-1 transition ${activeSalaryDeptCode === entry.code
+                                                                    ? 'bg-blue-600 text-white ring-blue-600'
+                                                                    : 'bg-white text-gray-700 ring-gray-200 hover:bg-gray-50'}`}
+                                                            >
+                                                                {entry.label}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                )}
                                                 {salaryDualResult && salaryDualResult.length >= 2 && (
                                                     <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50/60 p-4 sm:p-5">
                                                         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-2">
@@ -50201,46 +50273,41 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                         </div>
                                                     </div>
                                                 )}
-                                                <div className="grid grid-cols-3 gap-2 mb-4 sm:flex sm:flex-wrap">
-                                                    {isTezSalaryDept ? (
-                                                        <>
+                                                {showSalaryModelTabs && (
+                                                    <div className="grid grid-cols-2 gap-2 mb-4 sm:grid-cols-3 sm:flex sm:flex-wrap">
+                                                        {salaryModelOptions.map((model) => (
                                                             <button
-                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${tezSalaryModel === 'tez_line' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => { tezCalculatorTypePickedRef.current = true; setCalculatorType('tez_line'); }}
+                                                                key={model.key}
+                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${activeSalaryModel === model.key ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
+                                                                onClick={() => {
+                                                                    // Ручной выбор вкладки TEZ отключает автоподстановку
+                                                                    // модели оператора до конца сессии.
+                                                                    if (activeSalaryDeptCode === 'tez') tezCalculatorTypePickedRef.current = true;
+                                                                    setCalculatorType(model.key);
+                                                                }}
                                                             >
-                                                                Линия TEZ
+                                                                {model.label}
                                                             </button>
-                                                            <button
-                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${tezSalaryModel === 'tez_op' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => { tezCalculatorTypePickedRef.current = true; setCalculatorType('tez_op'); }}
-                                                            >
-                                                                ОП TEZ
-                                                            </button>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <button
-                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'call' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => setCalculatorType('call')}
-                                                            >
-                                                                Линия
-                                                            </button>
-                                                            <button
-                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'chat' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => setCalculatorType('chat')}
-                                                            >
-                                                                Чат
-                                                            </button>
-                                                            <button
-                                                                className={`w-full sm:w-auto px-3 sm:px-4 py-2 rounded text-sm font-medium ${calculatorType === 'converter' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                                                                onClick={() => setCalculatorType('converter')}
-                                                              >
-                                                                Конвертер
-                                                            </button>
-                                                        </>
-                                                    )}
-                                                </div>
-                                                {isTezSalaryDept ? (
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {activeSalaryDeptCode === 'op' ? (
+                                                    <Suspense fallback={null}>
+                                                        {activeSalaryModel === 'op_potok' ? (
+                                                            <SalaryCalculatorPotok
+                                                                prefill={opCalculatorPrefill}
+                                                                prefillNonce={opCalculatorPrefillNonce}
+                                                                month={selectedMonth}
+                                                            />
+                                                        ) : (
+                                                            <SalaryCalculatorOsnova
+                                                                prefill={opCalculatorPrefill}
+                                                                prefillNonce={opCalculatorPrefillNonce}
+                                                                month={selectedMonth}
+                                                            />
+                                                        )}
+                                                    </Suspense>
+                                                ) : activeSalaryDeptCode === 'tez' ? (
                                                     <Suspense fallback={null}>
                                                         <SalaryCalculatorTez
                                                             model={tezSalaryModel}
@@ -50249,7 +50316,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             hoursPrefillNonce={tezCalculatorPrefillNonce}
                                                         />
                                                     </Suspense>
-                                                ) : calculatorType === 'call' ? (
+                                                ) : activeSalaryModel === 'call' ? (
                                                     <>
                                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 lg:gap-8">
                                                             <div className="p-4 sm:p-6 bg-gray-50 rounded-xl shadow-sm hover:shadow-md transition">
@@ -50470,7 +50537,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             {generatePointsTable()}
                                                         </div>
                                                     </>
-                                                ) : calculatorType === 'chat' ?(
+                                                ) : activeSalaryModel === 'chat' ?(
                                                     <Suspense fallback={null}>
                                                         <SalaryCalculatorChat prefill={salaryChatPrefill} prefillNonce={salaryChatPrefillNonce} />
                                                     </Suspense>

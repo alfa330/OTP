@@ -135,10 +135,18 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
         self.result_card = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculationResult.jsx")
 
     def test_sales_department_has_a_calculator(self):
-        # Без 'op' в списке весь раздел подменяется заглушкой SalaryComingSoon.
-        start = self.app.index("const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(")
-        block = self.app[start:self.app.index(")", start)]
-        self.assertIn("'op'", block)
+        # Каталог — единственный источник: из него выводятся и «готовые» отделы,
+        # и допустимые значения вкладки. Без записи 'op' раздел подменяется
+        # заглушкой SalaryComingSoon.
+        start = self.app.index("const SALARY_CALCULATOR_CATALOG = [")
+        catalog = self.app[start:self.app.index("\n];", start)]
+        self.assertIn("code: 'op',", catalog)
+        self.assertIn("key: 'op_osnova'", catalog)
+        self.assertIn("key: 'op_potok'", catalog)
+        self.assertIn(
+            "const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(SALARY_CALCULATOR_CATALOG.map((entry) => entry.code));",
+            self.app,
+        )
 
     def test_salary_view_loads_hours_for_own_model(self):
         # Модель оператора живёт в часах месяца. Раздел «Зарплата» их не запрашивал,
@@ -177,22 +185,26 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
         # заглушка, а СВ и главе доступны обе вкладки.
         self.assertIn("const OP_SALARY_CALCULATOR_MODELS = new Set(['op_osnova', 'op_potok']);", self.app)
         self.assertIn("const showOpCalculator = isOpSalaryDept", self.app)
-        self.assertIn("isOpSalaryDept && !showOpCalculator", self.app)
+        self.assertIn("(isOpSalaryDept && !showOpCalculator)", self.app)
 
     def test_operator_sees_his_own_model_without_tabs(self):
         # Вкладку модели оператор не выбирает: в своей зарплате ошибиться нельзя.
         self.assertIn("const opSalaryModel = (isOwnSalaryOperator && isOwnOpModelSupported)", self.app)
         self.assertIn("? ownCalculationModelCode", self.app)
-        self.assertIn("!(isOwnSalaryOperator && isOwnOpModelSupported) && (", self.app)
-        # Коды моделей должны переживать нормализацию сохранённой вкладки.
-        start = self.app.index("const SALARY_CALCULATOR_TYPES = new Set(")
-        types = self.app[start:self.app.index(")", start)]
-        self.assertIn("'op_osnova'", types)
-        self.assertIn("'op_potok'", types)
+        self.assertIn(
+            "&& !(activeSalaryDeptCode === 'op' && isOwnSalaryOperator && isOwnOpModelSupported);",
+            self.app,
+        )
+        # Коды моделей переживают нормализацию сохранённой вкладки: набор типов
+        # выводится из каталога, где обе модели ОП присутствуют.
+        self.assertIn(
+            "const SALARY_CALCULATOR_TYPES = new Set(\n    SALARY_CALCULATOR_CATALOG.flatMap((entry) => entry.models.map((model) => model.key))\n);",
+            self.app,
+        )
 
     def test_potok_calculator_is_wired(self):
         self.assertIn("import('./components/salary/SalaryCalculatorPotok')", self.app)
-        self.assertIn("opSalaryModel === 'op_potok' ? (", self.app)
+        self.assertIn("activeSalaryModel === 'op_potok' ? (", self.app)
         self.assertIn("salaryResult.model === 'op_potok'", self.result_card)
         self.assertIn("PotokCalculationResult", self.result_card)
         # Оба потока продаж и обе удерживаемые суммы должны вводиться.

@@ -235,15 +235,13 @@ class MyHoursOpMetricsTests(unittest.TestCase):
             "const own = TEZ_SALARY_CALCULATOR_TYPES.has(ownCalculationModelCode)",
             self.src,
         )
-        # ручной выбор вкладки выключает автоподстановку
+        # Ручной выбор вкладки выключает автоподстановку. Вкладки строятся из
+        # каталога отделов, поэтому проверяем обработчик, а не два литерала.
         self.assertIn(
-            "onClick={() => { tezCalculatorTypePickedRef.current = true; setCalculatorType('tez_op'); }}",
+            "if (activeSalaryDeptCode === 'tez') tezCalculatorTypePickedRef.current = true;",
             self.src,
         )
-        self.assertIn(
-            "onClick={() => { tezCalculatorTypePickedRef.current = true; setCalculatorType('tez_line'); }}",
-            self.src,
-        )
+        self.assertIn("setCalculatorType(model.key);", self.src)
 
 
 class ProfileTilesTests(unittest.TestCase):
