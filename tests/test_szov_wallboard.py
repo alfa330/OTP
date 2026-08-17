@@ -792,16 +792,18 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.view_path = ROOT / "src" / "components" / "monitoring" / "SzovWallboardView.jsx"
+        # Пороги и функции тона живут в общем модуле: их читают и раздел, и виджет «поверх окон».
+        cls.view_path = ROOT / "src" / "components" / "monitoring" / "szovWallboardShared.js"
         cls.source = cls.view_path.read_text(encoding="utf-8-sig")
         if shutil.which("node") is None:
             raise unittest.SkipTest("node недоступен")
 
     def _run_tone(self, fn_name, const_prefix, expected_consts, values, divisor):
-        """Вырезает пороги и функцию тона из компонента и гоняет их настоящим node."""
-        consts = re.findall(rf"^const {const_prefix}[A-Z_]+ = [\d.]+;$", self.source, flags=re.MULTILINE)
+        """Вырезает пороги и функцию тона из общего модуля и гоняет их настоящим node."""
+        consts = re.findall(rf"^(?:export )?const {const_prefix}[A-Z_]+ = [\d.]+;$", self.source,
+                            flags=re.MULTILINE)
         self.assertEqual(len(consts), expected_consts, f"ожидались {expected_consts} константы порогов {const_prefix}")
-        fn = re.search(rf"^const {fn_name} = \(ratio\) => \{{.*?^\}};$", self.source,
+        fn = re.search(rf"^(?:export )?const {fn_name} = \(ratio\) => \{{.*?^\}};$", self.source,
                        flags=re.MULTILINE | re.DOTALL)
         self.assertIsNotNone(fn, f"не нашли функцию {fn_name}")
         script = "\n".join(consts) + "\n" + fn.group(0) + "\n" + (
@@ -850,7 +852,8 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
             return float(re.search(rf"{name} = float\(os\.getenv\('{name}'\) or ([\d.]+)\)", api).group(1))
 
         def frontend(name):
-            return float(re.search(rf"^const {name} = ([\d.]+);$", self.source, flags=re.MULTILINE).group(1))
+            return float(re.search(rf"^(?:export )?const {name} = ([\d.]+);$", self.source,
+                                   flags=re.MULTILINE).group(1))
 
         self.assertEqual(backend('SZOV_SL_MIN_PERCENT') / 100, frontend('SL_GOOD_RATIO'))
         self.assertEqual(backend('SZOV_AR_MIN_PERCENT'), frontend('AR_MIN_PERCENT'))
@@ -860,8 +863,8 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
         """Одна цифра не должна гореть на табло и в отчёте разными цветами."""
         billing = (ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx").read_text(encoding="utf-8-sig")
         self.assertIn("billingSlRatio >= 0.8 ? 'emerald'", billing.replace("\n", " ").replace("  ", " "))
-        self.assertIn("const SL_GOOD_RATIO = 0.8;", self.source)
-        self.assertIn("const SL_WARN_RATIO = 0.6;", self.source)
+        self.assertIn("export const SL_GOOD_RATIO = 0.8;", self.source)
+        self.assertIn("export const SL_WARN_RATIO = 0.6;", self.source)
 
     def test_corridor_boundaries(self):
         """Коридор владельца 3–5 %: внутри зелёный, снаружи красный, промежуточного нет."""
@@ -890,9 +893,25 @@ class SzovWallboardWiringTests(unittest.TestCase):
         cls.view = (
             ROOT / "src" / "components" / "monitoring" / "SzovWallboardView.jsx"
         ).read_text(encoding="utf-8-sig")
+        # Каталог показателей и снимок: раздел и виджет читают их вместе.
+        cls.shared = (
+            ROOT / "src" / "components" / "monitoring" / "szovWallboardShared.js"
+        ).read_text(encoding="utf-8-sig")
+        cls.widget = (
+            ROOT / "src" / "components" / "monitoring" / "SzovWallboardWidget.jsx"
+        ).read_text(encoding="utf-8-sig")
         cls.faicon = (
             ROOT / "src" / "components" / "common" / "FaIcon.jsx"
         ).read_text(encoding="utf-8-sig")
+
+    def _metric(self, key):
+        """Запись каталога показателей — по ней проверяем подпись, значение и тон."""
+        block = re.search(rf"\n    \{{\n        key: '{key}',.*?\n    \}},\n", self.shared, flags=re.DOTALL)
+        self.assertIsNotNone(block, f"в каталоге нет показателя {key}")
+        return block.group(0)
+
+    def _metric_label(self, key):
+        return re.search(r"label: '([^']+)'", self._metric(key)).group(1)
 
     def test_backend_endpoint_is_registered_and_guarded(self):
         self.assertIn("@app.route('/api/szov_wallboard/snapshot', methods=['GET', 'OPTIONS'])", self.api)
@@ -935,11 +954,27 @@ class SzovWallboardWiringTests(unittest.TestCase):
             self.assertIn(f"'{token}'", self.faicon, token)
 
     def test_view_polls_without_reloading_and_guards_overlap(self):
-        self.assertIn("const POLL_INTERVAL_MS = 15000;", self.view)
-        self.assertIn("if (inFlightRef.current) return;", self.view)
-        self.assertIn("new AbortController()", self.view)
+        self.assertIn("const POLL_INTERVAL_MS = 15000;", self.shared)
+        self.assertIn("if (store.inFlight) return;", self.shared)
+        self.assertIn("new AbortController()", self.shared)
         # Скрытую вкладку не опрашиваем
-        self.assertIn("visibilitychange", self.view)
+        self.assertIn("visibilitychange", self.shared)
+
+    def test_section_and_widget_share_one_poll(self):
+        """Открытые раздел и виджет не должны дёргать низкоконкурентный прокси Oktell вдвое чаще,
+        а в один момент времени показывать разные цифры."""
+        self.assertIn("useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.view)
+        self.assertIn("useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.widget)
+        # таймер и запрос живут ровно в одном месте — в общем модуле
+        self.assertEqual(self.shared.count("setInterval("), 1)
+        self.assertNotIn("setInterval(", self.view)
+        self.assertNotIn("setInterval(", self.widget)
+        snapshot_call = "fetch(`${apiBaseUrl}/api/szov_wallboard/snapshot`"
+        self.assertEqual(self.shared.count(snapshot_call), 1)
+        self.assertNotIn(snapshot_call, self.view)
+        self.assertNotIn(snapshot_call, self.widget)
+        # опрос останавливается, когда закрыты и раздел, и виджет
+        self.assertIn("if (store.subscribers === 0) stopPolling();", self.shared)
 
     def test_view_renders_every_metric_of_the_layout(self):
         for label in (
@@ -947,7 +982,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
             "Принято / входящих", "Потеряно", "SL", "Ср. ожидание",
             "Свободны", "В разговоре", "Ср. разговор", "Перезвон",
         ):
-            self.assertIn(label, self.view, label)
+            self.assertIn(label, self.shared, label)
 
     def test_three_captioned_sections_with_icons(self):
         """Макет владельца: три секции с подписью и иконкой."""
@@ -960,8 +995,8 @@ class SzovWallboardWiringTests(unittest.TestCase):
 
     def test_metric_order(self):
         """Порядок плиток внутри секций — как на макете."""
-        labels = re.findall(r'label="([^"]+)"', self.view)
-        self.assertEqual(labels, [
+        keys = re.findall(r'metricKey="([^"]+)"', self.view)
+        self.assertEqual([self._metric_label(key) for key in keys], [
             "В очереди", "AR", "Онлайн", "Перерыв",
             "Принято / входящих", "Потеряно", "SL", "Ср. ожидание",
             "Свободны", "В разговоре", "Ср. разговор", "Перезвон",
@@ -970,36 +1005,89 @@ class SzovWallboardWiringTests(unittest.TestCase):
     def test_only_key_tiles_are_coloured(self):
         """Цветные плитки — только в ключевых показателях; день и операторы белые."""
         self.assertEqual(self.view.count("<KeyTile"), 4)
-        self.assertEqual(self.view.count("<StatTile"), 7)
-        self.assertEqual(self.view.count("<PairTile"), 1)
-        stat = re.search(r"const StatTile = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertEqual(self.view.count("<StatTile"), 8)
+        stat = re.search(r"const StatTile = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
         self.assertIn("border border-slate-200/80", stat)
         self.assertNotIn("bg-emerald", stat)
 
     def test_key_tile_tones(self):
         """Очередь и AR оцениваются, онлайн и перерыв носят опознавательный цвет."""
-        self.assertIn("tone={queueTone}", self.view)
-        self.assertIn("tone={arTone(today.ar_ratio)}", self.view)
-        self.assertIn('tone="info"', self.view)   # онлайн — синий
-        self.assertIn('tone="warn"', self.view)   # перерыв — оранжевый
         # пустая очередь это хорошо, очередь без свободных — тревога
-        self.assertIn("queue === 0 ? 'good' : nobodyFree ? 'bad' : 'warn'", self.view)
+        self.assertIn("(Number(now.queue) || 0) === 0", self._metric('queue'))
+        self.assertIn("(Number(now.operators_free) === 0 ? 'bad' : 'warn')", self._metric('queue'))
+        self.assertIn("tone: arTone(today.ar_ratio)", self._metric('ar_ratio'))
+        self.assertIn("tone: 'info'", self._metric('operators_online'))   # онлайн — синий
+        self.assertIn("tone: 'warn'", self._metric('operators_on_break'))  # перерыв — оранжевый
 
     def test_accepted_is_the_main_number_of_the_pair(self):
         """«Принято / входящих»: принятые — главное число, общий поток приглушён."""
-        pair = re.search(r"<PairTile(.*?)/>", self.view, flags=re.DOTALL).group(0)
-        self.assertIn("first={formatInt(today.served)}", pair)
+        pair = self._metric('served_pair')
+        self.assertIn("value: formatInt(today.served)", pair)
         # входящие = дошедшие до очереди, сброшенные на приветствии сюда не идут
-        self.assertIn("second={formatInt(today.arrived)}", pair)
-        self.assertNotIn("today.total", self.view)
-        body = re.search(r"const PairTile = .*?^\);$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertIn("secondary: formatInt(today.arrived)", pair)
+        self.assertNotIn("metricKey=\"total\"", self.view)
+        body = re.search(r"const StatTile = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
         self.assertIn("text-slate-400", body)
 
     def test_lost_is_red_and_sl_follows_its_thresholds(self):
-        lost = re.search(r'label="Потеряно"(.*?)/>', self.view, flags=re.DOTALL).group(0)
-        self.assertIn('tone="bad"', lost)
-        sl = re.search(r'label="SL"(.*?)/>', self.view, flags=re.DOTALL).group(0)
-        self.assertIn("tone={slTone(today.sl_ratio)}", sl)
+        self.assertIn("tone: 'bad'", self._metric('lost'))
+        self.assertIn("tone: slTone(today.sl_ratio)", self._metric('sl_ratio'))
+
+    def test_widget_exists_only_as_a_window_above_others(self):
+        """Решение владельца: виджет — окно поверх других окон, встроенной карточки в странице нет."""
+        self.assertIn("documentPictureInPicture", self.widget)
+        self.assertIn("requestWindow({ width: PIP_WIDTH", self.widget)
+        # ни плавающей карточки, ни перетаскивания внутри страницы
+        for stale in ("position: fixed", "handlePointerDown", "FLOATING_", "'floating'"):
+            self.assertNotIn(stale, self.widget, stale)
+        self.assertEqual(self.widget.count("createPortal("), 1)
+        self.assertIn("if (!pipContainer) return null;", self.widget)
+        # своё окно = свой документ, без переноса стилей там голый HTML
+        self.assertIn("cloneDocumentStyles", self.widget)
+
+    def test_widget_survives_leaving_the_section(self):
+        """Виджет нужен, чтобы следить за линией, занимаясь другим, — значит живёт в App.jsx."""
+        self.assertIn("import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';",
+                      self.app)
+        self.assertIn("const [szovWallboardWidgetOpen, setSzovWallboardWidgetOpen] = useState(false);",
+                      self.app)
+        self.assertIn("canAccessSzovWallboardSection && szovWallboardWidgetOpen && (", self.app)
+        self.assertIn("onToggleWidget={setSzovWallboardWidgetOpen}", self.app)
+        # закрытое системным крестиком окно не должно оставлять виджет «открытым»
+        self.assertIn("pipWindow.addEventListener('pagehide'", self.widget)
+
+    def test_widget_metrics_are_chosen_inside_the_widget(self):
+        """Из PiP-окна сайта не видно: набор правится в самом окне и запоминается на пользователя."""
+        self.assertIn("const SettingsPanel = ", self.widget)
+        self.assertIn('role="switch"', self.widget)
+        self.assertIn("Выбрать показатели", self.widget)
+        self.assertIn("По умолчанию", self.widget)
+        self.assertIn("otp:szov-wallboard-widget", self.widget)
+        self.assertIn("sanitizeWidgetMetrics", self.widget)
+        # порядок плиток — порядок каталога, а не порядок нажатий
+        self.assertIn("WALLBOARD_METRICS.filter((metric) => metric.key === key", self.widget)
+
+    def test_widget_button_promises_only_what_the_browser_can_do(self):
+        self.assertIn("canOpenWallboardWidget", self.view)
+        self.assertIn("disabled={!widgetSupported}", self.view)
+        self.assertIn("Окно поверх других программ умеют Chrome и Edge", self.view)
+        # чужое PiP-окно (закреплённая задача) не отбираем молча
+        self.assertIn("Окно поверх других уже занято другим виджетом", self.widget)
+
+    def test_catalog_covers_the_wall_and_more(self):
+        """Каталог — единственный источник подписей: в нём и плитки стены, и то, чего на ней нет."""
+        groups = re.findall(r"\{ key: '(\w+)', title: '([^']+)' \}", self.shared)
+        self.assertEqual([key for key, _ in groups], ['line', 'people', 'today', 'lists'])
+        keys = re.findall(r"^        key: '(\w+)',$", self.shared, flags=re.MULTILINE)
+        self.assertEqual(len(keys), len(set(keys)), "дубли ключей в каталоге")
+        for key in re.findall(r'metricKey="([^"]+)"', self.view):
+            self.assertIn(key, keys, key)
+        # показатели, которых на стене не было вовсе, — ради них виджет и настраивают
+        for key in ("queue_max_wait", "talking_calls", "max_wait_seconds", "greet_drop",
+                    "break_list", "recall_list"):
+            self.assertIn(key, keys, key)
+        for key in re.findall(r"^    '(\w+)',$", self.shared, flags=re.MULTILINE):
+            self.assertIn(key, keys, f"набор по умолчанию ссылается на несуществующий {key}")
 
     def test_training_and_tech_are_not_silently_dropped(self):
         """Своих плиток у них нет, поэтому люди в этих статусах уходят в приглушённую строку."""
@@ -1037,16 +1125,16 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("item.reason_key !== 'break'", block)
 
     def test_numbers_are_centred(self):
-        for component in ("const KeyTile", "const StatTile", "const PairTile"):
-            block = re.search(rf"{component} = .*?^\);?$", self.view, flags=re.MULTILINE | re.DOTALL)
+        for component in ("const KeyTile", "const StatTile"):
+            block = re.search(rf"{component} = .*?^\}};$", self.view, flags=re.MULTILINE | re.DOTALL)
             self.assertIn("text-center", block.group(0), component)
             self.assertIn("items-center", block.group(0), component)
 
     def test_status_chip_colours_match_the_owners_choice(self):
         """Перерыв оранжевый, тренинг зелёный, тех.причина фиолетовая — в списке причин."""
-        self.assertIn("break: { label: 'Перерыв', chip: 'bg-orange-100", self.view)
-        self.assertIn("training: { label: 'Тренинг', chip: 'bg-emerald-100", self.view)
-        self.assertIn("tech: { label: 'Тех.причина', chip: 'bg-violet-100", self.view)
+        self.assertIn("break: { label: 'Перерыв', chip: 'bg-orange-100", self.shared)
+        self.assertIn("training: { label: 'Тренинг', chip: 'bg-emerald-100", self.shared)
+        self.assertIn("tech: { label: 'Тех.причина', chip: 'bg-violet-100", self.shared)
 
     def test_old_layout_primitives_are_gone(self):
         """Панелей без зазоров, водяных знаков и полосы статусов в новом макете нет."""
@@ -1346,6 +1434,8 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         cls.db = (ROOT / "database.py").read_text(encoding="utf-8-sig")
         cls.view = (ROOT / "src" / "components" / "monitoring"
                     / "SzovWallboardView.jsx").read_text(encoding="utf-8-sig")
+        cls.shared = (ROOT / "src" / "components" / "monitoring"
+                      / "szovWallboardShared.js").read_text(encoding="utf-8-sig")
 
     def test_recipient_and_history_tables_exist(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_chats", self.db)
@@ -1441,7 +1531,7 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         """Входящие — только дошедшие до очереди, и на экране, и в картинке отбивки."""
         self.assertIn("f\"{totals['served']}/{totals['arrived']}\"", self.api)
         self.assertNotIn("totals['total']}\"", self.api)
-        self.assertIn("second={formatInt(today.arrived)}", self.view)
+        self.assertIn("secondary: formatInt(today.arrived)", self.shared)
 
     def test_images_fail_loudly_without_a_cyrillic_font(self):
         """Встроенный шрифт Pillow не умеет кириллицу — молча рисовать квадратики нельзя."""
