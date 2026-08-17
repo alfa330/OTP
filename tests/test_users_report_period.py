@@ -90,6 +90,7 @@ REPORT_COLUMN_NAMES = (
     "close_contact_2_relation", "close_contact_2_full_name", "close_contact_2_phone",
     "card_number", "city", "internship_in_company", "front_office_training",
     "front_office_training_date", "taxipro_id", "supervisor_id", "gender",
+    "birth_date",
     "dismissal_start_date", "dismissal_end_date", "dismissal_reason",
     "dismissal_comment", "dismissal_is_blacklist", "status_fired_changed_at",
 )
@@ -125,6 +126,7 @@ def _operator_row(
     dismissal_start=date(2026, 2, 25),
     dismissal_end=date(2026, 7, 12),
     city=None,
+    birth_date=date(1998, 4, 19),
 ):
     """Return one row in the shape selected by ``generate_users_report``."""
     row = [None] * len(REPORT_COLUMN_NAMES)
@@ -148,6 +150,7 @@ def _operator_row(
     _set("front_office_training", False)
     _set("supervisor_id", 126)
     _set("gender", "male")
+    _set("birth_date", birth_date)
     _set("dismissal_start_date", dismissal_start)
     _set("dismissal_end_date", dismissal_end)
     _set("dismissal_reason", "Нарушение дисциплины")
@@ -226,10 +229,25 @@ class UsersReportPeriodQueryTests(unittest.TestCase):
         self.assertTrue(content.startswith(b"PK"))
         workbook = load_workbook(BytesIO(content), data_only=True)
         self.assertEqual(workbook.sheetnames, ["Summary"])
-        self.assertEqual(workbook["Summary"]["A2"].value, "Тестбаев Алан Тестович")
-        self.assertEqual(workbook["Summary"]["J2"].value, "2024-11-07")
+        sheet = workbook["Summary"]
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(sheet["A2"].value, "Тестбаев Алан Тестович")
+        self.assertEqual(sheet.cell(2, headers.index("Дата принятия") + 1).value, "2024-11-07")
         # Ни у кого нет города — колонку не добавляем, чтобы не плодить пустую.
-        self.assertNotIn("Город", [cell.value for cell in workbook["Summary"][1]])
+        self.assertNotIn("Город", headers)
+
+    def test_birth_date_column_follows_gender(self):
+        """Дату рождения заполняют в карточке — она обязана быть и в выгрузке."""
+        (_filename, content), _sql, _params = self._build([_operator_row()])
+
+        workbook = load_workbook(BytesIO(content), data_only=True)
+        sheet = workbook["Summary"]
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(headers.index("Дата рождения"), headers.index("Пол") + 1)
+        self.assertEqual(
+            sheet.cell(2, headers.index("Дата рождения") + 1).value,
+            "1998-04-19",
+        )
 
     def test_city_column_appears_only_when_someone_has_a_city(self):
         (_filename, content), _sql, _params = self._build([_operator_row(city="Актобе")])

@@ -30453,6 +30453,7 @@ class Database:
                         u.taxipro_id,
                         u.supervisor_id,
                         u.gender,
+                        u.birth_date,
                         dismissal_info.dismissal_start_date,
                         dismissal_info.dismissal_end_date,
                         dismissal_info.dismissal_reason,
@@ -30578,6 +30579,7 @@ class Database:
             headers = [
                 "ФИО",
                 "Пол",
+                "Дата рождения",
                 "Логин",
                 "Роль",
                 "Отдел",
@@ -30635,6 +30637,7 @@ class Database:
                     close_contact_1_relation, close_contact_1_full_name, close_contact_1_phone,
                     close_contact_2_relation, close_contact_2_full_name, close_contact_2_phone,
                     card_number, city, internship_in_company, front_office_training, front_office_training_date, taxipro_id, sup_id, gender,
+                    birth_date,
                     dismissal_start_date, dismissal_end_date, dismissal_reason, dismissal_comment, dismissal_is_blacklist,
                     status_fired_changed_at
                 ) = row
@@ -30644,6 +30647,7 @@ class Database:
                 row_values = [
                     name or "",
                     _format_gender(gender),
+                    _format_date(birth_date),
                     login or "",
                     role or "",
                     department_name or "N/A",
