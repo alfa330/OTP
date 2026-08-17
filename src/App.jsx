@@ -39,6 +39,7 @@ import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, 
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
+import { stripTechnicalQueryParams } from './utils/urlHygiene';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -1540,6 +1541,8 @@ const buildAppViewUrl = (nextView) => {
     if (typeof window === 'undefined') return APP_BASE_URL;
     try {
         const url = new URL(window.location.href);
+        // Метки перезагрузки в ссылку не переносим — см. utils/urlHygiene.js.
+        stripTechnicalQueryParams(url);
         if (nextView === 'lms') {
             url.pathname = resolveAppPathname('/lms');
             url.searchParams.delete(APP_VIEW_QUERY_PARAM);
@@ -1565,6 +1568,7 @@ const syncAppViewWithUrl = (nextView) => {
     if (typeof window === 'undefined') return;
     try {
         const url = new URL(window.location.href);
+        stripTechnicalQueryParams(url);
         if (nextView === 'lms') {
             // Preserve existing LMS sub-path (e.g. /lms/course/5, /lms/admin)
             // Only reset to /lms if the current URL is not already an LMS path

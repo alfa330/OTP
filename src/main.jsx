@@ -3,9 +3,14 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App, { ErrorBoundary } from './App';
+import { cleanTechnicalQueryParamsFromAddressBar } from './utils/urlHygiene';
 import './styles.css';
 
 try {
+  /* Метки перезагрузки (?v=, ?auth_reload=) свою работу уже сделали — документ
+     загружен. Убираем их до старта роутера, чтобы они не жили в адресной строке
+     и не уезжали в ссылки, которыми делятся. */
+  cleanTechnicalQueryParamsFromAddressBar();
   const routerBase = import.meta.env.BASE_URL || '/';
   const root = ReactDOM.createRoot(document.getElementById('root'));
   root.render(

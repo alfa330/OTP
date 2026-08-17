@@ -28,6 +28,7 @@ import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
 import { planTaskFocus, shouldOpenFetchedTask } from './taskFocus';
+import { stripTechnicalQueryParams } from '../../utils/urlHygiene';
 import {
   TASK_DEPARTMENT_ALL,
   buildDepartmentOptions,
@@ -2566,6 +2567,9 @@ const buildTaskDeepLink = (taskId) => {
   if (!Number.isInteger(normalizedTaskId) || normalizedTaskId <= 0) return '';
   try {
     const url = new URL(window.location.href);
+    /* Ссылку копируют и отправляют людям: метки перезагрузки (?v=, ?auth_reload=)
+       в ней не нужны — см. utils/urlHygiene.js. */
+    stripTechnicalQueryParams(url);
     url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
     url.searchParams.set(TASK_ID_QUERY_PARAM, String(normalizedTaskId));
     return url.toString();
@@ -2578,6 +2582,7 @@ const syncTaskDeepLink = (taskId) => {
   if (typeof window === 'undefined') return;
   try {
     const url = new URL(window.location.href);
+    stripTechnicalQueryParams(url);
     if (taskId) {
       url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
       url.searchParams.set(TASK_ID_QUERY_PARAM, String(taskId));
