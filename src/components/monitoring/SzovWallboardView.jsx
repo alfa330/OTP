@@ -3,82 +3,39 @@ import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import FullscreenSheet from '../common/FullscreenSheet';
 import { APPLE_FONT, iosCard, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosBadge, IosModal, IosToggle } from '../ui/ios';
+import {
+    AR_MAX_PERCENT,
+    AR_MIN_PERCENT,
+    SL_GOOD_RATIO,
+    STATUS_STYLE,
+    WALLBOARD_METRIC_MAP,
+    WALLBOARD_TONE_TEXT,
+    canOpenWallboardWidget,
+    formatClock,
+    formatDuration,
+    formatInt,
+    readWallboardMetric,
+    useSzovWallboardSnapshot,
+    wallboardStaleNotice,
+} from './szovWallboardShared';
 
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108).
  *
  * Экран рассчитан на вывод на стену, поэтому:
- *   - обновляется сам, без перезагрузки страницы (опрос раз в 10 с, один общий снапшот);
+ *   - обновляется сам, без перезагрузки страницы (опрос раз в 15 с, один общий снапшот);
  *   - показатели собраны в сплошные панели без зазоров: соседние ячейки делит волосяная
  *     линия, поэтому цифрам достаётся вся ширина и подписи рядов не нужны;
  *   - цветом помечаем только то, что несёт смысл: AR вне целевого коридора и статусы
  *     операторов (у них цвет задан владельцем, чтобы различать причины с расстояния).
  *
  * Все показатели считает бэкенд (/api/szov_wallboard/snapshot) по формулам «Биллинга Oktell»,
- * чтобы табло и отчёт не расходились в цифрах.
+ * чтобы табло и отчёт не расходились в цифрах. Названия, значения и цвета живут в каталоге
+ * szovWallboardShared — тот же каталог питает виджет «поверх окон», где каждый выбирает свой
+ * набор показателей; здесь остаётся только раскладка стены.
  */
 
-// Опрос под TTL серверного кэша (13 с). Прокси Oktell низкоконкурентный и иногда подвисает
-// на установке соединения, поэтому лишний раз его не дёргаем: 15 с для стены достаточно.
-const POLL_INTERVAL_MS = 15000;
 const FULLSCREEN_Z = 150;
-
-/*
- * AR — не «чем меньше, тем лучше», а коридор (правило владельца): норма 3…5 %.
- * Ниже 3 % — тоже отклонение, а не успех: значит операторов на линии больше, чем нужно.
- * Коридор сплошной, промежуточного цвета нет: либо в норме, либо нет.
- */
-const AR_MIN_PERCENT = 3;
-const AR_MAX_PERCENT = 5;
-
-const arTone = (ratio) => {
-    if (ratio === null || ratio === undefined || !Number.isFinite(Number(ratio))) return 'neutral';
-    const percent = Number(ratio) * 100;
-    return percent >= AR_MIN_PERCENT && percent <= AR_MAX_PERCENT ? 'good' : 'bad';
-};
-
-/*
- * SL — доля звонков, отвеченных в пределах порога ожидания, ко ВСЕМ попавшим в очередь.
- * Пороги те же, что в отчёте «Расчёт ресурсов -> Биллинг» (ResourceFteView), иначе одна и та
- * же цифра горела бы на табло и в отчёте разными цветами.
- */
-const SL_GOOD_RATIO = 0.8;
-const SL_WARN_RATIO = 0.6;
-
-const slTone = (ratio) => {
-    if (ratio === null || ratio === undefined || !Number.isFinite(Number(ratio))) return 'neutral';
-    const value = Number(ratio);
-    if (value >= SL_GOOD_RATIO) return 'good';
-    if (value >= SL_WARN_RATIO) return 'warn';
-    return 'bad';
-};
-
-const formatInt = (value) => (Number.isFinite(Number(value)) ? Number(value).toLocaleString('ru-RU') : '—');
-
-const formatPercent = (ratio, digits = 1) => (
-    ratio === null || ratio === undefined || !Number.isFinite(Number(ratio))
-        ? '—'
-        : `${(Number(ratio) * 100).toFixed(digits).replace('.', ',')}%`
-);
-
-/** Секунды -> «М:СС» (или «Ч:ММ:СС» для долгих ожиданий). Компактно, читаемо с расстояния. */
-const formatDuration = (seconds) => {
-    const total = Number(seconds);
-    if (!Number.isFinite(total) || total < 0) return '—';
-    const whole = Math.round(total);
-    const hours = Math.floor(whole / 3600);
-    const minutes = Math.floor((whole % 3600) / 60);
-    const secs = whole % 60;
-    if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    return `${minutes}:${String(secs).padStart(2, '0')}`;
-};
-
-/** «12:07:18» из «2026-08-03 12:07:18» — на табло дата не нужна, только время источника. */
-const formatClock = (value) => {
-    const text = String(value || '').trim();
-    const match = text.match(/(\d{2}):(\d{2}):(\d{2})/);
-    return match ? match[0] : '—';
-};
 
 /*
  * Ключевые плитки цветные: два «оценочных» цвета (очередь и AR — по ним видно, всё ли в норме)
@@ -90,14 +47,8 @@ const KEY_PALETTE = {
     warn: { bg: 'bg-amber-100/70', text: 'text-amber-700', hint: 'text-amber-600/80' },
     bad: { bg: 'bg-rose-100/70', text: 'text-rose-700', hint: 'text-rose-600/80' },
     info: { bg: 'bg-blue-100/70', text: 'text-blue-700', hint: 'text-blue-600/80' },
-    slate: { bg: 'bg-slate-100', text: 'text-slate-700', hint: 'text-slate-500' },
-};
-
-const STAT_TONE = {
-    neutral: 'text-slate-900',
-    good: 'text-emerald-600',
-    warn: 'text-amber-600',
-    bad: 'text-rose-600',
+    violet: { bg: 'bg-violet-100/70', text: 'text-violet-700', hint: 'text-violet-600/80' },
+    neutral: { bg: 'bg-slate-100', text: 'text-slate-700', hint: 'text-slate-500' },
 };
 
 // Два размера цифр: ключевые показатели читаются через зал, показатели дня и операторов — рядом.
@@ -123,63 +74,46 @@ const Grid = ({ children }) => (
     <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{children}</div>
 );
 
-const KeyTile = ({ label, value, hint, tone = 'slate', scale = 1 }) => {
-    const palette = KEY_PALETTE[tone] || KEY_PALETTE.slate;
+/*
+ * Плитки берут показатель из каталога: подпись, значение и тон приходят оттуда, здесь остаются
+ * только размер цифр и фон. Поэтому цифра на стене и та же цифра в виджете разойтись не могут.
+ */
+const KeyTile = ({ metricKey, snapshot, scale = 1 }) => {
+    const metric = WALLBOARD_METRIC_MAP[metricKey];
+    const { value, tone } = readWallboardMetric(metric, snapshot);
+    const palette = KEY_PALETTE[tone] || KEY_PALETTE.neutral;
     return (
         <div className={`flex flex-col items-center gap-2 rounded-2xl px-4 py-6 text-center ${palette.bg}`}>
-            <div className={`text-[15px] font-semibold ${palette.text}`}>{label}</div>
+            <div className={`text-[15px] font-semibold ${palette.text}`}>{metric.label}</div>
             <div
                 className={`font-semibold tabular-nums leading-none ${palette.text}`}
                 style={{ fontSize: valueFontSize('key', scale) }}
             >
                 {value}
             </div>
-            {hint ? <div className={`text-[13px] leading-tight ${palette.hint}`}>{hint}</div> : null}
+            {metric.hint ? <div className={`text-[13px] leading-tight ${palette.hint}`}>{metric.hint}</div> : null}
         </div>
     );
 };
 
-const StatTile = ({ label, value, tone = 'neutral', scale = 1 }) => (
-    <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
-        <div className="text-[14px] font-medium text-slate-500">{label}</div>
-        <div
-            className={`font-semibold tabular-nums leading-none ${STAT_TONE[tone] || STAT_TONE.neutral}`}
-            style={{ fontSize: valueFontSize('stat', scale) }}
-        >
-            {value}
+/** Плитка дня/операторов. Показатель-пара («Принято / входящих») отдаёт второе число приглушённым. */
+const StatTile = ({ metricKey, snapshot, scale = 1 }) => {
+    const metric = WALLBOARD_METRIC_MAP[metricKey];
+    const { value, secondary, tone } = readWallboardMetric(metric, snapshot);
+    return (
+        <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
+            <div className="text-[14px] font-medium text-slate-500">{metric.label}</div>
+            <div
+                className={`font-semibold tabular-nums leading-none ${WALLBOARD_TONE_TEXT[tone] || WALLBOARD_TONE_TEXT.neutral}`}
+                style={{ fontSize: valueFontSize('stat', scale) }}
+            >
+                {value}
+                {secondary === null ? null : (
+                    <span className="font-normal text-slate-400" style={{ fontSize: '0.6em' }}>/{secondary}</span>
+                )}
+            </div>
         </div>
-    </div>
-);
-
-/*
- * «Принято / входящих» одной плиткой: принятые — главное число, входящие приглушены.
- * Входящими считаем только дошедших до очереди — сбросившие трубку на приветствии до
- * оператора не доходили, и записывать их во входящие некорректно. За счёт этого разрыв
- * между числами равен ровно потерянным, а плитка AR показывает, допустим ли он.
- */
-const PairTile = ({ label, first, second, scale = 1 }) => (
-    <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
-        <div className="text-[14px] font-medium text-slate-500">{label}</div>
-        <div
-            className="font-semibold tabular-nums leading-none text-slate-900"
-            style={{ fontSize: valueFontSize('stat', scale) }}
-        >
-            {first}
-            <span className="font-normal text-slate-400" style={{ fontSize: '0.6em' }}>/{second}</span>
-        </div>
-    </div>
-);
-
-/*
- * Цвета статусов заданы владельцем: перерыв — оранжевый, тренинг — зелёный,
- * тех.причина — фиолетовый. Перезвон владелец не называл; взяли синий (акцент приложения),
- * чтобы он не сливался с тремя остальными.
- */
-const STATUS_STYLE = {
-    break: { label: 'Перерыв', chip: 'bg-orange-100 text-orange-700' },
-    training: { label: 'Тренинг', chip: 'bg-emerald-100 text-emerald-700' },
-    tech: { label: 'Тех.причина', chip: 'bg-violet-100 text-violet-700' },
-    recall: { label: 'Перезвон', chip: 'bg-blue-100 text-blue-700' },
+    );
 };
 
 /*
@@ -533,12 +467,6 @@ const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, show
 /** Само табло. Выделено в компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
 const WallboardBody = ({ snapshot, scale }) => {
     const now = snapshot?.now || {};
-    const today = snapshot?.today || {};
-
-    // Очередь оцениваем: пусто — хорошо; есть очередь и никто не свободен — тревога.
-    const queue = Number(now.queue) || 0;
-    const nobodyFree = Number(now.operators_free) === 0;
-    const queueTone = queue === 0 ? 'good' : nobodyFree ? 'bad' : 'warn';
 
     // Тренинг и тех.причина отдельных плиток не имеют — чтобы люди в этих статусах не
     // пропадали из виду, показываем их приглушённой строкой, но только когда они есть.
@@ -558,57 +486,28 @@ const WallboardBody = ({ snapshot, scale }) => {
             <div className="space-y-4">
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
                 <Grid>
-                    <KeyTile
-                        label="В очереди"
-                        value={formatInt(queue)}
-                        hint="Ждут ответа"
-                        tone={queueTone}
-                        scale={scale}
-                    />
-                    <KeyTile
-                        label="AR"
-                        value={formatPercent(today.ar_ratio)}
-                        hint={`Норма ${AR_MIN_PERCENT}–${AR_MAX_PERCENT}%`}
-                        tone={arTone(today.ar_ratio)}
-                        scale={scale}
-                    />
-                    <KeyTile
-                        label="Онлайн"
-                        value={formatInt(now.operators_online)}
-                        hint="Сотрудников"
-                        tone="info"
-                        scale={scale}
-                    />
-                    <KeyTile
-                        label="Перерыв"
-                        value={formatInt(now.operators_on_break)}
-                        hint="Сотрудников"
-                        tone="warn"
-                        scale={scale}
-                    />
+                    <KeyTile metricKey="queue" snapshot={snapshot} scale={scale} />
+                    <KeyTile metricKey="ar_ratio" snapshot={snapshot} scale={scale} />
+                    <KeyTile metricKey="operators_online" snapshot={snapshot} scale={scale} />
+                    <KeyTile metricKey="operators_on_break" snapshot={snapshot} scale={scale} />
                 </Grid>
             </Section>
 
             <Section icon="fa-chart-bar" title="Показатели за день">
                 <Grid>
-                    <PairTile
-                        label="Принято / входящих"
-                        first={formatInt(today.served)}
-                        second={formatInt(today.arrived)}
-                        scale={scale}
-                    />
-                    <StatTile label="Потеряно" value={formatInt(today.lost)} tone="bad" scale={scale} />
-                    <StatTile label="SL" value={formatPercent(today.sl_ratio)} tone={slTone(today.sl_ratio)} scale={scale} />
-                    <StatTile label="Ср. ожидание" value={formatDuration(today.avg_wait_seconds)} scale={scale} />
+                    <StatTile metricKey="served_pair" snapshot={snapshot} scale={scale} />
+                    <StatTile metricKey="lost" snapshot={snapshot} scale={scale} />
+                    <StatTile metricKey="sl_ratio" snapshot={snapshot} scale={scale} />
+                    <StatTile metricKey="avg_wait_seconds" snapshot={snapshot} scale={scale} />
                 </Grid>
             </Section>
 
             <Section icon="fa-headset" title="Операторы">
                 <Grid>
-                    <StatTile label="Свободны" value={formatInt(now.operators_free)} scale={scale} />
-                    <StatTile label="В разговоре" value={formatInt(now.operators_talking)} scale={scale} />
-                    <StatTile label="Ср. разговор" value={formatDuration(today.avg_talk_seconds)} scale={scale} />
-                    <StatTile label="Перезвон" value={formatInt(now.operators_on_recall)} scale={scale} />
+                    <StatTile metricKey="operators_free" snapshot={snapshot} scale={scale} />
+                    <StatTile metricKey="operators_talking" snapshot={snapshot} scale={scale} />
+                    <StatTile metricKey="avg_talk_seconds" snapshot={snapshot} scale={scale} />
+                    <StatTile metricKey="operators_on_recall" snapshot={snapshot} scale={scale} />
                 </Grid>
                 {asideParts.length > 0 ? (
                     <div className="mt-3 px-1 text-[14px] text-slate-400">
@@ -624,95 +523,17 @@ const WallboardBody = ({ snapshot, scale }) => {
 };
 
 export default function SzovWallboardView(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast } = props;
+    const { apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast, widgetOpen, onToggleWidget } = props;
 
-    const [snapshot, setSnapshot] = useState(null);
-    const [error, setError] = useState(null);
-    const [loading, setLoading] = useState(true);
+    // Снимок и опрос общие с виджетом: один запрос к Oktell на оба экрана, одни цифры в обоих.
+    const { snapshot, error, loading, refresh } = useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
     const [broadcastOpen, setBroadcastOpen] = useState(false);
 
-    const inFlightRef = useRef(false);
-    const abortRef = useRef(null);
-    const headersRef = useRef(withAccessTokenHeader);
-    headersRef.current = withAccessTokenHeader;
-
-    const load = useCallback(async ({ silent = false } = {}) => {
-        // Защита от наложения запросов: табло опрашивается по таймеру и по фокусу окна.
-        if (inFlightRef.current) return;
-        inFlightRef.current = true;
-        abortRef.current?.abort?.();
-        const controller = new AbortController();
-        abortRef.current = controller;
-        if (!silent) setLoading(true);
-        try {
-            const buildHeaders = headersRef.current;
-            const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/snapshot`, {
-                headers: buildHeaders ? buildHeaders({ Accept: 'application/json' }) : { Accept: 'application/json' },
-                credentials: 'include',
-                signal: controller.signal,
-            });
-            if (!response.ok) {
-                let detail = '';
-                try {
-                    const body = await response.json();
-                    detail = body?.error || body?.detail || '';
-                } catch (parseError) {
-                    detail = '';
-                }
-                throw new Error(detail || `Сервер ответил ${response.status}`);
-            }
-            const data = await response.json();
-            setSnapshot(data);
-            setError(null);
-        } catch (requestError) {
-            if (requestError?.name === 'AbortError') return;
-            // Пока есть последний снимок — экран на стене не гасим, просто помечаем расхождение.
-            setError(requestError?.message || 'Не удалось получить данные');
-        } finally {
-            inFlightRef.current = false;
-            setLoading(false);
-        }
-    }, [apiBaseUrl]);
-
-    const loadRef = useRef(load);
-    loadRef.current = load;
-
-    useEffect(() => {
-        let cancelled = false;
-        const isActive = () => {
-            const visible = typeof document.visibilityState === 'string'
-                ? document.visibilityState === 'visible'
-                : !document.hidden;
-            return visible;
-        };
-        loadRef.current?.({ silent: false });
-        const timer = window.setInterval(() => {
-            // Скрытую вкладку не опрашиваем: незачем дёргать прокси Oktell впустую.
-            if (!cancelled && isActive()) loadRef.current?.({ silent: true });
-        }, POLL_INTERVAL_MS);
-        const onWake = () => {
-            if (!cancelled && isActive()) loadRef.current?.({ silent: true });
-        };
-        document.addEventListener('visibilitychange', onWake);
-        window.addEventListener('focus', onWake);
-        return () => {
-            cancelled = true;
-            window.clearInterval(timer);
-            document.removeEventListener('visibilitychange', onWake);
-            window.removeEventListener('focus', onWake);
-            abortRef.current?.abort?.();
-        };
-    }, []);
-
-    const staleNotice = useMemo(() => {
-        if (error) return error;
-        if (snapshot?.stale) {
-            const age = Number(snapshot.age_seconds);
-            return `Oktell не отвечает, данные ${Number.isFinite(age) ? `${formatDuration(age)} назад` : 'устарели'}`;
-        }
-        return null;
-    }, [error, snapshot]);
+    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error), [error, snapshot]);
+    // Виджет существует только как окно поверх других окон. Умеет ли так браузер — выясняем
+    // здесь, чтобы кнопка не обещала того, чего не будет.
+    const widgetSupported = useMemo(() => canOpenWallboardWidget(), []);
 
     const header = (
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -729,7 +550,7 @@ export default function SzovWallboardView(props) {
                         {staleNotice}
                     </span>
                 ) : null}
-                <button type="button" className={iosBtnGhost} onClick={() => load({ silent: true })} disabled={loading}>
+                <button type="button" className={iosBtnGhost} onClick={() => refresh()} disabled={loading}>
                     <FaIcon className="fas fa-rotate"></FaIcon>
                     Обновить
                 </button>
@@ -737,6 +558,23 @@ export default function SzovWallboardView(props) {
                     <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
                         <FaIcon className="fas fa-paper-plane"></FaIcon>
                         Отбивка
+                    </button>
+                ) : null}
+                {/* Виджет — отдельное окно поверх других окон, и оно остаётся открытым после ухода
+                    из раздела: он для того и нужен, чтобы следить за линией, занимаясь другим.
+                    Набор показателей выбирается в самом окне. */}
+                {onToggleWidget ? (
+                    <button
+                        type="button"
+                        className={`${iosBtnGhost} disabled:opacity-40 ${widgetOpen ? 'bg-slate-100 text-slate-900' : ''}`}
+                        disabled={!widgetSupported}
+                        title={widgetSupported
+                            ? 'Окно поверх других программ: выберите в нём, что мониторить'
+                            : 'Окно поверх других программ умеют Chrome и Edge — в этом браузере недоступно'}
+                        onClick={() => onToggleWidget(!widgetOpen)}
+                    >
+                        <FaIcon className="fas fa-picture-in-picture"></FaIcon>
+                        {widgetOpen ? 'Виджет открыт' : 'Виджет'}
                     </button>
                 ) : null}
                 <button type="button" className={iosBtnGhost} onClick={() => setFullscreen(true)}>

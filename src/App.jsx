@@ -22,6 +22,11 @@ import TechnicalIssuesView from './components/technical/TechnicalIssuesView';
 import RecruitingView from './components/recruiting/RecruitingView';
 import LmsView from './components/lms/LmsView';
 import MonitoringScaleView from './components/monitoring/MonitoringScaleView';
+// Виджет табло переживает уход из раздела — иначе он бесполезен: смысл окна поверх других
+// программ в том, чтобы линия была видна, пока работаешь в другом месте. Поэтому обычным
+// импортом: отдельным чанком он грузился бы уже после нажатия, а разрешение на окно
+// «поверх всех» браузер даёт только по свежему жесту пользователя.
+import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';
 import FaIcon from './components/common/FaIcon';
 import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
@@ -34933,6 +34938,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessGroupLateBotSection = canAccessGroupLateBotForUser(user);
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
+            // Виджет табло живёт здесь, а не в разделе: закрывается только своим крестиком.
+            const [szovWallboardWidgetOpen, setSzovWallboardWidgetOpen] = useState(false);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
             const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
@@ -45097,6 +45104,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
+                                    widgetOpen={szovWallboardWidgetOpen}
+                                    onToggleWidget={setSzovWallboardWidgetOpen}
                                 />
                             </Suspense>
                         )}
@@ -51123,6 +51132,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </>
                         )}
                     </div>
+
+                    {canAccessSzovWallboardSection && szovWallboardWidgetOpen && (
+                        <SzovWallboardWidget
+                            user={user}
+                            apiBaseUrl={API_BASE_URL}
+                            withAccessTokenHeader={withAccessTokenHeader}
+                            showToast={showToast}
+                            onClose={() => setSzovWallboardWidgetOpen(false)}
+                        />
+                    )}
 
                     {canUsePinnedTasks && pinnedTask && (
                         <PinnedTaskWidget
