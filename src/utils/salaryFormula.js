@@ -474,3 +474,159 @@ export function calculateTezOpMonthlyPlan({
         ],
     };
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// МОДЕЛЬ ОП «ОСНОВА» (op_osnova).
+// Перенесена 1:1 из файла владельца «Основа_калькулятор зарплаты.xlsx»
+// (лист «Основа») и сверена с презентацией «Мотивационная схема ЗП Основа»:
+//   Оклад      = отработанные часы × 600 ₸/ч                        (I24 = G24×H24)
+//   План сделок= план_1FTE ÷ норма_1FTE × отработанные часы          (D5)
+//                новичку ×0,8                                       (D6)
+//   % плана    = сделки ÷ план                                      (E5)
+//   Цена сделки= ступень по % плана                                 (J24)
+//   Бонус      = сделки × цена сделки                               (K24)
+//   Удержано   = бонус × коэффициент по качеству звонков            (L24 = K24×C24)
+//   Итого      = оклад + бонус − удержано − штрафы + премии         (N24 + столбец M)
+// ВАЖНО: в N24 исходной таблицы штрафы (столбец M) не вычитались, хотя столбец
+// заполняется вручную и ограничен валидацией. Здесь они вычитаются — как во
+// всех остальных моделях; поле видно в расчёте отдельной строкой.
+// ──────────────────────────────────────────────────────────────────────────
+export const OSNOVA_HOURLY_RATE = 600;             // G12 «Оплата в час»
+export const OSNOVA_NORM_HOURS_FTE = 176;          // I5 «Норма часов» на 1 FTE
+export const OSNOVA_NEWBIE_COEF = 0.8;             // D6 — план новичка ×0,8
+export const OSNOVA_NIGHT_PLAN_COEF = 0.5;         // H6 = H5 ÷ 2 «План на 1FTE Ночь»
+export const OSNOVA_BEST_OPERATOR_PREMIUM = 50000; // I12 — премия лучшему по продажам в час (1 FTE)
+
+// Норма часов на 1 FTE для месяца: раб. дни × 8, где раб. дни = округл(дни ÷ 7 × 5).
+// Тот же счёт, что у плана ОП TEZ (31 д → 22 → 176 ч; 30 д → 21 → 168 ч) — ровно
+// как в презентации владельца.
+export function osnovaNormHoursForMonth(month = '') {
+    const [yStr, mStr] = String(month || '').split('-');
+    const year = parseInt(yStr, 10);
+    const monthNum = parseInt(mStr, 10);
+    if (!Number.isFinite(year) || !(monthNum >= 1 && monthNum <= 12)) return OSNOVA_NORM_HOURS_FTE;
+    return tezWorkdaysInMonth(year, monthNum) * 8;
+}
+
+// Коэффициент удержания с бонуса по качеству звонков (A13:B18, формула C24).
+// Качество приходит числом 0..100. Границы взяты из формулы, а не из подписей:
+// 74 ≤ q < 80 → 0,4 … q ≥ 96 → 0. Пустое поле = 0 → максимальное удержание,
+// как в таблице владельца.
+export function osnovaQualityWithholdRate(quality) {
+    const q = parseFloat(quality) || 0;
+    if (q < 74) return 0.5;
+    if (q < 80) return 0.4;
+    if (q < 86) return 0.3;
+    if (q < 91) return 0.2;
+    if (q < 96) return 0.1;
+    return 0;
+}
+
+// Цена одной успешной сделки от % выполнения плана (C13:D20, формула J24).
+// planRatio — доля (1 = 100%). Выше 140% цена не растёт: в таблице 160% и 180%
+// тоже дают 600 ₸.
+export function osnovaDealPrice(planRatio) {
+    const r = parseFloat(planRatio) || 0;
+    if (r < 0.5) return 100;
+    if (r < 0.8) return 200;
+    if (r < 1.0) return 400;
+    if (r < 1.2) return 450;
+    if (r < 1.4) return 500;
+    return 600;
+}
+
+/**
+ * Индивидуальный план сделок за месяц, модель ОП «Основа».
+ * План растёт от ФАКТИЧЕСКИ отработанных часов (D5 = $H$5/$I$5*C5), поэтому
+ * ставка сотрудника отдельно не участвует — она уже в часах.
+ * @param planPerFte   план сделок на 1 FTE за месяц (дневная смена)
+ * @param normHoursFte норма часов на 1 FTE (176 / 168 — зависит от месяца)
+ * @param hoursWorked  фактически отработанные часы
+ * @param newbie       новичок — план ×0,8
+ * @param nightShift   ночная смена — план на 1 FTE вдвое меньше (H6)
+ */
+export function calculateOsnovaMonthlyPlan({
+    planPerFte = 0,
+    normHoursFte = OSNOVA_NORM_HOURS_FTE,
+    hoursWorked = 0,
+    newbie = false,
+    nightShift = false,
+} = {}) {
+    const planFteDay = Math.max(0, parseFloat(planPerFte) || 0);
+    const normFte = parseFloat(normHoursFte) || OSNOVA_NORM_HOURS_FTE;
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const planFte = nightShift ? planFteDay * OSNOVA_NIGHT_PLAN_COEF : planFteDay;
+    const newbieCoef = newbie ? OSNOVA_NEWBIE_COEF : 1;
+    const plan = normFte > 0 ? (planFte / normFte) * hours * newbieCoef : 0;
+    return {
+        plan,
+        planPerFte: planFte,
+        planPerFteDay: planFteDay,
+        normHoursFte: normFte,
+        hoursWorked: hours,
+        isNewbie: Boolean(newbie),
+        nightShift: Boolean(nightShift),
+        newbieCoef,
+    };
+}
+
+/**
+ * Зарплата оператора ОП «Основа» за месяц.
+ * planTarget — уже посчитанный индивидуальный план (calculateOsnovaMonthlyPlan);
+ * если не передан, считается из planPerFte/normHoursFte/часов прямо здесь.
+ */
+export function calculateOsnovaSalary({
+    hoursWorked = 0,
+    hoursNorm = 0,
+    deals = 0,
+    planTarget = null,
+    planPerFte = 0,
+    normHoursFte = OSNOVA_NORM_HOURS_FTE,
+    newbie = false,
+    nightShift = false,
+    quality = 0,
+    fines = 0,
+    bonuses = 0,
+} = {}) {
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const norm = Math.max(0, parseFloat(hoursNorm) || 0);
+    const dealsV = Math.max(0, parseFloat(deals) || 0);
+    const planInfo = calculateOsnovaMonthlyPlan({ planPerFte, normHoursFte, hoursWorked: hours, newbie, nightShift });
+    const parsedTarget = planTarget === null || planTarget === '' ? null : parseFloat(planTarget);
+    const target = Number.isFinite(parsedTarget) ? Math.max(0, parsedTarget) : planInfo.plan;
+
+    const oklad = hours * OSNOVA_HOURLY_RATE;
+    const planPercent = target > 0 ? dealsV / target : 0;
+    const dealPrice = osnovaDealPrice(planPercent);
+    const bonusDeals = dealsV * dealPrice;
+    const qualityWithholdRate = osnovaQualityWithholdRate(quality);
+    const qualityWithheld = bonusDeals * qualityWithholdRate;
+    const finesV = parseFloat(fines) || 0;
+    const bonusesV = parseFloat(bonuses) || 0;
+    const finalSalary = oklad + bonusDeals - qualityWithheld - finesV + bonusesV;
+
+    return {
+        model: 'op_osnova',
+        hourlyRate: OSNOVA_HOURLY_RATE,
+        oklad,
+        deals: dealsV,
+        planTarget: target,
+        planPercent,                       // доля: 1 = 100%
+        planPerFte: planInfo.planPerFte,
+        planPerFteDay: planInfo.planPerFteDay,
+        normHoursFte: planInfo.normHoursFte,
+        isNewbie: planInfo.isNewbie,
+        nightShift: planInfo.nightShift,
+        dealPrice,
+        bonusDeals,
+        quality: parseFloat(quality) || 0,
+        qualityWithholdRate,
+        qualityWithheld,
+        fines: finesV,
+        bonuses: bonusesV,
+        hoursWorked: hours,
+        hoursNorm: norm,
+        hoursPercentage: norm > 0 ? (hours / norm) * 100 : 0,
+        finalSalary,
+    };
+}

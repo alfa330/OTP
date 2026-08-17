@@ -123,6 +123,58 @@ class OpSalesOperatorHoursAccessTests(unittest.TestCase):
         self.assertIn("trainee: SALES_OPERATOR_VIEWS,", block)
 
 
+class OpOsnovaSalaryCalculatorWiringTests(unittest.TestCase):
+    """Калькулятор ОП «Основа»: формулы в salaryFormula.js проверяет
+    tests/salary_osnova.test.mjs, здесь — что раздел до него вообще доходит."""
+
+    def setUp(self):
+        self.app = _read(APP_PATH)
+        self.calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorOsnova.jsx")
+        self.result_card = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculationResult.jsx")
+
+    def test_sales_department_has_a_calculator(self):
+        # Без 'op' в списке весь раздел подменяется заглушкой SalaryComingSoon.
+        start = self.app.index("const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(")
+        block = self.app[start:self.app.index(")", start)]
+        self.assertIn("'op'", block)
+
+    def test_only_osnova_model_gets_the_calculator(self):
+        # Оператору ОП другого направления формула «Основы» не подходит —
+        # ему остаётся заглушка, а СВ и главе калькулятор доступен.
+        self.assertIn("const OP_SALARY_CALCULATOR_MODEL = 'op_osnova';", self.app)
+        self.assertIn("const showOsnovaCalculator = isOpSalaryDept", self.app)
+        self.assertIn("ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL", self.app)
+        self.assertIn("isOpSalaryDept && !showOsnovaCalculator", self.app)
+
+    def test_hours_button_opens_osnova_before_generic_branches(self):
+        # Ветка op_osnova обязана стоять раньше isTezModel и общей: иначе оператор
+        # «Основы» молча уезжает в калькулятор СЗоВ.
+        handler = self.app[self.app.index("const openSalaryCalculatorWithHours = () => {"):]
+        handler = handler[:handler.index("const estimatedSalaryHint")] if "const estimatedSalaryHint" in handler else handler[:8000]
+        osnova_at = handler.index("if (isOsnovaModel) {")
+        self.assertLess(osnova_at, handler.index("if (isTezModel) {"))
+        self.assertLess(osnova_at, handler.index("if (isChatModel) {"))
+        self.assertIn("setOsnovaCalculatorPrefillNonce", handler)
+
+    def test_result_card_dispatches_osnova_model(self):
+        self.assertIn("salaryResult.model === 'op_osnova'", self.result_card)
+        self.assertIn("OsnovaCalculationResult", self.result_card)
+
+    def test_calculator_is_lazy_and_month_aware(self):
+        self.assertIn("import('./components/salary/SalaryCalculatorOsnova')", self.app)
+        # Норма на 1 FTE зависит от месяца (176/168/160) — месяц обязан доезжать.
+        self.assertIn("month={selectedMonth}", self.app)
+        self.assertIn("osnovaNormHoursForMonth(month)", self.calculator)
+
+    def test_calculator_inputs_cover_every_formula_argument(self):
+        for state in (
+            "setHoursWorked", "setHoursNorm", "setDeals", "setPlanPerFte",
+            "setNormHoursFte", "setNightShift", "setIsNewbie", "setQuality",
+            "setFines", "setBonuses",
+        ):
+            self.assertIn(state, self.calculator)
+
+
 class OpSalesDirectionsEditorTests(unittest.TestCase):
     """Редактор направлений (шкала мониторинга) знает коды моделей ОП —
     иначе normalizeCalculationModelCode сбрасывал бы их в operator при сохранении."""

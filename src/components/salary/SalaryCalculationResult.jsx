@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { TEZ_NORM_HOURS, TEZ_LINE_OKLAD, TEZ_OP_OKLAD } from '../../utils/salaryFormula';
+import { TEZ_NORM_HOURS, TEZ_LINE_OKLAD, TEZ_OP_OKLAD, OSNOVA_HOURLY_RATE } from '../../utils/salaryFormula';
 
 const num = (v) => {
     const n = Number(v);
@@ -346,6 +346,171 @@ const TezCalculationResult = ({ salaryResult, label }) => {
     );
 };
 
+/**
+ * Карточка результата для модели ОП «Основа»: постоянная часть за часы плюс
+ * переменная за сделки, из которой удерживают процент по качеству звонков.
+ * Формулы — calculateOsnovaSalary (таблица владельца «Основа_калькулятор зарплаты»).
+ */
+const OsnovaCalculationResult = ({ salaryResult, label }) => {
+    const hoursWorked = num(salaryResult.hoursWorked);
+    const hoursNorm = num(salaryResult.hoursNorm);
+    const hoursPercentage = num(salaryResult.hoursPercentage);
+    const oklad = num(salaryResult.oklad);
+    const deals = num(salaryResult.deals);
+    const planTarget = num(salaryResult.planTarget);
+    const planPercent = num(salaryResult.planPercent) * 100;
+    const dealPrice = num(salaryResult.dealPrice);
+    const bonusDeals = num(salaryResult.bonusDeals);
+    const quality = num(salaryResult.quality);
+    const withholdRate = num(salaryResult.qualityWithholdRate) * 100;
+    const qualityWithheld = num(salaryResult.qualityWithheld);
+    const fines = num(salaryResult.fines);
+    const bonuses = num(salaryResult.bonuses);
+    const finalSalary = num(salaryResult.finalSalary);
+    const hourlyRate = num(salaryResult.hourlyRate) || OSNOVA_HOURLY_RATE;
+
+    return (
+        <CardShell subtitle="Сводка по часам, сделкам и качеству звонков" finalSalary={finalSalary}>
+            {/* Сводка */}
+            <div className="bg-white p-4 rounded border border-gray-100">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <SummaryTile title="Направление" value={label || 'Оператор ОП Основа'} />
+                    <SummaryTile
+                        title="План сделок"
+                        value={planTarget > 0 ? simple(Math.round(planTarget * 10) / 10) : '—'}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Индивидуальный план</div>
+                                <div className="text-xs text-gray-600">
+                                    План на 1 FTE ÷ норму 1 FTE × отработанные часы.
+                                    {salaryResult.nightShift ? ' Ночная смена — план вдвое меньше.' : ''}
+                                    {salaryResult.isNewbie ? ' Новичок — ×0,8.' : ''}
+                                </div>
+                            </>
+                        )}
+                    />
+                    <SummaryTile title="Факт сделок" value={simple(deals)} />
+                    <SummaryTile
+                        title="Цена сделки"
+                        value={shortMoney(dealPrice)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Ступени по % плана</div>
+                                <div className="text-xs text-gray-600">
+                                    &lt;50% → 100 ₸, 50–80% → 200 ₸, 80–100% → 400 ₸, 100–120% → 450 ₸,
+                                    120–140% → 500 ₸, от 140% → 600 ₸
+                                </div>
+                            </>
+                        )}
+                    />
+                </div>
+            </div>
+
+            {/* Компоненты выплаты */}
+            <div className="bg-white p-4 rounded border border-gray-100">
+                <h4 className="text-sm font-semibold text-gray-700 mb-3">Компоненты выплаты</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <ComponentTile
+                        title="Постоянная часть (часы)"
+                        value={money(oklad)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Формула</div>
+                                <div className="text-xs text-gray-600 mb-2">
+                                    Постоянная часть = отработанные часы × {hourlyRate} ₸/ч
+                                </div>
+                                <div className="text-sm font-semibold">
+                                    Подстановка: {fmtNum(hoursWorked)} × {hourlyRate} = <b>{fmtNum(oklad)}</b>
+                                </div>
+                            </>
+                        )}
+                    />
+                    <ComponentTile
+                        title="Бонус за сделки"
+                        value={money(bonusDeals)}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Формула</div>
+                                <div className="text-xs text-gray-600 mb-2">Бонус = сделки × цена сделки по % плана</div>
+                                <div className="text-sm">
+                                    <div>Факт сделок: <b>{simple(deals)}</b></div>
+                                    <div>План сделок: <b>{planTarget > 0 ? simple(Math.round(planTarget * 10) / 10) : '—'}</b></div>
+                                    <div>% плана: <b>{pct(planPercent)}</b></div>
+                                    <div className="mt-2 font-semibold">
+                                        Подстановка: {simple(deals)} × {fmtNum(dealPrice)} = <b>{fmtNum(bonusDeals)}</b>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    />
+                    <ComponentTile
+                        title="Удержано за качество"
+                        value={`− ${money(qualityWithheld)}`}
+                        tooltip={(
+                            <>
+                                <div className="font-medium mb-1">Удержание с бонуса</div>
+                                <div className="text-xs text-gray-600 mb-2">
+                                    96–100% → 0%, 91–95% → 10%, 86–90% → 20%, 80–85% → 30%, 74–79% → 40%, ниже 74% → 50%
+                                </div>
+                                <div className="text-sm">
+                                    <div>Качество звонков: <b>{pct(quality)}</b></div>
+                                    <div className="mt-2 font-semibold">
+                                        Подстановка: {fmtNum(bonusDeals)} × {(num(salaryResult.qualityWithholdRate)).toFixed(2)} = <b>{fmtNum(qualityWithheld)}</b>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    />
+                    <ComponentTile title="Премии" value={shortMoney(bonuses)} />
+                </div>
+            </div>
+
+            <TotalBlock
+                finalSalary={finalSalary}
+                hoursNorm={hoursNorm}
+                hoursPercentage={hoursPercentage}
+                extra={(
+                    <div className="mt-1">% плана: <span className="font-medium text-gray-800 sm:ml-1">{pct(planPercent)}</span></div>
+                )}
+            />
+
+            {/* Детали расчёта */}
+            <div className="bg-white p-4 rounded border border-gray-100">
+                <h4 className="text-sm font-semibold text-gray-700 mb-3">Детали расчёта</h4>
+
+                <DetailGroup title="Часы & план">
+                    <DetailRow label="Норма часов" value={hoursNorm.toFixed(2)} />
+                    <DetailRow alt label="Отработанные часы" value={hoursWorked.toFixed(2)} />
+                    <DetailRow label="Выполнение нормы" value={pct(hoursPercentage)} />
+                    <DetailRow
+                        alt
+                        label={`План на 1 FTE${salaryResult.nightShift ? ' (ночь)' : ''}`}
+                        value={num(salaryResult.planPerFte) > 0 ? simple(Math.round(num(salaryResult.planPerFte) * 10) / 10) : '—'}
+                    />
+                    <DetailRow label="Норма часов на 1 FTE" value={simple(num(salaryResult.normHoursFte))} />
+                    <DetailRow alt label={`План сделок${salaryResult.isNewbie ? ' (новичок ×0,8)' : ''}`} value={planTarget > 0 ? simple(Math.round(planTarget * 10) / 10) : '—'} />
+                    <DetailRow label="Факт сделок" value={simple(deals)} />
+                    <DetailRow alt label="% плана" value={pct(planPercent)} />
+                </DetailGroup>
+
+                <DetailGroup title="Качество звонков">
+                    <DetailRow label="Качество" value={pct(quality)} />
+                    <DetailRow alt label="Удержание с бонуса" value={pct(withholdRate)} />
+                </DetailGroup>
+
+                <DetailGroup title="Компоненты выплаты">
+                    <DetailRow label="Постоянная часть (часы)" value={money(oklad)} />
+                    <DetailRow alt label={`Бонус за сделки (${fmtNum(dealPrice)} × ${simple(deals)})`} value={money(bonusDeals)} />
+                    <DetailRow label="Удержано за качество" value={`− ${money(qualityWithheld)}`} />
+                    <DetailRow alt label="Штрафы" value={`− ${money(fines)}`} />
+                    <DetailRow label="Премии" value={`+ ${money(bonuses)}`} />
+                    <DetailRow strong label="Итого к выплате" value={money(finalSalary)} />
+                </DetailGroup>
+            </div>
+        </CardShell>
+    );
+};
+
 const SalaryCalculationResult = ({ salaryResult, label }) => {
         if (!salaryResult) return null;
 
@@ -353,6 +518,11 @@ const SalaryCalculationResult = ({ salaryResult, label }) => {
         // раскладка внутри той же карточки, что и у СЗоВ.
         if (salaryResult.model === 'tez_op' || salaryResult.model === 'tez_line') {
             return <TezCalculationResult salaryResult={salaryResult} label={label} />;
+        }
+
+        // ОП «Основа»: часы × 600 + сделки × цена сделки − удержание по качеству.
+        if (salaryResult.model === 'op_osnova') {
+            return <OsnovaCalculationResult salaryResult={salaryResult} label={label} />;
         }
 
         // --- Входные данные (с устойчивыми нэйминг-фоллбэками) ---

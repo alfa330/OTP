@@ -204,11 +204,19 @@ class MyHoursOpMetricsTests(unittest.TestCase):
             "const estimatedSalary = estimatedTezSalary",
             self.src,
         )
-        self.assertIn(
-            "import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, "
-            "calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary }",
-            self.src,
-        )
+        # Импорт проверяем посимвольно, а не одним литералом: список моделей
+        # растёт (добавилась ОП «Основа»), и жёсткая строка ломалась бы на каждой.
+        import_line = self.src[self.src.index("import { calculateOperatorSalary"):]
+        import_line = import_line[:import_line.index("from './utils/salaryFormula'")]
+        for symbol in (
+            "calculateOperatorSalary",
+            "calculateChatSalary",
+            "resolveMonthlySalaryQuality",
+            "calculateTezOpMonthlyPlan",
+            "calculateTezOpSalary",
+            "calculateTezLineSalary",
+        ):
+            self.assertIn(symbol, import_line)
 
     def test_calculator_opens_on_own_tez_model_with_prefill(self):
         self.assertIn("setTezCalculatorPrefill({", self.src)

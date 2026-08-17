@@ -1237,8 +1237,9 @@ class BoardPaginationTests(unittest.TestCase):
         # Цифры «Обзора» приходят серверной сводкой, а не считаются по списку.
         self.assertIn("total:      Number(tasksSummary?.total || 0),", src)
         self.assertIn("setTasksSummary(data?.summary || null);", src)
-        # Диплинк на задачу вне выборки догружается точечно.
-        self.assertIn("params: { task_id: taskId, limit: 1 }", src)
+        # Диплинк на задачу вне выборки догружается точечно — одной строкой и без
+        # сводки (summary=0), иначе запрос за одной задачей тянет агрегаты по базе.
+        self.assertIn("params: { task_id: plan.taskId, limit: 1, summary: 0 }", src)
 
     def test_importance_sort_is_applied_across_the_whole_board(self):
         db_src = _read(DATABASE_PATH)

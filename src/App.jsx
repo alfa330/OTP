@@ -37,7 +37,7 @@ import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
-import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary } from './utils/salaryFormula';
+import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
 
@@ -130,6 +130,7 @@ const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditMo
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
+const SalaryCalculatorOsnova = lazyWithRetry(() => import('./components/salary/SalaryCalculatorOsnova'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
@@ -181,8 +182,11 @@ const DEFAULT_USERS_REPORT_OPTIONS = {
     departmentId: ''
 };
 const SALARY_CALCULATOR_TYPES = new Set(['call', 'chat', 'converter', 'tez_line', 'tez_op']);
-const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez']);
+const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(['szov', 'tez', 'op']);
 const TEZ_SALARY_CALCULATOR_TYPES = new Set(['tez_line', 'tez_op']);
+// Отдел продаж: посчитать зарплату умеем пока только по направлению «Основа».
+// Оператору ОП другой модели по-прежнему показываем заглушку «скоро».
+const OP_SALARY_CALCULATOR_MODEL = 'op_osnova';
 // Разделы «чистого» тренера (тренер-глава отдела ходит по правилам главы).
 // Список один на оба гарда — восстановление вида из URL и редирект при смене
 // вида: пока это были два литерала, раздел, добавленный в один, молча
@@ -35082,6 +35086,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Предзаполнение калькулятора TEZ из «Моих часов» (часы, норма, план и факт успешек).
             const [tezCalculatorPrefill, setTezCalculatorPrefill] = useState(null);
             const [tezCalculatorPrefillNonce, setTezCalculatorPrefillNonce] = useState(0);
+            // Предзаполнение калькулятора ОП «Основа» из «Моих часов» (часы, норма, качество, штрафы).
+            const [osnovaCalculatorPrefill, setOsnovaCalculatorPrefill] = useState(null);
+            const [osnovaCalculatorPrefillNonce, setOsnovaCalculatorPrefillNonce] = useState(0);
             const [showPointsTable, setShowPointsTable] = useState(false);
             const [passwordData, setPasswordData] = useState({
                 user_id: '',
@@ -35150,6 +35157,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const own = list.find((o) => Number(o?.operator_id) === Number(user?.id)) || list[0] || null;
                 return resolveWorkHoursMonthModelInfo(own).modelCode;
             }, [hoursData, user?.id]);
+            // Отдел продаж считает по своей модели «Основа» (часы × 600 + бонус за
+            // сделки). Оператору/стажёру ОП другого направления формула не подходит —
+            // ему остаётся заглушка; СВ и главе калькулятор нужен для ручного расчёта.
+            const isOpSalaryDept = normalizeDepartmentCode(salaryDepartment.code) === 'op';
+            const isOwnSalaryOperator = currentUserRole === 'operator' || currentUserRole === 'trainee';
+            const showOsnovaCalculator = isOpSalaryDept
+                && (!isOwnSalaryOperator || ownCalculationModelCode === OP_SALARY_CALCULATOR_MODEL);
             useEffect(() => {
                 if (!isTezSalaryDept || tezCalculatorTypePickedRef.current) return;
                 const own = TEZ_SALARY_CALCULATOR_TYPES.has(ownCalculationModelCode)
@@ -48202,6 +48216,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             // Модели TEZ: у ОП выплата считается по успешкам, у Линии — по качеству и стажу.
                                             const isTezOpModel = !hasMixedCalculationModels && calculationModelCode === 'tez_op';
                                             const isTezLineModel = !hasMixedCalculationModels && calculationModelCode === 'tez_line';
+                                            // ОП «Основа»: часы × 600 + бонус за сделки минус удержание по качеству.
+                                            const isOsnovaModel = !hasMixedCalculationModels && calculationModelCode === 'op_osnova';
                                             const interactionLabel = isChatModel ? 'Чаты' : 'Звонки';
                                             const interactionPerHourLabel = isChatModel ? 'Чаты в час' : 'Звонки в час';
                                             const interactionIcon = isChatModel ? 'fas fa-comments' : 'fas fa-phone';
@@ -48433,7 +48449,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     })
                                                     : null);
                                             const isTezModel = isTezOpModel || isTezLineModel;
+                                            // ОП «Основа»: в часах есть только постоянная часть, штрафы и качество —
+                                            // сделки и план оператор вносит в калькуляторе сам (источника в системе нет),
+                                            // поэтому превью показывает часть выплаты и честно говорит, чего не хватает.
+                                            const estimatedOsnovaSalary = isOsnovaModel
+                                                ? calculateOsnovaSalary({
+                                                    hoursWorked: regular,
+                                                    hoursNorm: norm,
+                                                    deals: 0,
+                                                    planTarget: 0,
+                                                    quality: salaryQuality,
+                                                    fines,
+                                                    bonuses,
+                                                })
+                                                : null;
                                             const estimatedSalary = estimatedTezSalary
+                                                || estimatedOsnovaSalary
                                                 || (isChatModel ? estimatedChatSalary : estimatedOperatorSalary);
                                             const formatEstimatedSalaryMoney = (value) => {
                                                 const n = Number(value);
@@ -48450,6 +48481,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 ].filter(Boolean)
                                                 : isTezLineModel
                                                 ? [
+                                                    !hasSalaryQuality ? 'качество' : null,
+                                                    safeNum(norm) <= 0 ? 'норма' : null,
+                                                ].filter(Boolean)
+                                                : isOsnovaModel
+                                                ? [
+                                                    // Сделки и план в системе не хранятся — их вносят в калькуляторе,
+                                                    // поэтому в часах видна только постоянная часть.
+                                                    'план и сделки',
                                                     !hasSalaryQuality ? 'качество' : null,
                                                     safeNum(norm) <= 0 ? 'норма' : null,
                                                 ].filter(Boolean)
@@ -48555,6 +48594,23 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     setSalaryDualResult(dualSalaryResults);
                                                     setShowPointsTable(false);
                                                     setCalculatorType('call');
+                                                    navigateToView('salary');
+                                                    return;
+                                                }
+                                                if (isOsnovaModel) {
+                                                    // Калькулятор ОП «Основа»: часы, норма, качество и штрафы месяца.
+                                                    // План на 1 FTE и количество сделок оператор вносит сам — в системе
+                                                    // их пока негде взять (в таблице владельца это тоже ручные поля).
+                                                    setOsnovaCalculatorPrefill({
+                                                        hoursNorm: safeNum(norm).toFixed(2),
+                                                        hoursWorked: safeNum(regular).toFixed(2),
+                                                        quality: hasSalaryQuality ? salaryQuality.toFixed(2) : '',
+                                                        fines: safeNum(fines) > 0 ? safeNum(fines).toFixed(2) : '',
+                                                        bonuses: safeNum(bonuses) > 0 ? safeNum(bonuses).toFixed(2) : '',
+                                                    });
+                                                    setOsnovaCalculatorPrefillNonce((n) => n + 1);
+                                                    setSalaryDualResult(null);
+                                                    setShowPointsTable(false);
                                                     navigateToView('salary');
                                                     return;
                                                 }
@@ -48803,6 +48859,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ? `По модели «Оператор ОП TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
                                                                     : isTezLineModel
                                                                     ? `По модели «Оператор Линия TEZ»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                                    : isOsnovaModel
+                                                                    ? `По модели «Оператор ОП Основа»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
                                                                     : isChatModel
                                                                     ? 'Для чат-модели используется отдельный калькулятор.'
                                                                     : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`}
@@ -48814,6 +48872,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ? 'Оклад + бонус за успешки, минус штрафы. Удержание 50% не учтено.'
                                                                     : isTezLineModel
                                                                     ? 'Оклад + бонус за качество и стаж, минус штрафы. Удержание 50% не учтено.'
+                                                                    : isOsnovaModel
+                                                                    ? 'Только постоянная часть: часы × 600 ₸, минус штрафы. Бонус за сделки — в калькуляторе.'
                                                                     : isChatModel
                                                                     ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
                                                                     : 'Штрафы в формуле калькулятора не вычитаются.'}
@@ -48836,6 +48896,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ? 'Открыть калькулятор ОП TEZ'
                                                                     : isTezLineModel
                                                                     ? 'Открыть калькулятор Линия TEZ'
+                                                                    : isOsnovaModel
+                                                                    ? 'Открыть калькулятор «Основа»'
                                                                     : isChatModel
                                                                     ? 'Открыть чат-калькулятор'
                                                                     : 'Открыть в калькуляторе'}
@@ -49968,8 +50030,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <FaIcon className="fas fa-calculator text-blue-600"></FaIcon>
                                                     <span className="text-blue-600">Калькулятор зарплаты</span>
                                                 </h2>
-                                                {!hasSalaryCalculatorForDepartment ? (
+                                                {!hasSalaryCalculatorForDepartment || (isOpSalaryDept && !showOsnovaCalculator) ? (
                                                     <SalaryComingSoon departmentName={salaryDepartment.name} />
+                                                ) : isOpSalaryDept ? (
+                                                    <Suspense fallback={null}>
+                                                        <SalaryCalculatorOsnova
+                                                            prefill={osnovaCalculatorPrefill}
+                                                            prefillNonce={osnovaCalculatorPrefillNonce}
+                                                            month={selectedMonth}
+                                                        />
+                                                    </Suspense>
                                                 ) : (
                                                     <>
                                                 {salaryDualResult && salaryDualResult.length >= 2 && (
