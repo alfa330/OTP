@@ -20040,8 +20040,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const detailsByIndex = new Map();
                 let overlapsWithDirection = 0;
                 let overlapsInsideShift = 0;
+                let crowdViolationsWithDirection = 0;
                 let gapViolationsWithDirection = 0;
                 const overlapIndexes = new Set();
+                const crowdIndexes = new Set();
                 const gapIndexes = new Set();
                 const formatMinuteForConflict = (minuteValue) => {
                     const val = Number(minuteValue);
@@ -20080,6 +20082,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         detailsByIndex,
                         overlapsWithDirection,
                         overlapsInsideShift,
+                        crowdViolationsWithDirection,
+                        crowdIndexes: new Set(),
                         gapViolationsWithDirection,
                         gapOnlyIndexes: new Set(),
                         crossOperatorGapMinutes: 0,
@@ -20153,8 +20157,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     if (breakConcurrencyPenaltyMinutes(b, occupiedByDirectionDetailed) > 0) {
                         const crowdDetails = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
                         conflictIndexes.add(b.idx);
-                        overlapIndexes.add(b.idx);
-                        overlapsWithDirection += 1;
+                        crowdIndexes.add(b.idx);
+                        crowdViolationsWithDirection += 1;
                         const uniqueNames = Array.from(new Set(crowdDetails.map(item => item.operatorName))).filter(Boolean);
                         const namesPreview = uniqueNames.slice(0, 2).join(', ');
                         const namesTail = uniqueNames.length > 2 ? ` +${uniqueNames.length - 2}` : '';
@@ -20222,7 +20226,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     }));
 
                 const gapOnlyIndexes = new Set(
-                    Array.from(gapIndexes).filter(idx => !overlapIndexes.has(idx))
+                    Array.from(gapIndexes).filter(idx => !overlapIndexes.has(idx) && !crowdIndexes.has(idx))
                 );
 
                 return {
@@ -20232,6 +20236,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     detailsByIndex,
                     overlapsWithDirection,
                     overlapsInsideShift,
+                    crowdViolationsWithDirection,
+                    crowdIndexes,
                     gapViolationsWithDirection,
                     gapOnlyIndexes,
                     crossOperatorGapMinutes,
@@ -27656,7 +27662,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     className="text-[11px] text-rose-700"
                                     title={(modalBreakConflictState.detailsByIndex.get(i) || []).map(item => item.text).join('\n') || undefined}
                                 >
-                                    {modalBreakConflictState.gapOnlyIndexes?.has(i) ? 'Мало промежутка' : 'Пересечение'}
+                                    {modalBreakConflictState.gapOnlyIndexes?.has(i)
+                                        ? 'Мало промежутка'
+                                        : (modalBreakConflictState.crowdIndexes?.has(i) ? 'Трое на перерыве' : 'Пересечение')}
                                 </span>
                             )}
                             </div>
@@ -27683,11 +27691,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 <div className="font-semibold">
                                     {(modalBreakConflictState.overlapsInsideShift + modalBreakConflictState.overlapsWithDirection) > 0
                                         ? 'Есть пересечения перерывов'
-                                        : 'Перерывы стоят слишком близко'}
+                                        : (modalBreakConflictState.crowdViolationsWithDirection > 0
+                                            ? 'Слишком много операторов на перерыве'
+                                            : 'Перерывы стоят слишком близко')}
                                 </div>
                                 <div>
                                     {modalBreakConflictState.overlapsInsideShift > 0 ? `Внутри смены: ${modalBreakConflictState.overlapsInsideShift}. ` : ''}
-                                    {modalBreakConflictState.overlapsWithDirection > 0 ? `С перерывами направления: ${modalBreakConflictState.overlapsWithDirection}. ` : ''}
+                                    {modalBreakConflictState.overlapsWithDirection > 0 ? `Сверх нормы с перерывами направления: ${modalBreakConflictState.overlapsWithDirection}. ` : ''}
+                                    {modalBreakConflictState.crowdViolationsWithDirection > 0 ? `Больше двух операторов разом: ${modalBreakConflictState.crowdViolationsWithDirection}. ` : ''}
                                     {modalBreakConflictState.gapViolationsWithDirection > 0 ? `Ближе ${modalBreakConflictState.crossOperatorGapMinutes} мин к перерывам направления: ${modalBreakConflictState.gapViolationsWithDirection}.` : ''}
                                 </div>
                                 {modalBreakConflictState.conflictsForDisplay.length > 0 && (
