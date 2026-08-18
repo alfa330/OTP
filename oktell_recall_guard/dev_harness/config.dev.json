@@ -1,0 +1,25 @@
+{
+  "server_url": "http://127.0.0.1:8799",
+  "agent_token": "dev-token",
+  "verify_tls": false,
+  "poll_interval_s": 15,
+  "operator_login": "6612",
+  "oktell_url": "http://127.0.0.1:8799/fake-oktell/",
+  "browser": {
+    "cdp_port": 9333,
+    "app_mode": true,
+    "launch_on_start": true,
+    "keep_open": false
+  },
+  "unmanaged": {
+    "detect": true,
+    "window_title_patterns": [
+      "oktell"
+    ],
+    "action": "report"
+  },
+  "warn_banner": true,
+  "dry_run": false,
+  "ensure_watchdog_alive": false,
+  "log_level": "DEBUG"
+}

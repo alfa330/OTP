@@ -1,0 +1,57 @@
+{
+  "server_url": "https://icore.example.com",
+  "heartbeat_path": "/api/oktell_guard/heartbeat",
+  "ack_path": "/api/oktell_guard/ack",
+  "agent_token": "ЗАМЕНИ_НА_ТОКЕН_АГЕНТА",
+  "verify_tls": true,
+  "request_timeout_s": 10,
+  "poll_interval_s": 5,
+  "offline_max_backoff_s": 60,
+  "operator_login": "",
+  "oktell_url": "",
+  "session_keys": [
+    "___oktellsessionid"
+  ],
+  "browser": {
+    "chrome_path": "",
+    "profile_dir": "",
+    "cdp_port": 0,
+    "app_mode": true,
+    "launch_on_start": true,
+    "keep_open": false,
+    "extra_args": [
+      "--ignore-certificate-errors-spki-list=ОТПЕЧАТОК_СЕРТИФИКАТА_OKTELL"
+    ]
+  },
+  "unmanaged": {
+    "detect": true,
+    "window_title_patterns": [
+      "oktell"
+    ],
+    "action": "report"
+  },
+  "dry_run": true,
+  "ensure_watchdog_alive": true,
+  "guardian_interval_s": 5,
+  "watchdog_check_interval_s": 2,
+  "watchdog_spawn_grace_s": 3,
+  "log_level": "INFO",
+  "log_max_bytes": 1048576,
+  "log_backup_count": 3,
+  "single_instance": true,
+  "in_window_rule": {
+    "enabled": true,
+    "threshold_s": 180,
+    "warn_before_s": 30,
+    "recall_lunch_reason_id": 2,
+    "call_state_strings": [
+      "talk",
+      "dial",
+      "call",
+      "ring"
+    ],
+    "call_state_ids": [],
+    "message": "«Перезвон» дольше 3 минут — сессия будет закрыта"
+  },
+  "warn_banner": true
+}

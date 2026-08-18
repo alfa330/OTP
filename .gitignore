@@ -30,3 +30,19 @@ __pycache__/
 # Виртуальные окружения Python
 venv/
 .venv/
+
+# Агент Oktell Recall Guard.
+# В git едут только исходники, батники и образец конфига. Всё остальное —
+# сборка, профиль браузера и настройки конкретной машины (внутренний адрес
+# Oktell, пин сертификата, токен агента) — остаётся локальным: репозиторий
+# публичный, а собранный exe весит 14 МБ.
+oktell_recall_guard/dist/
+oktell_recall_guard/build/
+oktell_recall_guard/*.spec
+oktell_recall_guard/*.exe
+oktell_recall_guard/*.log
+oktell_recall_guard/config.json
+oktell_recall_guard/chrome-profile/
+oktell_recall_guard/dev_harness/config.real.json
+oktell_recall_guard/dev_harness/*.log
+oktell_recall_guard/_build_token.py
