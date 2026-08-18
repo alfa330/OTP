@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
     Archive, ArchiveRestore, ChevronRight, FolderTree, Globe, Layers, Lock, Plus,
-    Loader2, Pencil,
+    Loader2, Pencil, Trash2,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -24,7 +24,9 @@ import { selectableSections, sectionOptionLabel } from './sectionPicker';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, onRestore, busy }) => (
+// Строка живого раздела. Архивные сюда не попадают — у них своя вкладка,
+// поэтому ни ветки «вернуть», ни бейджа «в архиве» здесь нет.
+const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, busy }) => (
     <div
         className="flex items-center gap-2 px-4 py-2.5 transition hover:bg-slate-50"
         style={{ paddingLeft: `${16 + depth * 22}px` }}
@@ -51,7 +53,6 @@ const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, onRestore, 
                         {section.department_name}
                     </IosBadge>
                 )}
-                {section.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
             </div>
             <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-slate-400">
                 <span className="tabular-nums">{section.articles_count} статей</span>
@@ -64,17 +65,15 @@ const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, onRestore, 
             задавалась только селектом внутри модалки, которую открывала кнопка
             у пространства, — и «добавить внутрь этого раздела» выглядело как
             отсутствующая возможность. */}
-        {section.status === 'active' && (
-            <button
-                type="button"
-                onClick={() => onAddChild(section)}
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
-                aria-label={`Добавить подраздел в «${section.name}»`}
-                title="Добавить подраздел"
-            >
-                <Plus size={15} />
-            </button>
-        )}
+        <button
+            type="button"
+            onClick={() => onAddChild(section)}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+            aria-label={`Добавить подраздел в «${section.name}»`}
+            title="Добавить подраздел"
+        >
+            <Plus size={15} />
+        </button>
         <button
             type="button"
             onClick={() => onEdit(section)}
@@ -83,33 +82,25 @@ const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, onRestore, 
         >
             <Pencil size={14} />
         </button>
-        {section.status === 'active' ? (
-            <button
-                type="button"
-                disabled={busy}
-                onClick={() => onArchive(section)}
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600 disabled:opacity-40"
-                aria-label="Убрать в архив"
-            >
-                <Archive size={14} />
-            </button>
-        ) : (
-            <button
-                type="button"
-                disabled={busy}
-                onClick={() => onRestore(section)}
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-40"
-                aria-label="Вернуть из архива"
-            >
-                <ArchiveRestore size={14} />
-            </button>
-        )}
+        <button
+            type="button"
+            disabled={busy}
+            onClick={() => onArchive(section)}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600 disabled:opacity-40"
+            aria-label="Убрать в архив"
+        >
+            <Archive size={14} />
+        </button>
     </div>
 );
 
 export default function WikiStructure({ base, headers, showToast, structure, reload, loading }) {
     const [departments, setDepartments] = useState([]);
     const [busy, setBusy] = useState(false);
+
+    // Три вкладки вместо одного длинного списка: пространства правят редко,
+    // разделы — постоянно, а архив нужен, только когда что-то возвращают.
+    const [tab, setTab] = useState('sections');
 
     const [spaceModal, setSpaceModal] = useState(null);   // {id?, name, ...}
     const [sectionModal, setSectionModal] = useState(null);
@@ -123,12 +114,25 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
 
+    const activeSpaces = useMemo(() => spaces.filter((x) => x.status !== 'archived'), [spaces]);
+    const archivedSpaces = useMemo(() => spaces.filter((x) => x.status === 'archived'), [spaces]);
+    const archivedSections = useMemo(
+        () => sections.filter((x) => x.status === 'archived'), [sections]);
+
     // Дерево строим один раз на изменение списка, а не на каждый рендер строки.
+    // Только живые разделы: архивные живут на своей вкладке, а рядом с живым
+    // двойником были неотличимы — архивируют обычно как раз дубль с тем же именем.
     const bySpace = useMemo(() => {
         const grouped = new Map();
+        const alive = sections.filter((x) => x.status !== 'archived');
+        const shown = new Set(alive.map((x) => x.id));
         const children = new Map();
-        sections.forEach((s) => {
-            const key = s.parent_section_id || `root:${s.space_id}`;
+        alive.forEach((s) => {
+            // Родитель в архиве — живая ветка поднимается в корень пространства,
+            // иначе она пропала бы из вкладки вместе с ним.
+            const key = (s.parent_section_id && shown.has(s.parent_section_id))
+                ? s.parent_section_id
+                : `root:${s.space_id}`;
             if (!children.has(key)) children.set(key, []);
             children.get(key).push(s);
         });
@@ -141,6 +145,25 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
         });
         return grouped;
     }, [spaces, sections]);
+
+    const spaceName = useMemo(
+        () => new Map(spaces.map((sp) => [sp.id, sp.name])), [spaces]);
+
+    const archiveSpace = (space) => {
+        setBusy(true);
+        axios.delete(`${base}/spaces/${space.id}`, { headers })
+            .then(() => { showToast?.('Пространство убрано в архив', 'success'); reload(); })
+            .catch((e) => showToast?.(errText(e, 'Не удалось убрать в архив'), 'error'))
+            .finally(() => setBusy(false));
+    };
+
+    const restoreSpace = (space) => {
+        setBusy(true);
+        axios.patch(`${base}/spaces/${space.id}`, { status: 'active' }, { headers })
+            .then(() => { showToast?.('Пространство возвращено из архива', 'success'); reload(); })
+            .catch((e) => showToast?.(errText(e, 'Не удалось вернуть'), 'error'))
+            .finally(() => setBusy(false));
+    };
 
     const saveSpace = () => {
         const payload = {
@@ -211,14 +234,40 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     return (
         <div className="space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className={iosGroupLabel}>Пространства и разделы</div>
-                <button
-                    type="button"
-                    className={iosBtnPrimary}
-                    onClick={() => setSpaceModal({ name: '', description: '', department_id: '' })}
-                >
-                    <Plus size={15} /> Пространство
-                </button>
+                <div className={iosGroupLabel}>Структура вики</div>
+                {tab === 'spaces' && (
+                    <button
+                        type="button"
+                        className={iosBtnPrimary}
+                        onClick={() => setSpaceModal({ name: '', description: '', department_id: '' })}
+                    >
+                        <Plus size={15} /> Пространство
+                    </button>
+                )}
+            </div>
+
+            <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
+                {[
+                    { key: 'spaces', label: 'Пространства', icon: Layers, count: activeSpaces.length },
+                    { key: 'sections', label: 'Разделы', icon: FolderTree,
+                      count: sections.filter((x) => x.status !== 'archived').length },
+                    { key: 'archive', label: 'Архив', icon: Archive,
+                      count: archivedSpaces.length + archivedSections.length },
+                ].map(({ key, label, icon: Icon, count }) => (
+                    <button
+                        key={key}
+                        type="button"
+                        onClick={() => setTab(key)}
+                        className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-medium transition ${
+                            tab === key
+                                ? 'bg-white text-slate-900 shadow-sm'
+                                : 'text-slate-500 hover:text-slate-700'
+                        }`}
+                    >
+                        <Icon size={14} /> {label}
+                        <span className="tabular-nums text-[11.5px] text-slate-400">{count}</span>
+                    </button>
+                ))}
             </div>
 
             {loading && (
@@ -241,7 +290,48 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                 </div>
             )}
 
-            {!loading && spaces.map((space) => (
+            {/* ── Вкладка «Пространства» ── */}
+            {!loading && tab === 'spaces' && activeSpaces.map((space) => (
+                <div key={space.id} className={`${iosCard} flex flex-wrap items-center gap-2 px-4 py-3`}>
+                    <Layers size={15} className="shrink-0 text-indigo-500" />
+                    <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-[14px] font-semibold text-slate-900">{space.name}</span>
+                            {space.department_name && (
+                                <IosBadge tone="slate">{space.department_name}</IosBadge>
+                            )}
+                        </div>
+                        <div className="mt-0.5 text-[11.5px] text-slate-400">
+                            <span className="tabular-nums">
+                                {(bySpace.get(space.id) || []).length} разделов
+                            </span>
+                            {space.description && <span> · {space.description}</span>}
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        className={iosBtnGhost}
+                        onClick={() => setSpaceModal({
+                            id: space.id, name: space.name,
+                            description: space.description || '',
+                            department_id: space.department_id ? String(space.department_id) : '',
+                        })}
+                    >
+                        <Pencil size={13} /> Изменить
+                    </button>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        className={iosBtnGhost}
+                        onClick={() => archiveSpace(space)}
+                    >
+                        <Trash2 size={13} /> В архив
+                    </button>
+                </div>
+            ))}
+
+            {/* ── Вкладка «Разделы» ── */}
+            {!loading && tab === 'sections' && activeSpaces.map((space) => (
                 <section key={space.id} className="space-y-1.5">
                     <div className="flex flex-wrap items-center justify-between gap-2 px-1">
                         <div className="flex items-center gap-2">
@@ -250,32 +340,18 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             {space.department_name && (
                                 <IosBadge tone="slate">{space.department_name}</IosBadge>
                             )}
-                            {space.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
                         </div>
-                        <div className="flex items-center gap-1">
-                            <button
-                                type="button"
-                                className={iosBtnGhost}
-                                onClick={() => setSpaceModal({
-                                    id: space.id, name: space.name,
-                                    description: space.description || '',
-                                    department_id: space.department_id ? String(space.department_id) : '',
-                                })}
-                            >
-                                <Pencil size={13} /> Изменить
-                            </button>
-                            <button
-                                type="button"
-                                className={iosBtnGhost}
-                                onClick={() => setSectionModal({
-                                    space_id: space.id, name: '', description: '',
-                                    visibility_scope: 'restricted', parent_section_id: '',
-                                    department_id: '',
-                                })}
-                            >
-                                <Plus size={13} /> Раздел
-                            </button>
-                        </div>
+                        <button
+                            type="button"
+                            className={iosBtnGhost}
+                            onClick={() => setSectionModal({
+                                space_id: space.id, name: '', description: '',
+                                visibility_scope: 'restricted', parent_section_id: '',
+                                department_id: '',
+                            })}
+                        >
+                            <Plus size={13} /> Раздел
+                        </button>
                     </div>
 
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
@@ -290,29 +366,118 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 section={section}
                                 depth={depth}
                                 busy={busy}
-                                onEdit={(s) => setSectionModal({
-                                    id: s.id, space_id: s.space_id, name: s.name,
-                                    description: s.description || '',
-                                    visibility_scope: s.visibility_scope,
-                                    parent_section_id: s.parent_section_id ? String(s.parent_section_id) : '',
-                                    department_id: s.department_id ? String(s.department_id) : '',
+                                onEdit={(x) => setSectionModal({
+                                    id: x.id, space_id: x.space_id, name: x.name,
+                                    description: x.description || '',
+                                    visibility_scope: x.visibility_scope,
+                                    parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
+                                    department_id: x.department_id ? String(x.department_id) : '',
                                 })}
-                                onAddChild={(s) => setSectionModal({
-                                    space_id: s.space_id, name: '', description: '',
+                                onAddChild={(x) => setSectionModal({
+                                    space_id: x.space_id, name: '', description: '',
                                     visibility_scope: 'restricted',
-                                    parent_section_id: String(s.id),
+                                    parent_section_id: String(x.id),
                                     // Отдел НЕ наследуем от родителя: подраздел ОП
                                     // внутри ветки ОП — это должность, а не второй
                                     // отдел, и метка отдела там только запутает.
                                     department_id: '',
                                 })}
                                 onArchive={archiveSection}
-                                onRestore={restoreSection}
                             />
                         ))}
                     </div>
                 </section>
             ))}
+
+            {/* ── Вкладка «Архив» ── */}
+            {/* Удаление везде мягкое: и раздел, и пространство уходят сюда, а не
+                исчезают. У пространства это принципиально — физическое удаление
+                снесло бы каскадом все его разделы вместе со статьями. */}
+            {!loading && tab === 'archive' && (
+                archivedSpaces.length === 0 && archivedSections.length === 0 ? (
+                    <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
+                        <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                            <Archive size={22} />
+                        </div>
+                        <div className="text-[15px] font-semibold text-slate-900">Архив пуст</div>
+                        <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
+                            Сюда попадает всё, что убрали из структуры. Ничего не удаляется
+                            насовсем — любой элемент можно вернуть на место.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="space-y-5">
+                        {archivedSpaces.length > 0 && (
+                            <section className="space-y-1.5">
+                                <div className="px-1 text-[12px] font-medium text-slate-500">Пространства</div>
+                                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                    {archivedSpaces.map((space) => (
+                                        <div key={space.id} className="flex items-center gap-2 px-4 py-2.5">
+                                            <Layers size={15} className="shrink-0 text-slate-300" />
+                                            <div className="min-w-0 flex-1">
+                                                <div className="truncate text-[13.5px] font-medium text-slate-900">
+                                                    {space.name}
+                                                </div>
+                                                {space.department_name && (
+                                                    <div className="mt-0.5 text-[11.5px] text-slate-400">
+                                                        {space.department_name}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <button
+                                                type="button"
+                                                disabled={busy}
+                                                className={iosBtnGhost}
+                                                onClick={() => restoreSpace(space)}
+                                            >
+                                                <ArchiveRestore size={13} /> Вернуть
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
+                        )}
+
+                        {archivedSections.length > 0 && (
+                            <section className="space-y-1.5">
+                                <div className="px-1 text-[12px] font-medium text-slate-500">Разделы</div>
+                                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                    {archivedSections.map((section) => (
+                                        <div key={section.id} className="flex items-center gap-2 px-4 py-2.5">
+                                            <FolderTree size={15} className="shrink-0 text-slate-300" />
+                                            <div className="min-w-0 flex-1">
+                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                    <span className="truncate text-[13.5px] font-medium text-slate-900">
+                                                        {section.name}
+                                                    </span>
+                                                    {section.department_name && (
+                                                        <IosBadge tone="blue">{section.department_name}</IosBadge>
+                                                    )}
+                                                </div>
+                                                <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-slate-400">
+                                                    <span>{spaceName.get(section.space_id) || '—'}</span>
+                                                    {/* Статьи из архивного раздела никуда не делись —
+                                                        показываем счётчик, чтобы «вернуть» не выглядело
+                                                        восстановлением пустышки. */}
+                                                    <span className="tabular-nums">{section.articles_count} статей</span>
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                disabled={busy}
+                                                className={iosBtnGhost}
+                                                onClick={() => restoreSection(section)}
+                                            >
+                                                <ArchiveRestore size={13} /> Вернуть
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
+                        )}
+                    </div>
+                )
+            )}
 
             {/* ── Пространство ── */}
             <IosModal
