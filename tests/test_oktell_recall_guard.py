@@ -769,3 +769,20 @@ def test_collect_js_reads_the_page_store():
 def test_violations_path_is_configurable():
     cfg = agent.load_config(Path("нет-такого.json"))
     assert cfg['violations_path'] == '/api/oktell_guard/violations'
+
+
+def test_fresh_filename_token_beats_stored_one(tmp_path, monkeypatch):
+    """Скачал заново — значит у человека новый пропуск, и цепляться за старый
+    нельзя: именно так установленная копия оставалась с отозванным токеном."""
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    agent.save_personal_token("oldTokenValue123")
+    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/Oktell-Perezvon-Setup-newTokenValue456.exe"))
+    assert agent.resolve_agent_token() == "newTokenValue456"
+    assert agent.load_personal_token() == "newTokenValue456"
+
+
+def test_stored_token_used_when_filename_has_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    agent.save_personal_token("storedTokenValue1")
+    monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.exe"))
+    assert agent.resolve_agent_token() == "storedTokenValue1"

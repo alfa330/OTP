@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -295,14 +295,20 @@ def save_personal_token(token: str) -> None:
 
 
 def resolve_agent_token() -> str:
-    """Личный токен важнее вшитого: он называет человека, вшитый — нет."""
+    """Личный токен важнее вшитого: он называет человека, вшитый — нет.
+
+    Токен из ИМЕНИ файла важнее сохранённого: человек скачал заново — значит у
+    него новый токен, и цепляться за старый нельзя. Раньше цеплялись, и после
+    повторного скачивания агент продолжал ходить с прежним токеном.
+    """
+    from_name = token_from_filename(program_path().name)
+    if from_name:
+        if from_name != load_personal_token():
+            save_personal_token(from_name)
+        return from_name
     stored = load_personal_token()
     if stored:
         return stored
-    from_name = token_from_filename(program_path().name)
-    if from_name:
-        save_personal_token(from_name)
-        return from_name
     return build_token()
 
 
@@ -2195,6 +2201,7 @@ def run_agent(cfg: dict) -> int:
     poll_s = float(cfg.get("poll_interval_s", 60))
     max_backoff = float(cfg.get("offline_max_backoff_s", 60))
     failures = 0
+    unauthorized_notified = [False]   # окно про отозванный пропуск показываем один раз
     last_command_report: Optional[dict] = None
     update_every_s = max(600.0, float(cfg.get("update_check_hours", 6)) * 3600.0)
     next_update_check = time.time()
@@ -2285,6 +2292,20 @@ def run_agent(cfg: dict) -> int:
             except Exception as exc:  # noqa: BLE001 — сеть/браузер не должны ронять агента
                 failures += 1
                 delay = backoff_delay(failures, poll_s, max_backoff)
+                if "401" in str(exc):
+                    # Молчать тут нельзя: агент жив, но сервер его не принимает,
+                    # и снаружи это выглядит как «программа не работает».
+                    logging.error(
+                        "Сервер не принимает наш пропуск (401). Скорее всего токен отозван — "
+                        "скачайте программу из раздела заново и запустите."
+                    )
+                    if not unauthorized_notified[0]:
+                        unauthorized_notified[0] = True
+                        show_message(
+                            "Программа не может связаться с сервером: пропуск больше не действует. "
+                            "Скачайте её из iCORE заново и запустите — всё остальное произойдёт само.",
+                            error=True,
+                        )
                 logging.warning("Цикл агента: ошибка (%s). Пауза %.0f c", exc, delay)
                 logging.debug("Подробности", exc_info=True)
                 time.sleep(delay)

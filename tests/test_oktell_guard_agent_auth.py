@@ -43,11 +43,14 @@ def test_revoked_tokens_are_excluded_by_query():
     assert 'revoked_at IS NULL' in sql
 
 
-def test_issuing_token_revokes_previous_ones():
-    """У человека один действующий токен: иначе отозвать скомпрометированный
-    означало бы гадать, каким из пяти он пользуется."""
+def test_issuing_token_does_not_revoke_previous_ones():
+    """Повторное скачивание НЕ должно гасить прежние токены.
+
+    Сначала гасило — и каждое новое скачивание молча убивало уже установленную
+    копию: она начинала получать 401 и переставала работать. У человека может
+    быть несколько машин; отзыв остаётся отдельным действием.
+    """
     cursor = TupleCursor(['id'], [])
     queries.issue_token(cursor, 42, 'b' * 64, note='тест')
-    first_sql = cursor.executed[0][0]
-    assert 'UPDATE oktell_guard_tokens' in first_sql and 'revoked_at' in first_sql
-    assert 'INSERT INTO oktell_guard_tokens' in cursor.executed[1][0]
+    assert len(cursor.executed) == 1
+    assert 'INSERT INTO oktell_guard_tokens' in cursor.executed[0][0]

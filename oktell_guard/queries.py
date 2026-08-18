@@ -431,14 +431,12 @@ def add_release(cursor, *, version, filename, sha256, size_bytes, gcs_bucket, gc
 def issue_token(cursor, user_id: int, token_hash: str, note: str = '') -> None:
     """Выдать сотруднику личный токен (храним только отпечаток).
 
-    Прежние его токены гасим: у человека один действующий, иначе отозвать
-    скомпрометированный означало бы гадать, каким из пяти он пользуется.
+    Прежние НЕ гасим. Сначала гасили — «один действующий на человека», — и это
+    оказалось ловушкой: каждое повторное скачивание убивало уже установленную
+    копию, агент начинал получать 401 и молча переставал работать. У человека
+    может быть несколько машин, и это нормально. Отзыв остаётся действием
+    по требованию, а не побочным эффектом скачивания.
     """
-    cursor.execute(
-        "UPDATE oktell_guard_tokens SET revoked_at = " + _NOW +
-        " WHERE user_id = %(user_id)s AND revoked_at IS NULL",
-        {'user_id': int(user_id)},
-    )
     cursor.execute(
         """
         INSERT INTO oktell_guard_tokens (user_id, token_hash, note)
