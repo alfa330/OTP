@@ -969,7 +969,10 @@ class SzovWallboardWiringTests(unittest.TestCase):
         """Открытые раздел и виджет не должны дёргать низкоконкурентный прокси Oktell вдвое чаще,
         а в один момент времени показывать разные цифры."""
         self.assertIn("useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.view)
-        self.assertIn("useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.widget)
+        # Виджет берёт опрос своего направления из общего описания — свой он не заводит.
+        self.assertIn("config.useSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.widget)
+        self.assertIn("useSnapshot: useSzovWallboardSnapshot", self.shared)
+        self.assertIn("useSnapshot: useSzovChatWallboardSnapshot", self.shared)
         # таймер и запрос живут ровно в одном месте — в общем модуле. Направлений табло два,
         # поэтому опрос заведён фабрикой: механика одна, адреса разные.
         self.assertEqual(self.shared.count("setInterval("), 1)
@@ -1044,7 +1047,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
     def test_widget_exists_only_as_a_window_above_others(self):
         """Решение владельца: виджет — окно поверх других окон, встроенной карточки в странице нет."""
         self.assertIn("documentPictureInPicture", self.widget)
-        self.assertIn("requestWindow({ width: PIP_WIDTH", self.widget)
+        self.assertIn("requestWindow({\n            width: PIP_WIDTH", self.widget)
         # ни плавающей карточки, ни перетаскивания внутри страницы
         for stale in ("position: fixed", "handlePointerDown", "FLOATING_", "'floating'"):
             self.assertNotIn(stale, self.widget, stale)
@@ -1057,10 +1060,13 @@ class SzovWallboardWiringTests(unittest.TestCase):
         """Виджет нужен, чтобы следить за линией, занимаясь другим, — значит живёт в App.jsx."""
         self.assertIn("import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';",
                       self.app)
-        self.assertIn("const [szovWallboardWidgetOpen, setSzovWallboardWidgetOpen] = useState(false);",
-                      self.app)
-        self.assertIn("canAccessSzovWallboardSection && szovWallboardWidgetOpen && (", self.app)
-        self.assertIn("onToggleWidget={setSzovWallboardWidgetOpen}", self.app)
+        # Состояние — направление открытого виджета, а не флаг: окно поверх других одно на документ.
+        self.assertIn("const [szovWallboardWidget, setSzovWallboardWidget] = useState(null);", self.app)
+        self.assertIn("canAccessSzovWallboardSection && szovWallboardWidget && (", self.app)
+        self.assertIn("onToggleWidget={setSzovWallboardWidget}", self.app)
+        self.assertIn("direction={szovWallboardWidget}", self.app)
+        # key по направлению: смена направления пересоздаёт окно, а не меняет хук опроса на лету
+        self.assertIn("key={szovWallboardWidget}", self.app)
         # закрытое системным крестиком окно не должно оставлять виджет «открытым»
         self.assertIn("pipWindow.addEventListener('pagehide'", self.widget)
 
@@ -1073,11 +1079,13 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("otp:szov-wallboard-widget", self.widget)
         self.assertIn("sanitizeWidgetMetrics", self.widget)
         # порядок плиток — порядок каталога, а не порядок нажатий
-        self.assertIn("WALLBOARD_METRICS.filter((metric) => metric.key === key", self.widget)
+        self.assertIn("config.metrics.filter((metric) => metric.key === key", self.widget)
+        # у направлений свои наборы, поэтому и ключ хранения свой
+        self.assertIn("`otp:szov-wallboard-widget:${direction}", self.widget)
 
     def test_widget_button_promises_only_what_the_browser_can_do(self):
         self.assertIn("canOpenWallboardWidget", self.view)
-        self.assertIn("disabled={!widgetSupported}", self.view)
+        self.assertIn("disabled={!supported}", self.view)
         self.assertIn("Окно поверх других программ умеют Chrome и Edge", self.view)
         # чужое PiP-окно (закреплённая задача) не отбираем молча
         self.assertIn("Окно поверх других уже занято другим виджетом", self.widget)
@@ -1085,7 +1093,9 @@ class SzovWallboardWiringTests(unittest.TestCase):
     def test_catalog_covers_the_wall_and_more(self):
         """Каталог — единственный источник подписей: в нём и плитки стены, и то, чего на ней нет."""
         groups = re.findall(r"\{ key: '(\w+)', title: '([^']+)' \}", self.shared)
-        self.assertEqual([key for key, _ in groups], ['line', 'people', 'today', 'lists'])
+        # Каталогов два — линии и чатов, у каждого свои группы.
+        self.assertEqual([key for key, _ in groups],
+                         ['line', 'people', 'today', 'lists', 'now', 'today', 'lists'])
         keys = re.findall(r"^        key: '(\w+)',$", self.shared, flags=re.MULTILINE)
         self.assertEqual(len(keys), len(set(keys)), "дубли ключей в каталоге")
         for key in re.findall(r'metricKey="([^"]+)"', self.view):

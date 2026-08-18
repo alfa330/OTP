@@ -3,17 +3,12 @@ import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT } from '../ui/ios';
 import {
-    DEFAULT_WIDGET_METRICS,
-    STATUS_STYLE,
-    WALLBOARD_METRICS,
-    WALLBOARD_METRIC_GROUPS,
-    WALLBOARD_METRIC_MAP,
     WALLBOARD_TONE_TEXT,
     formatClock,
     formatDuration,
     readWallboardMetric,
     sanitizeWidgetMetrics,
-    useSzovWallboardSnapshot,
+    wallboardDirection,
     wallboardStaleNotice,
 } from './szovWallboardShared';
 
@@ -41,24 +36,28 @@ const TILE_GAP = 10;
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
-const storageKey = (userId) => `otp:szov-wallboard-widget${userId ? `:${userId}` : ''}`;
+// Ключ хранения включает направление: наборы у линии и у чатов разные, и общий ключ означал бы,
+// что открытие второго виджета молча стирает набор первого.
+const storageKey = (userId, direction) => (
+    `otp:szov-wallboard-widget:${direction}${userId ? `:${userId}` : ''}`
+);
 
-const readStoredMetrics = (userId) => {
-    if (typeof window === 'undefined') return DEFAULT_WIDGET_METRICS;
+const readStoredMetrics = (userId, config) => {
+    if (typeof window === 'undefined') return config.defaultMetrics;
     try {
-        const raw = window.localStorage.getItem(storageKey(userId));
+        const raw = window.localStorage.getItem(storageKey(userId, config.key));
         const parsed = raw ? JSON.parse(raw) : null;
-        const stored = sanitizeWidgetMetrics(parsed?.metrics);
-        return stored.length > 0 ? stored : DEFAULT_WIDGET_METRICS;
+        const stored = sanitizeWidgetMetrics(parsed?.metrics, config.metricMap);
+        return stored.length > 0 ? stored : config.defaultMetrics;
     } catch (error) {
-        return DEFAULT_WIDGET_METRICS;
+        return config.defaultMetrics;
     }
 };
 
-const writeStoredMetrics = (userId, metrics) => {
+const writeStoredMetrics = (userId, config, metrics) => {
     if (typeof window === 'undefined') return;
     try {
-        window.localStorage.setItem(storageKey(userId), JSON.stringify({ metrics }));
+        window.localStorage.setItem(storageKey(userId, config.key), JSON.stringify({ metrics }));
     } catch (error) {
         // Набор показателей — предпочтение браузера, без него виджет просто откроется по умолчанию.
     }
@@ -122,8 +121,8 @@ const fittedValuePx = (basePx, tileWidth, value, secondary) => {
  * отступы, высота плитки и блока списка), то есть это оценка, а не подгонка попиксельно —
  * дальше окно всё равно тянет пользователь, и Chrome запоминает его размер.
  */
-const estimatePipHeight = (metricKeys) => {
-    const chosen = metricKeys.map((key) => WALLBOARD_METRIC_MAP[key]).filter(Boolean);
+const estimatePipHeight = (metricKeys, metricMap) => {
+    const chosen = metricKeys.map((key) => metricMap[key]).filter(Boolean);
     const tiles = chosen.filter((metric) => metric.kind !== 'list').length;
     const lists = chosen.filter((metric) => metric.kind === 'list').length;
     const rows = Math.ceil(tiles / Math.max(1, columnsFor(PIP_WIDTH - 20, tiles)));
@@ -181,17 +180,18 @@ const MetricList = ({ metric, snapshot }) => {
             ) : (
                 <ul className="mt-1 divide-y divide-slate-100">
                     {entries.map((item) => {
-                        const style = STATUS_STYLE[item.reason_key];
-                        const showReason = Boolean(style) && item.reason_key !== 'break';
+                        // Какой чип рисовать, знает каталог показателей: у линии это причина
+                        // перерыва, у чатов — статус чатника.
+                        const chip = metric.chip?.(item) || null;
                         return (
                             <li
                                 key={`${item.operator_id ?? item.name}-${item.since ?? ''}`}
                                 className="flex items-center gap-2 py-1.5"
                             >
                                 <span className="min-w-0 flex-1 truncate text-[13px] text-slate-800">{item.name}</span>
-                                {showReason ? (
-                                    <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${style.chip}`}>
-                                        {item.reason}
+                                {chip ? (
+                                    <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium ${chip.className}`}>
+                                        {chip.label}
                                     </span>
                                 ) : null}
                                 <span className="shrink-0 text-[12.5px] font-medium tabular-nums text-slate-400">
@@ -226,13 +226,13 @@ const ToolButton = ({ icon, label, active = false, tone = 'default', onClick }) 
 );
 
 /** Что показывать: список каталога с галочками, сгруппированный так же, как на табло. */
-const SettingsPanel = ({ selected, onToggle, onReset, onDone }) => {
+const SettingsPanel = ({ config, selected, onToggle, onReset, onDone }) => {
     const chosen = new Set(selected);
     return (
         <div className="space-y-2.5">
             <div className="flex items-center justify-between px-1">
                 <span className="text-[12px] text-slate-500">
-                    Отмечено {chosen.size} из {WALLBOARD_METRICS.length}
+                    Отмечено {chosen.size} из {config.metrics.length}
                 </span>
                 <button
                     type="button"
@@ -242,8 +242,8 @@ const SettingsPanel = ({ selected, onToggle, onReset, onDone }) => {
                     По умолчанию
                 </button>
             </div>
-            {WALLBOARD_METRIC_GROUPS.map((group) => {
-                const metrics = WALLBOARD_METRICS.filter((metric) => metric.group === group.key);
+            {config.metricGroups.map((group) => {
+                const metrics = config.metrics.filter((metric) => metric.group === group.key);
                 if (metrics.length === 0) return null;
                 return (
                     <div key={group.key} className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-900/5">
@@ -293,18 +293,25 @@ const SettingsPanel = ({ selected, onToggle, onReset, onDone }) => {
 
 export default function SzovWallboardWidget({
     user,
+    direction = 'osnova',
     apiBaseUrl,
     withAccessTokenHeader,
     showToast,
     onClose,
 }) {
     const userId = user?.id || 0;
-    const { snapshot, error, loading, refresh } = useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
+    /*
+     * Направление у окна одно и на всю его жизнь: смена направления в разделе не переключает
+     * уже открытый виджет, а открывает новый (в App.jsx компонент монтируется с key по
+     * направлению). Иначе пришлось бы менять хук опроса на лету, чего React не допускает.
+     */
+    const config = wallboardDirection(direction);
+    const { snapshot, error, loading, refresh } = config.useSnapshot({ apiBaseUrl, withAccessTokenHeader });
 
     const [pipContainer, setPipContainer] = useState(null);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [frameWidth, setFrameWidth] = useState(PIP_WIDTH - 20);
-    const [metrics, setMetrics] = useState(() => readStoredMetrics(userId));
+    const [metrics, setMetrics] = useState(() => readStoredMetrics(userId, config));
 
     const bodyRef = useRef(null);
     const pipWindowRef = useRef(null);
@@ -337,13 +344,16 @@ export default function SzovWallboardWidget({
             fail('Окно поверх других уже занято другим виджетом — закройте его и откройте табло снова');
             return undefined;
         }
-        pipApi.requestWindow({ width: PIP_WIDTH, height: estimatePipHeight(readStoredMetrics(userId)) })
+        pipApi.requestWindow({
+            width: PIP_WIDTH,
+            height: estimatePipHeight(readStoredMetrics(userId, config), config.metricMap),
+        })
             .then((pipWindow) => {
                 if (cancelled) {
                     pipWindow.close?.();
                     return;
                 }
-                pipWindow.document.title = 'Табло СЗоВ';
+                pipWindow.document.title = config.title;
                 cloneDocumentStyles(pipWindow);
                 pipWindow.document.body.style.margin = '0';
                 pipWindow.document.body.style.background = '#f1f5f9';
@@ -411,25 +421,26 @@ export default function SzovWallboardWidget({
 
     const persistMetrics = useCallback((next) => {
         setMetrics(next);
-        writeStoredMetrics(userId, next);
-    }, [userId]);
+        writeStoredMetrics(userId, config, next);
+    }, [userId, config]);
 
     const toggleMetric = useCallback((key) => {
         // Порядок плиток — всегда порядок каталога: иначе набор перетасовывался бы от каждой галочки.
         persistMetrics(
             metrics.includes(key)
                 ? metrics.filter((item) => item !== key)
-                : WALLBOARD_METRICS.filter((metric) => metric.key === key || metrics.includes(metric.key))
+                : config.metrics.filter((metric) => metric.key === key || metrics.includes(metric.key))
                     .map((metric) => metric.key)
         );
-    }, [metrics, persistMetrics]);
+    }, [metrics, persistMetrics, config]);
 
-    const resetMetrics = useCallback(() => persistMetrics([...DEFAULT_WIDGET_METRICS]), [persistMetrics]);
+    const resetMetrics = useCallback(() => persistMetrics([...config.defaultMetrics]), [persistMetrics, config]);
 
-    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error), [snapshot, error]);
+    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, config.source),
+                                [snapshot, error, config]);
     const visibleMetrics = useMemo(
-        () => metrics.map((key) => WALLBOARD_METRIC_MAP[key]).filter(Boolean),
-        [metrics]
+        () => metrics.map((key) => config.metricMap[key]).filter(Boolean),
+        [metrics, config]
     );
 
     if (!pipContainer) return null;
@@ -438,21 +449,22 @@ export default function SzovWallboardWidget({
     const lists = visibleMetrics.filter((metric) => metric.kind === 'list');
     const columns = columnsFor(frameWidth, tiles.length);
     const typography = tileTypography(frameWidth, columns);
+    const clock = snapshot?.[config.clockField];
     const subtitle = staleNotice
-        || (snapshot?.oktell_now ? `Данные Oktell на ${formatClock(snapshot.oktell_now)}` : 'Входящая линия');
+        || (clock ? `Данные ${config.source} на ${formatClock(clock)}` : config.hint);
 
     return createPortal(
         // Ровно высота окна, а не минимум: иначе при длинном наборе прокручивался бы весь
         // документ вместе с панелью, а не только содержимое.
         <section
-            aria-label="Виджет табло СЗоВ"
+            aria-label={`Виджет: ${config.title}`}
             className="flex h-[100vh] flex-col overflow-hidden bg-slate-100"
             style={{ fontFamily: APPLE_FONT }}
         >
             <header className="flex shrink-0 items-center gap-2 border-b border-slate-200/70 bg-white/85 px-2.5 py-2 backdrop-blur-xl">
                 <div className="min-w-0 flex-1 select-none">
                     <div className="truncate text-[12.5px] font-semibold leading-tight text-slate-900">
-                        {settingsOpen ? 'Что показывать' : 'Табло СЗоВ'}
+                        {settingsOpen ? 'Что показывать' : config.title}
                     </div>
                     <div className={`truncate text-[11px] leading-tight ${staleNotice ? 'text-amber-600' : 'text-slate-400'}`}>
                         {settingsOpen ? 'Отметьте показатели для виджета' : subtitle}
@@ -471,13 +483,14 @@ export default function SzovWallboardWidget({
             <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2.5">
                 {settingsOpen ? (
                     <SettingsPanel
+                        config={config}
                         selected={metrics}
                         onToggle={toggleMetric}
                         onReset={resetMetrics}
                         onDone={() => setSettingsOpen(false)}
                     />
                 ) : !snapshot && loading ? (
-                    <div className="px-1 py-4 text-[12.5px] text-slate-500">Загружаем данные Oktell…</div>
+                    <div className="px-1 py-4 text-[12.5px] text-slate-500">Загружаем данные {config.source}…</div>
                 ) : !snapshot ? (
                     <div className="px-1 py-4 text-[12.5px] text-rose-600">{error || 'Данные недоступны'}</div>
                 ) : visibleMetrics.length === 0 ? (

@@ -35097,7 +35097,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessCrmSection = canAccessCrmSectionForUser(user);
             const canAccessSzovWallboardSection = canAccessSzovWallboardForUser(user);
             // Виджет табло живёт здесь, а не в разделе: закрывается только своим крестиком.
-            const [szovWallboardWidgetOpen, setSzovWallboardWidgetOpen] = useState(false);
+            // Какое направление табло открыто виджетом: null | 'osnova' | 'chat'. Окно поверх
+            // других у документа одно, поэтому и здесь одно значение, а не флаг на каждое.
+            const [szovWallboardWidget, setSzovWallboardWidget] = useState(null);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
             const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
@@ -45424,8 +45426,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
-                                    widgetOpen={szovWallboardWidgetOpen}
-                                    onToggleWidget={setSzovWallboardWidgetOpen}
+                                    widgetOpen={szovWallboardWidget}
+                                    onToggleWidget={setSzovWallboardWidget}
                                 />
                             </Suspense>
                         )}
@@ -51552,13 +51554,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         )}
                     </div>
 
-                    {canAccessSzovWallboardSection && szovWallboardWidgetOpen && (
+                    {canAccessSzovWallboardSection && szovWallboardWidget && (
                         <SzovWallboardWidget
+                            // key по направлению: у направлений разные источники, и смена
+                            // направления должна пересоздать окно, а не менять хук опроса на лету.
+                            key={szovWallboardWidget}
+                            direction={szovWallboardWidget}
                             user={user}
                             apiBaseUrl={API_BASE_URL}
                             withAccessTokenHeader={withAccessTokenHeader}
                             showToast={showToast}
-                            onClose={() => setSzovWallboardWidgetOpen(false)}
+                            onClose={() => setSzovWallboardWidget(null)}
                         />
                     )}
 

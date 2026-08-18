@@ -108,6 +108,17 @@ export const CHAT_STATUS_STYLE = {
 };
 
 /*
+ * Ответ внутри чата: уложились в цель или нет. Порог приходит из снимка (`target_seconds`),
+ * а не задан здесь, чтобы цель правилась в одном месте — на сервере.
+ */
+export const chatReplyTone = (seconds, targetSeconds) => {
+    const value = Number(seconds);
+    const target = Number(targetSeconds) || 120;
+    if (seconds === null || seconds === undefined || !Number.isFinite(value)) return 'neutral';
+    return value <= target ? 'good' : 'bad';
+};
+
+/*
  * Секунды -> «12,7 мин». Ось графика и плитки чатов живут в минутах: цель тоже задана в них.
  * withUnit=false отдаёт голое число — плитка рисует «мин» отдельным приглушённым суффиксом.
  */
@@ -160,6 +171,15 @@ export const WALLBOARD_METRIC_GROUPS = [
  *
  * kind: 'tile' — плитка с числом, 'pair' — «главное / приглушённое», 'list' — перечень людей.
  */
+/*
+ * Чип у строки списка. Причину на линии показываем ТОЛЬКО когда это не обычный перерыв: иначе
+ * тренинг и тех.причина молча смешались бы с ним, а лишних чипов на экране не будет.
+ */
+const breakReasonChip = (item) => {
+    const style = STATUS_STYLE[item.reason_key];
+    return style && item.reason_key !== 'break' ? { label: item.reason, className: style.chip } : null;
+};
+
 export const WALLBOARD_METRICS = [
     {
         key: 'queue',
@@ -347,6 +367,7 @@ export const WALLBOARD_METRICS = [
         hint: 'Имя и время в статусе',
         icon: 'fa-list-ul',
         read: (now) => ({ items: now.break_list }),
+        chip: breakReasonChip,
     },
     {
         key: 'recall_list',
@@ -356,6 +377,7 @@ export const WALLBOARD_METRICS = [
         hint: 'Имя и время в статусе',
         icon: 'fa-phone-volume',
         read: (now) => ({ items: now.recall_list }),
+        chip: breakReasonChip,
     },
 ];
 
@@ -389,12 +411,123 @@ export const readWallboardMetric = (metric, snapshot) => {
     };
 };
 
+/*
+ * Каталог показателей направления «Чат». Устроен так же, как каталог линии, и по той же
+ * причине: раздел, виджет и подсказки читают одно описание, поэтому цифра и её цвет не могут
+ * разойтись между экранами.
+ */
+export const CHAT_WALLBOARD_METRIC_GROUPS = [
+    { key: 'now', title: 'Чатники сейчас' },
+    { key: 'today', title: 'За день' },
+    { key: 'lists', title: 'Списки' },
+];
+
+export const CHAT_WALLBOARD_METRICS = [
+    {
+        key: 'chat_online',
+        group: 'now',
+        label: 'Онлайн',
+        hint: 'Держат линию',
+        tone: 'info',
+        read: (now) => ({ value: formatInt(now.operators_online) }),
+    },
+    {
+        key: 'chat_busy',
+        group: 'now',
+        label: 'Занят',
+        hint: 'В системе, но не на линии',
+        tone: 'violet',
+        read: (now) => ({ value: formatInt(now.operators_busy) }),
+    },
+    {
+        key: 'chat_training',
+        group: 'now',
+        label: 'Тренинг',
+        tone: 'good',
+        read: (now) => ({ value: formatInt(now.operators_on_training) }),
+    },
+    {
+        key: 'chat_break',
+        group: 'now',
+        label: 'Перерыв',
+        tone: 'warn',
+        read: (now) => ({ value: formatInt(now.operators_on_break) }),
+    },
+    {
+        key: 'chat_open',
+        group: 'now',
+        label: 'Открыто чатов',
+        hint: 'В работе у чатников',
+        read: (now) => ({ value: formatInt(now.open_chats) }),
+    },
+    {
+        key: 'chat_offline',
+        group: 'now',
+        label: 'Не в системе',
+        read: (now) => ({ value: formatInt(now.operators_offline) }),
+    },
+    {
+        key: 'chat_chats',
+        group: 'today',
+        label: 'Чатов за сутки',
+        hint: 'С 00:00 сегодняшнего дня',
+        read: (now, today) => ({ value: formatInt(today.chats) }),
+    },
+    {
+        key: 'chat_inner',
+        group: 'today',
+        label: 'Ответ внутри чата',
+        hint: 'Колонка average_replies_time — по ней сверяются супервайзеры',
+        // Единственный оценочный цвет направления: уложились в цель или нет.
+        read: (now, today, snapshot) => ({
+            value: formatMinutes(today.inner_reply_seconds),
+            tone: chatReplyTone(today.inner_reply_seconds, snapshot?.target_seconds),
+        }),
+    },
+    {
+        key: 'chat_first',
+        group: 'today',
+        label: 'Первый ответ',
+        read: (now, today) => ({ value: formatMinutes(today.first_reply_seconds) }),
+    },
+    {
+        key: 'chat_shift_list',
+        group: 'lists',
+        kind: 'list',
+        label: 'Кто на смене',
+        hint: 'Имя, статус и время в нём',
+        icon: 'fa-comments',
+        read: (now) => ({ items: now.operators }),
+        // Статус показываем у каждого, включая «Онлайн» (решение владельца): со стены должно
+        // быть видно, кто держит линию, а кто нет.
+        chip: (item) => {
+            const style = CHAT_STATUS_STYLE[item.status_key] || CHAT_STATUS_STYLE.offline;
+            return { label: item.status, className: style.chip };
+        },
+    },
+];
+
+export const CHAT_WALLBOARD_METRIC_MAP = CHAT_WALLBOARD_METRICS.reduce((acc, metric) => {
+    acc[metric.key] = metric;
+    return acc;
+}, {});
+
+/** По умолчанию в виджете чатов — то же, что крупными плитками на стене, плюс время ответа. */
+export const DEFAULT_CHAT_WIDGET_METRICS = [
+    'chat_online',
+    'chat_busy',
+    'chat_training',
+    'chat_open',
+    'chat_inner',
+    'chat_first',
+];
+
 /** Отфильтровать сохранённый набор: ключи, которых больше нет в каталоге, молча выбрасываем. */
-export const sanitizeWidgetMetrics = (keys) => {
+export const sanitizeWidgetMetrics = (keys, map = WALLBOARD_METRIC_MAP) => {
     const list = Array.isArray(keys) ? keys : [];
     const seen = new Set();
     return list.filter((key) => {
-        if (!WALLBOARD_METRIC_MAP[key] || seen.has(key)) return false;
+        if (!map[key] || seen.has(key)) return false;
         seen.add(key);
         return true;
     });
@@ -538,6 +671,46 @@ export const useSzovChatWallboardSnapshot = createSnapshotFeed({
     path: '/api/szov_wallboard/chat_snapshot',
     pollIntervalMs: CHAT_POLL_INTERVAL_MS,
 });
+
+/*
+ * Направления табло одним описанием. Раздел берёт отсюда подписи и опрос, виджет — ещё и
+ * каталог показателей со своим набором по умолчанию. Появится третье направление — добавится
+ * одна запись, и раздел с виджетом подхватят его вместе.
+ */
+export const WALLBOARD_DIRECTIONS = {
+    osnova: {
+        key: 'osnova',
+        label: 'Основа',
+        hint: 'Входящая линия: Oktell',
+        title: 'Табло СЗоВ',
+        source: 'Oktell',
+        clockField: 'oktell_now',
+        icon: 'fa-tachometer-alt',
+        useSnapshot: useSzovWallboardSnapshot,
+        metrics: WALLBOARD_METRICS,
+        metricMap: WALLBOARD_METRIC_MAP,
+        metricGroups: WALLBOARD_METRIC_GROUPS,
+        defaultMetrics: DEFAULT_WIDGET_METRICS,
+    },
+    chat: {
+        key: 'chat',
+        label: 'Чат',
+        hint: 'Чаты: Chat2Desk',
+        title: 'Табло СЗоВ · чаты',
+        source: 'Chat2Desk',
+        clockField: 'chat2desk_now',
+        icon: 'fa-comments',
+        useSnapshot: useSzovChatWallboardSnapshot,
+        metrics: CHAT_WALLBOARD_METRICS,
+        metricMap: CHAT_WALLBOARD_METRIC_MAP,
+        metricGroups: CHAT_WALLBOARD_METRIC_GROUPS,
+        defaultMetrics: DEFAULT_CHAT_WIDGET_METRICS,
+    },
+};
+
+export const WALLBOARD_DIRECTION_LIST = Object.values(WALLBOARD_DIRECTIONS);
+
+export const wallboardDirection = (key) => WALLBOARD_DIRECTIONS[key] || WALLBOARD_DIRECTIONS.osnova;
 
 /** Текст «данные замерли»: ошибка запроса или устаревший снимок из кэша сервера. */
 export const wallboardStaleNotice = (snapshot, error, source = 'Oktell') => {

@@ -512,11 +512,23 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("path: '/api/szov_wallboard/chat_snapshot'", self.shared)
         self.assertIn("pollIntervalMs: CHAT_POLL_INTERVAL_MS", self.shared)
 
-    def test_broadcast_and_widget_stay_on_the_line_direction(self):
+    def test_broadcast_stays_on_the_line_direction(self):
+        """Отбивка собрана по показателям линии — на экране чатов ей делать нечего."""
         chat_board = self.view[self.view.index("const ChatWallboard ="):
                                self.view.index("export default function SzovWallboardView")]
         self.assertNotIn("Отбивка", chat_board)
-        self.assertNotIn("onToggleWidget", chat_board)
+
+    def test_chat_direction_offers_the_widget_too(self):
+        """Виджет «поверх окон» есть у обоих направлений, у каждого со своим набором."""
+        chat_board = self.view[self.view.index("const ChatWallboard ="):
+                               self.view.index("export default function SzovWallboardView")]
+        self.assertIn("onToggleWidget={onToggleWidget}", chat_board)
+        self.assertIn("<WidgetButton direction={direction}", self.view)
+        widget = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardWidget.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("direction = 'osnova'", widget)
+        self.assertIn("wallboardDirection(direction)", widget)
+        for key in ('chat_online', 'chat_busy', 'chat_training', 'chat_inner', 'chat_shift_list'):
+            self.assertIn(f"key: '{key}'", self.shared, key)
 
     def test_chosen_direction_is_remembered(self):
         self.assertIn("otp:szov-wallboard-direction", self.view)

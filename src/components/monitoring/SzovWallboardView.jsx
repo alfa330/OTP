@@ -509,7 +509,8 @@ const writeStoredDirection = (userId, direction) => {
  * виджет собраны по показателям линии).
  */
 const WallboardHeader = ({
-    subtitle, direction, onDirectionChange, staleNotice, loading, onRefresh, onFullscreen, children,
+    subtitle, direction, onDirectionChange, staleNotice, loading, onRefresh, onFullscreen,
+    widgetOpen, onToggleWidget, children,
 }) => (
     <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -528,6 +529,11 @@ const WallboardHeader = ({
                 Обновить
             </button>
             {children}
+            {/* Виджет — отдельное окно поверх других окон, и оно остаётся открытым после ухода
+                из раздела: он для того и нужен, чтобы следить за линией или чатами, занимаясь
+                другим. Набор показателей выбирается в самом окне, у каждого направления свой. */}
+            {onToggleWidget ? <WidgetButton direction={direction} widgetOpen={widgetOpen}
+                                            onToggleWidget={onToggleWidget} /> : null}
             <button type="button" className={iosBtnGhost} onClick={onFullscreen}>
                 <FaIcon className="fas fa-expand"></FaIcon>
                 На весь экран
@@ -535,6 +541,30 @@ const WallboardHeader = ({
         </div>
     </div>
 );
+
+/*
+ * Кнопка виджета. Открытое окно всегда одно, поэтому кнопка «зажата» только у того направления,
+ * чей виджет сейчас открыт; нажатие на соседнем направлении переоткрывает окно под него.
+ */
+const WidgetButton = ({ direction, widgetOpen, onToggleWidget }) => {
+    // Умеет ли браузер окно поверх других, выясняем здесь, чтобы кнопка не обещала того, чего не будет.
+    const supported = useMemo(() => canOpenWallboardWidget(), []);
+    const isOpen = widgetOpen === direction;
+    return (
+        <button
+            type="button"
+            className={`${iosBtnGhost} disabled:opacity-40 ${isOpen ? 'bg-slate-100 text-slate-900' : ''}`}
+            disabled={!supported}
+            title={supported
+                ? 'Окно поверх других программ: выберите в нём, что мониторить'
+                : 'Окно поверх других программ умеют Chrome и Edge — в этом браузере недоступно'}
+            onClick={() => onToggleWidget(isOpen ? null : direction)}
+        >
+            <FaIcon className="fas fa-picture-in-picture"></FaIcon>
+            {isOpen ? 'Виджет открыт' : 'Виджет'}
+        </button>
+    );
+};
 
 /** Пустые состояния (грузим / источник молчит) — одни на оба направления. */
 const WallboardPlaceholder = ({ header, message, tone = 'muted' }) => (
@@ -557,9 +587,6 @@ const LineWallboard = ({
     const [broadcastOpen, setBroadcastOpen] = useState(false);
 
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error), [error, snapshot]);
-    // Виджет существует только как окно поверх других окон. Умеет ли так браузер — выясняем
-    // здесь, чтобы кнопка не обещала того, чего не будет.
-    const widgetSupported = useMemo(() => canOpenWallboardWidget(), []);
 
     const header = (
         <WallboardHeader
@@ -571,28 +598,13 @@ const LineWallboard = ({
             loading={loading}
             onRefresh={refresh}
             onFullscreen={() => setFullscreen(true)}
+            widgetOpen={widgetOpen}
+            onToggleWidget={onToggleWidget}
         >
             {canManageBroadcast ? (
                 <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
                     <FaIcon className="fas fa-paper-plane"></FaIcon>
                     Отбивка
-                </button>
-            ) : null}
-            {/* Виджет — отдельное окно поверх других окон, и оно остаётся открытым после ухода
-                из раздела: он для того и нужен, чтобы следить за линией, занимаясь другим.
-                Набор показателей выбирается в самом окне. */}
-            {onToggleWidget ? (
-                <button
-                    type="button"
-                    className={`${iosBtnGhost} disabled:opacity-40 ${widgetOpen ? 'bg-slate-100 text-slate-900' : ''}`}
-                    disabled={!widgetSupported}
-                    title={widgetSupported
-                        ? 'Окно поверх других программ: выберите в нём, что мониторить'
-                        : 'Окно поверх других программ умеют Chrome и Edge — в этом браузере недоступно'}
-                    onClick={() => onToggleWidget(!widgetOpen)}
-                >
-                    <FaIcon className="fas fa-picture-in-picture"></FaIcon>
-                    {widgetOpen ? 'Виджет открыт' : 'Виджет'}
                 </button>
             ) : null}
         </WallboardHeader>
@@ -648,7 +660,8 @@ const LineWallboard = ({
 };
 
 /** Направление «Чат»: Chat2Desk. */
-const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, direction, onDirectionChange }) => {
+const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, direction, onDirectionChange,
+                        widgetOpen, onToggleWidget }) => {
     const { snapshot, error, loading, refresh } = useSzovChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
 
@@ -664,6 +677,8 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, direction, onDirecti
             loading={loading}
             onRefresh={refresh}
             onFullscreen={() => setFullscreen(true)}
+            widgetOpen={widgetOpen}
+            onToggleWidget={onToggleWidget}
         />
     );
 
@@ -717,6 +732,8 @@ export default function SzovWallboardView(props) {
                 withAccessTokenHeader={withAccessTokenHeader}
                 direction={direction}
                 onDirectionChange={changeDirection}
+                widgetOpen={widgetOpen}
+                onToggleWidget={onToggleWidget}
             />
         );
     }
