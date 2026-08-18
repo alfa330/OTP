@@ -76,9 +76,11 @@ def _operator_row(name, online=1, offline_type=None, dialogs=0, status='enabled'
 
 
 def _request(start, reaction, replies, total, operator='Алия Тестова', end='x'):
+    # average_replies_time = total_replies_time / replies — так его отдаёт Chat2Desk.
     return {'request_start': start, 'request_end': end, 'request_type': 'common',
             'operator_name': operator, 'reaction_time': reaction,
-            'replies': replies, 'total_replies_time': total}
+            'replies': replies, 'total_replies_time': total,
+            'average_replies_time': (total / replies) if (total is not None and replies) else ''}
 
 
 class _Harness:
@@ -262,15 +264,15 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         timelines = {'Алия Тестова': [(11 * 3600, 'online', 'Онлайн', '')],
                      'Бекзат Примеров': [(11 * 3600, 'online', 'Онлайн', '')]}
         requests = [
-            # Ответ внутри чата = (Σtotal − Σreaction) / Σ(replies − 1) = (740−20)/2 = 360 c.
-            _request('2026-08-18 11:05:00', 20, 3, 740),
+            # Ответ внутри чата = average_replies_time = total/replies = 720/3 = 240 c.
+            _request('2026-08-18 11:05:00', 20, 3, 720),
             _request('2026-08-18 12:30:00', 10, 2, 200),
         ]
         rows = self._rows(ns, timelines, requests, now)
         self.assertEqual(rows[11]['chats'], 1)
-        self.assertEqual(rows[11]['inner_reply_seconds'], 360)
+        self.assertEqual(rows[11]['inner_reply_seconds'], 240)
         self.assertEqual(rows[11]['operators_online'], 2.0)
-        self.assertEqual(rows[11]['operators_required'], 6)  # 2 × 360 / 120
+        self.assertEqual(rows[11]['operators_required'], 4)  # 2 × 240 / 120
         self.assertEqual(rows[11]['operators_took_chats'], 1)
 
     def test_hour_without_people_has_no_recommendation(self):

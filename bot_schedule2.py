@@ -31712,12 +31712,19 @@ def _chat_hourly_online(states):
 def _chat_hourly_response_times(rows):
     """(первый ответ, ответ внутри чата) — средние в секундах, None если считать не по чему.
 
-    Первый ответ — среднее `reaction_time`: ровно так же считает веб-отчёт Chat2Desk, по
-    которому владелец сверяет цифры.
-    Ответ внутри чата — это ВТОРОЙ и последующие ответы оператора. В `total_replies_time`
-    первый ответ включён, поэтому вычитаем его: (Σtotal − Σreaction) / Σ(replies − 1).
-    Считаем суммой по всем чатам, а не средним от средних — иначе диалог из двух реплик
-    весит столько же, сколько диалог из двадцати."""
+    ОБЕ величины — простые средние по обращениям того же отчёта `request_stats`, по которому
+    сверяются супервайзеры:
+      * первый ответ  — колонка `reaction_time`;
+      * ответ внутри чата — колонка `average_replies_time`.
+
+    Раньше «внутри чата» считался как второй и последующие ответы: (Σtotal − Σreaction) /
+    Σ(replies − 1). Логически это честнее (первый ответ — уже отдельный показатель), но у
+    супервайзеров в отчётах стоит именно `average_replies_time`, и цифры расходились: на
+    17.08.2026 — 6,4 мин против их 5,0; на 16.08 — 9,2 против 13,4. Показатель, который
+    ни с чем не сходится, никто не читает, поэтому считаем как они (решение владельца
+    18.08.2026). Проверено на живых данных: `average_replies_time` в точности равен
+    total_replies_time / replies (расхождений нет ни в одной из 1851 строки за два дня),
+    поэтому при пустой колонке спокойно считаем её сами."""
     first_sum, first_count = 0.0, 0
     inner_sum, inner_count = 0.0, 0
     for row in rows:
@@ -31725,12 +31732,15 @@ def _chat_hourly_response_times(rows):
         if reaction is not None:
             first_sum += reaction
             first_count += 1
-        replies = _chat_hourly_number(row.get('replies'))
-        total = _chat_hourly_number(row.get('total_replies_time'))
-        if reaction is None or total is None or replies is None or replies < 2:
+        average = _chat_hourly_number(row.get('average_replies_time'))
+        if average is None:
+            replies = _chat_hourly_number(row.get('replies'))
+            total = _chat_hourly_number(row.get('total_replies_time'))
+            average = (total / replies) if (total is not None and replies) else None
+        if average is None:
             continue
-        inner_sum += total - reaction
-        inner_count += int(replies) - 1
+        inner_sum += average
+        inner_count += 1
     return (
         (first_sum / first_count) if first_count else None,
         (inner_sum / inner_count) if inner_count > 0 else None,
@@ -31745,13 +31755,14 @@ def _chat_hourly_collect(now=None):
     """Данные отчёта: чаты за час и за сутки, время ответа — общее и по каждому чатнику."""
     tz = ZoneInfo(CHAT_HOURLY_TIMEZONE)
     now = now or datetime.now(tz)
-    day_str = now.strftime('%Y-%m-%d')
     # Отчёт уходит в начале часа и рассказывает про ЗАКОНЧИВШИЙСЯ час, а не про начавшуюся минуту.
     hour_end = now.replace(minute=0, second=0, microsecond=0)
     hour_start = hour_end - timedelta(hours=1)
-    if hour_start.strftime('%Y-%m-%d') != day_str:
-        # Отчёт в 00:00: прошедший час — это уже вчера, отдельной строкой его не показываем.
-        hour_start = hour_end
+    # Отчёт в 00:00 рассказывает про ВЧЕРАШНИЕ сутки целиком: закончившийся час 23:00–00:00
+    # принадлежит им, и сутки в этом отчёте — те же, что и час. Раньше день брался новый, а
+    # вчерашний час просто выбрасывался, поэтому данных за 23:00 не видел никто.
+    day_str = hour_start.strftime('%Y-%m-%d')
+    is_previous_day = day_str != now.strftime('%Y-%m-%d')
     window_from = hour_start.strftime('%Y-%m-%d %H:%M:%S')
     window_to = hour_end.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -31811,8 +31822,10 @@ def _chat_hourly_collect(now=None):
     return {
         'generated_at': now.strftime('%d.%m.%Y %H:%M'),
         'day': day_str,
-        'hour_label': (f"{hour_start.strftime('%H:%M')}–{hour_end.strftime('%H:%M')}"
-                       if hour_start != hour_end else None),
+        # Полуночный отчёт — про вчера, и это должно быть видно в заголовке, иначе «сутки»
+        # прочитаются как сегодняшние, которым от роду одна минута.
+        'is_previous_day': is_previous_day,
+        'hour_label': f"{hour_start.strftime('%H:%M')}–{hour_end.strftime('%H:%M')}",
         'chats_day': len(rows),
         'chats_hour': len(hour_rows),
         'chats_open': sum(1 for row in rows if _chat_hourly_is_open(row)),
@@ -31844,22 +31857,29 @@ def _chat_hourly_seconds(seconds):
     return '—' if seconds is None else _szov_format_seconds_mmss(int(round(seconds)))
 
 
+def _chat_hourly_day_words(data):
+    """Как назвать сутки отчёта: «с начала суток» или «за сутки 17.08.2026» у полуночного.
+
+    В 00:00 отчёт рассказывает про вчера, и по времени отправки этого не видно — дату
+    приходится называть прямо, иначе «сутки» прочитаются как только что начавшиеся."""
+    if not data.get('is_previous_day'):
+        return 'с начала суток'
+    parts = str(data.get('day') or '').split('-')
+    return f"за сутки {parts[2]}.{parts[1]}.{parts[0]}" if len(parts) == 3 else 'за прошедшие сутки'
+
+
 def _chat_hourly_text(data):
     """Текст отчёта. HTML parse_mode: подписи жирные, цифры обычные."""
     hour_label = data.get('hour_label')
+    day_words = _chat_hourly_day_words(data)
 
     def _pair(hour_value, day_value):
-        if not hour_label:
-            return f"{_chat_hourly_seconds(day_value)} (сутки)"
         return (f"{_chat_hourly_seconds(hour_value)} (за час), "
                 f"{_chat_hourly_seconds(day_value)} (сутки)")
 
     lines = [f"<b>Чаты</b> — {data['generated_at']}", ""]
-    if hour_label:
-        lines.append(f"<b>Количество чатов:</b> {data['chats_hour']} за {hour_label}, "
-                     f"{data['chats_day']} с начала суток")
-    else:
-        lines.append(f"<b>Количество чатов:</b> {data['chats_day']} с начала суток")
+    lines.append(f"<b>Количество чатов:</b> {data['chats_hour']} за {hour_label}, "
+                 f"{data['chats_day']} {day_words}")
     lines.append(f"<b>Открыто сейчас:</b> {data['chats_open']}")
     lines.append(f"<b>Среднее время первого ответа:</b> "
                  f"{_pair(data['first_reply_hour'], data['first_reply_day'])}")
@@ -31871,7 +31891,7 @@ def _chat_hourly_text(data):
     if operators:
         lines.append(f"<b>Чатники за сутки ({len(operators)}):</b>")
         for item in operators:
-            suffix = f" (за час {item['chats_hour']})" if hour_label and item['chats_hour'] else ""
+            suffix = f" (за час {item['chats_hour']})" if item['chats_hour'] else ""
             lines.append(
                 f"• {item['name']} — {item['chats']}{suffix}, "
                 f"первый ответ {_chat_hourly_seconds(item.get('first_reply_day'))}, "
@@ -31916,12 +31936,6 @@ _CHAT_HOURLY_TABLE_COLUMNS = (
 _CHAT_HOURLY_HOUR_COLUMN_KEYS = frozenset({'chats_hour', 'first_hour', 'inner_hour'})
 
 
-def _chat_hourly_table_columns(with_hour):
-    """Колонки таблицы. В отчёте за 00:00 часа нет — и пустых колонок быть не должно."""
-    return tuple(col for col in _CHAT_HOURLY_TABLE_COLUMNS
-                 if with_hour or col[0] not in _CHAT_HOURLY_HOUR_COLUMN_KEYS)
-
-
 def _chat_hourly_table_row(item):
     """Значения ячеек для одного чатника. Прочерк — «нечего считать», а не ноль."""
     def count(value):
@@ -31947,7 +31961,9 @@ def _chat_hourly_render_table_png(data):
 
     font = _szov_font(20)
     font_bold = _szov_font(20, bold=True)
-    columns = _chat_hourly_table_columns(bool(data.get('hour_label')))
+    # Час есть в любом отчёте, включая полуночный (он про 23:00–00:00 вчерашних
+    # суток), поэтому часовые колонки больше не пропадают.
+    columns = _CHAT_HOURLY_TABLE_COLUMNS
     operators = data.get('operators') or []
 
     row_h, head_h, title_h = 34, 74, 76
@@ -31961,8 +31977,7 @@ def _chat_hourly_render_table_png(data):
     hour_head_fill, hour_cell_fill = '#a3b9d9', '#e8f0fb'
     total_fill = '#eef2f7'
 
-    subtitle = (f"за час {data['hour_label']} и с начала суток" if data.get('hour_label')
-                else "с начала суток")
+    subtitle = f"за час {data['hour_label']} и {_chat_hourly_day_words(data)}"
     draw.text((4, 6), f"Чаты — {data['generated_at']}", font=_szov_font(26, bold=True), fill='#0f172a')
     draw.text((4, 42), subtitle, font=_szov_font(17), fill='#64748b')
 
@@ -32021,9 +32036,8 @@ def _chat_hourly_render_table_png(data):
 
 def _chat_hourly_caption(data):
     """Подпись к картинке. Цифры не повторяем — они все в таблице; тут только отклонения."""
-    hour_label = data.get('hour_label')
-    lines = [f"<b>Чаты</b> — {data['generated_at']}"
-             + (f", за {hour_label}" if hour_label else "")]
+    lines = [f"<b>Чаты</b> — {data['generated_at']}, за {data['hour_label']}"
+             + (f" ({_chat_hourly_day_words(data)})" if data.get('is_previous_day') else "")]
     if data.get('online_error'):
         lines.append("Статусы операторов Chat2Desk не отдал — колонка «Статус» пустая.")
     return "\n".join(lines)

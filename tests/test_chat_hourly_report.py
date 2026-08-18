@@ -33,10 +33,11 @@ NAMES = {
     '_chat_hourly_operator_name', '_chat_hourly_fetch_requests',
     '_chat_hourly_operator_states', '_chat_hourly_online',
     '_chat_hourly_response_times', '_chat_hourly_collect', '_chat_hourly_report',
-    '_chat_hourly_seconds', '_chat_hourly_text', '_chat_hourly_caption',
+    '_chat_hourly_seconds', '_chat_hourly_day_words', '_chat_hourly_text',
+    '_chat_hourly_caption',
     'CHAT_HOURLY_PRESENCE_ORDER', '_CHAT_HOURLY_PRESENCE_RANK', 'CHAT_HOURLY_PRESENCE_COLORS',
     '_CHAT_HOURLY_TABLE_COLUMNS', '_CHAT_HOURLY_HOUR_COLUMN_KEYS',
-    '_chat_hourly_table_columns', '_chat_hourly_table_row',
+    '_CHAT_HOURLY_TABLE_COLUMNS', '_chat_hourly_table_row',
 }
 
 
@@ -98,7 +99,11 @@ def _namespace(fake_requests=None):
 
 
 def _request(request_id, start, end='', operator='Оператор', reaction=None,
-             replies=0, total=None, request_type='common'):
+             replies=0, total=None, request_type='common', average=None):
+    # average_replies_time Chat2Desk отдаёт как total_replies_time / replies (проверено на
+    # живых данных) — в фикстуре считаем так же, если не задано явно.
+    if average is None and total is not None and replies:
+        average = total / replies
     return {
         'request_id': request_id,
         'request_type': request_type,
@@ -108,11 +113,12 @@ def _request(request_id, start, end='', operator='Оператор', reaction=No
         'reaction_time': '' if reaction is None else reaction,
         'replies': replies,
         'total_replies_time': '' if total is None else total,
+        'average_replies_time': '' if average is None else average,
     }
 
 
 class ChatHourlyResponseTimeTests(unittest.TestCase):
-    """Первый ответ и ответ внутри чата — разные цифры, и вторая считается без первого."""
+    """Первый ответ и ответ внутри чата — обе величины из колонок, по которым сверяются СВ."""
 
     def setUp(self):
         self.ns = _namespace()
@@ -124,27 +130,32 @@ class ChatHourlyResponseTimeTests(unittest.TestCase):
         first, _inner = self.ns['_chat_hourly_response_times'](rows)
         self.assertEqual(first, 20)
 
-    def test_inner_reply_excludes_the_first_answer(self):
-        """total_replies_time включает первый ответ — иначе получилось бы то же самое число."""
-        # 3 ответа, суммарно 97 с, из них первый — 2 с. Внутри чата: (97-2)/2 = 47,5.
-        rows = [_request(1, '2026-08-07 10:00:00', reaction=2, replies=3, total=97)]
+    def test_inner_reply_is_the_average_replies_time_column(self):
+        """Так считают супервайзеры: колонка average_replies_time, первый ответ в ней учтён."""
+        rows = [_request(1, '2026-08-07 10:00:00', reaction=2, replies=3, total=97, average=40)]
         first, inner = self.ns['_chat_hourly_response_times'](rows)
         self.assertEqual(first, 2)
-        self.assertEqual(inner, 47.5)
+        self.assertEqual(inner, 40)
 
-    def test_single_reply_chats_do_not_affect_the_inner_average(self):
-        """Чат с единственным ответом ответов «внутри» не содержит вовсе."""
+    def test_inner_reply_falls_back_to_total_over_replies(self):
+        """Колонки может не быть в строке — считаем её сами тем же делением."""
+        rows = [_request(1, '2026-08-07 10:00:00', reaction=2, replies=4, total=100, average='')]
+        _first, inner = self.ns['_chat_hourly_response_times'](rows)
+        self.assertEqual(inner, 25)
+
+    def test_single_reply_chats_count_too(self):
+        """У чата с одним ответом average_replies_time есть, и в отчёте СВ он участвует."""
         rows = [_request(1, '2026-08-07 10:00:00', reaction=5, replies=1, total=5),
-                _request(2, '2026-08-07 10:10:00', reaction=10, replies=3, total=130)]
+                _request(2, '2026-08-07 10:10:00', reaction=10, replies=3, total=135)]
         _first, inner = self.ns['_chat_hourly_response_times'](rows)
-        self.assertEqual(inner, 60)
+        self.assertEqual(inner, 25)  # (5 + 45) / 2
 
-    def test_inner_average_is_weighted_by_replies(self):
-        """Средним от средних длинный диалог весил бы столько же, сколько короткий."""
+    def test_inner_average_counts_chats_not_replies(self):
+        """Простое среднее по обращениям: длинный диалог весит столько же, сколько короткий."""
         rows = [_request(1, '2026-08-07 10:00:00', reaction=0, replies=2, total=100),
-                _request(2, '2026-08-07 10:10:00', reaction=0, replies=11, total=100)]
+                _request(2, '2026-08-07 10:10:00', reaction=0, replies=10, total=100)]
         _first, inner = self.ns['_chat_hourly_response_times'](rows)
-        self.assertEqual(inner, 200 / 11)
+        self.assertEqual(inner, 30)  # (50 + 10) / 2
 
     def test_missing_numbers_are_not_zeros(self):
         """Пустая строка в Chat2Desk означает «нет данных» — нулём её считать нельзя."""
@@ -310,12 +321,13 @@ class ChatHourlyCollectTests(unittest.TestCase):
         """Время ответа по чатнику считается теми же формулами, что и итог."""
         _ns, data = self._collect()
         by_name = {o['name']: o for o in data['operators']}
-        # Сынакбай: заявки 1 и 2 → первый ответ (10+20)/2 = 15, внутри чата (80-20)/2 = 30
+        # Сынакбай: заявки 1 и 2 → первый ответ (10+20)/2 = 15,
+        # внутри чата — среднее average_replies_time: (10/1 + 80/3)/2 = 18,33
         self.assertEqual(by_name['Сынакбай']['first_reply_day'], 15)
-        self.assertEqual(by_name['Сынакбай']['inner_reply_day'], 30)
-        # Тестбаев: заявки 3 и 4 → (30+40)/2 = 35, внутри чата (90-30)/1 = 60
+        self.assertAlmostEqual(by_name['Сынакбай']['inner_reply_day'], (10 + 80 / 3) / 2)
+        # Тестбаев: заявки 3 и 4 → (30+40)/2 = 35, внутри чата (90/2 + 40/1)/2 = 42,5
         self.assertEqual(by_name['Тестбаев']['first_reply_day'], 35)
-        self.assertEqual(by_name['Тестбаев']['inner_reply_day'], 60)
+        self.assertEqual(by_name['Тестбаев']['inner_reply_day'], 42.5)
         # за час у Сынакбайа только заявка 2
         self.assertEqual(by_name['Сынакбай']['first_reply_hour'], 20)
 
@@ -372,13 +384,28 @@ class ChatHourlyCollectTests(unittest.TestCase):
         _ns, data = self._collect()
         self.assertEqual(data['first_reply_day'], 25)     # (10+20+30+40)/4
         self.assertEqual(data['first_reply_hour'], 25)    # (20+30)/2
-        self.assertEqual(data['inner_reply_day'], 40)     # ((80-20)+(90-30))/(2+1)
-        self.assertEqual(data['inner_reply_hour'], 40)
+        # Внутри чата — среднее колонки average_replies_time (= total/replies) по обращениям.
+        self.assertAlmostEqual(data['inner_reply_day'], (10 + 80 / 3 + 45 + 40) / 4)
+        self.assertAlmostEqual(data['inner_reply_hour'], (80 / 3 + 45) / 2)
 
-    def test_midnight_report_has_no_hour_block(self):
-        """В 00:00 прошедший час — уже вчерашние сутки, отдельной строкой его не показываем."""
-        _ns, data = self._collect(at='2026-08-07 00:00:00')
-        self.assertIsNone(data['hour_label'])
+    def test_midnight_report_covers_the_last_hour_of_the_previous_day(self):
+        """Час 23:00–00:00 раньше не показывал никто: день брался новый, а час был вчерашний."""
+        _ns, data = self._collect(at='2026-08-08 00:00:00')
+        self.assertEqual(data['hour_label'], '23:00–00:00')
+        self.assertEqual(data['day'], '2026-08-07')
+        self.assertTrue(data['is_previous_day'])
+        # Сутки в полуночном отчёте — вчерашние целиком, а не только что начавшиеся.
+        self.assertEqual(data['chats_day'], 4)
+
+    def test_midnight_report_says_which_day_it_is_about(self):
+        _ns, data = self._collect(at='2026-08-08 00:00:00')
+        self.assertEqual(_ns['_chat_hourly_day_words'](data), 'за сутки 07.08.2026')
+        self.assertIn('за сутки 07.08.2026', _ns['_chat_hourly_text'](data))
+
+    def test_daytime_report_talks_about_the_running_day(self):
+        _ns, data = self._collect()
+        self.assertFalse(data['is_previous_day'])
+        self.assertEqual(_ns['_chat_hourly_day_words'](data), 'с начала суток')
 
     def test_operator_list_failure_does_not_lose_the_numbers(self):
         api = _FakeChat2Desk(self.ROWS, limit=10)
@@ -466,20 +493,15 @@ class ChatHourlyTableTests(unittest.TestCase):
     def setUp(self):
         self.ns = _namespace()
 
-    def test_hour_columns_disappear_in_the_midnight_report(self):
-        """В отчёте за 00:00 часа нет — пустые колонки показывать нечестно."""
-        with_hour = [c[0] for c in self.ns['_chat_hourly_table_columns'](True)]
-        without = [c[0] for c in self.ns['_chat_hourly_table_columns'](False)]
-        self.assertIn('chats_hour', with_hour)
-        self.assertNotIn('chats_hour', without)
-        self.assertNotIn('first_hour', without)
-        self.assertNotIn('inner_hour', without)
-        self.assertIn('chats', without)
-        self.assertIn('first_day', without)
+    def test_hour_columns_are_in_every_report(self):
+        """Полуночный отчёт теперь тоже про час (23:00–00:00 вчера) — колонки не пропадают."""
+        keys = [c[0] for c in self.ns['_CHAT_HOURLY_TABLE_COLUMNS']]
+        for key in ('chats_hour', 'first_hour', 'inner_hour', 'chats', 'first_day'):
+            self.assertIn(key, keys)
 
     def test_both_response_times_are_columns_for_hour_and_day(self):
         """Ровно то, что просил владелец: время ответа в разрезе по операторам."""
-        keys = [c[0] for c in self.ns['_chat_hourly_table_columns'](True)]
+        keys = [c[0] for c in self.ns['_CHAT_HOURLY_TABLE_COLUMNS']]
         for key in ('first_hour', 'inner_hour', 'first_day', 'inner_day'):
             self.assertIn(key, keys)
 
