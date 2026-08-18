@@ -965,14 +965,15 @@ class SzovWallboardWiringTests(unittest.TestCase):
         а в один момент времени показывать разные цифры."""
         self.assertIn("useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.view)
         self.assertIn("useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader })", self.widget)
-        # таймер и запрос живут ровно в одном месте — в общем модуле
+        # таймер и запрос живут ровно в одном месте — в общем модуле. Направлений табло два,
+        # поэтому опрос заведён фабрикой: механика одна, адреса разные.
         self.assertEqual(self.shared.count("setInterval("), 1)
         self.assertNotIn("setInterval(", self.view)
         self.assertNotIn("setInterval(", self.widget)
-        snapshot_call = "fetch(`${apiBaseUrl}/api/szov_wallboard/snapshot`"
-        self.assertEqual(self.shared.count(snapshot_call), 1)
-        self.assertNotIn(snapshot_call, self.view)
-        self.assertNotIn(snapshot_call, self.widget)
+        self.assertEqual(self.shared.count("fetch(`${apiBaseUrl}${path}`"), 1)
+        self.assertEqual(self.shared.count("path: '/api/szov_wallboard/snapshot'"), 1)
+        for source in (self.view, self.widget):
+            self.assertNotIn("/api/szov_wallboard/snapshot`", source)
         # опрос останавливается, когда закрыты и раздел, и виджет
         self.assertIn("if (store.subscribers === 0) stopPolling();", self.shared)
 
@@ -1469,8 +1470,9 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
         # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])", self.api)
-        # само табло — на своём гейте, вся отбивка (настройка, предпросмотр, отправка) — на строгом
-        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 1)
+        # оба табло (линия и чаты) — на своём гейте, вся отбивка (настройка, предпросмотр,
+        # отправка) — на строгом
+        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 2)
         self.assertEqual(self.api.count("requester_id, err = _szov_broadcast_guard()"), 3)
 
     def test_preview_never_sends_anything(self):
@@ -1553,9 +1555,12 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("const [broadcastOpen, setBroadcastOpen] = useState(false);", self.view)
 
     def test_broadcast_button_follows_the_refresh_button(self):
+        """Кнопки направления «Основа» вставляются в общую шапку между «Обновить» и «На весь экран»."""
         header = self.view[self.view.index("Обновить\n"):self.view.index("На весь экран")]
-        self.assertIn("setBroadcastOpen(true)", header)
-        self.assertIn("Отбивка", header)
+        self.assertIn("{children}", header)
+        line_board = self.view[self.view.index("const LineWallboard ="):self.view.index("const ChatWallboard =")]
+        self.assertIn("setBroadcastOpen(true)", line_board)
+        self.assertIn("Отбивка", line_board)
 
     def test_recipient_row_offers_both_modes_and_removal(self):
         self.assertIn("{ key: 'always'", self.view)
@@ -1573,7 +1578,7 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         manage = manage[:manage.index("};")]
         self.assertNotIn("isSupervisorRole", manage)
         self.assertIn("{canManageBroadcast ? (", self.view)
-        self.assertIn("{canManageBroadcast ? createPortal(", self.view)
+        self.assertIn("canManageBroadcast ? createPortal(", self.view)
 
     def test_a_chat_cannot_be_added_twice(self):
         """Дубль в списке — две одинаковые отбивки в одну группу."""

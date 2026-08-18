@@ -13,6 +13,11 @@ import { useCallback, useSyncExternalStore } from 'react';
 // на установке соединения, поэтому лишний раз его не дёргаем: 15 с для стены достаточно.
 const POLL_INTERVAL_MS = 15000;
 
+// Направление «Чат» опрашиваем реже: квота Chat2Desk общая на всю компанию и уже расходуется
+// ночным синком и почасовым отчётом. Сервер всё равно держит снимок 2 минуты, поэтому чаще
+// спрашивать нечего — придёт тот же ответ, только счётчик квоты потратится.
+const CHAT_POLL_INTERVAL_MS = 60000;
+
 // Пробуждение вкладки (focus/visibilitychange) прилетает пачками — при переключении окон
 // событие приходит на каждый чих. Снимок свежее этого порога перезапрашивать незачем.
 const WAKE_REFRESH_MIN_AGE_MS = 5000;
@@ -85,6 +90,29 @@ export const STATUS_STYLE = {
     tech: { label: 'Тех.причина', chip: 'bg-violet-100 text-violet-700' },
     recall: { label: 'Перезвон', chip: 'bg-blue-100 text-blue-700' },
 };
+
+/*
+ * Статусы чатников (Chat2Desk). Цвета взяты у статусов линии, чтобы один и тот же смысл на
+ * обоих направлениях табло горел одинаково: перерыв — оранжевый, тренинг — зелёный, онлайн —
+ * синий. «Занят» на линии нет, поэтому ему достался фиолетовый — свободный цвет из той же
+ * палитры. Отпуск и «не в системе» серые: это отсутствие, а не состояние работы.
+ */
+export const CHAT_STATUS_STYLE = {
+    online: { label: 'Онлайн', chip: 'bg-blue-100 text-blue-700' },
+    busy: { label: 'Занят', chip: 'bg-violet-100 text-violet-700' },
+    training: { label: 'Тренинг', chip: 'bg-emerald-100 text-emerald-700' },
+    break: { label: 'Перерыв', chip: 'bg-orange-100 text-orange-700' },
+    tech: { label: 'Тех. перерыв', chip: 'bg-orange-100 text-orange-700' },
+    holiday: { label: 'Отпуск', chip: 'bg-slate-100 text-slate-600' },
+    offline: { label: 'Не в системе', chip: 'bg-slate-100 text-slate-500' },
+};
+
+/** Секунды -> «12,7 мин». Ось графика и плитки чатов живут в минутах: цель тоже задана в них. */
+export const formatMinutes = (seconds, digits = 1) => (
+    Number.isFinite(Number(seconds))
+        ? `${(Number(seconds) / 60).toFixed(digits).replace('.', ',')} мин`
+        : '—'
+);
 
 /*
  * Тон показателя. Два вида, и путать их нельзя:
@@ -374,27 +402,12 @@ export const sanitizeWidgetMetrics = (keys) => {
  * могут расходиться. Опрос запускается с появлением первого подписчика и останавливается,
  * когда закрыли и раздел, и виджет; последний снимок остаётся в памяти, чтобы при возврате
  * экран не мигал пустотой.
+ *
+ * Направлений табло два («Основа» и «Чат»), у каждого свой источник и свой темп опроса,
+ * поэтому опрос собран фабрикой: одна и та же механика (общий снимок на всех подписчиков,
+ * пауза на скрытой вкладке, догрузка при возврате в окно) заводится дважды с разными
+ * адресами. Копировать её второй раз нельзя — разойдётся ровно там, где чинили один раз.
  */
-const store = {
-    state: { snapshot: null, error: null, loading: true },
-    listeners: new Set(),
-    source: { apiBaseUrl: '', buildHeaders: null },
-    timer: null,
-    controller: null,
-    inFlight: false,
-    lastFetchAt: 0,
-    subscribers: 0,
-};
-
-const notify = () => { store.listeners.forEach((listener) => listener()); };
-
-const patchState = (next) => {
-    store.state = { ...store.state, ...next };
-    notify();
-};
-
-const getStoreState = () => store.state;
-
 const isTabVisible = () => {
     if (typeof document === 'undefined') return true;
     return typeof document.visibilityState === 'string'
@@ -402,101 +415,131 @@ const isTabVisible = () => {
         : !document.hidden;
 };
 
-async function fetchSnapshot({ silent = false } = {}) {
-    // Защита от наложения запросов: снимок просят и таймер, и фокус окна, и кнопка «Обновить».
-    if (store.inFlight) return;
-    const { apiBaseUrl, buildHeaders } = store.source;
-    if (!apiBaseUrl) return;
-    store.inFlight = true;
-    const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    store.controller = controller;
-    if (!silent) patchState({ loading: true });
-    try {
-        const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/snapshot`, {
-            headers: buildHeaders ? buildHeaders({ Accept: 'application/json' }) : { Accept: 'application/json' },
-            credentials: 'include',
-            signal: controller?.signal,
-        });
-        if (!response.ok) {
-            let detail = '';
-            try {
-                const body = await response.json();
-                detail = body?.error || body?.detail || '';
-            } catch (parseError) {
-                detail = '';
-            }
-            throw new Error(detail || `Сервер ответил ${response.status}`);
-        }
-        const data = await response.json();
-        store.lastFetchAt = Date.now();
-        patchState({ snapshot: data, error: null });
-    } catch (requestError) {
-        if (requestError?.name === 'AbortError') return;
-        // Пока есть последний снимок — экран на стене не гасим, просто помечаем расхождение.
-        patchState({ error: requestError?.message || 'Не удалось получить данные' });
-    } finally {
-        store.inFlight = false;
-        store.controller = null;
-        if (store.state.loading) patchState({ loading: false });
-    }
-}
-
-const handleWake = () => {
-    if (!isTabVisible()) return;
-    if (Date.now() - store.lastFetchAt < WAKE_REFRESH_MIN_AGE_MS) return;
-    fetchSnapshot({ silent: Boolean(store.state.snapshot) });
-};
-
-function startPolling() {
-    if (typeof window === 'undefined') return;
-    fetchSnapshot({ silent: Boolean(store.state.snapshot) });
-    store.timer = window.setInterval(() => {
-        // Скрытую вкладку не опрашиваем: незачем дёргать прокси Oktell впустую.
-        if (isTabVisible()) fetchSnapshot({ silent: true });
-    }, POLL_INTERVAL_MS);
-    document.addEventListener('visibilitychange', handleWake);
-    window.addEventListener('focus', handleWake);
-}
-
-function stopPolling() {
-    if (typeof window === 'undefined') return;
-    if (store.timer) window.clearInterval(store.timer);
-    store.timer = null;
-    document.removeEventListener('visibilitychange', handleWake);
-    window.removeEventListener('focus', handleWake);
-    store.controller?.abort?.();
-}
-
-const subscribeSnapshot = (listener) => {
-    store.listeners.add(listener);
-    store.subscribers += 1;
-    if (store.subscribers === 1) startPolling();
-    return () => {
-        store.listeners.delete(listener);
-        store.subscribers = Math.max(0, store.subscribers - 1);
-        if (store.subscribers === 0) stopPolling();
+function createSnapshotFeed({ path, pollIntervalMs }) {
+    const store = {
+        state: { snapshot: null, error: null, loading: true },
+        listeners: new Set(),
+        source: { apiBaseUrl: '', buildHeaders: null },
+        timer: null,
+        controller: null,
+        inFlight: false,
+        lastFetchAt: 0,
+        subscribers: 0,
     };
-};
 
-/**
- * Снимок табло: {snapshot, error, loading, refresh}.
- *
- * Источник (адрес API и сборщик заголовков) обновляем в рендере, а не в эффекте: первый
- * запрос уходит из subscribe, то есть ДО эффектов, и без адреса он бы просто не состоялся.
- */
-export function useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader }) {
-    store.source = { apiBaseUrl, buildHeaders: withAccessTokenHeader };
-    const state = useSyncExternalStore(subscribeSnapshot, getStoreState, getStoreState);
-    const refresh = useCallback(() => { fetchSnapshot({ silent: true }); }, []);
-    return { snapshot: state.snapshot, error: state.error, loading: state.loading, refresh };
+    const getStoreState = () => store.state;
+
+    const patchState = (next) => {
+        store.state = { ...store.state, ...next };
+        store.listeners.forEach((listener) => listener());
+    };
+
+    async function fetchSnapshot({ silent = false } = {}) {
+        // Защита от наложения запросов: снимок просят и таймер, и фокус окна, и кнопка «Обновить».
+        if (store.inFlight) return;
+        const { apiBaseUrl, buildHeaders } = store.source;
+        if (!apiBaseUrl) return;
+        store.inFlight = true;
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        store.controller = controller;
+        if (!silent) patchState({ loading: true });
+        try {
+            const response = await fetch(`${apiBaseUrl}${path}`, {
+                headers: buildHeaders ? buildHeaders({ Accept: 'application/json' }) : { Accept: 'application/json' },
+                credentials: 'include',
+                signal: controller?.signal,
+            });
+            if (!response.ok) {
+                let detail = '';
+                try {
+                    const body = await response.json();
+                    detail = body?.error || body?.detail || '';
+                } catch (parseError) {
+                    detail = '';
+                }
+                throw new Error(detail || `Сервер ответил ${response.status}`);
+            }
+            const data = await response.json();
+            store.lastFetchAt = Date.now();
+            patchState({ snapshot: data, error: null });
+        } catch (requestError) {
+            if (requestError?.name === 'AbortError') return;
+            // Пока есть последний снимок — экран на стене не гасим, просто помечаем расхождение.
+            patchState({ error: requestError?.message || 'Не удалось получить данные' });
+        } finally {
+            store.inFlight = false;
+            store.controller = null;
+            if (store.state.loading) patchState({ loading: false });
+        }
+    }
+
+    const handleWake = () => {
+        if (!isTabVisible()) return;
+        if (Date.now() - store.lastFetchAt < WAKE_REFRESH_MIN_AGE_MS) return;
+        fetchSnapshot({ silent: Boolean(store.state.snapshot) });
+    };
+
+    function startPolling() {
+        if (typeof window === 'undefined') return;
+        fetchSnapshot({ silent: Boolean(store.state.snapshot) });
+        store.timer = window.setInterval(() => {
+            // Скрытую вкладку не опрашиваем: незачем дёргать источник впустую.
+            if (isTabVisible()) fetchSnapshot({ silent: true });
+        }, pollIntervalMs);
+        document.addEventListener('visibilitychange', handleWake);
+        window.addEventListener('focus', handleWake);
+    }
+
+    function stopPolling() {
+        if (typeof window === 'undefined') return;
+        if (store.timer) window.clearInterval(store.timer);
+        store.timer = null;
+        document.removeEventListener('visibilitychange', handleWake);
+        window.removeEventListener('focus', handleWake);
+        store.controller?.abort?.();
+    }
+
+    const subscribeSnapshot = (listener) => {
+        store.listeners.add(listener);
+        store.subscribers += 1;
+        if (store.subscribers === 1) startPolling();
+        return () => {
+            store.listeners.delete(listener);
+            store.subscribers = Math.max(0, store.subscribers - 1);
+            if (store.subscribers === 0) stopPolling();
+        };
+    };
+
+    /**
+     * Снимок: {snapshot, error, loading, refresh}.
+     *
+     * Источник (адрес API и сборщик заголовков) обновляем в рендере, а не в эффекте: первый
+     * запрос уходит из subscribe, то есть ДО эффектов, и без адреса он бы просто не состоялся.
+     */
+    return function useSnapshot({ apiBaseUrl, withAccessTokenHeader }) {
+        store.source = { apiBaseUrl, buildHeaders: withAccessTokenHeader };
+        const state = useSyncExternalStore(subscribeSnapshot, getStoreState, getStoreState);
+        const refresh = useCallback(() => { fetchSnapshot({ silent: true }); }, []);
+        return { snapshot: state.snapshot, error: state.error, loading: state.loading, refresh };
+    };
 }
+
+export const useSzovWallboardSnapshot = createSnapshotFeed({
+    path: '/api/szov_wallboard/snapshot',
+    pollIntervalMs: POLL_INTERVAL_MS,
+});
+
+export const useSzovChatWallboardSnapshot = createSnapshotFeed({
+    path: '/api/szov_wallboard/chat_snapshot',
+    pollIntervalMs: CHAT_POLL_INTERVAL_MS,
+});
 
 /** Текст «данные замерли»: ошибка запроса или устаревший снимок из кэша сервера. */
-export const wallboardStaleNotice = (snapshot, error) => {
+export const wallboardStaleNotice = (snapshot, error, source = 'Oktell') => {
     if (error) return error;
     if (snapshot?.stale) {
         const age = Number(snapshot.age_seconds);
-        return `Oktell не отвечает, данные ${Number.isFinite(age) ? `${formatDuration(age)} назад` : 'устарели'}`;
+        return `${source} не отвечает, данные ${Number.isFinite(age) ? `${formatDuration(age)} назад` : 'устарели'}`;
     }
     return null;
 };

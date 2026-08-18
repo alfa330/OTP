@@ -36,6 +36,7 @@ def _status_import_namespace():
         "_status_import_resolve_break_note_label",
         "_status_import_resolve_display_state",
         "_status_import_secure_filename_and_ext",
+        "_operator_info_is_chat_manager",
         "_status_import_build_operator_lookup",
         "_status_import_build_status_events",
         "_status_import_split_segment_by_day",

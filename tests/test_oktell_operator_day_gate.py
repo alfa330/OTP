@@ -187,7 +187,8 @@ class OperatorModelGateTests(unittest.TestCase):
 
 class OperatorLookupRestrictTests(unittest.TestCase):
     def setUp(self):
-        ns = _extract_functions(["_status_import_build_operator_lookup"])
+        ns = _extract_functions(["_operator_info_is_chat_manager",
+                                 "_status_import_build_operator_lookup"])
         self.build_lookup = ns["_status_import_build_operator_lookup"]
         self.ns = ns
         # Минимальный variants-стаб: один ключ = нормализованное имя.

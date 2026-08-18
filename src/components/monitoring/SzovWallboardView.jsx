@@ -15,12 +15,18 @@ import {
     formatDuration,
     formatInt,
     readWallboardMetric,
+    useSzovChatWallboardSnapshot,
     useSzovWallboardSnapshot,
     wallboardStaleNotice,
 } from './szovWallboardShared';
+import SzovChatWallboardBody from './SzovChatWallboard';
 
 /*
- * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108).
+ * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108) и чатов.
+ *
+ * Направлений два, переключатель в шапке: «Основа» (входящая линия Oktell, весь код этого
+ * файла) и «Чат» (Chat2Desk, SzovChatWallboard.jsx). Общие у них шапка, полноэкранный режим
+ * и механика опроса; всё остальное у каждого своё, потому что и источники разные.
  *
  * Экран рассчитан на вывод на стену, поэтому:
  *   - обновляется сам, без перезагрузки страницы (опрос раз в 15 с, один общий снапшот);
@@ -184,26 +190,28 @@ const BROADCAST_MODES = [
 
 const modeLabel = (key) => (BROADCAST_MODES.find((mode) => mode.key === key) || BROADCAST_MODES[0]).label;
 
-/** Сегментированный переключатель режима — тот же, что в остальных разделах. */
-const ModeSwitch = ({ value, disabled, onChange }) => (
+/** Сегментированный переключатель — тот же, что в остальных разделах. */
+const SegmentedSwitch = ({ value, options, disabled, onChange }) => (
     <div className="flex rounded-xl bg-slate-100 p-1">
-        {BROADCAST_MODES.map((mode) => (
+        {options.map((option) => (
             <button
-                key={mode.key}
+                key={option.key}
                 type="button"
                 disabled={disabled}
-                onClick={() => { if (value !== mode.key) onChange(mode.key); }}
-                title={mode.hint}
+                onClick={() => { if (value !== option.key) onChange(option.key); }}
+                title={option.hint}
                 className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all disabled:opacity-50 ${
-                    value === mode.key
+                    value === option.key
                         ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                         : 'text-slate-500 hover:text-slate-700'}`}
             >
-                {mode.label}
+                {option.label}
             </button>
         ))}
     </div>
 );
+
+const ModeSwitch = (props) => <SegmentedSwitch options={BROADCAST_MODES} {...props} />;
 
 /** Строка истории «кто менял» человеческим языком. */
 const historyLine = (settings) => {
@@ -522,9 +530,86 @@ const WallboardBody = ({ snapshot, scale }) => {
     );
 };
 
-export default function SzovWallboardView(props) {
-    const { apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast, widgetOpen, onToggleWidget } = props;
+/*
+ * Направления табло. «Основа» — входящая линия Oktell, «Чат» — Chat2Desk: разные источники,
+ * разный темп опроса и разный набор показателей, поэтому каждое направление живёт своим
+ * компонентом со своим снимком. Рисуется всегда только выбранное — иначе закрытое направление
+ * продолжало бы опрашивать свой источник впустую (а квота Chat2Desk общая на компанию).
+ */
+const DIRECTIONS = [
+    { key: 'osnova', label: 'Основа', hint: 'Входящая линия: Oktell' },
+    { key: 'chat', label: 'Чат', hint: 'Чаты: Chat2Desk' },
+];
 
+const directionStorageKey = (userId) => `otp:szov-wallboard-direction${userId ? `:${userId}` : ''}`;
+
+const readStoredDirection = (userId) => {
+    if (typeof window === 'undefined') return DIRECTIONS[0].key;
+    try {
+        const stored = window.localStorage.getItem(directionStorageKey(userId));
+        return DIRECTIONS.some((item) => item.key === stored) ? stored : DIRECTIONS[0].key;
+    } catch (error) {
+        return DIRECTIONS[0].key;
+    }
+};
+
+const writeStoredDirection = (userId, direction) => {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage.setItem(directionStorageKey(userId), direction);
+    } catch (error) {
+        // Выбор направления — предпочтение браузера: не сохранилось, откроется «Основа».
+    }
+};
+
+/*
+ * Шапка у обоих направлений одна: заголовок, переключатель, пометка о замерших данных, кнопки.
+ * Различаются только подпись под заголовком и кнопки, которые есть лишь у «Основы» (отбивка и
+ * виджет собраны по показателям линии).
+ */
+const WallboardHeader = ({
+    subtitle, direction, onDirectionChange, staleNotice, loading, onRefresh, onFullscreen, children,
+}) => (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+            <h1 className="text-[26px] font-semibold text-slate-900">Табло СЗоВ</h1>
+            <p className="mt-1 text-[14px] text-slate-500">{subtitle}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+            <SegmentedSwitch value={direction} options={DIRECTIONS} onChange={onDirectionChange} />
+            {staleNotice ? (
+                <span className="rounded-full bg-amber-50 px-3 py-1 text-[12px] font-medium text-amber-700 ring-1 ring-amber-200">
+                    {staleNotice}
+                </span>
+            ) : null}
+            <button type="button" className={iosBtnGhost} onClick={() => onRefresh()} disabled={loading}>
+                <FaIcon className="fas fa-rotate"></FaIcon>
+                Обновить
+            </button>
+            {children}
+            <button type="button" className={iosBtnGhost} onClick={onFullscreen}>
+                <FaIcon className="fas fa-expand"></FaIcon>
+                На весь экран
+            </button>
+        </div>
+    </div>
+);
+
+/** Пустые состояния (грузим / источник молчит) — одни на оба направления. */
+const WallboardPlaceholder = ({ header, message, tone = 'muted' }) => (
+    <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+        {header}
+        <div className={`${iosCard} p-6 text-[13px] ${tone === 'error' ? 'text-rose-600' : 'text-slate-500'}`}>
+            {message}
+        </div>
+    </div>
+);
+
+/** Направление «Основа»: входящая линия Oktell. */
+const LineWallboard = ({
+    apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast, widgetOpen, onToggleWidget,
+    direction, onDirectionChange,
+}) => {
     // Снимок и опрос общие с виджетом: один запрос к Oktell на оба экрана, одни цифры в обоих.
     const { snapshot, error, loading, refresh } = useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -536,90 +621,72 @@ export default function SzovWallboardView(props) {
     const widgetSupported = useMemo(() => canOpenWallboardWidget(), []);
 
     const header = (
-        <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-                <h1 className="text-[26px] font-semibold text-slate-900">Табло СЗоВ</h1>
-                <p className="mt-1 text-[14px] text-slate-500">
-                    Входящая линия в реальном времени
-                    {snapshot?.oktell_now ? ` · данные Oktell на ${formatClock(snapshot.oktell_now)}` : ''}
-                </p>
-            </div>
-            <div className="flex items-center gap-2">
-                {staleNotice ? (
-                    <span className="rounded-full bg-amber-50 px-3 py-1 text-[12px] font-medium text-amber-700 ring-1 ring-amber-200">
-                        {staleNotice}
-                    </span>
-                ) : null}
-                <button type="button" className={iosBtnGhost} onClick={() => refresh()} disabled={loading}>
-                    <FaIcon className="fas fa-rotate"></FaIcon>
-                    Обновить
+        <WallboardHeader
+            subtitle={`Входящая линия в реальном времени${
+                snapshot?.oktell_now ? ` · данные Oktell на ${formatClock(snapshot.oktell_now)}` : ''}`}
+            direction={direction}
+            onDirectionChange={onDirectionChange}
+            staleNotice={staleNotice}
+            loading={loading}
+            onRefresh={refresh}
+            onFullscreen={() => setFullscreen(true)}
+        >
+            {canManageBroadcast ? (
+                <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
+                    <FaIcon className="fas fa-paper-plane"></FaIcon>
+                    Отбивка
                 </button>
-                {canManageBroadcast ? (
-                    <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
-                        <FaIcon className="fas fa-paper-plane"></FaIcon>
-                        Отбивка
-                    </button>
-                ) : null}
-                {/* Виджет — отдельное окно поверх других окон, и оно остаётся открытым после ухода
-                    из раздела: он для того и нужен, чтобы следить за линией, занимаясь другим.
-                    Набор показателей выбирается в самом окне. */}
-                {onToggleWidget ? (
-                    <button
-                        type="button"
-                        className={`${iosBtnGhost} disabled:opacity-40 ${widgetOpen ? 'bg-slate-100 text-slate-900' : ''}`}
-                        disabled={!widgetSupported}
-                        title={widgetSupported
-                            ? 'Окно поверх других программ: выберите в нём, что мониторить'
-                            : 'Окно поверх других программ умеют Chrome и Edge — в этом браузере недоступно'}
-                        onClick={() => onToggleWidget(!widgetOpen)}
-                    >
-                        <FaIcon className="fas fa-picture-in-picture"></FaIcon>
-                        {widgetOpen ? 'Виджет открыт' : 'Виджет'}
-                    </button>
-                ) : null}
-                <button type="button" className={iosBtnGhost} onClick={() => setFullscreen(true)}>
-                    <FaIcon className="fas fa-expand"></FaIcon>
-                    На весь экран
-                </button>
-            </div>
-            {/* Через портал, как и полноэкранный режим: модалка не должна зависеть от
-                вертикальных отступов шапки, а шапка рисуется во всех трёх состояниях экрана. */}
-            {canManageBroadcast ? createPortal(
-                <BroadcastModal
-                    open={broadcastOpen}
-                    onClose={() => setBroadcastOpen(false)}
-                    apiBaseUrl={apiBaseUrl}
-                    withAccessTokenHeader={withAccessTokenHeader}
-                    showToast={showToast}
-                />,
-                document.body,
             ) : null}
-        </div>
+            {/* Виджет — отдельное окно поверх других окон, и оно остаётся открытым после ухода
+                из раздела: он для того и нужен, чтобы следить за линией, занимаясь другим.
+                Набор показателей выбирается в самом окне. */}
+            {onToggleWidget ? (
+                <button
+                    type="button"
+                    className={`${iosBtnGhost} disabled:opacity-40 ${widgetOpen ? 'bg-slate-100 text-slate-900' : ''}`}
+                    disabled={!widgetSupported}
+                    title={widgetSupported
+                        ? 'Окно поверх других программ: выберите в нём, что мониторить'
+                        : 'Окно поверх других программ умеют Chrome и Edge — в этом браузере недоступно'}
+                    onClick={() => onToggleWidget(!widgetOpen)}
+                >
+                    <FaIcon className="fas fa-picture-in-picture"></FaIcon>
+                    {widgetOpen ? 'Виджет открыт' : 'Виджет'}
+                </button>
+            ) : null}
+        </WallboardHeader>
     );
 
-    if (!snapshot && loading) {
-        return (
-            <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
-                {header}
-                <div className={`${iosCard} p-6 text-[13px] text-slate-500`}>Загружаем данные Oktell…</div>
-            </div>
-        );
-    }
+    /* Через портал, как и полноэкранный режим: модалка не должна зависеть от вертикальных
+       отступов шапки, а шапка рисуется во всех трёх состояниях экрана. */
+    const broadcastModal = canManageBroadcast ? createPortal(
+        <BroadcastModal
+            open={broadcastOpen}
+            onClose={() => setBroadcastOpen(false)}
+            apiBaseUrl={apiBaseUrl}
+            withAccessTokenHeader={withAccessTokenHeader}
+            showToast={showToast}
+        />,
+        document.body,
+    ) : null;
 
     if (!snapshot) {
         return (
-            <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
-                {header}
-                <div className={`${iosCard} p-6 text-[13px] text-rose-600`}>
-                    {error || 'Данные недоступны'}
-                </div>
-            </div>
+            <>
+                <WallboardPlaceholder
+                    header={header}
+                    message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
+                    tone={loading ? 'muted' : 'error'}
+                />
+                {broadcastModal}
+            </>
         );
     }
 
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
+            {broadcastModal}
             <WallboardBody snapshot={snapshot} scale={1} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
@@ -636,5 +703,92 @@ export default function SzovWallboardView(props) {
                 document.body,
             ) : null}
         </div>
+    );
+};
+
+/** Направление «Чат»: Chat2Desk. */
+const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, direction, onDirectionChange }) => {
+    const { snapshot, error, loading, refresh } = useSzovChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
+    const [fullscreen, setFullscreen] = useState(false);
+
+    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, 'Chat2Desk'), [error, snapshot]);
+
+    const header = (
+        <WallboardHeader
+            subtitle={`Чаты в реальном времени${
+                snapshot?.chat2desk_now ? ` · данные Chat2Desk на ${formatClock(snapshot.chat2desk_now)}` : ''}`}
+            direction={direction}
+            onDirectionChange={onDirectionChange}
+            staleNotice={staleNotice}
+            loading={loading}
+            onRefresh={refresh}
+            onFullscreen={() => setFullscreen(true)}
+        />
+    );
+
+    if (!snapshot) {
+        return (
+            <WallboardPlaceholder
+                header={header}
+                message={loading ? 'Загружаем данные Chat2Desk…' : (error || 'Данные недоступны')}
+                tone={loading ? 'muted' : 'error'}
+            />
+        );
+    }
+
+    return (
+        <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
+            {header}
+            <SzovChatWallboardBody snapshot={snapshot} scale={1} />
+            {fullscreen ? createPortal(
+                <FullscreenSheet
+                    open
+                    wide
+                    z={FULLSCREEN_Z}
+                    icon="fa-comments"
+                    title="Табло СЗоВ · чаты"
+                    subtitle={`${snapshot?.chat2desk_now ? `Данные Chat2Desk на ${formatClock(snapshot.chat2desk_now)} · ` : ''}Esc чтобы выйти`}
+                    onClose={() => setFullscreen(false)}
+                >
+                    <SzovChatWallboardBody snapshot={snapshot} scale={1.35} />
+                </FullscreenSheet>,
+                document.body,
+            ) : null}
+        </div>
+    );
+};
+
+export default function SzovWallboardView(props) {
+    const { user, apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast, widgetOpen, onToggleWidget } = props;
+    const userId = user?.id;
+    // Выбор направления запоминаем: чат-менеджеру незачем каждый раз переключаться с линии.
+    const [direction, setDirection] = useState(() => readStoredDirection(userId));
+
+    const changeDirection = useCallback((next) => {
+        setDirection(next);
+        writeStoredDirection(userId, next);
+    }, [userId]);
+
+    if (direction === 'chat') {
+        return (
+            <ChatWallboard
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                direction={direction}
+                onDirectionChange={changeDirection}
+            />
+        );
+    }
+    return (
+        <LineWallboard
+            apiBaseUrl={apiBaseUrl}
+            withAccessTokenHeader={withAccessTokenHeader}
+            showToast={showToast}
+            canManageBroadcast={canManageBroadcast}
+            widgetOpen={widgetOpen}
+            onToggleWidget={onToggleWidget}
+            direction={direction}
+            onDirectionChange={changeDirection}
+        />
     );
 }
