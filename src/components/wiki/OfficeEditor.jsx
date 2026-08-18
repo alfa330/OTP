@@ -4,6 +4,7 @@ import { Loader2, MapPin, Phone, Wifi } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
 import OfficeMap from './OfficeMap';
 import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
+import { Field } from './formField';
 
 /* Форма офиса: адрес, карта и график.
  *
@@ -30,14 +31,6 @@ const PRESETS = [
     { label: 'Пн–Вс 09:00–19:00', days: DAY_CODES, from: '09:00', to: '19:00' },
     { label: 'Пн–Пт 10:00–19:00', days: WORKDAYS, from: '10:00', to: '19:00' },
 ];
-
-const Field = ({ label, hint, children }) => (
-    <div>
-        <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">{label}</label>
-        {children}
-        {hint && <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">{hint}</p>}
-    </div>
-);
 
 const TimeInput = ({ value, onChange, disabled }) => (
     <input

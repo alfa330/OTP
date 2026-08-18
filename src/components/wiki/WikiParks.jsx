@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, Building2, Check, Globe, Loader2, MapPin, Percent,
+    Archive, ArchiveRestore, Building2, Globe, Loader2, MapPin, Percent,
     Phone, Plus, Search, Tag, Pencil,
 } from 'lucide-react';
 import {
@@ -9,6 +9,7 @@ import {
     IosBadge, IosModal,
 } from '../ui/ios';
 import useStableCallback from './useStableCallback';
+import ParkEditor from './ParkEditor';
 
 /* Таксопарки и акции.
  *
@@ -28,81 +29,6 @@ const emptyPark = () => ({
     name: '', city: '', phone: '', address: '', website: '', commission: '', description: '',
     offices: [],
 });
-
-/* Офисы парка.
- *
- * Связь «офис ↔ парк» настраивается здесь, а не в форме офиса: офис отвечает
- * за место (адрес, точка на карте, часы), а кому он принадлежит — вопрос
- * парка. Здесь же задаётся телефон этого парка в этом офисе: в исходном
- * справочнике по одному адресу у разных парков были разные номера.
- */
-const ParkOffices = ({ draft, setDraft, offices }) => {
-    const linkFor = (officeId) => draft.offices.find((link) => link.office_id === officeId);
-
-    const toggle = (officeId) => setDraft((prev) => ({
-        ...prev,
-        offices: prev.offices.find((link) => link.office_id === officeId)
-            ? prev.offices.filter((link) => link.office_id !== officeId)
-            : [...prev.offices, { office_id: officeId, phone: '' }],
-    }));
-
-    const setPhone = (officeId, phone) => setDraft((prev) => ({
-        ...prev,
-        offices: prev.offices.map((link) => (
-            link.office_id === officeId ? { ...link, phone } : link)),
-    }));
-
-    if (offices.length === 0) {
-        return (
-            <p className="rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] leading-relaxed text-slate-500">
-                Справочник офисов пуст — заполните вкладку «Офисы», тогда их можно будет
-                привязать к парку.
-            </p>
-        );
-    }
-
-    return (
-        <div className="max-h-[260px] divide-y divide-slate-100 overflow-y-auto rounded-xl border border-slate-200">
-            {offices.map((office) => {
-                const link = linkFor(office.id);
-                return (
-                    <div key={office.id} className="px-3 py-2">
-                        <div className="flex items-center gap-2.5">
-                            <button
-                                type="button"
-                                onClick={() => toggle(office.id)}
-                                className={`grid h-5 w-5 shrink-0 place-items-center rounded-md border transition ${
-                                    link
-                                        ? 'border-indigo-600 bg-indigo-600 text-white'
-                                        : 'border-slate-300 bg-white text-transparent'
-                                }`}
-                                aria-label={link ? `Убрать офис ${office.name}` : `Добавить офис ${office.name}`}
-                            >
-                                <Check size={13} />
-                            </button>
-                            <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
-                                {office.name}
-                            </span>
-                            {office.city && (
-                                <span className="shrink-0 text-[11.5px] text-slate-400">{office.city}</span>
-                            )}
-                        </div>
-                        {link && (
-                            <input
-                                className={`${iosInput} mt-1.5 h-9`}
-                                value={link.phone || ''}
-                                placeholder={office.phone
-                                    ? `телефон офиса: ${office.phone} — оставьте пустым, если тот же`
-                                    : 'Телефон этого парка в этом офисе'}
-                                onChange={(e) => setPhone(office.id, e.target.value)}
-                            />
-                        )}
-                    </div>
-                );
-            })}
-        </div>
-    );
-};
 
 const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => (
     <div className={`${iosCard} p-4`}>
@@ -386,56 +312,7 @@ export default function WikiParks({ base, headers, showToast }) {
                 )}
             >
                 {draft && (
-                    <div className="space-y-3">
-                        {[
-                            ['name', 'Название', 'Например: iTaxi'],
-                            ['city', 'Город', 'Алматы'],
-                            ['phone', 'Телефон', '+7 700 000 00 00'],
-                            ['address', 'Адрес', ''],
-                            ['website', 'Сайт', 'https://'],
-                        ].map(([key, label, placeholder]) => (
-                            <div key={key}>
-                                <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">{label}</label>
-                                <input
-                                    className={iosInput}
-                                    value={draft[key]}
-                                    autoFocus={key === 'name'}
-                                    placeholder={placeholder}
-                                    onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                                />
-                            </div>
-                        ))}
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                Комиссия, %
-                            </label>
-                            <input
-                                className={`${iosInput} tabular-nums`}
-                                inputMode="decimal"
-                                value={draft.commission}
-                                onChange={(e) => setDraft((prev) => ({ ...prev, commission: e.target.value.replace(/[^\d.]/g, '') }))}
-                                placeholder="3.5"
-                            />
-                        </div>
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Описание</label>
-                            <textarea
-                                className={`${iosInput} min-h-[76px] resize-y`}
-                                value={draft.description}
-                                onChange={(e) => setDraft((prev) => ({ ...prev, description: e.target.value }))}
-                            />
-                        </div>
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                Офисы парка
-                            </label>
-                            <ParkOffices draft={draft} setDraft={setDraft} offices={offices} />
-                            <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                Адрес, карта и график живут в самом офисе — на вкладке «Офисы».
-                                Здесь выбирается, какие из них принадлежат этому парку.
-                            </p>
-                        </div>
-                    </div>
+                    <ParkEditor draft={draft} setDraft={setDraft} offices={offices} />
                 )}
             </IosModal>
         </div>
