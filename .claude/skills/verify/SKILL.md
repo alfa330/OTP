@@ -21,6 +21,18 @@ docker run -d --name otp-verify -e POSTGRES_PASSWORD=verify -e POSTGRES_DB=otp_v
 пропущенные триггеры — это норма для пустой базы). Отдел `szov` схема заводит сама,
 поэтому сидировать его повторно нельзя — `departments_code_key` упадёт.
 
+Колонки вики схема НЕ заводит, а `db.get_departments()` их читает, поэтому любой раздел,
+спрашивающий отделы, падает с `column d.wiki_enabled does not exist`. Лечится один раз:
+
+```bash
+docker exec otp-verify psql -U postgres -d otp_verify \
+  -c "ALTER TABLE departments ADD COLUMN IF NOT EXISTS wiki_enabled BOOLEAN NOT NULL DEFAULT TRUE"
+```
+
+Пароль в `users.password_hash` (не `password`); сотрудников для разделов, которые матчат
+людей по ФИО (табло по чатам, импорт статусов), сидировать НАСТОЯЩИМИ ФИО из боевой
+базы — на выдуманных именах экран честно покажет нули.
+
 ## Приложение
 
 ```bash
