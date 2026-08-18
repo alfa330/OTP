@@ -16,16 +16,17 @@ from tests.test_szov_wallboard import _FakeDb, _load_names
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Имена как их отдаёт Chat2Desk («Имя Фамилия») и как они записаны в OTP («Фамилия Имя Отчество»).
+# Имена вымышленные, но в тех же двух формах, что расходятся в жизни: Chat2Desk отдаёт
+# «Имя Фамилия», в OTP человек записан как «Фамилия Имя Отчество».
 CHAT_MANAGERS = {
-    'Анет Толегенов': {'id': 235, 'name': 'Толегенов Анет Серикулы',
-                       'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
-    'Жанеля Нургазы': {'id': 149, 'name': 'Нургазы Жанеля Багдаткызы',
-                       'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
-    'Асель Серикбаева': {'id': 18, 'name': 'Серикбаева Асел Куралбеккызы',
-                         'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
-    'Жаркынай Шаяхмет': {'id': 37, 'name': 'Шаяхмет Жаркынай Канапийкызы',
-                         'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
+    'Алия Тестова': {'id': 235, 'name': 'Тестова Алия Тестовна',
+                     'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
+    'Бекзат Примеров': {'id': 149, 'name': 'Примеров Бекзат Примерулы',
+                        'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
+    'Дана Ночная': {'id': 18, 'name': 'Ночная Дана Сменовна',
+                    'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
+    'Ерлан Учебный': {'id': 37, 'name': 'Учебный Ерлан Тренингулы',
+                      'calculation_model_code': 'chat_manager', 'direction_name': 'Чат менеджер'},
 }
 
 NAMES = {
@@ -74,7 +75,7 @@ def _operator_row(name, online=1, offline_type=None, dialogs=0, status='enabled'
             'offline_type': offline_type, 'opened_dialogs': dialogs}
 
 
-def _request(start, reaction, replies, total, operator='Анет Толегенов', end='x'):
+def _request(start, reaction, replies, total, operator='Алия Тестова', end='x'):
     return {'request_start': start, 'request_end': end, 'request_type': 'common',
             'operator_name': operator, 'reaction_time': reaction,
             'replies': replies, 'total_replies_time': total}
@@ -179,40 +180,40 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
     def test_only_status_events_of_szov_chat_managers_get_in(self):
         ns = self._namespace()
         events = [
-            _event('Анет Толегенов', 'online', '2026-08-18 09:00:00'),
-            _event('Анет Толегенов', 'take_chat', '2026-08-18 09:05:00'),
+            _event('Алия Тестова', 'online', '2026-08-18 09:00:00'),
+            _event('Алия Тестова', 'take_chat', '2026-08-18 09:05:00'),
             _event('Посторонний Оператор', 'online', '2026-08-18 09:10:00'),
-            _event('Администратор sales@mail.ru', 'offline', '2026-08-18 09:15:00', role='admin'),
+            _event('Администратор компании', 'offline', '2026-08-18 09:15:00', role='admin'),
         ]
         lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
         timelines, unmatched = ns['_szov_chat_wallboard_timelines'](events, lookup)
-        self.assertEqual(list(timelines), ['Анет Толегенов'])
-        self.assertEqual([entry[1] for entry in timelines['Анет Толегенов']], ['online'])
+        self.assertEqual(list(timelines), ['Алия Тестова'])
+        self.assertEqual([entry[1] for entry in timelines['Алия Тестова']], ['online'])
         # Админская учётка чатов не ведёт и в «потерянные имена» не попадает.
         self.assertEqual(unmatched, ['Посторонний Оператор'])
 
     def test_night_shift_is_backfilled_from_midnight(self):
         """Первое событие суток — выход: человек работал с полуночи, а не появился в 02:00."""
         ns = self._namespace()
-        events = [_event('Асель Серикбаева', 'logout', '2026-08-18 02:00:45')]
+        events = [_event('Дана Ночная', 'logout', '2026-08-18 02:00:45')]
         lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
         timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
-        entries = timelines['Асель Серикбаева']
+        entries = timelines['Дана Ночная']
         self.assertEqual(entries[0][0], 0)
         self.assertEqual(entries[0][1], 'online')
         self.assertEqual(entries[1][1], 'offline')
 
     def test_morning_login_is_not_backfilled(self):
         ns = self._namespace()
-        events = [_event('Анет Толегенов', 'login', '2026-08-18 09:00:00'),
-                  _event('Анет Толегенов', 'online', '2026-08-18 09:00:00')]
+        events = [_event('Алия Тестова', 'login', '2026-08-18 09:00:00'),
+                  _event('Алия Тестова', 'online', '2026-08-18 09:00:00')]
         lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
         timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
-        self.assertEqual(timelines['Анет Толегенов'][0][0], 9 * 3600)
+        self.assertEqual(timelines['Алия Тестова'][0][0], 9 * 3600)
 
     def test_online_seconds_split_across_hours_and_stop_at_now(self):
         ns = self._namespace()
-        timelines = {'Анет Толегенов': [(8 * 3600 + 1800, 'online', 'Онлайн', '')]}
+        timelines = {'Алия Тестова': [(8 * 3600 + 1800, 'online', 'Онлайн', '')]}
         per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600 + 900)
         self.assertEqual(per_hour[8], 1800)
         self.assertEqual(per_hour[9], 3600)
@@ -220,7 +221,7 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
 
     def test_break_and_busy_do_not_hold_the_line(self):
         ns = self._namespace()
-        timelines = {'Анет Толегенов': [
+        timelines = {'Алия Тестова': [
             (9 * 3600, 'online', 'Онлайн', ''),
             (9 * 3600 + 600, 'busy', 'Занят', ''),
             (9 * 3600 + 1200, 'break', 'Перерыв', ''),
@@ -249,8 +250,8 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         ns = self._namespace()
         now = datetime(2026, 8, 18, 13, 20, 0)
         timelines = {
-            'Анет Толегенов': [(13 * 3600, 'online', 'Онлайн', '')],
-            'Жанеля Нургазы': [(13 * 3600, 'online', 'Онлайн', '')],
+            'Алия Тестова': [(13 * 3600, 'online', 'Онлайн', '')],
+            'Бекзат Примеров': [(13 * 3600, 'online', 'Онлайн', '')],
         }
         rows = self._rows(ns, timelines, [], now)
         self.assertEqual(rows[13]['operators_online'], 2.0)
@@ -258,8 +259,8 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
     def test_row_carries_chats_response_and_required(self):
         ns = self._namespace()
         now = datetime(2026, 8, 18, 12, 0, 0)
-        timelines = {'Анет Толегенов': [(11 * 3600, 'online', 'Онлайн', '')],
-                     'Жанеля Нургазы': [(11 * 3600, 'online', 'Онлайн', '')]}
+        timelines = {'Алия Тестова': [(11 * 3600, 'online', 'Онлайн', '')],
+                     'Бекзат Примеров': [(11 * 3600, 'online', 'Онлайн', '')]}
         requests = [
             # Ответ внутри чата = (Σtotal − Σreaction) / Σ(replies − 1) = (740−20)/2 = 360 c.
             _request('2026-08-18 11:05:00', 20, 3, 740),
@@ -292,31 +293,31 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
         """Ключевое: у вышедшего offline_type остаётся прежним, поэтому статус берём из событий."""
         ns = self._namespace()
         events = [
-            _event('Жанеля Нургазы', 'busy', '2026-08-18 10:08:34'),
-            _event('Асель Серикбаева', 'logout', '2026-08-18 02:00:45'),
+            _event('Бекзат Примеров', 'busy', '2026-08-18 10:08:34'),
+            _event('Дана Ночная', 'logout', '2026-08-18 02:00:45'),
         ]
         rows = [
             # Оба висят в живом списке одинаково: online=0, offline_type='busy'.
-            _operator_row('Жанеля Нургазы', online=0, offline_type='busy'),
-            _operator_row('Асель Серикбаева', online=0, offline_type='busy'),
+            _operator_row('Бекзат Примеров', online=0, offline_type='busy'),
+            _operator_row('Дана Ночная', online=0, offline_type='busy'),
         ]
         now = self._now(ns, events, rows)
         self.assertEqual(now['operators_busy'], 1)
         self.assertEqual(now['operators_offline'], 1)
         self.assertEqual([person['name'] for person in now['operators']],
-                         ['Нургазы Жанеля Багдаткызы'])
+                         ['Примеров Бекзат Примерулы'])
 
     def test_counts_by_status_and_open_chats(self):
         ns = self._namespace()
         events = [
-            _event('Анет Толегенов', 'online', '2026-08-18 13:10:46'),
-            _event('Жаркынай Шаяхмет', 'study', '2026-08-18 13:30:00'),
-            _event('Жанеля Нургазы', 'break', '2026-08-18 13:20:00'),
+            _event('Алия Тестова', 'online', '2026-08-18 13:10:46'),
+            _event('Ерлан Учебный', 'study', '2026-08-18 13:30:00'),
+            _event('Бекзат Примеров', 'break', '2026-08-18 13:20:00'),
         ]
         rows = [
-            _operator_row('Анет Толегенов', dialogs=75),
-            _operator_row('Жаркынай Шаяхмет', dialogs=3),
-            _operator_row('Жанеля Нургазы', dialogs=1),
+            _operator_row('Алия Тестова', dialogs=75),
+            _operator_row('Ерлан Учебный', dialogs=3),
+            _operator_row('Бекзат Примеров', dialogs=1),
         ]
         now = self._now(ns, events, rows)
         self.assertEqual(now['operators_online'], 1)
@@ -329,27 +330,27 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
 
     def test_time_in_status_counts_from_the_last_event(self):
         ns = self._namespace()
-        events = [_event('Анет Толегенов', 'online', '2026-08-18 13:00:00')]
-        now = self._now(ns, events, [_operator_row('Анет Толегенов')],
+        events = [_event('Алия Тестова', 'online', '2026-08-18 13:00:00')]
+        now = self._now(ns, events, [_operator_row('Алия Тестова')],
                         now_seconds=13 * 3600 + 36 * 60)
         self.assertEqual(now['operators'][0]['seconds'], 36 * 60)
 
     def test_operator_without_events_falls_back_to_the_live_flag(self):
         """Смена началась вчера: событий сегодня нет, но человек на линии."""
         ns = self._namespace()
-        now = self._now(ns, [], [_operator_row('Анет Толегенов', online=1, dialogs=12)])
+        now = self._now(ns, [], [_operator_row('Алия Тестова', online=1, dialogs=12)])
         self.assertEqual(now['operators_online'], 1)
         self.assertIsNone(now['operators'][0]['seconds'])
 
     def test_disabled_accounts_are_ignored(self):
         ns = self._namespace()
-        now = self._now(ns, [], [_operator_row('Анет Толегенов', online=1, status='deleted')])
+        now = self._now(ns, [], [_operator_row('Алия Тестова', online=1, status='deleted')])
         self.assertEqual(now['operators_online'], 0)
         self.assertEqual(now['operators'], [])
 
     def test_only_szov_chat_managers_are_counted(self):
         ns = self._namespace(members=set())
-        now = self._now(ns, [], [_operator_row('Анет Толегенов', online=1)])
+        now = self._now(ns, [], [_operator_row('Алия Тестова', online=1)])
         self.assertEqual(now['operators_online'], 0)
 
 
@@ -372,17 +373,17 @@ class ChatWallboardEventsFetchTests(_Harness, unittest.TestCase):
         return handler
 
     def test_first_pass_walks_the_whole_day(self):
-        first = [_event('Анет Толегенов', 'online', f'2026-08-18 09:{index:02d}:00') for index in range(60)]
-        second = [_event('Анет Толегенов', 'busy', f'2026-08-18 08:{index:02d}:00') for index in range(60)]
+        first = [_event('Алия Тестова', 'online', f'2026-08-18 09:{index:02d}:00') for index in range(60)]
+        second = [_event('Алия Тестова', 'busy', f'2026-08-18 08:{index:02d}:00') for index in range(60)]
         ns = self._namespace(requests_get=self._paged([first[:200] + second[:200]]))
         rows = ns['_szov_chat_wallboard_fetch_events']('2026-08-18')
         self.assertEqual(len(rows), 120)
         self.assertEqual(len(ns['_fake_requests'].calls), 1)
 
     def test_second_pass_stops_at_known_events(self):
-        page_one = [_event('Анет Толегенов', 'online', f'2026-08-18 12:{index:02d}:00', operator_id=index)
+        page_one = [_event('Алия Тестова', 'online', f'2026-08-18 12:{index:02d}:00', operator_id=index)
                     for index in range(59, -1, -1)]
-        page_two = [_event('Анет Толегенов', 'busy', f'2026-08-18 11:{index:02d}:00', operator_id=index)
+        page_two = [_event('Алия Тестова', 'busy', f'2026-08-18 11:{index:02d}:00', operator_id=index)
                     for index in range(59, -1, -1)]
         pages = [(page_one + page_two)[:200]]
         ns = self._namespace(requests_get=self._paged(pages))
@@ -394,7 +395,7 @@ class ChatWallboardEventsFetchTests(_Harness, unittest.TestCase):
         self.assertEqual(len(ns['_fake_requests'].calls), calls_after_first + 1)
 
     def test_new_day_drops_the_cache(self):
-        ns = self._namespace(requests_get=self._paged([[_event('Анет Толегенов', 'online', '2026-08-18 09:00:00')]]))
+        ns = self._namespace(requests_get=self._paged([[_event('Алия Тестова', 'online', '2026-08-18 09:00:00')]]))
         ns['_szov_chat_wallboard_fetch_events']('2026-08-18')
         ns['_szov_chat_wallboard_fetch_events']('2026-08-19')
         self.assertEqual(ns['_szov_chat_wallboard_events_cache']['day'], '2026-08-19')
