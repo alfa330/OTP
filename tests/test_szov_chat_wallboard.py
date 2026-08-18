@@ -56,7 +56,7 @@ NAMES = {
     '_szov_chat_wallboard_resolve',
     '_szov_chat_wallboard_day_seconds',
     '_szov_chat_wallboard_timelines',
-    '_szov_chat_wallboard_online_seconds',
+    '_szov_chat_wallboard_online_people',
     '_szov_chat_wallboard_hourly',
     '_szov_chat_wallboard_now',
     '_szov_chat_wallboard_fetch_events',
@@ -193,24 +193,35 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
         timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
         self.assertEqual(timelines['Алия Тестова'][0][0], 9 * 3600)
 
-    def test_online_seconds_split_across_hours_and_stop_at_now(self):
+    def test_online_people_land_in_every_hour_they_touched_and_stop_at_now(self):
+        """Смена через границу часа считается в каждом часе, но не заглядывает в будущее."""
         ns = self._namespace()
         timelines = {'Алия Тестова': [(8 * 3600 + 1800, 'online', 'Онлайн', '')]}
-        per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600 + 900)
-        self.assertEqual(per_hour[8], 1800)
-        self.assertEqual(per_hour[9], 3600)
-        self.assertEqual(per_hour[10], 900)
+        per_hour = ns['_szov_chat_wallboard_online_people'](timelines, 10 * 3600 + 900)
+        self.assertEqual(per_hour, {8: {'Алия Тестова'}, 9: {'Алия Тестова'}, 10: {'Алия Тестова'}})
 
     def test_break_and_busy_do_not_hold_the_line(self):
+        """Перерыв внутри часа не выбрасывает человека из часа и не считает его дважды."""
         ns = self._namespace()
         timelines = {'Алия Тестова': [
             (9 * 3600, 'online', 'Онлайн', ''),
             (9 * 3600 + 600, 'busy', 'Занят', ''),
             (9 * 3600 + 1200, 'break', 'Перерыв', ''),
             (9 * 3600 + 1800, 'online', 'Онлайн', ''),
-        ]}
-        per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600)
-        self.assertEqual(per_hour[9], 600 + 1800)
+        ],
+            # Весь час занят: линию не держал, значит в счёт людей не идёт.
+            'Бекзат Примеров': [(9 * 3600, 'busy', 'Занят', '')]}
+        per_hour = ns['_szov_chat_wallboard_online_people'](timelines, 10 * 3600)
+        self.assertEqual(per_hour, {9: {'Алия Тестова'}})
+
+    def test_a_five_minute_visit_is_a_whole_person(self):
+        """Головы считаем без порога (решение владельца): зашёл на пять минут — был на линии."""
+        ns = self._namespace()
+        timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', ''),
+                                      (9 * 3600 + 300, 'logout', 'Не в системе', '')],
+                     'Бекзат Примеров': [(9 * 3600, 'online', 'Онлайн', '')]}
+        per_hour = ns['_szov_chat_wallboard_online_people'](timelines, 10 * 3600)
+        self.assertEqual(per_hour[9], {'Алия Тестова', 'Бекзат Примеров'})
 
     def test_status_spellings_are_normalized(self):
         """Chat2Desk пишет один статус четырьмя способами — ключ должен получиться один."""
@@ -233,8 +244,10 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
                   _event('Алия Тестова', 'status.tech.break', '2026-08-18 09:30:00')]
         lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
         timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
-        per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600)
-        self.assertEqual(per_hour[9], 1800)
+        # Нераспознанный `tech.break` тянул бы «Онлайн» до самого «сейчас» — человек попал бы
+        # ещё и в 10-й час.
+        per_hour = ns['_szov_chat_wallboard_online_people'](timelines, 11 * 3600)
+        self.assertEqual(per_hour, {9: {'Алия Тестова'}})
 
     def test_truncated_events_do_not_backfill_the_night(self):
         """Выгрузка обрезалась — самое раннее событие уже не начало смены, достраивать нельзя."""
@@ -244,7 +257,7 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
         lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
         timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
         self.assertEqual([entry[1] for entry in timelines['Дана Ночная']], ['break'])
-        self.assertEqual(ns['_szov_chat_wallboard_online_seconds'](timelines, 15 * 3600), {})
+        self.assertEqual(ns['_szov_chat_wallboard_online_people'](timelines, 15 * 3600), {})
 
 
 class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
@@ -261,16 +274,19 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         self.assertTrue(rows[-1]['partial'])
         self.assertFalse(rows[-2]['partial'])
 
-    def test_partial_hour_counts_average_people_not_person_hours(self):
-        """Час прожит на треть: два человека на линии — это два, а не 0,67."""
+    def test_hour_counts_whole_people_not_person_hours(self):
+        """Час прожит на треть, а людей всё равно двое: считаем головы, а не человеко-часы."""
         ns = self._namespace()
         now = datetime(2026, 8, 18, 13, 20, 0)
         timelines = {
             'Алия Тестова': [(13 * 3600, 'online', 'Онлайн', '')],
-            'Бекзат Примеров': [(13 * 3600, 'online', 'Онлайн', '')],
+            # Половину прожитого отрезка простоял на перерыве — человек всё равно один, целый.
+            'Бекзат Примеров': [(13 * 3600, 'online', 'Онлайн', ''),
+                                (13 * 3600 + 600, 'break', 'Перерыв', '')],
         }
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[13]['operators_online'], 2.0)
+        self.assertEqual(rows[13]['operators_online'], 2)
+        self.assertIsInstance(rows[13]['operators_online'], int)
 
     def test_row_carries_chats_response_and_required(self):
         ns = self._namespace()
@@ -287,7 +303,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         self.assertEqual(rows[11]['chats'], 1)
         self.assertEqual(rows[12]['chats'], 1)
         self.assertEqual(rows[11]['inner_reply_seconds'], 240)
-        self.assertEqual(rows[11]['operators_online'], 2.0)
+        self.assertEqual(rows[11]['operators_online'], 2)
         self.assertNotIn('operators_required', rows[11])
 
     def test_hour_without_people_still_carries_the_chats(self):
@@ -295,7 +311,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         now = datetime(2026, 8, 18, 3, 0, 0)
         rows = self._rows(ns, {}, [_request('2026-08-18 02:10:00', 20, 3, 740)], now)
         self.assertEqual(rows[2]['chats'], 1)
-        self.assertEqual(rows[2]['operators_online'], 0.0)
+        self.assertEqual(rows[2]['operators_online'], 0)
 
 
 class ChatWallboardNowTests(_Harness, unittest.TestCase):
@@ -554,6 +570,14 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn('<Legend', self.board)
         for name in ('name="Чатников на линии"', 'name="Ответ внутри чата"'):
             self.assertIn(name, self.board, name)
+
+    def test_people_on_the_line_are_whole_people(self):
+        """Правая ось — головы: целое число людей, без дробей и без нуля над пустым часом."""
+        self.assertIn('const formatPeople = (value) => '
+                      "(Number(value) > 0 ? formatInt(value) : '');", self.board)
+        self.assertIn('allowDecimals={false}', self.board)
+        api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        self.assertNotIn('_szov_chat_wallboard_online_seconds', api)
 
     def test_required_staffing_is_gone_from_the_board(self):
         """Расчёт «сколько нужно под 2 минуты» убран: пропорция от факта завышала в разы."""

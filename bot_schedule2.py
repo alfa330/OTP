@@ -32419,13 +32419,18 @@ def _szov_chat_wallboard_timelines(events, lookup):
     return timelines, sorted(unmatched)
 
 
-def _szov_chat_wallboard_online_seconds(timelines, now_seconds):
-    """{час: человеко-секунды «на линии»} по лентам статусов.
+def _szov_chat_wallboard_online_people(timelines, now_seconds):
+    """{час: имена чатников, державших линию хотя бы часть этого часа}.
 
+    Считаем ЛЮДЕЙ ПО ГОЛОВАМ, а не человеко-часы (решение владельца 18.08.2026): на стене
+    нужен ответ «сколько конкретных людей было в этом часу», а среднее вида «1,6 человека»
+    этих людей за дробью и прятало. Человек попадает в час, если провёл в статусе «Онлайн»
+    хоть сколько-то внутри него: перерыв посреди часа его не удваивает и не выбрасывает, а
+    смена через границу часа считается в обоих часах.
     Считаем только статус «онлайн»: занят, перерыв, тренинг и отпуск линию не держат — ровно
     та же граница, что у «Основы», где онлайн это свободен или в разговоре."""
     per_hour = {}
-    for entries in timelines.values():
+    for name, entries in timelines.items():
         for index, (start, status_key, _label, _raw) in enumerate(entries):
             if status_key != 'online':
                 continue
@@ -32434,9 +32439,7 @@ def _szov_chat_wallboard_online_seconds(timelines, now_seconds):
             if end <= start:
                 continue
             for hour in range(start // 3600, (end - 1) // 3600 + 1):
-                overlap = min(end, (hour + 1) * 3600) - max(start, hour * 3600)
-                if overlap > 0:
-                    per_hour[hour] = per_hour.get(hour, 0) + overlap
+                per_hour.setdefault(hour, set()).add(name)
     return per_hour
 
 
@@ -32447,10 +32450,12 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now):
     обращения, начавшиеся внутри него, и время ответа считается ровно по ним. Та же нарезка,
     что в колонке «за час» почасового отчёта, — цифры обязаны совпадать.
     Только прошедшие часы сегодняшних суток плюс текущий, ещё неполный (решение владельца).
-    Число людей на линии — СРЕДНЕЕ за час (человеко-секунды / длина отрезка), иначе текущий
-    час, прожитый на треть, показывал бы втрое меньше людей, чем на нём реально работает."""
+    Число людей на линии — ГОЛОВЫ: сколько РАЗНЫХ чатников держало линию внутри часа. Среднее
+    по человеко-секундам отсюда убрано — оно показывало дробь вместо людей, а на стене нужен
+    ответ «сколько человек было» (решение владельца 18.08.2026). Неполный текущий час поэтому
+    считается сам собой: кто в нём уже постоял, тот и посчитан."""
     now_seconds = max(1, now.hour * 3600 + now.minute * 60 + now.second)
-    online_seconds = _szov_chat_wallboard_online_seconds(timelines, now_seconds)
+    online_people = _szov_chat_wallboard_online_people(timelines, now_seconds)
     by_hour = {}
     for row in request_rows or []:
         hour = _szov_chat_wallboard_day_seconds(_chat_hourly_request_start(row))
@@ -32462,14 +32467,12 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now):
     for hour in range(0, now.hour + 1):
         hour_rows = by_hour.get(hour) or []
         first_reply, inner_reply = _chat_hourly_response_times(hour_rows)
-        elapsed = min(now_seconds, (hour + 1) * 3600) - hour * 3600
-        avg_online = (online_seconds.get(hour, 0) / elapsed) if elapsed > 0 else 0.0
         rows.append({
             'hour': hour,
             'chats': len(hour_rows),
             'first_reply_seconds': first_reply,
             'inner_reply_seconds': inner_reply,
-            'operators_online': round(avg_online, 2),
+            'operators_online': len(online_people.get(hour) or ()),
             'partial': hour == now.hour,
         })
     return rows
