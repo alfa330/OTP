@@ -8,7 +8,7 @@ import {
     IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { selectableSections, sectionOptionLabel } from './sectionPicker';
+import { selectableSections, sectionPathLabel } from './sectionPicker';
 import useStableCallback from './useStableCallback';
 
 /* Выдача доступов.
@@ -124,7 +124,9 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
         const spaceName = new Map(spaces.map((s) => [s.id, s.name]));
         return selectableSections(sections, sectionId).map((s) => ({
             value: String(s.id),
-            label: sectionOptionLabel(s, spaceName.get(s.space_id) || '—'),
+            // Путь целиком, а не одно имя: «Руководитель» есть и у СЗоВ, и у ОП,
+            // и правило легко выписать не той ветке.
+            label: sectionPathLabel(sections, s.id, spaceName.get(s.space_id) || '—'),
         }));
     }, [sections, spaces, sectionId]);
 

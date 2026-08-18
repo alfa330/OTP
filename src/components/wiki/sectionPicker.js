@@ -30,3 +30,44 @@ export function sectionOptionLabel(section, prefix = '') {
     const name = prefix ? `${prefix} · ${section.name}` : section.name;
     return section.status === 'archived' ? `${name} — в архиве` : name;
 }
+
+/* ── Дерево вместо плоского списка ──────────────────────────────────────────
+ *
+ * Внутри пространства имена разделов повторяются намеренно: у СЗоВ и у ОП есть
+ * свои «Руководитель», «Супервайзер», «Оператор». В плоской выпадашке это шесть
+ * строк, из которых три пары неразличимы, и статья регулярно уезжает не в ту
+ * ветку. Отсюда две вещи ниже: путь до раздела в подписи и выбор по шагам.
+ */
+
+/** Прямые потомки раздела (parentId = null — корни пространства). */
+export function sectionChildren(sections, spaceId, parentId = null) {
+    return selectableSections(sections).filter(
+        (s) => s.space_id === spaceId
+            && (s.parent_section_id || null) === (parentId || null),
+    );
+}
+
+/** Путь от корня до раздела включительно. Пустой массив, если раздел не найден. */
+export function sectionAncestors(sections, sectionId) {
+    const byId = new Map((sections || []).map((s) => [s.id, s]));
+    const path = [];
+    let current = byId.get(Number(sectionId));
+    // Ограничитель на случай битого дерева: цикла быть не должно (сервер его не
+    // допускает), но зациклиться здесь — значит подвесить вкладку намертво.
+    let guard = 0;
+    while (current && guard < 50) {
+        path.unshift(current);
+        current = current.parent_section_id ? byId.get(current.parent_section_id) : null;
+        guard += 1;
+    }
+    return path;
+}
+
+/** Подпись с путём: «ОП › Супервайзер». Префикс — обычно название пространства. */
+export function sectionPathLabel(sections, sectionId, prefix = '') {
+    const path = sectionAncestors(sections, sectionId);
+    if (!path.length) return prefix || '—';
+    const name = path.map((s) => s.name).join(' › ');
+    const label = prefix ? `${prefix} · ${name}` : name;
+    return path[path.length - 1].status === 'archived' ? `${label} — в архиве` : label;
+}

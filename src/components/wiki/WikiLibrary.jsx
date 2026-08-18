@@ -296,6 +296,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                     showToast={showToast}
                     article={editing.id ? editing : null}
                     sections={sections}
+                    spaces={spaces}
                     pendingUpdateFile={pendingUpdateFile}
                     onPendingUsed={() => setPendingUpdateFile(null)}
                     /* Документ оказался новой версией другой статьи: открываем

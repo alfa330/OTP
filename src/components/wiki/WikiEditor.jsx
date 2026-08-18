@@ -21,7 +21,7 @@ import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { selectableSections, sectionOptionLabel } from './sectionPicker';
+import SectionCascade from './SectionCascade';
 import WikiAiDraft from './WikiAiDraft';
 
 /* Редактор статьи на TipTap.
@@ -72,7 +72,7 @@ const ToolButton = ({ active, disabled, title, onClick, children }) => (
 const Divider = () => <span className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />;
 
 export default function WikiEditor({
-    base, headers, showToast, article, sections, onClose, onSaved,
+    base, headers, showToast, article, sections, spaces = [], onClose, onSaved,
     pendingUpdateFile = null, onPendingUsed = null, onUpdateExisting = null,
 }) {
     const isNew = !article?.id;
@@ -124,16 +124,6 @@ export default function WikiEditor({
         window.addEventListener('beforeunload', handler);
         return () => window.removeEventListener('beforeunload', handler);
     }, [dirty]);
-
-    // Архивный раздел выбрать нельзя (см. sectionPicker.js), но если статья
-    // уже лежит в нём — он остаётся в списке с пометкой, иначе поле выглядело
-    // бы пустым при заполненном section_ids.
-    const sectionOptions = useMemo(
-        () => selectableSections(sections, sectionIds[0]).map((s) => ({
-            value: String(s.id), label: sectionOptionLabel(s),
-        })),
-        [sections, sectionIds],
-    );
 
     const save = useCallback((status) => {
         if (!editor) return;
@@ -320,13 +310,14 @@ export default function WikiEditor({
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
                                 Раздел
                             </label>
-                            <CustomSelect
-                                variant="ios"
-                                value={sectionIds[0] ? String(sectionIds[0]) : ''}
-                                onChange={(v) => { setSectionIds(v ? [Number(v)] : []); setDirty(true); }}
-                                options={sectionOptions}
-                                searchable
-                                ariaLabel="Раздел статьи"
+                            {/* Выбор по шагам, а не одним списком: ветки СЗоВ и ОП
+                                называются одинаково, и в плоской выпадашке статья
+                                уезжала не туда. */}
+                            <SectionCascade
+                                sections={sections}
+                                spaces={spaces}
+                                value={sectionIds[0] || null}
+                                onChange={(id) => { setSectionIds(id ? [id] : []); setDirty(true); }}
                             />
                         </div>
                     </div>

@@ -9,7 +9,7 @@ import {
     IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { selectableSections, sectionOptionLabel } from './sectionPicker';
+import { selectableSections, sectionPathLabel } from './sectionPicker';
 
 /* Структура вики: пространства → разделы (дерево).
  *
@@ -46,11 +46,6 @@ const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, busy }) => 
                 ) : (
                     <IosBadge tone="slate" title="Виден только по правилам доступа">
                         <Lock size={11} /> По правилам
-                    </IosBadge>
-                )}
-                {section.department_name && (
-                    <IosBadge tone="blue" title="Ветка отдела">
-                        {section.department_name}
                     </IosBadge>
                 )}
             </div>
@@ -192,9 +187,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             description: sectionModal.description || null,
             visibility_scope: sectionModal.visibility_scope,
             parent_section_id: sectionModal.parent_section_id || null,
-            // Пустая строка — это «раздел не принадлежит отделу», её надо
-            // отправить как null, иначе бэкенд не снимет отдел с ветки.
-            department_id: sectionModal.department_id || null,
         };
         setBusy(true);
         const request = sectionModal.id
@@ -347,7 +339,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             onClick={() => setSectionModal({
                                 space_id: space.id, name: '', description: '',
                                 visibility_scope: 'restricted', parent_section_id: '',
-                                department_id: '',
                             })}
                         >
                             <Plus size={13} /> Раздел
@@ -371,16 +362,11 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     description: x.description || '',
                                     visibility_scope: x.visibility_scope,
                                     parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
-                                    department_id: x.department_id ? String(x.department_id) : '',
                                 })}
                                 onAddChild={(x) => setSectionModal({
                                     space_id: x.space_id, name: '', description: '',
                                     visibility_scope: 'restricted',
                                     parent_section_id: String(x.id),
-                                    // Отдел НЕ наследуем от родителя: подраздел ОП
-                                    // внутри ветки ОП — это должность, а не второй
-                                    // отдел, и метка отдела там только запутает.
-                                    department_id: '',
                                 })}
                                 onArchive={archiveSection}
                             />
@@ -450,9 +436,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                                     <span className="truncate text-[13.5px] font-medium text-slate-900">
                                                         {section.name}
                                                     </span>
-                                                    {section.department_name && (
-                                                        <IosBadge tone="blue">{section.department_name}</IosBadge>
-                                                    )}
                                                 </div>
                                                 <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-slate-400">
                                                     <span>{spaceName.get(section.space_id) || '—'}</span>
@@ -594,33 +577,13 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     // но вкладывать живой раздел в архивный нельзя.
                                     ...selectableSections(sections, sectionModal.parent_section_id)
                                         .filter((s) => s.space_id === sectionModal.space_id && s.id !== sectionModal.id)
-                                        .map((s) => ({ value: String(s.id), label: sectionOptionLabel(s) })),
+                                        // Путь целиком: одноимённые ветки СЗоВ и ОП
+                                        // в плоском списке неразличимы.
+                                        .map((s) => ({ value: String(s.id), label: sectionPathLabel(sections, s.id) })),
                                 ]}
                                 ariaLabel="Родительский раздел"
                             />
                         </div>
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                Отдел ветки
-                            </label>
-                            <CustomSelect
-                                variant="ios"
-                                value={sectionModal.department_id || ''}
-                                onChange={(v) => setSectionModal({ ...sectionModal, department_id: v })}
-                                options={[
-                                    { value: '', label: 'Не привязан к отделу' },
-                                    ...departments.map((d) => ({ value: String(d.id), label: d.name })),
-                                ]}
-                                searchable
-                                ariaLabel="Отдел ветки"
-                            />
-                            <p className="mt-1 px-1 text-[11.5px] text-slate-400">
-                                Отмечает ветку как принадлежащую отделу — например «СЗоВ» или «ОП».
-                                Права на неё всё равно выдаются во вкладке «Доступы»: привязка
-                                к отделу сама по себе никого не пускает.
-                            </p>
-                        </div>
-
                         <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
                             <div className="min-w-0">
                                 <div className="text-[13.5px] font-medium text-slate-900">

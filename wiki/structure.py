@@ -66,8 +66,7 @@ def update_space(cursor, space_id, fields):
 
 _SECTION_KEYS = ('id', 'space_id', 'parent_section_id', 'name', 'slug', 'description',
                  'icon', 'visibility_scope', 'owner_user_id', 'owner_name', 'status',
-                 'position', 'department_id', 'department_name', 'section_kind',
-                 'articles_count', 'rules_count')
+                 'position', 'articles_count', 'rules_count')
 
 
 def list_sections(cursor, space_id=None, include_archived=False):
@@ -76,12 +75,10 @@ def list_sections(cursor, space_id=None, include_archived=False):
         SELECT s.id, s.space_id, s.parent_section_id, s.name, s.slug, s.description,
                s.icon, s.visibility_scope, s.owner_user_id, u.name AS owner_name,
                s.status, s.position,
-               s.department_id, d.name AS department_name, s.section_kind,
                (SELECT count(*) FROM wiki_article_sections a WHERE a.section_id = s.id),
                (SELECT count(*) FROM wiki_section_access_rules r WHERE r.section_id = s.id)
           FROM wiki_sections s
           LEFT JOIN users u ON u.id = s.owner_user_id
-          LEFT JOIN departments d ON d.id = s.department_id
          WHERE (%(space)s::int IS NULL OR s.space_id = %(space)s::int)
            AND (%(archived)s OR s.status = 'active')
          ORDER BY s.space_id, s.position, s.id
@@ -114,34 +111,27 @@ def article_counts_by_section(cursor, article_ids):
 
 
 def create_section(cursor, *, space_id, parent_section_id, name, slug, description,
-                   icon, visibility_scope, owner_user_id, created_by,
-                   department_id=None):
-    # section_kind выводится из отдела, а не задаётся отдельным полем: два
-    # источника правды для одного факта («это ветка отдела») неизбежно разъедутся.
-    section_kind = 'department' if department_id else 'common'
+                   icon, visibility_scope, owner_user_id, created_by):
     cursor.execute(
         """
         INSERT INTO wiki_sections (space_id, parent_section_id, name, slug, description,
-                                   icon, visibility_scope, owner_user_id, position, created_by,
-                                   department_id, section_kind)
+                                   icon, visibility_scope, owner_user_id, position, created_by)
         VALUES (%(space)s, %(parent)s, %(name)s, %(slug)s, %(description)s, %(icon)s,
                 %(scope)s, %(owner)s,
                 COALESCE((SELECT max(position) + 1 FROM wiki_sections
                            WHERE space_id = %(space)s), 0),
-                %(created_by)s, %(dept)s, %(kind)s)
+                %(created_by)s)
         RETURNING id
         """,
         {'space': space_id, 'parent': parent_section_id, 'name': name, 'slug': slug,
          'description': description, 'icon': icon, 'scope': visibility_scope,
-         'owner': owner_user_id, 'created_by': created_by,
-         'dept': department_id, 'kind': section_kind},
+         'owner': owner_user_id, 'created_by': created_by},
     )
     return cursor.fetchone()[0]
 
 
 _SECTION_UPDATABLE = ('name', 'slug', 'description', 'icon', 'visibility_scope',
-                      'owner_user_id', 'status', 'position', 'parent_section_id',
-                      'department_id', 'section_kind')
+                      'owner_user_id', 'status', 'position', 'parent_section_id')
 
 
 def update_section(cursor, section_id, fields):

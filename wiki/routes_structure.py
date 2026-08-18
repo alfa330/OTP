@@ -238,7 +238,6 @@ def register(bp, wiki_route, db, log_ip):
             icon=_clean(data.get('icon'), 64), visibility_scope=scope,
             owner_user_id=_int_or_none(data.get('owner_user_id')),
             created_by=ctx['user_id'],
-            department_id=_int_or_none(data.get('department_id')),
         )
         queries.log_action(cursor, actor_id=ctx['user_id'], action='section.create',
                            entity_type='section', entity_id=section_id,
@@ -289,14 +288,6 @@ def register(bp, wiki_route, db, log_ip):
             fields['owner_user_id'] = _int_or_none(data['owner_user_id'])
         if 'position' in data:
             fields['position'] = _int_or_none(data['position']) or 0
-        # Отдел ветки. section_kind не принимаем отдельным полем — выводим из
-        # отдела: два поля про один факт разъезжаются, и «ветка ОП без отдела»
-        # выглядела бы в конструкторе рабочей, а правилам была бы не видна.
-        if 'department_id' in data:
-            department_id = _int_or_none(data['department_id'])
-            fields['department_id'] = department_id
-            fields['section_kind'] = 'department' if department_id else 'common'
-
         if 'parent_section_id' in data:
             parent = _int_or_none(data['parent_section_id'])
             if structure.section_would_cycle(cursor, section_id, parent):
