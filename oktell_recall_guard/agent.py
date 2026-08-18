@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -242,23 +242,28 @@ def build_token() -> str:
 
 
 def token_from_filename(name: str) -> str:
-    """Достать личный токен из имени файла `OktellRecallGuard.<токен>.exe`.
+    """Достать личный токен из имени скачанного файла.
 
-    Токен именно в имени, а не внутри exe: файл в хранилище один на всех, и
-    пересобирать его под каждого сотрудника было бы абсурдом. Имя же задаётся
-    на скачивании — сотрудник ничего не делает, а присланное потом подписано им.
+    Ожидается `Oktell-Perezvon-Setup-<токен>.exe`; старый вид
+    `OktellRecallGuard.<токен>.exe` тоже понимается — иначе уже скачанные копии
+    после обновления стали бы анонимными.
+
+    Токен в имени, а не внутри exe: файл в хранилище один на всех, пересобирать
+    его под каждого сотрудника абсурдно. Имя задаётся на скачивании — сотрудник
+    не делает ничего, а присланное потом подписано им.
     """
     stem = str(name or '')
     if stem.lower().endswith('.exe'):
         stem = stem[:-4]
-    parts = stem.split('.')
-    if len(parts) < 2:
-        return ''
-    candidate = parts[-1].strip()
-    # Токен — латиница и цифры: всё остальное это часть имени вроде «(1)».
-    if len(candidate) < 12 or not candidate.isalnum() or not candidate.isascii():
-        return ''
-    return candidate
+    for separator in ('-', '.'):
+        parts = stem.split(separator)
+        if len(parts) < 2:
+            continue
+        candidate = parts[-1].strip()
+        # Токен — латиница и цифры: всё прочее это часть имени вроде «(1)».
+        if len(candidate) >= 12 and candidate.isalnum() and candidate.isascii():
+            return candidate
+    return ''
 
 
 def personal_token_path() -> Path:

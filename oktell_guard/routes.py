@@ -447,7 +447,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 cursor, requester_id, hashlib.sha256(token.encode('utf-8')).hexdigest(),
                 note='выдан при скачивании из раздела',
             )
-        filename = f"OktellRecallGuard.{token}.exe"
+        # Имя должно выглядеть осмысленно: случайный хвост в имени файла
+        # человек читает как «вирус», а это и так первое, что он видит рядом с
+        # предупреждением Windows о неизвестном издателе.
+        filename = f"Oktell-Perezvon-Setup-{token}.exe"
         url = signed_download_url(release, filename=filename)
         if not url:
             return jsonify({"error": "Ссылка на файл недоступна"}), 503

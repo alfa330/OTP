@@ -724,3 +724,18 @@ def test_config_server_url_wins(tmp_path, monkeypatch):
 
 def test_build_server_url_empty_without_module():
     assert agent.build_server_url() == ""
+
+
+def test_token_from_new_filename_shape():
+    """Имя должно читаться человеком: случайный хвост рядом с предупреждением
+    Windows выглядит как вирус."""
+    assert agent.token_from_filename("Oktell-Perezvon-Setup-n8oZgJIxZBaYMhoXwULf.exe") == "n8oZgJIxZBaYMhoXwULf"
+
+
+def test_old_filename_shape_still_understood():
+    """Уже скачанные копии не должны стать анонимными после обновления."""
+    assert agent.token_from_filename("OktellRecallGuard.n8oZgJIxZBaYMhoXwULf.exe") == "n8oZgJIxZBaYMhoXwULf"
+
+
+def test_plain_new_name_has_no_token():
+    assert agent.token_from_filename("Oktell-Perezvon-Setup.exe") == ""
