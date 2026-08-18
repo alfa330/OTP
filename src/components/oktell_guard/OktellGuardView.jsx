@@ -319,25 +319,25 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                                 Ограничитель «Перезвона»
                                 <IosHint text="Правило считается прямо в окне Oktell на машине сотрудника: клиент и так получает от АТС событие смены статуса, поэтому база не опрашивается. Каждый присланный выброс сервер сверяет с историей статусов самого Oktell — в отчёт попадает только подтверждённое." />
                             </div>
+                            {/* Состояние показано бейджем справа — здесь только суть. */}
                             <div className="text-[12.5px] text-slate-500">
                                 {settings?.enabled
-                                    ? `Включён, порог ${fmtMinutes(defaultThreshold)}`
-                                    : 'Выключен — агенты ничего не делают'}
-                                {settings?.dry_run && settings?.enabled ? ' · режим обкатки' : ''}
+                                    ? `Порог ${fmtMinutes(defaultThreshold)}, обнуляет звонок`
+                                    : 'Агенты на машинах ничего не делают'}
                             </div>
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
+                        {/* Состояние — словами. Голый тумблер рядом с кнопкой читался
+                            как её часть, и было неясно, что именно он включает;
+                            сам переключатель живёт в «Общих», с подписью. */}
+                        <IosBadge tone={settings?.enabled ? (settings?.dry_run ? 'amber' : 'green') : 'slate'}>
+                            {settings?.enabled ? (settings?.dry_run ? 'Обкатка' : 'Работает') : 'Выключен'}
+                        </IosBadge>
                         <button type="button" className={iosBtnSecondary} onClick={downloadAgent}>
                             <FaIcon className="fas fa-download" style={{ width: 12, height: 12 }} />
                             Скачать агента
                         </button>
-                        {canManage && (
-                            <IosToggle
-                                checked={Boolean(settings?.enabled)}
-                                onChange={(value) => patchSettings({ enabled: value })}
-                            />
-                        )}
                     </div>
                 </div>
 
@@ -376,6 +376,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             {tab === 'employees' && (
                 <IosSection
                     title="Сотрудники"
+                    hint="Справа — состояние программы на машине и число выбросов за 30 дней."
                     right={(
                         <input
                             value={search}
@@ -389,62 +390,57 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                 >
                     {filtered.length === 0 ? (
                         <div className="py-8 text-center text-[13px] text-slate-500">
-                            Никого нет. В списке только сотрудники с SIP-номером — он и есть логин в Oktell.
+                            Никого не нашлось.
                         </div>
                     ) : (
-                        <div className="-mx-1 overflow-x-auto">
-                            <table className="w-full min-w-[640px] border-separate border-spacing-y-1 px-1">
-                                <thead>
-                                    <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500">
-                                        <th className="w-8 px-2" />
-                                        <th className="px-2 py-1">Сотрудник</th>
-                                        <th className="px-2 py-1">SIP</th>
-                                        <th className="px-2 py-1">Порог</th>
-                                        <th className="px-2 py-1">Агент</th>
-                                        <th className="px-2 py-1 text-right">Выбросов (30 дн.)</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {filtered.map((row) => {
-                                        const state = agentState(row);
-                                        const personal = row.personal_threshold_s;
-                                        return (
-                                            <tr key={row.id} className="bg-slate-50/70 text-[13.5px] text-slate-800">
-                                                <td className="rounded-l-xl px-2 py-2">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selected.has(row.id)}
-                                                        onChange={() => toggleRow(row.id)}
-                                                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                    />
-                                                </td>
-                                                <td className="px-2 py-2">
-                                                    <div className="font-medium text-slate-900">{row.name}</div>
-                                                    {row.department_name && (
-                                                        <div className="text-[11.5px] text-slate-500">{row.department_name}</div>
-                                                    )}
-                                                </td>
-                                                <td className="px-2 py-2 tabular-nums text-slate-600">{row.sip_number}</td>
-                                                <td className="px-2 py-2">
-                                                    {row.rule_enabled === false ? (
-                                                        <IosBadge tone="slate">Не участвует</IosBadge>
-                                                    ) : personal ? (
-                                                        <IosBadge tone="blue">{fmtMinutes(personal)}</IosBadge>
-                                                    ) : (
-                                                        <span className="text-slate-500">{fmtMinutes(defaultThreshold)} — как у всех</span>
-                                                    )}
-                                                </td>
-                                                <td className="px-2 py-2">
-                                                    <IosBadge tone={state.tone}>{state.text}</IosBadge>
-                                                </td>
-                                                <td className="rounded-r-xl px-2 py-2 text-right tabular-nums font-semibold text-slate-900">
-                                                    {row.kicks_30d || 0}
-                                                </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </tbody>
-                            </table>
+                        <div className="divide-y divide-slate-100">
+                            {filtered.map((row) => {
+                                const state = agentState(row);
+                                const personal = row.personal_threshold_s;
+                                const checked = selected.has(row.id);
+                                return (
+                                    <div
+                                        key={row.id}
+                                        className={`flex items-center gap-3 px-1 py-2.5 transition-colors ${
+                                            checked ? 'bg-blue-50/60' : 'hover:bg-slate-50'
+                                        }`}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            onChange={() => toggleRow(row.id)}
+                                            className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        <div className="min-w-0 flex-1">
+                                            <div className="truncate text-[14px] font-medium text-slate-900">{row.name}</div>
+                                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-slate-500">
+                                                {row.sip_number
+                                                    ? <span className="tabular-nums">SIP {row.sip_number}</span>
+                                                    : <IosBadge tone="amber">нет SIP-номера</IosBadge>}
+                                                {row.department_name && <span>· {row.department_name}</span>}
+                                                {row.managed_today && (
+                                                    <span className="text-emerald-600">· вход через приложение</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div className="hidden shrink-0 sm:block">
+                                            {row.rule_enabled === false ? (
+                                                <IosBadge tone="slate">не участвует</IosBadge>
+                                            ) : personal ? (
+                                                <IosBadge tone="blue">{fmtMinutes(personal)}</IosBadge>
+                                            ) : (
+                                                <span className="text-[12.5px] text-slate-400">{fmtMinutes(defaultThreshold)}</span>
+                                            )}
+                                        </div>
+                                        <div className="w-[150px] shrink-0 text-right">
+                                            <IosBadge tone={state.tone}>{state.text}</IosBadge>
+                                        </div>
+                                        <div className="w-[52px] shrink-0 text-right tabular-nums text-[14px] font-semibold text-slate-900">
+                                            {row.kicks_30d || 0}
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
                     )}
                 </IosSection>
@@ -454,6 +450,18 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             {tab === 'common' && settings && (
                 <div className="space-y-4">
                     <IosSection title="Правило">
+                        <label className="flex items-center justify-between gap-3">
+                            <span className="flex items-center gap-2 text-[13.5px] text-slate-700">
+                                Ограничитель включён
+                                <IosHint text="Выключен — агенты на машинах ничего не делают: не предупреждают и не разлогинивают. Настройки при этом сохраняются." />
+                            </span>
+                            <IosToggle
+                                checked={Boolean(settings.enabled)}
+                                disabled={!canManage}
+                                onChange={(value) => patchSettings({ enabled: value })}
+                            />
+                        </label>
+                        <div className="h-px bg-slate-100" />
                         <label className="flex items-center justify-between gap-3">
                             <span className="flex items-center gap-2 text-[13.5px] text-slate-700">
                                 Режим обкатки

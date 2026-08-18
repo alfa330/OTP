@@ -148,10 +148,17 @@ def save_settings(cursor, payload: dict, updated_by=None) -> dict:
 # Сотрудники и персональные пороги
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Кто попадает в список. Роли и статусы — те же, что в разделе «Настройки SIP»:
+# там этот отбор давно работает на живых данных. На users.is_active опираться
+# нельзя: колонка по умолчанию FALSE и означает не «работает у нас», из-за чего
+# из списка выпадало большинство сотрудников.
+EMPLOYEE_ROLES = ('operator', 'trainee')
+INACTIVE_STATUSES = ('fired', 'dismissal')
+
 _EMPLOYEES_SQL = """
     SELECT u.id,
            u.name,
-           u.role,
+           LOWER(COALESCE(u.role, ''))           AS role,
            COALESCE(u.sip_number, '')            AS sip_number,
            d.code                                AS department_code,
            d.name                                AS department_name,
@@ -160,30 +167,43 @@ _EMPLOYEES_SQL = """
            a.last_seen_at                        AS agent_seen_at,
            a.agent_version                       AS agent_version,
            a.managed_window                      AS agent_window,
-           COALESCE(v.kicks, 0)                  AS kicks_30d
+           COALESCE(v.kicks, 0)                  AS kicks_30d,
+           (m.day IS NOT NULL)                   AS managed_today
       FROM users u
       LEFT JOIN departments d ON d.id = u.department_id
       LEFT JOIN oktell_guard_user_rules r ON r.user_id = u.id
       LEFT JOIN oktell_guard_agents a ON a.user_id = u.id
+      LEFT JOIN oktell_guard_managed_days m
+             ON m.user_id = u.id
+            AND m.day = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')::date
       LEFT JOIN (
             SELECT user_id, COUNT(*) AS kicks
               FROM oktell_guard_violations
-             WHERE happened_at >= %(since)s AND NOT dry_run
+             WHERE happened_at >= %(since)s AND NOT dry_run AND verified = 'confirmed'
              GROUP BY user_id
       ) v ON v.user_id = u.id
-     WHERE u.is_active
-       AND COALESCE(u.sip_number, '') <> ''
+     WHERE LOWER(COALESCE(u.role, '')) = ANY(%(roles)s)
+       AND LOWER(COALESCE(u.status, '')) <> ALL(%(inactive)s)
        AND (%(department_code)s IS NULL OR d.code = %(department_code)s)
      ORDER BY u.name
 """
 
 
 def list_employees(cursor, department_code=None, since=None):
-    """Сотрудники с SIP-номером: только они вообще могут сидеть в «Перезвоне».
+    """Операторы отдела — все, а не только те, у кого заполнен SIP-номер.
+
+    Сотрудник без номера как раз и есть тот, кого ограничитель не покрывает:
+    прятать его из списка означало бы прятать проблему. В интерфейсе он виден
+    с пометкой «нет SIP-номера».
 
     department_code=None — все отделы (глобальный админ), иначе периметр отдела.
     """
-    cursor.execute(_EMPLOYEES_SQL, {'department_code': department_code, 'since': since})
+    cursor.execute(_EMPLOYEES_SQL, {
+        'department_code': department_code,
+        'since': since,
+        'roles': list(EMPLOYEE_ROLES),
+        'inactive': list(INACTIVE_STATUSES),
+    })
     return fetch_all(cursor)
 
 
@@ -240,10 +260,11 @@ def personal_rule_by_sip(cursor, sip_number: str):
         SELECT u.id AS user_id, u.name, r.threshold_s, COALESCE(r.enabled, TRUE) AS enabled
           FROM users u
           LEFT JOIN oktell_guard_user_rules r ON r.user_id = u.id
-         WHERE COALESCE(u.sip_number, '') = %(sip)s AND u.is_active
+         WHERE COALESCE(u.sip_number, '') = %(sip)s
+           AND LOWER(COALESCE(u.status, '')) <> ALL(%(inactive)s)
          LIMIT 1
         """,
-        {'sip': sip},
+        {'sip': sip, 'inactive': list(INACTIVE_STATUSES)},
     )
     return fetch_one(cursor)
 
