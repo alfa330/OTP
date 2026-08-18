@@ -19,6 +19,34 @@ SETTINGS_FIELDS = (
 DEFAULT_CALL_STATES = ["talk", "dial", "call", "ring"]
 
 
+
+def _columns(cursor):
+    return [column[0] for column in (cursor.description or [])]
+
+
+def row_to_dict(cursor, row):
+    """Строка курсора → словарь по именам столбцов.
+
+    Курсор проекта возвращает кортежи (conn.cursor() без cursor_factory), и
+    dict(row) на них падает. Разбирать по индексам, как в crm, не хочется:
+    вставка столбца в середину SELECT молча сдвинула бы все поля.
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return dict(row)
+    return dict(zip(_columns(cursor), row))
+
+
+def fetch_one(cursor):
+    return row_to_dict(cursor, cursor.fetchone())
+
+
+def fetch_all(cursor):
+    columns = _columns(cursor)
+    return [row if isinstance(row, dict) else dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Чистая логика (тестируется без базы)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,8 +113,7 @@ def get_settings(cursor) -> dict:
                recall_reason_id, call_state_strings, heartbeat_interval_s, updated_by, updated_at
           FROM oktell_guard_settings WHERE id = 1
     """)
-    row = cursor.fetchone()
-    return dict(row) if row else {}
+    return fetch_one(cursor) or {}
 
 
 def save_settings(cursor, payload: dict, updated_by=None) -> dict:
@@ -157,7 +184,7 @@ def list_employees(cursor, department_code=None, since=None):
     department_code=None — все отделы (глобальный админ), иначе периметр отдела.
     """
     cursor.execute(_EMPLOYEES_SQL, {'department_code': department_code, 'since': since})
-    return [dict(row) for row in cursor.fetchall()]
+    return fetch_all(cursor)
 
 
 def bulk_set_rules(cursor, user_ids, *, threshold_s=None, enabled=None, updated_by=None) -> int:
@@ -218,8 +245,7 @@ def personal_rule_by_sip(cursor, sip_number: str):
         """,
         {'sip': sip},
     )
-    row = cursor.fetchone()
-    return dict(row) if row else None
+    return fetch_one(cursor)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -292,8 +318,8 @@ def rejected_count(cursor, date_from, date_to, department_code=None) -> int:
         """,
         {'date_from': date_from, 'date_to': date_to, 'department_code': department_code},
     )
-    row = cursor.fetchone()
-    return int((dict(row) if row else {}).get('cnt') or 0)
+    row = fetch_one(cursor) or {}
+    return int(row.get('cnt') or 0)
 
 
 def report(cursor, date_from, date_to, department_code=None):
@@ -323,7 +349,7 @@ def report(cursor, date_from, date_to, department_code=None):
         """,
         {'date_from': date_from, 'date_to': date_to, 'department_code': department_code},
     )
-    return [dict(row) for row in cursor.fetchall()]
+    return fetch_all(cursor)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,8 +362,7 @@ def current_release(cursor):
                notes, uploaded_by, uploaded_at
           FROM oktell_guard_releases WHERE is_current LIMIT 1
     """)
-    row = cursor.fetchone()
-    return dict(row) if row else None
+    return fetch_one(cursor)
 
 
 def add_release(cursor, *, version, filename, sha256, size_bytes, gcs_bucket, gcs_path,
@@ -415,14 +440,14 @@ def user_by_token(cursor, token_hash: str):
         """,
         {'token_hash': token_hash},
     )
-    row = cursor.fetchone()
-    if not row:
+    found = fetch_one(cursor)
+    if not found:
         return None
     cursor.execute(
         "UPDATE oktell_guard_tokens SET last_used_at = " + _NOW + " WHERE id = %(id)s",
-        {'id': dict(row)['id']},
+        {'id': found['id']},
     )
-    return dict(row)
+    return found
 
 
 def mark_managed_day(cursor, user_id) -> None:
@@ -458,7 +483,7 @@ def managed_days(cursor, date_from, date_to, department_code=None):
         """,
         {'date_from': date_from, 'date_to': date_to, 'department_code': department_code},
     )
-    return [dict(row) for row in cursor.fetchall()]
+    return fetch_all(cursor)
 
 
 def access_context(cursor, user_id):
@@ -493,10 +518,9 @@ def access_context(cursor, user_id):
         """,
         {'user_id': int(user_id)},
     )
-    row = cursor.fetchone()
-    if not row:
+    ctx = fetch_one(cursor)
+    if not ctx:
         return None
-    ctx = dict(row)
     # Глава отдела считается по отделу, которым он РУКОВОДИТ: его собственный
     # department_id может быть не заполнен или указывать на другой отдел.
     if ctx.get('is_department_head') and ctx.get('headed_department_code'):
