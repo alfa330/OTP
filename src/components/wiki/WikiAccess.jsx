@@ -25,6 +25,9 @@ import useStableCallback from './useStableCallback';
 const SUBJECT_KINDS = [
     { value: 'otp_role', label: 'Роль в системе' },
     { value: 'department', label: 'Отдел' },
+    // Адресуется НАЗНАЧЕНИЮ, а не человеку: правило переезжает вместе со сменой
+    // главы, и переставлять его руками не нужно.
+    { value: 'department_head', label: 'Глава отдела' },
     { value: 'group', label: 'Группа' },
     { value: 'direction', label: 'Направление' },
     { value: 'wiki_role', label: 'Роль в вики' },
@@ -32,6 +35,24 @@ const SUBJECT_KINDS = [
 ];
 
 const SUBJECT_KIND_LABEL = Object.fromEntries(SUBJECT_KINDS.map((k) => [k.value, k.label]));
+
+/* Второе измерение правила: «не ниже такой-то должности». Нужно, чтобы выразить
+   связку «отдел И уровень» — одним лишь субъектом-отделом раздел супервайзера
+   открылся бы операторам, а ролью 'sv' — супервайзерам чужих отделов.
+   Шкала совпадает с ROLE_LEVELS на бэкенде (wiki/access.py). */
+const ROLE_LEVEL_OPTIONS = [
+    { value: '', label: 'Без ограничения' },
+    { value: '10', label: 'Не ниже оператора' },
+    { value: '20', label: 'Не ниже тренера' },
+    { value: '30', label: 'Не ниже супервайзера' },
+    { value: '40', label: 'Не ниже главы отдела' },
+    { value: '50', label: 'Только супер-админ' },
+];
+
+const ROLE_LEVEL_LABEL = {
+    10: 'от оператора', 20: 'от тренера', 30: 'от СВ',
+    40: 'от главы отдела', 50: 'супер-админ',
+};
 
 const PERMISSIONS = [
     { key: 'can_read', label: 'Читать' },
@@ -49,6 +70,7 @@ const emptyRule = (sectionId) => ({
     subject_type: 'otp_role',
     subject_role: 'operator',
     subject_id: '',
+    min_role_level: '',
     grant_subsections: true,
     can_read: true,
     can_create: false,
@@ -111,7 +133,10 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
     const subjectOptions = useMemo(() => {
         const kind = draft?.subject_type;
         if (!kind || kind === 'otp_role' || kind === 'user') return [];
-        return (catalog[kind] || []).map((item) => ({
+        // «Глава отдела» выбирается из справочника отделов: правило адресовано
+        // должности главы этого отдела, а не конкретному человеку.
+        const source = kind === 'department_head' ? 'department' : kind;
+        return (catalog[source] || []).map((item) => ({
             value: String(item.id), label: item.name,
         }));
     }, [catalog, draft?.subject_type]);
@@ -123,6 +148,7 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
             section_id: Number(sectionId),
             subject_id: draft.subject_type === 'otp_role' ? null : Number(draft.subject_id) || null,
             subject_role: draft.subject_type === 'otp_role' ? draft.subject_role : null,
+            min_role_level: draft.min_role_level === '' ? null : Number(draft.min_role_level),
         }, { headers })
             .then(() => {
                 toast('Правило сохранено', 'success');
@@ -212,6 +238,7 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
                                 <div className="flex flex-wrap items-center gap-1.5">
                                     <IosBadge tone="blue">
                                         {SUBJECT_KIND_LABEL[rule.subject_type] || rule.subject_type}
+                                        {rule.min_role_level ? ` · ${ROLE_LEVEL_LABEL[rule.min_role_level] || rule.min_role_level}` : ''}
                                     </IosBadge>
                                     <span className="truncate text-[13.5px] font-medium text-slate-900">
                                         {rule.subject_label || rule.subject_role || `#${rule.subject_id}`}
@@ -379,6 +406,23 @@ export default function WikiAccess({ base, headers, showToast, structure, reload
                                 />
                             </div>
                         )}
+
+                        <div>
+                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                Уровень должности
+                            </label>
+                            <CustomSelect
+                                variant="ios"
+                                value={String(draft.min_role_level ?? '')}
+                                onChange={(v) => setDraft({ ...draft, min_role_level: v })}
+                                options={ROLE_LEVEL_OPTIONS}
+                                ariaLabel="Минимальный уровень должности"
+                            />
+                            <p className="mt-1 px-1 text-[11.5px] text-slate-400">
+                                Правило сработает, только если должность человека не ниже выбранной.
+                                Так раздел супервайзера остаётся закрытым для операторов того же отдела.
+                            </p>
+                        </div>
 
                         <div className="space-y-1.5">
                             <div className={iosGroupLabel}>Что разрешено</div>

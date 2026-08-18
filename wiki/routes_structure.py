@@ -8,7 +8,9 @@ from flask import jsonify, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
+from . import org as wiki_org
 from . import queries, structure
+from .schema import SUBJECT_TYPES
 
 
 def _body():
@@ -134,6 +136,21 @@ def register(bp, wiki_route, db, log_ip):
         })
 
     # ── Пространства ─────────────────────────────────────────────────────
+    @wiki_route('/structure/commercial', methods=('POST',),
+                capability='can_manage_structure')
+    def wiki_structure_commercial(cursor, ctx):
+        """Пересобрать дерево «Коммерческого отдела» и правила доступа к нему.
+
+        Отдельная кнопка, а не автозапуск при старте: автоматическая пересборка
+        молча возвращала бы правки, сделанные владельцем руками. Операция
+        идемпотентна и ничего не удаляет — снятая ветка уходит в архив.
+        """
+        report = wiki_org.ensure_commercial_structure(cursor, created_by=ctx['user_id'])
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='structure.commercial',
+                           entity_type='space', entity_id=report['space']['id'],
+                           details=report, ip_address=log_ip())
+        return jsonify(report)
+
     @wiki_route('/spaces', methods=('GET', 'POST'), capability='can_manage_structure')
     def wiki_spaces(cursor, ctx):
         if request.method == 'GET':
@@ -318,8 +335,7 @@ def register(bp, wiki_route, db, log_ip):
         data = _body()
         section_id = _int_or_none(data.get('section_id'))
         subject_type = data.get('subject_type')
-        if not section_id or subject_type not in (
-                'department', 'direction', 'group', 'otp_role', 'wiki_role', 'user'):
+        if not section_id or subject_type not in SUBJECT_TYPES:
             return jsonify({"error": "Укажите раздел и субъект правила"}), 400
         if structure.section_exists(cursor, section_id) is None:
             return jsonify({"error": "Раздел не найден"}), 404
@@ -334,6 +350,13 @@ def register(bp, wiki_route, db, log_ip):
             if not subject_id:
                 return jsonify({"error": "Не выбран субъект"}), 400
 
+        # Уровень должности — второе измерение правила: «не ниже супервайзера».
+        # Пустое значение (ничего не выбрано) означает «без ограничения»,
+        # поэтому 0 и None здесь равнозначны и оба кладутся как NULL.
+        min_role_level = _int_or_none(data.get('min_role_level'))
+        if min_role_level is not None and min_role_level not in wiki_access.ROLE_LEVELS.values():
+            return jsonify({"error": "Неизвестный уровень должности"}), 400
+
         permissions = {key: bool(data.get(key)) for key in PERMISSION_FIELDS}
         # Право без чтения бессмысленно: нельзя править то, чего не видишь.
         if any(permissions[k] for k in PERMISSION_FIELDS[1:]):
@@ -344,6 +367,7 @@ def register(bp, wiki_route, db, log_ip):
             subject_id=subject_id, subject_role=subject_role,
             permissions=permissions,
             grant_subsections=bool(data.get('grant_subsections', True)),
+            min_role_level=min_role_level,
             created_by=ctx['user_id'],
         )
         queries.log_action(cursor, actor_id=ctx['user_id'], action='rule.upsert',
@@ -351,7 +375,7 @@ def register(bp, wiki_route, db, log_ip):
                            target_user_id=subject_id if subject_type == 'user' else None,
                            details={'rule_id': rule_id, 'subject_type': subject_type,
                                     'subject_id': subject_id, 'subject_role': subject_role,
-                                    **permissions},
+                                    'min_role_level': min_role_level, **permissions},
                            ip_address=log_ip())
         return jsonify({"id": rule_id}), 201
 

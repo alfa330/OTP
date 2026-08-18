@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover
 
 from wiki import articles as wiki_articles  # noqa: E402
 from wiki import queries  # noqa: E402
+from wiki.access import collect_subjects  # noqa: E402
 from wiki.routes import build_wiki_blueprint  # noqa: E402
 
 WIKI_ADMIN_CAPS = {
@@ -43,8 +44,10 @@ WIKI_ADMIN_CAPS = {
 
 EDITOR_CAPS = {'can_read': True, 'can_create': True, 'can_edit': True}
 
-EMPTY_SUBJECTS = {'department': [], 'direction': [], 'group': [],
-                  'otp_role': ['operator'], 'wiki_role': [], 'user': [42]}
+# Субъекты собирает боевой collect_subjects: свой словарь-литерал уже отставал
+# от модели (в нём не было ни 'department_head', ни уровня роли) и ронял тест
+# при каждом расширении набора субъектов.
+EMPTY_SUBJECTS = collect_subjects(user_id=42, otp_role='operator')
 
 
 def ctx(caps, role='admin'):
@@ -67,11 +70,25 @@ class SubjectParamsTest(unittest.TestCase):
     def test_master_key_withheld_from_browsing(self):
         self.assertFalse(self.params(WIKI_ADMIN_CAPS, master_key=False)['is_wiki_admin'])
 
-    def test_super_admin_bypass_withheld_from_browsing(self):
-        """Обход строгого режима — тоже мастер-ключ, и в витрине его нет."""
+    def test_super_admin_sees_everything_including_browsing(self):
+        """Супер-админ видит статьи всех отделов — и в витрине тоже.
+
+        Решение владельца (август 2026). Отличие от мастер-ключа принципиальное:
+        can_manage_access достаётся ещё и роли 'admin', которую носят главы
+        разных служб, — вот у НИХ витрина остаётся личной (тест выше). Ролей
+        super_admin на проде пять, и это действительно глобальные админы.
+        """
         self.assertTrue(self.params(WIKI_ADMIN_CAPS, 'super_admin')['is_super_admin'])
+        self.assertTrue(
+            self.params(WIKI_ADMIN_CAPS, 'super_admin', master_key=False)['is_super_admin'],
+            'супер-админ обязан видеть чужие отделы и в списке статей')
+
+    def test_wiki_admin_who_is_not_super_admin_stays_scoped(self):
+        """Роль 'admin' с мастер-ключом в витрине по-прежнему видит только своё."""
         self.assertFalse(
-            self.params(WIKI_ADMIN_CAPS, 'super_admin', master_key=False)['is_super_admin'])
+            self.params(WIKI_ADMIN_CAPS, 'admin', master_key=False)['is_super_admin'])
+        self.assertFalse(
+            self.params(WIKI_ADMIN_CAPS, 'admin', master_key=False)['is_wiki_admin'])
 
     def test_editor_does_not_see_foreign_drafts(self):
         """can_edit есть у каждого супервайзера и тренера — гейтом она быть не может."""

@@ -13974,13 +13974,17 @@ class Database:
             "description": r[4], "is_active": r[5],
             "head_user_id": r[6], "head_name": r[7],
             "operator_field_schema": r[8] if r[8] is not None else [],
+            # Тумблер раздела «Вики». COALESCE в запросах: на базе, где схема
+            # вики ещё не разворачивалась, колонки нет — раздел считаем выданным.
+            "wiki_enabled": True if len(r) < 10 or r[9] is None else bool(r[9]),
         }
 
     def get_departments(self):
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT d.id, d.code, d.slug, d.name, d.description, d.is_active,
-                       d.head_user_id, h.name, d.operator_field_schema
+                       d.head_user_id, h.name, d.operator_field_schema,
+                       COALESCE(d.wiki_enabled, TRUE)
                 FROM departments d
                 LEFT JOIN users h ON h.id = d.head_user_id
                 ORDER BY d.name
@@ -13991,7 +13995,8 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT d.id, d.code, d.slug, d.name, d.description, d.is_active,
-                       d.head_user_id, h.name, d.operator_field_schema
+                       d.head_user_id, h.name, d.operator_field_schema,
+                       COALESCE(d.wiki_enabled, TRUE)
                 FROM departments d
                 LEFT JOIN users h ON h.id = d.head_user_id
                 WHERE d.id = %s
@@ -14019,7 +14024,8 @@ class Database:
             }
 
     def update_department(self, department_id, **kwargs):
-        allowed = {'code', 'slug', 'name', 'description', 'is_active', 'operator_field_schema'}
+        allowed = {'code', 'slug', 'name', 'description', 'is_active',
+                   'operator_field_schema', 'wiki_enabled'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return self.get_department_by_id(department_id)
@@ -14151,6 +14157,32 @@ class Database:
             """, (user_id,))
             r = cursor.fetchone()
             return (r[0], r[1]) if r else (None, None)
+
+    def department_wiki_enabled(self, department_id):
+        """Выдан ли отделу раздел «Вики». Без отдела — выдан.
+
+        Колонку заводит схема раздела (wiki/schema.py). Отсутствие колонки на
+        ещё не мигрированной базе трактуем как «выдан»: раздел уже открыт всем,
+        и миграция не должна отбирать его молча.
+        """
+        if not department_id:
+            return True
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(wiki_enabled, TRUE) FROM departments WHERE id = %s",
+                (department_id,),
+            )
+            row = cursor.fetchone()
+            return bool(row[0]) if row else True
+
+    def set_department_wiki_enabled(self, department_id, enabled):
+        """Включить/выключить раздел «Вики» для отдела."""
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "UPDATE departments SET wiki_enabled = %s WHERE id = %s",
+                (bool(enabled), department_id),
+            )
+            return cursor.rowcount > 0
 
     def get_supervisor_direction_ids(self, supervisor_id, department_id=None):
         """Живые направления супервайзера: активные группы, где он текущий СВ,

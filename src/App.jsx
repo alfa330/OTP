@@ -237,6 +237,11 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     'wiki',
     'events',
 ]);
+// Выдан ли отделу раздел «Вики». Поле приходит в профиле; его отсутствие
+// (старый кэш профиля, служебная учётка без отдела) означает «выдан» — раздел
+// уже открыт всем, и молча отбирать его на клиенте нельзя.
+const wikiEnabledFor = (user) => user?.wiki_enabled !== false;
+
 const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     admin_sessions: 'Admin sessions',
     ai_feedback: 'Dos AI',
@@ -34990,6 +34995,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
             const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
+            // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
+            // раздел общий, и в карте разделов пришлось бы держать его у всех.
+            const wikiSectionEnabled = wikiEnabledFor(user);
             // Просмотр переписки оценённого чата Chat2Desk из «Мои оценки»
             // (оценки чатов ЧМ живут в журнале оценок: calls.c2d_snapshot_id).
             const [myEvalChatView, setMyEvalChatView] = useState(null); // {snapshotId, quotes, title}
@@ -43527,10 +43535,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings' && canAccessSipSettings) return;
-                // «Вики» — база знаний, доступна всем сотрудникам независимо от отдела.
-                // Что человек увидит ВНУТРИ, решают правила разделов и статей на бэкенде,
-                // а не этот гард: у раздела своя модель прав с точностью до статьи.
-                if (view === 'wiki') return;
+                // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
+                // (departments.wiki_enabled), а не allowlist'ом: он общий, и
+                // держать его в карте разделов пришлось бы у каждого отдела.
+                // Что человек увидит ВНУТРИ, решают правила разделов и статей на
+                // бэкенде: у раздела своя модель прав с точностью до статьи.
+                if (view === 'wiki' && wikiSectionEnabled) return;
                 // «Обращения» — свой предикат, не allowlist отдела: раздел общий,
                 // но на время выката открыт СЗоВ, админам и пилотному оператору.
                 if (view === 'crm_tickets' && canAccessCrmSection) return;
@@ -43539,7 +43549,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) setView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessSipSettings, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessSipSettings, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -44694,6 +44704,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     {/* «Вики» — база знаний, открыта всем ролям, поэтому пункт
                                         объявлен один раз здесь, а не продублирован по ролевым
                                         веткам. Периметр внутри раздела считает бэкенд. */}
+                                    {wikiSectionEnabled && (
                                     <li>
                                         <button
                                             type="button"
@@ -44703,6 +44714,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <FaIcon className="fas fa-book"></FaIcon> <span className="sidebar-text">Вики</span>
                                         </button>
                                     </li>
+                                    )}
 
                                     {/* «Обращения» — заявки в рабочие Telegram-группы.
                                         На время выката пункт видят СЗоВ (глава и СВ), админы и

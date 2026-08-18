@@ -90,6 +90,21 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         )
                         context['capabilities'] = capabilities
 
+                        # Тумблер «раздел выдан отделу» — на бэкенде, а не
+                        # только в меню: гард во фронте отсекает пункт, но не
+                        # запрос, и раздел, снятый у отдела, открывался бы
+                        # прямым обращением к API.
+                        # Супер-админа и администратора структуры тумблер не
+                        # касается: иначе, закрыв раздел своему отделу, они
+                        # потеряли бы доступ к настройке самого тумблера.
+                        if not context.get('wiki_enabled', True) and not (
+                                wiki_access.normalize_role(context['otp_role']) == 'super_admin'
+                                or capabilities.get('can_manage_structure')):
+                            return jsonify({
+                                "error": "Раздел «Вики» не выдан вашему отделу",
+                                "code": "WIKI_DEPARTMENT_DISABLED",
+                            }), 403
+
                         if capability and not capabilities.get(capability):
                             return jsonify({
                                 "error": "Недостаточно прав для этого действия",

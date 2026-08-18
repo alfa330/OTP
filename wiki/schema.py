@@ -28,6 +28,21 @@ OTP_ROLES = (
     'super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator', 'trainee',
 )
 
+# Субъекты, на которые можно адресовать правило доступа. Один источник правды:
+# CHECK в схеме, валидация в роутах и подстановка в SQL обязаны идти отсюда.
+# 'department_head' — не роль и не человек, а НАЗНАЧЕНИЕ главой отдела
+# (department_head_assignments). Правило переезжает вместе с назначением, поэтому
+# смена главы не требует переставлять права руками, а у отдела с двумя главами
+# (на проде это «Отдел продаж») правило одно на обоих.
+SUBJECT_TYPES = (
+    'department', 'department_head', 'direction', 'group',
+    'otp_role', 'wiki_role', 'user',
+)
+
+# Тип раздела в дереве. 'department' — ветка конкретного отдела внутри
+# пространства (ОП / ОТП у «Коммерческого отдела»); 'common' — всё остальное.
+SECTION_KINDS = ('common', 'department')
+
 # Шесть прав. В оригинальной вики их пять — can_delete добавлено нами.
 PERMISSION_COLUMNS = (
     'can_read', 'can_create', 'can_edit', 'can_delete', 'can_publish', 'can_approve',
@@ -976,6 +991,129 @@ _CLASSIFIER_STATEMENTS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ОТДЕЛ И УРОВЕНЬ ДОЛЖНОСТИ В ДЕРЕВЕ РАЗДЕЛОВ
+#
+# Дерево «Коммерческого отдела» выглядит так:
+#
+#     Коммерческий отдел (пространство)
+#     ├── Коммерческий директор      min_role_level 50
+#     ├── Руководитель группы        subject_type='department_head'
+#     ├── Супервайзер                department + min_role_level 30
+#     └── Оператор
+#         ├── ОП    (section_kind='department', department_id=<ОП>)
+#         └── ОТП   (section_kind='department', department_id=<СЗоВ>)
+#
+# Зачем min_role_level. Правило несёт РОВНО ОДИН субъект, а нам нужна связка
+# «отдел И не ниже уровня»: правило на department открыло бы операторам раздел
+# супервайзера, а правило на otp_role='sv' пробило бы границу отдела — СВ продаж
+# увидел бы ОТП. Уровень — второе измерение того же правила, а не второй субъект:
+# правило действует, если уровень роли человека НЕ НИЖЕ указанного. Отсюда же
+# бесплатно получается «видит своё и всё, что ниже себя»: раздел супервайзера
+# требует 30, операторский — ничего, и глава отдела (40) подпадает под оба.
+#
+# Шкала — ROLE_LEVELS из wiki/access.py (operator 10, trainer 20, sv 30,
+# admin 40, super_admin 50). NULL = ограничения по уровню нет.
+# ─────────────────────────────────────────────────────────────────────────────
+_ORG_STATEMENTS = [
+    "ALTER TABLE wiki_sections ADD COLUMN IF NOT EXISTS "
+    "department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL;",
+    "ALTER TABLE wiki_sections ADD COLUMN IF NOT EXISTS "
+    "section_kind VARCHAR(16) NOT NULL DEFAULT 'common';",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                        WHERE conname = 'wiki_sections_kind_chk') THEN
+            ALTER TABLE wiki_sections ADD CONSTRAINT wiki_sections_kind_chk
+                CHECK (section_kind IN ('common', 'department'));
+        END IF;
+    END $$;
+    """,
+    # Один отдел — одна ветка у одного родителя. Предикат отсекает архив:
+    # иначе ветку, убранную в архив, нельзя было бы создать заново.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_department
+        ON wiki_sections (space_id, COALESCE(parent_section_id, 0), department_id)
+     WHERE section_kind = 'department' AND status = 'active';
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_sections_department "
+    "ON wiki_sections (department_id) WHERE department_id IS NOT NULL;",
+
+    "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS "
+    "min_role_level INTEGER;",
+    # Уровень входит в КЛЮЧ правила, а не просто в его поля. Иначе на одном
+    # разделе нельзя выразить «отдел читает» + «супервайзер того же отдела ещё и
+    # правит»: пара (раздел, субъект) совпадает, и второе правило затирало бы
+    # первое при ON CONFLICT. Старый индекс без уровня снимаем.
+    "DROP INDEX IF EXISTS uq_wiki_section_rule_subject;",
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject_level
+        ON wiki_section_access_rules (section_id, subject_type,
+                                      COALESCE(subject_id, -1),
+                                      COALESCE(subject_role, ''),
+                                      COALESCE(min_role_level, -1));
+    """,
+    "ALTER TABLE wiki_article_access_rules ADD COLUMN IF NOT EXISTS "
+    "min_role_level INTEGER;",
+
+    # Родословная копии и рубильник витрины соседей.
+    # cross_department по умолчанию TRUE: закрытость — осознанное решение
+    # владельца статьи, а не состояние по умолчанию, иначе заимствовать будет
+    # нечего и механика «перенести к себе» останется мёртвой.
+    # Раздел «Вики» как обычный раздел портала: выдаётся отделу тумблером.
+    # По умолчанию TRUE — раздел уже открыт всем, и миграция не должна его
+    # ни у кого отобрать; закрывают точечно.
+    "ALTER TABLE departments ADD COLUMN IF NOT EXISTS "
+    "wiki_enabled BOOLEAN NOT NULL DEFAULT TRUE;",
+
+    "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
+    "cross_department BOOLEAN NOT NULL DEFAULT TRUE;",
+    "ALTER TABLE wiki_articles ADD COLUMN IF NOT EXISTS "
+    "source_article_id INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL;",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_articles_source "
+    "ON wiki_articles (source_article_id) WHERE source_article_id IS NOT NULL;",
+]
+
+
+def _subject_type_check_statement(table):
+    """Пересобирает CHECK на subject_type, добавляя новые типы субъектов.
+
+    Список типов задан один раз в SUBJECT_TYPES, а в базе на проде уже лежит
+    ограничение со СТАРЫМ набором и автоматическим именем
+    (wiki_section_access_rules_subject_type_check). ADD COLUMN IF NOT EXISTS тут
+    не поможет — колонка есть, ограничение просто отстало, поэтому старое
+    снимаем и ставим именованное.
+
+    Отличаем нужное ограничение по 'ANY (ARRAY[': в этих же таблицах есть второе
+    CHECK, тоже упоминающее subject_type («у otp_role заполнена subject_role, у
+    остальных subject_id»), и снести его нельзя — оно продолжает работать и для
+    department_head, где заполняется subject_id (идентификатор отдела).
+    """
+    values = ", ".join("'%s'" % name for name in SUBJECT_TYPES)
+    name = '%s_subject_type_chk' % table
+    return """
+    DO $$
+    DECLARE stale text;
+    BEGIN
+        FOR stale IN
+            SELECT conname FROM pg_constraint
+             WHERE conrelid = '{table}'::regclass
+               AND contype = 'c'
+               AND conname <> '{name}'
+               AND pg_get_constraintdef(oid) LIKE '%subject_type%ANY (ARRAY[%'
+        LOOP
+            EXECUTE format('ALTER TABLE {table} DROP CONSTRAINT %I', stale);
+        END LOOP;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '{name}') THEN
+            ALTER TABLE {table} ADD CONSTRAINT {name}
+                CHECK (subject_type IN ({values}));
+        END IF;
+    END $$;
+    """.format(table=table, name=name, values=values)
+
+
 def init_wiki_schema(cursor):
     """Создаёт/дополняет схему раздела «Вики». Идемпотентно.
 
@@ -988,6 +1126,13 @@ def init_wiki_schema(cursor):
         # (ValueError: unsupported format character). psycopg2 интерполяцию тоже
         # не делает — второй аргумент execute не передаётся.
         cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Отдел и уровень должности в дереве — строго после базовых таблиц:
+    # это ALTER по wiki_sections и обеим таблицам правил.
+    for statement in _ORG_STATEMENTS:
+        cursor.execute(statement)
+    for table in ('wiki_section_access_rules', 'wiki_article_access_rules'):
+        cursor.execute(_subject_type_check_statement(table))
 
     for row in _SEED_ROLES:
         cursor.execute(

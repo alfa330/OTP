@@ -26,16 +26,11 @@
 по-прежнему может увидеть всё — но по явной просьбе (?scope=all), а не молча.
 """
 
-# Подстановка субъектов повторяется в нескольких запросах — держим одной строкой,
-# чтобы условие нигде не разъехалось.
-_SUBJECT_MATCH = """
-        (r.subject_type = 'department' AND r.subject_id   = ANY(%(departments)s))
-     OR (r.subject_type = 'direction'  AND r.subject_id   = ANY(%(directions)s))
-     OR (r.subject_type = 'group'      AND r.subject_id   = ANY(%(groups)s))
-     OR (r.subject_type = 'otp_role'   AND r.subject_role = ANY(%(roles)s))
-     OR (r.subject_type = 'wiki_role'  AND r.subject_id   = ANY(%(wiki_roles)s))
-     OR (r.subject_type = 'user'       AND r.subject_id   = %(user_id)s)
-"""
+# Совпадение правила с пользователем и подстановка параметров — общие
+# с разделами, из wiki/queries.py. Двух определений быть не должно:
+# в оригинальной вике они разошлись, и список статей с деревом разделов
+# показывали разное.
+from .queries import SUBJECT_MATCH as _SUBJECT_MATCH, subject_params
 
 _VISIBLE_ARTICLES_SQL = """
 WITH my_rules AS (
@@ -92,16 +87,15 @@ SELECT a.id
 def _subject_params(ctx, subjects, sections, master_key=True):
     caps = ctx['capabilities']
     role = str(ctx.get('otp_role') or '').strip().lower()
-    return {
-        'user_id': ctx['user_id'],
+    return dict(
+        subject_params(subjects, ctx['user_id']),
+        **{
         'sections': list(sections) or [-1],
-        'departments': subjects['department'] or [-1],
-        'directions': subjects['direction'] or [-1],
-        'groups': subjects['group'] or [-1],
-        'roles': subjects['otp_role'] or [''],
-        'wiki_roles': subjects['wiki_role'] or [-1],
         'is_wiki_admin': bool(caps.get('can_manage_access')) and master_key,
-        'is_super_admin': role in ('super_admin', 'superadmin') and master_key,
+        # Супер-админ — всегда, даже в витрине: по решению владельца он видит
+        # статьи всех отделов. У мастер-ключа выше оговорка про master_key
+        # остаётся, потому что can_manage_access несёт и роль 'admin'.
+        'is_super_admin': role in ('super_admin', 'superadmin'),
         # Черновик — незаконченный текст, и в списке чтения ему не место.
         # Гейтом было can_edit, а эту способность в OTP по умолчанию получают
         # супервайзер и тренер: чужие неопубликованные статьи попадали к ним
@@ -111,7 +105,8 @@ def _subject_params(ctx, subjects, sections, master_key=True):
                                or caps.get('can_manage_access')),
         'can_see_archived': bool(caps.get('can_manage_structure')
                                  or caps.get('can_manage_access')),
-    }
+        },
+    )
 
 
 def visible_article_ids(cursor, ctx, subjects, allowed_sections, *, master_key=True):
@@ -138,15 +133,7 @@ def article_rules_for_user(cursor, article_ids, subjects, user_id):
           FROM wiki_article_access_rules r
          WHERE r.article_id = ANY(%(articles)s) AND (""" + _SUBJECT_MATCH + """)
         """,
-        {
-            'articles': list(article_ids),
-            'user_id': user_id,
-            'departments': subjects['department'] or [-1],
-            'directions': subjects['direction'] or [-1],
-            'groups': subjects['group'] or [-1],
-            'roles': subjects['otp_role'] or [''],
-            'wiki_roles': subjects['wiki_role'] or [-1],
-        },
+        dict(subject_params(subjects, user_id), articles=list(article_ids)),
     )
     keys = ('mode', 'can_read', 'can_create', 'can_edit',
             'can_delete', 'can_publish', 'can_approve')
@@ -210,7 +197,9 @@ _ARTICLE_KEYS = ('id', 'slug', 'title', 'summary', 'content', 'article_type', 's
                  'visibility_mode', 'strict_mode', 'ai_opt_out', 'toc', 'views',
                  'author_id',
                  'author_name', 'owner_user_id', 'updated_by', 'updated_at',
-                 'created_at', 'published_at', 'review_due_at', 'section_ids', 'tags')
+                 'created_at', 'published_at', 'review_due_at',
+                 'cross_department', 'source_article_id', 'source_article_title',
+                 'section_ids', 'tags')
 
 
 def get_article(cursor, *, article_id=None, slug=None):
@@ -221,6 +210,8 @@ def get_article(cursor, *, article_id=None, slug=None):
                a.author_id, u.name,
                a.owner_user_id, a.updated_by, a.updated_at, a.created_at,
                a.published_at, a.review_due_at,
+               a.cross_department, a.source_article_id,
+               (SELECT src.title FROM wiki_articles src WHERE src.id = a.source_article_id),
                COALESCE((SELECT array_agg(s.section_id) FROM wiki_article_sections s
                           WHERE s.article_id = a.id), '{}'),
                COALESCE((SELECT array_agg(t.tag_name) FROM wiki_article_tags t

@@ -7,7 +7,7 @@ import {
     IosToggle, IosBadge, IosModal,
 } from '../ui/ios';
 
-const EMPTY_FORM = { code: '', name: '', description: '', is_active: true };
+const EMPTY_FORM = { code: '', name: '', description: '', is_active: true, wiki_enabled: true };
 
 const ROLE_LABELS = {
     super_admin: 'Супер-админ', admin: 'Админ', sv: 'Супервайзер',
@@ -97,7 +97,7 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
     const openCreate = () => { setEditingId(null); setForm({ ...EMPTY_FORM }); setFormOpen(true); };
     const openEdit = (dept) => {
         setEditingId(dept.id);
-        setForm({ code: dept.code || '', name: dept.name || '', description: dept.description || '', is_active: dept.is_active !== false });
+        setForm({ code: dept.code || '', name: dept.name || '', description: dept.description || '', is_active: dept.is_active !== false, wiki_enabled: dept.wiki_enabled !== false });
         setFormOpen(true);
     };
     const closeForm = () => { setFormOpen(false); setEditingId(null); setForm({ ...EMPTY_FORM }); };
@@ -115,7 +115,7 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
                 ? `${apiBaseUrl}/api/admin/departments/${editingId}`
                 : `${apiBaseUrl}/api/admin/departments`;
             const body = isEdit
-                ? { code: form.code.trim(), slug: form.code.trim(), name: form.name.trim(), description: form.description.trim() || null, is_active: form.is_active }
+                ? { code: form.code.trim(), slug: form.code.trim(), name: form.name.trim(), description: form.description.trim() || null, is_active: form.is_active, wiki_enabled: form.wiki_enabled }
                 : { code: form.code.trim(), name: form.name.trim(), description: form.description.trim() || null };
             const resp = await fetch(url, {
                 method: isEdit ? 'PUT' : 'POST',
@@ -345,6 +345,18 @@ const DepartmentsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader })
                         <div className="flex items-center justify-between rounded-xl bg-slate-50 px-3.5 py-2.5">
                             <span className="text-[13.5px] font-medium text-slate-700">Активен</span>
                             <IosToggle checked={form.is_active} onChange={(v) => setForm((f) => ({ ...f, is_active: v }))} />
+                        </div>
+                    )}
+                    {editingId && (
+                        <div className="rounded-xl bg-slate-50 px-3.5 py-2.5">
+                            <div className="flex items-center justify-between">
+                                <span className="text-[13.5px] font-medium text-slate-700">Раздел «Вики»</span>
+                                <IosToggle checked={form.wiki_enabled} onChange={(v) => setForm((f) => ({ ...f, wiki_enabled: v }))} />
+                            </div>
+                            <p className="mt-1 text-[12px] leading-snug text-slate-500">
+                                Выключено — сотрудники отдела не видят пункт меню и не могут открыть раздел.
+                                Что именно видно внутри, решают правила разделов и статей.
+                            </p>
                         </div>
                     )}
                 </form>

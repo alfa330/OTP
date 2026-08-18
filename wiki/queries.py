@@ -10,13 +10,19 @@
 без транзакции. Здесь контекст доступа собирается одним CTE.
 """
 
+from .access import normalize_role
+
 # Один запрос вместо пяти: профиль, возглавляемые отделы, активные группы
 # (и как оператор, и как супервайзер), роли вики, режим доступа.
 _ACCESS_CONTEXT_SQL = """
 WITH me AS (
-    SELECT id, role, department_id, direction_id
-      FROM users
-     WHERE id = %(user_id)s
+    SELECT u.id, u.role, u.department_id, u.direction_id,
+           -- Тумблер «раздел Вики выдан отделу». У сотрудника без отдела
+           -- (админы, служебные учётки) отдела нет — им раздел не закрываем.
+           COALESCE(d.wiki_enabled, TRUE) AS wiki_enabled
+      FROM users u
+      LEFT JOIN departments d ON d.id = u.department_id
+     WHERE u.id = %(user_id)s
 ),
 headed AS (
     SELECT d.id
@@ -51,6 +57,7 @@ SELECT
     (SELECT role          FROM me)                                   AS otp_role,
     (SELECT department_id FROM me)                                   AS department_id,
     (SELECT direction_id  FROM me)                                   AS direction_id,
+    (SELECT wiki_enabled  FROM me)                                   AS wiki_enabled,
     COALESCE((SELECT array_agg(id)       FROM headed),     '{}')     AS headed_department_ids,
     COALESCE((SELECT array_agg(group_id) FROM my_groups),  '{}')     AS group_ids,
     COALESCE((SELECT json_agg(row_to_json(my_wiki_roles)) FROM my_wiki_roles), '[]') AS wiki_roles,
@@ -70,12 +77,14 @@ def load_access_context(cursor, user_id):
     if not row:
         return None
 
-    otp_role, department_id, direction_id, headed, groups, wiki_roles, access_mode = row
+    (otp_role, department_id, direction_id, wiki_enabled,
+     headed, groups, wiki_roles, access_mode) = row
     return {
         'user_id': int(user_id),
         'otp_role': otp_role,
         'department_id': department_id,
         'direction_id': direction_id,
+        'wiki_enabled': wiki_enabled is not False,
         'headed_department_ids': list(headed or []),
         'group_ids': list(groups or []),
         'wiki_roles': list(wiki_roles or []),
@@ -86,6 +95,63 @@ def load_access_context(cursor, user_id):
 # ─────────────────────────────────────────────────────────────────────────────
 # Периметр доступа
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Совпадение правила с пользователем — ОДНО определение на весь раздел.
+#
+# Держать одной строкой обязательно: в оригинальной вике условие было
+# продублировано в двух вычислителях, они разошлись, и дерево навигации со
+# списком статей показывали разное. Здесь его импортирует и wiki/articles.py.
+#
+# Две оси, а не одна:
+#   субъект       — под кого выписано правило (отдел, назначение главой, роль…);
+#   min_role_level — ниже какого уровня должности правило не действует.
+# Связка нужна, чтобы выразить «отдел И не ниже супервайзера»: правилом на один
+# лишь department раздел супервайзера открылся бы операторам, а правилом на
+# otp_role='sv' — супервайзерам ЧУЖИХ отделов.
+# ─────────────────────────────────────────────────────────────────────────────
+SUBJECT_MATCH = """
+        (
+            (r.subject_type = 'department'      AND r.subject_id   = ANY(%(departments)s))
+         OR (r.subject_type = 'department_head' AND r.subject_id   = ANY(%(headed)s))
+         OR (r.subject_type = 'direction'       AND r.subject_id   = ANY(%(directions)s))
+         OR (r.subject_type = 'group'           AND r.subject_id   = ANY(%(groups)s))
+         OR (r.subject_type = 'otp_role'        AND r.subject_role = ANY(%(roles)s))
+         OR (r.subject_type = 'wiki_role'       AND r.subject_id   = ANY(%(wiki_roles)s))
+         OR (r.subject_type = 'user'            AND r.subject_id   = %(user_id)s)
+        )
+        AND (r.min_role_level IS NULL OR %(role_level)s >= r.min_role_level)
+"""
+
+
+def from_super_admin(ctx):
+    """Супер-админ ли это. Роль, а не способность.
+
+    Способность can_manage_access шире роли: её автоматически получает и 'admin'
+    (главы отделов), поэтому «показать всё» на неё вешать нельзя.
+    """
+    return normalize_role(ctx.get('otp_role')) == 'super_admin'
+
+
+def subject_params(subjects, user_id):
+    """Параметры подстановки для SUBJECT_MATCH.
+
+    Пустые списки заменяются заведомо непопадающим значением: `= ANY('{}')`
+    в постгресе не ошибка, но и не совпадение, а вот NULL сравнивать нельзя.
+    Уровень роли приезжает готовым из collect_subjects — второй раз выводить
+    его из строки роли негде и незачем.
+    """
+    return {
+        'user_id': user_id,
+        'departments': subjects['department'] or [-1],
+        'headed': subjects['department_head'] or [-1],
+        'directions': subjects['direction'] or [-1],
+        'groups': subjects['group'] or [-1],
+        'roles': subjects['otp_role'] or [''],
+        'wiki_roles': subjects['wiki_role'] or [-1],
+        'role_level': subjects['role_level'],
+    }
+
 
 # Разделы, доступные на чтение в АВТОМАТИЧЕСКОМ режиме.
 #
@@ -102,12 +168,7 @@ WITH RECURSIVE rule_hits AS (
       JOIN wiki_sections s ON s.id = r.section_id AND s.status = 'active'
      WHERE r.can_read
        AND (
-            (r.subject_type = 'department' AND r.subject_id   = ANY(%(departments)s))
-         OR (r.subject_type = 'direction'  AND r.subject_id   = ANY(%(directions)s))
-         OR (r.subject_type = 'group'      AND r.subject_id   = ANY(%(groups)s))
-         OR (r.subject_type = 'otp_role'   AND r.subject_role = ANY(%(roles)s))
-         OR (r.subject_type = 'wiki_role'  AND r.subject_id   = ANY(%(wiki_roles)s))
-         OR (r.subject_type = 'user'       AND r.subject_id   = %(user_id)s)
+"""  + SUBJECT_MATCH + """
        )
      GROUP BY r.section_id
 ),
@@ -187,18 +248,15 @@ def allowed_section_ids(cursor, ctx, subjects, *, master_key=True):
     носят руководители разных служб, и мастер-ключ выкладывал им в «Все статьи»
     содержимое чужих отделов вместе с чужими черновиками.
     """
-    if master_key and ctx['capabilities'].get('can_manage_access'):
+    # Супер-админ видит статьи всех отделов — по решению владельца, и в личном
+    # периметре тоже. Отдельно от мастер-ключа: can_manage_access достаётся ещё
+    # и роли 'admin', которую носят главы разных служб, и вот ИМ показывать
+    # чужие отделы в витринах нельзя (ровно ради этого заведён master_key=False).
+    if from_super_admin(ctx) or (master_key and ctx['capabilities'].get('can_manage_access')):
         cursor.execute("SELECT id FROM wiki_sections WHERE status = 'active'")
         return {row[0] for row in cursor.fetchall()}
 
-    params = {
-        'user_id': ctx['user_id'],
-        'departments': subjects['department'] or [-1],
-        'directions': subjects['direction'] or [-1],
-        'groups': subjects['group'] or [-1],
-        'roles': subjects['otp_role'] or [''],
-        'wiki_roles': subjects['wiki_role'] or [-1],
-    }
+    params = subject_params(subjects, ctx['user_id'])
     sql = _MANUAL_SECTIONS_SQL if ctx.get('access_mode') == 'manual' else _AUTO_SECTIONS_SQL
     cursor.execute(sql, params)
     return {row[0] for row in cursor.fetchall()}
@@ -219,23 +277,10 @@ def section_rules_for_user(cursor, section_ids, subjects, user_id):
           FROM wiki_section_access_rules r
          WHERE r.section_id = ANY(%(sections)s)
            AND (
-                (r.subject_type = 'department' AND r.subject_id   = ANY(%(departments)s))
-             OR (r.subject_type = 'direction'  AND r.subject_id   = ANY(%(directions)s))
-             OR (r.subject_type = 'group'      AND r.subject_id   = ANY(%(groups)s))
-             OR (r.subject_type = 'otp_role'   AND r.subject_role = ANY(%(roles)s))
-             OR (r.subject_type = 'wiki_role'  AND r.subject_id   = ANY(%(wiki_roles)s))
-             OR (r.subject_type = 'user'       AND r.subject_id   = %(user_id)s)
+"""  + SUBJECT_MATCH + """
            )
         """,
-        {
-            'sections': list(section_ids),
-            'user_id': user_id,
-            'departments': subjects['department'] or [-1],
-            'directions': subjects['direction'] or [-1],
-            'groups': subjects['group'] or [-1],
-            'roles': subjects['otp_role'] or [''],
-            'wiki_roles': subjects['wiki_role'] or [-1],
-        },
+        dict(subject_params(subjects, user_id), sections=list(section_ids)),
     )
     keys = ('can_read', 'can_create', 'can_edit', 'can_delete', 'can_publish', 'can_approve')
     result = {}

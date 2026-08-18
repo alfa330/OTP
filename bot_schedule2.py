@@ -972,6 +972,9 @@ def _get_user_payload(user):
         avatar_updated_at = user.get("avatar_updated_at")
     department_id = None
     department_code = None
+    # Раздел «Вики» выдаётся отделу тумблером. Отдела нет (админы, служебные
+    # учётки) — раздел открыт: закрывать нечего, тумблер живёт на отделе.
+    wiki_enabled = True
     headed_department_id = None
     headed_department_ids = []
     headed_department_code = None
@@ -984,6 +987,10 @@ def _get_user_payload(user):
             department_id = None
             department_code = None
             headed_department_id = None
+        try:
+            wiki_enabled = db.department_wiki_enabled(department_id)
+        except Exception:
+            wiki_enabled = True
         try:
             headed_departments = db.get_headed_departments_for_user(user_id) or []
             headed_department_ids = [
@@ -1019,6 +1026,7 @@ def _get_user_payload(user):
         "gender": gender,
         "department_id": department_id,
         "department_code": department_code,
+        "wiki_enabled": wiki_enabled,
         "headed_department_id": headed_department_id,
         "headed_department_ids": headed_department_ids,
         "headed_department_code": headed_department_code,
@@ -10885,7 +10893,7 @@ def api_admin_update_department(department_id):
         if not _is_super_admin_role(requester_role):
             return jsonify({"error": "Only super admins can update departments"}), 403
         data = request.get_json() or {}
-        allowed = {'code', 'slug', 'name', 'description', 'is_active'}
+        allowed = {'code', 'slug', 'name', 'description', 'is_active', 'wiki_enabled'}
         updates = {k: v for k, v in data.items() if k in allowed}
         if not updates:
             return jsonify({"error": "No valid fields to update"}), 400

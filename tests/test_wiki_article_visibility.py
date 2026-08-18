@@ -25,7 +25,9 @@ import unittest
 from pathlib import Path
 
 from tests import prod_db
+from wiki.access import collect_subjects  # noqa: E402
 from wiki.articles import _VISIBLE_ARTICLES_SQL
+from wiki.queries import subject_params  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,9 +43,11 @@ WITH wiki_articles AS (
 ),
 wiki_article_access_rules AS (
     SELECT article_id::int, subject_type::text, subject_id::int,
-           subject_role::text, mode::text, can_read::boolean
+           subject_role::text, mode::text, can_read::boolean,
+           min_role_level::int
       FROM (VALUES {rules}) AS t(
-        article_id, subject_type, subject_id, subject_role, mode, can_read)
+        article_id, subject_type, subject_id, subject_role, mode, can_read,
+        min_role_level)
 ),
 wiki_article_sections AS (
     SELECT article_id::int, section_id::int
@@ -59,7 +63,7 @@ wiki_guest_access AS (
 
 _EMPTY = {
     'articles': "(NULL::int, NULL::text, NULL::text, NULL::bool, NULL::int, NULL::int)",
-    'rules': "(NULL::int, NULL::text, NULL::int, NULL::text, NULL::text, NULL::bool)",
+    'rules': "(NULL::int, NULL::text, NULL::int, NULL::text, NULL::text, NULL::bool, NULL::int)",
     'sections': "(NULL::int, NULL::int)",
     'guests': "(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp)",
 }
@@ -90,20 +94,33 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
         # Боевой запрос начинается с "WITH my_rules AS (" — приклеиваем заглушки
         # перед ним, ничего не меняя в самом тексте.
         sql = _VISIBLE_ARTICLES_SQL.replace('WITH my_rules AS (', stub + 'my_rules AS (', 1)
-        subjects = subjects or {}
-        params = {
-            'user_id': user_id,
-            'sections': list(allowed_sections) or [-1],
-            'departments': subjects.get('department') or [-1],
-            'directions': subjects.get('direction') or [-1],
-            'groups': subjects.get('group') or [-1],
-            'roles': subjects.get('otp_role') or [''],
-            'wiki_roles': subjects.get('wiki_role') or [-1],
-            'is_wiki_admin': is_wiki_admin,
-            'is_super_admin': role == 'super_admin',
-            'can_see_drafts': can_see_drafts,
-            'can_see_archived': can_see_archived,
-        }
+        # Субъекты собирает БОЕВОЙ collect_subjects, а параметры — боевой
+        # subject_params: иначе тест проверял бы свою копию правил подстановки,
+        # а не ту, что работает в проде.
+        given = subjects or {}
+        subj = collect_subjects(
+            user_id=user_id,
+            otp_role=role,
+            department_id=(given.get('department') or [None])[0],
+            headed_department_ids=given.get('department_head') or (),
+            direction_id=(given.get('direction') or [None])[0],
+            group_ids=given.get('group') or (),
+            wiki_role_ids=given.get('wiki_role') or (),
+        )
+        # Тест адресует правила ролями напрямую (в том числе «только оператор»),
+        # поэтому список ролей берём из теста, а не из раскрытия иерархии.
+        if 'otp_role' in given:
+            subj['otp_role'] = given['otp_role']
+        if 'department' in given:
+            subj['department'] = given['department']
+        params = dict(
+            subject_params(subj, user_id),
+            sections=list(allowed_sections) or [-1],
+            is_wiki_admin=is_wiki_admin,
+            is_super_admin=role == 'super_admin',
+            can_see_drafts=can_see_drafts,
+            can_see_archived=can_see_archived,
+        )
         cur = self.conn.cursor()
         try:
             cur.execute(sql, params)
@@ -115,7 +132,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     # ── Наследование от разделов ─────────────────────────────────────────
     def test_inherit_visible_through_allowed_section(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[5],
         )
@@ -123,7 +140,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
 
     def test_inherit_hidden_when_section_not_allowed(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[7],
         )
@@ -133,7 +150,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     def test_restricted_ignores_sections(self):
         """Главное требование владельца: некоторые статьи нельзя даже читать."""
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[5],
         )
@@ -141,8 +158,8 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
 
     def test_restricted_visible_to_listed_role(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
-            rules=["(1, 'otp_role', NULL, 'operator', 'grant', true)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
+            rules=["(1, 'otp_role', NULL, 'operator', 'grant', true, NULL)"],
             subjects={'otp_role': ['operator']},
         )
         self.assertEqual(got, {1})
@@ -150,18 +167,18 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     # ── Запрет сильнее разрешения ────────────────────────────────────────
     def test_deny_beats_section_grant(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
-            rules=["(1, 'user', 10, NULL, 'deny', true)"],
+            rules=["(1, 'user', 10, NULL, 'deny', true, NULL)"],
             allowed_sections=[5],
         )
         self.assertEqual(got, set(), 'персональный запрет должен перекрывать доступ по разделу')
 
     def test_deny_for_other_user_does_not_affect_me(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
-            rules=["(1, 'user', 777, NULL, 'deny', true)"],
+            rules=["(1, 'user', 777, NULL, 'deny', true, NULL)"],
             allowed_sections=[5],
         )
         self.assertEqual(got, {1})
@@ -169,7 +186,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     # ── Строгий режим ────────────────────────────────────────────────────
     def test_strict_hidden_from_wiki_admin(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', true, 99, NULL)"],
+            articles=["(1, 'published', 'inherit', true, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[5],
             is_wiki_admin=True, can_see_drafts=True, can_see_archived=True,
@@ -178,7 +195,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
 
     def test_strict_open_to_super_admin(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', true, 99, NULL)"],
+            articles=["(1, 'published', 'inherit', true, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[5],
             role='super_admin', is_wiki_admin=True,
@@ -188,24 +205,24 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
 
     def test_strict_open_to_explicit_grant(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', true, 99, NULL)"],
-            rules=["(1, 'user', 10, NULL, 'grant', true)"],
+            articles=["(1, 'published', 'restricted', true, 99, NULL, NULL)"],
+            rules=["(1, 'user', 10, NULL, 'grant', true, NULL)"],
         )
         self.assertEqual(got, {1})
 
     # ── Администратор доступов ───────────────────────────────────────────
     def test_wiki_admin_sees_everything_not_strict(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)",
-                      "(2, 'published', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)",
+                      "(2, 'published', 'inherit', false, 99, NULL, NULL)"],
             is_wiki_admin=True, can_see_drafts=True, can_see_archived=True,
         )
         self.assertEqual(got, {1, 2})
 
     def test_wiki_admin_overrides_deny(self):
         got = self.visible(
-            articles=["(1, 'published', 'inherit', false, 99, NULL)"],
-            rules=["(1, 'user', 10, NULL, 'deny', true)"],
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
+            rules=["(1, 'user', 10, NULL, 'deny', true, NULL)"],
             is_wiki_admin=True, can_see_drafts=True, can_see_archived=True,
         )
         self.assertEqual(got, {1}, 'администратор не должен уметь заблокировать сам себя')
@@ -213,7 +230,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     # ── Статусы ──────────────────────────────────────────────────────────
     def test_draft_hidden_from_reader(self):
         got = self.visible(
-            articles=["(1, 'draft', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'draft', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[5],
         )
@@ -221,7 +238,7 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
 
     def test_own_draft_visible_to_author(self):
         got = self.visible(
-            articles=["(1, 'draft', 'inherit', false, 10, NULL)"],
+            articles=["(1, 'draft', 'inherit', false, 10, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[5],
         )
@@ -229,13 +246,13 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
 
     def test_archived_hidden_unless_managing_structure(self):
         hidden = self.visible(
-            articles=["(1, 'archived', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'archived', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"], allowed_sections=[5], can_see_drafts=True,
         )
         self.assertEqual(hidden, set())
 
         shown = self.visible(
-            articles=["(1, 'archived', 'inherit', false, 99, NULL)"],
+            articles=["(1, 'archived', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"], allowed_sections=[5],
             can_see_drafts=True, can_see_archived=True,
         )
@@ -244,21 +261,21 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     # ── Гостевой доступ ──────────────────────────────────────────────────
     def test_active_guest_grant_opens_article(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
             guests=["(1, 10, NULL::timestamp, (CURRENT_TIMESTAMP + interval '1 day')::timestamp)"],
         )
         self.assertEqual(got, {1})
 
     def test_expired_guest_grant_is_ignored(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
             guests=["(1, 10, NULL::timestamp, (CURRENT_TIMESTAMP - interval '1 day')::timestamp)"],
         )
         self.assertEqual(got, set())
 
     def test_revoked_guest_grant_is_ignored(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
             guests=["(1, 10, CURRENT_TIMESTAMP::timestamp, (CURRENT_TIMESTAMP + interval '1 day')::timestamp)"],
         )
         self.assertEqual(got, set())
@@ -266,23 +283,23 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     # ── Субъекты ─────────────────────────────────────────────────────────
     def test_grant_by_department(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
-            rules=["(1, 'department', 3, NULL, 'grant', true)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
+            rules=["(1, 'department', 3, NULL, 'grant', true, NULL)"],
             subjects={'department': [3]},
         )
         self.assertEqual(got, {1})
 
     def test_grant_by_group_does_not_leak_to_other_group(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', false, 99, NULL)"],
-            rules=["(1, 'group', 3, NULL, 'grant', true)"],
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
+            rules=["(1, 'group', 3, NULL, 'grant', true, NULL)"],
             subjects={'group': [4]},
         )
         self.assertEqual(got, set())
 
     def test_author_always_sees_own_article(self):
         got = self.visible(
-            articles=["(1, 'published', 'restricted', true, 10, NULL)"],
+            articles=["(1, 'published', 'restricted', true, 10, NULL, NULL)"],
         )
         self.assertEqual(got, {1}, 'автор не должен терять доступ к собственной статье')
 

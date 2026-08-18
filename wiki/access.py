@@ -38,6 +38,15 @@ ROLE_LEVELS = {
     'super_admin': 50,
 }
 
+def role_level_of(role):
+    """Уровень должности по шкале ROLE_LEVELS. Незнакомая роль — 0.
+
+    Ноль, а не None: уровень участвует в сравнении `уровень >= min_role_level`,
+    и незнакомая роль обязана не проходить ни одно ограничение по уровню.
+    """
+    return ROLE_LEVELS.get(normalize_role(role), 0)
+
+
 NO_PERMISSIONS = {name: False for name in PERMISSION_COLUMNS}
 NO_CAPABILITIES = {name: False for name in CAPABILITY_COLUMNS}
 
@@ -163,8 +172,9 @@ def collect_subjects(*, user_id, otp_role, department_id=None, headed_department
     """Все пары (subject_type, ключ), под которые подпадает пользователь.
 
     Возвращает словарь, готовый для подстановки в SQL-запрос правил:
-        {'department': [...], 'direction': [...], 'group': [...],
-         'otp_role': [...], 'wiki_role': [...], 'user': [...]}
+        {'department': [...], 'department_head': [...], 'direction': [...],
+         'group': [...], 'otp_role': [...], 'wiki_role': [...], 'user': [...],
+         'role_level': int}
     """
     departments = set()
     if department_id:
@@ -173,13 +183,20 @@ def collect_subjects(*, user_id, otp_role, department_id=None, headed_department
         if value:
             departments.add(int(value))
 
+    headed = sorted({int(value) for value in (headed_department_ids or ()) if value})
+
     return {
         'department': sorted(departments),
+        # Возглавляемые отделы попадают в ОБА ключа намеренно: по 'department'
+        # глава получает всё, что открыто его отделу (то самое «видит всё, что
+        # ниже себя»), а по 'department_head' — то, что адресовано именно главе.
+        'department_head': headed,
         'direction': [int(direction_id)] if direction_id else [],
         'group': sorted({int(value) for value in (group_ids or ()) if value}),
         'otp_role': expand_otp_roles(otp_role),
         'wiki_role': sorted({int(value) for value in (wiki_role_ids or ()) if value}),
         'user': [int(user_id)] if user_id else [],
+        'role_level': role_level_of(otp_role),
     }
 
 

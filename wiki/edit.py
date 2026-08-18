@@ -72,7 +72,7 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
 
 _UPDATABLE = ('title', 'summary', 'article_type', 'status',
               'visibility_mode', 'strict_mode', 'ai_opt_out', 'owner_user_id',
-              'review_due_at')
+              'review_due_at', 'cross_department')
 
 
 def update_article(cursor, article_id, fields, *, editor_id, session_id, comment):
@@ -235,6 +235,61 @@ def set_sections(cursor, article_id, section_ids):
             'ON CONFLICT DO NOTHING',
             (article_id, section_id),
         )
+
+
+def attach_section(cursor, article_id, section_id):
+    """Подключить статью к ещё одному разделу, ничего не отвязывая.
+
+    Отдельно от set_sections: та ЗАМЕНЯЕТ набор разделов (сначала DELETE), и
+    заимствование чужой статьи через неё оторвало бы её от раздела-источника —
+    у соседнего отдела статья молча пропала бы.
+    """
+    cursor.execute(
+        'INSERT INTO wiki_article_sections (article_id, section_id) VALUES (%s, %s) '
+        'ON CONFLICT DO NOTHING',
+        (article_id, section_id),
+    )
+    return cursor.rowcount > 0
+
+
+def fork_article(cursor, source_id, *, section_id, author_id, slug, title):
+    """Своя копия чужой статьи: дальше расходится независимо от источника.
+
+    Копия создаётся ЧЕРНОВИКОМ: заимствованный регламент почти всегда правят
+    под свой отдел, и публиковать его от чужого имени, не читая, нельзя.
+    """
+    cursor.execute(
+        """
+        SELECT summary, content, content_plain, article_type, ai_opt_out
+          FROM wiki_articles WHERE id = %s
+        """,
+        (source_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    summary, content, content_plain, article_type, ai_opt_out = row
+
+    cursor.execute(
+        """
+        INSERT INTO wiki_articles (slug, title, summary, content, content_plain,
+                                   article_type, status, visibility_mode, strict_mode,
+                                   ai_opt_out, author_id, updated_by, owner_user_id,
+                                   source_article_id)
+        VALUES (%s, %s, %s, %s, %s, %s, 'draft', 'inherit', FALSE, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (slug, title, summary, content, content_plain, article_type,
+         ai_opt_out, author_id, author_id, author_id, source_id),
+    )
+    article_id = cursor.fetchone()[0]
+    set_sections(cursor, article_id, [section_id])
+    # Файлы перепривязываются к копии: без этого картинки остались бы видны
+    # только тому, кто их когда-то загрузил в исходную статью.
+    link_content_files(cursor, article_id, content)
+    snapshot_version(cursor, article_id, editor_id=author_id, session_id=None,
+                     comment='Копия статьи №%s' % source_id)
+    return article_id
 
 
 def set_tags(cursor, article_id, tags):

@@ -12,6 +12,7 @@ from . import access as wiki_access
 from . import articles as wiki_articles
 from . import edit as wiki_edit
 from . import queries
+from .schema import SUBJECT_TYPES
 from .ai import embed as ai_embed
 from .ai import index as ai_index
 from .routes_structure import PERMISSION_FIELDS, _clean, _int_or_none, _slugify
@@ -93,6 +94,118 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
         permissions = wiki_articles.effective_permissions(
             cursor, ctx, article, subjects, sections, queries.section_rules_for_user)
         return article, permissions, None
+
+    # ── Перенос статьи между ветками отделов ─────────────────────────────
+    #
+    # Два действия, а не одно. «Подключить» оставляет один источник истины:
+    # статья лежит в обеих ветках, правит её владелец, у заимствующего она
+    # всегда свежая. «Копия» отвязывает текст: дальше отделы правят каждый своё.
+    # Третьего действия — «забрать себе» — здесь намеренно нет: оно молча
+    # оставило бы соседний отдел без регламента.
+
+    def _target_section(cursor, ctx, section_id):
+        """Проверка, что в этот раздел человек вправе класть статьи.
+
+        Возвращает (раздел, ошибка). Право берём то же самое, что и у создания
+        статьи, — can_create в конкретном разделе, а не роль: супервайзер вправе
+        наполнять ветку СВОЕГО отдела и не вправе — соседнего.
+        """
+        if not section_id:
+            return None, (jsonify({"error": "Не выбран раздел"}), 400)
+        cursor.execute(
+            "SELECT id, name, department_id FROM wiki_sections "
+            "WHERE id = %s AND status = 'active'",
+            (section_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None, (jsonify({"error": "Раздел не найден"}), 404)
+
+        subjects, _sections, _visible = _perimeter(cursor, ctx)
+        rules = queries.section_rules_for_user(cursor, [section_id], subjects, ctx['user_id'])
+        allowed = any(rule.get('can_create')
+                      for section_rules in rules.values() for rule in section_rules)
+        if not allowed and not ctx['capabilities'].get('can_manage_access'):
+            return None, (jsonify({
+                "error": "Нет права добавлять статьи в этот раздел",
+                "code": "WIKI_SECTION_FORBIDDEN",
+            }), 403)
+        return {'id': row[0], 'name': row[1], 'department_id': row[2]}, None
+
+    def _may_borrow(article, ctx):
+        """Можно ли заимствовать эту статью в другой отдел.
+
+        cross_department=FALSE — владелец закрыл статью от соседей. Мастер-ключ
+        не в счёт: закрытость статьи это решение её владельца, а не вопрос
+        полномочий администратора структуры.
+        """
+        if article.get('cross_department') is False:
+            return False
+        return True
+
+    @wiki_route('/articles/<int:article_id>/adopt', methods=('POST',))
+    def wiki_article_adopt(cursor, ctx, article_id):
+        """Подключить статью к своему разделу. Источник истины остаётся один."""
+        article, _permissions, error = _load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+        if not _may_borrow(article, ctx):
+            return jsonify({
+                "error": "Статья закрыта от других отделов",
+                "code": "WIKI_ARTICLE_NOT_SHARED",
+            }), 403
+
+        section, error = _target_section(cursor, ctx, _int_or_none(_body().get('section_id')))
+        if error:
+            return error
+
+        added = wiki_edit.attach_section(cursor, article_id, section['id'])
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='article.adopt',
+                           entity_type='article', entity_id=article_id,
+                           details={'section_id': section['id'],
+                                    'section_name': section['name'],
+                                    'already_there': not added},
+                           ip_address=log_ip())
+        return jsonify({"id": article_id, "section_id": section['id'], "added": added})
+
+    @wiki_route('/articles/<int:article_id>/fork', methods=('POST',))
+    def wiki_article_fork(cursor, ctx, article_id):
+        """Сделать свою копию чужой статьи. Копия создаётся черновиком."""
+        article, _permissions, error = _load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+        if not _may_borrow(article, ctx):
+            return jsonify({
+                "error": "Статья закрыта от других отделов",
+                "code": "WIKI_ARTICLE_NOT_SHARED",
+            }), 403
+
+        data = _body()
+        section, error = _target_section(cursor, ctx, _int_or_none(data.get('section_id')))
+        if error:
+            return error
+
+        title = _clean(data.get('title')) or article['title']
+        slug = _slugify(title)
+        base_slug, suffix = slug, 2
+        while not wiki_edit.slug_is_free(cursor, slug):
+            slug = '%s-%d' % (base_slug, suffix)
+            suffix += 1
+
+        new_id = wiki_edit.fork_article(
+            cursor, article_id, section_id=section['id'],
+            author_id=ctx['user_id'], slug=slug, title=title)
+        if not new_id:
+            return jsonify({"error": "Статья не найдена"}), 404
+
+        _sync_ai_index(cursor, new_id)
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='article.fork',
+                           entity_type='article', entity_id=new_id,
+                           details={'source_article_id': article_id,
+                                    'section_id': section['id'],
+                                    'section_name': section['name']},
+                           ip_address=log_ip())
+        return jsonify({"id": new_id, "slug": slug, "source_article_id": article_id}), 201
 
     # ── Создание ─────────────────────────────────────────────────────────
     @wiki_route('/articles', methods=('POST',), capability='can_create')
@@ -251,6 +364,17 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                 fields[key] = (data[key] == 'restricted' if key == 'visibility_mode'
                                else bool(data[key]))
 
+        # «Показывать статью соседним отделам» — решение ВЛАДЕЛЬЦА статьи, а не
+        # администратора доступов: закрывает он свой регламент, и права на
+        # правку статьи для этого достаточно.
+        if 'cross_department' in data:
+            if not permissions.get('can_edit'):
+                return jsonify({
+                    "error": "Нет права править эту статью",
+                    "code": "WIKI_FORBIDDEN", "required": "can_edit",
+                }), 403
+            fields['cross_department'] = bool(data['cross_department'])
+
         changed = wiki_edit.update_article(
             cursor, article_id, fields, editor_id=ctx['user_id'],
             session_id=_session_id(), comment=_clean(data.get('comment'), 500))
@@ -329,8 +453,7 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
 
         data = _body()
         subject_type = data.get('subject_type')
-        if subject_type not in ('department', 'direction', 'group', 'otp_role',
-                                'wiki_role', 'user'):
+        if subject_type not in SUBJECT_TYPES:
             return jsonify({"error": "Не выбран субъект правила"}), 400
 
         subject_id, subject_role = None, None
