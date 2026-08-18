@@ -502,6 +502,26 @@ SHIFT_BREAK_PLANNING_BUFFER_MINUTES = 15
 SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES = 30
 SHIFT_BREAK_MIN_GAP_MINUTES = 15
 
+# Пересечение перерывов РАЗНЫХ операторов направления (задача #175).
+# Перерывы больше не разбегаются от любого пересечения — иначе на плотном
+# направлении свободными остаются только края смены, и вся норма сбивается
+# в начало или конец. Вместо этого:
+#   * пересечение пары перерывов допустимо в пределах SHIFT_BREAK_PAIR_OVERLAP_*
+#     (15 мин → 10, 30 мин → 15);
+#   * одновременно на перерыве не больше SHIFT_BREAK_MAX_CONCURRENT операторов;
+#   * третий выходит только на пересдаче — не дольше
+#     SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES минут подряд.
+SHIFT_BREAK_MAX_CONCURRENT = 2
+SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES = 5
+SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES = 5
+SHIFT_BREAK_PAIR_OVERLAP_SHARE = 3
+# Веса раскладки: сначала правила пересечений, затем пожелание держать дистанцию
+# (настройка направления), и уже потом — близость к равномерной точке.
+SHIFT_BREAK_WEIGHT_CONCURRENCY = 60
+SHIFT_BREAK_WEIGHT_PAIR_EXCESS = 40
+SHIFT_BREAK_WEIGHT_CROSS_GAP = 4
+SHIFT_BREAK_WEIGHT_OVERLAP = 2
+
 
 def _normalize_work_shift_type_value(value: Optional[str]) -> str:
     raw = str(value or '').strip().lower()
@@ -34296,7 +34316,9 @@ class Database:
         breaks = []
 
         def snap5(x):
-            return int(round(float(x) / 5.0) * 5)
+            # Половину округляем вверх — ровно как Math.round в браузере,
+            # иначе планировщик показывает перерыв на 5 минут левее сохранённого.
+            return int(math.floor((float(x) / 5.0) + 0.5) * 5)
 
         def push_centered(center, size):
             center_snapped = snap5(center)
@@ -34640,31 +34662,6 @@ class Database:
                 result.append(dict(cur))
         return result
 
-    def _find_non_overlapping_break_start(self, desired_start, length, seg_start, seg_end, occupied_intervals):
-        step = 5
-
-        def snap(v):
-            return int(round(float(v) / step) * step)
-
-        desired_start = snap(desired_start)
-        candidates = [0]
-        max_shift = max(int(seg_end) - int(seg_start), 60)
-        for delta in range(step, max_shift + step, step):
-            candidates.append(delta)
-            candidates.append(-delta)
-
-        for delta in candidates:
-            s = desired_start + delta
-            start = max(int(seg_start), min(int(seg_end) - int(length), s))
-            end = start + int(length)
-            if start < int(seg_start) or end > int(seg_end):
-                continue
-            interval = {'start': start, 'end': end}
-            if any(self._break_intervals_overlap(interval, occ) for occ in (occupied_intervals or [])):
-                continue
-            return start
-        return None
-
     def _break_layout_spacing(self, seg_start, seg_end, break_durations):
         duration = max(0, int(seg_end) - int(seg_start))
         count = len(break_durations or [])
@@ -34719,7 +34716,118 @@ class Database:
                 total += overlap
         return total
 
-    def _find_best_break_start(self, desired_start, length, lower_bound, upper_bound, occupied_intervals):
+    def _break_allowed_pair_overlap_minutes(self, length_a, length_b):
+        """
+        Сколько минут пересечения допустимо между перерывами двух операторов.
+        Длительность 15 → 10 минут, 30 → 15; для нестандартных длительностей
+        та же прямая, и не больше самого короткого из двух перерывов.
+        """
+        def allowed(value):
+            length = max(0, int(value or 0))
+            if length <= 0:
+                return 0
+            share = SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES + (length / float(SHIFT_BREAK_PAIR_OVERLAP_SHARE))
+            return min(length, int(round(share)))
+
+        return min(allowed(length_a), allowed(length_b))
+
+    def _break_pair_overlap_excess_minutes(self, interval, neighbor_intervals):
+        """Минуты пересечения сверх допустимых — по каждому чужому перерыву отдельно."""
+        total = 0
+        for occ in (neighbor_intervals or []):
+            try:
+                start = max(int(interval['start']), int(occ['start']))
+                end = min(int(interval['end']), int(occ['end']))
+            except Exception:
+                continue
+            overlap = end - start
+            if overlap <= 0:
+                continue
+            allowed = self._break_allowed_pair_overlap_minutes(
+                int(interval['end']) - int(interval['start']),
+                int(occ['end']) - int(occ['start'])
+            )
+            if overlap > allowed:
+                total += overlap - allowed
+        return total
+
+    def _break_concurrency_penalty_minutes(self, interval, neighbor_intervals):
+        """
+        Штраф за нарушение «одновременно не больше двух операторов».
+
+        Считаем, сколько чужих перерывов накрывает каждую минуту кандидата: один
+        сосед — норма, два (то есть трое на перерыве) допустимы только как пересдача
+        и не дольше SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES подряд, трое и больше —
+        всегда нарушение.
+        """
+        try:
+            c_start = int(interval['start'])
+            c_end = int(interval['end'])
+        except Exception:
+            return 0
+        if c_end <= c_start:
+            return 0
+
+        spans = []
+        for occ in (neighbor_intervals or []):
+            try:
+                start = max(c_start, int(occ['start']))
+                end = min(c_end, int(occ['end']))
+            except Exception:
+                continue
+            if end > start:
+                spans.append((start, end))
+        if len(spans) < SHIFT_BREAK_MAX_CONCURRENT:
+            return 0
+
+        points = sorted({c_start, c_end} | {value for span in spans for value in span})
+        penalty = 0
+        run = 0
+        for left, right in zip(points, points[1:]):
+            if right <= left:
+                continue
+            covering = sum(1 for start, end in spans if start < right and end > left)
+            if covering > SHIFT_BREAK_MAX_CONCURRENT:
+                # Четвёртый оператор на перерыве — нарушение без всяких скидок.
+                penalty += (right - left) * (covering - SHIFT_BREAK_MAX_CONCURRENT) * 10
+            if covering >= SHIFT_BREAK_MAX_CONCURRENT:
+                run += right - left
+            else:
+                penalty += max(0, run - SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES)
+                run = 0
+        penalty += max(0, run - SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES)
+        return penalty
+
+    def _break_cross_gap_deficit_minutes(self, interval, neighbor_intervals):
+        """
+        Насколько не выдержан промежуток между перерывами разных операторов
+        (настройка направления, задача #112). Промежуток не задан — 0.
+        """
+        total = 0
+        for occ in (neighbor_intervals or []):
+            gap = max(0, int(occ.get('gap') or 0))
+            if gap <= 0:
+                continue
+            try:
+                distance = max(
+                    int(occ['start']) - int(interval['end']),
+                    int(interval['start']) - int(occ['end'])
+                )
+            except Exception:
+                continue
+            if distance < gap:
+                total += gap - distance
+        return total
+
+    def _find_best_break_start(self, desired_start, length, lower_bound, upper_bound,
+                               neighbor_intervals, self_intervals=None):
+        """
+        Ищет старт перерыва в допустимом окне.
+
+        Пересечения с чужими перерывами больше не запрещены наглухо: сначала
+        отсеиваются нарушения правил (свои перерывы, одновременность, лимит на
+        пару), а среди оставшихся выигрывает точка, ближайшая к равномерной.
+        """
         step = 5
         length = int(length)
         if length <= 0:
@@ -34730,20 +34838,24 @@ class Database:
         if upper < lower:
             return None
 
-        desired = int(round(float(desired_start) / step) * step)
+        desired = int(math.floor((float(desired_start) / step) + 0.5) * step)
         best = None
         best_score = None
         for start in range(lower, upper + 1, step):
             interval = {'start': start, 'end': start + length}
-            overlap_minutes = self._break_total_overlap_minutes(interval, occupied_intervals)
-            overlap_count = sum(
-                1
-                for occ in (occupied_intervals or [])
-                if self._break_intervals_overlap(interval, occ)
+            deviation = abs(start - desired)
+            cost = (
+                self._break_concurrency_penalty_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CONCURRENCY
+                + self._break_pair_overlap_excess_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_PAIR_EXCESS
+                + self._break_cross_gap_deficit_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CROSS_GAP
+                + self._break_total_overlap_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_OVERLAP
+                + deviation
             )
             score = (
-                overlap_minutes * 1000 + overlap_count * 100,
-                abs(start - desired),
+                # Свои же перерывы наложиться не могут ни при каких условиях.
+                self._break_total_overlap_minutes(interval, self_intervals),
+                cost,
+                deviation,
                 start
             )
             if best_score is None or score < best_score:
@@ -34814,21 +34926,23 @@ class Database:
 
         return sorted(occupied, key=lambda item: (int(item['start']), int(item['end'])))
 
-    def _pad_break_intervals_for_cross_gap(self, intervals, gap_minutes):
+    def _tag_break_intervals_with_cross_gap(self, intervals, gap_minutes):
         """
-        Расширяет перерывы других операторов на требуемый промежуток с обеих
-        сторон: тогда обычный поиск «без пересечений» автоматически держит
-        дистанцию между перерывами разных операторов. gap<=0 — без изменений.
+        Помечает перерывы коллег требуемым промежутком. Сливать и раздувать их
+        нельзя: по исходным интервалам считается и одновременность, и лимит
+        пересечения пары перерывов.
         """
         gap = max(0, int(gap_minutes or 0))
-        if gap <= 0:
-            return list(intervals or [])
-        padded = [
-            {'start': int(item['start']) - gap, 'end': int(item['end']) + gap}
-            for item in (intervals or [])
-            if int(item.get('end', 0)) > int(item.get('start', 0))
-        ]
-        return self._merge_break_intervals(padded)
+        tagged = []
+        for item in (intervals or []):
+            try:
+                start = int(item['start'])
+                end = int(item['end'])
+            except Exception:
+                continue
+            if end > start:
+                tagged.append({'start': start, 'end': end, 'gap': max(gap, int(item.get('gap') or 0))})
+        return sorted(tagged, key=lambda item: (item['start'], item['end']))
 
     def _adjust_shift_breaks_against_occupied_tx(
         self,
@@ -34844,7 +34958,10 @@ class Database:
         extra_occupied=None
     ):
         """
-        Раскладывает перерывы смены без пересечений с перерывами коллег направления.
+        Раскладывает перерывы смены равномерно, сверяясь с перерывами коллег направления.
+
+        Пересечение с коллегой допустимо в пределах правил (см. SHIFT_BREAK_PAIR_*),
+        поэтому норма не сбивается к краям смены, когда операторов много.
 
         frozen_breaks — уже прошедшие перерывы: они не двигаются и не удаляются,
         а лишь занимают время. planning_from_minutes — минута, раньше которой нельзя
@@ -34871,16 +34988,16 @@ class Database:
         if not isinstance(breaks, list) or not breaks:
             return protected
 
-        occupied = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
+        neighbors = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
         if cross_gap_minutes is None:
             cross_gap_minutes = self._get_break_cross_operator_gap_for_direction_tx(
                 cursor,
                 self._get_operator_direction_name_tx(cursor, operator_id)
             )
-        occupied.extend(self._normalize_break_intervals_soft(extra_occupied))
-        occupied = self._pad_break_intervals_for_cross_gap(occupied, cross_gap_minutes)
-        occupied.extend({'start': int(p['start']), 'end': int(p['end'])} for p in protected)
-        occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+        neighbors.extend(self._normalize_break_intervals_soft(extra_occupied))
+        neighbors = self._tag_break_intervals_with_cross_gap(neighbors, cross_gap_minutes)
+        # Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
+        own_intervals = [{'start': int(p['start']), 'end': int(p['end'])} for p in protected]
 
         prepared_breaks = []
         for b in sorted((breaks or []), key=lambda x: (int(x.get('start', 0)), int(x.get('end', 0)))):
@@ -34926,7 +35043,8 @@ class Database:
                 length=length,
                 lower_bound=lower,
                 upper_bound=upper,
-                occupied_intervals=occupied
+                neighbor_intervals=neighbors,
+                self_intervals=own_intervals
             )
             if found is not None:
                 nb = {'start': int(found), 'end': int(found) + int(length)}
@@ -34941,8 +35059,7 @@ class Database:
                 nb = {'start': int(clamped_start), 'end': int(clamped_end)}
 
             new_breaks.append(nb)
-            occupied.append(nb)
-            occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+            own_intervals.append(dict(nb))
 
         if not protected:
             return new_breaks

@@ -46,6 +46,14 @@ from database import (
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
     SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES,
     SHIFT_BREAK_MIN_GAP_MINUTES,
+    SHIFT_BREAK_MAX_CONCURRENT,
+    SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES,
+    SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES,
+    SHIFT_BREAK_PAIR_OVERLAP_SHARE,
+    SHIFT_BREAK_WEIGHT_CONCURRENCY,
+    SHIFT_BREAK_WEIGHT_PAIR_EXCESS,
+    SHIFT_BREAK_WEIGHT_CROSS_GAP,
+    SHIFT_BREAK_WEIGHT_OVERLAP,
     TECHNICAL_ISSUE_REASONS,
     IT_TICKET_CATALOG,
     IT_TICKET_DEFAULT_PROFILE,
@@ -33823,7 +33831,8 @@ def _ws_place_break_durations_centered(start_min, end_min, break_durations):
     breaks = []
 
     def snap5(x):
-        return int(round(float(x) / 5.0) * 5)
+        # Половину округляем вверх — ровно как Math.round в браузере.
+        return int(math.floor((float(x) / 5.0) + 0.5) * 5)
 
     def push_centered(center, size):
         center = snap5(center)
@@ -33990,25 +33999,6 @@ def _ws_intervals_overlap(a, b):
     return int(a['start']) < int(b['end']) and int(b['start']) < int(a['end'])
 
 
-def _ws_merge_intervals(items):
-    if not items:
-        return []
-    sorted_items = sorted(
-        [{'start': int(x['start']), 'end': int(x['end'])} for x in items if int(x.get('end', 0)) > int(x.get('start', 0))],
-        key=lambda x: (x['start'], x['end'])
-    )
-    if not sorted_items:
-        return []
-    res = [dict(sorted_items[0])]
-    for cur in sorted_items[1:]:
-        last = res[-1]
-        if cur['start'] <= last['end']:
-            last['end'] = max(last['end'], cur['end'])
-        else:
-            res.append(dict(cur))
-    return res
-
-
 def _ws_parse_date_str(value):
     return datetime.strptime(str(value), '%Y-%m-%d').date()
 
@@ -34122,24 +34112,22 @@ def _ws_cross_operator_gap_for_direction(direction_value, break_gaps_map=None):
 
 def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id, direction_scope, get_scope_key,
                                           break_gaps_map=None):
+    """
+    Перерывы коллег направления как есть, каждый со своим требуемым промежутком.
+    Сливать и раздувать их нельзя: по исходным интервалам считаются и лимит
+    пересечения пары перерывов, и «одновременно не больше двух операторов».
+    """
     occupied = []
     prev_str = _ws_add_days_str(date_str, -1)
     next_str = _ws_add_days_str(date_str, 1)
     target_scope = str(get_scope_key(direction_scope))
     target_gap = _ws_cross_operator_gap_for_direction(direction_scope, break_gaps_map)
-    padded_any = False
 
     def clamp_push(s, e, gap):
-        # Перерыв чужого оператора расширяем на требуемый промежуток с двух сторон:
-        # тогда обычный поиск «без пересечений» сам держит дистанцию.
-        nonlocal padded_any
-        pad = max(0, int(gap or 0))
-        if pad > 0:
-            padded_any = True
-        ns = max(0, min(2880, int(s) - pad))
-        ne = max(0, min(2880, int(e) + pad))
+        ns = max(0, min(2880, int(s)))
+        ne = max(0, min(2880, int(e)))
         if ne > ns:
-            occupied.append({'start': ns, 'end': ne})
+            occupied.append({'start': ns, 'end': ne, 'gap': max(0, int(gap or 0))})
 
     for op in (all_operators or []):
         if int(op.get('id') or 0) == int(exclude_op_id or 0):
@@ -34162,36 +34150,7 @@ def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id
             for b in (seg.get('breaks') or []):
                 clamp_push(int(b.get('start', 0)) + 1440, int(b.get('end', 0)) + 1440, op_gap)
 
-    # Расширенные интервалы могут склеиваться — сливаем, чтобы штраф за
-    # пересечение не считался дважды. Без промежутка поведение не меняется.
-    if padded_any:
-        return _ws_merge_intervals(occupied)
     return sorted(occupied, key=lambda item: (int(item['start']), int(item['end'])))
-
-
-def _ws_find_non_overlapping_start(desired_start, length, seg_start, seg_end, occupied_intervals):
-    step = 5
-    def snap(v):
-        return int(round(float(v) / step) * step)
-
-    desired_start = snap(desired_start)
-    candidates = [0]
-    max_shift = max(int(seg_end) - int(seg_start), 60)
-    for d in range(step, max_shift + step, step):
-        candidates.append(d)
-        candidates.append(-d)
-
-    for delta in candidates:
-        s = desired_start + delta
-        start = max(int(seg_start), min(int(seg_end) - int(length), s))
-        end = start + int(length)
-        if start < int(seg_start) or end > int(seg_end):
-            continue
-        test_iv = {'start': start, 'end': end}
-        if any(_ws_intervals_overlap(test_iv, occ) for occ in (occupied_intervals or [])):
-            continue
-        return start
-    return None
 
 
 def _ws_break_layout_spacing(seg_start, seg_end, break_durations):
@@ -34250,7 +34209,97 @@ def _ws_break_total_overlap_minutes(interval, occupied_intervals):
     return total
 
 
-def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, occupied_intervals):
+def _ws_break_allowed_pair_overlap_minutes(length_a, length_b):
+    """Допустимое пересечение перерывов двух операторов: 15 мин → 10, 30 мин → 15."""
+    def allowed(value):
+        length = max(0, int(value or 0))
+        if length <= 0:
+            return 0
+        share = SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES + (length / float(SHIFT_BREAK_PAIR_OVERLAP_SHARE))
+        return min(length, int(round(share)))
+
+    return min(allowed(length_a), allowed(length_b))
+
+
+def _ws_break_pair_overlap_excess_minutes(interval, neighbor_intervals):
+    total = 0
+    for occ in (neighbor_intervals or []):
+        try:
+            overlap = min(int(interval['end']), int(occ['end'])) - max(int(interval['start']), int(occ['start']))
+        except Exception:
+            continue
+        if overlap <= 0:
+            continue
+        allowed = _ws_break_allowed_pair_overlap_minutes(
+            int(interval['end']) - int(interval['start']),
+            int(occ['end']) - int(occ['start'])
+        )
+        if overlap > allowed:
+            total += overlap - allowed
+    return total
+
+
+def _ws_break_concurrency_penalty_minutes(interval, neighbor_intervals):
+    """Штраф за нарушение «одновременно не больше двух операторов» (зеркало сервера)."""
+    try:
+        c_start = int(interval['start'])
+        c_end = int(interval['end'])
+    except Exception:
+        return 0
+    if c_end <= c_start:
+        return 0
+
+    spans = []
+    for occ in (neighbor_intervals or []):
+        try:
+            start = max(c_start, int(occ['start']))
+            end = min(c_end, int(occ['end']))
+        except Exception:
+            continue
+        if end > start:
+            spans.append((start, end))
+    if len(spans) < SHIFT_BREAK_MAX_CONCURRENT:
+        return 0
+
+    points = sorted({c_start, c_end} | {value for span in spans for value in span})
+    penalty = 0
+    run = 0
+    for left, right in zip(points, points[1:]):
+        if right <= left:
+            continue
+        covering = sum(1 for start, end in spans if start < right and end > left)
+        if covering > SHIFT_BREAK_MAX_CONCURRENT:
+            penalty += (right - left) * (covering - SHIFT_BREAK_MAX_CONCURRENT) * 10
+        if covering >= SHIFT_BREAK_MAX_CONCURRENT:
+            run += right - left
+        else:
+            penalty += max(0, run - SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES)
+            run = 0
+    penalty += max(0, run - SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES)
+    return penalty
+
+
+def _ws_break_cross_gap_deficit_minutes(interval, neighbor_intervals):
+    """Насколько не выдержан промежуток между перерывами разных операторов."""
+    total = 0
+    for occ in (neighbor_intervals or []):
+        gap = max(0, int(occ.get('gap') or 0))
+        if gap <= 0:
+            continue
+        try:
+            distance = max(
+                int(occ['start']) - int(interval['end']),
+                int(interval['start']) - int(occ['end'])
+            )
+        except Exception:
+            continue
+        if distance < gap:
+            total += gap - distance
+    return total
+
+
+def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, neighbor_intervals,
+                              self_intervals=None):
     step = 5
     length = int(length)
     if length <= 0:
@@ -34261,20 +34310,23 @@ def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, o
     if upper < lower:
         return None
 
-    desired = int(round(float(desired_start) / step) * step)
+    desired = int(math.floor((float(desired_start) / step) + 0.5) * step)
     best = None
     best_score = None
     for start in range(lower, upper + 1, step):
         test_iv = {'start': start, 'end': start + length}
-        overlap_minutes = _ws_break_total_overlap_minutes(test_iv, occupied_intervals)
-        overlap_count = sum(
-            1
-            for occ in (occupied_intervals or [])
-            if _ws_intervals_overlap(test_iv, occ)
+        deviation = abs(start - desired)
+        cost = (
+            _ws_break_concurrency_penalty_minutes(test_iv, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CONCURRENCY
+            + _ws_break_pair_overlap_excess_minutes(test_iv, neighbor_intervals) * SHIFT_BREAK_WEIGHT_PAIR_EXCESS
+            + _ws_break_cross_gap_deficit_minutes(test_iv, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CROSS_GAP
+            + _ws_break_total_overlap_minutes(test_iv, neighbor_intervals) * SHIFT_BREAK_WEIGHT_OVERLAP
+            + deviation
         )
         score = (
-            overlap_minutes * 1000 + overlap_count * 100,
-            abs(start - desired),
+            _ws_break_total_overlap_minutes(test_iv, self_intervals),
+            cost,
+            deviation,
             start
         )
         if best_score is None or score < best_score:
@@ -34287,7 +34339,8 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
                                            break_gaps_map=None, frozen_breaks_by_index=None,
                                            planning_from_minutes=None):
     """
-    Раскладка перерывов без пересечений с коллегами направления.
+    Раскладка перерывов равномерно по смене, со сверкой с коллегами направления:
+    пересечение допустимо в пределах правил, одновременно на перерыве не больше двух.
 
     frozen_breaks_by_index — уже прошедшие перерывы сегмента (по его индексу): их
     нельзя двигать, они лишь занимают время. planning_from_minutes — минута, раньше
@@ -34296,7 +34349,7 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
     segs = (op or {}).get('shifts', {}).get(date_str) or []
     if not segs:
         return
-    occupied = _ws_build_occupied_intervals_for_date(
+    neighbors = _ws_build_occupied_intervals_for_date(
         all_operators=all_operators,
         date_str=date_str,
         exclude_op_id=op.get('id'),
@@ -34304,6 +34357,8 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         get_scope_key=get_direction_scope_key,
         break_gaps_map=break_gaps_map
     )
+    # Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
+    own_intervals = []
     frozen_map = frozen_breaks_by_index if isinstance(frozen_breaks_by_index, dict) else {}
     for seg_index, seg in enumerate(segs):
         raw_seg_start = int(seg.get('__startMin', _ws_time_to_minutes(seg.get('start'))))
@@ -34340,14 +34395,10 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
 
         if not prepared_breaks:
             seg['breaks'] = protected
-            for item in protected:
-                occupied.append(dict(item))
-            occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+            own_intervals.extend(dict(item) for item in protected)
             continue
 
-        for item in protected:
-            occupied.append(dict(item))
-        occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+        own_intervals.extend(dict(item) for item in protected)
 
         protected_end = max((int(p['end']) for p in protected), default=None)
         win_start = seg_start
@@ -34376,7 +34427,7 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
                 lower = max(lower, protected_end + int(min_gap))
 
             desired_start = max(lower, min(upper, int(b['start']))) if upper >= lower else int(b['start'])
-            found = _ws_find_best_break_start(desired_start, length, lower, upper, occupied)
+            found = _ws_find_best_break_start(desired_start, length, lower, upper, neighbors, own_intervals)
             if found is not None:
                 nb = {'start': int(found), 'end': int(found) + int(length)}
             else:
@@ -34389,8 +34440,7 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
                     continue
                 nb = {'start': clamped_start, 'end': clamped_end}
             new_breaks.append(nb)
-            occupied.append(nb)
-            occupied.sort(key=lambda item: (int(item['start']), int(item['end'])))
+            own_intervals.append(dict(nb))
         seg['breaks'] = sorted(
             protected + new_breaks,
             key=lambda item: (int(item['start']), int(item['end']))

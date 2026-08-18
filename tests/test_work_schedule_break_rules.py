@@ -93,10 +93,14 @@ BREAK_ADJUST_METHODS = (
     "_break_intervals_overlap",
     "_merge_break_intervals",
     "_normalize_break_intervals_soft",
-    "_pad_break_intervals_for_cross_gap",
+    "_tag_break_intervals_with_cross_gap",
     "_break_layout_spacing",
     "_break_start_bounds_for_index",
     "_break_total_overlap_minutes",
+    "_break_allowed_pair_overlap_minutes",
+    "_break_pair_overlap_excess_minutes",
+    "_break_concurrency_penalty_minutes",
+    "_break_cross_gap_deficit_minutes",
     "_find_best_break_start",
     "_place_break_durations_centered_minutes",
     "_fit_break_durations_to_window",
@@ -108,6 +112,35 @@ BREAK_ADJUST_METHODS = (
 )
 
 
+def _module_constants(path, names):
+    """Модульные константы правил перерывов — их же читают функции в exec-namespace."""
+    source, module = _parsed_module(path)
+    wanted = set(names)
+    values = {}
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in wanted:
+                values[target.id] = ast.literal_eval(node.value)
+    missing = wanted - set(values)
+    assert not missing, f"нет констант {sorted(missing)} в {path.name}"
+    return values
+
+
+BREAK_RULE_CONSTANT_NAMES = (
+    "SHIFT_BREAK_MAX_CONCURRENT",
+    "SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES",
+    "SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES",
+    "SHIFT_BREAK_PAIR_OVERLAP_SHARE",
+    "SHIFT_BREAK_WEIGHT_CONCURRENCY",
+    "SHIFT_BREAK_WEIGHT_PAIR_EXCESS",
+    "SHIFT_BREAK_WEIGHT_CROSS_GAP",
+    "SHIFT_BREAK_WEIGHT_OVERLAP",
+)
+BREAK_RULE_CONSTANTS = _module_constants(DATABASE_PATH, BREAK_RULE_CONSTANT_NAMES)
+
+
 def _make_break_adjust_dummy(occupied=None):
     namespace = {
         "math": math,
@@ -115,6 +148,7 @@ def _make_break_adjust_dummy(occupied=None):
         "SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES": 30,
         "SHIFT_BREAK_MIN_GAP_MINUTES": 15,
         "SHIFT_BREAK_PLANNING_BUFFER_MINUTES": 15,
+        **BREAK_RULE_CONSTANTS,
     }
     for function_name in BREAK_ADJUST_METHODS:
         exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
@@ -413,24 +447,251 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         self.assertEqual(without_gap, legacy)
 
-    def test_database_cross_gap_padding_merges_touching_intervals(self):
+    def test_database_cross_gap_is_tagged_not_baked_into_intervals(self):
+        # Раздувать интервалы коллег нельзя: по исходным считаются и лимит
+        # пересечения пары перерывов, и «одновременно не больше двух».
         dummy = _make_break_adjust_dummy()
-        padded = dummy._pad_break_intervals_for_cross_gap(
-            [{"start": 600, "end": 630}, {"start": 645, "end": 675}],
-            10,
-        )
-        self.assertEqual(padded, [{"start": 590, "end": 685}])
         self.assertEqual(
-            dummy._pad_break_intervals_for_cross_gap([{"start": 600, "end": 630}], 0),
-            [{"start": 600, "end": 630}],
+            dummy._tag_break_intervals_with_cross_gap(
+                [{"start": 645, "end": 675}, {"start": 600, "end": 630}],
+                10,
+            ),
+            [
+                {"start": 600, "end": 630, "gap": 10},
+                {"start": 645, "end": 675, "gap": 10},
+            ],
+        )
+        self.assertEqual(
+            dummy._tag_break_intervals_with_cross_gap([{"start": 600, "end": 630}], 0),
+            [{"start": 600, "end": 630, "gap": 0}],
         )
 
-    def test_import_simulation_pads_other_operators_breaks_by_direction_gap(self):
+    # --- Задача #175: равномерность и допустимые пересечения --------------------
+
+    # Смена 10:00-21:00, норма [15, 30, 15]: равномерные точки — 12:40, 15:15, 18:10.
+    CROWDED_SHIFT = (10 * 60, 21 * 60)
+    CROWDED_DURATIONS = [15, 30, 15]
+    # Вторая половина смены плотно занята коллегами (окна между их перерывами по
+    # 10 минут), а начало смены свободно. Раньше обед из-за этого уезжал в 14:00 —
+    # к первому перерыву вплотную, — и смена оставалась с дырой в 3,5 часа.
+    CROWDED_COLLEAGUES = [
+        {"start": start, "end": start + 30}
+        for start in (870, 910, 950, 990, 1030, 1070, 1110, 1150, 1190)
+    ]
+
+    def _even_targets(self, seg_start, seg_end, durations):
+        span = seg_end - seg_start
+        return [
+            int(round((seg_start + span * ((idx + 1) / (len(durations) + 1)) - size / 2) / 5) * 5)
+            for idx, size in enumerate(durations)
+        ]
+
+    def _crowded_layout(self):
+        seg_start, seg_end = self.CROWDED_SHIFT
+        dummy = _make_break_adjust_dummy(occupied=[dict(x) for x in self.CROWDED_COLLEAGUES])
+        planned = dummy._place_break_durations_centered_minutes(seg_start, seg_end, self.CROWDED_DURATIONS)
+        return dummy, dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-08-20",
+            start_time="10:00",
+            end_time="21:00",
+            breaks=planned,
+            cross_gap_minutes=0,
+        )
+
+    def test_crowded_direction_keeps_breaks_evenly_spread_over_the_shift(self):
+        # Задача #175: перерывы больше не сбиваются в начало смены, когда у
+        # коллег занята вся середина, — каждый остаётся у своей равномерной точки.
+        seg_start, seg_end = self.CROWDED_SHIFT
+        _, result = self._crowded_layout()
+
+        self.assertEqual([item["end"] - item["start"] for item in result], self.CROWDED_DURATIONS)
+        targets = self._even_targets(seg_start, seg_end, self.CROWDED_DURATIONS)
+        for item, target in zip(result, targets):
+            self.assertLessEqual(
+                abs(item["start"] - target),
+                30,
+                f"перерыв {item} уехал от равномерной точки {target}",
+            )
+        # И не жмутся друг к другу: между ними куда больше обязательного минимума в 45 минут.
+        self.assertTrue(
+            all(b["start"] - a["end"] >= 120 for a, b in zip(result, result[1:])),
+            result,
+        )
+
+    def test_crowded_direction_respects_pair_overlap_limit(self):
+        # Пересечение допустимо, но не любое: 15-минутный — до 10 минут, 30-минутный — до 15.
+        dummy, result = self._crowded_layout()
+        for item in result:
+            for colleague in self.CROWDED_COLLEAGUES:
+                overlap = min(item["end"], colleague["end"]) - max(item["start"], colleague["start"])
+                if overlap <= 0:
+                    continue
+                allowed = dummy._break_allowed_pair_overlap_minutes(
+                    item["end"] - item["start"],
+                    colleague["end"] - colleague["start"],
+                )
+                self.assertLessEqual(overlap, allowed, f"{item} × {colleague}")
+
+    def test_half_minute_snap_rounds_up_like_the_browser(self):
+        # Python округляет половину «к чётному», JS — вверх. Из-за этого планировщик
+        # показывал перерыв на 5 минут левее того, что сохранял сервер.
+        dummy = _make_break_adjust_dummy()
+        # Центр доли — 690, минус половина 15-минутного перерыва → 682.5.
+        self.assertEqual(
+            dummy._place_break_durations_centered_minutes(300, 1080, [15]),
+            [{"start": 685, "end": 700}],
+        )
+
+    def test_allowed_pair_overlap_follows_break_duration(self):
+        dummy = _make_break_adjust_dummy()
+        self.assertEqual(dummy._break_allowed_pair_overlap_minutes(15, 15), 10)
+        self.assertEqual(dummy._break_allowed_pair_overlap_minutes(30, 30), 15)
+        # У разных длительностей действует более строгое из двух правил.
+        self.assertEqual(dummy._break_allowed_pair_overlap_minutes(15, 30), 10)
+        # Пересечение не может быть длиннее самого перерыва.
+        self.assertEqual(dummy._break_allowed_pair_overlap_minutes(5, 30), 5)
+
+    def test_third_operator_on_break_is_allowed_only_as_short_handover(self):
+        # Двое уже на перерыве 14:00-14:30; третий может выйти только на пересдаче,
+        # не больше чем на 5 минут внахлёст.
+        dummy = _make_break_adjust_dummy()
+        pair = [{"start": 14 * 60, "end": 14 * 60 + 30}, {"start": 14 * 60, "end": 14 * 60 + 30}]
+        self.assertEqual(dummy._break_concurrency_penalty_minutes({"start": 14 * 60 + 25, "end": 14 * 60 + 40}, pair), 0)
+        self.assertEqual(dummy._break_concurrency_penalty_minutes({"start": 14 * 60 + 20, "end": 14 * 60 + 35}, pair), 5)
+        # Один коллега на перерыве — это норма, а не «третий».
+        self.assertEqual(dummy._break_concurrency_penalty_minutes({"start": 14 * 60, "end": 14 * 60 + 30}, pair[:1]), 0)
+        # Четвёртый оператор не оправдан ничем.
+        trio = pair + [{"start": 14 * 60, "end": 14 * 60 + 30}]
+        self.assertGreater(dummy._break_concurrency_penalty_minutes({"start": 14 * 60, "end": 14 * 60 + 5}, trio), 5)
+
+    def test_break_placement_avoids_becoming_the_third_operator_on_break(self):
+        # Свободного окна без коллег нет вовсе, но пара 15:00-15:30 занята дважды:
+        # автоматика обязана уйти от неё, а не встать третьей.
+        crowd = [
+            {"start": 15 * 60, "end": 15 * 60 + 30},
+            {"start": 15 * 60, "end": 15 * 60 + 30},
+        ]
+        dummy = _make_break_adjust_dummy(occupied=[dict(x) for x in crowd])
+        result = dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-08-20",
+            start_time="12:00",
+            end_time="18:00",
+            breaks=[{"start": 15 * 60, "end": 15 * 60 + 15}],
+            cross_gap_minutes=0,
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(dummy._break_concurrency_penalty_minutes(result[0], crowd), 0)
+
+    def test_import_simulation_lays_breaks_out_exactly_like_the_server(self):
+        # Алгоритм живёт в трёх местах; при расхождении фронт покажет одно, а
+        # сервер запишет другое. Гоняем импорт-симуляцию на том же сценарии.
+        namespace = {
+            "math": math,
+            "datetime": __import__("datetime").datetime,
+            "timedelta": __import__("datetime").timedelta,
+            **BREAK_RULE_CONSTANTS,
+        }
+        for function_name in (
+            "_ws_time_to_minutes",
+            "_ws_normalize_direction_key",
+            "_ws_is_chat_manager_direction",
+            "_ws_normalize_break_durations",
+            "_ws_pick_break_durations_for_shift",
+            "_ws_place_break_durations_centered",
+            "_ws_compute_breaks_for_shift_minutes",
+            "_ws_intervals_overlap",
+            "_ws_parse_date_str",
+            "_ws_date_str",
+            "_ws_add_days_str",
+            "_ws_cross_operator_gap_for_direction",
+            "_ws_build_occupied_intervals_for_date",
+            "_ws_break_layout_spacing",
+            "_ws_break_start_bounds_for_index",
+            "_ws_break_total_overlap_minutes",
+            "_ws_break_allowed_pair_overlap_minutes",
+            "_ws_break_pair_overlap_excess_minutes",
+            "_ws_break_concurrency_penalty_minutes",
+            "_ws_break_cross_gap_deficit_minutes",
+            "_ws_find_best_break_start",
+            "_ws_adjust_breaks_for_operator_on_date",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+
+        date_str = "2026-08-20"
+        colleagues = [
+            {
+                "id": 100 + index,
+                "direction": "Основа",
+                "shifts": {date_str: [{"start": "00:00", "end": "23:59", "breaks": [dict(item)]}]},
+            }
+            for index, item in enumerate(self.CROWDED_COLLEAGUES)
+        ]
+        seg_start, seg_end = self.CROWDED_SHIFT
+        server_dummy, server_result = self._crowded_layout()
+        target = {
+            "id": 1,
+            "direction": "Основа",
+            "shifts": {date_str: [{
+                "start": "10:00",
+                "end": "21:00",
+                # Норму берём ту же, что у сервера: сверяем раскладку, а не выбор длительностей.
+                "breaks": server_dummy._place_break_durations_centered_minutes(
+                    seg_start, seg_end, self.CROWDED_DURATIONS
+                ),
+            }]},
+        }
+        namespace["_ws_adjust_breaks_for_operator_on_date"](
+            op=target,
+            date_str=date_str,
+            all_operators=[target] + colleagues,
+            get_direction_scope_key=lambda value: f"dir:{str(value or '').strip().lower()}",
+            break_rules_map=None,
+        )
+
+        self.assertEqual(target["shifts"][date_str][0]["breaks"], server_result)
+
+    def test_frontend_mirrors_overlap_and_concurrency_rules(self):
+        app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+        for marker in (
+            "BREAK_MAX_CONCURRENT",
+            "BREAK_HANDOVER_OVERLAP_MIN",
+            "breakAllowedPairOverlapMinutes",
+            "breakPairOverlapExcessMinutes",
+            "breakConcurrencyPenaltyMinutes",
+            "breakCrossGapDeficitMinutes",
+        ):
+            self.assertIn(marker, app_source, marker)
+        # Значения правил обязаны совпадать с серверными.
+        self.assertIn(f"const BREAK_MAX_CONCURRENT = {BREAK_RULE_CONSTANTS['SHIFT_BREAK_MAX_CONCURRENT']};", app_source)
+        self.assertIn(
+            f"const BREAK_HANDOVER_OVERLAP_MIN = {BREAK_RULE_CONSTANTS['SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES']};",
+            app_source,
+        )
+        self.assertIn(
+            f"const BREAK_PAIR_OVERLAP_BASE_MIN = {BREAK_RULE_CONSTANTS['SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES']};",
+            app_source,
+        )
+        self.assertIn(
+            f"const BREAK_PAIR_OVERLAP_SHARE = {BREAK_RULE_CONSTANTS['SHIFT_BREAK_PAIR_OVERLAP_SHARE']};",
+            app_source,
+        )
+        for js_name, py_name in (
+            ("BREAK_WEIGHT_CONCURRENCY", "SHIFT_BREAK_WEIGHT_CONCURRENCY"),
+            ("BREAK_WEIGHT_PAIR_EXCESS", "SHIFT_BREAK_WEIGHT_PAIR_EXCESS"),
+            ("BREAK_WEIGHT_CROSS_GAP", "SHIFT_BREAK_WEIGHT_CROSS_GAP"),
+            ("BREAK_WEIGHT_OVERLAP", "SHIFT_BREAK_WEIGHT_OVERLAP"),
+        ):
+            self.assertIn(f"const {js_name} = {BREAK_RULE_CONSTANTS[py_name]};", app_source, js_name)
+
+    def test_import_simulation_tags_other_operators_breaks_with_direction_gap(self):
         namespace = {}
         for function_name in (
             "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
-            "_ws_merge_intervals",
             "_ws_cross_operator_gap_for_direction",
             "_ws_add_days_str",
             "_ws_parse_date_str",
@@ -464,7 +725,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             direction_scope="Чат менеджер",
             get_scope_key=scope_key,
         )
-        self.assertEqual(without_gap, [{"start": 700, "end": 730}])
+        self.assertEqual(without_gap, [{"start": 700, "end": 730, "gap": 0}])
 
         with_gap = build(
             all_operators=operators,
@@ -474,14 +735,13 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             get_scope_key=scope_key,
             break_gaps_map={"чат менеджер": 10},
         )
-        self.assertEqual(with_gap, [{"start": 690, "end": 740}])
+        self.assertEqual(with_gap, [{"start": 700, "end": 730, "gap": 10}])
 
     def test_import_simulation_uses_strictest_gap_inside_direction_group(self):
         namespace = {}
         for function_name in (
             "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
-            "_ws_merge_intervals",
             "_ws_cross_operator_gap_for_direction",
             "_ws_add_days_str",
             "_ws_parse_date_str",
@@ -513,7 +773,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             get_scope_key=scope_key,
             break_gaps_map={"чат менеджер": 15},
         )
-        self.assertEqual(occupied, [{"start": 685, "end": 745}])
+        self.assertEqual(occupied, [{"start": 700, "end": 730, "gap": 15}])
 
     def test_frontend_break_simulation_receives_cross_operator_gap(self):
         app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")

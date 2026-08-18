@@ -11758,6 +11758,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const BREAK_PLANNING_BUFFER_MIN = 15;
             const BREAK_MIN_EDGE_MARGIN_MIN = 30;
             const BREAK_MIN_GAP_MIN = 15;
+            // Пересечение перерывов РАЗНЫХ операторов направления (задача #175, зеркало сервера).
+            // Перерыв больше не убегает от любого пересечения: иначе на плотном направлении
+            // свободны только края смены и вся норма сбивается в начало или конец.
+            const BREAK_MAX_CONCURRENT = 2;
+            const BREAK_HANDOVER_OVERLAP_MIN = 5;
+            const BREAK_PAIR_OVERLAP_BASE_MIN = 5;
+            const BREAK_PAIR_OVERLAP_SHARE = 3;
+            const BREAK_WEIGHT_CONCURRENCY = 60;
+            const BREAK_WEIGHT_PAIR_EXCESS = 40;
+            const BREAK_WEIGHT_CROSS_GAP = 4;
+            const BREAK_WEIGHT_OVERLAP = 2;
             // Время рабочего часового пояса, а не браузера: СВ может сидеть в другом городе,
             // и «прошедшим» перерыв должен считаться одинаково у него и на сервере.
             const almatyNowParts = () => {
@@ -12974,15 +12985,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
             const scopeDirectionKey = getScopeKey(directionScope);
             const targetGap = getCrossGap(directionScope);
-            let paddedAny = false;
-            // Перерыв чужого оператора расширяем на требуемый промежуток с двух сторон:
-            // тогда обычный поиск «без пересечений» сам держит дистанцию.
+            // Перерывы коллег берём как есть, каждый со своим требуемым промежутком:
+            // по исходным интервалам считается и лимит пересечения пары, и одновременность.
             const clampRange = (s, e, pad) => {
                 const gap = Math.max(0, Number(pad) || 0);
-                if (gap > 0) paddedAny = true;
-                const ns = Math.max(0, Math.min(2880, s - gap));
-                const ne = Math.max(0, Math.min(2880, e + gap));
-                if (ne > ns) occupied.push({ start: ns, end: ne });
+                const ns = Math.max(0, Math.min(2880, s));
+                const ne = Math.max(0, Math.min(2880, e));
+                if (ne > ns) occupied.push({ start: ns, end: ne, gap });
             };
             allOperators.forEach(op => {
                 if (op.id === excludeOpId) return;
@@ -13008,9 +13017,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
                 });
             });
-            // Расширенные интервалы могут склеиваться — сливаем, чтобы штраф за
-            // пересечение не считался дважды. Без промежутка поведение не меняется.
-            if (paddedAny) return mergeIntervals(occupied);
             return occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
             }
 
@@ -13056,7 +13062,86 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, 0);
             }
 
-            function findBestBreakStart(desiredStart, length, lowerBound, upperBound, occupiedIntervals) {
+            // Оценки сравниваем «по словарю»: первый различающийся элемент решает.
+            const compareBreakScores = (a, b) => {
+            for (let i = 0; i < a.length; i += 1) {
+                if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+            }
+            return 0;
+            };
+
+            // Допустимое пересечение перерывов двух операторов: 15 мин → 10, 30 мин → 15.
+            const breakAllowedPairOverlapMinutes = (lengthA, lengthB) => {
+            const allowed = (value) => {
+                const len = Math.max(0, Math.round(Number(value) || 0));
+                if (len <= 0) return 0;
+                return Math.min(len, Math.round(BREAK_PAIR_OVERLAP_BASE_MIN + (len / BREAK_PAIR_OVERLAP_SHARE)));
+            };
+            return Math.min(allowed(lengthA), allowed(lengthB));
+            };
+
+            function breakPairOverlapExcessMinutes(interval, neighbors) {
+            return (neighbors || []).reduce((sum, occ) => {
+                const overlap = Math.min(Number(interval.end), Number(occ.end)) - Math.max(Number(interval.start), Number(occ.start));
+                if (!Number.isFinite(overlap) || overlap <= 0) return sum;
+                const allowed = breakAllowedPairOverlapMinutes(
+                    Number(interval.end) - Number(interval.start),
+                    Number(occ.end) - Number(occ.start)
+                );
+                return sum + Math.max(0, overlap - allowed);
+            }, 0);
+            }
+
+            // Штраф за нарушение «одновременно на перерыве не больше двух операторов»:
+            // один сосед — норма, двое (то есть трое на перерыве) допустимы только как
+            // пересдача и не дольше BREAK_HANDOVER_OVERLAP_MIN подряд.
+            function breakConcurrencyPenaltyMinutes(interval, neighbors) {
+            const cStart = Number(interval.start);
+            const cEnd = Number(interval.end);
+            if (!Number.isFinite(cStart) || !Number.isFinite(cEnd) || cEnd <= cStart) return 0;
+            const spans = [];
+            (neighbors || []).forEach(occ => {
+                const start = Math.max(cStart, Number(occ.start));
+                const end = Math.min(cEnd, Number(occ.end));
+                if (Number.isFinite(start) && Number.isFinite(end) && end > start) spans.push({ start, end });
+            });
+            if (spans.length < BREAK_MAX_CONCURRENT) return 0;
+            const points = Array.from(new Set([cStart, cEnd, ...spans.flatMap(s => [s.start, s.end])])).sort((a, b) => a - b);
+            let penalty = 0;
+            let run = 0;
+            for (let i = 0; i < points.length - 1; i += 1) {
+                const left = points[i];
+                const right = points[i + 1];
+                if (right <= left) continue;
+                const covering = spans.reduce((sum, s) => sum + ((s.start < right && s.end > left) ? 1 : 0), 0);
+                if (covering > BREAK_MAX_CONCURRENT) {
+                    penalty += (right - left) * (covering - BREAK_MAX_CONCURRENT) * 10;
+                }
+                if (covering >= BREAK_MAX_CONCURRENT) {
+                    run += right - left;
+                } else {
+                    penalty += Math.max(0, run - BREAK_HANDOVER_OVERLAP_MIN);
+                    run = 0;
+                }
+            }
+            return penalty + Math.max(0, run - BREAK_HANDOVER_OVERLAP_MIN);
+            }
+
+            // Насколько не выдержан промежуток между перерывами разных операторов
+            // (настройка направления). Промежуток не задан — 0.
+            function breakCrossGapDeficitMinutes(interval, neighbors) {
+            return (neighbors || []).reduce((sum, occ) => {
+                const gap = Math.max(0, Number(occ.gap) || 0);
+                if (gap <= 0) return sum;
+                const distance = Math.max(Number(occ.start) - Number(interval.end), Number(interval.start) - Number(occ.end));
+                return sum + (distance < gap ? gap - distance : 0);
+            }, 0);
+            }
+
+            // Пересечения с чужими перерывами больше не запрещены наглухо: сначала
+            // отсеиваются нарушения правил, среди оставшихся выигрывает точка,
+            // ближайшая к равномерной.
+            function findBestBreakStart(desiredStart, length, lowerBound, upperBound, neighbors, selfIntervals = null) {
             const step = 5;
             const len = Number(length || 0);
             if (len <= 0) return null;
@@ -13069,45 +13154,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             let bestScore = null;
             for (let start = lower; start <= upper; start += step) {
                 const candidate = { start, end: start + len };
-                const overlapMinutes = breakTotalOverlapMinutes(candidate, occupiedIntervals);
-                const overlapCount = (occupiedIntervals || []).reduce((sum, occ) => sum + (intervalsOverlap(candidate, occ) ? 1 : 0), 0);
+                const deviation = Math.abs(start - desired);
+                const cost = breakConcurrencyPenaltyMinutes(candidate, neighbors) * BREAK_WEIGHT_CONCURRENCY
+                    + breakPairOverlapExcessMinutes(candidate, neighbors) * BREAK_WEIGHT_PAIR_EXCESS
+                    + breakCrossGapDeficitMinutes(candidate, neighbors) * BREAK_WEIGHT_CROSS_GAP
+                    + breakTotalOverlapMinutes(candidate, neighbors) * BREAK_WEIGHT_OVERLAP
+                    + deviation;
                 const score = [
-                    overlapMinutes * 1000 + overlapCount * 100,
-                    Math.abs(start - desired),
+                    // Свои же перерывы наложиться не могут ни при каких условиях.
+                    breakTotalOverlapMinutes(candidate, selfIntervals),
+                    cost,
+                    deviation,
                     start
                 ];
-                if (
-                    !bestScore
-                    || score[0] < bestScore[0]
-                    || (score[0] === bestScore[0] && score[1] < bestScore[1])
-                    || (score[0] === bestScore[0] && score[1] === bestScore[1] && score[2] < bestScore[2])
-                ) {
+                if (!bestScore || compareBreakScores(score, bestScore) < 0) {
                     bestScore = score;
                     bestStart = start;
                 }
             }
             return bestStart;
-            }
-
-            function findNonOverlappingStart(desiredStart, length, segStart, segEnd, occupiedIntervals) {
-            const step = 5;
-            const snap = (x) => Math.round(x/step)*step;
-            desiredStart = snap(desiredStart);
-            const candidates = [0];
-            const maxShift = Math.max(segEnd - segStart, 60);
-            for (let d = step; d <= maxShift; d += step) { candidates.push(d); candidates.push(-d); }
-            for (const delta of candidates) {
-                const s = desiredStart + delta;
-                const start = Math.max(segStart, Math.min(segEnd - length, s));
-                const end = start + length;
-                if (start < segStart || end > segEnd) continue;
-                let ok = true;
-                for (const occ of occupiedIntervals) {
-                if (intervalsOverlap({start,end}, occ)) { ok = false; break; }
-                }
-                if (ok) return start;
-            }
-            return null;
             }
 
             // frozenBreaksBySegIndex — уже прошедшие перерывы сегмента: их не двигаем,
@@ -13116,7 +13181,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null, frozenBreaksBySegIndex = null, planningFromMinutes = null) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
-            let occupied = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+            const neighbors = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+            // Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
+            const ownIntervals = [];
             const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
                 ? getBreakRuleRangesForDirection(op?.direction)
                 : null;
@@ -13148,8 +13215,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     .sort((a, b) => (a.start - b.start) || (a.end - b.end))
                     .map(b => ({ ...b, length: b.end - b.start }));
 
-                protectedBreaks.forEach(item => occupied.push({ ...item }));
-                occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                protectedBreaks.forEach(item => ownIntervals.push({ ...item }));
 
                 if (preparedBreaks.length === 0) {
                     seg.breaks = protectedBreaks;
@@ -13179,26 +13245,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     lower = Math.max(lower, protectedEnd + minGap);
                 }
                 let desiredStart = upper >= lower ? Math.max(lower, Math.min(upper, b.start)) : b.start;
-                const found = findBestBreakStart(desiredStart, length, lower, upper, occupied);
+                const found = findBestBreakStart(desiredStart, length, lower, upper, neighbors, ownIntervals);
                 if (found !== null) {
                     const nb = { start: found, end: found + length };
                     newBreaks.push(nb);
-                    occupied.push(nb);
+                    ownIntervals.push({ ...nb });
                 } else {
                     let clampedStart = Math.max(winStart, Math.min(segEnd - length, b.start));
                     if (newBreaks.length > 0 && minGap > 0) {
                         clampedStart = Math.max(clampedStart, newBreaks[newBreaks.length - 1].end + minGap);
                     }
                     clampedStart = Math.min(clampedStart, segEnd - length);
-                    if (clampedStart < winStart) {
-                        occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
-                        continue;
-                    }
+                    if (clampedStart < winStart) continue;
                     const clamped = { start: clampedStart, end: clampedStart + length };
                     newBreaks.push(clamped);
-                    occupied.push(clamped);
+                    ownIntervals.push({ ...clamped });
                 }
-                occupied = occupied.slice().sort((a, b) => (a.start - b.start) || (a.end - b.end));
                 }
                 seg.breaks = protectedBreaks.concat(newBreaks).sort((a, b) => (a.start - b.start) || (a.end - b.end));
             }
@@ -20065,8 +20127,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                 }
 
+                // Пересечение в пределах нормы (15 мин → 10, 30 мин → 15) нарушением не считается —
+                // подсвечиваем только то, что вышло за правило или собрало третьего на перерыве.
                 breaksNormalized.forEach(b => {
-                    const overlapDetails = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
+                    const overlapDetails = occupiedByDirectionDetailed.filter(occ => {
+                        const overlap = Math.min(b.end, occ.end) - Math.max(b.start, occ.start);
+                        return overlap > breakAllowedPairOverlapMinutes(b.end - b.start, occ.end - occ.start);
+                    });
                     if (overlapDetails.length > 0) {
                         conflictIndexes.add(b.idx);
                         overlapIndexes.add(b.idx);
@@ -20074,7 +20141,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const uniqueNames = Array.from(new Set(overlapDetails.map(item => item.operatorName))).filter(Boolean);
                         const namesPreview = uniqueNames.slice(0, 2).join(', ');
                         const namesTail = uniqueNames.length > 2 ? ` +${uniqueNames.length - 2}` : '';
-                        putReason(b.idx, `пересечение с: ${namesPreview}${namesTail}`);
+                        putReason(b.idx, `пересечение больше нормы с: ${namesPreview}${namesTail}`);
                         overlapDetails.forEach(item => {
                             putDetail(b.idx, {
                                 key: `dir:${item.key}`,
@@ -20083,11 +20150,28 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         return;
                     }
+                    if (breakConcurrencyPenaltyMinutes(b, occupiedByDirectionDetailed) > 0) {
+                        const crowdDetails = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
+                        conflictIndexes.add(b.idx);
+                        overlapIndexes.add(b.idx);
+                        overlapsWithDirection += 1;
+                        const uniqueNames = Array.from(new Set(crowdDetails.map(item => item.operatorName))).filter(Boolean);
+                        const namesPreview = uniqueNames.slice(0, 2).join(', ');
+                        const namesTail = uniqueNames.length > 2 ? ` +${uniqueNames.length - 2}` : '';
+                        putReason(b.idx, `на перерыве больше двух операторов: ${namesPreview}${namesTail}`);
+                        crowdDetails.forEach(item => {
+                            putDetail(b.idx, {
+                                key: `crowd:${item.key}`,
+                                text: `${item.operatorName} • ${formatMinuteForConflict(item.start)} — ${formatMinuteForConflict(item.end)} • одновременно на перерыве`
+                            });
+                        });
+                        return;
+                    }
                     if (crossOperatorGapMinutes <= 0) return;
                     // Перерыв не пересекается, но стоит ближе требуемого промежутка к перерыву коллеги.
                     const tooCloseDetails = occupiedByDirectionDetailed.filter(occ => {
-                        const distance = (b.start >= occ.end) ? (b.start - occ.end) : (occ.start - b.end);
-                        return distance >= 0 && distance < crossOperatorGapMinutes;
+                        const distance = Math.max(occ.start - b.end, b.start - occ.end);
+                        return distance < crossOperatorGapMinutes;
                     });
                     if (tooCloseDetails.length === 0) return;
                     conflictIndexes.add(b.idx);
