@@ -105,10 +105,17 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 if request.method == 'OPTIONS':
                     return build_cors_preflight_response()
                 try:
-                    requester_id, requester, error = resolve_requester()
+                    requester_id, _row, error = resolve_requester()
                     if error:
                         message, status = error
                         return jsonify({"error": message}), status
+                    # Контекст берём запросом, а не из строки базы: у неё
+                    # позиционные поля, и обращение по имени молча давало None —
+                    # раздел закрывался даже суперадмину.
+                    with db._get_cursor() as cursor:
+                        requester = queries.access_context(cursor, requester_id)
+                    if not requester:
+                        return jsonify({"error": "Пользователь не найден"}), 404
                     # Гейт здесь, а не в каждом обработчике: спрятанный пункт
                     # меню доступом не является, раздел открывается и прямым
                     # адресом.

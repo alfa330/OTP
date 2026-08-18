@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
+import useStableCallback from '../wiki/useStableCallback';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
     iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -86,6 +87,7 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [canManage, setCanManage] = useState(false);
+    const [fatal, setFatal] = useState('');
 
     const [settings, setSettings] = useState(null);
     const [release, setRelease] = useState(null);
@@ -106,9 +108,16 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
     const [uploadNotes, setUploadNotes] = useState('');
     const uploadFileRef = useRef(null);
 
+    // showToast объявлен обычной функцией в теле App и НОВЫЙ на каждый рендер.
+    // Попав в зависимости загрузки, он заставлял раздел перезапрашивать данные
+    // без остановки — при отказе доступа это выглядело как лента одинаковых
+    // красных плашек. Та же мина описана в useStableCallback.
+    const toast = useStableCallback(showToast);
+    const headerFactory = useStableCallback(withAccessTokenHeader);
+
     const authHeaders = useCallback(
-        (extra = {}) => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? ''), ...extra }),
-        [withAccessTokenHeader, user?.id]
+        (extra = {}) => headerFactory({ 'X-User-Id': String(user?.id ?? ''), ...extra }),
+        [headerFactory, user?.id]
     );
 
     const request = useCallback(async (path, options = {}) => {
@@ -136,13 +145,17 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             setCanManage(Boolean(settingsData.can_manage));
             setEmployees(Array.isArray(employeesData.employees) ? employeesData.employees : []);
         } catch (error) {
-            showToast?.(`Не удалось загрузить раздел: ${error.message}`, 'error');
+            // Отказ в доступе — не повод пытаться снова: раздел закрыт, и
+            // повтор даст только ещё одну такую же плашку.
+            setFatal(error.message || 'Раздел недоступен');
+            toast(`Не удалось загрузить раздел: ${error.message}`, 'error');
         } finally {
             setLoading(false);
         }
-    }, [request, showToast]);
+    }, [request]);
 
-    useEffect(() => { loadAll(); }, [loadAll]);
+    // Ровно один раз на открытие раздела. Перезагрузка — по действию человека.
+    useEffect(() => { loadAll(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
     const loadReport = useCallback(async () => {
         try {
@@ -150,11 +163,14 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             setReportRows(Array.isArray(data.rows) ? data.rows : []);
             setReportRejected(Number(data.rejected || 0));
         } catch (error) {
-            showToast?.(`Отчёт не загрузился: ${error.message}`, 'error');
+            toast(`Отчёт не загрузился: ${error.message}`, 'error');
         }
-    }, [request, reportFrom, reportTo, showToast]);
+    }, [request, reportFrom, reportTo]);
 
-    useEffect(() => { if (tab === 'report') loadReport(); }, [tab, loadReport]);
+    useEffect(() => {
+        if (tab === 'report' && !fatal) loadReport();
+        /* eslint-disable-next-line react-hooks/exhaustive-deps */
+    }, [tab, reportFrom, reportTo, fatal]);
 
     /* ─── сохранение ─── */
 
@@ -169,12 +185,12 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             });
             setSettings(data.settings || {});
         } catch (error) {
-            showToast?.(`Не сохранилось: ${error.message}`, 'error');
+            toast(`Не сохранилось: ${error.message}`, 'error');
             loadAll();
         } finally {
             setSaving(false);
         }
-    }, [request, showToast, loadAll]);
+    }, [request, loadAll]);
 
     const applyBulk = useCallback(async () => {
         const payload = { user_ids: Array.from(selected) };
@@ -191,28 +207,28 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
             });
-            showToast?.(`Изменено сотрудников: ${data.changed}`, 'success');
+            toast(`Изменено сотрудников: ${data.changed}`, 'success');
             setBulkOpen(false);
             setSelected(new Set());
             loadAll();
         } catch (error) {
-            showToast?.(`Не применилось: ${error.message}`, 'error');
+            toast(`Не применилось: ${error.message}`, 'error');
         }
-    }, [request, selected, bulkThreshold, bulkEnabled, showToast, loadAll]);
+    }, [request, selected, bulkThreshold, bulkEnabled, loadAll]);
 
     const downloadAgent = useCallback(async () => {
         try {
             const data = await request('/download');
             window.open(data.url, '_blank', 'noopener');
         } catch (error) {
-            showToast?.(error.message, 'error');
+            toast(error.message, 'error');
         }
-    }, [request, showToast]);
+    }, [request]);
 
     const uploadRelease = useCallback(async () => {
         const file = uploadFileRef.current?.files?.[0];
         if (!file || !uploadVersion.trim()) {
-            showToast?.('Нужны файл и номер версии', 'error');
+            toast('Нужны файл и номер версии', 'error');
             return;
         }
         const form = new FormData();
@@ -229,17 +245,17 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
-            showToast?.(`Версия ${data.version} загружена — агенты обновятся сами`, 'success');
+            toast(`Версия ${data.version} загружена — агенты обновятся сами`, 'success');
             setUploadOpen(false);
             setUploadVersion('');
             setUploadNotes('');
             loadAll();
         } catch (error) {
-            showToast?.(`Не загрузилось: ${error.message}`, 'error');
+            toast(`Не загрузилось: ${error.message}`, 'error');
         } finally {
             setSaving(false);
         }
-    }, [apiBaseUrl, authHeaders, uploadVersion, uploadNotes, showToast, loadAll]);
+    }, [apiBaseUrl, authHeaders, uploadVersion, uploadNotes, loadAll]);
 
     /* ─── производные ─── */
 
@@ -273,6 +289,18 @@ export default function OktellGuardView({ user, showToast, apiBaseUrl, withAcces
         return (
             <div style={{ fontFamily: APPLE_FONT }} className="p-6 text-[13.5px] text-slate-500">
                 Загрузка раздела…
+            </div>
+        );
+    }
+
+    if (fatal) {
+        return (
+            <div style={{ fontFamily: APPLE_FONT }} className={`${iosCard} p-6 text-center`}>
+                <div className="text-[15px] font-semibold text-slate-900">Раздел недоступен</div>
+                <div className="mt-1 text-[13px] text-slate-500">{fatal}</div>
+                <button type="button" className={`${iosBtnSecondary} mt-4`} onClick={() => { setFatal(''); loadAll(); }}>
+                    Попробовать снова
+                </button>
             </div>
         );
     }

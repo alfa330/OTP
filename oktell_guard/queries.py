@@ -459,3 +459,46 @@ def managed_days(cursor, date_from, date_to, department_code=None):
         {'date_from': date_from, 'date_to': date_to, 'department_code': department_code},
     )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def access_context(cursor, user_id):
+    """Кто пришёл: роль, отдел и возглавляет ли он отдел.
+
+    Отдельным запросом, а не разбором кортежа из _resolve_requester: там
+    пользователь приходит СТРОКОЙ базы, и обращение к ней по имени поля молча
+    давало None — из-за этого раздел закрывался даже суперадмину. Порядок
+    столбцов в той строке меняется вместе с чужими правками, привязываться к
+    нему нельзя.
+    """
+    if not user_id:
+        return None
+    cursor.execute(
+        """
+        SELECT u.id,
+               u.name,
+               u.role,
+               COALESCE(d.code, '')  AS department_code,
+               EXISTS (
+                   SELECT 1 FROM departments h
+                    WHERE h.head_user_id = u.id AND h.is_active
+               )                     AS is_department_head,
+               COALESCE((
+                   SELECT h.code FROM departments h
+                    WHERE h.head_user_id = u.id AND h.is_active
+                    LIMIT 1
+               ), '')                AS headed_department_code
+          FROM users u
+          LEFT JOIN departments d ON d.id = u.department_id
+         WHERE u.id = %(user_id)s
+        """,
+        {'user_id': int(user_id)},
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    ctx = dict(row)
+    # Глава отдела считается по отделу, которым он РУКОВОДИТ: его собственный
+    # department_id может быть не заполнен или указывать на другой отдел.
+    if ctx.get('is_department_head') and ctx.get('headed_department_code'):
+        ctx['department_code'] = ctx['headed_department_code']
+    return ctx
