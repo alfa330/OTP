@@ -225,10 +225,25 @@ def register(bp, wiki_route, db, log_ip):
         if scope not in ('public', 'restricted'):
             scope = 'restricted'
 
+        # Отдел ветки. Из него выводится section_kind, и он же подставляется в
+        # правила доступа подразделов: ветка «СЗоВ» делает раздел «Оператор»
+        # внутри неё правилом «отдел СЗоВ + порог должности», а не голой ролью,
+        # которая пробила бы границу отдела.
+        parent_section_id = _int_or_none(data.get('parent_section_id'))
+        department_id = _int_or_none(data.get('department_id'))
+        taken = structure.department_branch_taken(
+            cursor, space_id=space_id, parent_section_id=parent_section_id,
+            department_id=department_id)
+        if taken:
+            return jsonify({
+                "error": "Ветка этого отдела здесь уже есть — «%s»" % taken,
+                "code": "WIKI_DEPARTMENT_BRANCH_TAKEN",
+            }), 400
+
         section_id = structure.create_section(
             cursor, space_id=space_id,
-            parent_section_id=_int_or_none(data.get('parent_section_id')),
-            name=name,
+            parent_section_id=parent_section_id,
+            name=name, department_id=department_id,
             # Слаг обязан быть уникален в пространстве, и занять его мог даже
             # архивный раздел. Дописываем номер, как это делают статьи, — иначе
             # повтор названия падал в 500.
@@ -242,7 +257,8 @@ def register(bp, wiki_route, db, log_ip):
         queries.log_action(cursor, actor_id=ctx['user_id'], action='section.create',
                            entity_type='section', entity_id=section_id,
                            details={'name': name, 'space_id': space_id,
-                                    'visibility_scope': scope},
+                                    'visibility_scope': scope,
+                                    'department_id': department_id},
                            ip_address=log_ip())
         return jsonify({"id": section_id}), 201
 
@@ -251,7 +267,7 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_section_item(cursor, ctx, section_id):
         cursor.execute(
             """
-            SELECT s.name, sp.department_id, s.space_id
+            SELECT s.name, sp.department_id, s.space_id, s.parent_section_id
               FROM wiki_sections s JOIN wiki_spaces sp ON sp.id = s.space_id
              WHERE s.id = %s
             """,
@@ -263,6 +279,7 @@ def register(bp, wiki_route, db, log_ip):
         if not _may_manage_space(ctx, row[1]):
             return jsonify({"error": "Раздел относится к другому отделу"}), 403
         section_exists_space_id = row[2]
+        section_parent_id = row[3]
 
         if request.method == 'DELETE':
             structure.update_section(cursor, section_id, {'status': 'archived'})
@@ -296,6 +313,22 @@ def register(bp, wiki_route, db, log_ip):
                     "code": "WIKI_SECTION_CYCLE",
                 }), 400
             fields['parent_section_id'] = parent
+        # Отдел ветки: вид раздела выводим из него же, вторым полем не берём —
+        # иначе пара «kind=department, department_id=NULL» проскочит мимо
+        # уникального индекса и ветка перестанет быть веткой.
+        if 'department_id' in data:
+            department_id = _int_or_none(data['department_id'])
+            taken = structure.department_branch_taken(
+                cursor, space_id=section_exists_space_id,
+                parent_section_id=fields.get('parent_section_id', section_parent_id),
+                department_id=department_id, exclude_id=section_id)
+            if taken:
+                return jsonify({
+                    "error": "Ветка этого отдела здесь уже есть — «%s»" % taken,
+                    "code": "WIKI_DEPARTMENT_BRANCH_TAKEN",
+                }), 400
+            fields['department_id'] = department_id
+            fields['section_kind'] = structure.section_kind_of(department_id)
 
         if not structure.update_section(cursor, section_id, fields):
             return jsonify({"error": "Нечего обновлять"}), 400
@@ -305,9 +338,20 @@ def register(bp, wiki_route, db, log_ip):
         return jsonify({"status": "ok"})
 
     # ── Правила доступа ──────────────────────────────────────────────────
-    @wiki_route('/access/subjects', capability='can_manage_access')
+    # Гейт не одной способностью, а любой из двух: справочник нужен и форме
+    # раздела («отдел ветки» выбирается из него — её открывает управляющий
+    # структурой, а глава отдела мастер-ключа не носит), и форме правила.
+    # Роль вики может нести can_manage_access без can_manage_structure, поэтому
+    # проверка идёт «или», а не сменой одной способности на другую. Отдаются
+    # только названия отделов, направлений, групп и ролей вики; само
+    # выписывание правил по-прежнему требует can_manage_access.
+    @wiki_route('/access/subjects')
     def wiki_access_subjects(cursor, ctx):
-        """Справочники для выбора субъекта правила."""
+        """Справочники для выбора субъекта правила и отдела ветки."""
+        caps = ctx['capabilities']
+        if not (caps.get('can_manage_structure') or caps.get('can_manage_access')):
+            return jsonify({"error": "Недостаточно прав для этого действия",
+                            "code": "WIKI_FORBIDDEN"}), 403
         catalog = structure.subject_catalog(cursor)
         catalog['otp_role'] = [
             {'id': code, 'name': label} for code, label in (

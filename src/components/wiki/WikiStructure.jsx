@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, ChevronRight, FolderTree, Globe, Layers, Lock, Plus,
-    Loader2, Pencil, Trash2,
+    Archive, ArchiveRestore, Building2, ChevronRight, FolderTree, Globe, KeyRound,
+    Layers, Lock, Plus, Loader2, Pencil, Trash2, UserSearch,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -10,6 +10,8 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { selectableSections, sectionPathLabel } from './sectionPicker';
+import WikiSectionAccess, { branchDepartment } from './WikiSectionAccess';
+import WikiAccessProbe from './WikiAccessProbe';
 
 /* Структура вики: пространства → разделы (дерево).
  *
@@ -24,72 +26,116 @@ import { selectableSections, sectionPathLabel } from './sectionPicker';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-// Строка живого раздела. Архивные сюда не попадают — у них своя вкладка,
-// поэтому ни ветки «вернуть», ни бейджа «в архиве» здесь нет.
-const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, busy }) => (
-    <div
-        className="flex items-center gap-2 px-4 py-2.5 transition hover:bg-slate-50"
-        style={{ paddingLeft: `${16 + depth * 22}px` }}
+// Кнопка действия в строке раздела: одинаковая мишень 32×32 у всех четырёх.
+const RowAction = ({ icon: Icon, label, tone, onClick, disabled = false, size = 14 }) => (
+    <button
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+        title={label}
+        aria-label={label}
+        className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition active:scale-95 disabled:opacity-40 ${tone}`}
     >
-        {depth > 0 && <ChevronRight size={13} className="shrink-0 text-slate-300" />}
-        <FolderTree size={15} className="shrink-0 text-amber-500" />
-
-        <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5">
-                <span className="truncate text-[13.5px] font-medium text-slate-900">
-                    {section.name}
-                </span>
-                {section.visibility_scope === 'public' ? (
-                    <IosBadge tone="green" title="Виден всем сотрудникам без правил">
-                        <Globe size={11} /> Публичный
-                    </IosBadge>
-                ) : (
-                    <IosBadge tone="slate" title="Виден только по правилам доступа">
-                        <Lock size={11} /> По правилам
-                    </IosBadge>
-                )}
-            </div>
-            <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-slate-400">
-                <span className="tabular-nums">{section.articles_count} статей</span>
-                <span className="tabular-nums">{section.rules_count} правил</span>
-                {section.owner_name && <span>владелец: {section.owner_name}</span>}
-            </div>
-        </div>
-
-        {/* Подраздел добавляется прямо со строки родителя. Раньше вложенность
-            задавалась только селектом внутри модалки, которую открывала кнопка
-            у пространства, — и «добавить внутрь этого раздела» выглядело как
-            отсутствующая возможность. */}
-        <button
-            type="button"
-            onClick={() => onAddChild(section)}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
-            aria-label={`Добавить подраздел в «${section.name}»`}
-            title="Добавить подраздел"
-        >
-            <Plus size={15} />
-        </button>
-        <button
-            type="button"
-            onClick={() => onEdit(section)}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
-            aria-label="Изменить раздел"
-        >
-            <Pencil size={14} />
-        </button>
-        <button
-            type="button"
-            disabled={busy}
-            onClick={() => onArchive(section)}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600 disabled:opacity-40"
-            aria-label="Убрать в архив"
-        >
-            <Archive size={14} />
-        </button>
-    </div>
+        <Icon size={size} />
+    </button>
 );
 
-export default function WikiStructure({ base, headers, showToast, structure, reload, loading }) {
+/* Строка живого раздела. Архивные сюда не попадают — у них своя вкладка,
+   поэтому ни ветки «вернуть», ни бейджа «в архиве» здесь нет.
+
+   Действия все четыре здесь же, включая доступ: отдельной вкладки «Доступы»
+   больше нет. Там раздел выбирался селектом из плоского списка, в котором у
+   СЗоВ и у ОП свои одноимённые «Руководитель», «Супервайзер», «Оператор», —
+   и правило регулярно уезжало в чужую ветку. */
+const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
+                     onAccess, busy }) => {
+    // Ветка отдела и должность внутри неё — разные сущности, и на глаз они
+    // должны отличаться так же, как отличаются по смыслу.
+    const isBranch = !!section.department_id;
+    const orphan = section.visibility_scope !== 'public' && !section.rules_count;
+
+    return (
+        <div
+            className="flex items-center gap-2 px-4 py-2.5 transition hover:bg-slate-50"
+            style={{ paddingLeft: `${16 + depth * 22}px` }}
+        >
+            {depth > 0 && <ChevronRight size={13} className="shrink-0 text-slate-300" />}
+            {isBranch
+                ? <Building2 size={15} className="shrink-0 text-indigo-500" />
+                : <FolderTree size={15} className="shrink-0 text-amber-500" />}
+
+            <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="truncate text-[13.5px] font-medium text-slate-900">
+                        {section.name}
+                    </span>
+                    {isBranch && (
+                        <IosBadge tone="blue" title="Ветка отдела: доступ внутри неё считается по этому отделу">
+                            <Building2 size={11} /> {section.department_name || 'отдел'}
+                        </IosBadge>
+                    )}
+                    {section.visibility_scope === 'public' ? (
+                        <IosBadge tone="green" title="Виден всем сотрудникам без правил">
+                            <Globe size={11} /> Публичный
+                        </IosBadge>
+                    ) : (
+                        <IosBadge tone="slate" title="Виден только по правилам доступа">
+                            <Lock size={11} /> По правилам
+                        </IosBadge>
+                    )}
+                    {/* Раздел без единого правила не видит никто, кроме админов.
+                        Молчать об этом нельзя: у веток «Супервайзер» и
+                        «Руководитель группы» так и вышло — статьи лежат, а
+                        открыть их некому. */}
+                    {orphan && (
+                        <IosBadge tone="amber" title="Ни одного правила: раздел не виден никому, кроме администраторов">
+                            доступа нет
+                        </IosBadge>
+                    )}
+                </div>
+                <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-slate-400">
+                    <span className="tabular-nums">{section.articles_count} статей</span>
+                    <span className="tabular-nums">{section.rules_count} правил</span>
+                    {!isBranch && department && <span>в отделе {department.name}</span>}
+                    {section.owner_name && <span>владелец: {section.owner_name}</span>}
+                </div>
+            </div>
+
+            {/* Подраздел добавляется прямо со строки родителя. Раньше вложенность
+                задавалась только селектом внутри модалки, которую открывала кнопка
+                у пространства, — и «добавить внутрь этого раздела» выглядело как
+                отсутствующая возможность. */}
+            <RowAction
+                icon={Plus} size={15}
+                label={`Добавить подраздел в «${section.name}»`}
+                tone="hover:bg-emerald-50 hover:text-emerald-600"
+                onClick={() => onAddChild(section)}
+            />
+            <RowAction
+                icon={Pencil} label="Изменить раздел"
+                tone="hover:bg-blue-50 hover:text-blue-600"
+                onClick={() => onEdit(section)}
+            />
+            {onAccess && (
+                <RowAction
+                    icon={KeyRound} label="Кому открыт раздел"
+                    tone={orphan
+                        ? 'text-amber-500 hover:bg-amber-50 hover:text-amber-600'
+                        : 'hover:bg-indigo-50 hover:text-indigo-600'}
+                    onClick={() => onAccess(section)}
+                />
+            )}
+            <RowAction
+                icon={Archive} label="Убрать в архив" disabled={busy}
+                tone="hover:bg-rose-50 hover:text-rose-600"
+                onClick={() => onArchive(section)}
+            />
+        </div>
+    );
+};
+
+export default function WikiStructure({ base, headers, showToast, structure, reload, loading,
+                                        canManageAccess = false }) {
     const [departments, setDepartments] = useState([]);
     const [busy, setBusy] = useState(false);
 
@@ -99,6 +145,8 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
 
     const [spaceModal, setSpaceModal] = useState(null);   // {id?, name, ...}
     const [sectionModal, setSectionModal] = useState(null);
+    const [accessSection, setAccessSection] = useState(null);
+    const [probeOpen, setProbeOpen] = useState(false);
 
     useEffect(() => {
         axios.get(`${base}/access/subjects`, { headers })
@@ -187,6 +235,9 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             description: sectionModal.description || null,
             visibility_scope: sectionModal.visibility_scope,
             parent_section_id: sectionModal.parent_section_id || null,
+            // Ключ шлём всегда, в том числе пустым: сняли отдел — раздел обязан
+            // перестать быть веткой, а без ключа сервер просто не тронет поле.
+            department_id: sectionModal.department_id || null,
         };
         setBusy(true);
         const request = sectionModal.id
@@ -227,15 +278,26 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
         <div className="space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className={iosGroupLabel}>Структура вики</div>
-                {tab === 'spaces' && (
-                    <button
-                        type="button"
-                        className={iosBtnPrimary}
-                        onClick={() => setSpaceModal({ name: '', description: '', department_id: '' })}
-                    >
-                        <Plus size={15} /> Пространство
-                    </button>
-                )}
+                <div className="flex flex-wrap items-center gap-2">
+                    {/* Проверка «что видит человек» переехала сюда со вкладки
+                        «Доступы»: она про сотрудника, а не про раздел, и строкой
+                        дерева её не открыть. */}
+                    {canManageAccess && (
+                        <button type="button" className={iosBtnGhost}
+                                onClick={() => setProbeOpen(true)}>
+                            <UserSearch size={14} /> Проверить доступ
+                        </button>
+                    )}
+                    {tab === 'spaces' && (
+                        <button
+                            type="button"
+                            className={iosBtnPrimary}
+                            onClick={() => setSpaceModal({ name: '', description: '', department_id: '' })}
+                        >
+                            <Plus size={15} /> Пространство
+                        </button>
+                    )}
+                </div>
             </div>
 
             <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
@@ -339,6 +401,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             onClick={() => setSectionModal({
                                 space_id: space.id, name: '', description: '',
                                 visibility_scope: 'restricted', parent_section_id: '',
+                                department_id: '',
                             })}
                         >
                             <Plus size={13} /> Раздел
@@ -357,18 +420,22 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 section={section}
                                 depth={depth}
                                 busy={busy}
+                                department={branchDepartment(sections, section.id)}
                                 onEdit={(x) => setSectionModal({
                                     id: x.id, space_id: x.space_id, name: x.name,
                                     description: x.description || '',
                                     visibility_scope: x.visibility_scope,
                                     parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
+                                    department_id: x.department_id ? String(x.department_id) : '',
                                 })}
                                 onAddChild={(x) => setSectionModal({
                                     space_id: x.space_id, name: '', description: '',
                                     visibility_scope: 'restricted',
                                     parent_section_id: String(x.id),
+                                    department_id: '',
                                 })}
                                 onArchive={archiveSection}
+                                onAccess={canManageAccess ? setAccessSection : null}
                             />
                         ))}
                     </div>
@@ -584,6 +651,80 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 ariaLabel="Родительский раздел"
                             />
                         </div>
+                        {/* Чем является раздел. Ветка отдела (СЗоВ, ОП) сама
+                            доступ не раздаёт — она задаёт отдел, в границах
+                            которого считаются права её подразделов: «Оператор»
+                            внутри СЗоВ открывается операторам СЗоВ, а не всей
+                            компании. Должность — обычный раздел, и права на
+                            неё выдаются из строки кнопкой с ключом.
+
+                            Вид раздела не хранится вторым полем: он выводится
+                            из отдела, иначе пара «ветка без отдела» разъедется
+                            с уникальным индексом на сервере. */}
+                        <div className="space-y-1.5">
+                            <label className="block px-1 text-[12px] font-medium text-slate-500">
+                                Чем является раздел
+                            </label>
+                            <div className="flex gap-1 rounded-2xl bg-slate-100 p-1">
+                                {[
+                                    { key: 'common', label: 'Должность', icon: FolderTree },
+                                    { key: 'department', label: 'Отдел', icon: Building2 },
+                                ].map(({ key, label, icon: Icon }) => {
+                                    const active = key === 'department'
+                                        ? !!sectionModal.department_id
+                                        : !sectionModal.department_id;
+                                    return (
+                                        <button
+                                            key={key}
+                                            type="button"
+                                            onClick={() => setSectionModal({
+                                                ...sectionModal,
+                                                // Первый отдел из справочника, чтобы переключение
+                                                // сразу что-то значило; список рядом.
+                                                department_id: key === 'department'
+                                                    ? (sectionModal.department_id
+                                                        || (departments[0] ? String(departments[0].id) : ''))
+                                                    : '',
+                                            })}
+                                            className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium transition ${
+                                                active
+                                                    ? 'bg-white text-slate-900 shadow-sm'
+                                                    : 'text-slate-500 hover:text-slate-700'
+                                            }`}
+                                        >
+                                            <Icon size={14} /> {label}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            {sectionModal.department_id ? (
+                                <>
+                                    <CustomSelect
+                                        variant="ios"
+                                        value={sectionModal.department_id}
+                                        onChange={(v) => setSectionModal({ ...sectionModal, department_id: v })}
+                                        options={departments.map((d) => ({
+                                            value: String(d.id), label: d.name,
+                                        }))}
+                                        searchable
+                                        ariaLabel="Отдел ветки"
+                                    />
+                                    <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                        Доступ у самой ветки настраивать не нужно — его выдают
+                                        в подразделах: «Руководитель группы», «Супервайзер»,
+                                        «Оператор». Права там будут действовать только внутри
+                                        этого отдела.
+                                    </p>
+                                </>
+                            ) : (
+                                <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    Обычный раздел. Если он лежит внутри ветки отдела, права
+                                    выдаются по должностям этого отдела; если нет — по должностям
+                                    всей компании.
+                                </p>
+                            )}
+                        </div>
+
                         <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
                             <div className="min-w-0">
                                 <div className="text-[13.5px] font-medium text-slate-900">
@@ -605,6 +746,26 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                     </div>
                 )}
             </IosModal>
+
+            {/* ── Доступ к разделу ── */}
+            {accessSection && (
+                <WikiSectionAccess
+                    base={base}
+                    headers={headers}
+                    showToast={showToast}
+                    section={sections.find((x) => x.id === accessSection.id) || accessSection}
+                    sections={sections}
+                    onClose={() => setAccessSection(null)}
+                    reload={reload}
+                />
+            )}
+
+            <WikiAccessProbe
+                base={base}
+                headers={headers}
+                open={probeOpen}
+                onClose={() => setProbeOpen(false)}
+            />
         </div>
     );
 }

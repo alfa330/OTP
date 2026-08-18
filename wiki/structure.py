@@ -66,7 +66,8 @@ def update_space(cursor, space_id, fields):
 
 _SECTION_KEYS = ('id', 'space_id', 'parent_section_id', 'name', 'slug', 'description',
                  'icon', 'visibility_scope', 'owner_user_id', 'owner_name', 'status',
-                 'position', 'articles_count', 'rules_count')
+                 'position', 'department_id', 'department_name', 'section_kind',
+                 'articles_count', 'rules_count')
 
 
 def list_sections(cursor, space_id=None, include_archived=False):
@@ -74,11 +75,13 @@ def list_sections(cursor, space_id=None, include_archived=False):
         """
         SELECT s.id, s.space_id, s.parent_section_id, s.name, s.slug, s.description,
                s.icon, s.visibility_scope, s.owner_user_id, u.name AS owner_name,
-               s.status, s.position,
+               s.status, s.position, s.department_id, d.name AS department_name,
+               s.section_kind,
                (SELECT count(*) FROM wiki_article_sections a WHERE a.section_id = s.id),
                (SELECT count(*) FROM wiki_section_access_rules r WHERE r.section_id = s.id)
           FROM wiki_sections s
           LEFT JOIN users u ON u.id = s.owner_user_id
+          LEFT JOIN departments d ON d.id = s.department_id
          WHERE (%(space)s::int IS NULL OR s.space_id = %(space)s::int)
            AND (%(archived)s OR s.status = 'active')
          ORDER BY s.space_id, s.position, s.id
@@ -110,28 +113,70 @@ def article_counts_by_section(cursor, article_ids):
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
+def section_kind_of(department_id):
+    """Вид раздела выводится из отдела, а не задаётся вторым полем.
+
+    Два независимых поля разъезжаются: раздел с section_kind='department' и
+    пустым department_id ничего не значит, а обратная пара молча теряет
+    уникальный индекс uq_wiki_section_department. Источник истины один — отдел.
+    """
+    return 'department' if department_id else 'common'
+
+
+def department_branch_taken(cursor, *, space_id, parent_section_id, department_id,
+                            exclude_id=None):
+    """Занят ли отдел соседней веткой того же родителя.
+
+    На (space_id, parent, department_id) висит частичный UNIQUE, и без этой
+    проверки повтор падал бы в обработчик ошибок — человек увидел бы
+    «Внутреннюю ошибку раздела Вики» вместо внятного ответа. Ровно та же
+    история, что со слагом раздела (см. free_section_slug).
+    """
+    if not department_id:
+        return None
+    cursor.execute(
+        """
+        SELECT name FROM wiki_sections
+         WHERE space_id = %(space)s
+           AND COALESCE(parent_section_id, 0) = COALESCE(%(parent)s::int, 0)
+           AND department_id = %(dept)s
+           AND section_kind = 'department' AND status = 'active'
+           AND (%(exclude)s::int IS NULL OR id <> %(exclude)s::int)
+         LIMIT 1
+        """,
+        {'space': space_id, 'parent': parent_section_id, 'dept': department_id,
+         'exclude': exclude_id},
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def create_section(cursor, *, space_id, parent_section_id, name, slug, description,
-                   icon, visibility_scope, owner_user_id, created_by):
+                   icon, visibility_scope, owner_user_id, created_by,
+                   department_id=None):
     cursor.execute(
         """
         INSERT INTO wiki_sections (space_id, parent_section_id, name, slug, description,
-                                   icon, visibility_scope, owner_user_id, position, created_by)
+                                   icon, visibility_scope, owner_user_id, position,
+                                   department_id, section_kind, created_by)
         VALUES (%(space)s, %(parent)s, %(name)s, %(slug)s, %(description)s, %(icon)s,
                 %(scope)s, %(owner)s,
                 COALESCE((SELECT max(position) + 1 FROM wiki_sections
                            WHERE space_id = %(space)s), 0),
-                %(created_by)s)
+                %(dept)s, %(kind)s, %(created_by)s)
         RETURNING id
         """,
         {'space': space_id, 'parent': parent_section_id, 'name': name, 'slug': slug,
          'description': description, 'icon': icon, 'scope': visibility_scope,
-         'owner': owner_user_id, 'created_by': created_by},
+         'owner': owner_user_id, 'dept': department_id,
+         'kind': section_kind_of(department_id), 'created_by': created_by},
     )
     return cursor.fetchone()[0]
 
 
 _SECTION_UPDATABLE = ('name', 'slug', 'description', 'icon', 'visibility_scope',
-                      'owner_user_id', 'status', 'position', 'parent_section_id')
+                      'owner_user_id', 'status', 'position', 'parent_section_id',
+                      'department_id', 'section_kind')
 
 
 def update_section(cursor, section_id, fields):

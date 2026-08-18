@@ -11,7 +11,6 @@ import WikiLibrary from './WikiLibrary';
 import WikiParks from './WikiParks';
 import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
-import WikiAccess from './WikiAccess';
 import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
@@ -121,8 +120,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'parks', label: 'Парки', icon: Building2, show: true },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: true },
+        // Отдельной вкладки «Доступы» нет: права выдаются из строки раздела на
+        // вкладке «Структура». Раздел там выбран тем, что человек на него нажал,
+        // а не селектом из плоского списка, где ветки СЗоВ и ОП одноимённые.
         { key: 'structure', label: 'Структура', icon: Layers, show: canManageStructure },
-        { key: 'access', label: 'Доступы', icon: KeyRound, show: canManageAccess },
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
     ].filter((t) => t.show)), [canManageStructure, canManageAccess]);
 
@@ -132,7 +133,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     }, [tabs, tab]);
 
     /* Пришли по уведомлению об ознакомлении — открываем вкладку со статьями,
-       даже если в прошлый раз ушли, например, в «Доступы». */
+       даже если в прошлый раз ушли, например, в «Структуру». */
     useEffect(() => {
         if (initialArticleSlug) setTab('library');
     }, [initialArticleSlug]);
@@ -435,17 +436,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         showToast={showToast}
                         structure={structure}
                         loading={structureLoading}
+                        canManageAccess={canManageAccess}
                         reload={() => { loadStructure(); loadPing(); }}
-                    />
-                )}
-
-                {tab === 'access' && (
-                    <WikiAccess
-                        base={base}
-                        headers={headers}
-                        showToast={showToast}
-                        structure={structure}
-                        reload={loadStructure}
                     />
                 )}
 

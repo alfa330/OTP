@@ -318,5 +318,111 @@ class RulePermissionNormalisationTest(unittest.TestCase):
                         'правка без чтения — противоречие, can_read должен включиться сам')
 
 
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
+    """Отдел ветки у раздела: «ОП» и «СЗоВ» помечаются отделом, а не должностью.
+
+    Поле уже было и было снято (b264a080) — теперь оно вернулось как переключатель
+    в форме раздела: доступ внутри ветки считается по ЭТОМУ отделу, иначе правило
+    на роль 'sv' пробило бы границу и супервайзер продаж увидел бы ОТП.
+
+    Проверяем не UI, а контракт: department_id доезжает до SQL, section_kind
+    выводится из него (вторым полем не приходит) и повтор отдела у соседа
+    отвечает внятной ошибкой, а не 500 от уникального индекса.
+    """
+
+    def _admin(self):
+        return self.build(make_context('admin', wiki_roles=[ADMIN_ROLE]))
+
+    def test_create_section_stores_department_and_kind(self):
+        captured = {}
+
+        def fake_create(cursor, **kwargs):
+            captured.update(kwargs)
+            return 77
+
+        self.addCleanup(setattr, structure, 'create_section', structure.create_section)
+        structure.create_section = fake_create
+        self.addCleanup(setattr, structure, 'free_section_slug', structure.free_section_slug)
+        structure.free_section_slug = lambda cursor, space_id, base, exclude_id=None: base
+        self.addCleanup(setattr, structure, 'department_branch_taken',
+                        structure.department_branch_taken)
+        structure.department_branch_taken = lambda cursor, **kwargs: None
+
+        client, cursor = self._admin()
+        cursor.fetchone.return_value = (None,)   # пространство без отдела
+        response = client.post('/api/wiki/sections',
+                               json={'name': 'ОП', 'space_id': 1, 'department_id': 367})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(captured['department_id'], 367)
+
+    def test_section_kind_follows_department(self):
+        """Вид раздела выводится из отдела, а не задаётся вторым полем.
+
+        Два независимых поля разъезжаются: «ветка без отдела» проскочила бы мимо
+        уникального индекса uq_wiki_section_department и перестала быть веткой.
+        """
+        self.assertEqual(structure.section_kind_of(367), 'department')
+        self.assertEqual(structure.section_kind_of(None), 'common')
+        self.assertEqual(structure.section_kind_of(0), 'common')
+
+    def test_duplicate_department_branch_answers_clearly(self):
+        """Повтор отдела у соседа — 400 с именем занявшей ветки, а не 500.
+
+        На (space_id, parent, department_id) висит частичный UNIQUE. Без явной
+        проверки человек видел бы «Внутреннюю ошибку раздела Вики» — ровно та
+        история, что была со слагом раздела (2817ebcc).
+        """
+        self.addCleanup(setattr, structure, 'department_branch_taken',
+                        structure.department_branch_taken)
+        structure.department_branch_taken = lambda cursor, **kwargs: 'ОП'
+
+        client, cursor = self._admin()
+        cursor.fetchone.return_value = (None,)
+        response = client.post('/api/wiki/sections',
+                               json={'name': 'Продажи', 'space_id': 1, 'department_id': 367})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_DEPARTMENT_BRANCH_TAKEN')
+        self.assertIn('ОП', response.get_json().get('error', ''))
+
+    def test_patch_clears_department_when_null(self):
+        """Пустой отдел снимает пометку ветки, а не молча ничего не делает.
+
+        Форма шлёт ключ всегда, в том числе пустым: без этого раздел, у которого
+        отдел сняли, остался бы веткой навсегда.
+        """
+        captured = {}
+
+        self.addCleanup(setattr, structure, 'update_section', structure.update_section)
+        structure.update_section = lambda cursor, sid, fields: (captured.update(fields), True)[1]
+        self.addCleanup(setattr, structure, 'department_branch_taken',
+                        structure.department_branch_taken)
+        structure.department_branch_taken = lambda cursor, **kwargs: None
+
+        client, cursor = self._admin()
+        # SELECT в начале обработчика: имя, отдел пространства, space_id, родитель.
+        cursor.fetchone.return_value = ('Оператор', None, 1, 5)
+        response = client.patch('/api/wiki/sections/9', json={'department_id': None})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(captured['department_id'])
+        self.assertEqual(captured['section_kind'], 'common')
+
+    def test_subjects_catalog_open_to_structure_manager(self):
+        """Справочник отделов нужен форме раздела, а её открывает глава отдела.
+
+        Глава отдела мастер-ключа can_manage_access не носит
+        (department-head-permission-semantics), и пока гейт был только на нём,
+        селектор «Отдел ветки» у него оставался пустым.
+        """
+        client, _ = self.build(make_context('admin', headed=[7], department_id=7))
+        self.assertEqual(client.get('/api/wiki/access/subjects').status_code, 200)
+        # Но выписывать правила он по-прежнему не может.
+        self.assertEqual(
+            client.post('/api/wiki/access/section-rules', json={}).status_code, 403)
+
+
 if __name__ == '__main__':
     unittest.main()
