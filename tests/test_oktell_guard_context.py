@@ -25,7 +25,7 @@ def test_department_head_context_uses_headed_department():
     по отделу, которым он руководит."""
     ctx = {'id': 9, 'role': 'admin', 'department_code': 'szov', 'is_department_head': True}
     assert access.can_view_section(ctx) is True
-    assert access.visible_department_code(ctx) == 'szov'
+    assert access.visible_department_code(ctx) == 'szov'   # и админу тоже только СЗоВ
 
 
 def test_head_of_other_department_still_denied():

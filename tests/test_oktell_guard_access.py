@@ -40,8 +40,11 @@ def test_camel_case_fields_from_frontend():
     assert access.can_view_section({"role": "admin", "isDepartmentHead": True, "departmentCode": "szov"}) is True
 
 
-def test_report_scope():
-    assert access.visible_department_code(user(role="admin", department_code="")) is None
+def test_scope_is_always_szov():
+    """Раздел про один отдел: даже глобальный админ видит в нём только СЗоВ,
+    иначе в списке оказываются люди, которых ограничитель не касается."""
+    assert access.visible_department_code(user(role="admin", department_code="")) == "szov"
+    assert access.visible_department_code(user(role="super_admin", department_code="")) == "szov"
     assert access.visible_department_code(user(role="admin", is_department_head=True)) == "szov"
     assert access.visible_department_code(user(role="operator")) == ""
 
