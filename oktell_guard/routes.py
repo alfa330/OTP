@@ -332,12 +332,12 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             personal = queries.personal_rule_by_sip(cursor, sip) if sip else None
             for item in items[:50]:
                 status, note = check_violation(item, str(item.get('login') or sip))
-                # Личный токен называет отправителя. Если он присылает факт про
-                # ЧУЖОЙ номер — это не сбой, а попытка приписать нарушение
-                # коллеге, и она отклоняется вместе с именем автора.
+                # Отправитель и субъект могут не совпадать законно: на одной
+                # машине посменно работают разные операторы, а агента скачивал
+                # кто-то один. Поэтому это не отказ, а пометка — достоверность
+                # всё равно решает сверка с историей Oktell.
                 if reporter and reporter.get('sip_number') and sip and reporter['sip_number'] != sip:
-                    status = verify.REJECTED
-                    note = f"прислано с токена сотрудника {reporter['name']}, а факт про номер {sip}"
+                    note = f"{note}; агент принадлежит {reporter['name']}, факт про номер {sip}"
                 created = queries.record_violation(cursor, {
                     'user_id': (personal or {}).get('user_id'),
                     'sip_number': str(item.get('login') or sip)[:64],

@@ -436,7 +436,7 @@ def test_in_window_rule_records_violation_after_wipe():
     js = agent.build_hook_js({})
     body = js[js.index("function logout("):]      # смотрим сам разлогин, а не объявление функции
     wipe = body.index("sessionStorage.clear()")
-    record = body.index("recordViolation(seconds)")
+    record = body.index("recordViolation(seconds, false)")   # у вызова появился флаг обкатки
     assert wipe < record
 
 
@@ -739,3 +739,33 @@ def test_old_filename_shape_still_understood():
 
 def test_plain_new_name_has_no_token():
     assert agent.token_from_filename("Oktell-Perezvon-Setup.exe") == ""
+
+
+# --------------------------------------------------------------------------- #
+# Отправка нарушений на сервер
+# --------------------------------------------------------------------------- #
+
+def test_dry_run_reaches_the_in_window_rule():
+    """Обкатка задаётся в общих настройках, а решает правило в окне: без
+    передачи флага «безопасный» режим выкидывал людей по-настоящему."""
+    assert '"dryRun": true' in agent.build_hook_js({'dry_run': True})
+    assert '"dryRun": false' in agent.build_hook_js({'dry_run': False})
+
+
+def test_clear_js_removes_only_sent_records():
+    """Пока идёт отправка, правило могло записать новое нарушение — очистка
+    целиком его бы потеряла."""
+    js = agent.build_clear_violations_js(['6612|2026-08-18T10:00:00.000Z'])
+    assert '6612|2026-08-18T10:00:00.000Z' in js
+    assert 'sent.indexOf(key) < 0' in js
+    assert 'localStorage.removeItem' not in js
+
+
+def test_collect_js_reads_the_page_store():
+    js = agent.build_collect_violations_js()
+    assert '__oktell_guard_violations' in js
+
+
+def test_violations_path_is_configurable():
+    cfg = agent.load_config(Path("нет-такого.json"))
+    assert cfg['violations_path'] == '/api/oktell_guard/violations'

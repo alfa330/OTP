@@ -33,6 +33,7 @@ function hookSource(overrides = {}) {
     sessionKeys: ['___oktellsessionid'],
     callStateStrings: ['talk', 'dial', 'call', 'ring'],
     callStateIds: [],
+    dryRun: false,
     ...overrides,
   };
   return template.replace('__RULE_PARAMS__', JSON.stringify(params));
@@ -236,4 +237,35 @@ test('выключенное правило ничего не делает', () 
   ws.emit(frame(recall));
   env.advanceSeconds(300);
   assert.equal(env.reloads, 0);
+});
+
+test('в режиме обкатки нарушение записывается, но человека не трогает', () => {
+  const env = makeEnv();
+  const { ws, rule } = runHook(env, { dryRun: true });
+  ws.emit(frame(recall));
+  env.advanceSeconds(181);
+  assert.equal(rule.fired, true, 'правило должно сработать');
+  assert.equal(env.reloads, 0, 'но страницу перезагружать нельзя');
+  assert.ok(!ws.sent.some((m) => m.includes('logout')), 'и logout в сокет слать нельзя');
+  const list = JSON.parse(env.storage.get('__oktell_guard_violations'));
+  assert.equal(list[0].dry_run, true, 'запись должна быть помечена как обкатка');
+});
+
+test('в обкатке не показывается и плашка', () => {
+  const env = makeEnv();
+  const { ws } = runHook(env, { dryRun: true });
+  ws.emit(frame(recall));
+  env.advanceSeconds(160);
+  const banners = env.window.document.body.children.filter((c) => c.id === '__oktell_guard_banner');
+  assert.equal(banners.length, 0, 'предупреждение, за которым ничего не следует, учит его игнорировать');
+});
+
+test('у каждой записи есть ключ — повтор отправки не удвоит отчёт', () => {
+  const env = makeEnv();
+  const { ws } = runHook(env);
+  ws.emit(frame(recall));
+  env.advanceSeconds(181);
+  const list = JSON.parse(env.storage.get('__oktell_guard_violations'));
+  assert.ok(list[0].key && list[0].key.includes('6612'));
+  assert.equal(list[0].threshold_s, 180);
 });

@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -79,6 +79,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "server_url": "https://icore.example.com",
     "heartbeat_path": "/api/oktell_guard/heartbeat",
     "ack_path": "/api/oktell_guard/ack",
+    "violations_path": "/api/oktell_guard/violations",
     "agent_token": "",
     "verify_tls": True,
     "request_timeout_s": 10,
@@ -1182,18 +1183,34 @@ HOOK_JS_TEMPLATE = r"""
     var handle = setInterval(tick, 1000);
   }
 
-  function recordViolation(seconds) {
+  function recordViolation(seconds, dry) {
     // Пишем ПОСЛЕ очистки хранилища, иначе стёрли бы собственную запись.
     try {
       var list = [];
       try { list = JSON.parse(localStorage.getItem('__oktell_guard_violations') || '[]'); } catch (e) { list = []; }
-      list.push({ at: new Date().toISOString(), login: rule.login, seconds: seconds, reason: 'recall_timeout' });
+      var at = new Date().toISOString();
+      list.push({
+        at: at,
+        login: rule.login,
+        seconds: seconds,
+        threshold_s: cfg.thresholdS,
+        reason: 'recall_timeout',
+        dry_run: !!dry,
+        // Ключ, чтобы повторная отправка не удвоила запись в отчёте.
+        key: (rule.login || 'нет-логина') + '|' + at
+      });
       if (list.length > 50) { list = list.slice(-50); }
       localStorage.setItem('__oktell_guard_violations', JSON.stringify(list));
     } catch (e) {}
   }
 
   function logout(seconds) {
+    if (cfg.dryRun) {
+      // Обкатка: фиксируем и уходим. Плашку тоже не показываем — предупреждение,
+      // за которым никогда ничего не следует, приучает его игнорировать.
+      recordViolation(seconds, true);
+      return;
+    }
     try {
       var socks = window.__oktellGuardSockets || [];
       for (var i = socks.length - 1; i >= 0; i--) {
@@ -1212,7 +1229,7 @@ HOOK_JS_TEMPLATE = r"""
       } catch (e) {}
     }
     try { sessionStorage.clear(); } catch (e) {}
-    recordViolation(seconds);
+    recordViolation(seconds, false);
     setTimeout(function () { location.reload(); }, 300);
   }
 
@@ -1239,7 +1256,7 @@ HOOK_JS_TEMPLATE = r"""
       rule.seconds = seconds;
       if (!rule.warned && seconds >= cfg.thresholdS - cfg.warnBeforeS) {
         rule.warned = true;
-        banner(cfg.message, Math.max(1, cfg.thresholdS - seconds));
+        if (!cfg.dryRun) { banner(cfg.message, Math.max(1, cfg.thresholdS - seconds)); }
       }
       if (seconds >= cfg.thresholdS) {
         rule.fired = true;
@@ -1291,6 +1308,8 @@ def build_hook_js(rule=None) -> str:
             "thresholdS": int(rule.get("threshold_s", 180)),
             "warnBeforeS": int(rule.get("warn_before_s", 30)),
             "recallReasonId": int(rule.get("recall_lunch_reason_id", 2)),
+            # Обкатка: считаем и записываем, но не трогаем человека.
+            "dryRun": bool(rule.get("dry_run")),
             # Что считать звонком: строки состояния и/или числовые коды.
             # Обнуляет накопленное ТОЛЬКО это, смена статуса — нет.
             "callStateStrings": list(rule.get("call_state_strings") or ["talk", "dial", "call", "ring"]),
@@ -1395,6 +1414,44 @@ def build_logout_js(session_keys: Iterable[str]) -> str:
   }}
   try {{ localStorage.clear(); sessionStorage.clear(); out.wiped = true; }} catch (e) {{}}
   return out;
+}})();
+""".strip()
+
+
+def build_collect_violations_js() -> str:
+    """Забрать накопленные записи о нарушениях из страницы."""
+    return """
+(function () {
+  try {
+    return JSON.parse(localStorage.getItem('__oktell_guard_violations') || '[]');
+  } catch (e) {
+    return [];
+  }
+})();
+""".strip()
+
+
+def build_clear_violations_js(keys) -> str:
+    """Удалить ровно отправленные записи.
+
+    По ключам, а не «очистить всё»: пока шла отправка, правило могло записать
+    новое нарушение, и очистка целиком его бы потеряла.
+    """
+    payload = json.dumps(list(keys))
+    return f"""
+(function () {{
+  var sent = {payload};
+  try {{
+    var list = JSON.parse(localStorage.getItem('__oktell_guard_violations') || '[]');
+    var left = list.filter(function (item) {{
+      var key = item && (item.key || ((item.login || '') + '|' + item.at));
+      return sent.indexOf(key) < 0;
+    }});
+    localStorage.setItem('__oktell_guard_violations', JSON.stringify(left));
+    return left.length;
+  }} catch (e) {{
+    return -1;
+  }}
 }})();
 """.strip()
 
@@ -1760,6 +1817,10 @@ class ManagedBrowser:
         """
         rule_cfg = dict(self.cfg.get("in_window_rule") or {})
         rule_cfg.setdefault("session_keys", self.cfg.get("session_keys", DEFAULT_SESSION_KEYS))
+        # Обкатка задаётся на верхнем уровне настроек, а решает правило в окне —
+        # без этой строки флаг до него не доезжал и «безопасный» режим выкидывал
+        # людей по-настоящему.
+        rule_cfg.setdefault("dry_run", bool(self.cfg.get("dry_run")))
         source = build_hook_js(rule_cfg)
         expected = rule_version(rule_cfg)
         try:
@@ -1838,6 +1899,27 @@ class ManagedBrowser:
         except Exception:  # noqa: BLE001
             logging.debug("Не удалось показать окно Oktell", exc_info=True)
             return False
+
+    def collect_violations(self) -> list:
+        """Записи о нарушениях, накопленные страницей."""
+        page = self.page()
+        if not page:
+            return []
+        try:
+            data = page.evaluate(build_collect_violations_js())
+        except Exception:  # noqa: BLE001
+            logging.debug("Не удалось прочитать нарушения из страницы", exc_info=True)
+            return []
+        return data if isinstance(data, list) else []
+
+    def drop_violations(self, keys) -> None:
+        page = self.page()
+        if not page or not keys:
+            return
+        try:
+            page.evaluate(build_clear_violations_js(keys))
+        except Exception:  # noqa: BLE001
+            logging.debug("Не удалось очистить отправленные нарушения", exc_info=True)
 
     def show_banner(self, message: str, seconds: int) -> bool:
         page = self.page()
@@ -2036,6 +2118,12 @@ class ServerLink:
         data = response.json()
         return data if isinstance(data, dict) else None
 
+    def violations(self, payload: dict) -> bool:
+        url = self._url("violations_path", "/api/oktell_guard/violations")
+        response = self._session.post(url, json=payload, timeout=self.timeout, verify=self.verify)
+        response.raise_for_status()
+        return True
+
     def ack(self, payload: dict) -> None:
         url = self._url("ack_path", "/api/oktell_guard/ack")
         try:
@@ -2140,6 +2228,25 @@ def run_agent(cfg: dict) -> int:
                 payload = build_heartbeat_payload(state, cfg, now_iso())
                 data = link.heartbeat(payload)
                 failures = 0
+
+                # Нарушения, накопленные страницей, уезжают на сервер. Без этого
+                # правило срабатывало, а в отчёте не появлялось ничего.
+                pending = browser.collect_violations()
+                if pending:
+                    sent = link.violations({
+                        "agent_id": identity.agent_id,
+                        "operator_login": state.browser.get("login") or identity.operator_login,
+                        "hostname": identity.hostname,
+                        "windows_user": identity.windows_user,
+                        "version": VERSION,
+                        "dry_run": bool(cfg.get("dry_run")),
+                        "violations": pending,
+                    })
+                    if sent:
+                        keys = [str(item.get("key") or f"{item.get('login', '')}|{item.get('at', '')}")
+                                for item in pending]
+                        browser.drop_violations(keys)
+                        logging.info("Отправлено нарушений: %d", len(pending))
 
                 if data:
                     server_interval = data.get("poll_interval_s")
