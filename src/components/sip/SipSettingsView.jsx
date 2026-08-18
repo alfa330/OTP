@@ -121,7 +121,11 @@ const SecretInput = ({ value, onChange, placeholder, disabled }) => {
     );
 };
 
-const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canEdit = true }) => {
+// canDownloadPhone — программа iCORE Phone положена отделу продаж и админам, а раздел
+// «Настройки SIP» ведут главы любых отделов. Поэтому право на скачивание приходит
+// отдельным пропом, а не выводится из canEdit.
+const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canEdit = true,
+                           canDownloadPhone = false }) => {
     const [tab, setTab] = useState('operators');
 
     const [operators, setOperators] = useState([]);
@@ -233,6 +237,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     // Манифест версии публичный (телефон читает его до входа оператора), поэтому
     // без токена; cache: 'no-store' — чтобы после публикации не показывать старое.
     useEffect(() => {
+        // Кому телефон не положен, тому и версия ни к чему — не ходим за манифестом.
+        if (!canDownloadPhone) { setReleaseLoading(false); return undefined; }
         let alive = true;
         (async () => {
             try {
@@ -249,7 +255,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             }
         })();
         return () => { alive = false; };
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, canDownloadPhone]);
 
     // История нужна редко — грузим при первом открытии вкладки.
     useEffect(() => {
@@ -951,7 +957,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     </section>
 
                     {/* Программа телефона. Раздают её отсюда же, где ведут SIP-настройки:
-                        обновляется парк машин сам, но ссылка нужна для новых сотрудников. */}
+                        обновляется парк машин сам, но ссылка нужна для новых сотрудников.
+                        Видна только тем, кому телефон положен (отдел продаж и админы) —
+                        у главы другого отдела ссылка всё равно вернула бы 403. */}
+                    {canDownloadPhone && (
                     <section className="space-y-1.5">
                         <div className={iosGroupLabel}>Программа iCORE Phone</div>
                         <div className={`${iosCard} space-y-3 p-4`}>
@@ -1008,6 +1017,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </p>
                         </div>
                     </section>
+                    )}
 
                     <div className="flex items-center justify-between gap-3 px-1">
                         <span className="text-[11.5px] text-slate-400">

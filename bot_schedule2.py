@@ -22214,6 +22214,13 @@ ICORE_PHONE_BUCKET_ENV = ('GOOGLE_CLOUD_STORAGE_BUCKET_AGENTS',
                           'GOOGLE_CLOUD_STORAGE_BUCKET_TASKS',
                           'GOOGLE_CLOUD_STORAGE_BUCKET')
 ICORE_PHONE_PREFIX = 'icore_phone'
+# Кому доступен дистрибутив: отдел продаж (367) и администраторы.
+# СЗоВ (1) и Тез КЦ (560) тоже держат SIP-номера, поэтому если телефон поедет и к
+# ним, достаточно добавить id сюда И в ICORE_PHONE_DEPARTMENT_IDS на фронте — иначе
+# либо кнопки не будет, либо кнопка будет, а ручка ответит 403.
+# Ограничение обязано жить на сервере, а не только в интерфейсе: спрятанная кнопка
+# ничего не ограничивает, подписанную ссылку можно было бы запросить напрямую.
+ICORE_PHONE_DEPARTMENT_IDS = (367,)
 # Час, а не 15 минут как у аватаров: телефон может проснуться на медленной машине,
 # и протухшая на полпути ссылка означала бы, что обновление не доедет.
 ICORE_PHONE_URL_TTL_MINUTES = 60
@@ -22233,6 +22240,34 @@ def _icore_phone_bucket_name() -> str:
         if value:
             return value
     return ''
+
+
+def _can_download_icore_phone(requester_id, role) -> bool:
+    """Дистрибутив телефона: администраторы и отдел продаж (см. ICORE_PHONE_DEPARTMENT_IDS).
+
+    Глава разрешённого отдела проходит даже если его собственный department_id пуст —
+    у глав он не всегда заполнен, а отдел за ними закреплён отдельно.
+    """
+    if _is_admin_role(role):
+        return True
+    try:
+        headed = _headed_department_id(requester_id)
+        if headed is not None and int(headed) in ICORE_PHONE_DEPARTMENT_IDS:
+            return True
+    except (TypeError, ValueError):
+        pass
+    except Exception:
+        logging.warning("iCORE Phone: не удалось определить отдел главы %s", requester_id)
+    try:
+        dept_id = db.get_user_department_id(requester_id)
+    except Exception:
+        return False
+    if dept_id is None:
+        return False
+    try:
+        return int(dept_id) in ICORE_PHONE_DEPARTMENT_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def _icore_phone_public_release(release):
@@ -22315,6 +22350,10 @@ def icore_phone_download_endpoint():
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
+        # Та же проверка закрывает и кнопку в iCORE, и автообновление телефона:
+        # за ссылкой оба приходят сюда.
+        if not _can_download_icore_phone(requester_id, requester[3]):
+            return jsonify({"error": "iCORE Phone доступен отделу продаж и администраторам"}), 403
         variant = db.normalize_icore_phone_variant(request.args.get('variant'))
         release = db.get_icore_phone_release(variant)
         if not release:

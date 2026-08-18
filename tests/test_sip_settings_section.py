@@ -774,6 +774,31 @@ class SipEndpointTests(unittest.TestCase):
             self.source,
         )
 
+    def test_phone_download_is_limited_to_sales_and_admins(self):
+        """Ограничение обязано жить на сервере, а не только в спрятанной кнопке.
+
+        За подписанной ссылкой приходят и кнопка в iCORE, и автообновление самого
+        телефона, поэтому проверка стоит именно здесь.
+        """
+        body = self._function('icore_phone_download_endpoint')
+        self.assertIn('_can_download_icore_phone', body)
+        self.assertIn('403', body)
+
+        gate = self._function('_can_download_icore_phone')
+        self.assertIn('_is_admin_role', gate)
+        self.assertIn('ICORE_PHONE_DEPARTMENT_IDS', gate)
+        # Отдел продаж; расширяется добавлением id, а не правкой условий.
+        self.assertIn('ICORE_PHONE_DEPARTMENT_IDS = (367,)', self.source)
+
+    def test_phone_version_manifest_stays_public(self):
+        """Манифест версии закрывать нельзя: истёкшая сессия иначе запирает парк
+        машин на старой версии — узнать о новой они не смогут."""
+        idx = self.source.index("@app.route('/api/phone/version'")
+        head = self.source[idx:self.source.index('def icore_phone_version_endpoint')]
+        self.assertNotIn('@require_api_key', head)
+        body = self._function('icore_phone_version_endpoint')
+        self.assertIn("'no-store'", body)
+
     def test_both_endpoints_reuse_the_panel_gate(self):
         for name in ("sip_config_operators_endpoint", "sip_config_operator_update_endpoint"):
             body = self._function(name)

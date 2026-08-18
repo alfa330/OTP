@@ -172,6 +172,11 @@ const ADMIN_SESSIONS_PAGE_SIZE = 100;
 const FOUR_YOU_ADMIN_USER_ID = 2;
 const FOUR_YOU_VIEWER_USER_ID = 241;
 const AI_QA_OP_DEPARTMENT_ID = 367;
+// Кому доступна программа iCORE Phone: отдел продаж (367) и админы. Та же
+// константа на бэкенде (ICORE_PHONE_DEPARTMENT_IDS в bot_schedule2.py) — она там
+// главная, потому что решает не только видимость кнопки, но и доступ к ссылке.
+// Поедет телефон в другой отдел — добавить id в оба места.
+const ICORE_PHONE_DEPARTMENT_IDS = new Set([367]);
 // Главы этих отделов видят раздел «ИИ-оценка» и «Чаты Верификаторов» целиком.
 // Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES в bot_schedule2.py).
 const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
@@ -35313,6 +35318,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
             const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
+            // Программа iCORE Phone: отдел продаж и админы (решение владельца).
+            // Правило дублируется на бэкенде, и там оно решающее: за подписанной
+            // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.
+            const canDownloadIcorePhone = isAdminLikeRole
+                || ICORE_PHONE_DEPARTMENT_IDS.has(Number(user?.department_id ?? user?.departmentId));
             // «Ограничитель Перезвона»: глава СЗоВ и глобальные админы (решение
             // владельца). Глава чужого отдела не проходит — назначение главой
             // заменяет базовую роль и режет периметр отделом, ровно как у табло СЗоВ.
@@ -45085,9 +45095,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
 
                                     {/* «Скачать телефон» — программа iCORE Phone сотруднику.
-                                        Виден всем ролям и объявлен ОДИН раз в общей части меню.
-                                        Это не переход в раздел, а действие: ссылка на файл в GCS
-                                        подписана на час, поэтому берётся свежей по нажатию. */}
+                                        Только отдел продаж и админы: телефон раздаётся там.
+                                        Объявлен ОДИН раз в общей части меню, а не по ролевым
+                                        ветвям. Это не переход в раздел, а действие: ссылка на
+                                        файл в GCS подписана на час, поэтому берётся свежей по
+                                        нажатию. Само ограничение проверяет бэкенд. */}
+                                    {canDownloadIcorePhone && (
                                     <li>
                                         <button
                                             type="button"
@@ -45098,6 +45111,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             <span className="sidebar-text">Скачать телефон</span>
                                         </button>
                                     </li>
+                                    )}
 
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>
@@ -47317,6 +47331,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     canEdit={canAccessSipSettings}
+                                    canDownloadPhone={canDownloadIcorePhone}
                                 />
                             </Suspense>
                         ))}
