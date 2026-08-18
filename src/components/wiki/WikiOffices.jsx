@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, Building2, Clock, Coffee, Loader2, MapPin, Pencil, Phone, Plus,
-    Search, Wifi,
+    Archive, ArchiveRestore, Building2, Clock, Coffee, Loader2, MapPin, Pencil,
+    Phone, Plus, Search, Wifi,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary,
@@ -71,7 +71,7 @@ const StatusBadge = ({ schedule, isOnline, tick }) => {
     );
 };
 
-const OfficeCard = ({ base, office, canManage, onEdit, onArchive, tick }) => {
+const OfficeCard = ({ base, office, canManage, onEdit, onArchive, onRestore, tick }) => {
     const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
     const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
     const overrides = (office.parks || []).filter((link) => link.phone);
@@ -136,7 +136,7 @@ const OfficeCard = ({ base, office, canManage, onEdit, onArchive, tick }) => {
                                 >
                                     <Pencil size={14} />
                                 </button>
-                                {office.status === 'active' && (
+                                {office.status === 'active' ? (
                                     <button
                                         type="button"
                                         onClick={() => onArchive(office)}
@@ -144,6 +144,18 @@ const OfficeCard = ({ base, office, canManage, onEdit, onArchive, tick }) => {
                                         aria-label="Убрать в архив"
                                     >
                                         <Archive size={14} />
+                                    </button>
+                                ) : (
+                                    // Без обратного хода архив превращается в
+                                    // одностороннюю дверь: убрать одним нажатием,
+                                    // вернуть — ничем.
+                                    <button
+                                        type="button"
+                                        onClick={() => onRestore(office)}
+                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+                                        aria-label="Вернуть из архива"
+                                    >
+                                        <ArchiveRestore size={14} />
                                     </button>
                                 )}
                             </div>
@@ -297,6 +309,14 @@ export default function WikiOffices({ base, headers, showToast }) {
             .finally(() => setBusy(false));
     };
 
+    const restore = (office) => {
+        setBusy(true);
+        axios.patch(`${base}/offices/${office.id}`, { status: 'active' }, { headers })
+            .then(() => { toast('Офис возвращён из архива', 'success'); load(); })
+            .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
+            .finally(() => setBusy(false));
+    };
+
     /* Группировка по городам: справочник читают запросом «а где офис в
        Караганде», а не листая всё подряд. Порядок групп — как пришёл с
        сервера, там он задан позицией. */
@@ -390,6 +410,7 @@ export default function WikiOffices({ base, headers, showToast }) {
                                 canManage={canManage}
                                 onEdit={(item) => setDraft(draftFrom(item))}
                                 onArchive={archive}
+                                onRestore={restore}
                                 tick={tick}
                             />
                         ))}

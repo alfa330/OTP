@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, Building2, Globe, Loader2, MapPin, Percent, Phone, Plus,
+    Archive, ArchiveRestore, Building2, Globe, Loader2, MapPin, Percent, Phone, Plus,
     Search, Tag, Pencil,
 } from 'lucide-react';
 import {
@@ -28,7 +28,7 @@ const emptyPark = () => ({
     name: '', city: '', phone: '', address: '', website: '', commission: '', description: '',
 });
 
-const ParkCard = ({ park, canManage, onEdit, onArchive }) => (
+const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => (
     <div className={`${iosCard} p-4`}>
         <div className="flex items-start gap-3">
             <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 text-indigo-600">
@@ -81,7 +81,7 @@ const ParkCard = ({ park, canManage, onEdit, onArchive }) => (
                     >
                         <Pencil size={14} />
                     </button>
-                    {park.status === 'active' && (
+                    {park.status === 'active' ? (
                         <button
                             type="button"
                             onClick={() => onArchive(park)}
@@ -89,6 +89,17 @@ const ParkCard = ({ park, canManage, onEdit, onArchive }) => (
                             aria-label="Убрать в архив"
                         >
                             <Archive size={14} />
+                        </button>
+                    ) : (
+                        // Обратный ход обязателен рядом с архивированием: убрать
+                        // парк можно было одним нажатием, а вернуть — ничем.
+                        <button
+                            type="button"
+                            onClick={() => onRestore(park)}
+                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+                            aria-label="Вернуть из архива"
+                        >
+                            <ArchiveRestore size={14} />
                         </button>
                     )}
                 </div>
@@ -153,6 +164,14 @@ export default function WikiParks({ base, headers, showToast }) {
         axios.delete(`${base}/parks/${park.id}`, { headers })
             .then(() => { toast('Парк убран в архив', 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
+            .finally(() => setBusy(false));
+    };
+
+    const restore = (park) => {
+        setBusy(true);
+        axios.patch(`${base}/parks/${park.id}`, { status: 'active' }, { headers })
+            .then(() => { toast('Парк возвращён из архива', 'success'); load(); })
+            .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
     };
 
@@ -247,6 +266,7 @@ export default function WikiParks({ base, headers, showToast }) {
                                     commission: p.commission ?? '',
                                 })}
                                 onArchive={archive}
+                                onRestore={restore}
                             />
                         ))}
                     </div>

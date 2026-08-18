@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ChevronRight, FolderTree, Globe, Layers, Lock, Plus, Loader2, Pencil,
+    Archive, ArchiveRestore, ChevronRight, FolderTree, Globe, Layers, Lock, Plus,
+    Loader2, Pencil,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -23,7 +24,7 @@ import { selectableSections, sectionOptionLabel } from './sectionPicker';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-const SectionRow = ({ section, depth, onEdit, onArchive, busy }) => (
+const SectionRow = ({ section, depth, onEdit, onArchive, onRestore, busy }) => (
     <div
         className="flex items-center gap-2 px-4 py-2.5 transition hover:bg-slate-50"
         style={{ paddingLeft: `${16 + depth * 22}px` }}
@@ -62,7 +63,7 @@ const SectionRow = ({ section, depth, onEdit, onArchive, busy }) => (
         >
             <Pencil size={14} />
         </button>
-        {section.status === 'active' && (
+        {section.status === 'active' ? (
             <button
                 type="button"
                 disabled={busy}
@@ -71,6 +72,16 @@ const SectionRow = ({ section, depth, onEdit, onArchive, busy }) => (
                 aria-label="Убрать в архив"
             >
                 <Archive size={14} />
+            </button>
+        ) : (
+            <button
+                type="button"
+                disabled={busy}
+                onClick={() => onRestore(section)}
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600 disabled:opacity-40"
+                aria-label="Вернуть из архива"
+            >
+                <ArchiveRestore size={14} />
             </button>
         )}
     </div>
@@ -158,6 +169,14 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
         axios.delete(`${base}/sections/${section.id}`, { headers })
             .then(() => { showToast?.('Раздел убран в архив', 'success'); reload(); })
             .catch((e) => showToast?.(errText(e, 'Не удалось убрать в архив'), 'error'))
+            .finally(() => setBusy(false));
+    };
+
+    const restoreSection = (section) => {
+        setBusy(true);
+        axios.patch(`${base}/sections/${section.id}`, { status: 'active' }, { headers })
+            .then(() => { showToast?.('Раздел возвращён из архива', 'success'); reload(); })
+            .catch((e) => showToast?.(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
     };
 
@@ -254,6 +273,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     parent_section_id: s.parent_section_id ? String(s.parent_section_id) : '',
                                 })}
                                 onArchive={archiveSection}
+                                onRestore={restoreSection}
                             />
                         ))}
                     </div>
