@@ -71,7 +71,9 @@ def main() -> int:
         f"{server}/api/oktell_guard/publish",
         headers={"X-Publish-Token": token},
         files={"file": (exe.name, payload, "application/octet-stream")},
-        data={"version": version, "notes": args.notes},
+        # Отпечаток шлём ЗАРАНЕЕ: сервер сверит его со своим и не примет файл,
+        # который доехал не таким, каким его собрали.
+        data={"version": version, "notes": args.notes, "sha256": digest},
         timeout=300,
     )
     if response.status_code != 200:

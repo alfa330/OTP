@@ -18,6 +18,7 @@ import hashlib
 import logging
 import os
 import secrets
+import time
 from datetime import date, timedelta
 from functools import wraps
 
@@ -44,6 +45,65 @@ def release_bucket_name() -> str:
         if value:
             return value
     return ''
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Защита публикации
+#
+# Право выложить версию — самое опасное в системе: файл уезжает на все машины
+# операторов. Поэтому здесь не только ключ, но и проверки того, ЧТО публикуют,
+# и защита от перебора.
+# ─────────────────────────────────────────────────────────────────────────────
+
+MIN_PUBLISH_TOKEN_LENGTH = 24
+MAX_RELEASE_BYTES = 80 * 1024 * 1024
+MIN_RELEASE_BYTES = 1 * 1024 * 1024
+PUBLISH_FAIL_LIMIT = 5
+PUBLISH_FAIL_WINDOW_S = 900
+
+_publish_failures = {}
+
+
+def token_is_strong(token) -> bool:
+    """Короткий или предсказуемый ключ здесь недопустим: его подберут.
+
+    Публикация с таким ключом не включается вовсе — молча работать
+    «почти защищённо» хуже, чем не работать и сказать об этом в лог.
+    """
+    value = str(token or '').strip()
+    if len(value) < MIN_PUBLISH_TOKEN_LENGTH or not value.isascii():
+        return False
+    # Одни буквы или одни цифры — это не случайная строка.
+    return not value.isalpha() and not value.isdigit()
+
+
+def is_windows_executable(content) -> bool:
+    """Публиковать можно только Windows-программу: иначе одна перепутанная
+    кнопка разошлёт операторам произвольный файл, и агенты честно поставят
+    его вместо себя."""
+    return bool(content) and content[:2] == b'MZ'
+
+
+def is_valid_version(version) -> bool:
+    """Номер версии — только цифры и точки: агенты сравнивают его численно."""
+    value = str(version or '').strip()
+    if not value or len(value) > 32:
+        return False
+    parts = value.split('.')
+    return 1 < len(parts) <= 4 and all(part.isdigit() and len(part) <= 4 for part in parts)
+
+
+def note_publish_failure(remote_ip, now) -> int:
+    """Счётчик неудачных попыток на адрес. Возвращает их число в окне."""
+    bucket = [ts for ts in _publish_failures.get(remote_ip, []) if now - ts < PUBLISH_FAIL_WINDOW_S]
+    bucket.append(now)
+    _publish_failures[remote_ip] = bucket
+    return len(bucket)
+
+
+def publish_locked(remote_ip, now) -> bool:
+    bucket = [ts for ts in _publish_failures.get(remote_ip, []) if now - ts < PUBLISH_FAIL_WINDOW_S]
+    return len(bucket) >= PUBLISH_FAIL_LIMIT
 
 
 def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_response,
@@ -379,15 +439,27 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         })
 
     def publish_authorized() -> bool:
-        expected = (os.getenv(PUBLISH_TOKEN_ENV) or '').strip()
-        return bool(expected) and (request.headers.get('X-Publish-Token') or '').strip() == expected
+        expected = (os.getenv(PUBLISH_TOKEN_ENV) or "").strip()
+        if not expected:
+            return False
+        if not token_is_strong(expected):
+            logging.error(
+                "%s слишком слаб (нужно от %d символов, латиница вперемешку с цифрами) — публикация выключена",
+                PUBLISH_TOKEN_ENV, MIN_PUBLISH_TOKEN_LENGTH,
+            )
+            return False
+        provided = (request.headers.get("X-Publish-Token") or "").strip()
+        # Сравнение постоянного времени: обычное == отвечает тем быстрее, чем
+        # раньше расходятся строки, и по этой разнице ключ подбирают посимвольно.
+        return secrets.compare_digest(provided, expected)
 
-    def store_release(upload, version, notes, uploaded_by=None):
+    def store_release(upload, version, notes, uploaded_by=None, content=None):
         """Положить файл в GCS и отметить версию текущей."""
         bucket_name = release_bucket_name()
         if not bucket_name or gcs_client_factory is None:
             return {"error": "Хранилище файлов не настроено"}, 503
-        content = upload.read()
+        if content is None:
+            content = upload.read()
         if not content:
             return {"error": "Пустой файл"}, 400
         digest = hashlib.sha256(content).hexdigest()
@@ -417,16 +489,47 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
         """Публикация версии самой сборкой — чтобы человеку не приходилось
         ничего загружать руками. Собрал exe — он сам уехал в хранилище, и
         агенты обновились по манифесту."""
-        if request.method == 'OPTIONS':
+        if request.method == "OPTIONS":
             return build_cors_preflight_response()
+
+        remote_ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+        now = time.time()
+        if publish_locked(remote_ip, now):
+            logging.error("Публикация: адрес %s заблокирован после %d неудачных попыток",
+                          remote_ip, PUBLISH_FAIL_LIMIT)
+            return jsonify({"error": "Слишком много неудачных попыток, попробуйте позже"}), 429
+
         if not publish_authorized():
+            failures = note_publish_failure(remote_ip, now)
+            # Сам ключ в лог не попадает никогда — только факт и адрес.
+            logging.error("Публикация: неверный ключ с адреса %s (попытка %d)", remote_ip, failures)
             return jsonify({"error": "Публикация не авторизована"}), 401
-        upload = request.files.get('file')
-        version = (request.form.get('version') or '').strip()
-        notes = (request.form.get('notes') or '').strip()
+
+        upload = request.files.get("file")
+        version = (request.form.get("version") or "").strip()
+        notes = (request.form.get("notes") or "").strip()
         if not upload or not version:
             return jsonify({"error": "Нужны файл и номер версии"}), 400
-        payload, status = store_release(upload, version, notes)
+        if not is_valid_version(version):
+            return jsonify({"error": "Номер версии должен быть вида 1.2.3"}), 400
+
+        content = upload.read()
+        if not is_windows_executable(content):
+            logging.error("Публикация: файл не является Windows-программой (адрес %s)", remote_ip)
+            return jsonify({"error": "Это не Windows-программа"}), 400
+        if not (MIN_RELEASE_BYTES <= len(content) <= MAX_RELEASE_BYTES):
+            return jsonify({"error": "Неправдоподобный размер файла"}), 400
+
+        expected_sha = (request.form.get("sha256") or "").strip().lower()
+        actual_sha = hashlib.sha256(content).hexdigest()
+        if expected_sha and not secrets.compare_digest(expected_sha, actual_sha):
+            logging.error("Публикация: отпечаток не совпал с заявленным (адрес %s)", remote_ip)
+            return jsonify({"error": "Отпечаток файла не совпал с заявленным"}), 400
+
+        payload, status = store_release(upload, version, notes, content=content)
+        if status == 200:
+            logging.info("Публикация: версия %s выложена с адреса %s, отпечаток %s…",
+                         version, remote_ip, actual_sha[:12])
         return jsonify(payload), status
 
     @section_route('/release', methods=('POST',), manage=True)
