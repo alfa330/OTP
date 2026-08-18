@@ -1085,10 +1085,16 @@ def _subject_type_check_statement(table):
     не поможет — колонка есть, ограничение просто отстало, поэтому старое
     снимаем и ставим именованное.
 
-    Отличаем нужное ограничение по 'ANY (ARRAY[': в этих же таблицах есть второе
+    Отличаем нужное ограничение по 'ARRAY[': в этих же таблицах есть второе
     CHECK, тоже упоминающее subject_type («у otp_role заполнена subject_role, у
     остальных subject_id»), и снести его нельзя — оно продолжает работать и для
-    department_head, где заполняется subject_id (идентификатор отдела).
+    department_head, где заполняется subject_id (идентификатор отдела). Списка
+    значений в нём нет, поэтому 'ARRAY[' их и разделяет.
+
+    Ловушка, на которой это уже сломалось: pg_get_constraintdef печатает список
+    как `= ANY ((ARRAY[...])::text[])` — с ДВОЙНОЙ скобкой. Шаблон 'ANY (ARRAY['
+    не совпадал ни с чем, старое ограничение оставалось рядом с новым, и вставка
+    правила с субъектом department_head падала на нём с 500.
     """
     values = ", ".join("'%s'" % name for name in SUBJECT_TYPES)
     name = '%s_subject_type_chk' % table
@@ -1101,7 +1107,8 @@ def _subject_type_check_statement(table):
              WHERE conrelid = '{table}'::regclass
                AND contype = 'c'
                AND conname <> '{name}'
-               AND pg_get_constraintdef(oid) LIKE '%subject_type%ANY (ARRAY[%'
+               AND pg_get_constraintdef(oid) LIKE '%subject_type%'
+               AND pg_get_constraintdef(oid) LIKE '%ARRAY[%'
         LOOP
             EXECUTE format('ALTER TABLE {table} DROP CONSTRAINT %I', stale);
         END LOOP;
