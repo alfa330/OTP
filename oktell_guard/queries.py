@@ -99,7 +99,9 @@ def agent_config_payload(settings: dict, personal: dict | None) -> dict:
         'in_window_rule': rule,
         'poll_interval_s': int(settings.get('heartbeat_interval_s') or 60),
         'dry_run': bool(settings.get('dry_run')),
-        'browser': {'extra_args': extra_args, 'keep_open': True},
+        # keep_open НЕ навязываем: закрыл окно — значит закрыл. Возвращать его
+        # силой означает спорить с человеком, а открыть заново он может ярлыком.
+        'browser': {'extra_args': extra_args, 'keep_open': False, 'launch_on_start': False},
     }
 
 

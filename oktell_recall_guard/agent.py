@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -114,7 +114,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "profile_dir": "",          # пусто = %LOCALAPPDATA%\OktellRecallGuard\chrome-profile
         "cdp_port": 0,              # 0 = Chrome выберет сам, порт читаем из DevToolsActivePort
         "app_mode": True,           # окно без адресной строки (--app=)
-        "launch_on_start": True,    # открыть Oktell при старте агента
+        # Окно открывает человек — ярлыком «Oktell» на рабочем столе. Агент его
+        # не навязывает: ни при своём старте, ни после того, как окно закрыли.
+        # Иначе программа спорит с оператором, а он этого не просил.
+        "launch_on_start": False,
         "focus_on_command": True,   # поднимать окно поверх при разлогине
         "keep_open": False,         # переоткрывать окно, если оператор его закрыл
         "extra_args": [],

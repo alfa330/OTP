@@ -61,3 +61,11 @@ def test_message_matches_threshold():
 def test_clamp_helper():
     assert queries.clamp_threshold(None, default=90) == 90
     assert queries.clamp_threshold('180') == 180
+
+
+def test_server_does_not_force_the_window_open():
+    """Закрыл окно — значит закрыл. Возвращать его силой означает спорить с
+    человеком; открыть заново он может ярлыком."""
+    payload = queries.agent_config_payload(settings(), None)
+    assert payload['browser']['keep_open'] is False
+    assert payload['browser']['launch_on_start'] is False
