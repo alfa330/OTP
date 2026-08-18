@@ -37,11 +37,9 @@ import {
  * подпись, у каждого ряда легенда, а в подсказке обе величины стоят рядом с единицами.
  */
 
-// Ряды графика. Цвета проверены валидатором палитры на различимость при дальтонизме:
-// синий (факт) / янтарный (норма) / малиновый (время ответа) дают ΔE 19+ на худшей паре.
+// Ряды графика. Цвета проверены валидатором палитры на различимость при дальтонизме.
 const CHART_COLORS = {
     online: '#3b82f6',
-    required: '#f59e0b',
     inner: '#e11d48',
     target: '#059669',
 };
@@ -97,13 +95,29 @@ const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
     );
 };
 
-const hourLabel = (hour) => `${String(hour).padStart(2, '0')}:00`;
+/*
+ * Людей на линии считаем средним за час, поэтому число дробное. На стене «6,54 человека» —
+ * лишняя точность: показываем один знак и убираем его у целых.
+ */
+const formatPeople = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return '';
+    // Сначала округляем, потом убираем «,0»: иначе рядом стоят «1» и «1,0» — это одно и то же.
+    const rounded = Math.round(number * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace('.', ',');
+};
+
+/*
+ * Час — промежуток, а не момент: в столбик идут чаты, начавшиеся с 12:00:00 по 12:59:59.
+ * Подписываем его так же, как почасовой отчёт в Telegram, чтобы «12–13» на табло и «12:00–13:00»
+ * в отчёте читались как одно и то же и никто не гадал, накопление это или интервал.
+ */
+const hourLabel = (hour) => `${String(hour).padStart(2, '0')}–${String((hour + 1) % 24).padStart(2, '0')}`;
 
 /** Подсказка графика: обе оси рядом, каждая со своей единицей — иначе их легко перепутать. */
-const ChartTooltip = ({ active, payload, label, targetSeconds }) => {
+const ChartTooltip = ({ active, payload, label }) => {
     if (!active || !payload?.length) return null;
     const row = payload[0]?.payload || {};
-    const target = formatMinutes(targetSeconds, 0);
     return (
         <div className="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-[12.5px] shadow-lg">
             <div className="mb-1 font-semibold text-slate-900">
@@ -127,13 +141,7 @@ const ChartTooltip = ({ active, payload, label, targetSeconds }) => {
                 <div>
                     Было на линии:{' '}
                     <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.online }}>
-                        {row.online === null ? '—' : `${String(row.online).replace('.', ',')} чел.`}
-                    </span>
-                </div>
-                <div>
-                    Нужно под {target}:{' '}
-                    <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.required }}>
-                        {row.required === null ? '—' : `${formatInt(row.required)} чел.`}
+                        {row.online === null ? '—' : `${formatPeople(row.online) || '0'} чел.`}
                     </span>
                 </div>
             </div>
@@ -142,9 +150,10 @@ const ChartTooltip = ({ active, payload, label, targetSeconds }) => {
 };
 
 /*
- * График по часам. Слева минуты (как быстро отвечали внутри чата), справа люди (сколько их
- * было и сколько нужно было под цель). Пунктир — сама цель: пока малиновая линия под ним,
- * людей хватает, и янтарный столбик не выше синего.
+ * График по часам. Слева минуты — как быстро отвечали внутри чата, справа люди — сколько
+ * чатников держало линию в этот час. Пунктир — цель по времени ответа.
+ * Столбик «сколько людей нужно под цель» отсюда убран: пропорция от факта завышала в разы,
+ * и на стене это читалось как план найма, которым оно не было (решение владельца 18.08.2026).
  */
 const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
     const data = useMemo(() => (rows || []).map((row) => ({
@@ -155,7 +164,6 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
         innerSeconds: row.inner_reply_seconds ?? null,
         firstSeconds: row.first_reply_seconds ?? null,
         online: row.operators_online ?? null,
-        required: row.operators_required ?? null,
         partial: Boolean(row.partial),
     })), [rows]);
 
@@ -182,18 +190,14 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
                            width={44 * scale}
                            label={{ value: 'чатники', position: 'top', offset: 12,
                                     fontSize: 11 * scale, fill: '#94a3b8' }} />
-                    <Tooltip content={<ChartTooltip targetSeconds={targetSeconds} />} cursor={{ fill: '#f8fafc' }} />
+                    <Tooltip content={<ChartTooltip />} cursor={{ fill: '#f8fafc' }} />
                     <Legend verticalAlign="bottom" height={28} iconType="circle"
                             wrapperStyle={{ fontSize: 12 * scale, color: '#475569' }} />
-                    <Bar yAxisId="right" dataKey="online" name="Было на линии"
-                         fill={CHART_COLORS.online} radius={[4, 4, 0, 0]} maxBarSize={26} />
-                    {/* Число над столбиком: когда «нужно» в разы больше факта, столбик факта
-                        прижимается к нулю, и без подписи из графика не вычитать, сколько же
-                        людей не хватает. */}
-                    <Bar yAxisId="right" dataKey="required" name="Нужно под цель"
-                         fill={CHART_COLORS.required} radius={[4, 4, 0, 0]} maxBarSize={26}>
-                        <LabelList dataKey="required" position="top"
-                                   style={{ fontSize: 10.5 * scale, fill: '#b45309', fontWeight: 600 }} />
+                    {/* Число над столбиком: людей на линии единицы, и на глаз 3 от 4 не отличить. */}
+                    <Bar yAxisId="right" dataKey="online" name="Чатников на линии"
+                         fill={CHART_COLORS.online} radius={[4, 4, 0, 0]} maxBarSize={26}>
+                        <LabelList dataKey="online" position="top" formatter={formatPeople}
+                                   style={{ fontSize: 10.5 * scale, fill: '#1d4ed8', fontWeight: 600 }} />
                     </Bar>
                     <ReferenceLine yAxisId="left" y={targetSeconds / 60} stroke={CHART_COLORS.target}
                                    strokeDasharray="5 4" strokeWidth={2}
@@ -271,7 +275,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                     title="По часам"
                     right={(
                         <span className="text-[12.5px] text-slate-400">
-                            сколько чатников нужно, чтобы отвечать внутри чата за {formatMinutes(targetSeconds, 0)}
+                            время ответа внутри чата и сколько чатников было на линии; цель {formatMinutes(targetSeconds, 0)}
                         </span>
                     )}
                 >

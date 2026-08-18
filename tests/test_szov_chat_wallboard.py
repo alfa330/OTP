@@ -57,7 +57,6 @@ NAMES = {
     '_szov_chat_wallboard_day_seconds',
     '_szov_chat_wallboard_timelines',
     '_szov_chat_wallboard_online_seconds',
-    '_szov_chat_wallboard_required',
     '_szov_chat_wallboard_hourly',
     '_szov_chat_wallboard_now',
     '_szov_chat_wallboard_fetch_events',
@@ -155,29 +154,6 @@ class _Harness:
         ns['_szov_chat_wallboard_cache'].update(ts=0.0, payload=None, failed_at=0.0, error=None)
         ns['_fake_requests'] = fake_requests
         return ns
-
-
-class ChatWallboardStaffingTests(_Harness, unittest.TestCase):
-    """Правая ось графика: сколько чатников нужно под цель в 2 минуты."""
-
-    def test_required_scales_with_how_far_we_are_from_target(self):
-        ns = self._namespace()
-        # Втрое медленнее цели при трёх людях на линии — нужно втрое больше.
-        self.assertEqual(ns['_szov_chat_wallboard_required'](3.0, 360), 9)
-
-    def test_required_rounds_up_partial_person(self):
-        ns = self._namespace()
-        self.assertEqual(ns['_szov_chat_wallboard_required'](2.0, 130), 3)
-
-    def test_required_never_drops_below_one_while_people_worked(self):
-        """Ответ вдвое быстрее цели не означает «людей не нужно» — линию кто-то держит."""
-        ns = self._namespace()
-        self.assertEqual(ns['_szov_chat_wallboard_required'](0.5, 60), 1)
-
-    def test_required_is_unknown_without_response_time_or_people(self):
-        ns = self._namespace()
-        self.assertIsNone(ns['_szov_chat_wallboard_required'](0.0, 360))
-        self.assertIsNone(ns['_szov_chat_wallboard_required'](3.0, None))
 
 
 class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
@@ -307,17 +283,19 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
             _request('2026-08-18 12:30:00', 10, 2, 200),
         ]
         rows = self._rows(ns, timelines, requests, now)
+        # Час — промежуток: заявка из 12:30 в строку 11 часа не попадает.
         self.assertEqual(rows[11]['chats'], 1)
+        self.assertEqual(rows[12]['chats'], 1)
         self.assertEqual(rows[11]['inner_reply_seconds'], 240)
         self.assertEqual(rows[11]['operators_online'], 2.0)
-        self.assertEqual(rows[11]['operators_required'], 4)  # 2 × 240 / 120
+        self.assertNotIn('operators_required', rows[11])
 
-    def test_hour_without_people_has_no_recommendation(self):
+    def test_hour_without_people_still_carries_the_chats(self):
         ns = self._namespace()
         now = datetime(2026, 8, 18, 3, 0, 0)
         rows = self._rows(ns, {}, [_request('2026-08-18 02:10:00', 20, 3, 740)], now)
         self.assertEqual(rows[2]['chats'], 1)
-        self.assertIsNone(rows[2]['operators_required'])
+        self.assertEqual(rows[2]['operators_online'], 0.0)
 
 
 class ChatWallboardNowTests(_Harness, unittest.TestCase):
@@ -548,20 +526,28 @@ class ChatWallboardWiringTests(unittest.TestCase):
         for label in ('label="Онлайн"', 'label="Занят"', 'label="Тренинг"'):
             self.assertIn(label, self.board, label)
 
-    def test_chart_pairs_minutes_with_people_and_shows_the_target(self):
+    def test_chart_pairs_minutes_with_people_on_the_line(self):
         self.assertIn('yAxisId="left"', self.board)
         self.assertIn('yAxisId="right"', self.board)
         self.assertIn('dataKey="innerMinutes"', self.board)
-        self.assertIn('dataKey="required"', self.board)
         self.assertIn('dataKey="online"', self.board)
         self.assertIn('<ReferenceLine yAxisId="left" y={targetSeconds / 60}', self.board)
         # У каждого ряда подпись: две оси без легенды прочитать невозможно.
         self.assertIn('<Legend', self.board)
-        for name in ('name="Было на линии"', 'name="Нужно под цель"', 'name="Ответ внутри чата"'):
+        for name in ('name="Чатников на линии"', 'name="Ответ внутри чата"'):
             self.assertIn(name, self.board, name)
 
-    def test_chart_hours_come_from_the_snapshot(self):
-        self.assertIn("const hourLabel = (hour) => `${String(hour).padStart(2, '0')}:00`;", self.board)
+    def test_required_staffing_is_gone_from_the_board(self):
+        """Расчёт «сколько нужно под 2 минуты» убран: пропорция от факта завышала в разы."""
+        self.assertNotIn('dataKey="required"', self.board)
+        self.assertNotIn('Нужно под цель', self.board)
+        api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        self.assertNotIn('operators_required', api)
+
+    def test_chart_hours_are_labelled_as_intervals(self):
+        """«12–13», как в почасовом отчёте: иначе непонятно, промежуток это или накопление."""
+        self.assertIn("const hourLabel = (hour) => `${String(hour).padStart(2, '0')}–"
+                      "${String((hour + 1) % 24).padStart(2, '0')}`;", self.board)
         self.assertIn("rows || []", self.board)
 
 
