@@ -52,7 +52,8 @@ wiki_guest_access AS (
 
 _EMPTY_GUESTS = "(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp)"
 
-# Дерево, которое собирает wiki/org.py.
+# Дерево, которое собирают руками во вкладке «Структура»:
+# Коммерческий директор → отдел (СЗоВ / ОП) → должность (рук / СВ / оператор).
 _TREE = [
     "(1, NULL, 'active', 'restricted', NULL)",   # Коммерческий директор
     "(2, NULL, 'active', 'restricted', NULL)",   # Руководитель группы
@@ -63,7 +64,7 @@ _TREE = [
     "(7, NULL, 'active', 'public',     NULL)",   # Общий сотрудник
 ]
 
-# Правила ровно те, что выписывает ensure_commercial_structure.
+# Правила — те, что выставляются во вкладке «Доступы».
 _RULES = [
     # Коммерческий директор — только по уровню.
     "(1, 'otp_role', NULL, 'super_admin', true, true, 50)",

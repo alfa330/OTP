@@ -46,6 +46,11 @@ const SectionRow = ({ section, depth, onEdit, onArchive, onRestore, busy }) => (
                         <Lock size={11} /> По правилам
                     </IosBadge>
                 )}
+                {section.department_name && (
+                    <IosBadge tone="blue" title="Ветка отдела">
+                        {section.department_name}
+                    </IosBadge>
+                )}
                 {section.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
             </div>
             <div className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-slate-400">
@@ -149,6 +154,9 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             description: sectionModal.description || null,
             visibility_scope: sectionModal.visibility_scope,
             parent_section_id: sectionModal.parent_section_id || null,
+            // Пустая строка — это «раздел не принадлежит отделу», её надо
+            // отправить как null, иначе бэкенд не снимет отдел с ветки.
+            department_id: sectionModal.department_id || null,
         };
         setBusy(true);
         const request = sectionModal.id
@@ -247,6 +255,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 onClick={() => setSectionModal({
                                     space_id: space.id, name: '', description: '',
                                     visibility_scope: 'restricted', parent_section_id: '',
+                                    department_id: '',
                                 })}
                             >
                                 <Plus size={13} /> Раздел
@@ -271,6 +280,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     description: s.description || '',
                                     visibility_scope: s.visibility_scope,
                                     parent_section_id: s.parent_section_id ? String(s.parent_section_id) : '',
+                                    department_id: s.department_id ? String(s.department_id) : '',
                                 })}
                                 onArchive={archiveSection}
                                 onRestore={restoreSection}
@@ -393,6 +403,28 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 ariaLabel="Родительский раздел"
                             />
                         </div>
+                        <div>
+                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                Отдел ветки
+                            </label>
+                            <CustomSelect
+                                variant="ios"
+                                value={sectionModal.department_id || ''}
+                                onChange={(v) => setSectionModal({ ...sectionModal, department_id: v })}
+                                options={[
+                                    { value: '', label: 'Не привязан к отделу' },
+                                    ...departments.map((d) => ({ value: String(d.id), label: d.name })),
+                                ]}
+                                searchable
+                                ariaLabel="Отдел ветки"
+                            />
+                            <p className="mt-1 px-1 text-[11.5px] text-slate-400">
+                                Отмечает ветку как принадлежащую отделу — например «СЗоВ» или «ОП».
+                                Права на неё всё равно выдаются во вкладке «Доступы»: привязка
+                                к отделу сама по себе никого не пускает.
+                            </p>
+                        </div>
+
                         <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
                             <div className="min-w-0">
                                 <div className="text-[13.5px] font-medium text-slate-900">

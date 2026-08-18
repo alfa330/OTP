@@ -8,7 +8,6 @@ from flask import jsonify, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
-from . import org as wiki_org
 from . import queries, structure
 from .schema import SUBJECT_TYPES
 
@@ -136,21 +135,6 @@ def register(bp, wiki_route, db, log_ip):
         })
 
     # ── Пространства ─────────────────────────────────────────────────────
-    @wiki_route('/structure/commercial', methods=('POST',),
-                capability='can_manage_structure')
-    def wiki_structure_commercial(cursor, ctx):
-        """Пересобрать дерево «Коммерческого отдела» и правила доступа к нему.
-
-        Отдельная кнопка, а не автозапуск при старте: автоматическая пересборка
-        молча возвращала бы правки, сделанные владельцем руками. Операция
-        идемпотентна и ничего не удаляет — снятая ветка уходит в архив.
-        """
-        report = wiki_org.ensure_commercial_structure(cursor, created_by=ctx['user_id'])
-        queries.log_action(cursor, actor_id=ctx['user_id'], action='structure.commercial',
-                           entity_type='space', entity_id=report['space']['id'],
-                           details=report, ip_address=log_ip())
-        return jsonify(report)
-
     @wiki_route('/spaces', methods=('GET', 'POST'), capability='can_manage_structure')
     def wiki_spaces(cursor, ctx):
         if request.method == 'GET':
@@ -209,6 +193,13 @@ def register(bp, wiki_route, db, log_ip):
             fields['status'] = data['status']
         if 'position' in data:
             fields['position'] = _int_or_none(data['position']) or 0
+        # Отдел ветки. section_kind не принимаем отдельным полем — выводим из
+        # отдела: два поля про один факт разъезжаются, и «ветка ОП без отдела»
+        # выглядела бы в конструкторе рабочей, а правилам была бы не видна.
+        if 'department_id' in data:
+            department_id = _int_or_none(data['department_id'])
+            fields['department_id'] = department_id
+            fields['section_kind'] = 'department' if department_id else 'common'
 
         if not structure.update_space(cursor, space_id, fields):
             return jsonify({"error": "Нечего обновлять"}), 400
@@ -250,6 +241,7 @@ def register(bp, wiki_route, db, log_ip):
             icon=_clean(data.get('icon'), 64), visibility_scope=scope,
             owner_user_id=_int_or_none(data.get('owner_user_id')),
             created_by=ctx['user_id'],
+            department_id=_int_or_none(data.get('department_id')),
         )
         queries.log_action(cursor, actor_id=ctx['user_id'], action='section.create',
                            entity_type='section', entity_id=section_id,
