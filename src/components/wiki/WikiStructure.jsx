@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
     Archive, ArchiveRestore, Building2, ChevronRight, FolderTree, Globe, KeyRound,
-    Layers, Lock, Plus, Loader2, Pencil, Trash2, UserSearch,
+    Layers, Plus, Loader2, Pencil, UserSearch,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
-    IosBadge, IosModal, IosToggle,
+    IosBadge, IosMenu, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { selectableSections, sectionPathLabel } from './sectionPicker';
@@ -26,27 +26,18 @@ import WikiAccessProbe from './WikiAccessProbe';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-// Кнопка действия в строке раздела: одинаковая мишень 32×32 у всех четырёх.
-const RowAction = ({ icon: Icon, label, tone, onClick, disabled = false, size = 14 }) => (
-    <button
-        type="button"
-        disabled={disabled}
-        onClick={onClick}
-        title={label}
-        aria-label={label}
-        className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition active:scale-95 disabled:opacity-40 ${tone}`}
-    >
-        <Icon size={size} />
-    </button>
-);
-
 /* Строка живого раздела. Архивные сюда не попадают — у них своя вкладка,
    поэтому ни ветки «вернуть», ни бейджа «в архиве» здесь нет.
 
-   Действия все четыре здесь же, включая доступ: отдельной вкладки «Доступы»
-   больше нет. Там раздел выбирался селектом из плоского списка, в котором у
-   СЗоВ и у ОП свои одноимённые «Руководитель», «Супервайзер», «Оператор», —
-   и правило регулярно уезжало в чужую ветку. */
+   Все действия — под «тремя точками», включая доступ: отдельной вкладки
+   «Доступы» больше нет. Там раздел выбирался селектом из плоского списка, в
+   котором у СЗоВ и у ОП свои одноимённые «Руководитель», «Супервайзер»,
+   «Оператор», — и правило регулярно уезжало в чужую ветку.
+
+   Ряд из четырёх круглых иконок был первым заходом и от него отказались:
+   в строке они читаются как украшение, что делает каждая — понятно только по
+   наведению (а на телефоне наведения нет), и мишени стоят вплотную, так что
+   «в архив» ловится вместо «изменить». */
 const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                      onAccess, busy }) => {
     // Ветка отдела и должность внутри неё — разные сущности, и на глаз они
@@ -74,13 +65,12 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                             <Building2 size={11} /> {section.department_name || 'отдел'}
                         </IosBadge>
                     )}
-                    {section.visibility_scope === 'public' ? (
+                    {/* Бейджа «По правилам» нет: это состояние по умолчанию у
+                        всех разделов, и повторять его в каждой строке — шум.
+                        Отмечаем только исключение — публичный раздел. */}
+                    {section.visibility_scope === 'public' && (
                         <IosBadge tone="green" title="Виден всем сотрудникам без правил">
                             <Globe size={11} /> Публичный
-                        </IosBadge>
-                    ) : (
-                        <IosBadge tone="slate" title="Виден только по правилам доступа">
-                            <Lock size={11} /> По правилам
                         </IosBadge>
                     )}
                     {/* Раздел без единого правила не видит никто, кроме админов.
@@ -101,34 +91,31 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                 </div>
             </div>
 
-            {/* Подраздел добавляется прямо со строки родителя. Раньше вложенность
-                задавалась только селектом внутри модалки, которую открывала кнопка
-                у пространства, — и «добавить внутрь этого раздела» выглядело как
-                отсутствующая возможность. */}
-            <RowAction
-                icon={Plus} size={15}
-                label={`Добавить подраздел в «${section.name}»`}
-                tone="hover:bg-emerald-50 hover:text-emerald-600"
-                onClick={() => onAddChild(section)}
-            />
-            <RowAction
-                icon={Pencil} label="Изменить раздел"
-                tone="hover:bg-blue-50 hover:text-blue-600"
-                onClick={() => onEdit(section)}
-            />
-            {onAccess && (
-                <RowAction
-                    icon={KeyRound} label="Кому открыт раздел"
-                    tone={orphan
-                        ? 'text-amber-500 hover:bg-amber-50 hover:text-amber-600'
-                        : 'hover:bg-indigo-50 hover:text-indigo-600'}
-                    onClick={() => onAccess(section)}
-                />
-            )}
-            <RowAction
-                icon={Archive} label="Убрать в архив" disabled={busy}
-                tone="hover:bg-rose-50 hover:text-rose-600"
-                onClick={() => onArchive(section)}
+            <IosMenu
+                label={`Действия с разделом «${section.name}»`}
+                disabled={busy}
+                items={[
+                    /* Подраздел добавляется прямо со строки родителя. Раньше
+                       вложенность задавалась только селектом внутри модалки,
+                       которую открывала кнопка у пространства, — и «добавить
+                       внутрь этого раздела» выглядело как отсутствующая
+                       возможность. */
+                    { key: 'child', label: 'Добавить подраздел', icon: Plus,
+                      onSelect: () => onAddChild(section) },
+                    { key: 'edit', label: 'Изменить раздел', icon: Pencil,
+                      onSelect: () => onEdit(section) },
+                    onAccess && {
+                        key: 'access', label: 'Кому открыт раздел', icon: KeyRound,
+                        // Число правил прямо в пункте: у раздела без единого
+                        // правила это единственное место, где видно, что
+                        // открывать его некому.
+                        hint: orphan ? 'нет правил' : String(section.rules_count),
+                        onSelect: () => onAccess(section),
+                    },
+                    { key: 'archive', label: 'Убрать в архив', icon: Archive,
+                      danger: true, separatorBefore: true,
+                      onSelect: () => onArchive(section) },
+                ]}
             />
         </div>
     );
@@ -362,25 +349,30 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             {space.description && <span> · {space.description}</span>}
                         </div>
                     </div>
-                    <button
-                        type="button"
-                        className={iosBtnGhost}
-                        onClick={() => setSpaceModal({
-                            id: space.id, name: space.name,
-                            description: space.description || '',
-                            department_id: space.department_id ? String(space.department_id) : '',
-                        })}
-                    >
-                        <Pencil size={13} /> Изменить
-                    </button>
-                    <button
-                        type="button"
+                    {/* Те же «три точки», что и у раздела: строки соседние, и
+                        два разных способа вызвать одни и те же действия читались
+                        бы как два разных вида объектов. */}
+                    <IosMenu
+                        label={`Действия с пространством «${space.name}»`}
                         disabled={busy}
-                        className={iosBtnGhost}
-                        onClick={() => archiveSpace(space)}
-                    >
-                        <Trash2 size={13} /> В архив
-                    </button>
+                        items={[
+                            { key: 'section', label: 'Добавить раздел', icon: Plus,
+                              onSelect: () => setSectionModal({
+                                  space_id: space.id, name: '', description: '',
+                                  visibility_scope: 'restricted', parent_section_id: '',
+                                  department_id: '',
+                              }) },
+                            { key: 'edit', label: 'Изменить пространство', icon: Pencil,
+                              onSelect: () => setSpaceModal({
+                                  id: space.id, name: space.name,
+                                  description: space.description || '',
+                                  department_id: space.department_id ? String(space.department_id) : '',
+                              }) },
+                            { key: 'archive', label: 'Убрать в архив', icon: Archive,
+                              danger: true, separatorBefore: true,
+                              onSelect: () => archiveSpace(space) },
+                        ]}
+                    />
                 </div>
             ))}
 

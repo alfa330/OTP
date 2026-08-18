@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 
 /*
  * Общие iOS / macOS примитивы дизайн-системы.
@@ -231,5 +232,139 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
                 )}
             </div>
         </div>
+    );
+};
+
+
+/**
+ * Меню действий за «тремя точками» — как в macOS/iOS.
+ *
+ * Зачем оно вместо ряда иконок: в строке списка четыре круглые кнопки читаются
+ * как украшение, а не как действия. Что делает каждая — понятно только по
+ * наведению, на телефоне наведения нет вовсе, и мишени 32×32 стоят вплотную,
+ * так что «в архив» ловится вместо «изменить». Одна точка входа и подписанные
+ * пункты снимают всё это разом.
+ *
+ * Меню рендерится в ПОРТАЛ с fixed-позицией: строки списков лежат в карточке
+ * с overflow-hidden, и вложенное меню она бы обрезала. Механика позиционирования
+ * повторяет CustomSelect — общий приём раздела, а не второй способ делать то же.
+ *
+ * items: [{ key, label, icon, onSelect, danger?, hint?, separatorBefore? }]
+ */
+export const IosMenu = ({ items = [], label = 'Действия', align = 'right', disabled = false }) => {
+    const [open, setOpen] = React.useState(false);
+    const [coords, setCoords] = React.useState(null);
+    const btnRef = React.useRef(null);
+    const popRef = React.useRef(null);
+
+    const shown = items.filter(Boolean);
+
+    const recompute = React.useCallback(() => {
+        const el = btnRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        const width = 232;
+        // Высота меню известна заранее: пункты одинаковые. Считать по факту
+        // нельзя — на первом кадре меню ещё не отрисовано.
+        const height = shown.length * 40 + 12;
+        const spaceBelow = window.innerHeight - r.bottom;
+        const openUp = spaceBelow < height + 16 && r.top > spaceBelow;
+        setCoords({
+            width,
+            left: align === 'right'
+                ? Math.max(8, Math.round(r.right - width))
+                : Math.min(window.innerWidth - width - 8, Math.round(r.left)),
+            top: openUp ? undefined : Math.round(r.bottom + 6),
+            bottom: openUp ? Math.round(window.innerHeight - r.top + 6) : undefined,
+        });
+    }, [align, shown.length]);
+
+    React.useLayoutEffect(() => { if (open) recompute(); }, [open, recompute]);
+
+    React.useEffect(() => {
+        if (!open) return undefined;
+        const onDoc = (e) => {
+            if (btnRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
+            setOpen(false);
+        };
+        const onKey = (e) => {
+            if (e.key !== 'Escape') return;
+            setOpen(false);
+            requestAnimationFrame(() => btnRef.current?.focus());
+        };
+        // Прокрутка закрывает, а не тащит меню за собой: строка списка уезжает
+        // из-под пальца, и «приклеенное» меню оказалось бы над чужой строкой.
+        // Обработчик именованный: снять слушатель можно только по той же ссылке,
+        // а стрелка в removeEventListener создала бы новую и слушатель остался бы.
+        const onScroll = () => setOpen(false);
+        document.addEventListener('mousedown', onDoc);
+        document.addEventListener('keydown', onKey);
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', recompute);
+        return () => {
+            document.removeEventListener('mousedown', onDoc);
+            document.removeEventListener('keydown', onKey);
+            window.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', recompute);
+        };
+    }, [open, recompute]);
+
+    return (
+        <>
+            <button
+                ref={btnRef}
+                type="button"
+                disabled={disabled}
+                aria-label={label}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                onClick={() => setOpen((v) => !v)}
+                className={`grid h-8 w-8 shrink-0 place-items-center rounded-full transition active:scale-95 disabled:opacity-40 ${
+                    open ? 'bg-slate-200 text-slate-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700'
+                }`}
+            >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <circle cx="3" cy="8" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="13" cy="8" r="1.5" />
+                </svg>
+            </button>
+
+            {open && coords && createPortal(
+                <div
+                    ref={popRef}
+                    role="menu"
+                    style={{
+                        position: 'fixed',
+                        left: coords.left,
+                        width: coords.width,
+                        top: coords.top,
+                        bottom: coords.bottom,
+                        zIndex: 99999,
+                        fontFamily: APPLE_FONT,
+                    }}
+                    className="overflow-hidden rounded-2xl bg-white/95 p-1.5 shadow-[0_14px_40px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/80 backdrop-blur-xl animate-[fadeIn_.12s_ease]"
+                >
+                    {shown.map(({ key, label: text, icon: Icon, onSelect, danger, hint, separatorBefore }) => (
+                        <React.Fragment key={key}>
+                            {separatorBefore && <div className="my-1.5 h-px bg-slate-200/70" />}
+                            <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => { setOpen(false); onSelect?.(); }}
+                                className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition ${
+                                    danger
+                                        ? 'text-rose-600 hover:bg-rose-50'
+                                        : 'text-slate-800 hover:bg-slate-100'
+                                }`}
+                            >
+                                {Icon && <Icon size={15} className={danger ? 'text-rose-500' : 'text-slate-400'} />}
+                                <span className="min-w-0 flex-1 truncate">{text}</span>
+                                {hint && <span className="shrink-0 text-[11.5px] text-slate-400">{hint}</span>}
+                            </button>
+                        </React.Fragment>
+                    ))}
+                </div>,
+                document.body,
+            )}
+        </>
     );
 };
