@@ -112,9 +112,11 @@ export const CHAT_STATUS_STYLE = {
  * withUnit=false отдаёт голое число — плитка рисует «мин» отдельным приглушённым суффиксом.
  */
 export const formatMinutes = (seconds, digits = 1, withUnit = true) => (
-    Number.isFinite(Number(seconds))
-        ? `${(Number(seconds) / 60).toFixed(digits).replace('.', ',')}${withUnit ? ' мин' : ''}`
-        : '—'
+    // null проверяем отдельно: Number(null) === 0, и «нет данных» превратилось бы в «0,0 мин» —
+    // то есть в идеальный показатель там, где считать вообще нечего.
+    seconds === null || seconds === undefined || !Number.isFinite(Number(seconds))
+        ? '—'
+        : `${(Number(seconds) / 60).toFixed(digits).replace('.', ',')}${withUnit ? ' мин' : ''}`
 );
 
 /*

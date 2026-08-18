@@ -20,6 +20,7 @@ import {
     wallboardStaleNotice,
 } from './szovWallboardShared';
 import SzovChatWallboardBody from './SzovChatWallboard';
+import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
 
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108) и чатов.
@@ -44,82 +45,22 @@ import SzovChatWallboardBody from './SzovChatWallboard';
 const FULLSCREEN_Z = 150;
 
 /*
- * Ключевые плитки цветные: два «оценочных» цвета (очередь и AR — по ним видно, всё ли в норме)
- * и два «опознавательных» (онлайн синий, перерыв оранжевый — это идентичность статуса, а не
- * оценка). Плитки дня и операторов остаются белыми: цвет там только у смысловых величин.
+ * Плитки берут показатель из каталога: подпись, значение и тон приходят оттуда, а раскладку
+ * (размер цифр, фон, отступы) держат общие кирпичи табло — те же, что у направления «Чат».
+ * Поэтому цифра на стене и та же цифра в виджете разойтись не могут, а два направления
+ * одного экрана не разъедутся в оформлении.
  */
-const KEY_PALETTE = {
-    good: { bg: 'bg-emerald-100/70', text: 'text-emerald-700', hint: 'text-emerald-600/80' },
-    warn: { bg: 'bg-amber-100/70', text: 'text-amber-700', hint: 'text-amber-600/80' },
-    bad: { bg: 'bg-rose-100/70', text: 'text-rose-700', hint: 'text-rose-600/80' },
-    info: { bg: 'bg-blue-100/70', text: 'text-blue-700', hint: 'text-blue-600/80' },
-    violet: { bg: 'bg-violet-100/70', text: 'text-violet-700', hint: 'text-violet-600/80' },
-    neutral: { bg: 'bg-slate-100', text: 'text-slate-700', hint: 'text-slate-500' },
-};
-
-// Два размера цифр: ключевые показатели читаются через зал, показатели дня и операторов — рядом.
-const VALUE_SIZE = { key: [3, 4.7, 5], stat: [2.375, 3.5, 3.75] };
-
-const valueFontSize = (size, scale) => {
-    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.stat;
-    return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
-};
-
-/** Секция с подписью и иконкой; внутри — сетка плиток с отступами. */
-const Section = ({ icon, title, children }) => (
-    <div className={`${iosCard} p-5`}>
-        <div className="mb-4 flex items-center gap-2.5 px-0.5 text-[15px] font-semibold text-slate-500">
-            <FaIcon className={`fas ${icon}`}></FaIcon>
-            <span>{title}</span>
-        </div>
-        {children}
-    </div>
-);
-
-const Grid = ({ children }) => (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{children}</div>
-);
-
-/*
- * Плитки берут показатель из каталога: подпись, значение и тон приходят оттуда, здесь остаются
- * только размер цифр и фон. Поэтому цифра на стене и та же цифра в виджете разойтись не могут.
- */
-const KeyTile = ({ metricKey, snapshot, scale = 1 }) => {
+const MetricKeyTile = ({ metricKey, snapshot, scale = 1 }) => {
     const metric = WALLBOARD_METRIC_MAP[metricKey];
     const { value, tone } = readWallboardMetric(metric, snapshot);
-    const palette = KEY_PALETTE[tone] || KEY_PALETTE.neutral;
-    return (
-        <div className={`flex flex-col items-center gap-2 rounded-2xl px-4 py-6 text-center ${palette.bg}`}>
-            <div className={`text-[15px] font-semibold ${palette.text}`}>{metric.label}</div>
-            <div
-                className={`font-semibold tabular-nums leading-none ${palette.text}`}
-                style={{ fontSize: valueFontSize('key', scale) }}
-            >
-                {value}
-            </div>
-            {metric.hint ? <div className={`text-[13px] leading-tight ${palette.hint}`}>{metric.hint}</div> : null}
-        </div>
-    );
+    return <KeyTile label={metric.label} value={value} hint={metric.hint} tone={tone} scale={scale} />;
 };
 
 /** Плитка дня/операторов. Показатель-пара («Принято / входящих») отдаёт второе число приглушённым. */
-const StatTile = ({ metricKey, snapshot, scale = 1 }) => {
+const MetricStatTile = ({ metricKey, snapshot, scale = 1 }) => {
     const metric = WALLBOARD_METRIC_MAP[metricKey];
     const { value, secondary, tone } = readWallboardMetric(metric, snapshot);
-    return (
-        <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
-            <div className="text-[14px] font-medium text-slate-500">{metric.label}</div>
-            <div
-                className={`font-semibold tabular-nums leading-none ${WALLBOARD_TONE_TEXT[tone] || WALLBOARD_TONE_TEXT.neutral}`}
-                style={{ fontSize: valueFontSize('stat', scale) }}
-            >
-                {value}
-                {secondary === null ? null : (
-                    <span className="font-normal text-slate-400" style={{ fontSize: '0.6em' }}>/{secondary}</span>
-                )}
-            </div>
-        </div>
-    );
+    return <StatTile label={metric.label} value={value} secondary={secondary} tone={tone} scale={scale} />;
 };
 
 /*
@@ -494,28 +435,28 @@ const WallboardBody = ({ snapshot, scale }) => {
             <div className="space-y-4">
             <Section icon="fa-bolt" title="Ключевые показатели · сейчас">
                 <Grid>
-                    <KeyTile metricKey="queue" snapshot={snapshot} scale={scale} />
-                    <KeyTile metricKey="ar_ratio" snapshot={snapshot} scale={scale} />
-                    <KeyTile metricKey="operators_online" snapshot={snapshot} scale={scale} />
-                    <KeyTile metricKey="operators_on_break" snapshot={snapshot} scale={scale} />
+                    <MetricKeyTile metricKey="queue" snapshot={snapshot} scale={scale} />
+                    <MetricKeyTile metricKey="ar_ratio" snapshot={snapshot} scale={scale} />
+                    <MetricKeyTile metricKey="operators_online" snapshot={snapshot} scale={scale} />
+                    <MetricKeyTile metricKey="operators_on_break" snapshot={snapshot} scale={scale} />
                 </Grid>
             </Section>
 
             <Section icon="fa-chart-bar" title="Показатели за день">
                 <Grid>
-                    <StatTile metricKey="served_pair" snapshot={snapshot} scale={scale} />
-                    <StatTile metricKey="lost" snapshot={snapshot} scale={scale} />
-                    <StatTile metricKey="sl_ratio" snapshot={snapshot} scale={scale} />
-                    <StatTile metricKey="avg_wait_seconds" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="served_pair" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="lost" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="sl_ratio" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="avg_wait_seconds" snapshot={snapshot} scale={scale} />
                 </Grid>
             </Section>
 
             <Section icon="fa-headset" title="Операторы">
                 <Grid>
-                    <StatTile metricKey="operators_free" snapshot={snapshot} scale={scale} />
-                    <StatTile metricKey="operators_talking" snapshot={snapshot} scale={scale} />
-                    <StatTile metricKey="avg_talk_seconds" snapshot={snapshot} scale={scale} />
-                    <StatTile metricKey="operators_on_recall" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="operators_free" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="operators_talking" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="avg_talk_seconds" snapshot={snapshot} scale={scale} />
+                    <MetricStatTile metricKey="operators_on_recall" snapshot={snapshot} scale={scale} />
                 </Grid>
                 {asideParts.length > 0 ? (
                     <div className="mt-3 px-1 text-[14px] text-slate-400">

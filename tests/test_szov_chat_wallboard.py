@@ -39,6 +39,7 @@ NAMES = {
     'SZOV_CHAT_WALLBOARD_LOCK_WAIT_SECONDS',
     'SZOV_CHAT_WALLBOARD_EVENT_MAX_PAGES',
     '_SZOV_CHAT_WALLBOARD_STATUSES',
+    '_SZOV_CHAT_WALLBOARD_OTHER_KEY',
     '_SZOV_CHAT_WALLBOARD_OFFLINE',
     '_SZOV_CHAT_WALLBOARD_STATUS_ORDER',
     '_SZOV_CHAT_WALLBOARD_STATUS_RANK',
@@ -50,6 +51,7 @@ NAMES = {
     '_szov_chat_wallboard_cache',
     '_szov_chat_wallboard_lock',
     '_operator_info_is_chat_manager',
+    '_szov_chat_wallboard_status',
     '_szov_chat_wallboard_operator_lookup',
     '_szov_chat_wallboard_resolve',
     '_szov_chat_wallboard_day_seconds',
@@ -60,6 +62,7 @@ NAMES = {
     '_szov_chat_wallboard_now',
     '_szov_chat_wallboard_fetch_events',
     '_szov_chat_wallboard_fetch_snapshot',
+    '_wallboard_snapshot_with_cache',
     '_szov_chat_wallboard_snapshot',
 }
 
@@ -108,6 +111,7 @@ class _Harness:
             'datetime': datetime,
             'ZoneInfo': ZoneInfo,
             'requests': fake_requests,
+            're': __import__('re'),
             '_env_int': lambda name, default, minimum=None, maximum=None: default,
             'CHAT2DESK_API_PAGE_LIMIT': 200,
             'CHAT2DESK_API_TIMEOUT_SECONDS': 45,
@@ -232,6 +236,40 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
         per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600)
         self.assertEqual(per_hour[9], 600 + 1800)
 
+    def test_status_spellings_are_normalized(self):
+        """Chat2Desk пишет один статус четырьмя способами — ключ должен получиться один."""
+        ns = self._namespace()
+        for raw in ('tech break', 'tech_break', 'tech.break', 'status.tech.break', 'TECH BRAKE'):
+            self.assertEqual(ns['_szov_chat_wallboard_status'](raw), ('tech', 'Тех. перерыв'), raw)
+        self.assertEqual(ns['_szov_chat_wallboard_status']('status.online'), ('online', 'Онлайн'))
+        self.assertIsNone(ns['_szov_chat_wallboard_status']('take_chat'))
+
+    def test_unknown_live_status_goes_to_the_other_bucket(self):
+        """Незнакомый статус не выдумываем ключом, иначе человек выпадет из всех счётчиков."""
+        ns = self._namespace()
+        self.assertEqual(ns['_szov_chat_wallboard_status']('dinner', unknown_as_other=True),
+                         ('other', 'dinner'))
+
+    def test_status_event_with_a_prefixed_spelling_breaks_the_online_span(self):
+        """Раньше `tech.break` не распознавался, и человек «держал линию» весь перерыв."""
+        ns = self._namespace()
+        events = [_event('Алия Тестова', 'online', '2026-08-18 09:00:00'),
+                  _event('Алия Тестова', 'status.tech.break', '2026-08-18 09:30:00')]
+        lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
+        timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
+        per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600)
+        self.assertEqual(per_hour[9], 1800)
+
+    def test_truncated_events_do_not_backfill_the_night(self):
+        """Выгрузка обрезалась — самое раннее событие уже не начало смены, достраивать нельзя."""
+        ns = self._namespace()
+        ns['_szov_chat_wallboard_events_cache']['truncated'] = True
+        events = [_event('Дана Ночная', 'break', '2026-08-18 14:10:00')]
+        lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
+        timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
+        self.assertEqual([entry[1] for entry in timelines['Дана Ночная']], ['break'])
+        self.assertEqual(ns['_szov_chat_wallboard_online_seconds'](timelines, 15 * 3600), {})
+
 
 class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
     """Почасовые строки графика."""
@@ -273,7 +311,6 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         self.assertEqual(rows[11]['inner_reply_seconds'], 240)
         self.assertEqual(rows[11]['operators_online'], 2.0)
         self.assertEqual(rows[11]['operators_required'], 4)  # 2 × 240 / 120
-        self.assertEqual(rows[11]['operators_took_chats'], 1)
 
     def test_hour_without_people_has_no_recommendation(self):
         ns = self._namespace()
@@ -289,7 +326,7 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
     def _now(self, ns, events, operator_rows, now_seconds=13 * 3600 + 36 * 60):
         lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
         timelines, _ = ns['_szov_chat_wallboard_timelines'](events, lookup)
-        return ns['_szov_chat_wallboard_now'](timelines, operator_rows, lookup, now_seconds)[0]
+        return ns['_szov_chat_wallboard_now'](timelines, operator_rows, lookup, now_seconds)
 
     def test_busy_is_not_confused_with_a_finished_shift(self):
         """Ключевое: у вышедшего offline_type остаётся прежним, поэтому статус берём из событий."""
@@ -354,6 +391,31 @@ class ChatWallboardNowTests(_Harness, unittest.TestCase):
         ns = self._namespace(members=set())
         now = self._now(ns, [], [_operator_row('Алия Тестова', online=1)])
         self.assertEqual(now['operators_online'], 0)
+
+    def test_unknown_status_is_counted_in_other_not_lost(self):
+        ns = self._namespace()
+        now = self._now(ns, [], [_operator_row('Алия Тестова', online=1, offline_type='dinner')])
+        self.assertEqual(now['operators_other'], 1)
+        self.assertEqual(now['operators_online'], 0)
+        self.assertEqual(now['operators'][0]['status'], 'dinner')
+
+    def test_account_disabled_midday_counts_as_offline(self):
+        """Учётки в живом списке уже нет: на линии человека нет, а плитка «Онлайн» не должна врать."""
+        ns = self._namespace()
+        events = [_event('Алия Тестова', 'online', '2026-08-18 09:00:00')]
+        now = self._now(ns, events, [])
+        self.assertEqual(now['operators_online'], 0)
+        self.assertEqual(now['operators_offline'], 1)
+        self.assertEqual(now['operators'], [])
+
+    def test_strangers_do_not_pollute_the_rename_diagnostic(self):
+        """В диагностику идут только потерянные чат-менеджеры, а не операторы других отделов."""
+        ns = self._namespace()
+        lookup, _ = ns['_szov_chat_wallboard_operator_lookup']()
+        timelines, unmatched = ns['_szov_chat_wallboard_timelines']([], lookup)
+        ns['_szov_chat_wallboard_now'](timelines, [_operator_row('Чужой Оператор', online=1)],
+                                       lookup, 10 * 3600)
+        self.assertEqual(unmatched, [])
 
 
 class ChatWallboardEventsFetchTests(_Harness, unittest.TestCase):

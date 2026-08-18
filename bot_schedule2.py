@@ -22342,10 +22342,9 @@ def _call_distribution_operator_rows():
             op_id = int(row[0])
         except Exception:
             continue
-        direction_name = str(row[7] or '').strip() if len(row) > 7 else ''
-        calc = str(row[8] or '').strip().lower() if len(row) > 8 else ''
-        dkey = ' '.join(direction_name.lower().split())
-        if calc == 'chat_manager' or dkey in ('чат менеджер', 'chat manager'):
+        if _operator_info_is_chat_manager({
+                'direction_name': str(row[7] or '') if len(row) > 7 else '',
+                'calculation_model_code': str(row[8] or '') if len(row) > 8 else ''}):
             continue
         rows.append((op_id, str(row[1] or '').strip()))
     return rows
@@ -26341,8 +26340,10 @@ def _operator_info_is_chat_manager(operator_info):
     """Чат-менеджер ли это. Признак двойной: модель расчёта или название направления.
 
     Направление «Чат менеджер» заведено в базе не один раз, и у части людей модель расчёта
-    ещё не проставлена, поэтому одного признака мало. Спрашивают об этом два места — сборка
-    lookup ниже и табло СЗоВ по чатам, — и ответ у них обязан быть один."""
+    ещё не проставлена, поэтому одного признака мало. Спрашивают об этом четверо — сборка
+    lookup ниже, табло СЗоВ по чатам, «Деление звонков» и перерывы в «Графиках работы», — и
+    ответ у них обязан быть один. Название направления знают все, модель расчёта — не все,
+    поэтому отсутствующий ключ считается пустым, а не ошибкой."""
     if str(operator_info.get('calculation_model_code') or '').strip().lower() == 'chat_manager':
         return True
     direction_key = ' '.join(str(operator_info.get('direction_name') or '').lower().split())
@@ -30780,13 +30781,20 @@ def _szov_wallboard_persist_cache(payload, captured_at):
         logging.warning("Табло СЗоВ: не удалось сохранить снимок: %s", exc)
 
 
-def _szov_wallboard_snapshot():
-    """Снимок с общим TTL-кэшем на процесс.
+def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max, retry_after,
+                                   lock_wait, before=None, after=None):
+    """Снимок табло с общим TTL-кэшем на процесс. Одна механика на оба направления.
 
-    Табло опрашивают несколько человек одновременно (и оно висит на экране весь день), поэтому
-    к Oktell ходит только один запрос на TTL, под локом. Если Oktell отвалился или уже обновляет
-    сосед — отдаём последний удачный снимок с stale=True, чтобы экран на стене не гас и чтобы
-    не держать поток waitress в ожидании медленного прокси."""
+    Табло смотрят несколько человек сразу, и оно висит на стене весь день, поэтому к источнику
+    ходит один запрос на TTL, под локом. Если источник отвалился или его уже опрашивает сосед —
+    отдаём последний удачный снимок с stale=True: экран на стене гаснуть не должен, а поток
+    waitress не должен стоять в ожидании медленного прокси.
+
+    Направления два («Основа» по Oktell и «Чат» по Chat2Desk), у каждого свои константы и свой
+    кэш, но правила устаревания у них обязаны быть одни: разъедутся — и одно табло будет
+    показывать замёрзшие данные как свежие. Поэтому копии этой функции быть не должно.
+    before/after — то, чем направления отличаются: «Основа» поднимает кэш из БД на старте и
+    дублирует туда удачные снимки."""
 
     def _fresh(payload, at):
         return dict(payload, stale=False, age_seconds=int(max(0, time.time() - at)))
@@ -30794,45 +30802,63 @@ def _szov_wallboard_snapshot():
     def _stale(payload, at, reason):
         return dict(payload, stale=True, age_seconds=int(max(0, time.time() - at)), error=reason)
 
-    _szov_wallboard_restore_cache()
-    cached = _szov_wallboard_cache.get('payload')
-    cached_at = _szov_wallboard_cache['ts']
-    if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
+    if before is not None:
+        before()
+    cached = cache.get('payload')
+    cached_at = cache['ts']
+    if cached is not None and time.time() - cached_at < ttl:
         return _fresh(cached, cached_at)
 
-    # Прокси недавно не ответил — не идём к нему снова до конца паузы.
-    failed_at = _szov_wallboard_cache.get('failed_at') or 0.0
+    # Источник недавно не ответил — не идём к нему снова до конца паузы.
+    failed_at = cache.get('failed_at') or 0.0
     if (cached is not None
-            and time.time() - failed_at < SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS
-            and time.time() - cached_at < SZOV_WALLBOARD_STALE_MAX_SECONDS):
-        return _stale(cached, cached_at, _szov_wallboard_cache.get('error') or 'Oktell не отвечает')
+            and time.time() - failed_at < retry_after
+            and time.time() - cached_at < stale_max):
+        return _stale(cached, cached_at, cache.get('error') or f'{source} не отвечает')
 
-    if not _szov_wallboard_lock.acquire(timeout=SZOV_WALLBOARD_LOCK_WAIT_SECONDS):
+    if not lock.acquire(timeout=lock_wait):
         # Обновление уже идёт. Ждать нечего: отдаём что есть, следующий опрос подхватит свежее.
-        if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_STALE_MAX_SECONDS:
+        if cached is not None and time.time() - cached_at < stale_max:
             return _stale(cached, cached_at, 'Обновление ещё идёт')
-        raise RuntimeError("Табло СЗоВ: снимок обновляется, данных пока нет")
+        raise RuntimeError(f"Табло СЗоВ ({source}): снимок обновляется, данных пока нет")
     try:
         # Пока ждали лок, соседний поток мог уже обновить кэш.
-        cached = _szov_wallboard_cache.get('payload')
-        cached_at = _szov_wallboard_cache['ts']
-        if cached is not None and time.time() - cached_at < SZOV_WALLBOARD_CACHE_TTL_SECONDS:
+        cached = cache.get('payload')
+        cached_at = cache['ts']
+        if cached is not None and time.time() - cached_at < ttl:
             return _fresh(cached, cached_at)
         try:
-            payload = _szov_wallboard_fetch_snapshot()
+            payload = fetch()
         except Exception as exc:
-            _szov_wallboard_cache.update(failed_at=time.time(), error=str(exc)[:200])
+            cache.update(failed_at=time.time(), error=str(exc)[:200])
             age = time.time() - cached_at if cached is not None else None
-            if cached is not None and age is not None and age < SZOV_WALLBOARD_STALE_MAX_SECONDS:
-                logging.warning("Табло СЗоВ: Oktell недоступен, отдаём снимок %.0f с назад: %s", age, exc)
+            if cached is not None and age is not None and age < stale_max:
+                logging.warning("Табло СЗоВ: %s недоступен, отдаём снимок %.0f с назад: %s",
+                                source, age, exc)
                 return _stale(cached, cached_at, str(exc)[:200])
             raise
         payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
-        _szov_wallboard_cache.update(ts=time.time(), payload=payload, failed_at=0.0, error=None)
-        _szov_wallboard_persist_cache(payload, _szov_wallboard_cache['ts'])
-        return _fresh(payload, _szov_wallboard_cache['ts'])
+        cache.update(ts=time.time(), payload=payload, failed_at=0.0, error=None)
+        if after is not None:
+            after(payload, cache['ts'])
+        return _fresh(payload, cache['ts'])
     finally:
-        _szov_wallboard_lock.release()
+        lock.release()
+
+
+def _szov_wallboard_snapshot():
+    """Снимок направления «Основа»: входящая линия Oktell."""
+    return _wallboard_snapshot_with_cache(
+        cache=_szov_wallboard_cache,
+        lock=_szov_wallboard_lock,
+        fetch=_szov_wallboard_fetch_snapshot,
+        source='Oktell',
+        ttl=SZOV_WALLBOARD_CACHE_TTL_SECONDS,
+        stale_max=SZOV_WALLBOARD_STALE_MAX_SECONDS,
+        retry_after=SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS,
+        lock_wait=SZOV_WALLBOARD_LOCK_WAIT_SECONDS,
+        before=_szov_wallboard_restore_cache,
+        after=_szov_wallboard_persist_cache)
 
 
 @app.route('/api/szov_wallboard/snapshot', methods=['GET', 'OPTIONS'])
@@ -31518,7 +31544,7 @@ CHAT_HOURLY_PRESENCE_COLORS = {
 }
 
 _chat_hourly_requests_cache = {'day': None, 'rows': {}}
-_chat_hourly_report_cache = {'ts': 0.0, 'payload': None}
+_chat_hourly_report_cache = {'ts': 0.0, 'payload': None, 'hour': None}
 _chat_hourly_lock = threading.Lock()
 
 
@@ -31732,11 +31758,15 @@ def _chat_hourly_response_times(rows):
         if reaction is not None:
             first_sum += reaction
             first_count += 1
+        # Ответов не было вовсе — считать нечего: и пустая колонка, и ноль в ней означают
+        # «оператор не отвечал», а не «ответил мгновенно».
+        replies = _chat_hourly_number(row.get('replies'))
+        if not replies:
+            continue
         average = _chat_hourly_number(row.get('average_replies_time'))
         if average is None:
-            replies = _chat_hourly_number(row.get('replies'))
             total = _chat_hourly_number(row.get('total_replies_time'))
-            average = (total / replies) if (total is not None and replies) else None
+            average = (total / replies) if total is not None else None
         if average is None:
             continue
         inner_sum += average
@@ -31841,15 +31871,21 @@ def _chat_hourly_collect(now=None):
 
 
 def _chat_hourly_report(now=None):
-    """Собранный отчёт с коротким кэшем: команда и рассылка в одну минуту считают его один раз."""
+    """Собранный отчёт с коротким кэшем: команда и рассылка в одну минуту считают его один раз.
+
+    Кэш привязан к отчётному часу, а не только ко времени сборки. Иначе `/chats`, вызванная в
+    23:59, отдала бы свой отчёт (22:00–23:00) плановой рассылке в 00:00 — и час 23:00–00:00
+    снова потерялся бы, теперь уже из-за кэша."""
+    hour_key = (now or datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE))).strftime('%Y-%m-%d %H')
     with _chat_hourly_lock:
         cached = _chat_hourly_report_cache.get('payload')
         if (cached is not None and now is None
+                and _chat_hourly_report_cache.get('hour') == hour_key
                 and time.time() - _chat_hourly_report_cache['ts'] < CHAT_HOURLY_CACHE_SECONDS):
             return cached
         payload = _chat_hourly_collect(now=now)
         if now is None:
-            _chat_hourly_report_cache.update(ts=time.time(), payload=payload)
+            _chat_hourly_report_cache.update(ts=time.time(), payload=payload, hour=hour_key)
         return payload
 
 
@@ -32166,22 +32202,34 @@ SZOV_CHAT_WALLBOARD_EVENT_MAX_PAGES = _env_int(
 # Событие статуса Chat2Desk / offline_type -> (ключ, подпись). Оба источника говорят одними и
 # теми же словами, поэтому и справочник один. Событий чатов (take_chat/transfer_chat) здесь нет:
 # они не статусы и в разбор не идут.
+# Событие статуса Chat2Desk / offline_type -> (ключ, подпись). Ключи здесь уже нормализованы
+# (`_szov_chat_wallboard_status`): пробелы и подчёркивания сведены к точке, префикс `status.`
+# отброшен. Писать варианты руками нельзя — Chat2Desk отдаёт один и тот же статус как
+# `tech break`, `tech_break`, `tech.break` и `status.tech.break`; на этом уже обжигался учёт
+# статусов чат-менеджеров (CHAT2DESK_STATUS_EVENT_MAP выше). `brake` — не опечатка: так пишет
+# offline_type в живом списке операторов.
 _SZOV_CHAT_WALLBOARD_STATUSES = {
     'online': ('online', 'Онлайн'),
     'login': ('online', 'Онлайн'),
     'busy': ('busy', 'Занят'),
     'study': ('training', 'Тренинг'),
+    'training': ('training', 'Тренинг'),
     'break': ('break', 'Перерыв'),
-    'tech brake': ('tech', 'Тех. перерыв'),
-    'tech break': ('tech', 'Тех. перерыв'),
+    'tech.break': ('tech', 'Тех. перерыв'),
+    'tech.brake': ('tech', 'Тех. перерыв'),
     'holiday': ('holiday', 'Отпуск'),
     'logout': ('offline', 'Не в системе'),
     'offline': ('offline', 'Не в системе'),
 }
 _SZOV_CHAT_WALLBOARD_OFFLINE = ('offline', 'Не в системе')
+# Незнакомый статус (Chat2Desk завёл новый или переименовал) не выдумываем: он уходит в общее
+# ведро «прочее» под своей же подписью. Иначе счётчики перестают складываться в число людей —
+# человек не попадает ни в одну плитку и молча исчезает с табло.
+_SZOV_CHAT_WALLBOARD_OTHER_KEY = 'other'
 # Порядок в списке людей: сначала те, кто держит линию, потом занятые чем-то ещё, в конце —
 # вышедшие. Так список читается сверху вниз по убыванию доступности, как в отчёте по чатам.
-_SZOV_CHAT_WALLBOARD_STATUS_ORDER = ('online', 'busy', 'training', 'break', 'tech', 'holiday', 'offline')
+_SZOV_CHAT_WALLBOARD_STATUS_ORDER = ('online', 'busy', 'training', 'break', 'tech', 'holiday',
+                                     _SZOV_CHAT_WALLBOARD_OTHER_KEY, 'offline')
 _SZOV_CHAT_WALLBOARD_STATUS_RANK = {
     key: index for index, key in enumerate(_SZOV_CHAT_WALLBOARD_STATUS_ORDER)}
 
@@ -32208,6 +32256,26 @@ def _szov_chat_wallboard_operator_lookup():
         if chat_managers:
             lookup[key] = chat_managers
     return lookup, department_id
+
+
+def _szov_chat_wallboard_status(raw, *, unknown_as_other=False):
+    """Статус Chat2Desk -> (ключ, подпись). None, если это вообще не статус.
+
+    Одна точка разбора и для событий (`operator_events.event`), и для живого списка
+    (`offline_type`): разнобой в написании (`tech break` / `tech_break` / `status.tech.break`)
+    сводим к одному ключу тем же способом, что и учёт статусов чат-менеджеров.
+    unknown_as_other=True нужен живому списку: там незнакомое значение — это статус, которого
+    мы ещё не видели, и человека надо посчитать хотя бы в «прочее», а не потерять."""
+    text = str(raw or '').strip().lower()
+    if not text:
+        return None
+    key = re.sub(r'\.+', '.', re.sub(r'[\s_]+', '.', text)).strip('.')
+    if key.startswith('status.'):
+        key = key[len('status.'):]
+    known = _SZOV_CHAT_WALLBOARD_STATUSES.get(key)
+    if known:
+        return known
+    return (_SZOV_CHAT_WALLBOARD_OTHER_KEY, str(raw).strip()) if unknown_as_other else None
 
 
 def _szov_chat_wallboard_resolve(name, lookup):
@@ -32313,7 +32381,7 @@ def _szov_chat_wallboard_timelines(events, lookup):
     for row in events or []:
         if not isinstance(row, dict):
             continue
-        status = _SZOV_CHAT_WALLBOARD_STATUSES.get(str(row.get('event') or '').strip().lower())
+        status = _szov_chat_wallboard_status(row.get('event'))
         if not status:
             continue  # take_chat / transfer_chat — это не статус
         oktell_name = str(row.get('operator_name') or '').strip()
@@ -32328,13 +32396,17 @@ def _szov_chat_wallboard_timelines(events, lookup):
             continue
         timelines.setdefault(oktell_name, []).append(
             (seconds, status[0], status[1], str(row.get('created_at') or '').strip()))
+    # Достраивать ночную смену можно, только если события за сутки полные. Если выгрузка
+    # обрезалась по потолку страниц, самое раннее известное событие — середина дня, и
+    # достройка приписала бы человеку часы «на линии», которых не было.
+    backfill = not _szov_chat_wallboard_events_cache.get('truncated')
     for entries in timelines.values():
         entries.sort(key=lambda item: item[0])
         # Смена, начатая вчера. Вход в систему всегда даёт событие login, поэтому ЛЮБОЕ первое
         # событие суток, кроме входа (выход, перерыв, «занят»), означает: человек работал ещё
         # до него, с полуночи. Без этой достройки ночные часы выглядели бы безлюдными при
         # десятках обработанных чатов.
-        if entries[0][1] != 'online':
+        if backfill and entries[0][1] != 'online':
             entries.insert(0, (0, 'online', 'Онлайн', ''))
     return timelines, sorted(unmatched)
 
@@ -32398,8 +32470,6 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now):
             'first_reply_seconds': first_reply,
             'inner_reply_seconds': inner_reply,
             'operators_online': round(avg_online, 2),
-            'operators_took_chats': len({_chat_hourly_operator_name(row) for row in hour_rows
-                                         if _chat_hourly_operator_name(row)}),
             'operators_required': _szov_chat_wallboard_required(avg_online, inner_reply),
             'partial': hour == now.hour,
         })
@@ -32414,7 +32484,6 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
     даёт, но линию держит."""
     counts = {key: 0 for key in _SZOV_CHAT_WALLBOARD_STATUS_ORDER}
     people = []
-    unmatched = set()
     seen = set()
     open_chats_total = 0
     for row in operator_rows or []:
@@ -32423,11 +32492,12 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
         if str(row.get('status') or '').strip().lower() != 'enabled':
             continue  # удалённые и отключённые учётки висят online=1 от последнего входа
         oktell_name = _chat2desk_operator_display_name(row)
-        if not oktell_name:
+        if not oktell_name or str(row.get('role') or '').strip().lower() == 'admin':
             continue
         operator = _szov_chat_wallboard_resolve(oktell_name, lookup)
         if operator is None:
-            unmatched.add(oktell_name)
+            # Не чат-менеджер СЗоВ: оператор линии, служебная учётка. Это не «потеря», в
+            # диагностику переименований такие имена не идут — иначе в ней утонет настоящее.
             continue
         entries = timelines.get(oktell_name) or []
         if entries:
@@ -32439,10 +32509,9 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
             raw_since = ''
             since_seconds = None
             if _chat_hourly_number(row.get('online')):
-                status_key, status_label = _SZOV_CHAT_WALLBOARD_STATUSES.get(
-                    str(row.get('offline_type') or '').strip().lower(),
-                    ('online', 'Онлайн') if not str(row.get('offline_type') or '').strip()
-                    else (str(row.get('offline_type')).strip().lower(), str(row.get('offline_type')).strip()))
+                status_key, status_label = (
+                    _szov_chat_wallboard_status(row.get('offline_type'), unknown_as_other=True)
+                    or ('online', 'Онлайн'))
             else:
                 status_key, status_label = _SZOV_CHAT_WALLBOARD_OFFLINE
         open_chats = int(_chat_hourly_number(row.get('opened_dialogs')) or 0)
@@ -32460,12 +32529,12 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
                 'open_chats': open_chats,
             })
     # Учётка могла быть отключена посреди дня — в живом списке её уже нет, а события за сутки
-    # остались. Такой человек на линии не стоит, но и терять его из счётчиков нечестно.
+    # остались. На линии такой человек не стоит (учётки больше нет), поэтому считаем его
+    # вышедшим: иначе плитка «Онлайн» показывала бы больше людей, чем стоит в списке смены.
     for oktell_name, entries in timelines.items():
         if oktell_name in seen or not entries:
             continue
-        status_key = entries[-1][1]
-        counts[status_key] = counts.get(status_key, 0) + 1
+        counts['offline'] = counts.get('offline', 0) + 1
     people.sort(key=lambda item: (
         _SZOV_CHAT_WALLBOARD_STATUS_RANK.get(item['status_key'], len(_SZOV_CHAT_WALLBOARD_STATUS_ORDER)),
         -int(item['open_chats'] or 0), item['name']))
@@ -32475,10 +32544,11 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
         'operators_on_training': counts.get('training', 0),
         'operators_on_break': counts.get('break', 0) + counts.get('tech', 0),
         'operators_on_holiday': counts.get('holiday', 0),
+        'operators_other': counts.get(_SZOV_CHAT_WALLBOARD_OTHER_KEY, 0),
         'operators_offline': counts.get('offline', 0),
         'open_chats': open_chats_total,
         'operators': people,
-    }, sorted(unmatched)
+    }
 
 
 def _szov_chat_wallboard_day_requests(day_str):
@@ -32488,15 +32558,17 @@ def _szov_chat_wallboard_day_requests(day_str):
     отчёт только что сходил за днём, табло сходит бесплатно, и наоборот."""
     cache = _szov_chat_wallboard_requests_cache
     with _chat_hourly_lock:
-        cached_day = _chat_hourly_requests_cache.get('day')
         fresh = (cache.get('day') == day_str
                  and time.time() - float(cache.get('ts') or 0.0) < SZOV_CHAT_WALLBOARD_REQUESTS_TTL_SECONDS)
-        if fresh and cached_day == day_str and _chat_hourly_requests_cache.get('rows'):
+        if fresh and _chat_hourly_requests_cache.get('day') == day_str and _chat_hourly_requests_cache.get('rows'):
             return [row for row in _chat_hourly_requests_cache['rows'].values()
                     if str(_chat2desk_row_first(row, 'request_type') or '').strip() == CHAT_HOURLY_REQUEST_TYPE]
-        rows = _chat_hourly_fetch_requests(day_str)
+    # Саму выкачку ведём БЕЗ лока: она листает страницы Chat2Desk минутами, а на этом же локе
+    # стоит почасовой отчёт в Telegram — иначе команда `/chats` ждала бы обновления табло.
+    rows = _chat_hourly_fetch_requests(day_str)
+    with _chat_hourly_lock:
         cache.update(day=day_str, ts=time.time())
-        return rows
+    return rows
 
 
 def _szov_chat_wallboard_fetch_snapshot():
@@ -32523,8 +32595,7 @@ def _szov_chat_wallboard_fetch_snapshot():
         if _szov_chat_wallboard_resolve(oktell_name, lookup) is not None:
             timelines[oktell_name] = [(0, 'online', 'Онлайн', f'{day_str} 00:00:00')]
 
-    now_block, unmatched_roster = _szov_chat_wallboard_now(
-        timelines, operator_rows, lookup, now_seconds)
+    now_block = _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds)
     first_reply, inner_reply = _chat_hourly_response_times(request_rows)
     return {
         'day': day_str,
@@ -32541,59 +32612,26 @@ def _szov_chat_wallboard_fetch_snapshot():
         'diagnostics': {
             'department_id': department_id,
             # Имя учётки Chat2Desk разошлось с ФИО в OTP — человек молча выпал из счётчиков.
-            'unmatched_names': sorted(set(unmatched_events) | set(unmatched_roster)),
+            'unmatched_names': unmatched_events,
             'events_truncated': bool(_szov_chat_wallboard_events_cache.get('truncated')),
         },
     }
 
 
 def _szov_chat_wallboard_snapshot():
-    """Снимок с общим TTL-кэшем на процесс — как у «Основы», но с оглядкой на квоту Chat2Desk.
+    """Снимок направления «Чат»: Chat2Desk.
 
-    Квота там общая на компанию, поэтому N открытых табло дают не N обращений к API, а одно
-    на TTL; при ошибке отдаём последний удачный снимок с пометкой, чтобы экран не гас."""
-
-    def _fresh(payload, at):
-        return dict(payload, stale=False, age_seconds=int(max(0, time.time() - at)))
-
-    def _stale(payload, at, reason):
-        return dict(payload, stale=True, age_seconds=int(max(0, time.time() - at)), error=reason)
-
-    cached = _szov_chat_wallboard_cache.get('payload')
-    cached_at = _szov_chat_wallboard_cache['ts']
-    if cached is not None and time.time() - cached_at < SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS:
-        return _fresh(cached, cached_at)
-
-    failed_at = _szov_chat_wallboard_cache.get('failed_at') or 0.0
-    if (cached is not None
-            and time.time() - failed_at < SZOV_CHAT_WALLBOARD_RETRY_AFTER_FAIL_SECONDS
-            and time.time() - cached_at < SZOV_CHAT_WALLBOARD_STALE_MAX_SECONDS):
-        return _stale(cached, cached_at, _szov_chat_wallboard_cache.get('error') or 'Chat2Desk не отвечает')
-
-    if not _szov_chat_wallboard_lock.acquire(timeout=SZOV_CHAT_WALLBOARD_LOCK_WAIT_SECONDS):
-        if cached is not None and time.time() - cached_at < SZOV_CHAT_WALLBOARD_STALE_MAX_SECONDS:
-            return _stale(cached, cached_at, 'Обновление ещё идёт')
-        raise RuntimeError("Табло СЗоВ (чат): снимок обновляется, данных пока нет")
-    try:
-        cached = _szov_chat_wallboard_cache.get('payload')
-        cached_at = _szov_chat_wallboard_cache['ts']
-        if cached is not None and time.time() - cached_at < SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS:
-            return _fresh(cached, cached_at)
-        try:
-            payload = _szov_chat_wallboard_fetch_snapshot()
-        except Exception as exc:
-            _szov_chat_wallboard_cache.update(failed_at=time.time(), error=str(exc)[:200])
-            age = time.time() - cached_at if cached is not None else None
-            if cached is not None and age is not None and age < SZOV_CHAT_WALLBOARD_STALE_MAX_SECONDS:
-                logging.warning("Табло СЗоВ (чат): Chat2Desk недоступен, отдаём снимок %.0f с назад: %s",
-                                age, exc)
-                return _stale(cached, cached_at, str(exc)[:200])
-            raise
-        payload['generated_at'] = datetime.now().isoformat(timespec='seconds')
-        _szov_chat_wallboard_cache.update(ts=time.time(), payload=payload, failed_at=0.0, error=None)
-        return _fresh(payload, _szov_chat_wallboard_cache['ts'])
-    finally:
-        _szov_chat_wallboard_lock.release()
+    Кэш тут длиннее, чем у «Основы»: квота Chat2Desk общая на компанию, а не наш собственный
+    прокси. Правила устаревания — общие с «Основой», см. _wallboard_snapshot_with_cache."""
+    return _wallboard_snapshot_with_cache(
+        cache=_szov_chat_wallboard_cache,
+        lock=_szov_chat_wallboard_lock,
+        fetch=_szov_chat_wallboard_fetch_snapshot,
+        source='Chat2Desk',
+        ttl=SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS,
+        stale_max=SZOV_CHAT_WALLBOARD_STALE_MAX_SECONDS,
+        retry_after=SZOV_CHAT_WALLBOARD_RETRY_AFTER_FAIL_SECONDS,
+        lock_wait=SZOV_CHAT_WALLBOARD_LOCK_WAIT_SECONDS)
 
 
 @app.route('/api/szov_wallboard/chat_snapshot', methods=['GET', 'OPTIONS'])
@@ -32611,7 +32649,7 @@ def api_szov_wallboard_chat_snapshot():
         return jsonify(_szov_chat_wallboard_snapshot())
     except Exception as exc:
         logging.error("Табло СЗоВ (чат): снимок недоступен: %s", exc, exc_info=True)
-        return jsonify({"error": f"Chat2Desk недоступен: {exc}"}), 503
+        return jsonify({"error": "Chat2Desk недоступен", "detail": str(exc)[:300]}), 503
 
 
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
@@ -33713,8 +33751,9 @@ def _ws_normalize_direction_key(value):
 
 
 def _ws_is_chat_manager_direction(direction_value):
-    key = _ws_normalize_direction_key(direction_value)
-    return key in ('чат менеджер', 'chat manager')
+    """Чат-менеджерское ли направление. Здесь известно только название, без модели расчёта,
+    поэтому спрашиваем общий признак ровно тем, что есть."""
+    return _operator_info_is_chat_manager({'direction_name': direction_value})
 
 
 def _ws_normalize_break_durations(value):

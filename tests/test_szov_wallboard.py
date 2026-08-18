@@ -525,6 +525,7 @@ class _SnapshotHarness:
             '_oktell_wallboard_totals_sql',
             '_oktell_wallboard_operator_states_sql',
             '_oktell_wallboard_snapshot_sql',
+            '_wallboard_snapshot_with_cache',
             '_szov_wallboard_restore_cache',
             '_szov_wallboard_persist_cache',
             '_szov_wallboard_fetch_snapshot',
@@ -900,6 +901,10 @@ class SzovWallboardWiringTests(unittest.TestCase):
         cls.widget = (
             ROOT / "src" / "components" / "monitoring" / "SzovWallboardWidget.jsx"
         ).read_text(encoding="utf-8-sig")
+        # Секция, сетка и плитки — общие кирпичи обоих направлений табло.
+        cls.tiles = (
+            ROOT / "src" / "components" / "monitoring" / "SzovWallboardTiles.jsx"
+        ).read_text(encoding="utf-8-sig")
         cls.faicon = (
             ROOT / "src" / "components" / "common" / "FaIcon.jsx"
         ).read_text(encoding="utf-8-sig")
@@ -1005,9 +1010,10 @@ class SzovWallboardWiringTests(unittest.TestCase):
 
     def test_only_key_tiles_are_coloured(self):
         """Цветные плитки — только в ключевых показателях; день и операторы белые."""
-        self.assertEqual(self.view.count("<KeyTile"), 4)
-        self.assertEqual(self.view.count("<StatTile"), 8)
-        stat = re.search(r"const StatTile = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        self.assertEqual(self.view.count("<MetricKeyTile"), 4)
+        self.assertEqual(self.view.count("<MetricStatTile"), 8)
+        stat = re.search(r"export const StatTile = .*?^\);$", self.tiles,
+                         flags=re.MULTILINE | re.DOTALL).group(0)
         self.assertIn("border border-slate-200/80", stat)
         self.assertNotIn("bg-emerald", stat)
 
@@ -1027,7 +1033,8 @@ class SzovWallboardWiringTests(unittest.TestCase):
         # входящие = дошедшие до очереди, сброшенные на приветствии сюда не идут
         self.assertIn("secondary: formatInt(today.arrived)", pair)
         self.assertNotIn("metricKey=\"total\"", self.view)
-        body = re.search(r"const StatTile = .*?^\};$", self.view, flags=re.MULTILINE | re.DOTALL).group(0)
+        body = re.search(r"export const StatTile = .*?^\);$", self.tiles,
+                         flags=re.MULTILINE | re.DOTALL).group(0)
         self.assertIn("text-slate-400", body)
 
     def test_lost_is_red_and_sl_follows_its_thresholds(self):
@@ -1126,10 +1133,18 @@ class SzovWallboardWiringTests(unittest.TestCase):
         self.assertIn("item.reason_key !== 'break'", block)
 
     def test_numbers_are_centred(self):
-        for component in ("const KeyTile", "const StatTile"):
-            block = re.search(rf"{component} = .*?^\}};$", self.view, flags=re.MULTILINE | re.DOTALL)
+        for component, closer in (("export const KeyTile", r"^\};$"), ("export const StatTile", r"^\);$")):
+            block = re.search(rf"{component} = .*?{closer}", self.tiles, flags=re.MULTILINE | re.DOTALL)
             self.assertIn("text-center", block.group(0), component)
             self.assertIn("items-center", block.group(0), component)
+
+    def test_both_directions_share_one_set_of_tiles(self):
+        """Раскладка плиток одна на «Основу» и «Чат»: копия разъедется в размерах и цветах."""
+        chat = (ROOT / "src" / "components" / "monitoring" / "SzovChatWallboard.jsx").read_text(encoding="utf-8-sig")
+        for source in (self.view, chat):
+            self.assertIn("from './SzovWallboardTiles'", source)
+            self.assertNotIn("const KEY_PALETTE = {", source)
+            self.assertNotIn("const valueFontSize = ", source)
 
     def test_status_chip_colours_match_the_owners_choice(self):
         """Перерыв оранжевый, тренинг зелёный, тех.причина фиолетовая — в списке причин."""

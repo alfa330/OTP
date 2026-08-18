@@ -14,6 +14,7 @@ import {
 } from 'recharts';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard } from '../ui/ios';
+import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
 import {
     CHAT_STATUS_STYLE,
     formatDuration,
@@ -44,74 +45,6 @@ const CHART_COLORS = {
     inner: '#e11d48',
     target: '#059669',
 };
-
-const KEY_PALETTE = {
-    info: { bg: 'bg-blue-100/70', text: 'text-blue-700', hint: 'text-blue-600/80' },
-    violet: { bg: 'bg-violet-100/70', text: 'text-violet-700', hint: 'text-violet-600/80' },
-    good: { bg: 'bg-emerald-100/70', text: 'text-emerald-700', hint: 'text-emerald-600/80' },
-    warn: { bg: 'bg-amber-100/70', text: 'text-amber-700', hint: 'text-amber-600/80' },
-    bad: { bg: 'bg-rose-100/70', text: 'text-rose-700', hint: 'text-rose-600/80' },
-    neutral: { bg: 'bg-slate-100', text: 'text-slate-700', hint: 'text-slate-500' },
-};
-
-// Те же два размера цифр, что на «Основе»: ключевые читаются через зал, дневные — рядом.
-const VALUE_SIZE = { key: [3, 4.7, 5], stat: [2.375, 3.5, 3.75] };
-
-const valueFontSize = (size, scale) => {
-    const [min, mid, max] = VALUE_SIZE[size] || VALUE_SIZE.stat;
-    return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
-};
-
-const Section = ({ icon, title, children, right = null }) => (
-    <div className={`${iosCard} p-5`}>
-        <div className="mb-4 flex items-center justify-between gap-3 px-0.5">
-            <div className="flex items-center gap-2.5 text-[15px] font-semibold text-slate-500">
-                <FaIcon className={`fas ${icon}`}></FaIcon>
-                <span>{title}</span>
-            </div>
-            {right}
-        </div>
-        {children}
-    </div>
-);
-
-const Grid = ({ children }) => (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{children}</div>
-);
-
-const KeyTile = ({ label, value, hint, tone = 'neutral', scale = 1 }) => {
-    const palette = KEY_PALETTE[tone] || KEY_PALETTE.neutral;
-    return (
-        <div className={`flex flex-col items-center gap-2 rounded-2xl px-4 py-6 text-center ${palette.bg}`}>
-            <div className={`text-[15px] font-semibold ${palette.text}`}>{label}</div>
-            <div
-                className={`font-semibold tabular-nums leading-none ${palette.text}`}
-                style={{ fontSize: valueFontSize('key', scale) }}
-            >
-                {value}
-            </div>
-            {hint ? <div className={`text-[13px] leading-tight ${palette.hint}`}>{hint}</div> : null}
-        </div>
-    );
-};
-
-/* Единицу выносим в приглушённый суффикс: «11,6 мин» целиком крупным шрифтом не влезает в
-   плитку и переносится на вторую строку, а ряд плиток из-за этого едет. */
-const StatTile = ({ label, value, unit = null, tone = 'neutral', scale = 1 }) => (
-    <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
-        <div className="text-[14px] font-medium text-slate-500">{label}</div>
-        <div
-            className={`whitespace-nowrap font-semibold tabular-nums leading-none ${
-                (KEY_PALETTE[tone] || KEY_PALETTE.neutral).text === 'text-slate-700'
-                    ? 'text-slate-900'
-                    : (KEY_PALETTE[tone] || KEY_PALETTE.neutral).text}`}
-            style={{ fontSize: valueFontSize('stat', scale) }}
-        >
-            {value}
-            {unit ? <span className="font-normal text-slate-400" style={{ fontSize: '0.45em' }}> {unit}</span> : null}
-        </div>
-    </div>
-);
 
 /** Правая колонка: кто сейчас на смене, в каком статусе и сколько у него открытых чатов. */
 const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
@@ -182,7 +115,13 @@ const ChartTooltip = ({ active, payload, label, targetSeconds }) => {
                 <div>
                     Ответ внутри чата:{' '}
                     <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.inner }}>
-                        {row.innerSeconds === null ? '—' : formatMinutes(row.innerSeconds)}
+                        {formatMinutes(row.innerSeconds)}
+                    </span>
+                </div>
+                <div>
+                    Первый ответ:{' '}
+                    <span className="font-medium tabular-nums text-slate-900">
+                        {formatMinutes(row.firstSeconds)}
                     </span>
                 </div>
                 <div>
@@ -214,6 +153,7 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
         innerMinutes: row.inner_reply_seconds === null || row.inner_reply_seconds === undefined
             ? null : Number((row.inner_reply_seconds / 60).toFixed(2)),
         innerSeconds: row.inner_reply_seconds ?? null,
+        firstSeconds: row.first_reply_seconds ?? null,
         online: row.operators_online ?? null,
         required: row.operators_required ?? null,
         partial: Boolean(row.partial),
@@ -287,6 +227,9 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     const asideParts = [
         [Number(now.operators_on_break) || 0, 'на перерыве'],
         [Number(now.operators_on_holiday) || 0, 'в отпуске'],
+        // «Прочее» — статус, которого мы ещё не видели: Chat2Desk завёл новый или переименовал.
+        // Человек в нём не пропадает с табло, хотя своей плитки у такого статуса нет.
+        [Number(now.operators_other) || 0, 'в прочих статусах'],
     ].filter(([count]) => count > 0).map(([count, label]) => `${formatInt(count)} ${label}`);
 
     return (

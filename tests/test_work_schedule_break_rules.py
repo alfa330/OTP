@@ -297,6 +297,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
     def test_import_simulation_custom_direction_rules_disable_default_fallback_for_gaps(self):
         namespace = {}
         for function_name in (
+            "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
             "_ws_normalize_break_durations",
             "_ws_is_chat_manager_direction",
@@ -427,6 +428,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
     def test_import_simulation_pads_other_operators_breaks_by_direction_gap(self):
         namespace = {}
         for function_name in (
+            "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
             "_ws_merge_intervals",
             "_ws_cross_operator_gap_for_direction",
@@ -477,6 +479,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
     def test_import_simulation_uses_strictest_gap_inside_direction_group(self):
         namespace = {}
         for function_name in (
+            "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
             "_ws_merge_intervals",
             "_ws_cross_operator_gap_for_direction",
