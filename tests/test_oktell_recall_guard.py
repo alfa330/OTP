@@ -705,3 +705,22 @@ def test_build_token_is_the_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "build_token", lambda: "baked-token")
     monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.exe"))
     assert agent.resolve_agent_token() == "baked-token"
+
+
+def test_placeholder_server_url_is_replaced_by_build_value(tmp_path, monkeypatch):
+    """Скачанный exe не знает адрес сервера ниоткуда, кроме сборки: с
+    плейсхолдером он стучится в несуществующий домен и ждёт настроек вечно."""
+    monkeypatch.setattr(agent, "build_server_url", lambda: "https://icore.example.org")
+    cfg = agent.load_config(tmp_path / "нет-такого.json")
+    assert cfg["server_url"] == "https://icore.example.org"
+
+
+def test_config_server_url_wins(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "build_server_url", lambda: "https://из-сборки")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"server_url": "http://127.0.0.1:8799"}), encoding="utf-8")
+    assert agent.load_config(path)["server_url"] == "http://127.0.0.1:8799"
+
+
+def test_build_server_url_empty_without_module():
+    assert agent.build_server_url() == ""

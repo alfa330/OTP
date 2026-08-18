@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -208,6 +208,20 @@ def header_safe(value: str) -> bool:
         return False
 
 
+def build_server_url() -> str:
+    """Адрес сервера, вшитый при сборке.
+
+    Без него скачанный exe не знает, куда обращаться: конфига у сотрудника нет,
+    а дефолт — плейсхолдер. Первая установка на живой машине именно на это и
+    напоролась: агент молча ждал настроек, которые не мог получить.
+    """
+    try:
+        from _build_token import SERVER_URL  # type: ignore
+        return str(SERVER_URL or "").strip().rstrip("/")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def build_token() -> str:
     """Токен агента, вшитый при сборке exe.
 
@@ -341,6 +355,10 @@ def normalize_config(cfg: dict) -> dict:
     keys = cfg.get("session_keys") or []
     cfg["session_keys"] = [str(k) for k in keys if str(k).strip()] or list(DEFAULT_SESSION_KEYS)
     cfg["server_url"] = str(cfg.get("server_url", "")).rstrip("/")
+    # Плейсхолдер из дефолтов адресом не считается: с ним агент честно стучится
+    # в несуществующий домен и ждёт настроек вечно.
+    if not cfg["server_url"] or cfg["server_url"] == DEFAULT_CONFIG["server_url"].rstrip("/"):
+        cfg["server_url"] = build_server_url() or cfg["server_url"]
     # Конфиг (у разработчика) перекрывает вшитый токен; у сотрудника конфига
     # нет, и работает именно вшитый.
     if not str(cfg.get("agent_token") or "").strip():
@@ -664,6 +682,25 @@ def _remove_shortcut() -> None:
         pass
 
 
+def show_message(text: str, title: str = APP_NAME, error: bool = False) -> None:
+    """Обычное окно Windows с сообщением.
+
+    Сборка идёт без консоли, поэтому иначе установка проходит МОЛЧА: человек
+    кликает по файлу, не видит ничего и жмёт ещё раз. Одно окно снимает вопрос.
+    """
+    if not IS_WINDOWS:
+        print(text)
+        return
+    try:
+        MB_ICONINFORMATION = 0x40
+        MB_ICONERROR = 0x10
+        ctypes.windll.user32.MessageBoxW(
+            None, str(text), str(title), MB_ICONERROR if error else MB_ICONINFORMATION
+        )
+    except Exception:  # noqa: BLE001
+        logging.debug("Окно с сообщением не показалось", exc_info=True)
+
+
 def run_install(cfg: dict, start: bool = True) -> int:
     """Разложить себя по местам. Ровно то, что делали install_*.bat."""
     setup_logging(cfg, "install.log")
@@ -686,8 +723,12 @@ def run_install(cfg: dict, start: bool = True) -> int:
         local_cfg = source.parent / "config.json"
         if local_cfg.exists() and local_cfg.resolve() != (target.parent / "config.json").resolve():
             shutil.copy2(local_cfg, target.parent / "config.json")
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logging.exception("Не удалось скопировать себя в %s", target)
+        show_message(
+            f"Не удалось установить программу.\n\n{exc}\n\nПодробности: {app_dir() / 'install.log'}",
+            error=True,
+        )
         return 1
 
     ok_run = _register_autostart(target)
@@ -699,9 +740,24 @@ def run_install(cfg: dict, start: bool = True) -> int:
         try:
             flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
             subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags, close_fds=True)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logging.exception("Не удалось запустить установленную копию")
+            show_message(f"Программа установлена, но не запустилась.\n\n{exc}", error=True)
             return 1
+
+    if ok_run:
+        show_message(
+            "Программа установлена и уже работает.\n\n"
+            "Она будет запускаться сама при входе в Windows.\n"
+            "На рабочем столе появился ярлык «Oktell» — открывайте Oktell через него.\n\n"
+            "Ничего настраивать не нужно."
+        )
+    else:
+        show_message(
+            "Программа скопирована, но не смогла прописаться в автозапуск.\n"
+            f"Подробности: {app_dir() / 'install.log'}",
+            error=True,
+        )
     return 0 if ok_run else 1
 
 

@@ -13,6 +13,9 @@ if "%OKTELL_GUARD_AGENT_TOKEN%"=="" (
   echo AGENT_TOKEN = "%OKTELL_GUARD_AGENT_TOKEN%" > _build_token.py
   echo [ok] Токен агента вшит в сборку.
 )
+REM Адрес сервера тоже вшивается: у сотрудника нет конфига, и без адреса агент
+REM не знает, куда обращаться — первая установка на живой машине на это и села.
+echo SERVER_URL = "%OKTELL_GUARD_SERVER%" >> _build_token.py
 
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller

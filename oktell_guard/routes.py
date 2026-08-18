@@ -120,13 +120,33 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
     # ── вспомогательное ─────────────────────────────────────────────────────
 
     def agent_authorized() -> bool:
+        """Пропуск агента: общий токен сборки ИЛИ личный токен сотрудника.
+
+        Личные обязательно: файл, скачанный из раздела, несёт в имени именно
+        личный токен, и агент шлёт его. Пока проверка знала только общий,
+        КАЖДЫЙ скачанный агент получал 401 и был мёртв с рождения — это и
+        случилось на первой живой установке.
+        """
+        provided = (request.headers.get('X-Agent-Token') or '').strip()
         expected = (os.getenv(AGENT_TOKEN_ENV) or '').strip()
+
         if not expected:
             # Токен не задан — раздел ещё настраивают. Пускаем, но говорим об
             # этом в лог: молча работать «без охраны» хуже, чем шумно.
             logging.warning("%s не задан — агентские роуты открыты", AGENT_TOKEN_ENV)
             return True
-        return (request.headers.get('X-Agent-Token') or '').strip() == expected
+        if not provided:
+            return False
+        if secrets.compare_digest(provided, expected):
+            return True
+
+        digest = hashlib.sha256(provided.encode('utf-8')).hexdigest()
+        try:
+            with db._get_cursor() as cursor:
+                return bool(queries.user_by_token(cursor, digest))
+        except Exception:
+            logging.exception("Ограничитель Перезвона: не удалось проверить личный токен")
+            return False
 
     def agent_route(rule, methods=('GET',), public=False):
         """public=True — ручка без токена.
