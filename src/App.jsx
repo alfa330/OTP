@@ -11766,10 +11766,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const BREAK_HANDOVER_OVERLAP_MIN = 5;
             const BREAK_PAIR_OVERLAP_BASE_MIN = 5;
             const BREAK_PAIR_OVERLAP_SHARE = 3;
-            const BREAK_WEIGHT_CONCURRENCY = 60;
-            const BREAK_WEIGHT_PAIR_EXCESS = 40;
-            const BREAK_WEIGHT_CROSS_GAP = 4;
-            const BREAK_WEIGHT_OVERLAP = 2;
+            const BREAK_WEIGHT_CONCURRENCY = 300;
+            const BREAK_WEIGHT_PAIR_EXCESS = 200;
+            const BREAK_WEIGHT_CROSS_GAP = 200;
+            const BREAK_WEIGHT_OVERLAP = 1;
+            const BREAK_WEIGHT_EVENNESS = 10;
+            // Слабое притяжение к уже стоящей позиции: решает только при равном счёте.
+            const BREAK_WEIGHT_KEEP_PLACE = 1;
+            // Равномерность: перерывы смены подбираются совместно, цель — одинаковые
+            // рабочие отрезки между ними. BREAK_EVEN_WINDOW_SHARE — насколько перерыв
+            // может отойти от своей равномерной точки, BREAK_LAYOUT_PASSES — сколько
+            // раз пройтись по операторам направления (за один проход последним места
+            // не остаётся). Зеркало SHIFT_BREAK_* на сервере.
+            const BREAK_EVEN_WINDOW_SHARE = 0.30;
+            const BREAK_LAYOUT_PASSES = 3;
             // Время рабочего часового пояса, а не браузера: СВ может сидеть в другом городе,
             // и «прошедшим» перерыв должен считаться одинаково у него и на сервере.
             const almatyNowParts = () => {
@@ -13142,6 +13152,118 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // Пересечения с чужими перерывами больше не запрещены наглухо: сначала
             // отсеиваются нарушения правил, среди оставшихся выигрывает точка,
             // ближайшая к равномерной.
+            // Старты при идеально равномерной раскладке: рабочие отрезки одинаковые.
+            function evenBreakStarts(winStart, segEnd, breakDurations) {
+            const durations = (breakDurations || []).map(Number).filter(v => Number.isFinite(v) && v > 0);
+            const span = Number(segEnd) - Number(winStart);
+            if (durations.length === 0 || span <= 0) return { starts: [], run: 0 };
+            const run = (span - durations.reduce((sum, v) => sum + v, 0)) / (durations.length + 1);
+            const starts = [];
+            let position = Number(winStart);
+            durations.forEach(length => {
+                position += run;
+                starts.push(position);
+                position += length;
+            });
+            return { starts, run };
+            }
+
+            function breakPositionCost(interval, neighbors) {
+            return breakConcurrencyPenaltyMinutes(interval, neighbors) * BREAK_WEIGHT_CONCURRENCY
+                + breakPairOverlapExcessMinutes(interval, neighbors) * BREAK_WEIGHT_PAIR_EXCESS
+                + breakCrossGapDeficitMinutes(interval, neighbors) * BREAK_WEIGHT_CROSS_GAP
+                + breakTotalOverlapMinutes(interval, neighbors) * BREAK_WEIGHT_OVERLAP;
+            }
+
+            // Совместный подбор стартов всех перерывов смены (зеркало сервера):
+            // сдвиг одного перерыва тянет за собой соседние, и смена не разваливается
+            // на «дыру в четыре часа и три перерыва подряд».
+            function planBreakPositions(winStart, segEnd, breakDurations, neighbors, ownIntervals = null, edgeMargin = 0, minGap = 0, desiredStarts = null) {
+            const step = 5;
+            const durations = (breakDurations || []).map(Number).filter(v => Number.isFinite(v) && v > 0);
+            const count = durations.length;
+            if (count === 0) return [];
+            const { starts: idealStarts, run: idealRun } = evenBreakStarts(winStart, segEnd, durations);
+            if (idealStarts.length === 0) return null;
+            // Промежуток направления (#112) требует отойти дальше обычного — ровно
+            // на него окно и расширяем. Без настройки (0) окно прежнее.
+            let crossGap = 0;
+            (neighbors || []).forEach(item => {
+                const value = Number(item?.gap || 0);
+                if (Number.isFinite(value) && value > crossGap) crossGap = Math.round(value);
+            });
+            const window = Math.max(step, Math.round(idealRun * BREAK_EVEN_WINDOW_SHARE)) + crossGap;
+            const own = ownIntervals || [];
+            const desired = desiredStarts || [];
+
+            const grids = [];
+            const costs = [];
+            for (let idx = 0; idx < count; idx += 1) {
+                const { lower, upper } = getBreakStartBoundsForIndex(winStart, segEnd, durations, idx, edgeMargin, minGap);
+                let low = Math.ceil(Math.max(lower, idealStarts[idx] - window) / step) * step;
+                let high = Math.floor(Math.min(upper, idealStarts[idx] + window) / step) * step;
+                if (high < low) {
+                    low = Math.ceil(lower / step) * step;
+                    high = Math.floor(upper / step) * step;
+                    if (high < low) return null;
+                }
+                const grid = [];
+                const row = [];
+                for (let start = low; start <= high; start += step) {
+                    grid.push(start);
+                    const interval = { start, end: start + durations[idx] };
+                    if (own.length > 0 && breakTotalOverlapMinutes(interval, own) > 0) { row.push(null); continue; }
+                    let cost = breakPositionCost(interval, neighbors);
+                    // Уже стоящий в графике будущий перерыв при прочих равных не двигаем.
+                    if (desired[idx] !== undefined && desired[idx] !== null) {
+                        cost += Math.abs(start - Number(desired[idx])) * BREAK_WEIGHT_KEEP_PLACE;
+                    }
+                    row.push(cost);
+                }
+                grids.push(grid);
+                costs.push(row);
+            }
+
+            const evenness = (run) => Math.abs(run - idealRun) * BREAK_WEIGHT_EVENNESS;
+            let bestCost = grids[0].map((start, j) => (costs[0][j] === null ? null : costs[0][j] + evenness(start - winStart)));
+            const backRefs = [];
+            for (let idx = 1; idx < count; idx += 1) {
+                const current = new Array(grids[idx].length).fill(null);
+                const refs = new Array(grids[idx].length).fill(null);
+                for (let j = 0; j < grids[idx].length; j += 1) {
+                    if (costs[idx][j] === null) continue;
+                    let bestValue = null;
+                    let bestRef = null;
+                    for (let k = 0; k < grids[idx - 1].length; k += 1) {
+                        if (bestCost[k] === null) continue;
+                        const run = grids[idx][j] - (grids[idx - 1][k] + durations[idx - 1]);
+                        if (run < minGap) continue;
+                        const value = bestCost[k] + evenness(run);
+                        if (bestValue === null || value < bestValue) { bestValue = value; bestRef = k; }
+                    }
+                    if (bestRef === null) continue;
+                    current[j] = bestValue + costs[idx][j];
+                    refs[j] = bestRef;
+                }
+                bestCost = current;
+                backRefs.push(refs);
+            }
+
+            let finalValue = null;
+            let finalIndex = null;
+            for (let j = 0; j < grids[count - 1].length; j += 1) {
+                if (bestCost[j] === null) continue;
+                const value = bestCost[j] + evenness(segEnd - (grids[count - 1][j] + durations[count - 1]));
+                if (finalValue === null || value < finalValue) { finalValue = value; finalIndex = j; }
+            }
+            if (finalIndex === null) return null;
+
+            const indexes = new Array(count).fill(0);
+            indexes[count - 1] = finalIndex;
+            for (let idx = count - 1; idx > 0; idx -= 1) indexes[idx - 1] = backRefs[idx - 1][indexes[idx]];
+            return indexes.map((gridIndex, idx) => grids[idx][gridIndex]);
+            }
+
             function findBestBreakStart(desiredStart, length, lowerBound, upperBound, neighbors, selfIntervals = null) {
             const step = 5;
             const len = Number(length || 0);
@@ -13235,6 +13357,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 const breakDurations = preparedBreaks.map(b => b.length);
                 const { edgeMargin, minGap } = getBreakLayoutSpacing(winStart, segEnd, breakDurations);
+
+                // Основной путь: перерывы смены подбираются совместно, цель — одинаковые
+                // рабочие отрезки. Пошаговый перебор ниже остаётся запасным.
+                const plannedStarts = planBreakPositions(winStart, segEnd, breakDurations, neighbors, ownIntervals, edgeMargin, minGap, preparedBreaks.map(b => b.start));
+                if (plannedStarts && plannedStarts.length === breakDurations.length) {
+                    const placed = plannedStarts.map((start, idx) => ({ start, end: start + breakDurations[idx] }));
+                    placed.forEach(item => ownIntervals.push({ ...item }));
+                    seg.breaks = protectedBreaks.concat(placed).sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                    continue;
+                }
+
                 const newBreaks = [];
                 for (let idx = 0; idx < preparedBreaks.length; idx += 1) {
                 const b = preparedBreaks[idx];
@@ -13265,6 +13398,65 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 seg.breaks = protectedBreaks.concat(newBreaks).sort((a, b) => (a.start - b.start) || (a.end - b.end));
             }
+            }
+
+            // Оценка целого прохода раскладки (зеркало сервера): сперва нарушения
+            // правил, потом неравномерность рабочих отрезков.
+            function breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection) {
+            let violations = 0;
+            let unevenness = 0;
+            jobs.forEach(job => {
+                const neighbors = buildOccupiedIntervalsForDate(
+                    allOperators, job.date, job.op.id, job.op?.direction,
+                    getDirectionBreakScopeKey, getCrossOperatorGapForDirection
+                );
+                const breaks = [];
+                (job.op.shifts?.[job.date] ?? []).forEach(seg => {
+                    (seg.breaks ?? []).forEach(b => breaks.push({ start: Number(b.start), end: Number(b.end) }));
+                });
+                breaks.forEach(item => {
+                    violations += breakConcurrencyPenaltyMinutes(item, neighbors) * BREAK_WEIGHT_CONCURRENCY
+                        + breakPairOverlapExcessMinutes(item, neighbors) * BREAK_WEIGHT_PAIR_EXCESS;
+                });
+                if (breaks.length >= 2) {
+                    const ordered = breaks.slice().sort((a, b) => a.start - b.start);
+                    const runs = ordered.slice(1).map((b, i) => b.start - ordered[i].end);
+                    const average = runs.reduce((sum, v) => sum + v, 0) / runs.length;
+                    unevenness += runs.reduce((sum, v) => sum + Math.abs(v - average), 0);
+                }
+            });
+            return [violations, Math.round(unevenness * 1000) / 1000];
+            }
+
+            // Раскладка пачки смен в несколько проходов: за один проход тем, кого
+            // раскладывают последними, свободного места уже не остаётся. Проходы
+            // улучшают картину немонотонно, поэтому оставляем лучший.
+            function runBreakLayoutPasses(allOperators, pairs, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection) {
+            const jobs = [];
+            pairs.forEach(({ opId, date }) => {
+                const op = allOperators.find(x => x.id === opId);
+                if (!op || !Array.isArray(op.shifts?.[date]) || op.shifts[date].length === 0) return;
+                jobs.push({ op, date });
+            });
+            if (jobs.length === 0) return;
+            const capture = () => jobs.map(job => (job.op.shifts[job.date] ?? []).map(seg => (seg.breaks ?? []).map(b => ({ ...b }))));
+            const restore = (snapshot) => jobs.forEach((job, i) => {
+                (job.op.shifts[job.date] ?? []).forEach((seg, j) => { seg.breaks = (snapshot[i]?.[j] ?? []).map(b => ({ ...b })); });
+            });
+            const runPass = () => jobs.forEach(job => {
+                try {
+                    adjustBreaksForOperatorOnDate(job.op, job.date, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection);
+                } catch (e) { /* одна смена не должна ронять раскладку остальных */ }
+            });
+            runPass();
+            let bestScore = breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+            let bestState = capture();
+            for (let pass = 1; pass < BREAK_LAYOUT_PASSES; pass += 1) {
+                runPass();
+                const score = breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+                if (compareBreakScores(score, bestScore) < 0) { bestScore = score; bestState = capture(); }
+            }
+            restore(bestState);
             }
 
             function mergeSegments(segments, directionValue = null, getBreakRuleRangesForDirection = null) {
@@ -18502,14 +18694,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                       touchedPairs.add(makeSelectedCellKey(target.opId, target.date));
                     });
 
+                    const layoutPairs = [];
                     preparedTargets.forEach(target => {
                       const pairKey = makeSelectedCellKey(target.opId, target.date);
                       if (!touchedPairs.has(pairKey)) return;
-                      const op = copy.find(x => x.id === target.opId);
-                      if (!op) return;
-                      try { adjustBreaksForOperatorOnDate(op, target.date, copy, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection); } catch (e) { /* ignore */ }
+                      layoutPairs.push({ opId: target.opId, date: target.date });
                       touchedPairs.delete(pairKey);
                     });
+                    runBreakLayoutPasses(copy, layoutPairs, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection);
                     return copy;
                   });
               

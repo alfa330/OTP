@@ -1,5 +1,6 @@
 import ast
 import math
+import random
 from functools import lru_cache
 from datetime import datetime
 import re
@@ -102,6 +103,10 @@ BREAK_ADJUST_METHODS = (
     "_break_pair_overlap_excess_minutes",
     "_break_concurrency_penalty_minutes",
     "_break_cross_gap_deficit_minutes",
+    "_break_layout_score",
+    "_even_break_starts",
+    "_break_position_cost",
+    "_plan_break_positions",
     "_find_best_break_start",
     "_place_break_durations_centered_minutes",
     "_fit_break_durations_to_window",
@@ -138,6 +143,10 @@ BREAK_RULE_CONSTANT_NAMES = (
     "SHIFT_BREAK_WEIGHT_PAIR_EXCESS",
     "SHIFT_BREAK_WEIGHT_CROSS_GAP",
     "SHIFT_BREAK_WEIGHT_OVERLAP",
+    "SHIFT_BREAK_WEIGHT_EVENNESS",
+    "SHIFT_BREAK_WEIGHT_KEEP_PLACE",
+    "SHIFT_BREAK_EVEN_WINDOW_SHARE",
+    "SHIFT_BREAK_LAYOUT_PASSES",
 )
 BREAK_RULE_CONSTANTS = _module_constants(DATABASE_PATH, BREAK_RULE_CONSTANT_NAMES)
 
@@ -370,7 +379,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertGreaterEqual(21 * 60 - result[-1]["end"], 90)
         self.assertTrue(all(b["start"] - a["end"] >= 45 for a, b in zip(result, result[1:])))
 
-    def test_database_break_adjustment_prefers_good_overlap_slot_over_edge_violation(self):
+    def test_break_keeps_its_even_point_and_overlap_stays_within_the_limit(self):
         dummy = _make_break_adjust_dummy(occupied=[{"start": 16 * 60 + 15, "end": 16 * 60 + 45}])
 
         result = dummy._adjust_shift_breaks_against_occupied_tx(
@@ -388,9 +397,23 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         lunch = result[1]
         colleague = {"start": 16 * 60 + 15, "end": 16 * 60 + 45}
-        self.assertEqual(dummy._break_total_overlap_minutes(lunch, [colleague]), 0)
+        # Обед не убегает от перерыва коллеги: пересечение разрешено в пределах
+        # правила (30 мин → 15), а равномерность важнее свободного места рядом.
+        self.assertLessEqual(
+            dummy._break_total_overlap_minutes(lunch, [colleague]),
+            dummy._break_allowed_pair_overlap_minutes(30, 30)
+        )
+        self.assertEqual(dummy._break_pair_overlap_excess_minutes(lunch, [colleague]), 0)
         self.assertGreaterEqual(lunch["start"] - result[0]["end"], 45)
         self.assertGreaterEqual(result[2]["start"] - lunch["end"], 45)
+        # Рабочие отрезки между перерывами остаются примерно одинаковыми.
+        runs = [
+            result[0]["start"] - 12 * 60,
+            result[1]["start"] - result[0]["end"],
+            result[2]["start"] - result[1]["end"],
+            21 * 60 - result[2]["end"],
+        ]
+        self.assertLessEqual(max(runs) - min(runs), 30)
 
     def test_database_break_adjustment_keeps_cross_operator_gap_from_other_operators(self):
         # Перерыв коллеги 16:15-16:45 и требование держать 10 минут между
@@ -520,6 +543,69 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         self.assertTrue(
             all(b["start"] - a["end"] >= 120 for a, b in zip(result, result[1:])),
             result,
+        )
+
+    def test_displaced_break_drags_its_neighbours_instead_of_leaving_a_hole(self):
+        """
+        Возврат по #175: обед было некуда поставить, он уезжал на два часа, а
+        соседние перерывы оставались на месте — получалось «275 минут работы
+        подряд, потом три перерыва через 45 минут». Смена раскладывается целиком.
+        """
+        seg_start, seg_end = 9 * 60, 21 * 60
+        durations = [15, 30, 15, 15]
+        # Естественное окно обеда занято коллегами наглухо: пары перерывов стоят
+        # так, что третьим туда не встать.
+        colleagues = []
+        for start in range(12 * 60 + 30, 15 * 60, 15):
+            colleagues.append({"start": start, "end": start + 30})
+            colleagues.append({"start": start, "end": start + 30})
+        dummy = _make_break_adjust_dummy(occupied=[dict(x) for x in colleagues])
+        planned = dummy._place_break_durations_centered_minutes(seg_start, seg_end, durations)
+        result = dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date="2026-08-20",
+            start_time="09:00",
+            end_time="21:00",
+            breaks=planned,
+            cross_gap_minutes=0,
+        )
+
+        self.assertEqual([item["end"] - item["start"] for item in result], durations)
+        runs = [result[0]["start"] - seg_start]
+        runs.extend(nxt["start"] - cur["end"] for cur, nxt in zip(result, result[1:]))
+        runs.append(seg_end - result[-1]["end"])
+        # Рабочие отрезки остаются соизмеримыми: ни «дыры» на четыре часа,
+        # ни двух перерывов подряд через минимальные 45 минут.
+        self.assertLessEqual(max(runs) - min(runs), 80, runs)
+        self.assertGreaterEqual(min(runs), 60, runs)
+
+    def test_even_break_starts_split_the_shift_into_equal_work_runs(self):
+        dummy = _make_break_adjust_dummy()
+        starts, run = dummy._even_break_starts(9 * 60, 21 * 60, [15, 30, 15, 15])
+        self.assertEqual(len(starts), 4)
+        self.assertAlmostEqual(run, ((12 * 60) - 75) / 5.0)
+        # Между соседними перерывами ровно один рабочий отрезок.
+        self.assertAlmostEqual(starts[1] - (starts[0] + 15), run)
+        self.assertAlmostEqual(starts[2] - (starts[1] + 30), run)
+        self.assertAlmostEqual((21 * 60) - (starts[3] + 15), run)
+
+    def test_layout_score_prefers_fewer_violations_over_even_runs(self):
+        # Повторные проходы улучшают раскладку немонотонно, поэтому берётся
+        # лучший проход — и «лучший» это сначала правила, потом равномерность.
+        dummy = _make_break_adjust_dummy()
+        meta = {1: (11, "2026-08-20", "основа"), 2: (12, "2026-08-20", "основа")}
+        clean = {
+            1: [{"start": 600, "end": 630}],
+            2: [{"start": 700, "end": 730}],
+        }
+        colliding = {
+            1: [{"start": 600, "end": 630}],
+            2: [{"start": 600, "end": 630}],
+        }
+        self.assertLess(
+            dummy._break_layout_score(clean, meta),
+            dummy._break_layout_score(colliding, meta),
         )
 
     def test_crowded_direction_respects_pair_overlap_limit(self):
@@ -653,6 +739,9 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "_ws_break_pair_overlap_excess_minutes",
             "_ws_break_concurrency_penalty_minutes",
             "_ws_break_cross_gap_deficit_minutes",
+            "_ws_even_break_starts",
+            "_ws_break_position_cost",
+            "_ws_plan_break_positions",
             "_ws_find_best_break_start",
             "_ws_adjust_breaks_for_operator_on_date",
         ):
@@ -700,6 +789,10 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "breakPairOverlapExcessMinutes",
             "breakConcurrencyPenaltyMinutes",
             "breakCrossGapDeficitMinutes",
+            "evenBreakStarts",
+            "planBreakPositions",
+            "runBreakLayoutPasses",
+            "breakLayoutScore",
         ):
             self.assertIn(marker, app_source, marker)
         # Значения правил обязаны совпадать с серверными.
@@ -721,8 +814,102 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             ("BREAK_WEIGHT_PAIR_EXCESS", "SHIFT_BREAK_WEIGHT_PAIR_EXCESS"),
             ("BREAK_WEIGHT_CROSS_GAP", "SHIFT_BREAK_WEIGHT_CROSS_GAP"),
             ("BREAK_WEIGHT_OVERLAP", "SHIFT_BREAK_WEIGHT_OVERLAP"),
+            ("BREAK_WEIGHT_EVENNESS", "SHIFT_BREAK_WEIGHT_EVENNESS"),
+            ("BREAK_WEIGHT_KEEP_PLACE", "SHIFT_BREAK_WEIGHT_KEEP_PLACE"),
+            ("BREAK_LAYOUT_PASSES", "SHIFT_BREAK_LAYOUT_PASSES"),
         ):
             self.assertIn(f"const {js_name} = {BREAK_RULE_CONSTANTS[py_name]};", app_source, js_name)
+        self.assertIn(
+            f"const BREAK_EVEN_WINDOW_SHARE = {BREAK_RULE_CONSTANTS['SHIFT_BREAK_EVEN_WINDOW_SHARE']:.2f};",
+            app_source,
+        )
+        # Импорт Excel обязан жить на тех же константах, а не на своей копии.
+        bot_source = BOT_PATH.read_text(encoding="utf-8-sig")
+        for name in (
+            "SHIFT_BREAK_WEIGHT_EVENNESS",
+            "SHIFT_BREAK_EVEN_WINDOW_SHARE",
+            "SHIFT_BREAK_LAYOUT_PASSES",
+        ):
+            self.assertIn(f"    {name},", bot_source, name)
+
+    def test_import_and_server_place_breaks_identically_on_random_shifts(self):
+        """
+        Раскладка живёт в трёх местах. Один сценарий расхождение не ловит —
+        гоняем сотню случайных: смена, норма, толпа коллег, промежуток направления.
+        """
+        namespace = {
+            "math": math,
+            "datetime": datetime,
+            **BREAK_RULE_CONSTANTS,
+        }
+        for function_name in (
+            "_ws_break_total_overlap_minutes",
+            "_ws_break_allowed_pair_overlap_minutes",
+            "_ws_break_pair_overlap_excess_minutes",
+            "_ws_break_concurrency_penalty_minutes",
+            "_ws_break_cross_gap_deficit_minutes",
+            "_ws_break_layout_spacing",
+            "_ws_break_start_bounds_for_index",
+            "_ws_even_break_starts",
+            "_ws_break_position_cost",
+            "_ws_plan_break_positions",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+
+        dummy = _make_break_adjust_dummy()
+        rnd = random.Random(20260818)
+        shift_starts = (0, 5 * 60, 8 * 60, 9 * 60, 10 * 60, 13 * 60, 20 * 60, 22 * 60)
+        shift_lengths = (300, 360, 420, 480, 540, 660, 720, 780, 900)
+        norms = ([15], [15, 15], [30], [30, 30], [15, 30, 15],
+                 [15, 30, 15, 15], [30, 30, 30], [15, 30, 15, 15, 30, 15])
+        for case_index in range(100):
+            seg_start = rnd.choice(shift_starts)
+            seg_end = seg_start + rnd.choice(shift_lengths)
+            durations = list(rnd.choice(norms))
+            gap = rnd.choice((0, 0, 0, 10, 20))
+            neighbors = []
+            for _ in range(rnd.randint(0, 14)):
+                start = rnd.randrange(max(0, seg_start - 120), seg_end + 120, 5)
+                neighbors.append({
+                    "start": start,
+                    "end": start + rnd.choice((15, 30)),
+                    "gap": gap,
+                })
+            own = []
+            if rnd.random() < 0.25:
+                start = rnd.randrange(seg_start, max(seg_start + 5, seg_end - 30), 5)
+                own.append({"start": start, "end": start + 15})
+            desired = None
+            if rnd.random() < 0.5:
+                desired = [rnd.randrange(seg_start, seg_end, 5) for _ in durations]
+
+            edge_margin, min_gap = dummy._break_layout_spacing(seg_start, seg_end, durations)
+            server = dummy._plan_break_positions(
+                win_start=seg_start,
+                seg_end=seg_end,
+                break_durations=durations,
+                neighbor_intervals=neighbors,
+                own_intervals=own,
+                edge_margin=edge_margin,
+                min_gap=min_gap,
+                desired_starts=desired,
+            )
+            imported = namespace["_ws_plan_break_positions"](
+                win_start=seg_start,
+                seg_end=seg_end,
+                break_durations=durations,
+                neighbor_intervals=neighbors,
+                own_intervals=own,
+                edge_margin=edge_margin,
+                min_gap=min_gap,
+                desired_starts=desired,
+            )
+            self.assertEqual(
+                server,
+                imported,
+                f"сценарий {case_index}: {seg_start}-{seg_end} {durations} "
+                f"соседей {len(neighbors)} промежуток {gap}",
+            )
 
     def test_import_simulation_tags_other_operators_breaks_with_direction_gap(self):
         namespace = {}

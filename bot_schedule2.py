@@ -54,6 +54,10 @@ from database import (
     SHIFT_BREAK_WEIGHT_PAIR_EXCESS,
     SHIFT_BREAK_WEIGHT_CROSS_GAP,
     SHIFT_BREAK_WEIGHT_OVERLAP,
+    SHIFT_BREAK_WEIGHT_EVENNESS,
+    SHIFT_BREAK_WEIGHT_KEEP_PLACE,
+    SHIFT_BREAK_EVEN_WINDOW_SHARE,
+    SHIFT_BREAK_LAYOUT_PASSES,
     TECHNICAL_ISSUE_REASONS,
     IT_TICKET_CATALOG,
     IT_TICKET_DEFAULT_PROFILE,
@@ -34304,6 +34308,137 @@ def _ws_break_cross_gap_deficit_minutes(interval, neighbor_intervals):
     return total
 
 
+def _ws_even_break_starts(win_start, seg_end, break_durations):
+    """Старты при идеально равномерной раскладке (зеркало сервера)."""
+    durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+    span = int(seg_end) - int(win_start)
+    if not durations or span <= 0:
+        return [], 0.0
+    run = (span - sum(durations)) / float(len(durations) + 1)
+    starts = []
+    position = float(win_start)
+    for length in durations:
+        position += run
+        starts.append(position)
+        position += length
+    return starts, run
+
+
+def _ws_break_position_cost(interval, neighbor_intervals):
+    return (
+        _ws_break_concurrency_penalty_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CONCURRENCY
+        + _ws_break_pair_overlap_excess_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_PAIR_EXCESS
+        + _ws_break_cross_gap_deficit_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CROSS_GAP
+        + _ws_break_total_overlap_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_OVERLAP
+    )
+
+
+def _ws_plan_break_positions(win_start, seg_end, break_durations, neighbor_intervals,
+                             own_intervals=None, edge_margin=0, min_gap=0, desired_starts=None):
+    """
+    Совместный подбор стартов всех перерывов смены (зеркало сервера):
+    цель — одинаковые рабочие отрезки между перерывами.
+    """
+    step = 5
+    durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+    count = len(durations)
+    if count == 0:
+        return []
+    ideal_starts, ideal_run = _ws_even_break_starts(win_start, seg_end, durations)
+    if not ideal_starts:
+        return None
+    # Промежуток направления (#112) требует отойти дальше обычного — ровно на него
+    # окно и расширяем. Без настройки (0) окно прежнее.
+    cross_gap = 0
+    for item in (neighbor_intervals or []):
+        try:
+            cross_gap = max(cross_gap, int(item.get('gap') or 0))
+        except Exception:
+            continue
+    window = max(step, int(round(ideal_run * SHIFT_BREAK_EVEN_WINDOW_SHARE))) + cross_gap
+    own = list(own_intervals or [])
+    desired = list(desired_starts or [])
+
+    grids = []
+    costs = []
+    for idx in range(count):
+        lower, upper = _ws_break_start_bounds_for_index(
+            win_start, seg_end, durations, idx, edge_margin, min_gap
+        )
+        low = int(math.ceil(float(max(lower, ideal_starts[idx] - window)) / step) * step)
+        high = int(math.floor(float(min(upper, ideal_starts[idx] + window)) / step) * step)
+        if high < low:
+            low = int(math.ceil(float(lower) / step) * step)
+            high = int(math.floor(float(upper) / step) * step)
+            if high < low:
+                return None
+        grid = list(range(low, high + 1, step))
+        row = []
+        for start in grid:
+            interval = {'start': start, 'end': start + durations[idx]}
+            if own and _ws_break_total_overlap_minutes(interval, own) > 0:
+                row.append(None)
+                continue
+            cost = _ws_break_position_cost(interval, neighbor_intervals)
+            # Уже стоящий в графике будущий перерыв при прочих равных не двигаем.
+            if desired and idx < len(desired) and desired[idx] is not None:
+                cost += abs(start - int(desired[idx])) * SHIFT_BREAK_WEIGHT_KEEP_PLACE
+            row.append(cost)
+        grids.append(grid)
+        costs.append(row)
+
+    def evenness(run_minutes):
+        return abs(run_minutes - ideal_run) * SHIFT_BREAK_WEIGHT_EVENNESS
+
+    best_cost = [
+        (costs[0][j] + evenness(start - win_start)) if costs[0][j] is not None else None
+        for j, start in enumerate(grids[0])
+    ]
+    back_refs = []
+    for idx in range(1, count):
+        current = [None] * len(grids[idx])
+        refs = [None] * len(grids[idx])
+        for j, start in enumerate(grids[idx]):
+            if costs[idx][j] is None:
+                continue
+            best_value = None
+            best_ref = None
+            for k, prev_start in enumerate(grids[idx - 1]):
+                if best_cost[k] is None:
+                    continue
+                run = start - (prev_start + durations[idx - 1])
+                if run < min_gap:
+                    continue
+                value = best_cost[k] + evenness(run)
+                if best_value is None or value < best_value:
+                    best_value = value
+                    best_ref = k
+            if best_ref is None:
+                continue
+            current[j] = best_value + costs[idx][j]
+            refs[j] = best_ref
+        best_cost = current
+        back_refs.append(refs)
+
+    final_value = None
+    final_index = None
+    for j, start in enumerate(grids[count - 1]):
+        if best_cost[j] is None:
+            continue
+        value = best_cost[j] + evenness(seg_end - (start + durations[count - 1]))
+        if final_value is None or value < final_value:
+            final_value = value
+            final_index = j
+    if final_index is None:
+        return None
+
+    indexes = [0] * count
+    indexes[count - 1] = final_index
+    for idx in range(count - 1, 0, -1):
+        indexes[idx - 1] = back_refs[idx - 1][indexes[idx]]
+    return [grids[idx][indexes[idx]] for idx in range(count)]
+
+
 def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, neighbor_intervals,
                               self_intervals=None):
     step = 5
@@ -34416,6 +34551,30 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
 
         break_durations = [int(b['length']) for b in prepared_breaks]
         edge_margin, min_gap = _ws_break_layout_spacing(win_start, seg_end, break_durations)
+
+        # Основной путь — совместный подбор; жадный перебор ниже остаётся запасным.
+        planned_starts = _ws_plan_break_positions(
+            win_start=win_start,
+            seg_end=seg_end,
+            break_durations=break_durations,
+            neighbor_intervals=neighbors,
+            own_intervals=own_intervals,
+            edge_margin=edge_margin,
+            min_gap=min_gap,
+            desired_starts=[int(b['start']) for b in prepared_breaks]
+        )
+        if planned_starts:
+            placed = [
+                {'start': int(start), 'end': int(start) + int(break_durations[idx])}
+                for idx, start in enumerate(planned_starts)
+            ]
+            own_intervals.extend(dict(item) for item in placed)
+            seg['breaks'] = sorted(
+                protected + placed,
+                key=lambda item: (int(item['start']), int(item['end']))
+            )
+            continue
+
         new_breaks = []
         for idx, b in enumerate(prepared_breaks):
             length = int(b['length'])
@@ -34451,6 +34610,37 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
             protected + new_breaks,
             key=lambda item: (int(item['start']), int(item['end']))
         )
+
+
+def _ws_break_layout_score(groups):
+    """
+    Оценка целого прохода раскладки (зеркало сервера): сперва нарушения правил,
+    потом неравномерность рабочих отрезков. Нужна, потому что повторные проходы
+    улучшают картину немонотонно — записываем лучший.
+
+    groups: {(scope_key, date_str): [(operator_id, [перерывы]), ...]}
+    """
+    violations = 0
+    unevenness = 0
+    for group in (groups or {}).values():
+        for index, (_operator_id, breaks) in enumerate(group):
+            neighbors = []
+            for other_index, (_other_id, other_breaks) in enumerate(group):
+                if other_index == index:
+                    continue
+                neighbors.extend({'start': int(x['start']), 'end': int(x['end'])} for x in other_breaks)
+            for item in breaks:
+                interval = {'start': int(item['start']), 'end': int(item['end'])}
+                violations += (
+                    _ws_break_concurrency_penalty_minutes(interval, neighbors) * SHIFT_BREAK_WEIGHT_CONCURRENCY
+                    + _ws_break_pair_overlap_excess_minutes(interval, neighbors) * SHIFT_BREAK_WEIGHT_PAIR_EXCESS
+                )
+            if len(breaks) >= 2:
+                ordered = sorted(breaks, key=lambda item: int(item['start']))
+                runs = [int(nxt['start']) - int(cur['end']) for cur, nxt in zip(ordered, ordered[1:])]
+                average = sum(runs) / float(len(runs))
+                unevenness += sum(abs(run - average) for run in runs)
+    return (violations, round(unevenness, 3))
 
 
 def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_map,
@@ -34520,6 +34710,7 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 continue
         return (date_str, scope_key, best_flexibility, first_start, op_id_value)
 
+    replan_jobs = []
     for entry in sorted(list(entries or []), key=_entry_sort_key):
         op_id = int(entry.get('operator_id'))
         date_str = str(entry.get('date'))
@@ -34620,10 +34811,65 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 frozen_breaks_by_index=frozen_by_index,
                 planning_from_minutes=planning_from_minutes
             )
+        replan_jobs.append((entry, sim_op, date_str, frozen_by_index, planning_from_minutes))
 
-        # Записываем финальные перерывы (после антиколлизии) обратно в entry
+    # Повторные проходы: за один проход тем, кого раскладывают последними,
+    # свободного места уже не остаётся, и правило «максимум двое» страдает.
+    def _layout_groups():
+        groups = {}
+        for _entry, sim_op, job_date, _frozen, _plan_from in replan_jobs:
+            key = (str(scope_resolver(sim_op.get('direction'))), job_date)
+            breaks = []
+            for seg in (sim_op.get('shifts', {}).get(job_date) or []):
+                breaks.extend(
+                    {'start': int(b.get('start')), 'end': int(b.get('end'))}
+                    for b in (seg.get('breaks') or [])
+                    if b is not None and int(b.get('end', 0)) > int(b.get('start', 0))
+                )
+            groups.setdefault(key, []).append((int(sim_op.get('id') or 0), breaks))
+        return groups
+
+    def _capture_layout():
+        return [
+            [
+                [dict(b) for b in (seg.get('breaks') or [])]
+                for seg in (sim_op.get('shifts', {}).get(job_date) or [])
+            ]
+            for _entry, sim_op, job_date, _frozen, _plan_from in replan_jobs
+        ]
+
+    def _restore_layout(snapshot):
+        for job, seg_breaks in zip(replan_jobs, snapshot):
+            _entry, sim_op, job_date, _frozen, _plan_from = job
+            for seg, breaks in zip((sim_op.get('shifts', {}).get(job_date) or []), seg_breaks):
+                seg['breaks'] = [dict(b) for b in breaks]
+
+    best_score = _ws_break_layout_score(_layout_groups())
+    best_state = _capture_layout()
+    for _pass_index in range(max(0, int(SHIFT_BREAK_LAYOUT_PASSES) - 1)):
+        for _entry, sim_op, job_date, frozen_map, plan_from in replan_jobs:
+            if not (sim_op.get('shifts', {}).get(job_date) or []):
+                continue
+            _ws_adjust_breaks_for_operator_on_date(
+                sim_op,
+                job_date,
+                sim_operators,
+                scope_resolver,
+                break_rules_map=break_rules_map,
+                break_gaps_map=break_gaps_map,
+                frozen_breaks_by_index=frozen_map,
+                planning_from_minutes=plan_from
+            )
+        score = _ws_break_layout_score(_layout_groups())
+        if score < best_score:
+            best_score = score
+            best_state = _capture_layout()
+    _restore_layout(best_state)
+
+    # Записываем финальные перерывы (после антиколлизии) обратно в entry
+    for entry, sim_op, job_date, _frozen, _plan_from in replan_jobs:
         final_shifts = []
-        for seg in (sim_op.get('shifts', {}).get(date_str) or []):
+        for seg in (sim_op.get('shifts', {}).get(job_date) or []):
             final_shifts.append({
                 'start': str(seg.get('start') or ''),
                 'end': str(seg.get('end') or ''),

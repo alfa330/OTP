@@ -516,11 +516,29 @@ SHIFT_BREAK_HANDOVER_OVERLAP_MINUTES = 5
 SHIFT_BREAK_PAIR_OVERLAP_BASE_MINUTES = 5
 SHIFT_BREAK_PAIR_OVERLAP_SHARE = 3
 # Веса раскладки: сначала правила пересечений, затем пожелание держать дистанцию
-# (настройка направления), и уже потом — близость к равномерной точке.
-SHIFT_BREAK_WEIGHT_CONCURRENCY = 60
-SHIFT_BREAK_WEIGHT_PAIR_EXCESS = 40
-SHIFT_BREAK_WEIGHT_CROSS_GAP = 4
-SHIFT_BREAK_WEIGHT_OVERLAP = 2
+# (настройка направления), затем просто пересечение, и всё это против
+# неравномерности рабочих отрезков между перерывами.
+SHIFT_BREAK_WEIGHT_CONCURRENCY = 300
+SHIFT_BREAK_WEIGHT_PAIR_EXCESS = 200
+SHIFT_BREAK_WEIGHT_CROSS_GAP = 200
+SHIFT_BREAK_WEIGHT_OVERLAP = 1
+SHIFT_BREAK_WEIGHT_EVENNESS = 10
+# Слабое притяжение к уже стоящей позиции: решает только при равном счёте.
+SHIFT_BREAK_WEIGHT_KEEP_PLACE = 1
+
+# Равномерность (доработка задачи #175, 2026-08-18).
+# Перерывы смены подбираются НЕ по одному, а совместно: цель — одинаковые
+# рабочие отрезки между ними, а не близость каждого перерыва к своей точке.
+# Иначе сдвиг одного обеда на два часа оставлял соседние на месте и получалось
+# «275 минут работы подряд, потом три перерыва через 45 минут».
+#   * SHIFT_BREAK_EVEN_WINDOW_SHARE — насколько перерыв вообще может отойти от
+#     своей равномерной точки (доля рабочего отрезка). Это и гарантия
+#     равномерности, и сужение перебора;
+#   * SHIFT_BREAK_LAYOUT_PASSES — сколько раз пройтись по операторам направления.
+#     За один проход последним места не остаётся: 11 нарушений «трое дольше пяти
+#     минут» против нуля за три прохода (замер на боевых графиках).
+SHIFT_BREAK_EVEN_WINDOW_SHARE = 0.30
+SHIFT_BREAK_LAYOUT_PASSES = 3
 
 
 def _normalize_work_shift_type_value(value: Optional[str]) -> str:
@@ -34667,6 +34685,42 @@ class Database:
         # и «одновременно не больше двух», и лимит пересечения пары перерывов.
         return sorted(result, key=lambda item: (int(item['start']), int(item['end'])))
 
+    def _planned_occupied_for_shift(self, planned_by_shift, operator_id, shift_date, direction_key,
+                                    shift_meta):
+        """
+        Перерывы коллег направления из ещё не записанного плана.
+
+        Пересчёт раскладывает направление в несколько проходов и пишет в базу
+        только в конце, поэтому «занятое время» коллег на промежуточных проходах
+        живёт в памяти, а не в shift_breaks. Соседний день сдвигается на сутки —
+        так же, как это делает загрузка из базы.
+        """
+        if not planned_by_shift:
+            return []
+        date_obj = self._normalize_schedule_date(shift_date)
+        result = []
+        for other_shift_id, breaks in planned_by_shift.items():
+            meta = shift_meta.get(other_shift_id)
+            if not meta:
+                continue
+            other_operator_id, other_date, other_direction_key = meta
+            if int(other_operator_id) == int(operator_id):
+                continue
+            if other_direction_key != direction_key:
+                continue
+            offset_days = (self._normalize_schedule_date(other_date) - date_obj).days
+            if abs(offset_days) > 1:
+                continue
+            shift_minutes = offset_days * 1440
+            for item in self._normalize_break_intervals_soft(breaks, dedupe=False):
+                start = int(item['start']) + shift_minutes
+                end = int(item['end']) + shift_minutes
+                start = max(0, min(2880, start))
+                end = max(0, min(2880, end))
+                if end > start:
+                    result.append({'start': start, 'end': end})
+        return sorted(result, key=lambda item: (int(item['start']), int(item['end'])))
+
     def _merge_break_intervals(self, items):
         if not items:
             return []
@@ -34845,6 +34899,150 @@ class Database:
             if distance < gap:
                 total += gap - distance
         return total
+
+    def _even_break_starts(self, win_start, seg_end, break_durations):
+        """
+        Старты перерывов при идеально равномерной раскладке: рабочие отрезки
+        между ними одинаковые. Возвращает (список стартов, длина отрезка).
+        """
+        durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+        span = int(seg_end) - int(win_start)
+        if not durations or span <= 0:
+            return [], 0.0
+        work = span - sum(durations)
+        run = work / float(len(durations) + 1)
+        starts = []
+        position = float(win_start)
+        for length in durations:
+            position += run
+            starts.append(position)
+            position += length
+        return starts, run
+
+    def _break_position_cost(self, interval, neighbor_intervals):
+        """Штраф позиции перерыва: нарушения правил тяжелее пожеланий."""
+        return (
+            self._break_concurrency_penalty_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CONCURRENCY
+            + self._break_pair_overlap_excess_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_PAIR_EXCESS
+            + self._break_cross_gap_deficit_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_CROSS_GAP
+            + self._break_total_overlap_minutes(interval, neighbor_intervals) * SHIFT_BREAK_WEIGHT_OVERLAP
+        )
+
+    def _plan_break_positions(self, win_start, seg_end, break_durations, neighbor_intervals,
+                              own_intervals=None, edge_margin=0, min_gap=0, desired_starts=None):
+        """
+        Подбирает старты ВСЕХ перерывов смены сразу.
+
+        Каждый перерыв ищется рядом со своей равномерной точкой, а выбор внутри
+        этого окна делает динамика: цена = нарушения правил плюс отклонение
+        рабочих отрезков от равномерного. Так сдвиг одного перерыва тянет за
+        собой соседние, и смена не разваливается на «дыру и три подряд».
+
+        Возвращает список стартов или None, если разложить не удалось.
+        """
+        step = 5
+        durations = [int(x) for x in (break_durations or []) if int(x) > 0]
+        count = len(durations)
+        if count == 0:
+            return []
+        ideal_starts, ideal_run = self._even_break_starts(win_start, seg_end, durations)
+        if not ideal_starts:
+            return None
+        # Промежуток направления (#112) требует отойти дальше обычного — ровно на
+        # него окно и расширяем, иначе соблюдающая промежуток позиция не попадёт
+        # в перебор. Без настройки (0) окно прежнее.
+        cross_gap = 0
+        for item in (neighbor_intervals or []):
+            try:
+                cross_gap = max(cross_gap, int(item.get('gap') or 0))
+            except Exception:
+                continue
+        window = max(step, int(round(ideal_run * SHIFT_BREAK_EVEN_WINDOW_SHARE))) + cross_gap
+        own = [item for item in (own_intervals or [])]
+        desired = list(desired_starts or [])
+
+        grids = []
+        costs = []
+        for idx in range(count):
+            lower, upper = self._break_start_bounds_for_index(
+                win_start, seg_end, durations, idx, edge_margin, min_gap
+            )
+            near_lower = max(lower, ideal_starts[idx] - window)
+            near_upper = min(upper, ideal_starts[idx] + window)
+            low = int(math.ceil(float(near_lower) / step) * step)
+            high = int(math.floor(float(near_upper) / step) * step)
+            if high < low:
+                # Окно равномерности не пересеклось с отступами — держимся отступов.
+                low = int(math.ceil(float(lower) / step) * step)
+                high = int(math.floor(float(upper) / step) * step)
+                if high < low:
+                    return None
+            grid = list(range(low, high + 1, step))
+            row = []
+            for start in grid:
+                interval = {'start': start, 'end': start + durations[idx]}
+                if own and self._break_total_overlap_minutes(interval, own) > 0:
+                    row.append(None)
+                    continue
+                cost = self._break_position_cost(interval, neighbor_intervals)
+                # Перерыв, который уже стоит в графике и ещё не начался, при прочих
+                # равных остаётся на месте: людям его уже назвали.
+                if desired and idx < len(desired) and desired[idx] is not None:
+                    cost += abs(start - int(desired[idx])) * SHIFT_BREAK_WEIGHT_KEEP_PLACE
+                row.append(cost)
+            grids.append(grid)
+            costs.append(row)
+
+        def evenness(run_minutes):
+            return abs(run_minutes - ideal_run) * SHIFT_BREAK_WEIGHT_EVENNESS
+
+        best_cost = [
+            (costs[0][j] + evenness(start - win_start)) if costs[0][j] is not None else None
+            for j, start in enumerate(grids[0])
+        ]
+        back_refs = []
+        for idx in range(1, count):
+            current = [None] * len(grids[idx])
+            refs = [None] * len(grids[idx])
+            for j, start in enumerate(grids[idx]):
+                if costs[idx][j] is None:
+                    continue
+                best_value = None
+                best_ref = None
+                for k, prev_start in enumerate(grids[idx - 1]):
+                    if best_cost[k] is None:
+                        continue
+                    run = start - (prev_start + durations[idx - 1])
+                    if run < min_gap:
+                        continue
+                    value = best_cost[k] + evenness(run)
+                    if best_value is None or value < best_value:
+                        best_value = value
+                        best_ref = k
+                if best_ref is None:
+                    continue
+                current[j] = best_value + costs[idx][j]
+                refs[j] = best_ref
+            best_cost = current
+            back_refs.append(refs)
+
+        final_value = None
+        final_index = None
+        for j, start in enumerate(grids[count - 1]):
+            if best_cost[j] is None:
+                continue
+            value = best_cost[j] + evenness(seg_end - (start + durations[count - 1]))
+            if final_value is None or value < final_value:
+                final_value = value
+                final_index = j
+        if final_index is None:
+            return None
+
+        indexes = [0] * count
+        indexes[count - 1] = final_index
+        for idx in range(count - 1, 0, -1):
+            indexes[idx - 1] = back_refs[idx - 1][indexes[idx]]
+        return [grids[idx][indexes[idx]] for idx in range(count)]
 
     def _find_best_break_start(self, desired_start, length, lower_bound, upper_bound,
                                neighbor_intervals, self_intervals=None):
@@ -35048,6 +35246,31 @@ class Database:
 
         break_durations = [int(b['length']) for b in prepared_breaks]
         edge_margin, min_gap = self._break_layout_spacing(win_start, seg_end, break_durations)
+
+        # Основной путь: перерывы смены подбираются совместно, цель — одинаковые
+        # рабочие отрезки между ними. Жадный перебор ниже остаётся запасным.
+        planned_starts = self._plan_break_positions(
+            win_start=win_start,
+            seg_end=seg_end,
+            break_durations=break_durations,
+            neighbor_intervals=neighbors,
+            own_intervals=own_intervals,
+            edge_margin=edge_margin,
+            min_gap=min_gap,
+            desired_starts=[int(b['start']) for b in prepared_breaks]
+        )
+        if planned_starts:
+            new_breaks = [
+                {'start': int(start), 'end': int(start) + int(break_durations[idx])}
+                for idx, start in enumerate(planned_starts)
+            ]
+            if not protected:
+                return new_breaks
+            return sorted(
+                protected + new_breaks,
+                key=lambda item: (int(item['start']), int(item['end']))
+            )
+
         new_breaks = []
         for idx, b in enumerate(prepared_breaks):
             length = int(b['length'])
@@ -35094,6 +35317,127 @@ class Database:
             protected + new_breaks,
             key=lambda item: (int(item['start']), int(item['end']))
         )
+
+    def _plan_recalc_pass(self, cursor, ordered_rows, planned_by_shift, frozen_by_shift, shift_meta,
+                          day_breaks_snapshots, rules_for_direction, cross_gap_for_direction,
+                          recalc_now, recalc_direction_keys):
+        """
+        Один проход пересчёта по всем сменам: каждая раскладывается с оглядкой на
+        текущий план коллег. Результат кладётся в planned_by_shift, база не трогается.
+        """
+        for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in ordered_rows:
+            start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
+            direction_rules = rules_for_direction(direction_name)
+            boundary_min = self._break_freeze_boundary_minutes(
+                shift_date,
+                seg_start=start_min,
+                now=recalc_now
+            )
+            planning_from_min = boundary_min + SHIFT_BREAK_PLANNING_BUFFER_MINUTES
+            snapshot = day_breaks_snapshots.get((int(operator_id), shift_date.strftime('%Y-%m-%d'))) or []
+            frozen_breaks, _, used_breaks = self._split_breaks_by_freeze_boundary(
+                snapshot,
+                planning_from_min,
+                seg_start=start_min,
+                seg_end=end_min
+            )
+            full_durations = self._pick_break_durations_for_shift(
+                duration_minutes=max(0, end_min - start_min),
+                direction_name=direction_name,
+                direction_rules=direction_rules
+            )
+            if planning_from_min <= start_min and not used_breaks:
+                window_start = start_min
+                computed_breaks = self._place_break_durations_centered_minutes(
+                    start_min,
+                    end_min,
+                    full_durations
+                )
+            else:
+                window_start = max(start_min, planning_from_min)
+                computed_breaks = self._place_break_durations_centered_minutes(
+                    window_start,
+                    end_min,
+                    self._fit_break_durations_to_window(
+                        window_start,
+                        end_min,
+                        self._remaining_break_durations_after_used(full_durations, used_breaks)
+                    )
+                )
+            extra_occupied = self._extra_occupied_from_day_snapshots(
+                cursor=cursor,
+                day_breaks_snapshots=day_breaks_snapshots,
+                operator_id=operator_id,
+                shift_date=shift_date,
+                now=recalc_now,
+                direction_key_cache=recalc_direction_keys
+            )
+            extra_occupied = list(extra_occupied) + self._planned_occupied_for_shift(
+                planned_by_shift=planned_by_shift,
+                operator_id=operator_id,
+                shift_date=shift_date,
+                direction_key=self._normalize_direction_key(direction_name),
+                shift_meta=shift_meta
+            )
+            adjusted_breaks = self._adjust_shift_breaks_against_occupied_tx(
+                cursor=cursor,
+                operator_id=operator_id,
+                shift_date=shift_date,
+                start_time=start_time_value,
+                end_time=end_time_value,
+                breaks=computed_breaks,
+                cross_gap_minutes=cross_gap_for_direction(direction_name),
+                frozen_breaks=frozen_breaks,
+                planning_from_minutes=window_start,
+                extra_occupied=extra_occupied
+            )
+            planned_by_shift[int(shift_id)] = [dict(item) for item in adjusted_breaks]
+            frozen_by_shift[int(shift_id)] = [dict(item) for item in frozen_breaks]
+
+    def _break_layout_score(self, planned_by_shift, shift_meta):
+        """
+        Оценка целого прохода: сперва нарушения правил, потом неравномерность.
+
+        Нужна потому, что повторные проходы улучшают раскладку немонотонно —
+        четвёртый проход может оказаться хуже третьего. Записываем лучший.
+        """
+        by_direction_date = {}
+        for shift_id, breaks in planned_by_shift.items():
+            meta = shift_meta.get(shift_id)
+            if not meta or not breaks:
+                continue
+            operator_id, shift_date, direction_key = meta
+            key = (direction_key, self._normalize_schedule_date(shift_date))
+            by_direction_date.setdefault(key, []).append((int(operator_id), breaks))
+
+        violations = 0
+        unevenness = 0
+        for group in by_direction_date.values():
+            for index, (operator_id, breaks) in enumerate(group):
+                neighbors = []
+                for other_index, (other_operator_id, other_breaks) in enumerate(group):
+                    if other_index == index:
+                        continue
+                    neighbors.extend({'start': int(x['start']), 'end': int(x['end'])} for x in other_breaks)
+                for item in breaks:
+                    interval = {'start': int(item['start']), 'end': int(item['end'])}
+                    violations += (
+                        self._break_concurrency_penalty_minutes(interval, neighbors) * SHIFT_BREAK_WEIGHT_CONCURRENCY
+                        + self._break_pair_overlap_excess_minutes(interval, neighbors) * SHIFT_BREAK_WEIGHT_PAIR_EXCESS
+                    )
+        for shift_id, breaks in planned_by_shift.items():
+            if len(breaks) < 2:
+                continue
+            ordered = sorted(breaks, key=lambda item: int(item['start']))
+            runs = [
+                int(nxt['start']) - int(cur['end'])
+                for cur, nxt in zip(ordered, ordered[1:])
+            ]
+            if not runs:
+                continue
+            average = sum(runs) / float(len(runs))
+            unevenness += sum(abs(run - average) for run in runs)
+        return (violations, round(unevenness, 3))
 
     def recalculate_work_schedule_breaks(self, start_date, end_date, operator_ids=None, now=None):
         """
@@ -35257,67 +35601,47 @@ class Database:
             breaks_frozen = 0
             affected_operator_ids = set()
             recalc_direction_keys = {}
-            for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in sorted(rows, key=_sort_key):
-                start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
-                direction_rules = _rules_for_direction(direction_name)
-                boundary_min = self._break_freeze_boundary_minutes(
-                    shift_date,
-                    seg_start=start_min,
-                    now=recalc_now
+            # Пересчёт идёт в несколько проходов: за один проход операторам,
+            # которых раскладывают последними, свободного места уже не остаётся.
+            # Пишем в базу только победивший проход, промежуточные живут в памяти.
+            ordered_rows = sorted(rows, key=_sort_key)
+            planned_by_shift = {}
+            frozen_by_shift = {}
+            shift_meta = {
+                int(row[0]): (
+                    int(row[1]),
+                    row[2],
+                    self._normalize_direction_key(row[5])
                 )
-                planning_from_min = boundary_min + SHIFT_BREAK_PLANNING_BUFFER_MINUTES
-                snapshot = day_breaks_snapshots.get((int(operator_id), shift_date.strftime('%Y-%m-%d'))) or []
-                frozen_breaks, _, used_breaks = self._split_breaks_by_freeze_boundary(
-                    snapshot,
-                    planning_from_min,
-                    seg_start=start_min,
-                    seg_end=end_min
-                )
-                full_durations = self._pick_break_durations_for_shift(
-                    duration_minutes=max(0, end_min - start_min),
-                    direction_name=direction_name,
-                    direction_rules=direction_rules
-                )
-                if planning_from_min <= start_min and not used_breaks:
-                    window_start = start_min
-                    computed_breaks = self._place_break_durations_centered_minutes(
-                        start_min,
-                        end_min,
-                        full_durations
-                    )
-                else:
-                    window_start = max(start_min, planning_from_min)
-                    computed_breaks = self._place_break_durations_centered_minutes(
-                        window_start,
-                        end_min,
-                        self._fit_break_durations_to_window(
-                            window_start,
-                            end_min,
-                            self._remaining_break_durations_after_used(full_durations, used_breaks)
-                        )
-                    )
-                adjusted_breaks = self._adjust_shift_breaks_against_occupied_tx(
+                for row in ordered_rows
+            }
+            best_snapshot = None
+            for _pass_index in range(max(1, int(SHIFT_BREAK_LAYOUT_PASSES))):
+                self._plan_recalc_pass(
                     cursor=cursor,
-                    operator_id=operator_id,
-                    shift_date=shift_date,
-                    start_time=start_time_value,
-                    end_time=end_time_value,
-                    breaks=computed_breaks,
-                    cross_gap_minutes=_cross_gap_for_direction(direction_name),
-                    frozen_breaks=frozen_breaks,
-                    planning_from_minutes=window_start,
-                    extra_occupied=self._extra_occupied_from_day_snapshots(
-                        cursor=cursor,
-                        day_breaks_snapshots=day_breaks_snapshots,
-                        operator_id=operator_id,
-                        shift_date=shift_date,
-                        now=recalc_now,
-                        direction_key_cache=recalc_direction_keys
-                    )
+                    ordered_rows=ordered_rows,
+                    planned_by_shift=planned_by_shift,
+                    frozen_by_shift=frozen_by_shift,
+                    shift_meta=shift_meta,
+                    day_breaks_snapshots=day_breaks_snapshots,
+                    rules_for_direction=_rules_for_direction,
+                    cross_gap_for_direction=_cross_gap_for_direction,
+                    recalc_now=recalc_now,
+                    recalc_direction_keys=recalc_direction_keys
                 )
+                score = self._break_layout_score(planned_by_shift, shift_meta)
+                if best_snapshot is None or score < best_snapshot[0]:
+                    best_snapshot = (
+                        score,
+                        {key: [dict(item) for item in value] for key, value in planned_by_shift.items()}
+                    )
+            planned_by_shift = best_snapshot[1] if best_snapshot else planned_by_shift
+
+            for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in ordered_rows:
+                adjusted_breaks = planned_by_shift.get(int(shift_id)) or []
                 self._insert_shift_breaks(cursor, shift_id, adjusted_breaks)
                 breaks_inserted += len(adjusted_breaks)
-                breaks_frozen += len(frozen_breaks)
+                breaks_frozen += len(frozen_by_shift.get(int(shift_id)) or [])
                 affected_operator_ids.add(int(operator_id))
 
             return {
