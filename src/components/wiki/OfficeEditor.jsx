@@ -1,15 +1,20 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
-import { Building2, Check, Loader2, MapPin, Phone, Wifi } from 'lucide-react';
+import { Loader2, MapPin, Phone, Wifi } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
 import OfficeMap from './OfficeMap';
 import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
 
-/* Форма офиса: адрес, карта, график и парки.
+/* Форма офиса: адрес, карта и график.
  *
- * Вынесена из WikiOffices отдельным файлом — в ней три самостоятельных
- * редактора (карта, неделя, переопределения по паркам), и вместе со списком
- * получился бы файл, в котором не найти ни того ни другого.
+ * Привязки к таксопаркам здесь НЕТ намеренно: связью управляют из карточки
+ * парка (WikiParks), где заодно задаётся телефон этого парка в этом офисе.
+ * Офис отвечает за место — адрес, точку на карте, часы работы; кому он
+ * принадлежит, решает парк.
+ *
+ * Вынесена из WikiOffices отдельным файлом — в ней два самостоятельных
+ * редактора (карта и неделя), и вместе со списком получился бы файл, в
+ * котором не найти ни того ни другого.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -174,110 +179,7 @@ function MapField({ draft, setDraft, base, headers, showToast }) {
     );
 }
 
-function ParkLinks({ draft, setDraft, parks }) {
-    const [expanded, setExpanded] = useState(() => new Set());
-
-    const linkFor = (parkId) => draft.parks.find((link) => link.park_id === parkId);
-
-    const toggle = (parkId) => setDraft((prev) => ({
-        ...prev,
-        parks: linkFor(parkId)
-            ? prev.parks.filter((link) => link.park_id !== parkId)
-            : [...prev.parks, { park_id: parkId, phone: '' }],
-    }));
-
-    const setPhone = (parkId, phone) => setDraft((prev) => ({
-        ...prev,
-        parks: prev.parks.map((link) => (link.park_id === parkId ? { ...link, phone } : link)),
-    }));
-
-    if (parks.length === 0) {
-        return (
-            <p className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] leading-relaxed text-amber-700">
-                Справочник таксопарков пуст — заполните вкладку «Парки», тогда офис можно будет
-                к ним привязать.
-            </p>
-        );
-    }
-
-    return (
-        <div className="space-y-2">
-            <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                <span className="text-[13px] text-slate-700">
-                    Офис у всех таксопарков
-                    <span className="mt-0.5 block text-[11.5px] leading-relaxed text-slate-400">
-                        Новые парки получат его автоматически. Отдельные парки ниже можно отметить,
-                        чтобы задать им свой телефон.
-                    </span>
-                </span>
-                <IosToggle
-                    checked={!!draft.all_parks}
-                    onChange={(next) => setDraft((prev) => ({ ...prev, all_parks: next }))}
-                />
-            </label>
-
-            <div className="max-h-[240px] divide-y divide-slate-100 overflow-y-auto rounded-xl border border-slate-200">
-                {parks.map((park) => {
-                    const link = linkFor(park.id);
-                    const open = expanded.has(park.id) || !!link?.phone;
-                    return (
-                        <div key={park.id} className="px-3 py-2">
-                            <div className="flex items-center gap-2.5">
-                                <button
-                                    type="button"
-                                    onClick={() => toggle(park.id)}
-                                    className={`grid h-5 w-5 shrink-0 place-items-center rounded-md border transition ${
-                                        link
-                                            ? 'border-indigo-600 bg-indigo-600 text-white'
-                                            : 'border-slate-300 bg-white text-transparent'
-                                    }`}
-                                    aria-label={link ? `Убрать парк ${park.name}` : `Добавить парк ${park.name}`}
-                                >
-                                    <Check size={13} />
-                                </button>
-                                <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
-                                    {park.name}
-                                </span>
-                                {link && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setExpanded((prev) => {
-                                            const next = new Set(prev);
-                                            if (next.has(park.id)) next.delete(park.id);
-                                            else next.add(park.id);
-                                            return next;
-                                        })}
-                                        className="shrink-0 text-[11.5px] font-medium text-indigo-600 hover:underline"
-                                    >
-                                        {open ? 'скрыть' : 'свой телефон'}
-                                    </button>
-                                )}
-                            </div>
-                            {link && open && (
-                                <input
-                                    className={`${iosInput} mt-1.5 h-9`}
-                                    value={link.phone || ''}
-                                    placeholder={draft.phone ? `как у офиса: ${draft.phone}` : 'Телефон для этого парка'}
-                                    onChange={(e) => setPhone(park.id, e.target.value)}
-                                />
-                            )}
-                        </div>
-                    );
-                })}
-            </div>
-        </div>
-    );
-}
-
-export default function OfficeEditor({ draft, setDraft, parks, base, headers, showToast }) {
-    const linkedNames = useMemo(() => {
-        if (draft.all_parks) return 'все таксопарки';
-        const names = draft.parks
-            .map((link) => parks.find((park) => park.id === link.park_id)?.name)
-            .filter(Boolean);
-        return names.length ? names.join(', ') : 'ни одного парка';
-    }, [draft.all_parks, draft.parks, parks]);
-
+export default function OfficeEditor({ draft, setDraft, base, headers, showToast }) {
     return (
         <div className="space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -352,13 +254,6 @@ export default function OfficeEditor({ draft, setDraft, parks, base, headers, sh
                     />
                 </Field>
             )}
-
-            <Field label="Таксопарки">
-                <ParkLinks draft={draft} setDraft={setDraft} parks={parks} />
-                <p className="mt-1.5 flex items-center gap-1.5 px-1 text-[11.5px] text-slate-400">
-                    <Building2 size={12} /> Сейчас: {linkedNames}
-                </p>
-            </Field>
 
             <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
                 <span className="flex items-center gap-2 text-[13px] text-slate-700">

@@ -25,8 +25,8 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
 const emptyDraft = () => ({
     name: '', city: '', address: '', address_note: '', phone: '',
     map_url: '', map_resolved_url: null, lat: null, lon: null,
-    schedule: {}, is_online: false, all_parks: false,
-    kind: 'park', partner_label: '', parks: [],
+    schedule: {}, is_online: false,
+    kind: 'park', partner_label: '',
 });
 
 const draftFrom = (office) => ({
@@ -42,12 +42,8 @@ const draftFrom = (office) => ({
     lon: office.lon ?? null,
     schedule: office.schedule || {},
     is_online: !!office.is_online,
-    all_parks: !!office.all_parks,
     kind: office.kind || 'park',
     partner_label: office.partner_label || '',
-    parks: (office.parks || []).map((link) => ({
-        park_id: link.park_id, phone: link.phone || '',
-    })),
 });
 
 const STATUS_TONE = { open: 'green', break: 'amber', closed: 'slate' };
@@ -192,14 +188,13 @@ const OfficeCard = ({ base, office, canManage, onEdit, onArchive, onRestore, tic
                         ))}
                     </div>
 
-                    {(office.all_parks || office.parks?.length > 0) && (
+                    {/* Список только показывает привязку; меняют её в карточке парка. */}
+                    {office.parks?.length > 0 && (
                         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                             <Building2 size={12} className="text-slate-400" />
-                            {office.all_parks
-                                ? <IosBadge tone="blue">Все таксопарки</IosBadge>
-                                : office.parks.map((link) => (
-                                    <IosBadge key={link.park_id} tone="slate">{link.name}</IosBadge>
-                                ))}
+                            {office.parks.map((link) => (
+                                <IosBadge key={link.park_id} tone="slate">{link.name}</IosBadge>
+                            ))}
                         </div>
                     )}
 
@@ -284,12 +279,8 @@ export default function WikiOffices({ base, headers, showToast }) {
             lon: draft.lon,
             schedule: draft.schedule,
             is_online: !!draft.is_online,
-            all_parks: !!draft.all_parks,
             kind: draft.kind,
             partner_label: draft.kind === 'partner' ? (draft.partner_label || null) : null,
-            parks: draft.parks.map((link) => ({
-                park_id: link.park_id, phone: link.phone || null,
-            })),
         };
         setBusy(true);
         const request = draft.id
@@ -443,7 +434,6 @@ export default function WikiOffices({ base, headers, showToast }) {
                     <OfficeEditor
                         draft={draft}
                         setDraft={setDraft}
-                        parks={parks}
                         base={base}
                         headers={headers}
                         showToast={toast}

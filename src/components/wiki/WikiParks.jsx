@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, Building2, Globe, Loader2, MapPin, Percent, Phone, Plus,
-    Search, Tag, Pencil,
+    Archive, ArchiveRestore, Building2, Check, Globe, Loader2, MapPin, Percent,
+    Phone, Plus, Search, Tag, Pencil,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -26,7 +26,83 @@ const fmtDate = (iso) => (iso
 
 const emptyPark = () => ({
     name: '', city: '', phone: '', address: '', website: '', commission: '', description: '',
+    offices: [],
 });
+
+/* Офисы парка.
+ *
+ * Связь «офис ↔ парк» настраивается здесь, а не в форме офиса: офис отвечает
+ * за место (адрес, точка на карте, часы), а кому он принадлежит — вопрос
+ * парка. Здесь же задаётся телефон этого парка в этом офисе: в исходном
+ * справочнике по одному адресу у разных парков были разные номера.
+ */
+const ParkOffices = ({ draft, setDraft, offices }) => {
+    const linkFor = (officeId) => draft.offices.find((link) => link.office_id === officeId);
+
+    const toggle = (officeId) => setDraft((prev) => ({
+        ...prev,
+        offices: prev.offices.find((link) => link.office_id === officeId)
+            ? prev.offices.filter((link) => link.office_id !== officeId)
+            : [...prev.offices, { office_id: officeId, phone: '' }],
+    }));
+
+    const setPhone = (officeId, phone) => setDraft((prev) => ({
+        ...prev,
+        offices: prev.offices.map((link) => (
+            link.office_id === officeId ? { ...link, phone } : link)),
+    }));
+
+    if (offices.length === 0) {
+        return (
+            <p className="rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] leading-relaxed text-slate-500">
+                Справочник офисов пуст — заполните вкладку «Офисы», тогда их можно будет
+                привязать к парку.
+            </p>
+        );
+    }
+
+    return (
+        <div className="max-h-[260px] divide-y divide-slate-100 overflow-y-auto rounded-xl border border-slate-200">
+            {offices.map((office) => {
+                const link = linkFor(office.id);
+                return (
+                    <div key={office.id} className="px-3 py-2">
+                        <div className="flex items-center gap-2.5">
+                            <button
+                                type="button"
+                                onClick={() => toggle(office.id)}
+                                className={`grid h-5 w-5 shrink-0 place-items-center rounded-md border transition ${
+                                    link
+                                        ? 'border-indigo-600 bg-indigo-600 text-white'
+                                        : 'border-slate-300 bg-white text-transparent'
+                                }`}
+                                aria-label={link ? `Убрать офис ${office.name}` : `Добавить офис ${office.name}`}
+                            >
+                                <Check size={13} />
+                            </button>
+                            <span className="min-w-0 flex-1 truncate text-[13px] text-slate-700">
+                                {office.name}
+                            </span>
+                            {office.city && (
+                                <span className="shrink-0 text-[11.5px] text-slate-400">{office.city}</span>
+                            )}
+                        </div>
+                        {link && (
+                            <input
+                                className={`${iosInput} mt-1.5 h-9`}
+                                value={link.phone || ''}
+                                placeholder={office.phone
+                                    ? `телефон офиса: ${office.phone} — оставьте пустым, если тот же`
+                                    : 'Телефон этого парка в этом офисе'}
+                                onChange={(e) => setPhone(office.id, e.target.value)}
+                            />
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
 
 const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => (
     <div className={`${iosCard} p-4`}>
@@ -40,6 +116,11 @@ const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => (
                 <div className="flex flex-wrap items-center gap-1.5">
                     <span className="text-[14.5px] font-semibold text-slate-900">{park.name}</span>
                     {park.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
+                    {park.offices?.length > 0 && (
+                        <IosBadge tone="slate">
+                            <MapPin size={11} /> офисов: {park.offices.length}
+                        </IosBadge>
+                    )}
                     {park.promotions_count > 0 && (
                         <IosBadge tone="blue">
                             <Tag size={11} /> акций: {park.promotions_count}
@@ -113,6 +194,7 @@ export default function WikiParks({ base, headers, showToast }) {
 
     const [parks, setParks] = useState([]);
     const [promotions, setPromotions] = useState([]);
+    const [offices, setOffices] = useState([]);
     const [canManage, setCanManage] = useState(false);
     const [loading, setLoading] = useState(true);
     const [busy, setBusy] = useState(false);
@@ -124,11 +206,14 @@ export default function WikiParks({ base, headers, showToast }) {
         Promise.all([
             axios.get(`${base}/parks`, { headers, params: query.trim() ? { q: query.trim() } : {} }),
             axios.get(`${base}/promotions`, { headers }),
+            axios.get(`${base}/offices`, { headers }),
         ])
-            .then(([parksResponse, promoResponse]) => {
+            .then(([parksResponse, promoResponse, officeResponse]) => {
                 setParks(parksResponse.data?.items || []);
                 setCanManage(!!parksResponse.data?.can_manage);
                 setPromotions(promoResponse.data?.items || []);
+                setOffices((officeResponse.data?.items || [])
+                    .filter((office) => office.status === 'active'));
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить справочник'), 'error'))
             .finally(() => setLoading(false));
@@ -148,6 +233,9 @@ export default function WikiParks({ base, headers, showToast }) {
             website: draft.website || null,
             description: draft.description || null,
             commission: draft.commission === '' ? null : Number(draft.commission),
+            offices: draft.offices.map((link) => ({
+                office_id: link.office_id, phone: link.phone || null,
+            })),
         };
         setBusy(true);
         const request = draft.id
@@ -264,6 +352,9 @@ export default function WikiParks({ base, headers, showToast }) {
                                     phone: p.phone || '', address: p.address || '',
                                     website: p.website || '', description: p.description || '',
                                     commission: p.commission ?? '',
+                                    offices: (p.offices || []).map((link) => ({
+                                        office_id: link.office_id, phone: link.phone || '',
+                                    })),
                                 })}
                                 onArchive={archive}
                                 onRestore={restore}
@@ -277,6 +368,7 @@ export default function WikiParks({ base, headers, showToast }) {
                 open={!!draft}
                 onClose={() => setDraft(null)}
                 title={draft?.id ? 'Изменить парк' : 'Новый таксопарк'}
+                maxWidth="max-w-xl"
                 footer={(
                     <>
                         <button type="button" className={iosBtnSecondary} onClick={() => setDraft(null)}>
@@ -309,7 +401,7 @@ export default function WikiParks({ base, headers, showToast }) {
                                     value={draft[key]}
                                     autoFocus={key === 'name'}
                                     placeholder={placeholder}
-                                    onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                                    onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
                                 />
                             </div>
                         ))}
@@ -321,7 +413,7 @@ export default function WikiParks({ base, headers, showToast }) {
                                 className={`${iosInput} tabular-nums`}
                                 inputMode="decimal"
                                 value={draft.commission}
-                                onChange={(e) => setDraft({ ...draft, commission: e.target.value.replace(/[^\d.]/g, '') })}
+                                onChange={(e) => setDraft((prev) => ({ ...prev, commission: e.target.value.replace(/[^\d.]/g, '') }))}
                                 placeholder="3.5"
                             />
                         </div>
@@ -330,8 +422,18 @@ export default function WikiParks({ base, headers, showToast }) {
                             <textarea
                                 className={`${iosInput} min-h-[76px] resize-y`}
                                 value={draft.description}
-                                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                                onChange={(e) => setDraft((prev) => ({ ...prev, description: e.target.value }))}
                             />
+                        </div>
+                        <div>
+                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                Офисы парка
+                            </label>
+                            <ParkOffices draft={draft} setDraft={setDraft} offices={offices} />
+                            <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                Адрес, карта и график живут в самом офисе — на вкладке «Офисы».
+                                Здесь выбирается, какие из них принадлежат этому парку.
+                            </p>
                         </div>
                     </div>
                 )}

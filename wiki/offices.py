@@ -361,8 +361,18 @@ def set_office_parks(cursor, office_id, links):
 
     links — список {park_id, phone, schedule, note}. Переписываем целиком, а не
     доливаем: иначе снятая в форме галочка парка не удалила бы связь.
+
+    Сносим только связи с ЖИВЫМИ парками: архивных нет в форме, и общая
+    очистка тихо оторвала бы их от офиса — а парк из архива возвращают.
     """
-    cursor.execute('DELETE FROM wiki_office_taxi_parks WHERE office_id = %s', (office_id,))
+    cursor.execute(
+        """
+        DELETE FROM wiki_office_taxi_parks op
+         USING wiki_taxi_parks p
+         WHERE op.park_id = p.id AND op.office_id = %s AND p.status = 'active'
+        """,
+        (office_id,),
+    )
     seen = set()
     for link in links or []:
         try:
@@ -447,6 +457,76 @@ def fetch_tile(z, x, y, attempts=3):
             if response.status_code == 200 and response.content:
                 return response.content
     return None
+
+
+def offices_by_park(cursor, park_ids):
+    """Офисы каждого парка. {park_id: [{office_id, name, city, is_online, phone, ...}]}
+
+    Зеркало list_offices: там к офису подтягиваются парки, здесь к парку —
+    офисы. Связь и переопределения хранятся в одной таблице, меняется только
+    сторона, с которой на неё смотрят.
+    """
+    if not park_ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT op.park_id, o.id, o.name, o.city, o.is_online, op.phone, op.schedule, op.note
+          FROM wiki_office_taxi_parks op
+          JOIN wiki_offices o ON o.id = op.office_id
+         WHERE op.park_id = ANY(%s) AND o.status = 'active'
+         ORDER BY o.position, o.city NULLS LAST, o.name
+        """,
+        (list(park_ids),),
+    )
+    result = {}
+    for row in cursor.fetchall():
+        park_id, office_id, name, city, is_online, phone, schedule, note = row
+        result.setdefault(park_id, []).append({
+            'office_id': office_id, 'name': name, 'city': city,
+            'is_online': is_online, 'phone': phone, 'schedule': schedule, 'note': note,
+        })
+    return result
+
+
+def set_park_offices(cursor, park_id, links):
+    """Переписывает офисы парка.
+
+    links — список {office_id, phone, schedule, note}, где phone/schedule это
+    «у этого парка в этом офисе иначе» (NULL = как у офиса).
+
+    Сносим только связи с ЖИВЫМИ офисами: архивных нет в форме, и общая
+    очистка оторвала бы их от парка молча.
+    """
+    cursor.execute(
+        """
+        DELETE FROM wiki_office_taxi_parks op
+         USING wiki_offices o
+         WHERE op.office_id = o.id AND op.park_id = %s AND o.status = 'active'
+        """,
+        (park_id,),
+    )
+    seen = set()
+    for link in links or []:
+        try:
+            office_id = int(link.get('office_id'))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if office_id in seen:
+            continue
+        seen.add(office_id)
+        cursor.execute(
+            """
+            INSERT INTO wiki_office_taxi_parks (office_id, park_id, phone, schedule, note)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (office_id, park_id) DO UPDATE
+               SET phone = EXCLUDED.phone,
+                   schedule = EXCLUDED.schedule,
+                   note = EXCLUDED.note
+            """,
+            (office_id, park_id, link.get('phone') or None,
+             _schedule_param(normalize_schedule(link.get('schedule'))),
+             link.get('note') or None),
+        )
 
 
 def slug_is_free(cursor, slug, exclude_id=None):

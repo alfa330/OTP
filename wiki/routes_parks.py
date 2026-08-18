@@ -6,6 +6,7 @@
 
 from flask import jsonify, request
 
+from . import offices as wiki_offices
 from . import parks as wiki_parks
 from . import queries
 from .routes_structure import _clean, _int_or_none, _slugify
@@ -31,11 +32,14 @@ def register(bp, wiki_route, db, log_ip):
         if request.method == 'GET':
             can_manage = bool(ctx['capabilities'].get('can_manage_structure')
                               or ctx['capabilities'].get('can_manage_access'))
-            return jsonify({
-                'items': wiki_parks.list_parks(cursor, include_archived=can_manage,
-                                               query=request.args.get('q')),
-                'can_manage': can_manage,
-            })
+            items = wiki_parks.list_parks(cursor, include_archived=can_manage,
+                                          query=request.args.get('q'))
+            # Офисы парка едут вместе со списком: связью управляют из карточки
+            # парка, и форма обязана открыться с уже проставленными галочками.
+            by_park = wiki_offices.offices_by_park(cursor, [p['id'] for p in items])
+            for park in items:
+                park['offices'] = by_park.get(park['id'], [])
+            return jsonify({'items': items, 'can_manage': can_manage})
 
         if not ctx['capabilities'].get('can_manage_structure'):
             return jsonify({"error": "Нет права управлять справочником",
@@ -62,6 +66,9 @@ def register(bp, wiki_route, db, log_ip):
                                              'commission': _decimal_or_none(data.get('commission')),
                                              'logo_file_id': data.get('logo_file_id') or None,
                                          })
+        if isinstance(data.get('offices'), list):
+            wiki_offices.set_park_offices(cursor, park_id, data['offices'])
+
         queries.log_action(cursor, actor_id=ctx['user_id'], action='park.create',
                            entity_type='park', entity_id=park_id,
                            details={'name': name}, ip_address=log_ip())
@@ -102,7 +109,12 @@ def register(bp, wiki_route, db, log_ip):
         if 'position' in data:
             fields['position'] = _int_or_none(data['position']) or 0
 
-        if not wiki_parks.update_park(cursor, park_id, fields):
+        changed = wiki_parks.update_park(cursor, park_id, fields) if fields else False
+        if isinstance(data.get('offices'), list):
+            wiki_offices.set_park_offices(cursor, park_id, data['offices'])
+            changed = True
+
+        if not changed:
             return jsonify({"error": "Нечего обновлять"}), 400
         queries.log_action(cursor, actor_id=ctx['user_id'], action='park.update',
                            entity_type='park', entity_id=park_id,
