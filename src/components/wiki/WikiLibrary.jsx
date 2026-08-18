@@ -327,9 +327,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         );
     }
 
-    /* Статья и редактор занимают всю ширину раздела намеренно: справочные
-       таблицы вики — это шесть колонок и больше (см. ступени ширины в
-       WikiView), и отобранные у них 400px возвращают перенос по буквам. */
+    /* Парк — страница витрины, а не её часть: рельс с плитками на ней не нужен,
+       человек уже выбрал парк. */
     if (openParkSlug) {
         return (
             <WikiPark
@@ -342,6 +341,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         );
     }
 
+    /* Статья и редактор занимают всю ширину раздела намеренно: справочные
+       таблицы вики — это шесть колонок и больше (см. ступени ширины в
+       WikiView), и отобранные у них 400px возвращают перенос по буквам. */
     if (openSlug) {
         return (
             <WikiArticle
