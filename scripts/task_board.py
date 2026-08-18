@@ -1666,9 +1666,14 @@ def build_parser():
 
     export = sub.add_parser('export', help='выгрузка задач в Excel (лист на колонку доски)')
     export.add_argument('--dir', help=f'куда сохранить (по умолчанию {DOWNLOAD_ROOT})')
-    export.add_argument('--mine', help='охват «мои»: тот же параметр, что у доски')
+    export.add_argument('--mine', choices=('any', 'assignee', 'creator'),
+                        help='охват «мои»: я исполнитель / я постановщик')
     export.add_argument('--person', help='id сотрудника')
-    export.add_argument('--person-scope', dest='person_scope', help='роль сотрудника в задаче')
+    # incoming/outgoing считаются относительно МЕНЯ: incoming — он поставил мне,
+    # outgoing — я поставил ему. «Все задачи этого человека» — это any.
+    export.add_argument('--person-scope', dest='person_scope',
+                        choices=('any', 'incoming', 'outgoing'),
+                        help='any — все его задачи; incoming — он мне; outgoing — я ему')
     export.add_argument('--department', help='id отдела (отдел задачи = отдел постановщика)')
     export.set_defaults(func=cmd_export)
 

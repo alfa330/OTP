@@ -484,6 +484,24 @@ class ServerContractTests(unittest.TestCase):
     def test_download_route_still_where_the_cli_looks(self):
         self.assertIn("/api/tasks/attachments/<int:attachment_id>/download", self.bot)
 
+    def test_upload_field_name_still_files(self):
+        # Поле называется `files` в обоих роутах; переименуют — загрузка станет
+        # тихо пустой, потому что getlist на отсутствующем ключе вернёт [].
+        self.assertGreaterEqual(len(re.findall(r"request\.files\.getlist\('files'\)", self.bot)), 2)
+
+    def test_required_checklist_still_blocks_handover(self):
+        # SKILL.md обещает: незакрытый обязательный пункт не даёт сдать задачу.
+        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+        self.assertIn('CHECKLIST_INCOMPLETE', database)
+        self.assertIn('is_required = TRUE', database)
+
+    def test_export_filter_values_match_server(self):
+        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+        mine = set(re.findall(r"mine_norm not in \{([^}]*)\}", database)[0].replace("'", '').split(', '))
+        self.assertEqual(mine | {'any'}, {'any', 'assignee', 'creator'})
+        scope = re.findall(r"person_scope_norm not in \{([^}]*)\}", database)[0]
+        self.assertEqual(set(re.findall(r"'(\w+)'", scope)), {'incoming', 'outgoing', 'any'})
+
     def test_task_id_filter_still_supported(self):
         # cmd_show ходит точечным запросом; без этого фильтра он снова начнёт
         # тянуть весь список и промахиваться на задачах за пределами limit.

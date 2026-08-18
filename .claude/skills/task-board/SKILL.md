@@ -19,11 +19,97 @@ description: Работа с бэклогом, канбаном и отчёта�
 python -X utf8 scripts/task_board.py board            # канбан по колонкам
 python -X utf8 scripts/task_board.py board --mine     # только мои
 python -X utf8 scripts/task_board.py backlog          # бэклог в порядке приоритета
-python -X utf8 scripts/task_board.py show 412         # карточка целиком (история, чек-лист, факт. старт)
+python -X utf8 scripts/task_board.py show 412         # карточка целиком
+python -X utf8 scripts/task_board.py inbox            # что ждёт лично меня
+python -X utf8 scripts/task_board.py files 412 --text # ВЛОЖЕНИЯ: скачать и прочитать
+python -X utf8 scripts/task_board.py history 412      # история с комментариями переходов
 python -X utf8 scripts/task_board.py recipients       # id исполнителей
 ```
 
 Любая команда принимает `--json` — отдаёт сырой ответ API, удобно парсить.
+`--json` глобальный: он идёт **до** имени команды (`--json show 412`, не `show 412 --json`).
+
+## ВЛОЖЕНИЯ: постановка часто лежит не в описании
+
+**Правило: описание пустое или короче задачи — сразу смотри вложения.** Так
+приходит большинство ТЗ от заказчиков: в карточке одна строка темы, а требования
+в приложенном `.docx` или на скриншоте. `show` печатает блок «ВЛОЖЕНИЯ» и прямо
+подсказывает, что описание пустое, а файлы есть.
+
+```bash
+python -X utf8 scripts/task_board.py files 412                 # список: id, имя, размер, вид
+python -X utf8 scripts/task_board.py files 412 --text          # скачать + вынуть текст
+python -X utf8 scripts/task_board.py files 412 --text --limit 0 # текст целиком, без обрезки
+python -X utf8 scripts/task_board.py files 412 --download       # только скачать
+python -X utf8 scripts/task_board.py files 412 --kind result    # что приложил исполнитель при сдаче
+python -X utf8 scripts/task_board.py files 412 --only 51 52     # конкретные вложения
+python -X utf8 scripts/task_board.py files 412 --dir C:/tmp/тз  # своя папка
+```
+
+Файлы падают в `%TEMP%/otp_task_files/task_<id>/` — вне репозитория, потому что
+это данные заказчика, и в git им не место.
+
+Два вида вложений: `initial` — приложил постановщик (в API это ключ
+`attachments`), `result` — приложил исполнитель при сдаче (`completion_attachments`).
+Файлы, приложенные к возврату на доработку, лежат как `initial`: `attachment_kind`
+знает только два значения, а `result` ставится только у `completed`.
+
+### Что читается, а что нет
+
+Текст разбирает `wiki/importer.py` — тот же код, что импортирует документы в
+статьи вики. Своего парсера не заводи, он уже есть.
+
+| Формат | Как |
+|---|---|
+| docx | mammoth, с заголовками |
+| pdf | pypdf; скан без текстового слоя честно скажет, что текста нет |
+| xlsx / xlsm / csv | openpyxl |
+| pptx | разбор слайдов, добавлен в CLI |
+| txt / md / json / log | сами, с перебором кодировок (cp1251 тоже) |
+| zip | список файлов внутри |
+| **картинки** | **текста нет — открой скачанный файл через Read и посмотри сам** |
+| видео, звук | текст не вынимается |
+
+Картинки — не тупик, а обычный путь: скриншот с таблицей требований отлично
+читается глазами. `--text` отдаст путь к файлу, дальше открывай его сам.
+
+### Ловушка: имя файла в базе бывает без расширения
+
+`werkzeug` прогоняет имя через `secure_filename`, а тот выбрасывает не-ASCII.
+Файл «проверка.xlsx» доезжает до базы под именем **`xlsx`**, а «ТЗ.docx» — под
+именем `docx`. Для кириллических имён это норма, а не редкий случай. CLI
+восстанавливает расширение по `content_type`, а если и его нет — по сигнатуре
+файла (docx/xlsx/pptx — все zip, различаются содержимым). Если пишешь свой
+запрос — учти это, иначе разбор документа откажет на пустом расширении.
+
+### Приложить файлы
+
+```bash
+python -X utf8 scripts/task_board.py create "Тема" --assignee 169 --attach тз.docx схема.png
+python -X utf8 scripts/task_board.py status 412 completed --report "готово" --attach результат.xlsx
+python -X utf8 scripts/task_board.py log "Что сделал" --report "итог" --spent 2h --attach отчёт.xlsx
+```
+
+До 10 файлов, каждый до 10 МБ — пределы сервера, CLI проверяет их заранее.
+Файлы принимают только переходы `completed`, `returned`, `reopened`; у остальных
+они молча пропали бы, поэтому CLI отказывается сразу.
+
+MIME-тип CLI подставляет сам. Без него сервер запишет `application/octet-stream`,
+и тип файла потеряется навсегда — в базе останется только имя.
+
+Кто и из какого статуса вправе сделать переход (иначе 403 или `INVALID_TRANSITION`):
+
+| Переход | Кто | Из статуса |
+|---|---|---|
+| `in_progress` | исполнитель | `assigned`, `returned`, `in_progress` |
+| `completed` | **только исполнитель** | `in_progress`, `returned` |
+| `accepted` | **только поручитель** | `completed` |
+| `returned` | **только поручитель** | `completed`, `accepted` |
+| `reopened` | **только поручитель** | `accepted` (задача уходит в `in_progress`) |
+
+**Незакрытый обязательный пункт чек-листа не даёт сдать задачу** — сервер
+отвечает `CHECKLIST_INCOMPLETE`. Поэтому `checklist` смотри до сдачи, а не после:
+пункты закрывают командой `check`, и только потом `status ... completed`.
 
 ## Модель данных (важно понимать до правок)
 
@@ -199,11 +285,82 @@ python -X utf8 scripts/task_board.py report 412 "Готово, вот итог" 
   доски. Параметры охвата те же, что у списка, и других нет: колонки в файле
   все сразу. Пустой лист и пустая во всех строках колонка не выводятся.
 
+- `GET /api/tasks?task_id=<id>` — точечный запрос одной задачи. Диплинк на задачу,
+  которой нет в загруженной выборке; `show` ходит именно так, а не выкачивает
+  весь список (тот упирается в `limit`, максимум `TASKS_MAX_PAGE_SIZE` = 200).
+- `GET /api/tasks/attachments/<attachment_id>/download` — файл вложения.
+  Обычная авторизация заголовками, никакого токена в адресе.
+- `POST /api/tasks` и `POST /api/tasks/<id>/status` — файлы полем **`files`**
+  (`request.files.getlist('files')`), только `multipart/form-data`. Когда есть
+  файлы, остальные поля обязаны ехать той же формой, а не JSON.
+- `GET /api/tasks/action_required` — только счётчики бейджа, без списка задач.
+  Сами задачи считает клиент теми же правилами (см. ниже).
+- `POST /api/tasks/<id>/action_seen` — погасить уведомление; статус задачи не меняет.
+- `PATCH /api/tasks/<id>/checklist/<item_id>` — `{"is_done":true,"result_note":"..."}`.
+- `GET|POST /api/tasks/notes`, `PATCH|DELETE /api/tasks/notes/<id>` — личные заметки.
+- `GET /api/tasks/board_people` — все сотрудники с отделами (без уволенных),
+  в отличие от `recipients` (только те, кому этот пользователь вправе ставить задачи).
+
 Реализация: роуты в `bot_schedule2.py` (`handle_tasks`, `handle_single_task`,
 `handle_tasks_board`, `handle_task_reports`, `handle_task_report_item`,
-`update_task_status`), логика — `database.py` (`create_task`, `edit_task`,
-`update_task_board_state`, `update_task_status`, `create_task_report`,
-`update_task_report`, `delete_task_report`, `get_tasks_for_requester`).
+`update_task_status`, `download_task_attachment`, `update_task_checklist_item`,
+`handle_task_notes`, `mark_task_action_seen`), логика — `database.py` (`create_task`,
+`edit_task`, `update_task_board_state`, `update_task_status`, `create_task_report`,
+`update_task_report`, `delete_task_report`, `get_tasks_for_requester`,
+`get_task_attachment_for_requester`, `get_task_action_needs_summary`).
+
+## Остальное вокруг задачи
+
+```bash
+python -X utf8 scripts/task_board.py history 412      # история статусов + комментарии переходов
+python -X utf8 scripts/task_board.py checklist 412    # чек-лист с результатами пунктов
+python -X utf8 scripts/task_board.py check 412 36 --note "что вышло"   # отметить пункт
+python -X utf8 scripts/task_board.py check 412 36 --undone             # снять отметку
+python -X utf8 scripts/task_board.py inbox            # что ждёт лично меня, по причинам
+python -X utf8 scripts/task_board.py seen 412         # погасить уведомление по задаче
+python -X utf8 scripts/task_board.py people           # кому можно ставить задачи
+python -X utf8 scripts/task_board.py people --all     # все сотрудники с отделами
+python -X utf8 scripts/task_board.py people --departments
+python -X utf8 scripts/task_board.py export           # выгрузка в xlsx
+python -X utf8 scripts/task_board.py notes            # мои заметки (личные)
+python -X utf8 scripts/task_board.py note "текст" --in 3h --remind 1h --todo
+python -X utf8 scripts/task_board.py note-set 19 --done
+python -X utf8 scripts/task_board.py note-del 19
+```
+
+**Комментарий перехода — это содержательная информация, а не служебный шум.**
+Причину возврата на доработку пишут именно там, и в `show` до этой правки её не
+было видно вовсе. Смотришь возвращённую задачу — читай `history`.
+
+`check` рассылает уведомление в Telegram всем участникам задачи (кроме тебя).
+Отмечать пункты «за компанию» нельзя — это увидят люди.
+
+`inbox` показывает пять причин, они взаимоисключающие и у задачи ровно одна,
+самая срочная:
+
+| Причина | Когда |
+|---|---|
+| `overdue` | я исполнитель, дедлайн прошёл, задача не закрыта |
+| `returned` | мне вернули на доработку |
+| `review` | я поручитель, исполнитель сдал и ждёт приёмки |
+| `fresh` | мне поручили, к работе ещё не приступил |
+| `accepted` | мою работу приняли — единственное «к сведению», а не «сделай» |
+
+Бэклог в счёт не идёт: это очередь планирования, работы там ещё нет.
+Просмотренные уведомления помечаются `(просмотрено)`, но из списка не исчезают —
+кроме `accepted`, у которой отметка вечная и просмотренная уходит совсем.
+
+Правила эти лежат в **четырёх** местах: `database.py::get_task_action_needs_summary`,
+`src/components/tasks/taskActionNeeds.js`, `notifications/sources.py::tasks` и
+`scripts/task_board.py::task_action_need`. Меняешь правило — меняй во всех четырёх;
+`tests/test_task_board_cli.py` сторожит, чтобы они не разъехались.
+
+**Заметки личные.** `task_notes.owner_id` — сервер отдаёт только свои, чужие не
+видны никому, включая админа. Напоминание — тот же предел суток, что у задач.
+
+**Осторожно с `GET /api/tasks`:** у него есть побочное действие — он
+материализует наступившие регламентные задачи и рассылает по ним уведомления
+в Telegram. Это не чтение вхолостую, так что в цикл его не ставь.
 
 ## Что от меня ждут по умолчанию (не спрашивать каждый раз)
 
