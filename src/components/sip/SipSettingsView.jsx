@@ -29,6 +29,7 @@ const TABS = [
 const EMPTY_FORM = {
     sip_number: '', sip_password: '', sip_domain: '',
     autodial_number: '', autodial_password: '', autodial_domain: '',
+    fop2_enabled: true,
 };
 
 // Массово меняются только пароль и домен: номера у каждого свои.
@@ -48,9 +49,16 @@ const formFromOperator = (op) => ({
     autodial_number: op?.autodial_number || '',
     autodial_password: op?.autodial_password || '',
     autodial_domain: op?.autodial_domain || '',
+    // Вход в FOP2 включён у всех, кому его отдельно не выключили: у записей,
+    // созданных до появления флага, поля просто нет — это не «выключено».
+    fop2_enabled: op?.fop2_enabled !== false,
 });
 
 const hasPersonalPassword = (op) => Boolean(op?.sip_password || op?.autodial_password);
+
+// Интересно только выключенное состояние: включённый FOP2 — норма, и помечать
+// им весь список нечего.
+const fop2Disabled = (op) => op?.fop2_enabled === false;
 
 const hasPersonalParams = (op) => Boolean(
     op?.sip_password || op?.sip_domain || op?.autodial_password || op?.autodial_domain
@@ -71,6 +79,12 @@ const buildSipPassword = (template, number) => {
 const normDomain = (value) => String(value || '').trim().toLowerCase();
 const effectiveDomain = (personal, common) => normDomain(personal) || normDomain(common);
 const numberKey = (number, domain) => `${String(number || '').trim()}@${normDomain(domain)}`;
+
+const fmtSize = (bytes) => {
+    const value = Number(bytes || 0);
+    if (!value) return '';
+    return `${(value / (1024 * 1024)).toFixed(1)} МБ`;
+};
 
 const fmtDateTime = (iso) => {
     if (!iso) return '';
@@ -148,6 +162,14 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
     const [historyLoading, setHistoryLoading] = useState(false);
     const historyLoadedRef = useRef(false);
 
+    // Версия телефона живёт своей жизнью: манифест публичный и к настройкам SIP
+    // отношения не имеет, поэтому и грузится отдельно — сбой здесь не должен
+    // мешать править номера.
+    const [release, setRelease] = useState(null);
+    const [releaseLoading, setReleaseLoading] = useState(true);
+    const [releaseError, setReleaseError] = useState('');
+    const [downloading, setDownloading] = useState(false);
+
     // showToast меняет идентичность при каждом тосте — держим в ref, чтобы не
     // перезапускать загрузку списка.
     const showToastRef = useRef(showToast);
@@ -207,6 +229,27 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             setHistoryLoading(false);
         }
     }, [apiBaseUrl, authHeaders]);
+
+    // Манифест версии публичный (телефон читает его до входа оператора), поэтому
+    // без токена; cache: 'no-store' — чтобы после публикации не показывать старое.
+    useEffect(() => {
+        let alive = true;
+        (async () => {
+            try {
+                const resp = await fetch(`${apiBaseUrl}/api/phone/version`, { cache: 'no-store' });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+                if (!alive) return;
+                setRelease(data.release || null);
+                setReleaseError('');
+            } catch (e) {
+                if (alive) setReleaseError(e.message);
+            } finally {
+                if (alive) setReleaseLoading(false);
+            }
+        })();
+        return () => { alive = false; };
+    }, [apiBaseUrl]);
 
     // История нужна редко — грузим при первом открытии вкладки.
     useEffect(() => {
@@ -510,6 +553,25 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         }
     };
 
+    // Ссылка на файл подписана на час, поэтому в разметке её держать нельзя:
+    // берём свежую в момент нажатия и сразу открываем.
+    const downloadPhone = async () => {
+        setDownloading(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/phone/download`, {
+                credentials: 'include',
+                headers: authHeaders(),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            window.open(data.url, '_blank', 'noopener');
+        } catch (e) {
+            showToastRef.current?.(`Не удалось скачать: ${e.message}`, 'error');
+        } finally {
+            setDownloading(false);
+        }
+    };
+
     const copyToClipboard = async (value, label) => {
         if (!value) return;
         try {
@@ -699,6 +761,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                                 <FaIcon className="fas fa-key" style={{ width: 11, height: 11 }} />
                                             </span>
                                         )}
+                                        {fop2Disabled(op) && (
+                                            <span className="hidden h-6 w-6 place-items-center rounded-full bg-amber-50 text-amber-600 sm:grid" title="Вход в FOP2 выключен — сотрудник не встаёт в очереди Asterisk">
+                                                <FaIcon className="fas fa-user-slash" style={{ width: 11, height: 11 }} />
+                                            </span>
+                                        )}
                                     </div>
                                     <FaIcon className="fas fa-chevron-right shrink-0 text-slate-300" style={{ width: 12, height: 12 }} />
                                 </button>
@@ -883,6 +950,65 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                         </div>
                     </section>
 
+                    {/* Программа телефона. Раздают её отсюда же, где ведут SIP-настройки:
+                        обновляется парк машин сам, но ссылка нужна для новых сотрудников. */}
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Программа iCORE Phone</div>
+                        <div className={`${iosCard} space-y-3 p-4`}>
+                            {releaseLoading ? (
+                                <p className="text-[12.5px] text-slate-400">Загружаю сведения о версии…</p>
+                            ) : releaseError ? (
+                                <p className="text-[12.5px] text-rose-600">Не удалось получить версию: {releaseError}</p>
+                            ) : !release ? (
+                                <p className="text-[12.5px] text-slate-500">
+                                    Дистрибутив ещё не опубликован. Он появится здесь после первой
+                                    сборки с публикацией.
+                                </p>
+                            ) : (
+                                <>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <IosBadge tone="blue">Версия {release.version}</IosBadge>
+                                        {release.mandatory && <IosBadge tone="slate">Обязательное</IosBadge>}
+                                        <span className="text-[11.5px] text-slate-400">
+                                            {[fmtSize(release.size), release.published_at ? fmtDateTime(release.published_at) : '']
+                                                .filter(Boolean).join(' · ')}
+                                        </span>
+                                    </div>
+                                    {release.notes && (
+                                        <p className="text-[12.5px] leading-relaxed text-slate-600">{release.notes}</p>
+                                    )}
+                                    <div className="flex items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2.5">
+                                        <span className="min-w-0 truncate font-mono text-[11px] text-slate-500" title={release.sha256}>
+                                            sha256 {release.sha256}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            onClick={() => copyToClipboard(release.sha256, 'sha256')}
+                                            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-white hover:text-slate-700"
+                                            title="Скопировать sha256"
+                                        >
+                                            <FaIcon className="fas fa-copy" style={{ width: 12, height: 12 }} />
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                            <button
+                                type="button"
+                                onClick={downloadPhone}
+                                disabled={downloading || !release}
+                                className={iosBtnPrimary}
+                            >
+                                <FaIcon className={downloading ? 'fas fa-spinner fa-spin' : 'fas fa-download'} />
+                                Скачать установщик
+                            </button>
+                            <p className="px-1 text-[11.5px] leading-relaxed text-slate-500">
+                                Ставится без прав администратора, только текущему пользователю.
+                                Обновления телефон потом качает сам и применяет в первую паузу
+                                без звонков — переустанавливать вручную не нужно.
+                            </p>
+                        </div>
+                    </section>
+
                     <div className="flex items-center justify-between gap-3 px-1">
                         <span className="text-[11.5px] text-slate-400">
                             {settings.updated_at
@@ -921,6 +1047,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         s.autodial_number ? `автодозвон ${s.autodial_number}` : null,
                                         s.sip_domain ? `домен ${s.sip_domain}` : null,
                                         s.sip_password ? 'свой пароль' : null,
+                                        // Флаг меняет, доходят ли до сотрудника звонки из
+                                        // очередей, — в истории он обязан быть виден.
+                                        s.fop2_enabled === false ? 'FOP2 выключен' : null,
                                     ]
                                     : [
                                         s.sip_server ? `сервер ${s.sip_server}` : 'сервер общий',
@@ -1223,6 +1352,37 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                         </button>
                                     )}
                                 </div>
+                            )}
+                        </div>
+                    </section>
+
+                    {/* Вход в FOP2. Выключают тем, кто не работает на очередях Asterisk:
+                        скрытый браузер FOP2 им ничего не даёт, а сломаться может. */}
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Очереди Asterisk (FOP2)</div>
+                        <div className={`${iosCard} space-y-2 p-4`}>
+                            <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
+                                <span className="text-[13px] text-slate-700">Входить в FOP2</span>
+                                <IosToggle
+                                    checked={form.fop2_enabled}
+                                    onChange={(v) => setForm((f) => ({ ...f, fop2_enabled: v }))}
+                                    disabled={!canEdit}
+                                />
+                            </div>
+                            <p className="mt-1 text-[11.5px] leading-relaxed text-slate-500">
+                                Касается только основного номера — режим автодозвона работает через
+                                свой FOP2 и не затрагивается. Применится при следующем запуске
+                                телефона у сотрудника.
+                            </p>
+                            {!form.fop2_enabled && (
+                                <p className="flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-700">
+                                    <FaIcon className="fas fa-triangle-exclamation mt-0.5 shrink-0" style={{ width: 11, height: 11 }} />
+                                    <span>
+                                        Статусы «Перерыв», «Тренинг» и «Техническая пауза» больше не будут
+                                        снимать сотрудника с очередей Asterisk — останется только запрет
+                                        звонков в самом телефоне.
+                                    </span>
+                                </p>
                             )}
                         </div>
                     </section>

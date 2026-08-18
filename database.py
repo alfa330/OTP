@@ -3987,6 +3987,14 @@ class Database:
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+            # Персональный выключатель входа в FOP2 для ОСНОВНОГО аккаунта.
+            # Колонка появилась позже таблицы, поэтому ALTER: строки операторов
+            # уже существуют, а вход в FOP2 до сих пор был безусловным — значит
+            # единственный безопасный дефолт «включён».
+            cursor.execute("""
+                ALTER TABLE user_sip_settings
+                ADD COLUMN IF NOT EXISTS fop2_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS resource_saved_schedule_plans (
                     id SERIAL PRIMARY KEY,
@@ -5243,6 +5251,7 @@ class Database:
             self._init_wiki_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
+            self._init_icore_phone_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5930,6 +5939,62 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT oktell_guard_schema")
+
+    def _init_icore_phone_schema_tx(self, cursor):
+        """Реестр релизов iCORE Phone — то, по чему телефоны решают, обновляться ли.
+
+        Схема скопирована с oktell_guard_releases (там она уже год возит
+        обновления агента), плюс два поля:
+          * variant — online-инсталлятор (~6 МБ, качается автообновлением) и
+            offline (~218 МБ, только для первичной установки руками);
+          * mandatory — «поставить молча при первой паузе», без права отложить.
+
+        SAVEPOINT и порядок CREATE TABLE → CREATE INDEX — как у остальных
+        разделов: весь _init_db идёт одной транзакцией, и падение здесь не
+        должно ронять инициализацию базы.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT icore_phone_schema")
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS icore_phone_releases (
+                    id          SERIAL PRIMARY KEY,
+                    version     VARCHAR(32) NOT NULL,
+                    variant     VARCHAR(16) NOT NULL DEFAULT 'online',
+                    filename    VARCHAR(160) NOT NULL DEFAULT '',
+                    sha256      CHAR(64) NOT NULL,
+                    size_bytes  BIGINT NOT NULL,
+                    gcs_bucket  VARCHAR(255) NOT NULL DEFAULT '',
+                    gcs_path    VARCHAR(512) NOT NULL DEFAULT '',
+                    notes       TEXT NOT NULL DEFAULT '',
+                    mandatory   BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_current  BOOLEAN NOT NULL DEFAULT TRUE,
+                    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    uploaded_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            # Одна версия одного варианта — один раз: повторная публикация той же
+            # сборки должна обновлять строку, а не плодить дубли с разными sha256.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS icore_phone_releases_variant_version_idx
+                ON icore_phone_releases (variant, version);
+            """)
+            # Текущая ровно одна на вариант: «две текущие» означали бы, что часть
+            # парка уедет не туда, а телефон берёт релиз без ORDER BY.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS icore_phone_releases_current_idx
+                ON icore_phone_releases (variant)
+                WHERE is_current;
+            """)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT icore_phone_schema")
+            logging.exception(
+                "Схема релизов iCORE Phone не применилась — автообновление телефона "
+                "будет недоступно, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT icore_phone_schema")
 
     def _init_reg_contest_schema_tx(self, cursor):
         """Конкурс «Топ по регистрациям» (данные из CRM yataxi).
@@ -23820,7 +23885,10 @@ class Database:
             COALESCE(dc.base_password, '') AS department_base_password,
             COALESCE(dc.autodial_code, '') AS department_autodial_code,
             COALESCE(dc.autodial_server, '') AS department_autodial_server,
-            COALESCE(dc.autodial_base_password, '') AS department_autodial_base_password
+            COALESCE(dc.autodial_base_password, '') AS department_autodial_base_password,
+            -- Строго последней колонкой: _sip_operator_row читает row по индексам,
+            -- вставка в середину сдвинула бы все поля после неё.
+            COALESCE(s.fop2_enabled, TRUE) AS fop2_enabled
         FROM users u
         LEFT JOIN departments dep ON dep.id = u.department_id
         LEFT JOIN user_sip_settings s ON s.user_id = u.id
@@ -23861,6 +23929,9 @@ class Database:
             "department_autodial_code": row[18] or "",
             "department_autodial_server": row[19] or "",
             "department_autodial_base_password": row[20] or "",
+            # Строки в user_sip_settings у большинства нет — COALESCE в SELECT
+            # уже отдал TRUE, поэтому здесь достаточно приведения к bool.
+            "fop2_enabled": bool(row[21]),
         }
 
     def get_sip_operators(self, department_ids=None, supervisor_id=None,
@@ -24005,6 +24076,17 @@ class Database:
                 return default
             return str(payload[key]).strip()
 
+        def _flag(key, default):
+            """Флаг разбираем отдельно от _field: str(False).strip() дал бы
+            непустую строку 'False', то есть «истину», и выключатель никогда бы
+            не выключался. JSON присылает bool, multipart-форма — '0'/'1'."""
+            value = payload.get(key)
+            if value is None:
+                return bool(default)
+            if isinstance(value, str):
+                return value.strip().lower() not in ('', '0', 'false', 'no', 'off')
+            return bool(value)
+
         sip_number = normalize_sip_identifier(_field('sip_number', current['sip_number']), field="SIP-номер")
         autodial_number = normalize_sip_identifier(
             _field('autodial_number', current['autodial_number']), field="Номер автодозвона")
@@ -24012,6 +24094,8 @@ class Database:
         sip_domain = _field('sip_domain', current['sip_domain'])
         autodial_password = _field('autodial_password', current['autodial_password'])
         autodial_domain = _field('autodial_domain', current['autodial_domain'])
+        # Флаг относится только к основному аккаунту: у режима автодозвона свой FOP2.
+        fop2_enabled = _flag('fop2_enabled', current.get('fop2_enabled', True))
 
         # Занятость номера считается в пределах домена: одинаковые номера на
         # разных АТС конфликтом не считаются. Домен «по умолчанию» для этого
@@ -24044,7 +24128,11 @@ class Database:
             (number, domain), owner = next(iter(owners.items()))
             raise ValueError(f"Номер {number} на домене {domain or '—'} уже занят: {owner['name']}")
 
-        has_overrides = any((sip_password, sip_domain, autodial_number, autodial_password, autodial_domain))
+        # Выключенный FOP2 — тоже персональная настройка: без него строка с
+        # одним лишь fop2_enabled=FALSE ушла бы в DELETE ниже, и флаг молча
+        # вернулся бы к «включён» (COALESCE отдаёт TRUE при отсутствии строки).
+        has_overrides = any((sip_password, sip_domain, autodial_number, autodial_password,
+                             autodial_domain, not fop2_enabled))
         changed = any((
             sip_number != current['sip_number'],
             sip_password != current['sip_password'],
@@ -24052,6 +24140,8 @@ class Database:
             autodial_number != current['autodial_number'],
             autodial_password != current['autodial_password'],
             autodial_domain != current['autodial_domain'],
+            # Без этой строки PUT с одним только флагом уходил бы в ранний return.
+            fop2_enabled != bool(current.get('fop2_enabled', True)),
         ))
         if not changed:
             return current
@@ -24072,18 +24162,20 @@ class Database:
                 cur.execute("""
                     INSERT INTO user_sip_settings (
                         user_id, sip_password, sip_domain,
-                        autodial_number, autodial_password, autodial_domain, updated_by, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                        autodial_number, autodial_password, autodial_domain,
+                        fop2_enabled, updated_by, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
                     ON CONFLICT (user_id) DO UPDATE SET
                         sip_password = EXCLUDED.sip_password,
                         sip_domain = EXCLUDED.sip_domain,
                         autodial_number = EXCLUDED.autodial_number,
                         autodial_password = EXCLUDED.autodial_password,
                         autodial_domain = EXCLUDED.autodial_domain,
+                        fop2_enabled = EXCLUDED.fop2_enabled,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, (user_id, sip_password, sip_domain, autodial_number,
-                      autodial_password, autodial_domain, changed_by))
+                      autodial_password, autodial_domain, fop2_enabled, changed_by))
             else:
                 cur.execute("DELETE FROM user_sip_settings WHERE user_id = %s", (user_id,))
             cur.execute("""
@@ -24096,6 +24188,9 @@ class Database:
                 "autodial_number": autodial_number,
                 "autodial_password": self._mask_sip_secret(autodial_password),
                 "autodial_domain": autodial_domain,
+                # Не секрет — пишем как есть, иначе на вкладке «История» не
+                # видно, кто и когда отключил оператору вход в FOP2.
+                "fop2_enabled": fop2_enabled,
             })))
         return self.get_sip_operator(user_id)
 
@@ -24271,6 +24366,119 @@ class Database:
             "autodial": _account(autodial_number, row.get("autodial_password"),
                                  row.get("autodial_domain"), autodial_server, autodial_base),
             "autodial_code": autodial_code,
+            # Выключатель входа в FOP2 для основного аккаунта. Режим автодозвона
+            # логинится в свой FOP2 и этим флагом не управляется.
+            "fop2_enabled": bool(row.get("fop2_enabled", True)),
+        }
+
+    # ── Релизы iCORE Phone ──────────────────────────────────────────────────
+    # Онлайн-инсталлятор раздаётся автообновлением, офлайн — только ссылкой на
+    # первичную установку, поэтому «текущий» релиз считается по варианту.
+    ICORE_PHONE_VARIANTS = ('online', 'offline')
+
+    _ICORE_PHONE_RELEASE_COLUMNS = (
+        "id, version, variant, filename, sha256, size_bytes, gcs_bucket, gcs_path, "
+        "notes, mandatory, is_current, uploaded_by, uploaded_at"
+    )
+
+    @classmethod
+    def normalize_icore_phone_variant(cls, value) -> str:
+        """Неизвестный вариант — это online: телефон, спросивший ерунду, должен
+        получить тот инсталлятор, который ему и нужен, а не 400."""
+        variant = str(value or '').strip().lower()
+        return variant if variant in cls.ICORE_PHONE_VARIANTS else 'online'
+
+    @staticmethod
+    def _icore_phone_release_row(row) -> dict:
+        return {
+            "id": row[0],
+            "version": row[1] or "",
+            "variant": row[2] or "online",
+            "filename": row[3] or "",
+            "sha256": (row[4] or "").strip().lower(),
+            "size": int(row[5] or 0),
+            "gcs_bucket": row[6] or "",
+            "gcs_path": row[7] or "",
+            "notes": row[8] or "",
+            "mandatory": bool(row[9]),
+            "is_current": bool(row[10]),
+            "uploaded_by": row[11],
+            "published_at": row[12].isoformat() if row[12] else None,
+        }
+
+    def get_icore_phone_release(self, variant: str = 'online'):
+        """Текущий релиз варианта или None, если ещё ничего не публиковали."""
+        variant = self.normalize_icore_phone_variant(variant)
+        with self._get_cursor() as cur:
+            cur.execute(
+                f"SELECT {self._ICORE_PHONE_RELEASE_COLUMNS} FROM icore_phone_releases "
+                "WHERE variant = %s AND is_current LIMIT 1",
+                (variant,))
+            row = cur.fetchone()
+        return self._icore_phone_release_row(row) if row else None
+
+    def get_icore_phone_releases(self, limit: int = 50) -> list:
+        """История публикаций для админского UI: свежие сверху."""
+        limit = max(1, min(int(limit or 50), 200))
+        with self._get_cursor() as cur:
+            cur.execute(
+                f"SELECT {self._ICORE_PHONE_RELEASE_COLUMNS} FROM icore_phone_releases "
+                "ORDER BY uploaded_at DESC, id DESC LIMIT %s",
+                (limit,))
+            rows = cur.fetchall()
+        return [self._icore_phone_release_row(r) for r in rows]
+
+    def add_icore_phone_release(self, *, version, variant='online', filename, sha256,
+                                size_bytes, gcs_bucket, gcs_path, notes='',
+                                mandatory=False, uploaded_by=None) -> dict:
+        """Зарегистрировать релиз и сделать его текущим для своего варианта.
+
+        Возвращает {'release': ..., 'stale_blobs': [(bucket, path), ...]}.
+        stale_blobs — объекты прежних версий этого варианта: имя объекта содержит
+        версию, поэтому старые файлы никем больше не используются и без чистки
+        бакет растёт на 6 МБ с каждой сборкой. Ссылку на них мы тут же обнуляем в
+        базе — подписать URL на уже удалённый объект хуже, чем не подписать вовсе.
+        """
+        variant = self.normalize_icore_phone_variant(variant)
+        version = str(version or '').strip()
+        if not version:
+            raise ValueError("Не задан номер версии")
+        sha256 = str(sha256 or '').strip().lower()
+        with self._get_cursor() as cur:
+            cur.execute(
+                "SELECT gcs_bucket, gcs_path FROM icore_phone_releases "
+                "WHERE variant = %s AND version <> %s AND gcs_path <> ''",
+                (variant, version))
+            stale = [(r[0], r[1]) for r in cur.fetchall() if r[0] and r[1]]
+            cur.execute(
+                "UPDATE icore_phone_releases SET is_current = FALSE, gcs_path = '' "
+                "WHERE variant = %s AND version <> %s",
+                (variant, version))
+            cur.execute(f"""
+                INSERT INTO icore_phone_releases (
+                    version, variant, filename, sha256, size_bytes, gcs_bucket, gcs_path,
+                    notes, mandatory, is_current, uploaded_by, uploaded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s,
+                        (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                ON CONFLICT (variant, version) DO UPDATE SET
+                    filename = EXCLUDED.filename,
+                    sha256 = EXCLUDED.sha256,
+                    size_bytes = EXCLUDED.size_bytes,
+                    gcs_bucket = EXCLUDED.gcs_bucket,
+                    gcs_path = EXCLUDED.gcs_path,
+                    notes = EXCLUDED.notes,
+                    mandatory = EXCLUDED.mandatory,
+                    is_current = TRUE,
+                    uploaded_by = EXCLUDED.uploaded_by,
+                    uploaded_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                RETURNING {self._ICORE_PHONE_RELEASE_COLUMNS}
+            """, (version, variant, str(filename or '').strip(), sha256, int(size_bytes or 0),
+                  str(gcs_bucket or '').strip(), str(gcs_path or '').strip(),
+                  str(notes or '').strip(), bool(mandatory), uploaded_by))
+            row = cur.fetchone()
+        return {
+            "release": self._icore_phone_release_row(row) if row else None,
+            "stale_blobs": stale,
         }
 
     def get_imported_call_keys_for_month(self, month: str) -> dict:

@@ -123,6 +123,8 @@ OPERATOR_STATE = {
     "updated_at": None, "updated_by_name": None,
     "department_sip_server": "", "department_base_password": "", "department_autodial_code": "",
     "department_autodial_server": "", "department_autodial_base_password": "",
+    # Вход в FOP2 включён у всех, кому его отдельно не выключали.
+    "fop2_enabled": True,
 }
 
 
@@ -279,6 +281,64 @@ class SaveUserSipSettingsTests(unittest.TestCase):
         self.assertFalse(any("DELETE FROM user_sip_settings" in s for s in sql))
         # Основной номер не переезжает в user_sip_settings — он остаётся в users.
         self.assertNotIn("sip_number", upsert.split("VALUES", 1)[0])
+
+    def test_disabling_fop2_alone_keeps_the_row(self):
+        """Выключенный FOP2 — сам по себе повод хранить строку.
+
+        Строка user_sip_settings удаляется, когда персональных настроек не осталось.
+        Если не считать выключенный флаг настройкой, запись с одним лишь
+        fop2_enabled=FALSE будет тут же удалена, и сотрудник молча вернётся
+        в очереди Asterisk.
+        """
+        self._save({"fop2_enabled": False})
+        calls = self.db.cursor.calls
+        self.assertFalse(any("DELETE FROM user_sip_settings" in s for s, _ in calls))
+        sql, params = next(
+            (s, p) for s, p in calls if "INSERT INTO user_sip_settings" in s
+        )
+        self.assertIn("fop2_enabled", sql)
+        # Порядок параметров upsert: user_id, пароль, домен, номер автодозвона,
+        # его пароль и домен, флаг FOP2, автор правки.
+        self.assertIs(False, params[6])
+
+    def test_only_fop2_change_is_not_treated_as_no_op(self):
+        """PUT, где поменялся только флаг, обязан дойти до базы.
+
+        Сохранение выходит раньше времени, если считает, что ничего не изменилось.
+        """
+        self._save({"fop2_enabled": False})
+        self.assertNotEqual([], self.db.cursor.calls)
+
+    def test_turning_fop2_back_on_releases_the_row(self):
+        """Флаг вернули в норму, других персональных настроек нет — строка не нужна."""
+        self.current["fop2_enabled"] = False
+        self._save({"fop2_enabled": True})
+        self.assertTrue(any("DELETE FROM user_sip_settings" in s for s in self._sql()))
+
+    def test_fop2_flag_is_written_to_history(self):
+        """Флаг меняет маршрутизацию звонков — в истории он должен быть виден."""
+        self._save({"fop2_enabled": False})
+        sql, params = next(
+            (s, p) for s, p in self.db.cursor.calls if "INSERT INTO sip_config_history" in s
+        )
+        snapshot = json.loads(params[2])
+        self.assertIs(False, snapshot["fop2_enabled"])
+
+    def test_fop2_flag_survives_the_positional_row_mapper(self):
+        """_sip_operator_row читает row по индексам: колонка обязана быть последней.
+
+        Вставка в середину SELECT сдвинула бы все поля после неё, и раздел начал бы
+        показывать чужие значения.
+        """
+        select = self.ns["_SIP_OPERATOR_SELECT"]
+        columns = select.split("FROM users", 1)[0]
+        self.assertIn("fop2_enabled", columns)
+        tail = [
+            line.strip().rstrip(',')
+            for line in columns.strip().splitlines()
+            if line.strip() and not line.strip().startswith('--')
+        ]
+        self.assertTrue(tail[-1].endswith("AS fop2_enabled"), tail[-1])
 
     def test_clearing_every_override_removes_the_row(self):
         self.current.update({"sip_password": "s3cret", "autodial_number": "2024"})
@@ -819,11 +879,15 @@ class SipSectionFrontendTests(unittest.TestCase):
         view = _read(VIEW_PATH)
         self.assertIn("/api/sip_config/operators", view)
         # Список и общие настройки приходят одним ответом: отдельного GET
-        # /api/sip_config нет. Всего четыре обращения — список, история
-        # (лениво, при открытии вкладки) и два сохранения.
+        # /api/sip_config нет. Шесть обращений по самим настройкам — список, история
+        # (лениво, при открытии вкладки) и сохранения; плюс два по программе телефона:
+        # публичный манифест версии и подписанная ссылка на файл (её берут свежей
+        # по нажатию, потому что она живёт час).
         self.assertIn("setCommonForm({", view)
         self.assertIn("setDepartments(Array.isArray(data.departments)", view)
-        self.assertEqual(6, view.count("await fetch("))
+        self.assertEqual(8, view.count("await fetch("))
+        self.assertIn("/api/phone/version", view)
+        self.assertIn("/api/phone/download", view)
         self.assertIn("if (tab === 'history' && !historyLoadedRef.current) fetchHistory();", view)
 
     def test_duplicates_and_conflicts_are_scoped_to_the_domain(self):

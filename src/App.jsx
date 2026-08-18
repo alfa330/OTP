@@ -732,6 +732,24 @@ const emitAppToast = (message, type = 'info') => {
     return false;
 };
 
+// Скачать программу телефона. Ссылка на файл в GCS подписана на час, поэтому её
+// нельзя держать в разметке — берём свежую в момент нажатия. Состояния компонента
+// намеренно не завожу: пункт есть у всех ролей и живёт в общем хвосте меню.
+const downloadIcorePhone = async () => {
+    try {
+        const resp = await fetch(`${API_BASE_URL}/api/phone/download`, {
+            credentials: 'include',
+            headers: withAccessTokenHeader(),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+        if (!data?.url) throw new Error('Сервер не вернул ссылку');
+        window.open(data.url, '_blank', 'noopener');
+    } catch (error) {
+        emitAppToast(`Не удалось скачать iCORE Phone: ${error.message}`, 'error');
+    }
+};
+
 const stripLegacyAuthHeaders = (headers = {}) => {
     const nextHeaders = { ...(headers || {}) };
     delete nextHeaders['X-API-Key'];
@@ -45065,6 +45083,21 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         </button>
                                     </li>
                                     )}
+
+                                    {/* «Скачать телефон» — программа iCORE Phone сотруднику.
+                                        Виден всем ролям и объявлен ОДИН раз в общей части меню.
+                                        Это не переход в раздел, а действие: ссылка на файл в GCS
+                                        подписана на час, поэтому берётся свежей по нажатию. */}
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={downloadIcorePhone}
+                                            className="relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3"
+                                        >
+                                            <FaIcon className="fas fa-download"></FaIcon>
+                                            <span className="sidebar-text">Скачать телефон</span>
+                                        </button>
+                                    </li>
 
                                     {canAccessAiQaSection && !isAdminLikeRole && !isAiQaDepartmentHead(user) && !isOpSalesSupervisorForAiQa(user) && (
                                         <li>

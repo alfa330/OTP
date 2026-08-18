@@ -22193,10 +22193,254 @@ def operator_sip_settings_endpoint():
                 "autodial": autodial,
                 # Общий код: набрать один раз, чтобы включить режим автодозвона.
                 "autodial_code": account.get("autodial_code") or "",
+                # Входить ли в FOP2 основным номером (персонально, «Настройки SIP»).
+                # Режима автодозвона не касается: у его АТС свой FOP2, без него
+                # режим не работает вообще. Нет записи у сотрудника → True.
+                "fop2_enabled": bool(account.get("fop2_enabled", True)),
             }
         }), 200
     except Exception as e:
         logging.error(f"Error in operator sip_settings: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+# ───────────────────── iCORE Phone: раздача и автообновление ──────────────────
+# Дистрибутив телефона лежит в GCS, метаданные — в icore_phone_releases. Схема
+# намеренно повторяет раздел «Ограничитель Перезвона»: задача та же — отдать
+# Windows-приложению новую версию так, чтобы сотрудник ничего не переустанавливал.
+
+ICORE_PHONE_PUBLISH_TOKEN_ENV = 'ICORE_PHONE_PUBLISH_TOKEN'
+ICORE_PHONE_BUCKET_ENV = ('GOOGLE_CLOUD_STORAGE_BUCKET_AGENTS',
+                          'GOOGLE_CLOUD_STORAGE_BUCKET_TASKS',
+                          'GOOGLE_CLOUD_STORAGE_BUCKET')
+ICORE_PHONE_PREFIX = 'icore_phone'
+# Час, а не 15 минут как у аватаров: телефон может проснуться на медленной машине,
+# и протухшая на полпути ссылка означала бы, что обновление не доедет.
+ICORE_PHONE_URL_TTL_MINUTES = 60
+# Онлайн-инсталлятор ~6 МБ. Офлайн-вариант (~210 МБ) через эту ручку не грузят:
+# файл читается целиком в память, а waitress рвёт запрос по channel_timeout.
+ICORE_PHONE_MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+# Манифест дёргает весь парк телефонов, поэтому ответ живёт в памяти процесса:
+# без этого каждый запрос уходил бы в базу, а полезной работы там на минуту раз.
+_icore_phone_version_cache = {}
+_ICORE_PHONE_VERSION_TTL_SEC = 60
+
+
+def _icore_phone_bucket_name() -> str:
+    """Тот же каскад, что у «Ограничителя Перезвона» — общий бакет для агентов."""
+    for name in ICORE_PHONE_BUCKET_ENV:
+        value = (os.getenv(name) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _icore_phone_public_release(release):
+    """Только то, что не секрет: версия, хэш, размер, имя файла, заметки."""
+    if not release:
+        return None
+    return {
+        "version": release.get("version") or "",
+        "variant": release.get("variant") or "online",
+        "filename": release.get("filename") or "",
+        "sha256": release.get("sha256") or "",
+        "size": int(release.get("size") or 0),
+        "mandatory": bool(release.get("mandatory")),
+        "notes": release.get("notes") or "",
+        "published_at": release.get("published_at"),
+    }
+
+
+def _icore_phone_signed_url(release, filename=None):
+    """Ссылка на файл в GCS: качают напрямую у Google, а не через наш инстанс."""
+    if not release or not release.get('gcs_bucket') or not release.get('gcs_path'):
+        return None
+    try:
+        blob = get_gcs_client().bucket(release['gcs_bucket']).blob(release['gcs_path'])
+        extra = {}
+        if filename:
+            extra['response_disposition'] = f'attachment; filename="{filename}"'
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=ICORE_PHONE_URL_TTL_MINUTES),
+            method="GET",
+            **extra,
+        )
+    except Exception:
+        logging.exception("iCORE Phone: не удалось подписать ссылку на дистрибутив")
+        return None
+
+
+@app.route('/api/phone/version', methods=['GET', 'OPTIONS'])
+def icore_phone_version_endpoint():
+    """Манифест версии — ПУБЛИЧНО, без токена.
+
+    Закрывать её нельзя: телефон сверяет версию и до входа оператора, и истёкшая
+    сессия не должна запирать парк машин на старой версии. Номер версии и sha256
+    секретом не являются, ссылки на файл здесь нет — она выдаётся отдельно.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        variant = db.normalize_icore_phone_variant(request.args.get('variant'))
+        now = time.time()
+        cached = _icore_phone_version_cache.get(variant)
+        if cached and now - cached[0] < _ICORE_PHONE_VERSION_TTL_SEC:
+            payload = cached[1]
+        else:
+            payload = _icore_phone_public_release(db.get_icore_phone_release(variant))
+            _icore_phone_version_cache[variant] = (now, payload)
+        resp = jsonify({"status": "success", "release": payload})
+        # Иначе прокси закэширует «обновлений нет» и парк застрянет на старой версии.
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
+    except Exception as e:
+        logging.error(f"Error in phone version: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/phone/download', methods=['GET', 'OPTIONS'])
+@require_api_key
+def icore_phone_download_endpoint():
+    """Свежая подписанная ссылка на дистрибутив — телефону и браузеру.
+
+    Подписываем на каждый запрос: ссылка живёт час, поэтому её нельзя ни отдавать
+    заранее в разметке, ни кэшировать — иначе сотрудник нажмёт кнопку и получит
+    просроченную ссылку.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        variant = db.normalize_icore_phone_variant(request.args.get('variant'))
+        release = db.get_icore_phone_release(variant)
+        if not release:
+            return jsonify({"error": "Дистрибутив iCORE Phone ещё не опубликован"}), 404
+        url = _icore_phone_signed_url(release, release.get('filename'))
+        if not url:
+            return jsonify({"error": "Не удалось подготовить ссылку на файл"}), 503
+        resp = jsonify({
+            "status": "success",
+            "url": url,
+            "filename": release.get("filename") or "",
+            "version": release.get("version") or "",
+            "sha256": release.get("sha256") or "",
+            "size": int(release.get("size") or 0),
+        })
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
+    except Exception as e:
+        logging.error(f"Error in phone download: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/phone/releases', methods=['GET', 'OPTIONS'])
+@require_api_key
+def icore_phone_releases_endpoint():
+    """История публикаций — тем же, кто ведёт «Настройки SIP»."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        role = requester[3]
+        if not _can_manage_sip_config(requester_id, role):
+            return jsonify({"error": "Forbidden"}), 403
+        return jsonify({"status": "success",
+                        "releases": db.get_icore_phone_releases()}), 200
+    except Exception as e:
+        logging.error(f"Error in phone releases: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/phone/publish', methods=['POST', 'OPTIONS'])
+def icore_phone_publish_endpoint():
+    """Публикация новой версии из сборки. Авторизация — заголовок X-Publish-Token.
+
+    Токен отдельный от операторских намеренно: он даёт право положить exe, который
+    парк машин затем установит сам. В приложение он не попадает — только в
+    переменные окружения билд-машины.
+
+    multipart/form-data: file, version, variant (online|offline), notes, mandatory.
+    Для офлайн-варианта файл кладут в бакет мимо API и передают gcs_path + sha256.
+    """
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    expected = (os.getenv(ICORE_PHONE_PUBLISH_TOKEN_ENV) or '').strip()
+    if not expected:
+        return jsonify({"error": "Публикация не настроена на сервере"}), 503
+    provided = (request.headers.get('X-Publish-Token') or '').strip()
+    # compare_digest, а не ==: обычное сравнение утекает токен по времени.
+    if not provided or not hmac.compare_digest(provided, expected):
+        return jsonify({"error": "Публикация не авторизована"}), 401
+    try:
+        version = (request.form.get('version') or '').strip()
+        if not version:
+            return jsonify({"error": "Не указана версия"}), 400
+        variant = db.normalize_icore_phone_variant(request.form.get('variant'))
+        notes = (request.form.get('notes') or '').strip()
+        mandatory = str(request.form.get('mandatory') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+        bucket_name = _icore_phone_bucket_name()
+        if not bucket_name:
+            return jsonify({"error": "На сервере не задан бакет GCS"}), 503
+
+        upload = request.files.get('file')
+        gcs_path_in = (request.form.get('gcs_path') or '').strip()
+        if upload is None and not gcs_path_in:
+            return jsonify({"error": "Нужен файл (file) либо готовый gcs_path"}), 400
+
+        if upload is not None:
+            data = upload.read()
+            size = len(data)
+            if size == 0:
+                return jsonify({"error": "Файл пустой"}), 400
+            if size > ICORE_PHONE_MAX_UPLOAD_BYTES:
+                return jsonify({"error": "Файл слишком большой для загрузки через API — "
+                                         "положите его в бакет и передайте gcs_path"}), 413
+            # Хэш считает сервер. Присланному клиентом верить нельзя: именно этот
+            # хэш решает, установит телефон файл или отбросит его.
+            digest = hashlib.sha256(data).hexdigest()
+            filename = os.path.basename((upload.filename or '').strip()
+                                        or f"iCORE-Phone-Setup-{version}.exe")
+            gcs_path = f"{ICORE_PHONE_PREFIX}/{filename}"
+            blob = get_gcs_client().bucket(bucket_name).blob(gcs_path)
+            # В имени объекта есть версия, значит содержимое не меняется никогда.
+            blob.cache_control = 'public, max-age=31536000, immutable'
+            blob.upload_from_string(data, content_type='application/octet-stream')
+        else:
+            gcs_path = gcs_path_in
+            filename = os.path.basename(gcs_path)
+            digest = (request.form.get('sha256') or '').strip().lower()
+            if len(digest) != 64:
+                return jsonify({"error": "Для gcs_path нужен sha256 (64 hex)"}), 400
+            try:
+                size = int(request.form.get('size') or 0)
+            except (TypeError, ValueError):
+                size = 0
+
+        result = db.add_icore_phone_release(
+            version=version, variant=variant, filename=filename, sha256=digest,
+            size_bytes=size, gcs_bucket=bucket_name, gcs_path=gcs_path,
+            notes=notes, mandatory=mandatory)
+        # Файлы прошлых версий этого варианта больше никому не нужны: в имени
+        # объекта есть версия, ссылок на них не осталось.
+        for stale_bucket, stale_path in (result.get('stale_blobs') or []):
+            try:
+                get_gcs_client().bucket(stale_bucket).blob(stale_path).delete()
+            except Exception:
+                logging.warning("iCORE Phone: не удалось удалить старый объект %s/%s",
+                                stale_bucket, stale_path)
+        # Манифест обязан отдать новую версию сразу, а не через минуту.
+        _icore_phone_version_cache.pop(variant, None)
+        return jsonify({"status": "success",
+                        "release": _icore_phone_public_release(result.get('release'))}), 200
+    except Exception as e:
+        logging.error(f"Error in phone publish: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -48648,6 +48892,9 @@ try:
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
         gcs_client_factory=get_gcs_client,
+        # Сверка присланных выбросов с историей самой АТС: программа стоит на
+        # компьютере сотрудника, и её словам без проверки верить нельзя.
+        oktell_query=_oktell_query,
     ))
     logging.info("Раздел «Ограничитель Перезвона»: Blueprint подключён на /api/oktell_guard")
 except Exception:
