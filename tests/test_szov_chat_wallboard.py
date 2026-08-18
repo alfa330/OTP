@@ -522,6 +522,12 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("otp:szov-wallboard-direction", self.view)
         self.assertIn("readStoredDirection(userId)", self.view)
 
+    def test_every_person_on_shift_carries_a_status(self):
+        """Запрос владельца: статус рядом с каждым чатником, включая «Онлайн»."""
+        column = self.board[self.board.index('const ChatPeopleColumn'):self.board.index('const formatPeople')]
+        self.assertIn('{item.status}', column)
+        self.assertNotIn("item.status_key !== 'online'", column)
+
     def test_chat_board_shows_the_three_asked_counters(self):
         for label in ('label="Онлайн"', 'label="Занят"', 'label="Тренинг"'):
             self.assertIn(label, self.board, label)

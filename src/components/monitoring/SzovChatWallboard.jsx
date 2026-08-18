@@ -66,13 +66,13 @@ const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
                                     <span className="min-w-0 leading-snug text-slate-800" style={{ fontSize: nameSize }}>
                                         {item.name}
                                     </span>
-                                    {/* Чип только у тех, кто не на линии: иначе «Онлайн» стоял бы
-                                        у большинства строк и перестал бы что-либо сообщать. */}
-                                    {style && item.status_key !== 'online' ? (
-                                        <span className={`mt-0.5 shrink-0 rounded-md px-2 py-0.5 text-[12px] font-medium ${style.chip}`}>
-                                            {item.status}
-                                        </span>
-                                    ) : null}
+                                    {/* Статус стоит у каждого, включая «Онлайн» (запрос владельца):
+                                        со стены должно быть видно, кто держит линию, а кто нет,
+                                        без вычитания из соседних плиток. */}
+                                    <span className={`mt-0.5 shrink-0 rounded-md px-2 py-0.5 text-[12px] font-medium ${
+                                        (style || CHAT_STATUS_STYLE.offline).chip}`}>
+                                        {item.status}
+                                    </span>
                                 </div>
                                 <div className="mt-0.5 flex items-center gap-2 text-[14px] font-medium tabular-nums text-slate-400">
                                     <span>{item.seconds === null || item.seconds === undefined
