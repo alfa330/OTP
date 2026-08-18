@@ -3,6 +3,7 @@ import {
     Bar,
     CartesianGrid,
     ComposedChart,
+    LabelList,
     Legend,
     Line,
     ReferenceLine,
@@ -94,17 +95,20 @@ const KeyTile = ({ label, value, hint, tone = 'neutral', scale = 1 }) => {
     );
 };
 
-const StatTile = ({ label, value, tone = 'neutral', scale = 1 }) => (
+/* Единицу выносим в приглушённый суффикс: «11,6 мин» целиком крупным шрифтом не влезает в
+   плитку и переносится на вторую строку, а ряд плиток из-за этого едет. */
+const StatTile = ({ label, value, unit = null, tone = 'neutral', scale = 1 }) => (
     <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-slate-200/80 px-4 py-5 text-center">
         <div className="text-[14px] font-medium text-slate-500">{label}</div>
         <div
-            className={`font-semibold tabular-nums leading-none ${
+            className={`whitespace-nowrap font-semibold tabular-nums leading-none ${
                 (KEY_PALETTE[tone] || KEY_PALETTE.neutral).text === 'text-slate-700'
                     ? 'text-slate-900'
                     : (KEY_PALETTE[tone] || KEY_PALETTE.neutral).text}`}
             style={{ fontSize: valueFontSize('stat', scale) }}
         >
             {value}
+            {unit ? <span className="font-normal text-slate-400" style={{ fontSize: '0.45em' }}> {unit}</span> : null}
         </div>
     </div>
 );
@@ -221,24 +225,36 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
     return (
         <div style={{ height: `${Math.round(300 * scale)}px` }}>
             <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                {/* Верхний отступ держит подписи осей: без него «мин» и «чатники» обрезаются
+                    краем области рисования. */}
+                <ComposedChart data={data} margin={{ top: 26, right: 8, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
                     <XAxis dataKey="hour" tick={{ fontSize: 11 * scale, fill: '#94a3b8' }}
                            tickLine={false} axisLine={{ stroke: '#e2e8f0' }} interval="preserveStartEnd" />
+                    {/* Подписи осей уводим выше делений: без отступа «мин» садится вплотную к
+                        верхнему делению и читается как часть числа. */}
                     <YAxis yAxisId="left" tick={{ fontSize: 11 * scale, fill: '#94a3b8' }}
                            tickLine={false} axisLine={false} width={44 * scale}
-                           label={{ value: 'мин', position: 'insideTopLeft', fontSize: 11 * scale, fill: '#94a3b8' }} />
+                           label={{ value: 'мин', position: 'top', offset: 12,
+                                    fontSize: 11 * scale, fill: '#94a3b8' }} />
                     <YAxis yAxisId="right" orientation="right" allowDecimals={false}
                            tick={{ fontSize: 11 * scale, fill: '#94a3b8' }} tickLine={false} axisLine={false}
                            width={44 * scale}
-                           label={{ value: 'чатники', position: 'insideTopRight', fontSize: 11 * scale, fill: '#94a3b8' }} />
+                           label={{ value: 'чатники', position: 'top', offset: 12,
+                                    fontSize: 11 * scale, fill: '#94a3b8' }} />
                     <Tooltip content={<ChartTooltip targetSeconds={targetSeconds} />} cursor={{ fill: '#f8fafc' }} />
                     <Legend verticalAlign="bottom" height={28} iconType="circle"
                             wrapperStyle={{ fontSize: 12 * scale, color: '#475569' }} />
                     <Bar yAxisId="right" dataKey="online" name="Было на линии"
                          fill={CHART_COLORS.online} radius={[4, 4, 0, 0]} maxBarSize={26} />
+                    {/* Число над столбиком: когда «нужно» в разы больше факта, столбик факта
+                        прижимается к нулю, и без подписи из графика не вычитать, сколько же
+                        людей не хватает. */}
                     <Bar yAxisId="right" dataKey="required" name="Нужно под цель"
-                         fill={CHART_COLORS.required} radius={[4, 4, 0, 0]} maxBarSize={26} />
+                         fill={CHART_COLORS.required} radius={[4, 4, 0, 0]} maxBarSize={26}>
+                        <LabelList dataKey="required" position="top"
+                                   style={{ fontSize: 10.5 * scale, fill: '#b45309', fontWeight: 600 }} />
+                    </Bar>
                     <ReferenceLine yAxisId="left" y={targetSeconds / 60} stroke={CHART_COLORS.target}
                                    strokeDasharray="5 4" strokeWidth={2}
                                    label={{ value: `цель ${formatMinutes(targetSeconds, 0)}`, position: 'right',
@@ -259,6 +275,12 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     const inner = today.inner_reply_seconds;
     const innerTone = inner === null || inner === undefined
         ? 'neutral' : (Number(inner) <= targetSeconds ? 'good' : 'bad');
+
+    // Часы с измеренным ответом внутри чата и доля тех, где уложились в цель.
+    const measuredHours = (snapshot?.hourly || []).filter(
+        (row) => row.inner_reply_seconds !== null && row.inner_reply_seconds !== undefined);
+    const hoursMeasured = measuredHours.length;
+    const hoursInTarget = measuredHours.filter((row) => row.inner_reply_seconds <= targetSeconds).length;
 
     // Отпуск и «не в системе» своих плиток не имеют — как тренинг и тех.причина на «Основе»,
     // показываем их приглушённой строкой и только когда есть кого показывать.
@@ -288,9 +310,16 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                 <Section icon="fa-chart-bar" title="Показатели за день">
                     <Grid>
                         <StatTile label="Чатов за сутки" value={formatInt(today.chats)} scale={scale} />
-                        <StatTile label="Открыто сейчас" value={formatInt(today.chats_open)} scale={scale} />
-                        <StatTile label="Ответ внутри чата" value={formatMinutes(inner)} tone={innerTone} scale={scale} />
-                        <StatTile label="Первый ответ" value={formatMinutes(today.first_reply_seconds)} scale={scale} />
+                        {/* Не «открыто сейчас»: это число почти совпадает с плиткой «Открыто чатов»
+                            выше, и два одинаковых на вид счётчика рядом только сбивают. Полезнее
+                            итог дня по цели — в скольких часах в неё уложились. */}
+                        <StatTile label="Часов в цели" value={formatInt(hoursInTarget)}
+                                  unit={`из ${formatInt(hoursMeasured)}`}
+                                  tone={hoursInTarget === hoursMeasured ? 'good' : 'neutral'} scale={scale} />
+                        <StatTile label="Ответ внутри чата" value={formatMinutes(inner, 1, false)} unit="мин"
+                                  tone={innerTone} scale={scale} />
+                        <StatTile label="Первый ответ" value={formatMinutes(today.first_reply_seconds, 1, false)}
+                                  unit="мин" scale={scale} />
                     </Grid>
                 </Section>
 

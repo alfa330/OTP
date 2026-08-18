@@ -107,10 +107,13 @@ export const CHAT_STATUS_STYLE = {
     offline: { label: 'Не в системе', chip: 'bg-slate-100 text-slate-500' },
 };
 
-/** Секунды -> «12,7 мин». Ось графика и плитки чатов живут в минутах: цель тоже задана в них. */
-export const formatMinutes = (seconds, digits = 1) => (
+/*
+ * Секунды -> «12,7 мин». Ось графика и плитки чатов живут в минутах: цель тоже задана в них.
+ * withUnit=false отдаёт голое число — плитка рисует «мин» отдельным приглушённым суффиксом.
+ */
+export const formatMinutes = (seconds, digits = 1, withUnit = true) => (
     Number.isFinite(Number(seconds))
-        ? `${(Number(seconds) / 60).toFixed(digits).replace('.', ',')} мин`
+        ? `${(Number(seconds) / 60).toFixed(digits).replace('.', ',')}${withUnit ? ' мин' : ''}`
         : '—'
 );
 
