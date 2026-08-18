@@ -24,7 +24,7 @@ import { selectableSections, sectionOptionLabel } from './sectionPicker';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-const SectionRow = ({ section, depth, onEdit, onArchive, onRestore, busy }) => (
+const SectionRow = ({ section, depth, onEdit, onAddChild, onArchive, onRestore, busy }) => (
     <div
         className="flex items-center gap-2 px-4 py-2.5 transition hover:bg-slate-50"
         style={{ paddingLeft: `${16 + depth * 22}px` }}
@@ -60,6 +60,21 @@ const SectionRow = ({ section, depth, onEdit, onArchive, onRestore, busy }) => (
             </div>
         </div>
 
+        {/* Подраздел добавляется прямо со строки родителя. Раньше вложенность
+            задавалась только селектом внутри модалки, которую открывала кнопка
+            у пространства, — и «добавить внутрь этого раздела» выглядело как
+            отсутствующая возможность. */}
+        {section.status === 'active' && (
+            <button
+                type="button"
+                onClick={() => onAddChild(section)}
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+                aria-label={`Добавить подраздел в «${section.name}»`}
+                title="Добавить подраздел"
+            >
+                <Plus size={15} />
+            </button>
+        )}
         <button
             type="button"
             onClick={() => onEdit(section)}
@@ -282,6 +297,15 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     parent_section_id: s.parent_section_id ? String(s.parent_section_id) : '',
                                     department_id: s.department_id ? String(s.department_id) : '',
                                 })}
+                                onAddChild={(s) => setSectionModal({
+                                    space_id: s.space_id, name: '', description: '',
+                                    visibility_scope: 'restricted',
+                                    parent_section_id: String(s.id),
+                                    // Отдел НЕ наследуем от родителя: подраздел ОП
+                                    // внутри ветки ОП — это должность, а не второй
+                                    // отдел, и метка отдела там только запутает.
+                                    department_id: '',
+                                })}
                                 onArchive={archiveSection}
                                 onRestore={restoreSection}
                             />
@@ -355,7 +379,14 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                 open={!!sectionModal}
                 onClose={() => setSectionModal(null)}
                 title={sectionModal?.id ? 'Изменить раздел' : 'Новый раздел'}
-                subtitle="Раздел — единица выдачи доступа"
+                subtitle={
+                    /* Куда именно ляжет раздел — в заголовке, а не только в
+                       селекте ниже: модалку открывают с трёх разных мест, и
+                       родитель уже подставлен. */
+                    sectionModal?.parent_section_id
+                        ? `Внутри раздела «${sections.find((x) => String(x.id) === String(sectionModal.parent_section_id))?.name || '—'}»`
+                        : 'Раздел — единица выдачи доступа'
+                }
                 footer={(
                     <>
                         <button type="button" className={iosBtnSecondary} onClick={() => setSectionModal(null)}>
