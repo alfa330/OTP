@@ -1,13 +1,14 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Building2, Globe, MapPin, Percent, Phone, Plus, Tag } from 'lucide-react';
-import { iosCard, IosBadge } from '../ui/ios';
+import React from 'react';
+import { Plus } from 'lucide-react';
+import { iosCard } from '../ui/ios';
 
 /* Рельс таксопарков — левая колонка витрины статей.
  *
  * Парки к статьям не привязаны (см. шапку WikiParks), поэтому рельс НЕ фильтр:
- * он справочник под рукой. Оператор читает статью и тут же смотрит комиссию или
- * телефон парка, не уходя со страницы — карточка раскрывается поповером рядом
- * с плиткой, а не переносит человека на другую вкладку.
+ * он справочник под рукой. Плитка — две буквы, и сама по себе не говорит
+ * ничего: наведение отвечает «что это» — название и комиссия. Двух строк
+ * подсказке хватает; всё остальное о парке (контакты, адрес, акции) открывается
+ * нажатием — отдельной страницей WikiPark, а не поповером у плитки.
  */
 
 /* Аббревиатура из названия: «Бизнес Партнёр» → «БП», «Global» → «GL».
@@ -20,113 +21,49 @@ const parkInitials = (name) => {
     return single.slice(0, 2).toUpperCase() || '—';
 };
 
-const ParkPopover = ({ park, onOpenDirectory }) => (
+/* Подсказка на CSS, а не на состоянии: перерисовывать витрину со всеми её
+   списками на каждое движение мыши по плиткам незачем. group-focus-within —
+   та же подсказка с клавиатуры: наведение мышью не единственный способ дойти
+   до плитки.
+
+   hidden lg:block намеренно: до lg рельс — горизонтальная лента с
+   overflow-x-auto, и подсказка обрезалась бы его краем. Наведения там всё
+   равно нет, название парка человек получает нажатием. */
+const ParkTooltip = ({ park }) => (
     <div
-        className={`${iosCard} absolute left-0 top-full z-30 mt-2 w-[248px] max-w-[calc(100vw-48px)] p-3 text-left shadow-[0_12px_32px_rgba(15,23,42,0.16)] lg:left-full lg:top-0 lg:ml-2 lg:mt-0`}
-        role="dialog"
-        aria-label={park.name}
+        role="tooltip"
+        className="pointer-events-none absolute left-full top-1/2 z-30 ml-2 hidden w-max max-w-[220px] -translate-y-1/2 scale-95 opacity-0 transition duration-150 group-hover:scale-100 group-hover:opacity-100 group-focus-within:scale-100 group-focus-within:opacity-100 lg:block"
     >
-        <div className="flex items-start gap-2.5">
-            <div className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 text-indigo-600">
-                {park.logo_url
-                    ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
-                    : <Building2 size={16} />}
-            </div>
-            <div className="min-w-0 flex-1">
-                <div className="text-[13.5px] font-semibold leading-snug text-slate-900">{park.name}</div>
-                {park.description && (
-                    <p className="mt-0.5 line-clamp-2 text-[11.5px] leading-relaxed text-slate-500">
-                        {park.description}
-                    </p>
-                )}
+        <div className="rounded-xl bg-slate-900/90 px-2.5 py-1.5 text-left shadow-[0_8px_20px_rgba(15,23,42,0.22)] backdrop-blur-sm">
+            <div className="text-[12.5px] font-semibold leading-tight text-white">{park.name}</div>
+            <div className="mt-0.5 text-[10.5px] leading-tight text-white/65 tabular-nums">
+                {park.commission != null
+                    ? `комиссия ${park.commission}%`
+                    : 'комиссия не указана'}
             </div>
         </div>
-
-        <div className="mt-2.5 space-y-1.5 text-[12px] text-slate-600">
-            {park.city && (
-                <div className="flex items-center gap-1.5"><MapPin size={12} className="text-slate-400" /> {park.city}</div>
-            )}
-            {park.phone && (
-                <div className="flex items-center gap-1.5"><Phone size={12} className="text-slate-400" /> {park.phone}</div>
-            )}
-            {park.commission != null && (
-                <div className="flex items-center gap-1.5 tabular-nums">
-                    <Percent size={12} className="text-slate-400" /> комиссия {park.commission}%
-                </div>
-            )}
-            {park.website && (
-                <a
-                    href={park.website}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 text-indigo-600 hover:underline"
-                >
-                    <Globe size={12} /> сайт парка
-                </a>
-            )}
-            {!park.city && !park.phone && park.commission == null && !park.website && (
-                <div className="text-[11.5px] text-slate-400">Контакты ещё не заполнены</div>
-            )}
-        </div>
-
-        {park.promotions_count > 0 && (
-            <div className="mt-2.5">
-                <IosBadge tone="amber"><Tag size={11} /> акций: {park.promotions_count}</IosBadge>
-            </div>
-        )}
-
-        <button
-            type="button"
-            onClick={onOpenDirectory}
-            className="mt-3 w-full rounded-lg bg-slate-100 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]"
-        >
-            Открыть справочник
-        </button>
     </div>
 );
 
-export default function WikiParkRail({ parks, canManage, onOpenParks }) {
-    const [openId, setOpenId] = useState(null);
-    const railRef = useRef(null);
-
-    /* Поповер закрывается по Esc и по клику мимо — обычная моторика macOS.
-       Слушаем на документе, а не рисуем невидимую подложку: подложка перехватила
-       бы первый клик по соседней плитке, и парки пришлось бы открывать дважды. */
-    useEffect(() => {
-        if (openId == null) return undefined;
-        const onKey = (e) => { if (e.key === 'Escape') setOpenId(null); };
-        const onDown = (e) => { if (!railRef.current?.contains(e.target)) setOpenId(null); };
-        document.addEventListener('keydown', onKey);
-        document.addEventListener('mousedown', onDown);
-        return () => {
-            document.removeEventListener('keydown', onKey);
-            document.removeEventListener('mousedown', onDown);
-        };
-    }, [openId]);
-
+export default function WikiParkRail({ parks, canManage, onOpenPark, onOpenParks }) {
     if (!parks.length && !canManage) return null;
 
     return (
         /* self-stretch — чтобы sticky-рельс ехал вдоль всей витрины, а не
            «отлипал», когда закончится его собственная высота. */
-        <aside ref={railRef} className="lg:w-[64px] lg:shrink-0 lg:self-stretch">
+        <aside className="lg:w-[64px] lg:shrink-0 lg:self-stretch">
             <div className={`${iosCard} flex items-center gap-2 overflow-x-auto p-2 lg:sticky lg:top-4 lg:flex-col lg:items-center lg:overflow-visible lg:py-2.5`}>
                 <span className="shrink-0 px-1 text-[9px] font-bold uppercase tracking-[0.08em] text-slate-400 lg:mb-0.5">
                     Парки
                 </span>
 
                 {parks.map((park) => (
-                    <div key={park.id} className="relative shrink-0">
+                    <div key={park.id} className="group relative shrink-0">
                         <button
                             type="button"
-                            onClick={() => setOpenId(openId === park.id ? null : park.id)}
-                            aria-expanded={openId === park.id}
-                            title={park.name}
-                            className={`relative grid h-[38px] w-[38px] place-items-center overflow-hidden rounded-xl text-[10.5px] font-bold transition active:scale-[0.96] ${
-                                openId === park.id
-                                    ? 'bg-indigo-600 text-white shadow-[0_3px_8px_rgba(79,70,229,0.35)]'
-                                    : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                            }`}
+                            onClick={() => onOpenPark?.(park.slug)}
+                            aria-label={park.name}
+                            className="relative grid h-[38px] w-[38px] place-items-center overflow-hidden rounded-xl bg-slate-100 text-[10.5px] font-bold text-slate-500 transition hover:bg-slate-200 active:scale-[0.96]"
                         >
                             {park.logo_url
                                 ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
@@ -136,12 +73,7 @@ export default function WikiParkRail({ parks, canManage, onOpenParks }) {
                             )}
                         </button>
 
-                        {openId === park.id && (
-                            <ParkPopover
-                                park={park}
-                                onOpenDirectory={() => { setOpenId(null); onOpenParks?.(); }}
-                            />
-                        )}
+                        <ParkTooltip park={park} />
                     </div>
                 ))}
 

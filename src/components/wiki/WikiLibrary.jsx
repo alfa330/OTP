@@ -6,6 +6,7 @@ import WikiArticle from './WikiArticle';
 import WikiHome from './WikiHome';
 import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
+import WikiPark from './WikiPark';
 import { markedWord } from './WikiSearch';
 import useStableCallback from './useStableCallback';
 import { selectableSections } from './sectionPicker';
@@ -88,6 +89,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const consumeSearchTarget = useStableCallback(onSearchTargetConsumed);
 
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
+    // Открытый парк — такая же страница витрины, как статья (см. WikiPark).
+    const [openParkSlug, setOpenParkSlug] = useState(null);
     const [openHighlight, setOpenHighlight] = useState(null);
     // Префилл для статьи-классификатора: пришли из поиска с готовой машиной.
     const [openPrefill, setOpenPrefill] = useState(null);
@@ -158,6 +161,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         setOpenSlug(null);
         setOpenHighlight(null);
         setOpenPrefill(null);
+        setOpenParkSlug(null);
         setEditing(null);
         setQuery('');
         setFound(null);
@@ -168,6 +172,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const openArticle = useCallback((slug) => {
         setOpenHighlight(null);
         setOpenPrefill(null);
+        setOpenParkSlug(null);
         setOpenSlug(slug);
     }, []);
 
@@ -325,6 +330,18 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     /* Статья и редактор занимают всю ширину раздела намеренно: справочные
        таблицы вики — это шесть колонок и больше (см. ступени ширины в
        WikiView), и отобранные у них 400px возвращают перенос по буквам. */
+    if (openParkSlug) {
+        return (
+            <WikiPark
+                base={base}
+                headers={headers}
+                slug={openParkSlug}
+                onBack={() => setOpenParkSlug(null)}
+                onOpenParks={onOpenParks}
+            />
+        );
+    }
+
     if (openSlug) {
         return (
             <WikiArticle
@@ -359,7 +376,12 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
 
     return (
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
-            <WikiParkRail parks={parks} canManage={parksCanManage} onOpenParks={onOpenParks} />
+            <WikiParkRail
+                parks={parks}
+                canManage={parksCanManage}
+                onOpenPark={(slug) => setOpenParkSlug(slug)}
+                onOpenParks={onOpenParks}
+            />
 
             <div className="flex min-w-0 flex-1 flex-col gap-3">
                 {/* Обложка витрины: где человек находится и одно поле, с которого
