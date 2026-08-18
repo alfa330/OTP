@@ -21,7 +21,7 @@ import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import SectionCascade from './SectionCascade';
+import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
 
 /* Редактор статьи на TipTap.
@@ -310,10 +310,10 @@ export default function WikiEditor({
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
                                 Раздел
                             </label>
-                            {/* Выбор по шагам, а не одним списком: ветки СЗоВ и ОП
-                                называются одинаково, и в плоской выпадашке статья
+                            {/* Дерево, а не плоский список: ветки СЗоВ и ОП
+                                называются одинаково, и в общей выпадашке статья
                                 уезжала не туда. */}
-                            <SectionCascade
+                            <SectionTreeSelect
                                 sections={sections}
                                 spaces={spaces}
                                 value={sectionIds[0] || null}
