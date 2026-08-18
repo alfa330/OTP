@@ -158,6 +158,32 @@ def update_section(cursor, section_id, fields):
     return cursor.rowcount > 0
 
 
+def free_section_slug(cursor, space_id, base, exclude_id=None):
+    """Свободный слаг в пределах пространства: к занятому дописывается номер.
+
+    В базе на (space_id, slug) висит UNIQUE, и попытка создать второй раздел с
+    тем же названием падала прямо в обработчик ошибок — человек видел
+    «Внутренняя ошибка раздела Вики» вместо внятного ответа. Занять слаг может
+    и АРХИВНЫЙ раздел: архивируют обычно как раз одноимённый дубль, и имя после
+    этого остаётся занятым.
+
+    Так же ведут себя статьи (slug_is_free в wiki/edit.py) — конструктор не
+    должен отличаться от них поведением.
+    """
+    base = (base or 'section')[:200]
+    slug, suffix = base, 2
+    while True:
+        cursor.execute(
+            'SELECT 1 FROM wiki_sections WHERE space_id = %s AND slug = %s '
+            'AND (%s::int IS NULL OR id <> %s::int) LIMIT 1',
+            (space_id, slug, exclude_id, exclude_id),
+        )
+        if cursor.fetchone() is None:
+            return slug
+        slug = '%s-%d' % (base[:190], suffix)
+        suffix += 1
+
+
 def section_would_cycle(cursor, section_id, new_parent_id):
     """Не станет ли раздел собственным предком.
 

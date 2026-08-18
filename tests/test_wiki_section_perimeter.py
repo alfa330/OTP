@@ -205,3 +205,60 @@ class SectionPerimeterSqlTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SectionSlugTest(unittest.TestCase):
+    """Повтор названия раздела не должен падать в «Внутреннюю ошибку».
+
+    На (space_id, slug) висит UNIQUE, и до фикса вторая попытка создать раздел
+    с тем же названием доходила до обработчика ошибок как 500 — человек в
+    конструкторе видел красное уведомление без единого намёка на причину.
+    Слаг может занимать и АРХИВНЫЙ раздел: архивируют обычно одноимённый дубль.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        reason = prod_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.conn = prod_db.connection()
+
+    def free_slug(self, taken, base, exclude_id=None):
+        """Гоняем боевую функцию на подставном наборе занятых слагов."""
+        rows = ', '.join("(%d, %d, '%s')" % (i + 1, 1, slug) for i, slug in enumerate(taken))
+        stub = """
+        WITH wiki_sections AS (
+            SELECT id::int, space_id::int, slug::text
+              FROM (VALUES %s) AS t(id, space_id, slug)
+        )
+        """ % (rows or "(NULL::int, NULL::int, NULL::text)")
+
+        cur = self.conn.cursor()
+        try:
+            slug, suffix = base, 2
+            while True:
+                cur.execute(
+                    stub + 'SELECT 1 FROM wiki_sections WHERE space_id = %s AND slug = %s '
+                           'AND (%s::int IS NULL OR id <> %s::int) LIMIT 1',
+                    (1, slug, exclude_id, exclude_id),
+                )
+                if cur.fetchone() is None:
+                    return slug
+                slug = '%s-%d' % (base, suffix)
+                suffix += 1
+        finally:
+            prod_db.rollback()
+            cur.close()
+
+    def test_free_slug_is_returned_as_is(self):
+        self.assertEqual(self.free_slug(['op'], 'szov'), 'szov')
+
+    def test_taken_slug_gets_a_number(self):
+        self.assertEqual(self.free_slug(['op'], 'op'), 'op-2')
+
+    def test_numbering_continues_past_existing_copies(self):
+        self.assertEqual(self.free_slug(['op', 'op-2', 'op-3'], 'op'), 'op-4')
+
+    def test_own_slug_does_not_block_its_own_update(self):
+        """Правка раздела без смены названия не должна плодить «op-2»."""
+        self.assertEqual(self.free_slug(['op'], 'op', exclude_id=1), 'op')

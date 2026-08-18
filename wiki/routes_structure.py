@@ -228,7 +228,12 @@ def register(bp, wiki_route, db, log_ip):
         section_id = structure.create_section(
             cursor, space_id=space_id,
             parent_section_id=_int_or_none(data.get('parent_section_id')),
-            name=name, slug=_clean(data.get('slug'), 200) or _slugify(name),
+            name=name,
+            # Слаг обязан быть уникален в пространстве, и занять его мог даже
+            # архивный раздел. Дописываем номер, как это делают статьи, — иначе
+            # повтор названия падал в 500.
+            slug=structure.free_section_slug(
+                cursor, space_id, _clean(data.get('slug'), 200) or _slugify(name)),
             description=_clean(data.get('description'), 2000),
             icon=_clean(data.get('icon'), 64), visibility_scope=scope,
             owner_user_id=_int_or_none(data.get('owner_user_id')),
@@ -247,7 +252,7 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_section_item(cursor, ctx, section_id):
         cursor.execute(
             """
-            SELECT s.name, sp.department_id
+            SELECT s.name, sp.department_id, s.space_id
               FROM wiki_sections s JOIN wiki_spaces sp ON sp.id = s.space_id
              WHERE s.id = %s
             """,
@@ -258,6 +263,7 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": "Раздел не найден"}), 404
         if not _may_manage_space(ctx, row[1]):
             return jsonify({"error": "Раздел относится к другому отделу"}), 403
+        section_exists_space_id = row[2]
 
         if request.method == 'DELETE':
             structure.update_section(cursor, section_id, {'status': 'archived'})
@@ -268,9 +274,13 @@ def register(bp, wiki_route, db, log_ip):
 
         data = _body()
         fields = {}
-        for key in ('name', 'slug', 'description', 'icon'):
+        for key in ('name', 'description', 'icon'):
             if key in data:
                 fields[key] = _clean(data[key], 2000 if key == 'description' else 255)
+        if 'slug' in data:
+            fields['slug'] = structure.free_section_slug(
+                cursor, section_exists_space_id, _clean(data['slug'], 200) or _slugify(row[0]),
+                exclude_id=section_id)
         if data.get('visibility_scope') in ('public', 'restricted'):
             fields['visibility_scope'] = data['visibility_scope']
         if data.get('status') in ('active', 'archived'):
