@@ -5224,6 +5224,7 @@ class Database:
             self._init_front_office_calls_schema_tx(cursor)
             self._init_wiki_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
+            self._init_oktell_guard_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -5887,6 +5888,30 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT crm_schema")
+
+    def _init_oktell_guard_schema_tx(self, cursor):
+        """Схема раздела «Ограничитель Перезвона» (таблицы oktell_guard_*).
+
+        SAVEPOINT — потому что весь _init_db идёт одной транзакцией: падение
+        здесь не должно ронять инициализацию базы. Порядок инструкций внутри
+        (CREATE TABLE → ALTER → CREATE INDEX) закреплён тестом: 17.08.2026
+        обратный порядок в другом разделе положил прод, а на чистой базе такая
+        ошибка не воспроизводится.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT oktell_guard_schema")
+        try:
+            from oktell_guard.schema import init_oktell_guard_schema
+            init_oktell_guard_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT oktell_guard_schema")
+            logging.exception(
+                "Схема раздела «Ограничитель Перезвона» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT oktell_guard_schema")
 
     def _init_reg_contest_schema_tx(self, cursor):
         """Конкурс «Топ по регистрациям» (данные из CRM yataxi).
@@ -34398,12 +34423,15 @@ class Database:
                 boundary -= 1440
         return boundary
 
-    def _normalize_break_intervals_soft(self, breaks):
+    def _normalize_break_intervals_soft(self, breaks, dedupe=True):
         """
         Мягкая нормализация списка перерывов: сортировка, отсев мусора и дублей.
         В отличие от _normalize_shift_breaks не кидает ошибку — применяется в том числе
         к данным, пришедшим от клиента, и сохранение смены не должно падать из-за одного
         битого интервала.
+
+        dedupe=False — для списков, где интервалы принадлежат РАЗНЫМ операторам:
+        два одинаковых перерыва там значат «двое на перерыве», и схлопывать их нельзя.
         """
         normalized = []
         seen = set()
@@ -34415,7 +34443,7 @@ class Database:
                 end = int(item.get('end'))
             except (TypeError, ValueError):
                 continue
-            if end <= start or (start, end) in seen:
+            if end <= start or (dedupe and (start, end) in seen):
                 continue
             seen.add((start, end))
             normalized.append({'start': start, 'end': end})
@@ -34635,10 +34663,9 @@ class Database:
             for item in self._normalize_break_intervals_soft(snapshot_breaks):
                 if int(item['start']) < boundary:
                     result.append(item)
-        return self._merge_break_intervals(result)
-
-    def _break_intervals_overlap(self, a, b):
-        return int(a['start']) < int(b['end']) and int(b['start']) < int(a['end'])
+        # Сливать нельзя: перерывы принадлежат разным операторам, а по ним считаются
+        # и «одновременно не больше двух», и лимит пересечения пары перерывов.
+        return sorted(result, key=lambda item: (int(item['start']), int(item['end'])))
 
     def _merge_break_intervals(self, items):
         if not items:
@@ -34994,7 +35021,7 @@ class Database:
                 cursor,
                 self._get_operator_direction_name_tx(cursor, operator_id)
             )
-        neighbors.extend(self._normalize_break_intervals_soft(extra_occupied))
+        neighbors.extend(self._normalize_break_intervals_soft(extra_occupied, dedupe=False))
         neighbors = self._tag_break_intervals_with_cross_gap(neighbors, cross_gap_minutes)
         # Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
         own_intervals = [{'start': int(p['start']), 'end': int(p['end'])} for p in protected]

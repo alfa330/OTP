@@ -137,6 +137,7 @@ const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/Shif
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
 const GroupsView = lazyWithRetry(() => import('./components/groups/GroupsView'));
 const SipSettingsView = lazyWithRetry(() => import('./components/sip/SipSettingsView'));
+const OktellGuardView = lazyWithRetry(() => import('./components/oktell_guard/OktellGuardView'));
 const FourYouView = lazyWithRetry(() => import('./components/four_you/lenta'));
 const EventsView = lazyWithRetry(() => import('./components/events/EventsView'));
 const CallQaView = lazyWithRetry(() => import('./components/call_qa/CallQaView'));
@@ -19972,7 +19973,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
                 const overlapStart = Math.max(p.start, bStartInDay);
                 const overlapEnd = Math.min(p.end, bEndInDay);
-                if (overlapEnd > overlapStart) res.push({ start: overlapStart, end: overlapEnd });
+                // fullLength — длительность целого перерыва: часть могла быть обрезана
+                // полуночью, а норма пересечения считается по всему перерыву.
+                if (overlapEnd > overlapStart) res.push({ start: overlapStart, end: overlapEnd, fullLength: bEndInDay - bStartInDay });
                 });
                 return res;
             };
@@ -20123,6 +20126,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     key,
                                     start,
                                     end,
+                                    fullLength: Number(bPart?.fullLength) || (end - start),
                                     operatorName: otherOp.name || `Оператор ${otherOp.id}`,
                                     shiftLabel
                                 });
@@ -20136,7 +20140,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 breaksNormalized.forEach(b => {
                     const overlapDetails = occupiedByDirectionDetailed.filter(occ => {
                         const overlap = Math.min(b.end, occ.end) - Math.max(b.start, occ.start);
-                        return overlap > breakAllowedPairOverlapMinutes(b.end - b.start, occ.end - occ.start);
+                        return overlap > breakAllowedPairOverlapMinutes(b.end - b.start, occ.fullLength);
                     });
                     if (overlapDetails.length > 0) {
                         conflictIndexes.add(b.idx);
@@ -20154,8 +20158,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         });
                         return;
                     }
-                    if (breakConcurrencyPenaltyMinutes(b, occupiedByDirectionDetailed) > 0) {
-                        const crowdDetails = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
+                    const crowdPenalty = breakConcurrencyPenaltyMinutes(b, occupiedByDirectionDetailed);
+                    if (crowdPenalty > 0) {
+                        // Показываем только тех, из-за кого нарушение и возникло: остальные
+                        // пересечения к нему не относятся и в списке только шумят.
+                        const guilty = occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ)
+                            && breakConcurrencyPenaltyMinutes(b, occupiedByDirectionDetailed.filter(other => other !== occ)) < crowdPenalty);
+                        const crowdDetails = guilty.length > 0
+                            ? guilty
+                            : occupiedByDirectionDetailed.filter(occ => intervalsOverlap(b, occ));
                         conflictIndexes.add(b.idx);
                         crowdIndexes.add(b.idx);
                         crowdViolationsWithDirection += 1;
@@ -35090,6 +35101,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
             const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
+            // «Ограничитель Перезвона»: глава СЗоВ и глобальные админы (решение
+            // владельца). Глава чужого отдела не проходит — назначение главой
+            // заменяет базовую роль и режет периметр отделом, ровно как у табло СЗоВ.
+            const canAccessOktellGuard = canAccessSzovWallboardForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             const wikiSectionEnabled = wikiEnabledFor(user);
@@ -43630,6 +43645,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'group_late_bot' && canAccessGroupLateBotSection) return;
                 // «Настройки SIP» — общий раздел телефонии, не привязан к allowlist отдела.
                 if (view === 'sip_settings' && canAccessSipSettings) return;
+                // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
+                if (view === 'oktell_guard' && canAccessOktellGuard) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -44273,6 +44290,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canAccessOktellGuard && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
+                                                    </button>
+                                                </li>
+                                            )}
                                             {canAccessAiQaSection && (
                                                 <li>
                                                     <button
@@ -44538,6 +44565,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'sip_settings' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-headset"></FaIcon> <span className="sidebar-text">Настройки SIP</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessOktellGuard && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'oktell_guard')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47053,6 +47090,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     canEdit={canAccessSipSettings}
+                                />
+                            </Suspense>
+                        ))}
+                        {/* Ограничитель «Перезвона»: глава СЗоВ и глобальные админы */}
+                        {( view === "oktell_guard" && canAccessOktellGuard && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <OktellGuardView
+                                    user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
                                 />
                             </Suspense>
                         ))}

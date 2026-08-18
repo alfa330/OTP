@@ -33995,10 +33995,6 @@ def _ws_seed_break_positions_from_existing(planned_breaks, existing_breaks):
     return result
 
 
-def _ws_intervals_overlap(a, b):
-    return int(a['start']) < int(b['end']) and int(b['start']) < int(a['end'])
-
-
 def _ws_parse_date_str(value):
     return datetime.strptime(str(value), '%Y-%m-%d').date()
 
@@ -48381,6 +48377,25 @@ try:
     logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
 except Exception:
     logging.exception("Раздел «Обращения»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Ограничитель Перезвона» (агент на машине оператора) ──────────────
+# GCS-клиент передаётся аргументом: раздел раздаёт exe агента подписанной
+# ссылкой, а не через наш инстанс — после выпуска версии обновляются все машины
+# разом, и это гигабайты трафика мимо интерфейса.
+try:
+    from oktell_guard.routes import build_oktell_guard_blueprint  # noqa: E402
+
+    app.register_blueprint(build_oktell_guard_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        gcs_client_factory=get_gcs_client,
+    ))
+    logging.info("Раздел «Ограничитель Перезвона»: Blueprint подключён на /api/oktell_guard")
+except Exception:
+    logging.exception("Раздел «Ограничитель Перезвона»: Blueprint НЕ подключён")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -90,9 +90,10 @@ class _TechReasonDummy:
 
 
 BREAK_ADJUST_METHODS = (
-    "_break_intervals_overlap",
     "_merge_break_intervals",
     "_normalize_break_intervals_soft",
+    "_break_freeze_boundary_minutes",
+    "_extra_occupied_from_day_snapshots",
     "_tag_break_intervals_with_cross_gap",
     "_break_layout_spacing",
     "_break_start_bounds_for_index",
@@ -386,7 +387,8 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
         )
 
         lunch = result[1]
-        self.assertFalse(dummy._break_intervals_overlap(lunch, {"start": 16 * 60 + 15, "end": 16 * 60 + 45}))
+        colleague = {"start": 16 * 60 + 15, "end": 16 * 60 + 45}
+        self.assertEqual(dummy._break_total_overlap_minutes(lunch, [colleague]), 0)
         self.assertGreaterEqual(lunch["start"] - result[0]["end"], 45)
         self.assertGreaterEqual(result[2]["start"] - lunch["end"], 45)
 
@@ -544,6 +546,42 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             [{"start": 685, "end": 700}],
         )
 
+    def test_frozen_colleague_breaks_keep_their_owners(self):
+        # Замороженные перерывы коллег приходят снимком дня. Если склеить или
+        # схлопнуть их в один интервал, «двое на перерыве» превращаются в одного,
+        # а длительность блоба поднимает допустимое пересечение.
+        dummy = _make_break_adjust_dummy()
+        snapshots = {
+            (2, "2026-08-06"): [{"start": 12 * 60, "end": 12 * 60 + 30}],
+            (3, "2026-08-06"): [{"start": 12 * 60, "end": 12 * 60 + 30}],
+            (4, "2026-08-06"): [{"start": 12 * 60 + 30, "end": 12 * 60 + 45}],
+        }
+        dummy._normalize_direction_key = lambda value: str(value or "").strip().lower()
+        extra = dummy._extra_occupied_from_day_snapshots(
+            cursor=None,
+            day_breaks_snapshots=snapshots,
+            operator_id=1,
+            shift_date="2026-08-06",
+            now=datetime(2026, 8, 6, 14, 0),
+        )
+        self.assertEqual(
+            extra,
+            [
+                {"start": 720, "end": 750},
+                {"start": 720, "end": 750},
+                {"start": 750, "end": 765},
+            ],
+        )
+        # И дальше по списку виден именно третий оператор, а не один слитый интервал.
+        self.assertGreater(
+            dummy._break_concurrency_penalty_minutes({"start": 720, "end": 735}, extra),
+            0,
+        )
+        self.assertEqual(
+            dummy._normalize_break_intervals_soft(extra, dedupe=False),
+            extra,
+        )
+
     def test_allowed_pair_overlap_follows_break_duration(self):
         dummy = _make_break_adjust_dummy()
         self.assertEqual(dummy._break_allowed_pair_overlap_minutes(15, 15), 10)
@@ -603,7 +641,6 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "_ws_pick_break_durations_for_shift",
             "_ws_place_break_durations_centered",
             "_ws_compute_breaks_for_shift_minutes",
-            "_ws_intervals_overlap",
             "_ws_parse_date_str",
             "_ws_date_str",
             "_ws_add_days_str",
