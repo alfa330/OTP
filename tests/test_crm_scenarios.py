@@ -13,8 +13,11 @@
 """
 
 import unittest
+from pathlib import Path
 
 from crm import scenarios as sc
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 # Ответы, при которых тематика ничего не блокирует и не закрывает. Нужны как
@@ -448,19 +451,75 @@ class RenderTest(unittest.TestCase):
         self.assertIn('Документы не поступили', subject)
         self.assertIn('123456789012', subject)
 
-    def test_body_lists_every_answered_question(self):
+    def test_body_opens_with_where_and_when(self):
+        """Парк, город и период — одной строкой контекста, а не тремя подписями."""
+        answers = full('sapar_docs_missing', park='iTaxi', city='Алматы')
+        body = sc.render_body('sapar_docs_missing', answers)
+        self.assertEqual(body.split('\n')[0], 'iTaxi · Алматы · период июль 2026')
+
+    def test_iin_is_not_repeated_in_the_body(self):
+        """Он уже стоит в теме обращения, и вторым разом только занимает строку."""
+        answers = full('sapar_docs_missing', iin='123456789012')
+        self.assertIn('123456789012', sc.render_subject('sapar_docs_missing', answers))
+        self.assertNotIn('ИИН водителя', sc.render_body('sapar_docs_missing', answers))
+
+    def test_answered_questions_are_all_there(self):
         answers = full('sapar_docs_missing', trips_in_park='yes', relogin_done='yes',
                        docs_after_relogin='no')
         body = sc.render_body('sapar_docs_missing', answers)
-        self.assertIn('ИИН водителя: 123456789012', body)
-        self.assertIn('Отчётный период: июль 2026', body)
-        self.assertIn('Были ли поездки в нашем парке: да', body)
-        self.assertIn('Появились ли документы после повторного входа: нет', body)
+        self.assertIn('Да: поездки в нашем парке', body)
+        self.assertIn('Нет: провайдер менялся · документы появились после повторного входа', body)
+
+    def test_repeated_yes_answers_collapse_into_one_line(self):
+        """Пять строк «…: да» подряд — стена, в которой сути не видно."""
+        answers = full('sapar_payment_required')
+        body = sc.render_body('sapar_payment_required', answers)
+        self.assertIn('Да: поездки в нашем парке · комиссия парка списывалась', body)
+        # Ни одной строки вида «что-то: да» в перечне не остаётся.
+        self.assertNotIn(': да', body)
+
+    def test_single_yes_answer_stays_a_normal_line(self):
+        """«Требование оплаты отображается: да» читается лучше, чем «Да: …»."""
+        answers = full('sapar_payment_required', trips_in_park='yes',
+                       park_commission_charged='yes', corp_or_bonus='yes',
+                       payment_shown='no', payment_is_sapar_signing='yes')
+        # payment_shown='no' закрывает обращение, поэтому берём тематику с одним «нет».
+        answers = full('sapar_service_error', signing_related='no')
+        body = sc.render_body('sapar_service_error', answers)
+        self.assertIn('На этапе подписания или сохранения: нет', body)
+        self.assertNotIn('Нет: ', body)
+
+    def test_performed_checks_collapse_separately_from_facts(self):
+        """«Я это проверил» и «это так» — разные вещи, в один перечень нельзя."""
+        body = sc.render_body('sapar_service_error', full('sapar_service_error'))
+        self.assertIn('✅ Проверено: ожидание 5 минут', body)
+        self.assertIn('интернет-соединение', body.split('✅ Проверено:')[1])
+
+    def test_list_items_are_separated_by_a_dot_not_a_comma(self):
+        """У подписей внутри бывают запятые, и перечень через запятую читался
+        неоднозначно: непонятно, где кончается один пункт."""
+        body = sc.render_body('sapar_sign_error', full('sapar_sign_error'))
+        line = next(l for l in body.split(chr(10)) if l.startswith('Да: '))
+        self.assertIn(' · ', line)
+        self.assertEqual(len(line.split(' · ')), 3, line)
 
     def test_yes_with_detail_is_readable(self):
         body = sc.render_body('sapar_docs_missing', full(
             'sapar_docs_missing', provider_changed={'value': 'yes', 'detail': '2026-07-10'}))
-        self.assertIn('Менялся ли провайдер: да (2026-07-10)', body)
+        self.assertIn('Провайдер менялся: да (2026-07-10)', body)
+
+    def test_datetime_is_written_the_way_people_read_it(self):
+        body = sc.render_body('sapar_service_error',
+                              full('sapar_service_error', last_try_at='2026-08-17T12:38'))
+        self.assertIn('Последняя попытка: 17.08.2026 12:38', body)
+        self.assertNotIn('2026-08-17T12:38', body)
+
+    def test_blocks_are_separated_by_a_blank_line(self):
+        """Пустая строка — разметка: по ней и Telegram, и карточка делят текст."""
+        body = sc.render_body('sapar_service_error', full('sapar_service_error'))
+        self.assertIn('\n\n', body)
+        for block in body.split('\n\n'):
+            self.assertTrue(block.strip(), 'пустой блок в тексте')
 
     def test_mass_outage_flag_goes_first(self):
         body = sc.render_body('sapar_service_error', full('sapar_service_error'),
@@ -474,7 +533,24 @@ class RenderTest(unittest.TestCase):
 
     def test_body_reports_confirmed_checks(self):
         body = sc.render_body('sapar_docs_missing', full('sapar_docs_missing'))
-        self.assertIn('обязательные проверки', body)
+        self.assertIn('✔️ Чек-лист выполнен: 5 из 5', body)
+
+    def test_checklist_line_can_only_be_true(self):
+        """Строка утверждает факт — значит текст обязан собираться только для
+        обращения, которое УЖЕ прошло проверку чек-листа.
+
+        Иначе в группу уходило бы «чек-лист выполнен» там, где его не выполняли.
+        Сторожим оба входа: и отправку, и предпросмотр.
+        """
+        answers = full('sapar_docs_missing')
+        without = sc.evaluate('sapar_docs_missing', answers, has_attachment=True,
+                              checks_confirmed=False)
+        self.assertNotEqual(without['outcome'], sc.READY)
+        self.assertIn('__checks__', without['missing'])
+
+        routes = (ROOT / 'crm' / 'routes.py').read_text(encoding='utf-8')
+        preview = routes.split("verdict['preview']")[0]
+        self.assertIn("if verdict['outcome'] == scenarios.READY:", preview)
 
 
 class CatalogForUiTest(unittest.TestCase):
@@ -551,7 +627,7 @@ class RulesAreDecidableTest(unittest.TestCase):
         """В группе должно быть видно «неизвестно», а не код и не «нет»."""
         answers = full('sapar_docs_missing', provider_changed={'value': 'unknown'})
         body = sc.render_body('sapar_docs_missing', answers)
-        self.assertIn('Менялся ли провайдер: неизвестно', body)
+        self.assertIn('Провайдер менялся: неизвестно', body)
 
     def test_device_and_browser_carry_examples(self):
         """Задача #174: без образца операторы пишут «телефон» и «браузер».
@@ -638,8 +714,8 @@ class RulesAreDecidableTest(unittest.TestCase):
     def test_park_and_city_reach_the_group_as_written(self):
         answers = full('sapar_docs_missing', park='Qazaq', city='Актау')
         body = sc.render_body('sapar_docs_missing', answers)
-        self.assertIn('Таксопарк: Qazaq', body)
-        self.assertIn('Город: Актау', body)
+        # Парк и город стоят в строке контекста, а не отдельными подписями.
+        self.assertEqual(body.split('\n')[0], 'Qazaq · Актау · период июль 2026')
 
     def test_every_flag_references_an_existing_step(self):
         for scenario in sc.SCENARIOS:
@@ -757,9 +833,9 @@ class TermoboxTest(unittest.TestCase):
 
     def test_group_message_shows_what_is_being_approved(self):
         body = sc.render_body(self.KEY, self.base(sc.TERMOBOX_REPLACE))
-        self.assertIn('Что нужно согласовать: Замену термокороба', body)
-        self.assertIn('Номер водительского удостоверения: 123456789', body)
-        self.assertIn('Фактический город: Актау', body)
+        self.assertIn('Согласовать: Замену термокороба', body)
+        self.assertIn('Водительское удостоверение: 123456789', body)
+        self.assertEqual(body.split('\n')[0], 'Актау')
         self.assertIn('ИИН 060606202020', sc.render_subject(self.KEY,
                                                             self.base(sc.TERMOBOX_REPLACE)))
 

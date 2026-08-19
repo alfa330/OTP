@@ -76,6 +76,31 @@ def _clip(text, limit):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
 
 
+def format_body(text):
+    """Готовый текст обращения — в разметку Telegram.
+
+    Разметки в самом тексте нет и быть не должно: его собирает crm.scenarios, а
+    тот ничего не знает ни про Telegram, ни про HTML — один и тот же текст
+    показывается ещё и в карточке обращения. Поэтому подписи выделяются здесь,
+    по формату строки: всё до первого «: » — подпись.
+
+    Без этого сообщение читалось одним серым полотном: глазу негде зацепиться,
+    и специалист искал ИИН построчно.
+    """
+    result = []
+    for line in str(text or '').split(chr(10)):
+        if not line.strip():
+            result.append('')
+            continue
+        head, sep, tail = line.partition(': ')
+        # Двоеточие внутри длинной фразы — не подпись, а знак препинания.
+        if sep and len(head) <= 64:
+            result.append('<b>%s:</b> %s' % (html.escape(head), html.escape(tail)))
+        else:
+            result.append(html.escape(line))
+    return chr(10).join(result)
+
+
 def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=None,
                          priority='normal', author_name=None, department_name=None,
                          client_name=None, client_phone=None, created_text=None,
@@ -100,7 +125,7 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=N
     lines.append('<b>%s</b>' % html.escape(_clip(subject, 300)))
     if body:
         lines.append('')
-        lines.append(html.escape(_clip(body, 2500)))
+        lines.append(format_body(_clip(body, 2500)))
 
     client = ' · '.join([p for p in (client_name, client_phone) if p])
     if client:

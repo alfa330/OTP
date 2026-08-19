@@ -262,5 +262,57 @@ class EveryGroupMessageCarriesTheIinTest(unittest.TestCase):
                                     'build_status_notice', 'build_ticket_message'])
 
 
+class BodyMarkupTest(unittest.TestCase):
+    """Разметка готового текста для Telegram.
+
+    Сам текст собирает crm.scenarios и разметки не несёт — он показывается ещё и
+    в карточке обращения. Выделение подписей живёт здесь.
+    """
+
+    BODY = '''
+iTaxi · Алматы · период февраль 2026
+
+Тип ошибки: Сайт не загружается
+Текст ошибки: сломалось: код 500
+
+✅ Проверено: повторный вход, ожидание 5 минут
+'''
+
+    def test_labels_become_bold(self):
+        out = telegram.format_body(self.BODY)
+        self.assertIn('<b>Тип ошибки:</b> Сайт не загружается', out)
+        self.assertIn('<b>✅ Проверено:</b> повторный вход, ожидание 5 минут', out)
+
+    def test_line_without_a_label_stays_plain(self):
+        out = telegram.format_body(self.BODY)
+        self.assertIn('iTaxi · Алматы · период февраль 2026', out)
+        self.assertNotIn('<b>iTaxi', out)
+
+    def test_only_the_first_colon_splits_the_line(self):
+        out = telegram.format_body(self.BODY)
+        self.assertIn('<b>Текст ошибки:</b> сломалось: код 500', out)
+
+    def test_blank_lines_survive(self):
+        """Пустая строка — граница блока, и в Telegram она тоже нужна."""
+        out = telegram.format_body(self.BODY)
+        self.assertEqual(out.count(chr(10) * 2), 2)
+
+    def test_values_are_escaped(self):
+        out = telegram.format_body('Текст ошибки: <b>500</b>')
+        self.assertIn('&lt;b&gt;500&lt;/b&gt;', out)
+        self.assertNotIn('<b>500</b>', out)
+
+    def test_long_phrase_with_a_colon_is_not_a_label(self):
+        long = '%s: ответ' % ('о' * 70)
+        out = telegram.format_body(long)
+        self.assertNotIn('<b>', out)
+
+    def test_ticket_message_uses_the_markup(self):
+        out = telegram.build_ticket_message(
+            ticket_id=12, subject='Тема · ИИН 060606202020', body=self.BODY,
+            queue_title='iTaxi Sapar')
+        self.assertIn('<b>Тип ошибки:</b>', out)
+
+
 if __name__ == '__main__':
     unittest.main()

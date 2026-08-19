@@ -10,6 +10,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import TicketWizard from './TicketWizard';
+import { formatTicketBody } from './ticketBody';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
  *
@@ -448,11 +449,33 @@ const TicketCard = ({
 
             {/* Переписка */}
             <div ref={threadRef} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto bg-slate-50/60 px-4 py-4">
-                <div className="rounded-2xl bg-white px-3.5 py-3 text-[13px] leading-relaxed text-slate-700 ring-1 ring-slate-200/70">
-                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                {/* Текст обращения — тот самый, что ушёл в группу, но разложенный
+                    по блокам и строкам: подпись бледная, ответ тёмный. Одним серым
+                    полотном перечень «вопрос: ответ» не читается вовсе. */}
+                <div className="rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70">
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                         Обращение
                     </div>
-                    <div className="whitespace-pre-wrap break-words">{ticket.body}</div>
+                    <div className="space-y-2.5">
+                        {formatTicketBody(ticket.body).map((block, blockIndex) => (
+                            <div key={blockIndex} className="space-y-1">
+                                {block.map((row, rowIndex) => (row.label ? (
+                                    <div key={rowIndex}
+                                         className="flex flex-wrap items-baseline gap-x-1.5 text-[13px] leading-relaxed">
+                                        <span className="text-slate-500">{row.label}</span>
+                                        <span className="min-w-0 break-words font-medium text-slate-800">
+                                            {row.value}
+                                        </span>
+                                    </div>
+                                ) : (
+                                    <div key={rowIndex}
+                                         className="break-words text-[13px] font-medium leading-relaxed text-slate-800">
+                                        {row.text}
+                                    </div>
+                                )))}
+                            </div>
+                        ))}
+                    </div>
                 </div>
                 {(data.messages || [])
                     /* Корневое сообщение уже показано блоком «Обращение» выше —

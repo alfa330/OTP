@@ -580,12 +580,80 @@ STEP_GROUPS = {
 DEFAULT_GROUP = 'Подробности'
 
 
-def _assign_groups(scenarios):
-    """Проставляет группу каждому шагу. Общие шаги (STEP_IIN и другие) —
-    один объект на все тематики, поэтому присваивание идемпотентно."""
+# Короткая подпись для ГОТОВОГО ТЕКСТА обращения. Вопрос оператору и строка в
+# отчёте — разные жанры: спрашивать надо полно («Выполнено ли ожидание в течение
+# 5 минут»), а специалист в группе читает перечень и полные вопросы ему только
+# мешают. Задаётся по ключу, как и экран: один вопрос — одна подпись во всех
+# тематиках, иначе получим шесть шансов разойтись.
+STEP_SHORT = {
+    'trips_in_park': 'Поездки в нашем парке',
+    'commission_charged': 'Комиссия списывалась',
+    'park_commission_charged': 'Комиссия парка списывалась',
+    'corp_or_bonus': 'Корпоративные поездки или бонусы',
+    'provider_changed': 'Провайдер менялся',
+    'docs_after_relogin': 'Документы появились после повторного входа',
+    'docs_visible': 'Документы в Sapar отображаются',
+    'error_stage': 'Этап ошибки',
+    'error_text': 'Текст ошибки',
+    'last_try_at': 'Последняя попытка',
+    'device': 'Устройство',
+    'browser': 'Браузер',
+    'cache_cleared': 'Очистка кэша',
+    'other_browser': 'Проверка в другом браузере',
+    'error_persists': 'Ошибка сохраняется после всех действий',
+    'error_repeats': 'Повторяемость',
+    'multiple_drivers': 'Сколько водителей',
+    'sapar_related': 'Проблема именно в Sapar',
+    'payment_shown': 'Требование оплаты отображается',
+    'payment_is_sapar_signing': 'Оплата за подписание в Sapar',
+    'what_to_check': 'Что проверить',
+    'where': 'Где возникает',
+    'signing_related': 'На этапе подписания или сохранения',
+    'termobox_action': 'Согласовать',
+    'licence': 'Водительское удостоверение',
+}
+
+# Вопросы «да/нет» о ДЕЙСТВИИ, которое оператор уже выполнил. В готовом тексте
+# они не занимают по строке каждый, а собираются в одну: семь строк «да» подряд
+# — это не отчёт, это стена, в которой специалист не найдёт сути. Значение —
+# название действия строчными буквами: оно попадает в перечень внутри строки.
+#
+# Сюда НЕ входят «очистка кэша» и «проверка в другом браузере»: у них по ТЗ есть
+# результат («да, но ошибка осталась»), и результат в перечень не уместить —
+# такие остаются отдельными строками. Не входят и вопросы о СОСТОЯНИИ
+# («сохраняется ли ошибка») — там «да» означает не выполненное действие, а
+# факт, и схлопывать их вместе было бы прямым искажением.
+ACTION_NAMES = {
+    'relogin_done': 'повторный вход',
+    'apps_restarted': 'перезапуск eGov Mobile и Sapar',
+    'other_device': 'проверка с другого устройства',
+    'waited_5min': 'ожидание 5 минут',
+    'other_browser_checked': 'проверка в другом браузере',
+    'internet_checked': 'интернет-соединение',
+    'local_cause_excluded': 'локальная причина исключена',
+}
+
+# Что в готовый текст отдельной строкой не идёт: ИИН уже стоит в теме
+# обращения, а парк, город и период собираются в одну строку контекста.
+BODY_CONTEXT = ('park', 'city', 'period')
+BODY_SKIP = ('iin',) + BODY_CONTEXT
+
+# Разделитель внутри перечня. Не запятая: в подписях запятые встречаются («а не в
+# ЭЦП, SMS или eGov»), и через запятую было не видно, где кончается один пункт.
+ITEM_SEP = ' · '
+
+
+def _assign_meta(scenarios):
+    """Проставляет шагам всё, что задано по ключу: экран, короткую подпись и
+    признак «это выполненное действие». Общие шаги (STEP_IIN и другие) — один
+    объект на все тематики, поэтому присваивание идемпотентно."""
     for scenario in scenarios:
         for item in scenario['steps']:
             item['group'] = STEP_GROUPS.get(item['key'], DEFAULT_GROUP)
+            item['short'] = STEP_SHORT.get(item['key'], item['label'])
+            action = ACTION_NAMES.get(item['key'])
+            if action:
+                item['action'] = action
 
 
 # Порядок экранов ОДИН для всех тематик: оператор запоминает одну форму, а не
@@ -649,7 +717,7 @@ SCENARIOS = [
     YANDEX_TERMOBOX,
 ]
 
-_assign_groups(SCENARIOS)
+_assign_meta(SCENARIOS)
 
 BY_KEY = {item['key']: item for item in SCENARIOS}
 
@@ -845,6 +913,16 @@ def format_answer(item, answers):
         if item['kind'] == YESNO_DATE and str(value) == 'yes' and detail:
             return '%s (%s)' % (word, detail)
         return word
+    if item['kind'] == DATETIME:
+        # 2026-08-17T12:38 читается плохо, а специалисту в группе важно «когда».
+        text = str(value).strip().replace(' ', 'T')
+        found = re.match(r'^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?', text)
+        if not found:
+            return text
+        day = '%s.%s.%s' % (found.group(3), found.group(2), found.group(1))
+        if item.get('date_only') or not found.group(4):
+            return day
+        return '%s %s:%s' % (day, found.group(4), found.group(5))
     if item['kind'] == PERIOD:
         text = str(value).strip()
         if _PERIOD_RE.match(text):
@@ -856,35 +934,129 @@ def format_answer(item, answers):
     return str(value).strip()
 
 
+def _lower_first(text):
+    """Внутри перечня подпись идёт со строчной: «Да: поездки в нашем парке…».
+
+    Ровно первый символ, а не .lower() целиком: в подписях есть Sapar, eGov и
+    ЭЦП, и понижать их регистр нельзя.
+    """
+    text = str(text or '')
+    return text[:1].lower() + text[1:]
+
+
+def _context_line(scenario, answers):
+    """Парк, город и период — одной строкой.
+
+    Тремя подписанными строками они занимали треть сообщения, хотя отвечают на
+    один вопрос: «где и за какой период». Отсюда же порядок — от общего к
+    частному.
+    """
+    parts = []
+    for key in BODY_CONTEXT:
+        item = next((s for s in scenario['steps'] if s['key'] == key), None)
+        if not item:
+            continue
+        value = format_answer(item, answers)
+        if not value or value == '—':
+            continue
+        parts.append('период %s' % value if key == 'period' else value)
+    return ' · '.join(parts)
+
+
 def render_body(scenario_key, answers, *, flags=()):
     """Текст обращения для группы. Собирается системой и вручную не правится.
 
     Это прямое требование ТЗ: «Сам текст стандартной тематики вручную не
-    редактируется». Отсюда и формат — не проза, а перечень «вопрос: ответ»:
-    специалисту в группе нужно за секунду увидеть ИИН, период и что уже
-    проверено, а не читать сочинение.
+    редактируется». Отсюда и формат — не проза, а перечень.
+
+    Формат переписан 19.08.2026: сообщение было плоской стеной из шестнадцати
+    строк, где семь подряд читались «…: да», а ИИН повторялся из темы. Теперь
+    оно собирается смысловыми блоками, разделёнными пустой строкой:
+
+        ⚠️ метка, если есть
+        парк · город · период
+        суть обращения короткими подписями
+        ✅ что оператор уже проверил — одной строкой
+        ✔️ чек-лист
+
+    Пустая строка тут несёт смысл: и Telegram, и карточка обращения делят текст
+    по ней на блоки, поэтому это разметка, а не украшение.
     """
     scenario = get(scenario_key)
     if not scenario:
         return ''
-    lines = []
-    for flag in flags or ():
-        if flag in FLAG_LABELS:
-            lines.append('⚠️ %s' % FLAG_LABELS[flag])
-    if lines:
-        lines.append('')
-    for item in visible_steps(scenario, answers or {}):
-        if item['kind'] == ATTACHMENT:
+    answers = answers or {}
+    blocks = []
+
+    warnings = ['⚠️ %s' % FLAG_LABELS[flag] for flag in (flags or ()) if flag in FLAG_LABELS]
+    if warnings:
+        blocks.append(warnings)
+
+    context = _context_line(scenario, answers)
+    if context:
+        blocks.append([context])
+
+    # Ответы «да/нет» собираются в перечни, а не занимают по строке каждый:
+    # пять-семь строк «…: да» подряд — это стена, в которой сути не видно.
+    # Действия отделены от фактов: «я это проверил» и «это так» — разные вещи,
+    # и мешать их в одном перечне значило бы искажать отчёт.
+    main, done, undone = [], [], []
+    facts = {'да': [], 'нет': []}
+    for item in visible_steps(scenario, answers):
+        if item['kind'] == ATTACHMENT or item['key'] in BODY_SKIP:
             continue
-        value = format_answer(item, answers or {})
+        value = format_answer(item, answers)
         if value == '—' and item.get('optional'):
             continue
-        lines.append('%s: %s' % (item['label'], value))
+        action = item.get('action')
+        if action and value in ('да', 'нет'):
+            (done if value == 'да' else undone).append(action)
+            continue
+        if item['kind'] in (YESNO, YESNO_DATE) and value in facts:
+            facts[value].append((item, item.get('short') or item['label']))
+            continue
+        # Название действия — строчными и для перечня; как подпись строки оно не
+        # годится, поэтому у таких вопросов берём полную формулировку.
+        label = item['label'] if action else item.get('short') or item['label']
+        main.append('%s: %s' % (label, value))
+
+    # Один ответ перечнем не становится: «Требование оплаты отображается: да»
+    # читается лучше, чем «Да: требование оплаты отображается».
+    collapsed = []
+    for word, entries in (('Да', facts['да']), ('Нет', facts['нет'])):
+        if not entries:
+            continue
+        if len(entries) == 1:
+            item, label = entries[0]
+            main.append('%s: %s' % (label, word.lower()))
+        else:
+            collapsed.append('%s: %s'
+                             % (word, ITEM_SEP.join(_lower_first(label)
+                                                    for _item, label in entries)))
+    main.extend(collapsed)
+
+    if main:
+        blocks.append(main)
+
+    tail = []
+    if done:
+        tail.append('✅ Проверено: %s' % ITEM_SEP.join(done))
+    if undone:
+        tail.append('❗ Не выполнено: %s' % ITEM_SEP.join(undone))
     if scenario.get('checks'):
-        lines.append('')
-        lines.append('Оператор подтвердил обязательные проверки: %d из %d.'
-                     % (len(scenario['checks']), len(scenario['checks'])))
-    return '\n'.join(lines)
+        # Строка утверждает факт, и утверждать его можно: текст собирается только
+        # для обращения, прошедшего evaluate до READY, а READY без подтверждённого
+        # чек-листа недостижим. Предпросмотр тоже строится только на READY
+        # (routes.crm_scenario_evaluate), так что состояние проверок здесь знать
+        # не нужно — оно уже проверено.
+        tail.append('✔️ Чек-лист выполнен: %d из %d'
+                    % (len(scenario['checks']), len(scenario['checks'])))
+    if tail:
+        blocks.append(tail)
+
+    # Пустая строка между блоками — разметка, поэтому склейка явная.
+    line, gap = chr(10), chr(10) * 2
+    return gap.join(line.join(block) for block in blocks)
 
 
 def render_subject(scenario_key, answers):
