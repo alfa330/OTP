@@ -145,6 +145,8 @@ def register(bp, wiki_route, db, log_ip, gcs):
         article['permissions'] = wiki_access.permissions_only(permissions)
         article['why'] = permissions['_reason']
         article['backlinks'] = wiki_articles.backlinks(cursor, article['id'], visible)
+        article['is_favorite'] = wiki_articles.is_favorite(
+            cursor, ctx['user_id'], article['id'])
         return jsonify(article)
 
     # ── Избранное ────────────────────────────────────────────────────────
@@ -153,9 +155,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
         _subjects, _sections, visible = _perimeter(cursor, ctx)
         if article_id not in visible:
             return jsonify({"error": "Статья не найдена"}), 404
-        wiki_articles.set_favorite(cursor, ctx['user_id'], article_id,
-                                   request.method == 'POST')
-        return jsonify({"status": "ok"})
+        favorite = request.method == 'POST'
+        wiki_articles.set_favorite(cursor, ctx['user_id'], article_id, favorite)
+        # Возвращаем состояние, а не голое «ok»: интерфейс рисует звезду по
+        # ответу сервера, и договариваться о нём догадками не должен.
+        return jsonify({"status": "ok", "is_favorite": favorite})
 
     # ── Файлы ────────────────────────────────────────────────────────────
     @wiki_route('/file/<file_id>')

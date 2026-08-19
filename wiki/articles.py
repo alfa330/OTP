@@ -333,6 +333,22 @@ def backlinks(cursor, article_id, visible_ids):
 # Избранное
 # ─────────────────────────────────────────────────────────────────────────────
 
+def is_favorite(cursor, user_id, article_id):
+    """Лежит ли статья в избранном у этого человека.
+
+    Ездит в теле статьи: без этого звёздочка в шапке не знала своего состояния и
+    была кнопкой в одну сторону — интерфейс всегда предлагал «В избранное» и
+    всегда слал POST, а вставка в базе идёт с ON CONFLICT DO NOTHING. Повторное
+    нажатие честно ничего не меняло, но рапортовало «Добавлено в избранное»:
+    убрать статью из избранного было нельзя вообще.
+    """
+    cursor.execute(
+        'SELECT 1 FROM wiki_user_favorite_articles WHERE user_id = %s AND article_id = %s',
+        (user_id, article_id),
+    )
+    return cursor.fetchone() is not None
+
+
 def set_favorite(cursor, user_id, article_id, favorite):
     if favorite:
         cursor.execute(

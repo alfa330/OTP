@@ -309,11 +309,42 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         return undefined;
     }, [safeHtml, highlightTerm]);
 
+    /* Звезда работает в обе стороны.
+     *
+     * Раньше кнопка ВСЕГДА слала POST, а вставка в базе идёт с ON CONFLICT DO
+     * NOTHING: второе нажатие не делало ничего, но показывало «Добавлено в
+     * избранное». Убрать статью из избранного было нельзя ниоткуда — при том,
+     * что DELETE на сервере есть и работает.
+     *
+     * Состояние ведём локально и меняем СРАЗУ, до ответа сервера: звезда должна
+     * откликаться на нажатие мгновенно, а сеть тут не при чём. Если запрос не
+     * прошёл — возвращаем как было, чтобы картинка не врала. */
+    const [favorite, setFavorite] = useState(false);
+    const [favoriteBusy, setFavoriteBusy] = useState(false);
+
+    useEffect(() => { setFavorite(!!article?.is_favorite); }, [article?.id, article?.is_favorite]);
+
     const toggleFavorite = () => {
-        if (!article) return;
-        axios.post(`${base}/articles/${article.id}/favorite`, {}, { headers })
-            .then(() => showToast?.('Добавлено в избранное', 'success'))
-            .catch((e) => showToast?.(errText(e, 'Не удалось'), 'error'));
+        if (!article || favoriteBusy) return;
+        const next = !favorite;
+        setFavorite(next);
+        setFavoriteBusy(true);
+        axios({
+            method: next ? 'post' : 'delete',
+            url: `${base}/articles/${article.id}/favorite`,
+            headers,
+        })
+            .then((r) => {
+                const applied = r.data?.is_favorite ?? next;
+                setFavorite(applied);
+                showToast?.(applied ? 'Добавлено в избранное' : 'Убрано из избранного',
+                            'success');
+            })
+            .catch((e) => {
+                setFavorite(!next);
+                showToast?.(errText(e, 'Не удалось изменить избранное'), 'error');
+            })
+            .finally(() => setFavoriteBusy(false));
     };
 
     if (loading) {
@@ -451,12 +482,22 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         <span className="flex items-center gap-1 tabular-nums">
                             <Eye size={12} /> {article.views}
                         </span>
+                        {/* Одна кнопка на оба действия: и надпись, и заливка
+                            звезды говорят, что произойдёт по нажатию. */}
                         <button
                             type="button"
                             onClick={toggleFavorite}
-                            className="flex items-center gap-1 rounded-md px-1 transition hover:text-amber-600"
+                            disabled={favoriteBusy}
+                            aria-pressed={favorite}
+                            title={favorite
+                                ? 'Убрать статью из избранного'
+                                : 'Статья появится в блоке «Избранное» на главной вики'}
+                            className={`flex items-center gap-1 rounded-md px-1 transition disabled:opacity-50 ${
+                                favorite ? 'text-amber-500 hover:text-slate-500' : 'hover:text-amber-600'
+                            }`}
                         >
-                            <Star size={12} /> В избранное
+                            <Star size={12} fill={favorite ? 'currentColor' : 'none'} />
+                            {favorite ? 'В избранном' : 'В избранное'}
                         </button>
                     </div>
                 </header>

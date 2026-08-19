@@ -87,7 +87,7 @@ export default function WikiHome({ isEditor, counters, parksCount, drafts, home,
                 оставалось «Как заправить…». Ширина колонки здесь важнее того,
                 что блок займёт две строки. */}
             <div className="grid grid-cols-1 gap-3 2xl:grid-cols-2">
-                {isEditor ? (
+                {isEditor && (
                     <Panel
                         icon={PenLine}
                         title="Черновики и модерация"
@@ -111,23 +111,29 @@ export default function WikiHome({ isEditor, counters, parksCount, drafts, home,
                             />
                         ))}
                     </Panel>
-                ) : (
-                    <Panel
-                        icon={Star}
-                        title="Избранное"
-                        items={favorites}
-                        empty="Пусто. Звёздочка в шапке статьи оставляет её здесь."
-                    >
-                        {favorites.map((article) => (
-                            <MiniCard
-                                key={article.id}
-                                title={article.title}
-                                subtitle={article.summary || 'Без описания'}
-                                onClick={() => onOpen(article.slug)}
-                            />
-                        ))}
-                    </Panel>
                 )}
+
+                {/* Избранное показываем ВСЕГДА, а не «когда нет черновиков».
+                    Раньше эти две полки делили одно место, и у редактора с
+                    единственным черновиком избранное пропадало с экрана целиком
+                    — вместе с единственным местом, где видно, что вообще
+                    отмечено звездой. Полок стало больше на одну; сетка на две
+                    колонки это выдерживает. */}
+                <Panel
+                    icon={Star}
+                    title="Избранное"
+                    items={favorites}
+                    empty="Пусто. Звёздочка в шапке статьи оставляет её здесь."
+                >
+                    {favorites.map((article) => (
+                        <MiniCard
+                            key={article.id}
+                            title={article.title}
+                            subtitle={article.summary || 'Без описания'}
+                            onClick={() => onOpen(article.slug)}
+                        />
+                    ))}
+                </Panel>
 
                 <Panel
                     icon={Clock}
