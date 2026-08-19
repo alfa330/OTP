@@ -659,8 +659,71 @@ const LineWallboard = ({
     );
 };
 
+/*
+ * Имя файла выгрузки. В нём стоит момент ДАННЫХ, а не скачивания: две выгрузки подряд в
+ * пределах кэша содержат один и тот же снимок и различаться именами не должны. Имя собирает
+ * фронт, а не сервер: Content-Disposition через CORS сюда не доходит (в Expose-Headers его нет).
+ */
+const chatExportFileName = (snapshot) => {
+    const day = String(snapshot?.day || '').replace(/-/g, '');
+    const clock = String(snapshot?.chat2desk_now || '').slice(11, 16).replace(':', '');
+    const stamp = [day, clock].filter(Boolean).join('_');
+    return `szov_wallboard_chat_${stamp || 'now'}.xlsx`;
+};
+
+/*
+ * Выгрузка показателей направления «Чат» в Excel. Файл собирает сервер по ТОМУ ЖЕ снимку,
+ * что нарисован на экране (общий кэш направления), поэтому цифры в файле и на стене совпадают,
+ * а квота Chat2Desk на выгрузку не тратится.
+ */
+const ChatExportButton = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapshot }) => {
+    const [busy, setBusy] = useState(false);
+    // showToast приходит новой функцией на каждый рендер родителя, а он перерисовывается раз в
+    // 15 с по опросу табло: держим её в ref, чтобы не тянуть в зависимости.
+    const toastRef = useRef(showToast);
+    toastRef.current = showToast;
+    const snapshotRef = useRef(snapshot);
+    snapshotRef.current = snapshot;
+
+    const download = useCallback(async () => {
+        setBusy(true);
+        try {
+            const build = withAccessTokenHeader;
+            const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/chat_export`, {
+                credentials: 'include',
+                headers: build ? build() : {},
+            });
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                throw new Error(payload?.error || `Сервер ответил ${response.status}`);
+            }
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = chatExportFileName(snapshotRef.current);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (error) {
+            toastRef.current?.(`Не удалось выгрузить показатели: ${error?.message || error}`, 'error');
+        } finally {
+            setBusy(false);
+        }
+    }, [apiBaseUrl, withAccessTokenHeader]);
+
+    return (
+        <button type="button" className={iosBtnGhost} onClick={download} disabled={busy}
+                title="Показатели табло за сегодня в Excel: сводка, по часам и состав смены">
+            <FaIcon className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
+            {busy ? 'Готовим…' : 'Выгрузить'}
+        </button>
+    );
+};
+
 /** Направление «Чат»: Chat2Desk. */
-const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, direction, onDirectionChange,
+const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, onDirectionChange,
                         widgetOpen, onToggleWidget }) => {
     const { snapshot, error, loading, refresh } = useSzovChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
@@ -679,7 +742,17 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, direction, onDirecti
             onFullscreen={() => setFullscreen(true)}
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
-        />
+        >
+            {/* Пока снимка нет, выгружать нечего: кнопка появляется вместе с цифрами. */}
+            {snapshot ? (
+                <ChatExportButton
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                    snapshot={snapshot}
+                />
+            ) : null}
+        </WallboardHeader>
     );
 
     if (!snapshot) {
@@ -730,6 +803,7 @@ export default function SzovWallboardView(props) {
             <ChatWallboard
                 apiBaseUrl={apiBaseUrl}
                 withAccessTokenHeader={withAccessTokenHeader}
+                showToast={showToast}
                 direction={direction}
                 onDirectionChange={changeDirection}
                 widgetOpen={widgetOpen}

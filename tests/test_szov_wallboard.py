@@ -1495,9 +1495,9 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
         # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])", self.api)
-        # оба табло (линия и чаты) — на своём гейте, вся отбивка (настройка, предпросмотр,
-        # отправка) — на строгом
-        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 2)
+        # оба табло (линия и чаты) и выгрузка показателей чатов — на своём гейте, вся отбивка
+        # (настройка, предпросмотр, отправка) — на строгом
+        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 3)
         self.assertEqual(self.api.count("requester_id, err = _szov_broadcast_guard()"), 3)
 
     def test_preview_never_sends_anything(self):

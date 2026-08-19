@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -632,11 +633,257 @@ class ChatWallboardWiringTests(unittest.TestCase):
         api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
         self.assertNotIn('operators_required', api)
 
+    def test_chat_direction_offers_the_excel_export(self):
+        """Кнопка выгрузки есть только у «Чата» и только когда снимок уже пришёл."""
+        self.assertIn("/api/szov_wallboard/chat_export", self.view)
+        self.assertIn("<ChatExportButton", self.view)
+        line_board = self.view[self.view.index("const LineWallboard ="):
+                               self.view.index("const chatExportFileName =")]
+        self.assertNotIn("ChatExportButton", line_board)
+        chat_board = self.view[self.view.index("const ChatWallboard ="):
+                               self.view.index("export default function SzovWallboardView")]
+        self.assertIn("{snapshot ? (\n                <ChatExportButton", chat_board)
+
+    def test_export_file_name_carries_the_moment_of_the_data(self):
+        """Имя собирает фронт: Content-Disposition через CORS сюда не доходит."""
+        self.assertIn("const chatExportFileName = (snapshot) => {", self.view)
+        self.assertIn("String(snapshot?.chat2desk_now || '').slice(11, 16)", self.view)
+        self.assertIn("szov_wallboard_chat_${stamp || 'now'}.xlsx", self.view)
+
+    def test_export_failure_is_reported_by_toast(self):
+        """showToast держим в ref: он новый на каждом рендере, а табло рендерится по опросу."""
+        self.assertIn("Не удалось выгрузить показатели", self.view)
+        self.assertIn("const toastRef = useRef(showToast);", self.view)
+        element = self.view[self.view.index("<ChatExportButton"):]
+        element = element[:element.index("/>")]
+        for prop in ('apiBaseUrl={apiBaseUrl}', 'withAccessTokenHeader={withAccessTokenHeader}',
+                     'showToast={showToast}', 'snapshot={snapshot}'):
+            self.assertIn(prop, element, prop)
+
     def test_chart_hours_are_labelled_as_intervals(self):
         """«12–13», как в почасовом отчёте: иначе непонятно, промежуток это или накопление."""
         self.assertIn("const hourLabel = (hour) => `${String(hour).padStart(2, '0')}–"
                       "${String((hour + 1) % 24).padStart(2, '0')}`;", self.board)
         self.assertIn("rows || []", self.board)
+
+
+# Имена сборщика .xlsx. Отдельным набором: файл собирается из готового снимка, источники
+# Chat2Desk ему не нужны, и тянуть в namespace весь их обвес было бы шумом.
+EXPORT_NAMES = {
+    'SZOV_CHAT_WALLBOARD_TARGET_SECONDS',
+    '_SZOV_CHAT_EXPORT_STATUS_FILL',
+    '_szov_chat_export_minutes',
+    '_szov_chat_export_hour_label',
+    '_szov_chat_wallboard_workbook',
+}
+
+
+def _export_namespace():
+    """namespace для сборщика выгрузки: openpyxl настоящий, снимок подаём руками."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+    ns = {
+        'math': math,
+        'datetime': datetime,
+        'ZoneInfo': ZoneInfo,
+        'BytesIO': BytesIO,
+        'Workbook': Workbook,
+        'Font': Font,
+        'PatternFill': PatternFill,
+        'Alignment': Alignment,
+        'Border': Border,
+        'Side': Side,
+        'get_column_letter': get_column_letter,
+        'CHAT_HOURLY_TIMEZONE': 'Asia/Almaty',
+        '_env_int': lambda name, default, minimum=None, maximum=None: default,
+    }
+    _load_names(source, EXPORT_NAMES, ns)
+    return ns
+
+
+def _export_snapshot(**overrides):
+    """Снимок направления «Чат» в том виде, в котором его отдаёт ручка табло."""
+    snapshot = {
+        'day': '2026-08-18',
+        'chat2desk_now': '2026-08-18 10:20:30',
+        'target_seconds': 120,
+        'now': {
+            'operators_online': 3, 'operators_busy': 1, 'operators_on_training': 1,
+            'operators_on_break': 2, 'operators_on_holiday': 1, 'operators_other': 0,
+            'operators_offline': 4, 'open_chats': 12,
+            'operators': [
+                {'operator_id': 235, 'name': 'Тестова Алия Тестовна', 'status': 'Онлайн',
+                 'status_key': 'online', 'since': '2026-08-18 09:50:00', 'seconds': 1800,
+                 'open_chats': 7},
+                {'operator_id': 18, 'name': 'Ночная Дана Сменовна', 'status': 'Онлайн',
+                 'status_key': 'online', 'since': '', 'seconds': None, 'open_chats': 5},
+                {'operator_id': 37, 'name': 'Учебный Ерлан Тренингулы', 'status': 'Тренинг',
+                 'status_key': 'training', 'since': '2026-08-18 10:10:30', 'seconds': 600,
+                 'open_chats': 0},
+            ],
+        },
+        'today': {'chats': 40, 'chats_open': 12, 'first_reply_seconds': 90.0,
+                  'inner_reply_seconds': 150.0},
+        'hourly': [
+            {'hour': 8, 'chats': 10, 'first_reply_seconds': 60.0, 'inner_reply_seconds': 90.0,
+             'operators_online': 3.84, 'online_seconds': 13824, 'partial': False},
+            {'hour': 9, 'chats': 0, 'first_reply_seconds': None, 'inner_reply_seconds': None,
+             'operators_online': 0, 'online_seconds': 0, 'partial': False},
+            {'hour': 10, 'chats': 30, 'first_reply_seconds': 120.0, 'inner_reply_seconds': 210.0,
+             'operators_online': 2.5, 'online_seconds': 3060, 'partial': True},
+        ],
+        'diagnostics': {'department_id': 1, 'unmatched_names': [], 'events_truncated': False},
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
+class ChatWallboardExcelExportTests(unittest.TestCase):
+    """Выгрузка показателей табло по чатам в .xlsx: те же цифры, что на экране."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ns = _export_namespace()
+
+    def _workbook(self, snapshot=None):
+        from openpyxl import load_workbook
+        content = self.ns['_szov_chat_wallboard_workbook'](snapshot or _export_snapshot())
+        return load_workbook(BytesIO(content))
+
+    def _find_row(self, sheet, label):
+        for row in sheet.iter_rows(min_col=1, max_col=3, values_only=True):
+            if row and row[0] == label:
+                return row
+        raise AssertionError(f'строка «{label}» не найдена')
+
+    def test_minutes_keep_the_gap_between_no_data_and_zero(self):
+        """None -> пустая ячейка, а не ноль: иначе «мерить было нечего» станет идеалом."""
+        minutes = self.ns['_szov_chat_export_minutes']
+        self.assertIsNone(minutes(None))
+        self.assertIsNone(minutes('—'))
+        self.assertEqual(minutes(0), 0.0)
+        self.assertEqual(minutes(150), 2.5)
+        self.assertEqual(minutes(13824, 0), 230.0)
+
+    def test_hour_is_labelled_as_an_interval(self):
+        """Час — промежуток, как в почасовом отчёте, а полночь замыкает сутки."""
+        self.assertEqual(self.ns['_szov_chat_export_hour_label'](12), '12:00–13:00')
+        self.assertEqual(self.ns['_szov_chat_export_hour_label'](23), '23:00–00:00')
+
+    def test_three_sheets_of_the_board(self):
+        wb = self._workbook()
+        self.assertEqual(wb.sheetnames, ['Показатели', 'По часам', 'Чатники'])
+
+    def test_summary_repeats_the_tiles_of_the_board(self):
+        sheet = self._workbook()['Показатели']
+        self.assertEqual(self._find_row(sheet, 'Дата')[1], '2026-08-18')
+        self.assertEqual(self._find_row(sheet, 'Данные Chat2Desk на')[1], '2026-08-18 10:20:30')
+        self.assertEqual(self._find_row(sheet, 'Цель по ответу внутри чата, мин')[1], 2.0)
+        self.assertEqual(self._find_row(sheet, 'Онлайн')[1], 3)
+        self.assertEqual(self._find_row(sheet, 'Занят')[1], 1)
+        self.assertEqual(self._find_row(sheet, 'Не в системе')[1], 4)
+        self.assertEqual(self._find_row(sheet, 'Открыто чатов')[1], 12)
+        self.assertEqual(self._find_row(sheet, 'Чатов за сутки')[1], 40)
+        self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[1], 2.5)
+        # Цель в пояснении — по-русски и без «,0»: файл читают глазами, а не только формулами.
+        self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[2],
+                         'Цель — не больше 2 мин')
+        self.assertEqual(self._find_row(sheet, 'Первый ответ, мин')[1], 1.5)
+        # «Часов в цели» считается по тем же часам, что плитка на табло: измеренных два (08 и 10),
+        # в цель уложился один.
+        self.assertEqual(self._find_row(sheet, 'Часов измерено')[1], 2)
+        self.assertEqual(self._find_row(sheet, 'Часов в цели')[1], 1)
+
+    def test_hours_carry_numbers_not_strings(self):
+        """По файлу считают дальше: минуты и люди — числа, а не «2,5 мин»."""
+        sheet = self._workbook()['По часам']
+        header = [cell.value for cell in sheet[1]]
+        self.assertEqual(header[:5], ['Час', 'Чатов', 'Ответ внутри чата, мин',
+                                      'Первый ответ, мин', 'В цели'])
+        first = [cell.value for cell in sheet[2]]
+        self.assertEqual(first[0], '08:00–09:00')
+        self.assertEqual(first[1:5], [10, 1.5, 1.0, 'да'])
+        # Дробь людей на линии не округляем (решение владельца 19.08.2026).
+        self.assertEqual(first[5], 3.84)
+        self.assertEqual(first[6], 230.0)
+        # Пустую строку openpyxl пишет пустой ячейкой — на прошедшем часе примечания нет.
+        self.assertFalse(first[7])
+
+    def test_hour_without_answers_stays_empty_and_current_hour_is_marked(self):
+        sheet = self._workbook()['По часам']
+        empty = [cell.value for cell in sheet[3]]
+        self.assertIsNone(empty[2])
+        self.assertIsNone(empty[3])
+        self.assertFalse(empty[4])
+        current = [cell.value for cell in sheet[4]]
+        self.assertEqual(current[4], 'нет')  # 3,5 мин против цели 2 мин
+        self.assertEqual(current[7], 'час идёт')
+
+    def test_daily_total_row_matches_the_day_tiles(self):
+        """Итог берётся из показателей дня, а не пересчитывается по часам."""
+        sheet = self._workbook()['По часам']
+        total = [cell.value for cell in sheet[5]]
+        self.assertEqual(total[0], 'За сутки')
+        self.assertEqual(total[1], 40)
+        self.assertEqual(total[2], 2.5)
+        self.assertEqual(total[4], '1 из 2')
+        # Средняя занятость за сутки — из человеко-минут, а не среднее средних по часам.
+        self.assertEqual(total[6], 281.0)
+        self.assertAlmostEqual(total[5], round((13824 + 3060) / (3600 * 3), 2))
+        # Фильтр стоит только по часам: строка итога под ним.
+        self.assertEqual(sheet.auto_filter.ref, 'A1:H4')
+
+    def test_shift_sheet_keeps_the_since_midnight_wording(self):
+        """seconds=None — человек в статусе с начала суток; «0 мин» тут соврало бы."""
+        sheet = self._workbook()['Чатники']
+        rows = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2, max_col=4)]
+        self.assertEqual(rows[0], ['Тестова Алия Тестовна', 'Онлайн', 30.0, 7])
+        self.assertEqual(rows[1], ['Ночная Дана Сменовна', 'Онлайн', 'с начала суток', 5])
+        self.assertEqual(rows[2], ['Учебный Ерлан Тренингулы', 'Тренинг', 10.0, 0])
+        # Вышедшие в список не идут, но их число видно — иначе смена выглядит меньше.
+        self.assertIn('Не в системе: 4',
+                      [cell.value for cell in sheet['A'] if isinstance(cell.value, str)])
+
+    def test_status_colour_matches_the_chip_on_the_board(self):
+        sheet = self._workbook()['Чатники']
+        self.assertIn(self.ns['_SZOV_CHAT_EXPORT_STATUS_FILL']['online'],
+                      str(sheet.cell(row=2, column=2).fill.fgColor.rgb))
+        self.assertIn(self.ns['_SZOV_CHAT_EXPORT_STATUS_FILL']['training'],
+                      str(sheet.cell(row=4, column=2).fill.fgColor.rgb))
+
+    def test_file_warns_about_stale_and_truncated_data(self):
+        """Оговорки живут В ФАЙЛЕ: он уходит в переписку без экрана, с которого его сняли."""
+        snapshot = _export_snapshot(
+            stale=True, age_seconds=420, error='Chat2Desk не отвечает',
+            diagnostics={'department_id': 1, 'unmatched_names': ['Алия Тестова'],
+                         'events_truncated': True})
+        sheet = self._workbook(snapshot)['Показатели']
+        notes = [row[1] for row in sheet.iter_rows(min_col=1, max_col=2, values_only=True)
+                 if row and row[0] == 'Внимание']
+        self.assertEqual(len(notes), 3)
+        self.assertIn('7 мин', notes[0])
+        self.assertIn('Chat2Desk не отвечает', notes[0])
+        self.assertIn('обрезаны', notes[1])
+        self.assertIn('Алия Тестова', notes[2])
+
+    def test_clean_snapshot_has_no_warnings(self):
+        """Шум = брак: пока всё в порядке, строк «Внимание» в файле нет."""
+        sheet = self._workbook()['Показатели']
+        self.assertEqual([row[0] for row in sheet.iter_rows(min_col=1, max_col=1, values_only=True)
+                          if row and row[0] == 'Внимание'], [])
+
+    def test_empty_day_does_not_break_the_file(self):
+        """Ночь, чатов ещё нет: файл собирается, а не падает на делении на ноль."""
+        snapshot = _export_snapshot(
+            hourly=[], today={'chats': 0, 'chats_open': 0, 'first_reply_seconds': None,
+                              'inner_reply_seconds': None},
+            now={'operators_online': 0, 'operators_offline': 0, 'open_chats': 0, 'operators': []})
+        wb = self._workbook(snapshot)
+        self.assertEqual([cell.value for cell in wb['По часам'][2]][0], 'За сутки')
+        self.assertIsNone(self._find_row(wb['Показатели'], 'Ответ внутри чата, мин')[1])
 
 
 if __name__ == '__main__':

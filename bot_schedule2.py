@@ -32949,6 +32949,325 @@ def api_szov_wallboard_chat_snapshot():
         return jsonify({"error": "Chat2Desk недоступен", "detail": str(exc)[:300]}), 503
 
 
+# --- Табло СЗоВ (чат): выгрузка показателей в Excel ----------------------------------------------
+# Показатели со стены нужны и в отчётах, поэтому рядом со снимком стоит .xlsx: сводка «сейчас»
+# и за день, почасовой срез и состав смены — ровно то, что нарисовано на экране, тремя листами.
+# Файл собирается по ТОМУ ЖЕ снимку, что рисует табло (общий кэш направления): выгрузка не
+# тратит квоту Chat2Desk и не может разойтись с экраном в цифрах.
+# Прошлые дни отсюда не выгружаются: «сейчас» у Chat2Desk есть только на сейчас (живой список
+# учёток), и файл за вчера был бы наполовину пустым, притворяясь полным.
+
+# Цвет статуса в файле — тот же, что у чипа на табло (CHAT_STATUS_STYLE во фронте): столбец
+# статуса должен читаться одним взглядом так же, как список смены на стене.
+_SZOV_CHAT_EXPORT_STATUS_FILL = {
+    'online': 'DBEAFE',
+    'busy': 'EDE9FE',
+    'training': 'D1FAE5',
+    'break': 'FFEDD5',
+    'tech': 'FFEDD5',
+    'holiday': 'F1F5F9',
+    'offline': 'F1F5F9',
+}
+
+
+def _szov_chat_export_minutes(seconds, digits=1):
+    """Секунды -> минуты числом, в тех же единицах, что на табло. None остаётся None.
+
+    Пропуск от нуля отличаем намеренно: «отвечать было нечего» и «ответили мгновенно» — разные
+    вещи, а ноль вместо пропуска молча улучшил бы любое среднее, которое посчитают в Excel.
+    Число пишем числом, а не строкой «1,8 мин»: файл берут, чтобы считать по нему дальше."""
+    if seconds is None or isinstance(seconds, bool):
+        return None
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return round(value / 60.0, digits)
+
+
+def _szov_chat_export_hour_label(hour):
+    """Час — ПРОМЕЖУТОК, а не момент: подписываем «12:00–13:00», как почасовой отчёт в Telegram."""
+    return '%02d:00–%02d:00' % (int(hour) % 24, (int(hour) + 1) % 24)
+
+
+def _szov_chat_wallboard_workbook(snapshot):
+    """Показатели табло по чатам в .xlsx (bytes): сводка, почасовой срез, состав смены."""
+    snapshot = snapshot or {}
+    now_block = snapshot.get('now') or {}
+    today = snapshot.get('today') or {}
+    hourly = [row for row in (snapshot.get('hourly') or []) if isinstance(row, dict)]
+    diagnostics = snapshot.get('diagnostics') or {}
+    target_seconds = int(snapshot.get('target_seconds') or 0) or SZOV_CHAT_WALLBOARD_TARGET_SECONDS
+    target_minutes = _szov_chat_export_minutes(target_seconds)
+
+    thin = Side(style='thin', color='E2E8F0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    header_fill = PatternFill('solid', fgColor='1F2937')
+    total_fill = PatternFill('solid', fgColor='F1F5F9')
+    header_font = Font(bold=True, color='FFFFFF', size=11)
+    title_font = Font(bold=True, size=15, color='0F172A')
+    group_font = Font(bold=True, size=12, color='0F172A')
+    label_font = Font(bold=True, color='334155')
+    hint_font = Font(color='94A3B8', size=10)
+    note_font = Font(color='B45309')
+    good_font = Font(bold=True, color='15803D')
+    bad_font = Font(bold=True, color='B91C1C')
+    center = Alignment(horizontal='center', vertical='center')
+    left = Alignment(vertical='center')
+
+    def _int(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    wb = Workbook()
+
+    # ── Лист 1: сводка ───────────────────────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = 'Показатели'
+    ws.column_dimensions['A'].width = 32
+    ws.column_dimensions['B'].width = 20
+    ws.column_dimensions['C'].width = 52
+    ws['A1'] = 'Табло СЗоВ · чаты'
+    ws['A1'].font = title_font
+
+    row = 3
+    for label, value in (
+        ('Дата', snapshot.get('day') or ''),
+        ('Данные Chat2Desk на', snapshot.get('chat2desk_now') or ''),
+        ('Цель по ответу внутри чата, мин', target_minutes),
+        ('Выгружено', datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).strftime('%Y-%m-%d %H:%M')),
+    ):
+        ws.cell(row=row, column=1, value=label).font = label_font
+        ws.cell(row=row, column=2, value=value).alignment = left
+        row += 1
+
+    # Оговорки о качестве цифр стоят В ФАЙЛЕ, а не только на экране: файл уходит в переписку и
+    # живёт своей жизнью, а замерший снимок или обрезанные события меняют смысл этих чисел.
+    notes = []
+    if snapshot.get('stale'):
+        minutes_old = max(0, _int(snapshot.get('age_seconds'))) // 60
+        notes.append('Снимок замер: данным %d мин (%s)'
+                     % (minutes_old, snapshot.get('error') or 'источник не отвечает'))
+    if diagnostics.get('events_truncated'):
+        notes.append('События Chat2Desk за день обрезаны по лимиту страниц: ранние часы '
+                     'по людям на линии могут быть занижены')
+    unmatched = [str(name).strip() for name in (diagnostics.get('unmatched_names') or [])
+                 if str(name or '').strip()]
+    if unmatched:
+        notes.append('Имена Chat2Desk без сотрудника в OTP (в счётчики не вошли): '
+                     + ', '.join(sorted(unmatched)))
+    for text in notes:
+        ws.cell(row=row, column=1, value='Внимание').font = label_font
+        ws.cell(row=row, column=2, value=text).font = note_font
+        row += 1
+
+    def _block(title, entries):
+        """Блок «шапка + показатель/значение/пояснение». Пояснения те же, что подписи плиток."""
+        nonlocal row
+        row += 1
+        ws.cell(row=row, column=1, value=title).font = group_font
+        row += 1
+        for column, name in ((1, 'Показатель'), (2, 'Значение'), (3, 'Пояснение')):
+            cell = ws.cell(row=row, column=column, value=name)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.border = border
+            cell.alignment = center if column == 2 else left
+        row += 1
+        for label, value, hint, font in entries:
+            ws.cell(row=row, column=1, value=label).border = border
+            value_cell = ws.cell(row=row, column=2, value=value)
+            value_cell.border = border
+            value_cell.alignment = center
+            if font is not None:
+                value_cell.font = font
+            hint_cell = ws.cell(row=row, column=3, value=hint or '')
+            hint_cell.border = border
+            hint_cell.font = hint_font
+            row += 1
+
+    _block('Чатники · сейчас', [
+        ('Онлайн', _int(now_block.get('operators_online')), 'Держат линию', None),
+        ('Занят', _int(now_block.get('operators_busy')), 'В системе, но не на линии', None),
+        ('Тренинг', _int(now_block.get('operators_on_training')), '', None),
+        ('На перерыве', _int(now_block.get('operators_on_break')), 'Перерыв и тех. перерыв', None),
+        ('В отпуске', _int(now_block.get('operators_on_holiday')), '', None),
+        ('В прочих статусах', _int(now_block.get('operators_other')),
+         'Статус Chat2Desk, которого нет в справочнике', None),
+        ('Не в системе', _int(now_block.get('operators_offline')), '', None),
+        ('Открыто чатов', _int(now_block.get('open_chats')), 'В работе у чатников', None),
+    ])
+
+    # Часы графика: «измеренные» — те, где вообще было что мерить, из них и считается «в цели».
+    measured = [row_ for row_ in hourly if row_.get('inner_reply_seconds') is not None]
+    hours_in_target = sum(1 for row_ in measured
+                          if float(row_.get('inner_reply_seconds') or 0) <= target_seconds)
+    inner_minutes = _szov_chat_export_minutes(today.get('inner_reply_seconds'))
+    inner_font = None
+    if today.get('inner_reply_seconds') is not None:
+        inner_font = (good_font if float(today.get('inner_reply_seconds') or 0) <= target_seconds
+                      else bad_font)
+
+    _block('Показатели за день', [
+        ('Чатов за сутки', _int(today.get('chats')), '', None),
+        ('Открыто сейчас', _int(today.get('chats_open')), 'Из чатов за сутки ещё не закрыты', None),
+        ('Ответ внутри чата, мин', inner_minutes,
+         # В пояснении цель стоит по-русски и без хвоста «,0»: «не больше 2 мин», а не «2.0».
+         'Цель — не больше %s мин' % (('%g' % target_minutes).replace('.', ',')
+                                      if target_minutes is not None else '—'),
+         inner_font),
+        ('Первый ответ, мин', _szov_chat_export_minutes(today.get('first_reply_seconds')), '', None),
+        ('Часов измерено', len(measured), 'Часы, в которых был хотя бы один ответ', None),
+        ('Часов в цели', hours_in_target, 'Из %d измеренных' % len(measured),
+         good_font if measured and hours_in_target == len(measured) else None),
+    ])
+
+    # ── Лист 2: почасовой срез ───────────────────────────────────────────────────────────────
+    ws2 = wb.create_sheet('По часам')
+    headers = ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин', 'В цели',
+               'Чатников на линии', 'На линии, мин', 'Примечание']
+    for index, title in enumerate(headers, start=1):
+        cell = ws2.cell(row=1, column=index, value=title)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = center if index > 1 else left
+
+    online_seconds_total = 0
+    for offset, hour_row in enumerate(hourly):
+        excel_row = 2 + offset
+        inner_seconds = hour_row.get('inner_reply_seconds')
+        in_target = None if inner_seconds is None else float(inner_seconds) <= target_seconds
+        online_seconds_total += _int(hour_row.get('online_seconds'))
+        values = [
+            _szov_chat_export_hour_label(hour_row.get('hour')),
+            _int(hour_row.get('chats')),
+            _szov_chat_export_minutes(inner_seconds),
+            _szov_chat_export_minutes(hour_row.get('first_reply_seconds')),
+            '' if in_target is None else ('да' if in_target else 'нет'),
+            # Людей на линии не округляем до целых (решение владельца 19.08.2026): 3,8 честнее
+            # четвёрки, а в файле по этой дробной величине ещё и считают средние за период.
+            round(float(hour_row.get('operators_online') or 0), 2),
+            _szov_chat_export_minutes(hour_row.get('online_seconds'), 0),
+            'час идёт' if hour_row.get('partial') else '',
+        ]
+        for index, value in enumerate(values, start=1):
+            cell = ws2.cell(row=excel_row, column=index, value=value)
+            cell.border = border
+            cell.alignment = center if index > 1 else left
+            if index == 3 and in_target is not None:
+                cell.font = good_font if in_target else bad_font
+            if index == 5 and in_target is not None:
+                cell.font = good_font if in_target else bad_font
+
+    last_hour_row = max(1, len(hourly) + 1)
+    total_row = last_hour_row + 1
+    totals = [
+        'За сутки',
+        _int(today.get('chats')),
+        inner_minutes,
+        _szov_chat_export_minutes(today.get('first_reply_seconds')),
+        '%d из %d' % (hours_in_target, len(measured)),
+        # Средняя занятость за сутки складывается из минут, а не из средних по часам: часы
+        # неравной длины (текущий ещё идёт), и среднее средних завысило бы неполный час.
+        round(online_seconds_total / (3600.0 * len(hourly)), 2) if hourly else 0,
+        _szov_chat_export_minutes(online_seconds_total, 0),
+        '',
+    ]
+    for index, value in enumerate(totals, start=1):
+        cell = ws2.cell(row=total_row, column=index, value=value)
+        cell.border = border
+        cell.fill = total_fill
+        cell.font = Font(bold=True, color='0F172A')
+        cell.alignment = center if index > 1 else left
+
+    for index, width in enumerate([15, 10, 22, 20, 9, 20, 16, 14], start=1):
+        ws2.column_dimensions[get_column_letter(index)].width = width
+    ws2.freeze_panes = 'A2'
+    # Фильтр — только по часам: строка «За сутки» под ним и в отбор попадать не должна.
+    ws2.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), last_hour_row)
+
+    # ── Лист 3: состав смены ─────────────────────────────────────────────────────────────────
+    ws3 = wb.create_sheet('Чатники')
+    people_headers = ['Сотрудник', 'Статус', 'В статусе, мин', 'Чатов в работе']
+    for index, title in enumerate(people_headers, start=1):
+        cell = ws3.cell(row=1, column=index, value=title)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.border = border
+        cell.alignment = center if index > 1 else left
+
+    people = [item for item in (now_block.get('operators') or []) if isinstance(item, dict)]
+    for offset, item in enumerate(people):
+        excel_row = 2 + offset
+        # seconds=None — событий за сутки не было: человек в этом статусе с начала суток, и
+        # выдавать это числом нельзя, иначе «0 мин» прочитается как «только что зашёл».
+        since = item.get('seconds')
+        values = [
+            item.get('name') or '',
+            item.get('status') or '',
+            'с начала суток' if since is None else _szov_chat_export_minutes(since),
+            _int(item.get('open_chats')),
+        ]
+        for index, value in enumerate(values, start=1):
+            cell = ws3.cell(row=excel_row, column=index, value=value)
+            cell.border = border
+            cell.alignment = center if index > 1 else left
+            if index == 2:
+                fill = _SZOV_CHAT_EXPORT_STATUS_FILL.get(item.get('status_key'))
+                if fill:
+                    cell.fill = PatternFill('solid', fgColor=fill)
+
+    for index, width in enumerate([34, 18, 16, 16], start=1):
+        ws3.column_dimensions[get_column_letter(index)].width = width
+    ws3.freeze_panes = 'A2'
+    ws3.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(people_headers)),
+                                       max(1, len(people) + 1))
+    # Вышедшие в список не идут (как и на табло), но их число видно — иначе смена в файле
+    # выглядит меньше, чем она есть.
+    offline = _int(now_block.get('operators_offline'))
+    if offline:
+        note = ws3.cell(row=len(people) + 3, column=1, value='Не в системе: %d' % offline)
+        note.font = hint_font
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+@app.route('/api/szov_wallboard/chat_export', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_szov_wallboard_chat_export():
+    """Табло СЗоВ, направление «Чат»: показатели экрана файлом .xlsx."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _szov_wallboard_guard()
+    if err:
+        return err
+    if not _chat2desk_authorization_header():
+        return jsonify({"error": "Интеграция с Chat2Desk недоступна: CHAT2DESK_API_TOKEN не задан"}), 503
+    try:
+        snapshot = _szov_chat_wallboard_snapshot()
+        content = _szov_chat_wallboard_workbook(snapshot)
+    except Exception as exc:
+        logging.error("Табло СЗоВ (чат): выгрузка не собралась: %s", exc, exc_info=True)
+        return jsonify({"error": "Не удалось собрать выгрузку", "detail": str(exc)[:300]}), 503
+    # В имени файла стоит момент ДАННЫХ, а не скачивания: две выгрузки подряд в пределах кэша
+    # содержат один и тот же снимок, и различаться именами они не должны.
+    day = str(snapshot.get('day') or '').replace('-', '')
+    clock = str(snapshot.get('chat2desk_now') or '')[11:16].replace(':', '')
+    stamp = '_'.join(part for part in (day, clock) if part) or 'now'
+    return send_file(
+        BytesIO(content),
+        as_attachment=True,
+        download_name='szov_wallboard_chat_%s.xlsx' % stamp,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
 
 def amo_leads_sync(days=None):
