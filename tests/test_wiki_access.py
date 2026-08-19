@@ -62,6 +62,50 @@ class CapabilitiesTest(unittest.TestCase):
         self.assertTrue(caps['can_read'])
         self.assertTrue(caps['can_edit'])
 
+    def test_supervisor_may_publish_but_trainer_may_not(self):
+        """Решение владельца 19.08.2026: выпуск содержимого — часть работы СВ.
+
+        До этого способности публиковать у роли не было, и выданное в ПРАВИЛЕ
+        РАЗДЕЛА can_publish молча гасилось гейтом способностей: владелец выдал
+        право в интерфейсе, правило сохранилось, а портал продолжал отвечать
+        «нет права публиковать в этом разделе». Тренер оставлен без выпуска
+        намеренно — он ведёт обучение, а не регламенты.
+        """
+        for role in ('sv', 'supervisor'):
+            caps = capabilities_from_otp_role(role)
+            self.assertTrue(caps['can_publish'], role)
+            self.assertTrue(caps['can_approve'], role)
+            # Удаление и раздача доступов супервайзеру по-прежнему не даются.
+            self.assertFalse(caps['can_delete'], role)
+            self.assertFalse(caps['can_manage_access'], role)
+            self.assertFalse(caps['can_manage_users'], role)
+
+        trainer = capabilities_from_otp_role('trainer')
+        self.assertTrue(trainer['can_edit'])
+        self.assertFalse(trainer['can_publish'])
+        self.assertFalse(trainer['can_approve'])
+
+    def test_publish_still_needs_the_section_rule(self):
+        """Способность — «вправе в принципе», раздел решает «вправе здесь».
+
+        Ровно этим разделены разделы «Супервайзер»/«Общий сотрудник» (право
+        выписано) и любой раздел без такого правила: способность одна и та же,
+        а результат разный. Если гейт правила когда-нибудь уберут, супервайзер
+        начнёт публиковать во ВСЁМ своём периметре.
+        """
+        caps = capabilities_from_otp_role('sv')
+
+        allowed = resolve_article_permissions(
+            capabilities=caps,
+            section_rules=[grant(can_read=True, can_edit=True, can_publish=True)])
+        self.assertTrue(allowed['can_publish'])
+
+        forbidden = resolve_article_permissions(
+            capabilities=caps,
+            section_rules=[grant(can_read=True, can_edit=True)])
+        self.assertFalse(forbidden['can_publish'],
+                         'без правила раздела способность публиковать не работает')
+
     def test_department_head_is_not_a_global_admin(self):
         # В OTP isAdminLikeRole специально вычитает глав отделов из глобальных
         # админов. Повторяем: структура — да, пользователи и доступы — нет.
