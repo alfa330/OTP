@@ -4,7 +4,7 @@ import { APPLE_FONT } from './ios';
 
 /*
  * Аккуратный кастомный select (вместо нативного <select>).
- * Раскрывающийся список рендерится в портал (document.body) с fixed-позицией,
+ * Раскрывающийся список рендерится в портал (body документа кнопки) с fixed-позицией,
  * чтобы не обрезался скроллом/overflow модалки. Закрывается по клику вне и Esc.
  * При скролле страницы/модалки позиция пересчитывается (список «приклеен» к кнопке);
  * скролл ВНУТРИ самого списка его не закрывает.
@@ -22,6 +22,7 @@ import { APPLE_FONT } from './ios';
  *   searchPlaceholder — плейсхолдер строки поиска
  *   variant           — `default` либо более мягкий `ios`
  *   ariaLabel         — доступное имя кнопки
+ *   id                — id кнопки: с ним <label htmlFor> открывает список
  */
 export default function CustomSelect({
   value,
@@ -34,6 +35,7 @@ export default function CustomSelect({
   searchPlaceholder = 'Поиск…',
   variant = 'default',
   ariaLabel,
+  id,
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
@@ -46,17 +48,24 @@ export default function CustomSelect({
 
   const showSearch = searchable;
 
+  /* Портал, размеры и слушатели берём у ОКНА кнопки, а не у главного: часть
+     разделов открывается в отдельном окне (Document Picture-in-Picture), и там
+     главное window даёт чужие размеры, а его document.body — чужой документ,
+     то есть список просто не появится. */
+  const ownerDocument = () => btnRef.current?.ownerDocument || document;
+
   const recompute = () => {
     const el = btnRef.current;
     if (!el) return;
+    const view = el.ownerDocument?.defaultView || window;
     const r = el.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - r.bottom;
+    const spaceBelow = view.innerHeight - r.bottom;
     const openUp = spaceBelow < 240 && r.top > spaceBelow;
     setCoords({
       left: Math.round(r.left),
       width: Math.round(r.width),
       top: openUp ? undefined : Math.round(r.bottom + 4),
-      bottom: openUp ? Math.round(window.innerHeight - r.top + 4) : undefined,
+      bottom: openUp ? Math.round(view.innerHeight - r.top + 4) : undefined,
       maxHeight: Math.max(160, Math.round((openUp ? r.top : spaceBelow) - 16)),
     });
   };
@@ -93,15 +102,17 @@ export default function CustomSelect({
       setOpen(false);
       requestAnimationFrame(() => btnRef.current?.focus());
     };
-    document.addEventListener('mousedown', onDoc);
-    window.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', recompute);
-    document.addEventListener('keydown', onKey);
+    const doc = ownerDocument();
+    const view = doc.defaultView || window;
+    doc.addEventListener('mousedown', onDoc);
+    view.addEventListener('scroll', onScroll, true);
+    view.addEventListener('resize', recompute);
+    doc.addEventListener('keydown', onKey);
     return () => {
-      document.removeEventListener('mousedown', onDoc);
-      window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', recompute);
-      document.removeEventListener('keydown', onKey);
+      doc.removeEventListener('mousedown', onDoc);
+      view.removeEventListener('scroll', onScroll, true);
+      view.removeEventListener('resize', recompute);
+      doc.removeEventListener('keydown', onKey);
     };
   }, [open]);
 
@@ -148,6 +159,7 @@ export default function CustomSelect({
     <div className={className}>
       <button
         ref={btnRef}
+        id={id}
         type="button"
         disabled={disabled}
         aria-label={ariaLabel}
@@ -303,7 +315,7 @@ export default function CustomSelect({
             )}
           </div>
         </div>,
-        document.body
+        ownerDocument().body
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import {
@@ -356,7 +356,7 @@ styleTag.textContent = `
     font-size: 12px; font-weight: 500; color: var(--ink-2);
     white-space: nowrap;
   }
-  .tv-composer-assignee .tv-select { flex: 1; }
+  .tv-composer-assignee .tv-select, .tv-composer-assignee .tv-person-select { flex: 1; }
   .tv-composer-self {
     flex: 0 0 auto;
     padding: 6px 11px; border-radius: 8px;
@@ -1661,6 +1661,35 @@ styleTag.textContent = `
   }
   .tv-input:disabled, .tv-textarea:disabled, .tv-select:disabled { opacity: .55; cursor: not-allowed; }
   .tv-textarea { resize: vertical; min-height: 86px; line-height: 1.5; }
+
+  /* Выбор человека — общий селектор сайта с поиском (components/ui/CustomSelect).
+     Кнопку подгоняем под поля раздела, чтобы в одной форме не стояли рядом два
+     разных по виду поля; сам список остаётся в дизайн-системе сайта, как и у
+     переключателя отделов выше. */
+  .tv-person-select { width: 100%; min-width: 0; }
+  .tv-person-select > button {
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    box-shadow: none;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px; font-weight: 400; color: var(--ink);
+    transition: border .15s, box-shadow .15s, transform .12s;
+  }
+  .tv-person-select > button:hover:not(:disabled) { border-color: var(--border-strong); }
+  .tv-person-select > button[aria-expanded="true"] {
+    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+  }
+  /* Синюю системную обводку убираем: после выбора список возвращает фокус на
+     кнопку, и в тёплой палитре раздела она читалась бы как ошибка. Фокус
+     показываем так же, как у остальных полей. */
+  .tv-person-select > button:focus,
+  .tv-person-select > button:focus-visible {
+    outline: none;
+    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+  }
+  .tv-person-select > button:disabled { opacity: .55; }
 
   /* ── Results count ── */
   .tv-results-info {
@@ -4153,6 +4182,23 @@ const TaskComposerForm = ({
     [supportsFiles]
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
+  const assigneeSelectId = useId();
+  /* В получателях — все админы и супервайзеры компании: в нативном списке
+     нужного человека приходилось искать глазами, поэтому здесь селектор с поиском. */
+  const recipientOptions = useMemo(
+    () => recipients.map((person) => ({
+      value: String(person.id),
+      label: person.role
+        ? `${person.name} (${ROLE_LABELS[person.role] || person.role})`
+        : person.name,
+    })),
+    [recipients]
+  );
+  // «Кто поручил» — тот же список без роли: строка вспомогательная, роль в ней лишняя.
+  const requesterOptions = useMemo(
+    () => recipients.map((person) => ({ value: String(person.id), label: person.name })),
+    [recipients]
+  );
   const canAssignSelf = Number(currentUserId) > 0
     && recipients.some((person) => Number(person.id) === Number(currentUserId));
   const isSelfAssigned = String(values.assignedTo || '') === String(currentUserId || '');
@@ -4205,21 +4251,20 @@ const TaskComposerForm = ({
       />
 
       <div className="tv-composer-assignee">
-        <label htmlFor="tv-composer-assignee-select">Исполнитель</label>
-        <select
-          id="tv-composer-assignee-select"
-          className="tv-select"
+        <label htmlFor={assigneeSelectId}>Исполнитель</label>
+        <CustomSelect
+          id={assigneeSelectId}
+          className="tv-person-select"
+          variant="ios"
+          ariaLabel="Исполнитель"
           value={values.assignedTo}
+          options={recipientOptions}
+          onChange={(next) => onChange({ assignedTo: String(next ?? '') })}
           disabled={disabled || isRecipientsLoading}
-          onChange={(event) => onChange({ assignedTo: event.target.value })}
-        >
-          <option value="">{isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
-          {recipients.map((person) => (
-            <option key={person.id} value={person.id}>
-              {person.name} ({ROLE_LABELS[person.role] || person.role})
-            </option>
-          ))}
-        </select>
+          placeholder={isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}
+          searchable
+          searchPlaceholder="Поиск по имени…"
+        />
         {canAssignSelf && (
           <button
             type="button"
@@ -4397,39 +4442,27 @@ const TaskComposerForm = ({
                     Другой источник
                   </button>
                 </div>
-                {values.requestedById ? (
-                  <select
-                    className="tv-select"
-                    value={values.requestedById}
-                    disabled={disabled || isRecipientsLoading}
-                    onChange={(event) => onChange({ requestedById: event.target.value, requestedByName: '' })}
-                  >
-                    {recipients.map((person) => (
-                      <option key={person.id} value={person.id}>{person.name}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <>
-                    <select
-                      className="tv-select"
-                      value=""
-                      disabled={disabled || isRecipientsLoading}
-                      onChange={(event) => onChange({ requestedById: event.target.value, requestedByName: '' })}
-                    >
-                      <option value="">Выбрать сотрудника…</option>
-                      {recipients.map((person) => (
-                        <option key={person.id} value={person.id}>{person.name}</option>
-                      ))}
-                    </select>
-                    <input
-                      className="tv-input"
-                      placeholder="Например: директор на планёрке, клиент Wolt"
-                      maxLength={160}
-                      value={values.requestedByName}
-                      disabled={disabled}
-                      onChange={(event) => onChange({ requestedByName: event.target.value, requestedById: '' })}
-                    />
-                  </>
+                <CustomSelect
+                  className="tv-person-select"
+                  variant="ios"
+                  ariaLabel="Кто поручил"
+                  value={values.requestedById}
+                  options={requesterOptions}
+                  onChange={(next) => onChange({ requestedById: String(next ?? ''), requestedByName: '' })}
+                  disabled={disabled || isRecipientsLoading}
+                  placeholder={isRecipientsLoading ? 'Загрузка...' : 'Выбрать сотрудника…'}
+                  searchable
+                  searchPlaceholder="Поиск по имени…"
+                />
+                {!values.requestedById && (
+                  <input
+                    className="tv-input"
+                    placeholder="Например: директор на планёрке, клиент Wolt"
+                    maxLength={160}
+                    value={values.requestedByName}
+                    disabled={disabled}
+                    onChange={(event) => onChange({ requestedByName: event.target.value, requestedById: '' })}
+                  />
                 )}
                 <p className="tv-field-hint">Не заполнено — задача считается своей инициативой.</p>
               </div>
@@ -5116,6 +5149,7 @@ export const PinnedTaskWidget = React.memo(({
   );
   const canEditTask = managementButtons.some((btn) => btn.action === 'edit');
   const canDeleteTask = managementButtons.some((btn) => btn.action === 'delete');
+  const quickAssigneeSelectId = useId();
   const recipientOptions = useMemo(() => {
     const unique = new Map();
     const addRecipient = (person) => {
@@ -5127,6 +5161,15 @@ export const PinnedTaskWidget = React.memo(({
     addRecipient(task?.assignee);
     return Array.from(unique.values());
   }, [taskRecipients, task?.assignee]);
+  const assigneeSelectOptions = useMemo(
+    () => recipientOptions.map((person) => ({
+      value: String(person.id),
+      label: person.role
+        ? `${person.name} (${ROLE_LABELS[person.role] || person.role})`
+        : person.name,
+    })),
+    [recipientOptions]
+  );
   const taskOptions = useMemo(() => {
     const unique = new Map();
     [...availableTasks, task].filter(Boolean).forEach((item) => {
@@ -5503,20 +5546,20 @@ export const PinnedTaskWidget = React.memo(({
         </div>
       </div>
       <div className="tv-form-field">
-        <label>Исполнитель *</label>
-        <select
-          className="tv-select"
+        <label htmlFor={quickAssigneeSelectId}>Исполнитель *</label>
+        <CustomSelect
+          id={quickAssigneeSelectId}
+          className="tv-person-select"
+          variant="ios"
+          ariaLabel="Исполнитель"
           value={quickForm.assignedTo}
+          options={assigneeSelectOptions}
+          onChange={(next) => updateQuickFormField('assignedTo', String(next ?? ''))}
           disabled={quickFormLoading || isTaskRecipientsLoading}
-          onChange={(event) => updateQuickFormField('assignedTo', event.target.value)}
-        >
-          <option value="">{isTaskRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}</option>
-          {recipientOptions.map((recipient) => (
-            <option key={recipient.id} value={recipient.id}>
-              {recipient.name} ({ROLE_LABELS[recipient.role] || recipient.role})
-            </option>
-          ))}
-        </select>
+          placeholder={isTaskRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}
+          searchable
+          searchPlaceholder="Поиск по имени…"
+        />
       </div>
       <div className="tv-form-field">
         <label>Дедлайн через</label>
