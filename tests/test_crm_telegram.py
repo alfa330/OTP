@@ -25,9 +25,14 @@ class TicketMessageTest(unittest.TestCase):
         """По номеру сотрудник понимает, о чём речь, а мы находим запись."""
         self.assertIn('Обращение №42', self.build())
 
-    def test_reply_instruction_is_always_present(self):
-        """Ответ «просто в чат» до системы не дойдёт: бот видит только реплаи."""
-        self.assertIn('Ответьте на это сообщение', self.build())
+    def test_no_reply_instruction(self):
+        """Владелец убрал её как лишнюю (19.08.2026).
+
+        Механику реплая это не меняет: бот по-прежнему видит только ответы на
+        свои сообщения, а под сообщением остаются кнопки «Беру в работу» и
+        «Выполнено» — они работают без реплая.
+        """
+        self.assertNotIn('Ответьте на это сообщение', self.build())
 
     def test_user_text_is_escaped(self):
         """Незакрытая скобка в описании не должна ломать разметку сообщения."""
@@ -94,8 +99,10 @@ class TicketMessageTest(unittest.TestCase):
         """4096 — жёсткий предел Bot API: длинное описание режем, а не теряем всё."""
         message = self.build(body='я' * 9000)
         self.assertLessEqual(len(message), telegram.MESSAGE_LIMIT)
+        # Шапка с номером и ссылкой обязана уцелеть: без неё обрезанное
+        # сообщение уже не привязать к обращению.
         self.assertIn('Обращение №42', message)
-        self.assertIn('Ответьте на это сообщение', message)
+        self.assertIn('ticket_id=42', message)
 
 
 class KeyboardTest(unittest.TestCase):
