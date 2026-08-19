@@ -79,6 +79,13 @@ export function officeNow(now = new Date()) {
     };
 }
 
+/** Сегодня по времени офисов, «ГГГГ-ММ-ДД». Не по зоне браузера: у оператора в
+ *  вебвью зона бывает чужой, а «сегодня» относится к офису. */
+export function officeTodayISO(now = new Date()) {
+    // en-CA даёт ровно ISO-порядок, без ручной сборки из частей.
+    return new Intl.DateTimeFormat('en-CA', { timeZone: OFFICE_TIME_ZONE }).format(now);
+}
+
 /**
  * Статус офиса на текущий момент.
  * state: 'open' | 'break' | 'closed' | 'none' (график не заполнен).
@@ -115,6 +122,36 @@ export function officeStatus(schedule, now = new Date()) {
         };
     }
     return { state: 'closed' };
+}
+
+/** Индекс дня недели (0 = понедельник) у даты «ГГГГ-ММ-ДД». null — не дата. */
+export function dayIndexOf(dayISO) {
+    const found = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dayISO || '').trim());
+    if (!found) return null;
+    // UTC-полдень, а не local: дата приходит как календарный день, и разбор по
+    // местной зоне в западных поясах отдал бы предыдущие сутки.
+    const date = new Date(Date.UTC(Number(found[1]), Number(found[2]) - 1, Number(found[3])));
+    if (Number.isNaN(date.getTime())) return null;
+    return (date.getUTCDay() + 6) % 7;
+}
+
+/**
+ * Статус офиса за календарный день по недельному графику.
+ * state: 'open' | 'closed' | 'none' (график не заполнен).
+ *
+ * Вердикт суточный: «работал ли офис в этот день». Про обед и «открыто до
+ * 19:00» отвечает officeStatus, и только про сейчас — для прошедшего дня такая
+ * точность была бы выдумкой. Близнец серверного schedule_state_on
+ * (wiki/offices.py); расходиться им нельзя, потому оба под тестами.
+ */
+export function officeStatusOn(schedule, dayISO) {
+    if (!hasSchedule(schedule)) return { state: 'none' };
+    const index = dayIndexOf(dayISO);
+    if (index === null) return { state: 'none' };
+
+    const interval = dayInterval(schedule[DAY_CODES[index]]);
+    if (!interval) return { state: 'closed' };
+    return { state: 'open', from: fmt(interval.from), until: fmt(interval.to) };
 }
 
 const sameDay = (left, right) => {
@@ -166,9 +203,24 @@ export function breakLines(schedule) {
             && day.break_to === first.break_to);
     if (uniform) return [{ days: null, time: `${first.break_from}–${first.break_to}` }];
 
-    return withBreak.map(({ code, day }) => ({
-        days: DAY_LABELS[code],
-        time: `${day.break_from}–${day.break_to}`,
+    /* Дальше — сериями подряд идущих дней, а не строкой на день: у Костаная
+       обед одинаков в Пн–Пт, и пять отдельных строк «обед Пн 13:00–14:00»
+       читаются как пять разных перерывов. Свёртка та же, что у scheduleLines. */
+    const runs = [];
+    withBreak.forEach(({ code, day }) => {
+        const time = `${day.break_from}–${day.break_to}`;
+        const last = runs[runs.length - 1];
+        const follows = last && DAY_CODES.indexOf(code)
+            === DAY_CODES.indexOf(last.codes[last.codes.length - 1]) + 1;
+        if (last && last.time === time && follows) last.codes.push(code);
+        else runs.push({ time, codes: [code] });
+    });
+
+    return runs.map(({ time, codes }) => ({
+        days: codes.length === 1
+            ? DAY_LABELS[codes[0]]
+            : `${DAY_LABELS[codes[0]]}–${DAY_LABELS[codes[codes.length - 1]]}`,
+        time,
     }));
 }
 

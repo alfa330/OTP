@@ -714,6 +714,36 @@ _OFFICE_STATEMENTS = [
                         WHERE ph.park_id = p.id AND ph.office_id IS NULL);
     """,
     "UPDATE wiki_taxi_parks SET phone = NULL WHERE phone IS NOT NULL;",
+    # «Офиса в городе нет» — тоже запись справочника, иначе такой город виден
+    # только тому, кто знает, что его там нет. Флагом, а не третьим значением
+    # kind: расширять CHECK у существующей колонки дороже, чем добавить флаг.
+    "ALTER TABLE wiki_offices ADD COLUMN IF NOT EXISTS no_office BOOLEAN NOT NULL DEFAULT FALSE;",
+    # Статус офиса за день.
+    #
+    # График отвечает на вопрос «во сколько открывается по вторникам», а не «был
+    # ли офис открыт 17 августа»: временное закрытие в графике не выразить, а
+    # задним числом менять график нельзя — он перепишет и всю прошлую историю.
+    # Поэтому день фиксируется строкой: source='manual' ставит человек
+    # («закрыт, прорвало трубу»), source='auto' — ночной снимок по графику.
+    # Ручная отметка снимку не уступает: ON CONFLICT DO NOTHING в
+    # snapshot_offices_day.
+    #
+    # Состояний два. «Нет офиса» — свойство самой записи (no_office), а не дня:
+    # город не закрывается на один вторник.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_office_days (
+        office_id   INTEGER NOT NULL REFERENCES wiki_offices(id) ON DELETE CASCADE,
+        day         DATE NOT NULL,
+        state       VARCHAR(16) NOT NULL CHECK (state IN ('open', 'closed')),
+        note        TEXT,
+        source      VARCHAR(16) NOT NULL DEFAULT 'manual'
+                    CHECK (source IN ('manual', 'auto')),
+        recorded_at TIMESTAMP NOT NULL DEFAULT %(now)s,
+        recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        PRIMARY KEY (office_id, day)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_office_days_day ON wiki_office_days(day);",
     # Кэш тайлов карты.
     #
     # Замер 12.08: 2ГИС отдаёт растровые тайлы без ключа, но пачку запросов

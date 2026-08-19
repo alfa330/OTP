@@ -200,6 +200,126 @@ def normalize_schedule(value):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Статус за день
+# ─────────────────────────────────────────────────────────────────────────────
+
+OFFICE_TIME_ZONE = 'Asia/Almaty'
+
+
+def office_today():
+    """Сегодня по времени офисов, а не сервера: Render живёт в UTC, и до трёх
+    часов ночи по Алматы «сегодня» у него ещё вчерашнее."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(OFFICE_TIME_ZONE)).date()
+
+
+def parse_day(value):
+    """'2026-08-19' → date. None, если это не дата."""
+    from datetime import date, datetime
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def schedule_state_on(schedule, day):
+    """Статус офиса за день по недельному графику: 'open' | 'closed' | None.
+
+    None — график не заполнен: у офиса «ОНЛАЙН» часов работы нет, и «Закрыт» про
+    него было бы неправдой.
+
+    Вердикт суточный, без обеда и без «открыто до 19:00» — намеренно проще
+    клиентского officeStatus. Истории нужен ответ «работал ли офис в этот день»;
+    минуты нужны только про сейчас, и их считает фронт (officeSchedule.js).
+    """
+    day = parse_day(day)
+    if day is None:
+        return None
+    normalized = normalize_schedule(schedule)
+    if not normalized:
+        return None
+    return 'open' if normalized.get(DAY_CODES[day.weekday()]) else 'closed'
+
+
+def read_office_day(cursor, office_id, day):
+    cursor.execute(
+        'SELECT state, note, source, day FROM wiki_office_days '
+        ' WHERE office_id = %s AND day = %s::date',
+        (office_id, day),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'state': row[0], 'note': row[1], 'source': row[2],
+            'recorded_on': row[3].isoformat() if row[3] else None}
+
+
+def set_office_day(cursor, office_id, day, state, note=None, recorded_by=None):
+    """Отметка человека: «в этот день офис был закрыт (открыт), вот причина»."""
+    cursor.execute(
+        """
+        INSERT INTO wiki_office_days (office_id, day, state, note, source, recorded_by)
+        VALUES (%s, %s::date, %s, %s, 'manual', %s)
+        ON CONFLICT (office_id, day) DO UPDATE
+           SET state = EXCLUDED.state,
+               note = EXCLUDED.note,
+               source = 'manual',
+               recorded_by = EXCLUDED.recorded_by,
+               recorded_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+        """,
+        (office_id, day, state, note, recorded_by),
+    )
+
+
+def clear_office_day(cursor, office_id, day):
+    """Снимает отметку — день снова считается по графику."""
+    cursor.execute(
+        'DELETE FROM wiki_office_days WHERE office_id = %s AND day = %s::date',
+        (office_id, day),
+    )
+    return cursor.rowcount > 0
+
+
+def snapshot_offices_day(cursor, day):
+    """Фиксирует статус дня по графику. Возвращает число записанных строк.
+
+    ON CONFLICT DO NOTHING держит сразу два обещания постановки: ручная отметка
+    снимку не уступает, а повторный прогон не перезаписывает историю задним
+    числом. Поэтому job можно гонять повторно и вручную без последствий.
+    """
+    day = parse_day(day)
+    if day is None:
+        return 0
+
+    cursor.execute(
+        "SELECT id, schedule FROM wiki_offices "
+        " WHERE status = 'active' AND NOT no_office"
+    )
+    written = 0
+    for office_id, schedule in cursor.fetchall():
+        state = schedule_state_on(schedule, day)
+        if state is None:
+            # График не заполнен — фиксировать нечего. Иначе офис «ОНЛАЙН»
+            # каждый день попадал бы в историю закрытым.
+            continue
+        cursor.execute(
+            """
+            INSERT INTO wiki_office_days (office_id, day, state, source)
+            VALUES (%s, %s::date, %s, 'auto')
+            ON CONFLICT (office_id, day) DO NOTHING
+            """,
+            (office_id, day, state),
+        )
+        written += cursor.rowcount
+    return written
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Номера парка
 #
 # Номер принадлежит паре «парк + точка», где точка — офис или NULL («онлайн»,
@@ -288,34 +408,47 @@ def set_park_online_phones(cursor, park_id, phones):
 
 _OFFICE_KEYS = ('id', 'slug', 'name', 'city', 'address', 'address_note', 'phone',
                 'map_url', 'map_resolved_url', 'lat', 'lon', 'schedule',
-                'is_online', 'all_parks', 'kind', 'partner_label', 'status', 'position')
+                'is_online', 'all_parks', 'kind', 'partner_label', 'status', 'position',
+                'no_office')
 
 _OFFICE_COLUMNS = """
     o.id, o.slug, o.name, o.city, o.address, o.address_note, o.phone,
     o.map_url, o.map_resolved_url, o.lat, o.lon, o.schedule,
-    o.is_online, o.all_parks, o.kind, o.partner_label, o.status, o.position
+    o.is_online, o.all_parks, o.kind, o.partner_label, o.status, o.position,
+    o.no_office
 """
 
 
 def _office_row(row):
-    office = dict(zip(_OFFICE_KEYS, row))
+    # Срез, а не zip по всей строке: у list_offices за колонками офиса идут ещё
+    # колонки статуса дня, и молчаливое усечение zip'ом читалось бы как ошибка.
+    office = dict(zip(_OFFICE_KEYS, row[:len(_OFFICE_KEYS)]))
     office['lat'] = float(office['lat']) if office['lat'] is not None else None
     office['lon'] = float(office['lon']) if office['lon'] is not None else None
     return office
 
 
-def list_offices(cursor, include_archived=False, query=None, park_id=None, city=None):
+def list_offices(cursor, include_archived=False, query=None, park_id=None, city=None,
+                 day=None):
     """Офисы со списком парков и переопределениями.
 
     Парки приезжают одним запросом на всю выборку, а не запросом на карточку:
     офисов два десятка, но раскладывать их по вкладке «парк → его офисы» фронт
     обязан уметь без похода на сервер за каждым.
+
+    day — дата, на которую нужен статус. Приезжает тем же запросом (LEFT JOIN по
+    первичному ключу), поэтому «показать статус на 17 августа» не превращается в
+    запрос на офис. Нет строки за день — приедет None, и клиент честно считает по
+    графику.
     """
     # Склейка, а не %-форматирование: в тексте есть литеральные '%%' для ILIKE,
     # и любой %-формат поверх них пришлось бы удваивать ещё раз.
     cursor.execute(
-        'SELECT ' + _OFFICE_COLUMNS + """
+        'SELECT ' + _OFFICE_COLUMNS + """,
+               d.state, d.note, d.source, d.day
           FROM wiki_offices o
+          LEFT JOIN wiki_office_days d
+                 ON d.office_id = o.id AND d.day = %(day)s::date
          WHERE (%(archived)s OR o.status = 'active')
            AND (%(city)s::text IS NULL OR o.city = %(city)s::text)
            AND (%(query)s::text IS NULL
@@ -330,9 +463,19 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
          ORDER BY o.position, o.city NULLS LAST, o.name
         """,
         {'archived': include_archived, 'query': query or None,
-         'park': park_id, 'city': city or None},
+         'park': park_id, 'city': city or None, 'day': day or None},
     )
-    offices = [_office_row(row) for row in cursor.fetchall()]
+    offices = []
+    for row in cursor.fetchall():
+        office = _office_row(row)
+        state, note, source, recorded_on = row[len(_OFFICE_KEYS):]
+        office['day'] = {
+            'state': state,
+            'note': note,
+            'source': source,
+            'recorded_on': recorded_on.isoformat() if recorded_on else None,
+        } if state else None
+        offices.append(office)
     if not offices:
         return []
 
@@ -386,7 +529,7 @@ def cities(cursor):
 _OFFICE_WRITABLE = ('name', 'city', 'address', 'address_note', 'phone',
                     'map_url', 'map_resolved_url', 'lat', 'lon', 'schedule',
                     'is_online', 'all_parks', 'kind', 'partner_label',
-                    'status', 'position', 'slug')
+                    'status', 'position', 'slug', 'no_office')
 
 
 def _schedule_param(value):
@@ -400,15 +543,17 @@ def create_office(cursor, *, slug, name, fields, created_by):
         INSERT INTO wiki_offices (slug, name, city, address, address_note, phone,
                                   map_url, map_resolved_url, lat, lon, map_checked_at,
                                   schedule, is_online, all_parks, kind, partner_label,
-                                  position, created_by)
+                                  no_office, position, created_by)
         VALUES (%(slug)s, %(name)s, %(city)s, %(address)s, %(address_note)s, %(phone)s,
                 %(map_url)s, %(map_resolved_url)s, %(lat)s, %(lon)s,
                 CASE WHEN %(lat)s IS NULL THEN NULL ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') END,
                 %(schedule)s, %(is_online)s, %(all_parks)s, %(kind)s, %(partner_label)s,
+                %(no_office)s,
                 COALESCE((SELECT max(position) + 1 FROM wiki_offices), 0), %(by)s)
         RETURNING id
         """,
         {'slug': slug, 'name': name, 'by': created_by,
+         'no_office': bool(fields.get('no_office')),
          'city': fields.get('city'), 'address': fields.get('address'),
          'address_note': fields.get('address_note'), 'phone': fields.get('phone'),
          'map_url': fields.get('map_url'), 'map_resolved_url': fields.get('map_resolved_url'),

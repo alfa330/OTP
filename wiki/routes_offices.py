@@ -76,6 +76,7 @@ def _fields(data, *, partial):
     take('schedule', wiki_offices.normalize_schedule)
     take('is_online', bool)
     take('all_parks', bool)
+    take('no_office', bool)
 
     if not partial or 'kind' in data:
         fields['kind'] = 'partner' if data.get('kind') == 'partner' else 'park'
@@ -94,6 +95,15 @@ def _fields(data, *, partial):
             fields['lon'] = _coord_or_none(data.get('lon'), 180)
             if fields['lat'] is None or fields['lon'] is None:
                 fields['lat'] = fields['lon'] = None
+
+    # «Офиса в городе нет» — это отсутствие офиса, а не офис с пустыми полями.
+    # Карту, график и телефон гасим сразу: оставленные «на всякий случай», они
+    # рано или поздно разойдутся с надписью «Офиса в городе нет», и город будет
+    # одновременно и без офиса, и с телефоном офиса.
+    if fields.get('no_office'):
+        fields.update({'address': None, 'phone': None, 'schedule': None,
+                       'map_url': None, 'map_resolved_url': None,
+                       'lat': None, 'lon': None, 'is_online': False})
 
     if data.get('status') in ('active', 'archived'):
         fields['status'] = data['status']
@@ -121,15 +131,25 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_offices_list(cursor, ctx):
         if request.method == 'GET':
             can_manage = _may_edit(ctx)
+            # Дата — «на какой день показать статус». По умолчанию сегодня по
+            # Алматы: у сервера в Render время UTC, и до трёх ночи его «сегодня»
+            # ещё вчерашнее.
+            day = wiki_offices.parse_day(request.args.get('date')) or wiki_offices.office_today()
+            # Архивные — по запросу, а не всегда. Управляющему они приезжали в
+            # общем списке и мешались среди живых офисов; теперь это тумблер в
+            # фильтре, и по умолчанию он выключен.
+            show_archived = can_manage and request.args.get('archived') in ('1', 'true')
             return jsonify({
                 'items': wiki_offices.list_offices(
                     cursor,
-                    include_archived=can_manage,
+                    include_archived=show_archived,
                     query=request.args.get('q'),
                     park_id=_int_or_none(request.args.get('park_id')),
                     city=request.args.get('city'),
+                    day=day,
                 ),
                 'cities': wiki_offices.cities(cursor),
+                'date': day.isoformat(),
                 'can_manage': can_manage,
             })
 
@@ -190,6 +210,50 @@ def register(bp, wiki_route, db, log_ip):
                            entity_type='office', entity_id=office_id,
                            details={'fields': sorted(fields.keys())}, ip_address=log_ip())
         return jsonify({"status": "ok"})
+
+    @wiki_route('/offices/<int:office_id>/day/<day>', methods=('PUT', 'DELETE'))
+    def wiki_office_day(cursor, ctx, office_id, day):
+        """Отметка «в этот день офис был открыт / закрыт» и снятие отметки.
+
+        Отдельный роут, а не поле формы офиса: закрытие на день — ежедневное
+        действие дежурного, а форма офиса открывается раз в полгода. Наперёд
+        отмечать нельзя — история фиксирует то, что было, а не то, что
+        планируется.
+        """
+        if not _may_edit(ctx):
+            return _forbidden()
+
+        target = wiki_offices.parse_day(day)
+        if target is None:
+            return jsonify({"error": "Неверная дата"}), 400
+        if target > wiki_offices.office_today():
+            return jsonify({"error": "Отметить можно сегодняшний или прошедший день"}), 400
+        if not wiki_offices.get_office(cursor, office_id):
+            return jsonify({"error": "Офис не найден"}), 404
+
+        if request.method == 'DELETE':
+            # Идемпотентно: не было отметки — значит день и так считается по
+            # графику, и это ровно тот результат, которого просили.
+            wiki_offices.clear_office_day(cursor, office_id, target)
+            queries.log_action(cursor, actor_id=ctx['user_id'], action='office.day.clear',
+                               entity_type='office', entity_id=office_id,
+                               details={'day': target.isoformat()}, ip_address=log_ip())
+            return jsonify({"status": "cleared", "day": None})
+
+        data = _body()
+        state = data.get('state')
+        if state not in ('open', 'closed'):
+            return jsonify({"error": "Статус дня — «Открыт» или «Закрыт»"}), 400
+
+        wiki_offices.set_office_day(cursor, office_id, target, state,
+                                   note=_clean(data.get('note'), 500),
+                                   recorded_by=ctx['user_id'])
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='office.day.set',
+                           entity_type='office', entity_id=office_id,
+                           details={'day': target.isoformat(), 'state': state},
+                           ip_address=log_ip())
+        return jsonify({"status": "ok",
+                        "day": wiki_offices.read_office_day(cursor, office_id, target)})
 
     @wiki_route('/offices/resolve-map', methods=('POST',))
     def wiki_office_resolve_map(cursor, ctx):

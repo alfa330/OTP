@@ -7,10 +7,12 @@
 """
 
 import unittest
+from datetime import date, datetime
 
 from wiki.offices import (
     DAY_CODES, MAX_PHONES_PER_POINT, clean_phones, link_phones, normalize_schedule,
-    parse_map_coords, resolve_map_link, tile_is_valid,
+    parse_day, parse_map_coords, resolve_map_link, schedule_state_on,
+    snapshot_offices_day, tile_is_valid,
 )
 
 
@@ -238,6 +240,106 @@ _KOSTANAY = {
     'sat': {'from': '10:00', 'to': '13:00'},
     'sun': None,
 }
+
+
+class ScheduleStateOnTest(unittest.TestCase):
+    """Суточный вердикт по графику.
+
+    Близнец officeStatusOn из officeSchedule.js: одно правило, две реализации —
+    сервер пишет им историю, клиент рисует прошедшие дни. Разойдясь, они дадут
+    расхождение, которое видно только глазами оператора, поэтому набор случаев
+    здесь и в mjs-тесте намеренно один и тот же.
+    """
+
+    def test_workday_is_open(self):
+        self.assertEqual(schedule_state_on(_KOSTANAY, date(2026, 8, 17)), 'open')  # понедельник
+
+    def test_short_saturday_is_open_too(self):
+        self.assertEqual(schedule_state_on(_KOSTANAY, date(2026, 8, 15)), 'open')
+
+    def test_day_off_is_closed(self):
+        self.assertEqual(schedule_state_on(_KOSTANAY, date(2026, 8, 16)), 'closed')  # воскресенье
+
+    def test_iso_string_is_accepted(self):
+        self.assertEqual(schedule_state_on(_KOSTANAY, '2026-08-16'), 'closed')
+
+    def test_empty_schedule_has_no_state(self):
+        # Офис «ОНЛАЙН»: часов работы нет, и «закрыт» про него было бы неправдой.
+        self.assertIsNone(schedule_state_on(None, date(2026, 8, 17)))
+        self.assertIsNone(schedule_state_on({'mon': None, 'sun': None}, date(2026, 8, 17)))
+
+    def test_broken_date_has_no_state(self):
+        self.assertIsNone(schedule_state_on(_KOSTANAY, 'позавчера'))
+
+    def test_parse_day_reads_iso_and_datetime(self):
+        self.assertEqual(parse_day('2026-08-19'), date(2026, 8, 19))
+        self.assertEqual(parse_day(datetime(2026, 8, 19, 23, 45)), date(2026, 8, 19))
+        self.assertIsNone(parse_day('19.08.2026'))
+        self.assertIsNone(parse_day(None))
+
+
+class _SnapshotCursor:
+    """Курсор ровно на тех двух запросах, которые делает snapshot_offices_day.
+
+    База здесь не нужна: проверяем не SQL, а обещания снимка — что ручную
+    отметку он не трогает и что повторный прогон ничего не переписывает.
+    """
+
+    def __init__(self, offices, existing=()):
+        self.offices = list(offices)
+        self.rows = {key: value for key, value in existing}
+        self.rowcount = 0
+        self._fetched = []
+
+    def execute(self, sql, params=None):
+        text = ' '.join(sql.split())
+        if text.startswith('SELECT id, schedule'):
+            self._fetched = self.offices
+            return
+        if 'INSERT INTO wiki_office_days' in text:
+            office_id, day, state = params
+            key = (office_id, day)
+            if key in self.rows:
+                self.rowcount = 0  # ON CONFLICT DO NOTHING
+            else:
+                self.rows[key] = ('auto', state)
+                self.rowcount = 1
+            return
+        raise AssertionError('неожиданный запрос: %s' % text)
+
+    def fetchall(self):
+        return self._fetched
+
+
+class SnapshotOfficesDayTest(unittest.TestCase):
+    DAY = date(2026, 8, 16)  # воскресенье
+
+    def test_writes_one_row_per_office_with_schedule(self):
+        cursor = _SnapshotCursor([(1, _KOSTANAY), (2, _KOSTANAY)])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 2)
+        self.assertEqual(cursor.rows[(1, self.DAY)], ('auto', 'closed'))
+
+    def test_office_without_schedule_is_skipped(self):
+        # Иначе «ОНЛАЙН» каждый день попадал бы в историю закрытым.
+        cursor = _SnapshotCursor([(1, None), (2, _KOSTANAY)])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 1)
+        self.assertNotIn((1, self.DAY), cursor.rows)
+
+    def test_manual_record_survives(self):
+        cursor = _SnapshotCursor([(1, _KOSTANAY)],
+                                 existing=[((1, self.DAY), ('manual', 'open'))])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 0)
+        self.assertEqual(cursor.rows[(1, self.DAY)], ('manual', 'open'))
+
+    def test_second_run_changes_nothing(self):
+        cursor = _SnapshotCursor([(1, _KOSTANAY)])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 1)
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 0)
+
+    def test_broken_day_writes_nothing(self):
+        cursor = _SnapshotCursor([(1, _KOSTANAY)])
+        self.assertEqual(snapshot_offices_day(cursor, 'позавчера'), 0)
+        self.assertEqual(cursor.rows, {})
 
 
 if __name__ == '__main__':

@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { Loader2, MapPin, Phone, Wifi } from 'lucide-react';
+import { Loader2, MapPin, MapPinOff, Phone, Wifi } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
 import OfficeMap from './OfficeMap';
 import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
 import { Field } from './formField';
+import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
 
 /* Форма офиса: адрес, карта и график.
  *
@@ -186,89 +187,125 @@ export default function OfficeEditor({ draft, setDraft, base, headers, showToast
                     />
                 </Field>
                 <Field label="Город">
+                    {/* Список-подсказка, а не выбор: колонка текстовая, и города,
+                        заведённые до справочника, должны сохраняться как есть.
+                        Нужен он затем, что группы в списке офисов бьются по
+                        строке города — «Астана» и «Нур-Султан» разъехались бы
+                        в два города. */}
                     <input
                         className={iosInput}
+                        list="wiki-office-cities"
                         value={draft.city}
                         placeholder="Алматы"
                         onChange={(e) => setDraft((prev) => ({ ...prev, city: e.target.value }))}
                     />
+                    <datalist id="wiki-office-cities">
+                        {KAZAKHSTAN_CITY_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value} />
+                        ))}
+                    </datalist>
                 </Field>
             </div>
 
+            {/* «Офиса в городе нет» — такая же запись справочника, как офис:
+                иначе город, где офиса нет, виден только тому, кто и так это
+                знает. Всё остальное у неё гасится — адреса и графика у
+                отсутствующего офиса не бывает. */}
             <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
                 <span className="flex items-center gap-2 text-[13px] text-slate-700">
-                    <Wifi size={15} className="text-slate-400" />
-                    Только по телефону (ОНЛАЙН)
+                    <MapPinOff size={15} className="text-slate-400" />
+                    Офиса в городе нет
+                    <IosBadge tone="slate">строка о городе</IosBadge>
                 </span>
                 <IosToggle
-                    checked={!!draft.is_online}
-                    onChange={(next) => setDraft((prev) => ({ ...prev, is_online: next }))}
+                    checked={!!draft.no_office}
+                    onChange={(next) => setDraft((prev) => ({ ...prev, no_office: next }))}
                 />
             </label>
 
-            {!draft.is_online && (
+            {draft.no_office ? (
+                <p className="px-1 text-[12px] leading-relaxed text-slate-500">
+                    В списке город получит статус «Офиса в городе нет» вместо адреса.
+                    Телефон, карта и график для такой записи не нужны.
+                </p>
+            ) : (
                 <>
-                    <Field label="Адрес">
+                    <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                        <span className="flex items-center gap-2 text-[13px] text-slate-700">
+                            <Wifi size={15} className="text-slate-400" />
+                            Только по телефону (ОНЛАЙН)
+                        </span>
+                        <IosToggle
+                            checked={!!draft.is_online}
+                            onChange={(next) => setDraft((prev) => ({ ...prev, is_online: next }))}
+                        />
+                    </label>
+
+                    {!draft.is_online && (
+                        <>
+                            <Field label="Адрес">
+                                <input
+                                    className={iosInput}
+                                    value={draft.address}
+                                    placeholder="Проспект Сарыарка, 31, угол улицы Алиби Жангельдин"
+                                    onChange={(e) => setDraft((prev) => ({ ...prev, address: e.target.value }))}
+                                />
+                            </Field>
+
+                            <Field label="Ориентиры" hint="Каждый с новой строки — как в справочнике: вход, этаж, кабинет, что рядом.">
+                                <textarea
+                                    className={`${iosInput} min-h-[72px] resize-y`}
+                                    value={draft.address_note}
+                                    placeholder={'Головной офис\nвход со стороны улицы Сарыарка'}
+                                    onChange={(e) => setDraft((prev) => ({ ...prev, address_note: e.target.value }))}
+                                />
+                            </Field>
+
+                            <MapField draft={draft} setDraft={setDraft} base={base} headers={headers} showToast={showToast} />
+                        </>
+                    )}
+
+                    <Field label="Телефон">
                         <input
                             className={iosInput}
-                            value={draft.address}
-                            placeholder="Проспект Сарыарка, 31, угол улицы Алиби Жангельдин"
-                            onChange={(e) => setDraft((prev) => ({ ...prev, address: e.target.value }))}
+                            value={draft.phone}
+                            placeholder="+7 707 705 08 80"
+                            onChange={(e) => setDraft((prev) => ({ ...prev, phone: e.target.value }))}
                         />
                     </Field>
 
-                    <Field label="Ориентиры" hint="Каждый с новой строки — как в справочнике: вход, этаж, кабинет, что рядом.">
-                        <textarea
-                            className={`${iosInput} min-h-[72px] resize-y`}
-                            value={draft.address_note}
-                            placeholder={'Головной офис\nвход со стороны улицы Сарыарка'}
-                            onChange={(e) => setDraft((prev) => ({ ...prev, address_note: e.target.value }))}
-                        />
-                    </Field>
+                    {!draft.is_online && (
+                        <Field label="График работы">
+                            <ScheduleEditor
+                                schedule={draft.schedule}
+                                onChange={(schedule) => setDraft((prev) => ({ ...prev, schedule }))}
+                            />
+                        </Field>
+                    )}
 
-                    <MapField draft={draft} setDraft={setDraft} base={base} headers={headers} showToast={showToast} />
+                    <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                        <span className="flex items-center gap-2 text-[13px] text-slate-700">
+                            <Phone size={15} className="text-slate-400" />
+                            Партнёрский офис
+                            <IosBadge tone="slate">не наш парк</IosBadge>
+                        </span>
+                        <IosToggle
+                            checked={draft.kind === 'partner'}
+                            onChange={(next) => setDraft((prev) => ({ ...prev, kind: next ? 'partner' : 'park' }))}
+                        />
+                    </label>
+
+                    {draft.kind === 'partner' && (
+                        <Field label="Чей офис" hint="Показывается плашкой на карточке.">
+                            <input
+                                className={iosInput}
+                                value={draft.partner_label}
+                                placeholder="Яндекс для водителей / Тариф Wolt"
+                                onChange={(e) => setDraft((prev) => ({ ...prev, partner_label: e.target.value }))}
+                            />
+                        </Field>
+                    )}
                 </>
-            )}
-
-            <Field label="Телефон">
-                <input
-                    className={iosInput}
-                    value={draft.phone}
-                    placeholder="+7 707 705 08 80"
-                    onChange={(e) => setDraft((prev) => ({ ...prev, phone: e.target.value }))}
-                />
-            </Field>
-
-            {!draft.is_online && (
-                <Field label="График работы">
-                    <ScheduleEditor
-                        schedule={draft.schedule}
-                        onChange={(schedule) => setDraft((prev) => ({ ...prev, schedule }))}
-                    />
-                </Field>
-            )}
-
-            <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                <span className="flex items-center gap-2 text-[13px] text-slate-700">
-                    <Phone size={15} className="text-slate-400" />
-                    Партнёрский офис
-                    <IosBadge tone="slate">не наш парк</IosBadge>
-                </span>
-                <IosToggle
-                    checked={draft.kind === 'partner'}
-                    onChange={(next) => setDraft((prev) => ({ ...prev, kind: next ? 'partner' : 'park' }))}
-                />
-            </label>
-
-            {draft.kind === 'partner' && (
-                <Field label="Чей офис" hint="Показывается плашкой на карточке.">
-                    <input
-                        className={iosInput}
-                        value={draft.partner_label}
-                        placeholder="Яндекс для водителей / Тариф Wolt"
-                        onChange={(e) => setDraft((prev) => ({ ...prev, partner_label: e.target.value }))}
-                    />
-                </Field>
             )}
         </div>
     );

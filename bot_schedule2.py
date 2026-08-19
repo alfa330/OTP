@@ -50428,6 +50428,35 @@ async def run_survey_tests_autoclose_async():
     except Exception:
         logging.exception("survey tests auto-close job failed")
 
+
+def wiki_office_status_snapshot_job():
+    """Фиксирует статус офисов вики за уходящий день.
+
+    Снимок нужен потому, что график отвечает на вопрос «во сколько открывается по
+    вторникам», а не «работал ли офис 17 августа»: график правят, и без снимка
+    правка переписала бы и всю прошлую историю. Ручные отметки дежурного снимок
+    не трогает (ON CONFLICT DO NOTHING), поэтому job безопасно гонять повторно.
+    """
+    try:
+        from wiki import offices as wiki_offices
+        day = wiki_offices.office_today()
+        with db._get_cursor() as cursor:
+            written = wiki_offices.snapshot_offices_day(cursor, day)
+        if written:
+            logging.info("Wiki offices day snapshot: day=%s rows=%s", day, written)
+        return written
+    except Exception:
+        logging.exception("wiki offices day snapshot job failed")
+        return None
+
+
+async def run_wiki_office_status_snapshot_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, wiki_office_status_snapshot_job)
+    except Exception:
+        logging.exception("wiki offices day snapshot job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -51046,6 +51075,18 @@ if __name__ == '__main__':
         CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
         id='task_deadline_reminders',
         misfire_grace_time=600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Статус офисов вики за день — в 23:45 по Алматы, то есть в конце самого
+    # дня: снимок фиксирует то, что было, а не то, что планировалось утром.
+    # Позже полуночи ставить нельзя — тогда он писал бы уже следующую дату.
+    scheduler.add_job(
+        run_wiki_office_status_snapshot_async,
+        CronTrigger(hour=23, minute=45, timezone=ZoneInfo('Asia/Almaty')),
+        id='wiki_office_status_snapshot_daily',
+        misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
     )

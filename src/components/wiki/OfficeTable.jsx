@@ -1,0 +1,144 @@
+import React from 'react';
+import { Archive, ArchiveRestore, CalendarClock, Pencil } from 'lucide-react';
+import { iosCard, IosBadge } from '../ui/ios';
+import {
+    DAY_STATE_ROW, DAY_STATE_TONE, formatDay, officeDayStatus,
+} from './officeDayStatus';
+
+/* Плотный вид справочника: город, адрес, статус на дату и дата актуальности.
+ *
+ * Карточки отвечают на вопрос «как доехать» (за этим и мини-карта), таблица —
+ * на вопрос «где сегодня закрыто»: двадцать городов видно одним экраном, и
+ * закрытый офис находится, не листая. Поэтому это переключатель вида, а не
+ * замена карточкам.
+ *
+ * Строка залита целиком (требование ТЗ): цвет должен считываться сразу, а не
+ * точкой в бейдже.
+ */
+
+const CELL = 'px-3 py-2.5 text-[13px] align-middle';
+
+export default function OfficeTable({
+    offices, dayISO, canManage, onEdit, onArchive, onRestore, onMarkDay,
+}) {
+    return (
+        <div className={`${iosCard} overflow-hidden`}>
+            {/* Прокрутка внутри рамки: сжимать текст в узком окне нельзя (п. 6 ТЗ),
+                а горизонтальная прокрутка всей страницы ломала бы раздел. */}
+            <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] border-collapse">
+                    <thead>
+                        <tr className="bg-slate-50 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                            <th className={`${CELL} font-semibold`}>Город</th>
+                            <th className={`${CELL} font-semibold`}>Адрес офиса</th>
+                            <th className={`${CELL} font-semibold`}>Статус на дату</th>
+                            <th className={`${CELL} font-semibold`}>Обновлено</th>
+                            {canManage && <th className={`${CELL} w-1`} aria-label="Действия" />}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {offices.map((office) => {
+                            const status = officeDayStatus(office, dayISO);
+                            const absent = status.state === 'absent';
+                            return (
+                                <tr
+                                    key={office.id}
+                                    className={`border-t border-slate-200/70 ${DAY_STATE_ROW[status.state] || ''}`}
+                                >
+                                    <td className={`${CELL} font-semibold text-slate-900`}>
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                            {office.city || 'Без города'}
+                                            {office.status === 'archived' && (
+                                                <IosBadge tone="amber">В архиве</IosBadge>
+                                            )}
+                                        </div>
+                                        {/* Название нужно, когда в городе несколько офисов:
+                                            иначе две строки «Алматы» неразличимы. Но у
+                                            записи о городе оно и есть город — тогда молчим. */}
+                                        {office.name !== office.city && (
+                                            <div className="text-[11.5px] font-normal text-slate-500">
+                                                {office.name}
+                                            </div>
+                                        )}
+                                    </td>
+
+                                    <td className={`${CELL} text-slate-700`}>
+                                        {absent ? (
+                                            <span className="italic text-slate-500">Офиса в городе нет</span>
+                                        ) : office.map_url && office.address ? (
+                                            <a
+                                                href={office.map_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="hover:text-blue-600 hover:underline"
+                                            >
+                                                {office.address}
+                                            </a>
+                                        ) : (
+                                            office.address || <span className="text-slate-400">—</span>
+                                        )}
+                                        {status.note && (
+                                            <div className="text-[11.5px] text-slate-500">{status.note}</div>
+                                        )}
+                                    </td>
+
+                                    <td className={CELL}>
+                                        <IosBadge tone={DAY_STATE_TONE[status.state]}>{status.label}</IosBadge>
+                                    </td>
+
+                                    <td className={`${CELL} tabular-nums text-slate-500`}>
+                                        {formatDay(status.recordedOn)}
+                                    </td>
+
+                                    {canManage && (
+                                        <td className={CELL}>
+                                            <div className="flex items-center justify-end gap-0.5">
+                                                {!absent && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => onMarkDay(office)}
+                                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                                                        aria-label="Отметить статус на дату"
+                                                    >
+                                                        <CalendarClock size={14} />
+                                                    </button>
+                                                )}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onEdit(office)}
+                                                    className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                                                    aria-label="Изменить офис"
+                                                >
+                                                    <Pencil size={14} />
+                                                </button>
+                                                {office.status === 'active' ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => onArchive(office)}
+                                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600"
+                                                        aria-label="Убрать в архив"
+                                                    >
+                                                        <Archive size={14} />
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => onRestore(office)}
+                                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+                                                        aria-label="Вернуть из архива"
+                                                    >
+                                                        <ArchiveRestore size={14} />
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </td>
+                                    )}
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
