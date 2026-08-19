@@ -798,15 +798,17 @@ export default function CrmTicketsView({
 
     const [stateFilter, setStateFilter] = useState('active');
     const [queueFilter, setQueueFilter] = useState('');
-    // По умолчанию открыт ОБЩИЙ список, а не «Мои»: раздел нужен ровно для того,
-    // чтобы по одному водителю было одно обращение, а найти чужое можно только
-    // если оно на виду (просьба СЗоВ 18.08.2026). «Мои» остаются сегментом рядом.
-    const [mine, setMine] = useState(false);
+    const [mine, setMine] = useState(true);
     const [search, setSearch] = useState('');
     const [offset, setOffset] = useState(0);
 
     const searchTimer = useRef(null);
     const [searchApplied, setSearchApplied] = useState('');
+
+    // Во время поиска выборка не сужается до «моих», поэтому и сегмент показывает
+    // «Все»: подсвеченные «Мои» над списком с чужими обращениями — это не фильтр,
+    // а неверная подпись к тому, что человек видит.
+    const searching = mine && !searchApplied;
 
     // Поиск не дёргает сервер на каждую букву: печатают быстрее, чем отвечает база.
     useEffect(() => {
@@ -846,7 +848,9 @@ export default function CrmTicketsView({
             const statuses = STATE_FILTERS.find((f) => f.key === stateFilter)?.statuses;
             if (statuses) params.set('status', statuses);
             if (queueFilter) params.set('queue_id', queueFilter);
-            if (mine) params.set('mine', '1');
+            // Поиск сквозной: ищем по всем обращениям, иначе сотрудник не увидит,
+            // что по этому водителю обращение уже завёл кто-то другой.
+            if (mine && !searchApplied) params.set('mine', '1');
             if (searchApplied) params.set('q', searchApplied);
             params.set('limit', String(PAGE_SIZE));
             params.set('offset', String(nextOffset));
@@ -994,12 +998,14 @@ export default function CrmTicketsView({
                                     { key: false, label: 'Все' },
                                 ].map((item) => (
                                     <button key={String(item.key)} type="button"
+                                            disabled={Boolean(searchApplied)}
+                                            title={searchApplied ? 'Поиск идёт по всем обращениям' : undefined}
                                             onClick={() => { setMine(item.key); setSelectedId(null); }}
                                             className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all ${
-                                                mine === item.key
+                                                searching === item.key
                                                     ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
                                                     : 'text-slate-500 hover:text-slate-700'
-                                            }`}>
+                                            } ${searchApplied ? 'cursor-not-allowed opacity-60' : ''}`}>
                                         {item.label}
                                     </button>
                                 ))}

@@ -345,7 +345,13 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
     where, params = visibility_sql(ctx)
     clauses = [where]
 
-    if mine:
+    # Поиск идёт по ВСЕМ обращениям, а не по «моим» (просьба СЗоВ 18.08.2026).
+    # Смысл поиска здесь ровно один: проверить, не заведено ли обращение по
+    # этому водителю кем-то ещё. Поиск, ограниченный своими, на этот вопрос
+    # честно отвечает «нет» — и человек заводит дубль. Правило стоит на
+    # сервере, а не только в интерфейсе: иначе оно держалось бы на том, что
+    # клиент не прислал лишний параметр.
+    if mine and not search:
         clauses.append('t.created_by = %(viewer_id)s')
     if status:
         params['statuses'] = list(status)

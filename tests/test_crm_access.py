@@ -514,6 +514,23 @@ class ListContractTest(unittest.TestCase):
         self.assertIn("(t.answers ->> 'iin') ILIKE %(search)s", sql)
         self.assertEqual(cursor.params['search'], '%060606202020%')
 
+    def test_search_is_never_narrowed_to_my_own_tickets(self):
+        """Просьба СЗоВ 19.08.2026: поиск ищет по всем.
+
+        Поиск нужен ровно для того, чтобы узнать, не завёл ли обращение по этому
+        водителю кто-то другой. Суженный до своих, он на этот вопрос отвечает
+        «нет» — и человек заводит дубль. Проверяется на сервере: правило, которое
+        держится на том, что клиент не прислал параметр, — не правило.
+        """
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='sv', user_id=10), mine=True,
+                             search='060606202020')
+        self.assertNotIn('t.created_by = %(viewer_id)s', cursor.queries[0])
+
+        # Без поиска «Мои» работает как работал.
+        queries.list_tickets(cursor, ctx(role='sv', user_id=10), mine=True)
+        self.assertIn('t.created_by = %(viewer_id)s', cursor.queries[-1])
+
     def test_iin_search_uses_the_same_expression_as_its_index(self):
         """Индекс по выражению не подходит запросу по столбцу — уже наступали.
 
