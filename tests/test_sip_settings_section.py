@@ -454,6 +454,43 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertIn("Иван", str(ctx.exception))
         self.assertIn("Пётр", str(ctx.exception))
 
+    def test_moving_onto_a_selected_neighbours_number_is_refused(self):
+        """Дыра в защите от дублей: find_sip_number_owners исключает всю выборку,
+        поэтому переезжающий вставал ровно на номер того выбранного, кто с места
+        не двинулся, — молча и с 200 в ответ. Стоящие занимают свои пары."""
+        rows = [
+            (1, 'Иван', '', 'pbx.new', '', '', '', '1024', '', '', True),   # уже там — не двинется
+            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', '', True),   # переезжает на pbx.new
+        ]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
+        self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+        with self.assertRaises(ValueError) as ctx:
+            self._bulk({"sip_domain": "pbx.new"}, ids=(1, 2))
+        self.assertIn("достанется двоим", str(ctx.exception))
+        self.assertIn("Иван", str(ctx.exception))
+        self.assertEqual([], [c for c in self.db.cursor.calls if "INSERT" in c[0]])
+
+    def test_two_standing_on_one_pair_do_not_block_each_other(self):
+        """Задвоенная пара сама по себе пачку не валит: если оба выбранных с места
+        не двигаются, спорить не о чем — было так и осталось."""
+        rows = [
+            (1, 'Иван', '', '', '', '', '', '1024', '', '', True),
+            (2, 'Пётр', '', '', '', '', '', '1024', '', '', True),
+        ]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
+        self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+        self._bulk({"fop2_enabled": False}, ids=(1, 2))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual({1, 2}, {row[0] for row in values})
+
     def test_everything_runs_in_batches_not_per_user(self):
         self._bulk({"sip_domain": "pbx.new"})
         inserts = [c for c in self.db.cursor.calls if "INSERT INTO user_sip_settings" in c[0]]

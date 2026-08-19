@@ -24277,27 +24277,38 @@ class Database:
         # Считаем итоговые пары «номер + домен» и сверяем их и между выбранными,
         # и с остальными сотрудниками. Делаем это до записи и вне курсора записи,
         # чтобы не держать два коннекта пула разом.
-        targets, planned, seen_pairs = {}, [], {}
+        def _pairs_of(state, user_id):
+            """Обе пары «номер + домен» сотрудника; пустые номера отбрасываем."""
+            return [pair for pair in (
+                (numbers.get(user_id, ''), _effective(state['sip_domain'], user_id)),
+                (state['autodial_number'], _effective_autodial(state['autodial_domain'], user_id)),
+            ) if pair[0]]
+
+        # Считаем в два прохода. Сначала занимаем пары теми выбранными, кто с
+        # места не двинется: find_sip_number_owners исключает всю выборку
+        # целиком, поэтому без этого переезд одного встал бы ровно на номер
+        # другого выбранного — молча и с 200 в ответ.
+        targets, movers, seen_pairs = {}, {}, {}
         for user_id in ids:
             before = current.get(user_id)
             if before is None:
                 continue
             after = {**before, **fields}
-            if after == before:
+            if after != before:
+                targets[user_id] = after
+            if any(after[key] != before[key] for key in self._SIP_OVERRIDE_FIELDS):
+                movers[user_id] = after
                 continue
-            targets[user_id] = after
-            # Выключатель FOP2 номеров не касается: если у сотрудника поменялся
-            # только он, сверять занятость нечего — а пара, давно задвоенная в
-            # данных, иначе завалила бы всю пачку сообщением про чужой номер.
-            if all(after[key] == before[key] for key in self._SIP_OVERRIDE_FIELDS):
-                continue
-            pairs = (
-                (numbers.get(user_id, ''), _effective(after['sip_domain'], user_id)),
-                (after['autodial_number'], _effective_autodial(after['autodial_domain'], user_id)),
-            )
-            for pair in pairs:
-                if not pair[0]:
-                    continue
+            # Выключатель FOP2 номеров не касается: у оставшегося на месте
+            # сверять нечего — пара, давно задвоенная в данных, иначе завалила
+            # бы всю пачку сообщением про чужой номер. Но занятой она остаётся,
+            # и двое стоящих на одной паре друг другу не мешают: было и было.
+            for pair in _pairs_of(before, user_id):
+                seen_pairs.setdefault(pair, user_id)
+
+        planned = []
+        for user_id, after in movers.items():
+            for pair in _pairs_of(after, user_id):
                 twin = seen_pairs.get(pair)
                 if twin is not None and twin != user_id:
                     raise ValueError(
