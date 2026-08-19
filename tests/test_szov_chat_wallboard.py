@@ -57,7 +57,6 @@ NAMES = {
     '_szov_chat_wallboard_day_seconds',
     '_szov_chat_wallboard_timelines',
     '_szov_chat_wallboard_online_seconds',
-    '_szov_chat_wallboard_people',
     '_szov_chat_wallboard_hourly',
     '_szov_chat_wallboard_now',
     '_szov_chat_wallboard_fetch_events',
@@ -276,7 +275,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
             'Бекзат Примеров': [(13 * 3600, 'online', 'Онлайн', '')],
         }
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[13]['operators_online'], 2)
+        self.assertEqual(rows[13]['operators_online'], 2.0)
 
     def test_two_half_shifts_make_one_person(self):
         """Двое, сменившиеся по получасу, держали линию как один человек — головой было бы «два»."""
@@ -289,22 +288,42 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
                                 (10 * 3600, 'logout', 'Не в системе', '')],
         }
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 1)
+        self.assertEqual(rows[9]['operators_online'], 1.0)
 
-    def test_the_number_is_whole_and_never_rounds_presence_down_to_zero(self):
-        """0,08 человека на стене не бывает; и ноль там, где человек работал, — тоже не ответ."""
+    def test_the_number_is_not_rounded(self):
+        """Дробь не округляем (решение владельца): 3,8 честнее четвёрки."""
         ns = self._namespace()
-        people = ns['_szov_chat_wallboard_people']
-        self.assertEqual(people(3900, 2400), 2)      # 1,625
-        self.assertEqual(people(1800, 3600), 1)      # ровно 0,5 — вверх, а не «в никуда»
-        self.assertEqual(people(9000, 3600), 3)      # 2,5 — вверх, без банковского округления
-        self.assertEqual(people(300, 3600), 1)       # пять минут за час: мало, но не ноль
-        self.assertEqual(people(0, 3600), 0)
+        now = datetime(2026, 8, 18, 10, 0, 0)
+        timelines = {
+            'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', '')],
+            'Бекзат Примеров': [(9 * 3600, 'online', 'Онлайн', ''),
+                                (9 * 3600 + 2880, 'logout', 'Не в системе', '')],
+        }
+        rows = self._rows(ns, timelines, [], now)
+        self.assertEqual(rows[9]['operators_online'], 1.8)
+
+    def test_row_carries_the_minutes_the_shift_stood_on_the_line(self):
+        """Рядом с дробью в подсказке — сколько всего минут смена простояла на линии в этом часу."""
+        ns = self._namespace()
+        now = datetime(2026, 8, 18, 10, 0, 0)
+        timelines = {
+            'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', '')],
+            'Бекзат Примеров': [(9 * 3600, 'online', 'Онлайн', ''),
+                                (9 * 3600 + 1800, 'break', 'Перерыв', '')],
+        }
+        rows = self._rows(ns, timelines, [], now)
+        self.assertEqual(rows[9]['online_seconds'], 3600 + 1800)
+        self.assertEqual(rows[9]['operators_online'], 1.5)
+
+    def test_a_five_minute_visit_stays_a_fraction(self):
+        """Заглянул на пять минут — это 0,08 человека, а не «один на линии»."""
+        ns = self._namespace()
         now = datetime(2026, 8, 18, 10, 0, 0)
         timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', ''),
                                       (9 * 3600 + 300, 'logout', 'Не в системе', '')]}
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 1)
+        self.assertEqual(rows[9]['operators_online'], 0.08)
+        self.assertEqual(rows[9]['online_seconds'], 300)
 
     def test_fresh_hour_is_not_diluted_by_the_whole_hour(self):
         """Часу минута от роду: делим на прожитое, иначе полная линия выглядит пустой."""
@@ -312,7 +331,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         now = datetime(2026, 8, 18, 9, 1, 0)
         timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', '')]}
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 1)
+        self.assertEqual(rows[9]['operators_online'], 1.0)
 
     def test_row_carries_chats_response_and_required(self):
         ns = self._namespace()
@@ -329,7 +348,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         self.assertEqual(rows[11]['chats'], 1)
         self.assertEqual(rows[12]['chats'], 1)
         self.assertEqual(rows[11]['inner_reply_seconds'], 240)
-        self.assertEqual(rows[11]['operators_online'], 2)
+        self.assertEqual(rows[11]['operators_online'], 2.0)
         self.assertNotIn('operators_required', rows[11])
 
     def test_hour_without_people_still_carries_the_chats(self):
@@ -337,7 +356,8 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         now = datetime(2026, 8, 18, 3, 0, 0)
         rows = self._rows(ns, {}, [_request('2026-08-18 02:10:00', 20, 3, 740)], now)
         self.assertEqual(rows[2]['chats'], 1)
-        self.assertEqual(rows[2]['operators_online'], 0)
+        self.assertEqual(rows[2]['operators_online'], 0.0)
+        self.assertEqual(rows[2]['online_seconds'], 0)
 
 
 class ChatWallboardNowTests(_Harness, unittest.TestCase):
@@ -597,11 +617,12 @@ class ChatWallboardWiringTests(unittest.TestCase):
         for name in ('name="Чатников на линии"', 'name="Ответ внутри чата"'):
             self.assertIn(name, self.board, name)
 
-    def test_the_line_is_shown_in_whole_people(self):
-        """На стене люди, а не дробь и не ставки: округление сделано на сервере."""
+    def test_the_hour_hint_pairs_people_with_minutes_on_the_line(self):
+        """Дробь не округляем, а рядом показываем минуты — из них она и получается."""
         self.assertIn("label={{ value: 'чатники'", self.board)
-        self.assertIn('${formatInt(row.online)} чел.', self.board)
-        self.assertIn('allowDecimals={false}', self.board)
+        self.assertIn("${formatPeople(row.online) || '0'} чел.", self.board)
+        self.assertIn("{formatMinutes(row.onlineSeconds, 0)} на линии", self.board)
+        self.assertIn('onlineSeconds: row.online_seconds ?? null', self.board)
         self.assertNotIn('FTE', self.board)
 
     def test_required_staffing_is_gone_from_the_board(self):

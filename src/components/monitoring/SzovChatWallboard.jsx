@@ -97,10 +97,18 @@ const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
 };
 
 /*
- * Людей на линии сервер уже округлил до целого (средняя занятость часа), здесь остаётся только
- * не подписывать ноль: пустой час и так пустой, цифра над ним только шумит.
+ * Людей на линии считаем средней занятостью часа, поэтому число дробное — и таким остаётся:
+ * округлять запрещено (решение владельца 19.08.2026), 3,8 честнее четвёрки. На стене «3,84» —
+ * лишняя точность: показываем один знак и убираем его у целых. Ноль не подписываем: пустой час
+ * и так пустой, цифра только шумит.
  */
-const formatPeople = (value) => (Number(value) > 0 ? formatInt(value) : '');
+const formatPeople = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return '';
+    // Сначала округляем, потом убираем «,0»: иначе рядом стоят «1» и «1,0» — это одно и то же.
+    const rounded = Math.round(number * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace('.', ',');
+};
 
 /*
  * Час — промежуток, а не момент: в столбик идут чаты, начавшиеся с 12:00:00 по 12:59:59.
@@ -134,10 +142,17 @@ const ChartTooltip = ({ active, payload, label }) => {
                     </span>
                 </div>
                 <div>
+                    {/* Рядом с дробью — сколько всего минут смена простояла на линии в этом часу:
+                        из них дробь и получается, и «3,8» перестаёт выглядеть выдумкой. */}
                     Было на линии:{' '}
                     <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.online }}>
-                        {row.online === null ? '—' : `${formatInt(row.online)} чел.`}
+                        {row.online === null ? '—' : `${formatPeople(row.online) || '0'} чел.`}
                     </span>
+                    {row.onlineSeconds === null ? null : (
+                        <span className="tabular-nums text-slate-400">
+                            {' · '}{formatMinutes(row.onlineSeconds, 0)} на линии
+                        </span>
+                    )}
                 </div>
             </div>
         </div>
@@ -159,6 +174,7 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
         innerSeconds: row.inner_reply_seconds ?? null,
         firstSeconds: row.first_reply_seconds ?? null,
         online: row.operators_online ?? null,
+        onlineSeconds: row.online_seconds ?? null,
         partial: Boolean(row.partial),
     })), [rows]);
 
