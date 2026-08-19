@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, Building2, ChevronRight, FolderTree, Globe, KeyRound,
-    Layers, Plus, Loader2, Pencil, UserSearch,
+    Archive, ArchiveRestore, ArrowDown, ArrowUp, Building2, ChevronRight, FolderTree,
+    FoldVertical, Globe, KeyRound, Layers, Plus, Loader2, Pencil, Search, UnfoldVertical,
+    UserSearch, X,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -12,6 +13,10 @@ import CustomSelect from '../ui/CustomSelect';
 import { selectableSections, sectionPathLabel } from './sectionPicker';
 import WikiSectionAccess, { branchDepartment } from './WikiSectionAccess';
 import WikiAccessProbe from './WikiAccessProbe';
+import {
+    FOCUS_TESTS, buildSpaceTree, collapseRows, filterRows, highlightParts,
+    reorderPatches, sectionSiblings, structureNeedles,
+} from './structureTree';
 
 /* Структура вики: пространства → разделы (дерево).
  *
@@ -22,9 +27,72 @@ import WikiAccessProbe from './WikiAccessProbe';
  * Раздел «публичный» виден всем сотрудникам без единого правила. В оригинале
  * это поле проставлялось только сидом по совпадению названия с «общ» и не
  * имело ни API, ни интерфейса — здесь это обычный переключатель.
+ *
+ * Над деревом стоит панель: поиск, быстрые фильтры и свёртка. Она не украшение
+ * и не «на вырост» — вкладку открывают три разных человека с тремя разными
+ * задачами. Управляющий структурой правит дерево целиком; глава отдела приходит
+ * за своей веткой в чужом дереве; супервайзер — вообще за одной строкой, чтобы
+ * открыть раздел операторам, и остальные ему шум. Раскладка одна на всех, а
+ * панель даёт каждому свести её к своему куску: фильтр «могу выдать доступ»
+ * появляется, только если человек может не везде, — администратору вики,
+ * который может всюду, он бы ничего не отфильтровал.
+ *
+ * Сама структура — лестница: «Коммерческий директор → СЗоВ → Руководитель
+ * группы → Супервайзер → Оператор». Пять уровней в развёрнутом виде занимают
+ * экран, поэтому ветки сворачиваются, а состояние свёртки переживает
+ * перезагрузку: к своей ветке возвращаются каждый день, разворачивать её заново
+ * каждый раз — работа, которую делать не надо.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
+
+const PREFS_KEY = 'wiki.structure.tree';
+
+/* Свёрнутые ветки помним между заходами. В приватном режиме Safari доступ к
+   localStorage бросает, поэтому обе стороны в try/catch: настройка
+   второстепенна, падать из-за неё нельзя (тот же приём, что в WikiOffices). */
+const readPrefs = () => {
+    try {
+        const raw = JSON.parse(window.localStorage.getItem(PREFS_KEY) || '{}');
+        return {
+            sections: new Set((raw.sections || []).map(Number)),
+            spaces: new Set((raw.spaces || []).map(Number)),
+        };
+    } catch {
+        return { sections: new Set(), spaces: new Set() };
+    }
+};
+
+const toggled = (set, key) => {
+    const next = new Set(set);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+};
+
+/* Найденное подсвечиваем прямо в названии: в лестнице из одинаковых
+   «Операторов» результат поиска иначе неотличим от строки-контекста. */
+const Highlight = ({ text, needles }) => (
+    <>
+        {highlightParts(text, needles).map((part, i) => (part.hit
+            ? <mark key={i} className="rounded bg-amber-200/70 px-0.5 text-slate-900">{part.text}</mark>
+            : <React.Fragment key={i}>{part.text}</React.Fragment>))}
+    </>
+);
+
+/* Отступ вложенности. На телефоне шаг вдвое меньше: пятый уровень лестницы с
+   десктопным шагом оставлял названию треть ширины экрана. Глубина уходит в
+   CSS-переменную, чтобы шаг задавала раскладка, а не пересчёт в JS. */
+const rowIndent = 'pl-[calc(10px+var(--depth)*13px)] sm:pl-[calc(16px+var(--depth)*22px)]';
+
+/* Быстрые фильтры. Взаимоисключающие: «и публичный, и без доступа» — пустой
+   ответ по определению, а не полезный срез, поэтому это выбор одного из, а не
+   набор галочек. Тон совпадает с бейджем в строке: нажали жёлтый «Без доступа»
+   — на экране остались строки с жёлтым бейджем. */
+const FOCUS_CHIPS = [
+    { key: 'orphan', label: 'Без доступа', on: 'bg-amber-100 text-amber-800 ring-1 ring-amber-200' },
+    { key: 'public', label: 'Публичные', on: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200' },
+    { key: 'grant', label: 'Могу выдать доступ', on: 'bg-blue-100 text-blue-800 ring-1 ring-blue-200' },
+];
 
 /* Список отделов публичного раздела. Через хелпер, а не напрямую: поле пришло
    позже самого раздела, и у ответа, отданного старым сервером, его нет вовсе —
@@ -43,8 +111,10 @@ const publicDepts = (x) => x?.public_department_ids || [];
    в строке они читаются как украшение, что делает каждая — понятно только по
    наведению (а на телефоне наведения нет), и мишени стоят вплотную, так что
    «в архив» ловится вместо «изменить». */
-const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
-                     onAccess, canManageStructure, busy }) => {
+const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, onEdit,
+                     onAddChild, onArchive, onAccess, onMove, canManageStructure, busy }) => {
+    const { section, depth, childCount, descendants, first, last, context } = row;
+
     // Ветка отдела и должность внутри неё — разные сущности, и на глаз они
     // должны отличаться так же, как отличаются по смыслу.
     const isBranch = !!section.department_id;
@@ -52,10 +122,31 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
 
     return (
         <div
-            className="flex items-center gap-2 px-4 py-2.5 transition hover:bg-slate-50"
-            style={{ paddingLeft: `${16 + depth * 22}px` }}
+            style={{ '--depth': depth }}
+            className={`flex items-center gap-2 py-2.5 pr-2 transition hover:bg-slate-50 ${rowIndent} ${
+                /* Строка-предок найденного бледнее: она здесь ответом на вопрос
+                   «который из двух Операторов», а не сама по себе результатом. */
+                context ? 'opacity-55' : ''
+            }`}
         >
-            {depth > 0 && <ChevronRight size={13} className="shrink-0 text-slate-300" />}
+            {childCount > 0 ? (
+                <button
+                    type="button"
+                    aria-expanded={!collapsed}
+                    aria-label={`${collapsed ? 'Раскрыть' : 'Свернуть'} раздел «${section.name}»`}
+                    onClick={() => onToggle(section)}
+                    className="grid h-5 w-5 shrink-0 place-items-center rounded-md text-slate-400 transition hover:bg-slate-200/70 hover:text-slate-600"
+                >
+                    <ChevronRight
+                        size={13}
+                        className={`transition-transform ${collapsed ? '' : 'rotate-90'}`}
+                    />
+                </button>
+            ) : (
+                /* Пустое место вместо стрелки: без него названия разделов без
+                   подразделов уезжали бы левее соседей по ветке. */
+                <span className="h-5 w-5 shrink-0" aria-hidden="true" />
+            )}
             {isBranch
                 ? <Building2 size={15} className="shrink-0 text-indigo-500" />
                 : <FolderTree size={15} className="shrink-0 text-amber-500" />}
@@ -63,8 +154,15 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
             <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-1.5">
                     <span className="truncate text-[13.5px] font-medium text-slate-900">
-                        {section.name}
+                        <Highlight text={section.name} needles={needles} />
                     </span>
+                    {/* Свёрнутая ветка обязана сказать, сколько в ней спрятано:
+                        иначе «свернул и забыл» превращается в «раздела нет». */}
+                    {collapsed && descendants > 0 && (
+                        <IosBadge tone="slate" title={`Внутри ещё ${descendants} — ветка свёрнута`}>
+                            +{descendants}
+                        </IosBadge>
+                    )}
                     {isBranch && (
                         <IosBadge tone="blue" title="Ветка отдела: доступ внутри неё считается по этому отделу">
                             <Building2 size={11} /> {section.department_name || 'отдел'}
@@ -122,12 +220,27 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                       onSelect: () => onAddChild(section) },
                     canManageStructure && { key: 'edit', label: 'Изменить раздел', icon: Pencil,
                       onSelect: () => onEdit(section) },
+                    /* Порядок разделов задавался только временем создания: поле
+                       position в API было, интерфейса к нему не было. Пункта нет
+                       на краю ветки (переставлять некуда) и во время поиска —
+                       двигать строку относительно соседей, которых на экране
+                       нет, значит стрелять вслепую. */
+                    canManageStructure && canMove && !first && {
+                        key: 'up', label: 'Переместить выше', icon: ArrowUp,
+                        separatorBefore: true, onSelect: () => onMove(section, -1) },
+                    canManageStructure && canMove && !last && {
+                        key: 'down', label: 'Переместить ниже', icon: ArrowDown,
+                        separatorBefore: first, onSelect: () => onMove(section, 1) },
                     /* Пункт есть, только если сервер сказал, что этот человек
                        вправе раздавать доступ ИМЕННО ТУТ (can_grant_access):
                        потолок должности и граница отдела считаются там же, где
                        проверяются, а не второй раз на клиенте. */
                     onAccess && section.can_grant_access && {
                         key: 'access', label: 'Кому открыт раздел', icon: KeyRound,
+                        // Черта отделяет доступ от правки дерева — но только если
+                        // сверху что-то есть: у супервайзера это единственный
+                        // пункт, и линия висела бы над ним ни к чему.
+                        separatorBefore: canManageStructure,
                         // Число правил прямо в пункте: у раздела без единого
                         // правила это единственное место, где видно, что
                         // открывать его некому.
@@ -158,6 +271,25 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const [accessSection, setAccessSection] = useState(null);
     const [probeOpen, setProbeOpen] = useState(false);
 
+    // Поиск и быстрый фильтр — состояние текущего захода, а не настройка:
+    // запомненный фильтр встретил бы человека урезанным деревом без объяснений.
+    // Свёрнутые ветки, наоборот, помним: это про «моя ветка», а не про «сейчас».
+    const [query, setQuery] = useState('');
+    const [focus, setFocus] = useState(null);
+    const prefs = useMemo(readPrefs, []);
+    const [collapsed, setCollapsed] = useState(prefs.sections);
+    const [closedSpaces, setClosedSpaces] = useState(prefs.spaces);
+
+    useEffect(() => {
+        try {
+            window.localStorage.setItem(PREFS_KEY, JSON.stringify({
+                sections: [...collapsed], spaces: [...closedSpaces],
+            }));
+        } catch {
+            // Приватный режим — молча живём без запомненной свёртки.
+        }
+    }, [collapsed, closedSpaces]);
+
     useEffect(() => {
         // Справочник нужен только форме раздела; кто структуру не правит —
         // и форму не открывает, а лишний запрос отвечал бы 403 в консоль.
@@ -175,32 +307,59 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const archivedSections = useMemo(
         () => sections.filter((x) => x.status === 'archived'), [sections]);
 
+    const liveSections = useMemo(
+        () => sections.filter((x) => x.status !== 'archived'), [sections]);
+
     // Дерево строим один раз на изменение списка, а не на каждый рендер строки.
     // Только живые разделы: архивные живут на своей вкладке, а рядом с живым
     // двойником были неотличимы — архивируют обычно как раз дубль с тем же именем.
-    const bySpace = useMemo(() => {
-        const grouped = new Map();
-        const alive = sections.filter((x) => x.status !== 'archived');
-        const shown = new Set(alive.map((x) => x.id));
-        const children = new Map();
-        alive.forEach((s) => {
-            // Родитель в архиве — живая ветка поднимается в корень пространства,
-            // иначе она пропала бы из вкладки вместе с ним.
-            const key = (s.parent_section_id && shown.has(s.parent_section_id))
-                ? s.parent_section_id
-                : `root:${s.space_id}`;
-            if (!children.has(key)) children.set(key, []);
-            children.get(key).push(s);
-        });
-        spaces.forEach((sp) => {
-            const walk = (parentKey, depth) => {
-                const list = children.get(parentKey) || [];
-                return list.flatMap((s) => [{ section: s, depth }, ...walk(s.id, depth + 1)]);
-            };
-            grouped.set(sp.id, walk(`root:${sp.id}`, 0));
-        });
-        return grouped;
-    }, [spaces, sections]);
+    const tree = useMemo(() => buildSpaceTree(spaces, sections), [spaces, sections]);
+
+    const needles = useMemo(() => structureNeedles(query), [query]);
+    const filtering = needles.length > 0 || !!focus;
+    const resetFilters = () => { setQuery(''); setFocus(null); };
+
+    const focusCounts = useMemo(() => ({
+        orphan: liveSections.filter(FOCUS_TESTS.orphan).length,
+        public: liveSections.filter(FOCUS_TESTS.public).length,
+        grant: liveSections.filter(FOCUS_TESTS.grant).length,
+    }), [liveSections]);
+
+    /* Фильтр показываем, только если ему есть что отсечь: у администратора вики
+       can_grant_access стоит на КАЖДОМ разделе, и кнопка «могу выдать доступ» не
+       убрала бы ни одной строки. Активный фильтр остаётся на месте, даже когда
+       счётчик обнулился (последний раздел без правил починили), — иначе
+       выключить его было бы нечем, а дерево осталось бы пустым. */
+    const chips = FOCUS_CHIPS.filter(({ key }) => focus === key || (
+        focusCounts[key] > 0
+        && (key !== 'grant' || focusCounts.grant < liveSections.length)
+    ));
+
+    /* Что рисуем на вкладке «Разделы». Пространство, где ничего не нашлось,
+       во время поиска исчезает целиком: пять карточек «тут пусто» — это не
+       ответ на вопрос, а пять способов его не дать. */
+    const spaceViews = useMemo(() => activeSpaces.map((space) => {
+        const all = tree.get(space.id) || [];
+        const found = filterRows(all, { needles, focus, spaceName: space.name });
+        return {
+            space,
+            total: all.length,
+            hits: found.filter((row) => row.matched).length,
+            // Во время поиска свёртку не применяем: искать в свёрнутом дереве
+            // бессмысленно, найденное всё равно пришлось бы раскрывать руками.
+            rows: filtering ? found : collapseRows(found, collapsed),
+        };
+    }).filter(({ hits }) => !filtering || hits > 0),
+    [activeSpaces, tree, needles, focus, filtering, collapsed]);
+
+    const collapsibleIds = useMemo(() => {
+        const out = [];
+        tree.forEach((rows) => rows.forEach((row) => {
+            if (row.childCount > 0) out.push(row.section.id);
+        }));
+        return out;
+    }, [tree]);
+    const anyCollapsed = collapsibleIds.some((id) => collapsed.has(id));
 
     const spaceName = useMemo(
         () => new Map(spaces.map((sp) => [sp.id, sp.name])), [spaces]);
@@ -293,6 +452,33 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             .finally(() => setBusy(false));
     };
 
+    /* Порядок внутри ветки. Сервер хранит его в position, и API для него был с
+       самого начала — не было интерфейса, поэтому разделы стояли в том порядке,
+       в каком их когда-то завели. Меняем значения position у двух соседей, по
+       запросу на каждого; успех молчит намеренно — строка на глазах уехала
+       выше, и тост на каждое нажатие был бы шумом поверх очевидного. */
+    const moveSection = (section, direction) => {
+        const patches = reorderPatches(sectionSiblings(sections, section), section.id, direction);
+        if (!patches.length) return;
+        setBusy(true);
+        Promise.all(patches.map((patch) => axios.patch(
+            `${base}/sections/${patch.id}`, { position: patch.position }, { headers })))
+            .then(() => reload())
+            .catch((e) => showToast?.(errText(e, 'Не удалось изменить порядок'), 'error'))
+            .finally(() => setBusy(false));
+    };
+
+    const moveSpace = (space, direction) => {
+        const patches = reorderPatches(activeSpaces, space.id, direction);
+        if (!patches.length) return;
+        setBusy(true);
+        Promise.all(patches.map((patch) => axios.patch(
+            `${base}/spaces/${patch.id}`, { position: patch.position }, { headers })))
+            .then(() => reload())
+            .catch((e) => showToast?.(errText(e, 'Не удалось изменить порядок'), 'error'))
+            .finally(() => setBusy(false));
+    };
+
     const restoreSection = (section) => {
         setBusy(true);
         axios.patch(`${base}/sections/${section.id}`, { status: 'active' }, { headers })
@@ -359,6 +545,67 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                 ))}
             </div>
 
+            {/* Панель дерева — только на «Разделах»: у пространств пять строк,
+                искать в них нечего, а архив открывают раз в месяц и глазами. */}
+            {tab === 'sections' && spaces.length > 0 && (
+                <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <div className="relative min-w-[200px] flex-1">
+                            <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                            <input
+                                className={`${iosInput} pl-10 ${query ? 'pr-10' : ''}`}
+                                value={query}
+                                onChange={(e) => setQuery(e.target.value)}
+                                placeholder="Раздел, отдел или пространство"
+                                aria-label="Поиск по структуре"
+                            />
+                            {query && (
+                                <button
+                                    type="button"
+                                    aria-label="Очистить поиск"
+                                    onClick={() => setQuery('')}
+                                    className="absolute right-2 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200/70 hover:text-slate-600"
+                                >
+                                    <X size={14} />
+                                </button>
+                            )}
+                        </div>
+                        {/* Кнопка есть, только когда есть что сворачивать. */}
+                        {!filtering && collapsibleIds.length > 0 && (
+                            <button
+                                type="button"
+                                className={iosBtnGhost}
+                                onClick={() => setCollapsed(
+                                    anyCollapsed ? new Set() : new Set(collapsibleIds))}
+                            >
+                                {anyCollapsed
+                                    ? <><UnfoldVertical size={14} /> Развернуть всё</>
+                                    : <><FoldVertical size={14} /> Свернуть всё</>}
+                            </button>
+                        )}
+                    </div>
+
+                    {chips.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                            {chips.map(({ key, label, on }) => (
+                                <button
+                                    key={key}
+                                    type="button"
+                                    aria-pressed={focus === key}
+                                    onClick={() => setFocus(focus === key ? null : key)}
+                                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium transition ${
+                                        focus === key ? on : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'
+                                    }`}
+                                >
+                                    {label}
+                                    <span className="tabular-nums opacity-60">{focusCounts[key]}</span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
             {loading && (
                 <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-slate-400`}>
                     <Loader2 size={18} className="animate-spin" />
@@ -380,7 +627,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             )}
 
             {/* ── Вкладка «Пространства» ── */}
-            {!loading && tab === 'spaces' && activeSpaces.map((space) => (
+            {!loading && tab === 'spaces' && activeSpaces.map((space, index) => (
                 <div key={space.id} className={`${iosCard} flex flex-wrap items-center gap-2 px-4 py-3`}>
                     <Layers size={15} className="shrink-0 text-indigo-500" />
                     <div className="min-w-0 flex-1">
@@ -392,7 +639,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                         </div>
                         <div className="mt-0.5 text-[11.5px] text-slate-400">
                             <span className="tabular-nums">
-                                {(bySpace.get(space.id) || []).length} разделов
+                                {(tree.get(space.id) || []).length} разделов
                             </span>
                             {space.description && <span> · {space.description}</span>}
                         </div>
@@ -416,6 +663,14 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                   description: space.description || '',
                                   department_id: space.department_id ? String(space.department_id) : '',
                               }) },
+                            /* Порядок пространств — тот же разговор, что и у
+                               разделов: position сервер хранил, менять его было
+                               нечем. Пункт исчезает на краю списка. */
+                            index > 0 && { key: 'up', label: 'Переместить выше', icon: ArrowUp,
+                              separatorBefore: true, onSelect: () => moveSpace(space, -1) },
+                            index < activeSpaces.length - 1 && {
+                              key: 'down', label: 'Переместить ниже', icon: ArrowDown,
+                              separatorBefore: index === 0, onSelect: () => moveSpace(space, 1) },
                             { key: 'archive', label: 'Убрать в архив', icon: Archive,
                               danger: true, separatorBefore: true,
                               onSelect: () => archiveSpace(space) },
@@ -425,66 +680,117 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             ))}
 
             {/* ── Вкладка «Разделы» ── */}
-            {!loading && tab === 'sections' && activeSpaces.map((space) => (
-                <section key={space.id} className="space-y-1.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-                        <div className="flex items-center gap-2">
-                            <Layers size={15} className="text-indigo-500" />
-                            <span className="text-[14px] font-semibold text-slate-900">{space.name}</span>
-                            {space.department_name && (
-                                <IosBadge tone="slate">{space.department_name}</IosBadge>
-                            )}
-                        </div>
-                        {canManageStructure && (
+            {!loading && tab === 'sections' && spaceViews.map(({ space, rows, total, hits }) => {
+                const spaceClosed = !filtering && closedSpaces.has(space.id);
+                return (
+                    <section key={space.id} className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                            {/* Во время поиска шапка — не кнопка: свернуть пространство
+                                с найденным нельзя (иначе результат исчезнет), а нажатие
+                                без ответа — тот же молчаливый отказ, только тихий. */}
                             <button
                                 type="button"
-                                className={iosBtnGhost}
-                                onClick={() => setSectionModal({
-                                    space_id: space.id, name: '', description: '',
-                                    visibility_scope: 'restricted', parent_section_id: '',
-                                    department_id: '', public_department_ids: [],
-                                })}
+                                disabled={filtering}
+                                aria-expanded={!spaceClosed}
+                                onClick={() => setClosedSpaces((prev) => toggled(prev, space.id))}
+                                className={`flex min-w-0 flex-1 items-center gap-2 rounded-xl py-1 pr-2 text-left transition ${
+                                    filtering ? 'cursor-default' : 'hover:bg-slate-100/70'}`}
                             >
-                                <Plus size={13} /> Раздел
+                                {!filtering && (
+                                    <ChevronRight
+                                        size={14}
+                                        className={`shrink-0 text-slate-400 transition-transform ${spaceClosed ? '' : 'rotate-90'}`}
+                                    />
+                                )}
+                                <Layers size={15} className="shrink-0 text-indigo-500" />
+                                <span className="truncate text-[14px] font-semibold text-slate-900">
+                                    <Highlight text={space.name} needles={needles} />
+                                </span>
+                                {space.department_name && (
+                                    <IosBadge tone="slate">{space.department_name}</IosBadge>
+                                )}
+                                {/* При поиске — «сколько из скольких»: без второго
+                                    числа непонятно, весь ли это список. */}
+                                <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">
+                                    {filtering ? `${hits} из ${total}` : total}
+                                </span>
                             </button>
-                        )}
-                    </div>
+                            {canManageStructure && (
+                                <button
+                                    type="button"
+                                    className={iosBtnGhost}
+                                    onClick={() => setSectionModal({
+                                        space_id: space.id, name: '', description: '',
+                                        visibility_scope: 'restricted', parent_section_id: '',
+                                        department_id: '', public_department_ids: [],
+                                    })}
+                                >
+                                    <Plus size={13} /> Раздел
+                                </button>
+                            )}
+                        </div>
 
-                    <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                        {(bySpace.get(space.id) || []).length === 0 && (
-                            <div className="px-4 py-8 text-center text-[13px] text-slate-400">
-                                В пространстве пока нет разделов
+                        {!spaceClosed && (
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                {rows.length === 0 && (
+                                    <div className="px-4 py-8 text-center text-[13px] text-slate-400">
+                                        В пространстве пока нет разделов
+                                    </div>
+                                )}
+                                {rows.map((row) => (
+                                    <SectionRow
+                                        key={row.section.id}
+                                        row={row}
+                                        busy={busy}
+                                        needles={needles}
+                                        collapsed={collapsed.has(row.section.id)}
+                                        canMove={!filtering}
+                                        onToggle={(x) => setCollapsed((prev) => toggled(prev, x.id))}
+                                        department={branchDepartment(sections, row.section.id)}
+                                        onEdit={(x) => setSectionModal({
+                                            id: x.id, space_id: x.space_id, name: x.name,
+                                            description: x.description || '',
+                                            visibility_scope: x.visibility_scope,
+                                            parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
+                                            department_id: x.department_id ? String(x.department_id) : '',
+                                            public_department_ids: x.public_department_ids || [],
+                                        })}
+                                        onAddChild={(x) => setSectionModal({
+                                            space_id: x.space_id, name: '', description: '',
+                                            visibility_scope: 'restricted',
+                                            parent_section_id: String(x.id),
+                                            department_id: '', public_department_ids: [],
+                                        })}
+                                        onArchive={archiveSection}
+                                        onAccess={setAccessSection}
+                                        onMove={moveSection}
+                                        canManageStructure={canManageStructure}
+                                    />
+                                ))}
                             </div>
                         )}
-                        {(bySpace.get(space.id) || []).map(({ section, depth }) => (
-                            <SectionRow
-                                key={section.id}
-                                section={section}
-                                depth={depth}
-                                busy={busy}
-                                department={branchDepartment(sections, section.id)}
-                                onEdit={(x) => setSectionModal({
-                                    id: x.id, space_id: x.space_id, name: x.name,
-                                    description: x.description || '',
-                                    visibility_scope: x.visibility_scope,
-                                    parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
-                                    department_id: x.department_id ? String(x.department_id) : '',
-                                    public_department_ids: x.public_department_ids || [],
-                                })}
-                                onAddChild={(x) => setSectionModal({
-                                    space_id: x.space_id, name: '', description: '',
-                                    visibility_scope: 'restricted',
-                                    parent_section_id: String(x.id),
-                                    department_id: '', public_department_ids: [],
-                                })}
-                                onArchive={archiveSection}
-                                onAccess={setAccessSection}
-                                canManageStructure={canManageStructure}
-                            />
-                        ))}
+                    </section>
+                );
+            })}
+
+            {/* Пусто по фильтру — не то же самое, что пустая структура: звать
+                «создайте пространство» здесь было бы ответом не на тот вопрос. */}
+            {!loading && tab === 'sections' && filtering && spaceViews.length === 0 && (
+                <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
+                    <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
+                        <Search size={22} />
                     </div>
-                </section>
-            ))}
+                    <div className="text-[15px] font-semibold text-slate-900">Ничего не нашлось</div>
+                    <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
+                        {query
+                            ? `По запросу «${query}» разделов нет.`
+                            : 'Под это условие не подходит ни один раздел.'}
+                    </p>
+                    <button type="button" className={iosBtnSecondary} onClick={resetFilters}>
+                        Показать все разделы
+                    </button>
+                </div>
+            )}
 
             {/* ── Вкладка «Архив» ── */}
             {/* Удаление везде мягкое: и раздел, и пространство уходят сюда, а не
