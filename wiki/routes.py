@@ -24,6 +24,20 @@ from . import access as wiki_access
 from . import queries
 
 
+# Человекочитаемые имена способностей — для внятного отказа.
+CAPABILITY_TITLES = {
+    'can_read': 'чтение',
+    'can_create': 'создание статей',
+    'can_edit': 'правка статей',
+    'can_delete': 'удаление',
+    'can_publish': 'публикация',
+    'can_approve': 'согласование',
+    'can_manage_users': 'управление людьми',
+    'can_manage_structure': 'управление структурой',
+    'can_manage_access': 'управление доступами',
+}
+
+
 def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                          resolve_requester, client_ip=None, gcs=None,
                          session_id_provider=None):
@@ -106,8 +120,21 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             }), 403
 
                         if capability and not capabilities.get(capability):
+                            # В тексте — КАКОГО права не хватило и откуда оно
+                            # берётся. Прежнее «Недостаточно прав для этого
+                            # действия» одинаково выглядело у оператора, у
+                            # главы отдела и у супер-админа с ролью вики,
+                            # которая молча перекрывает права должности
+                            # (resolve_capabilities: непустой список ролей вики
+                            # ЗАМЕЩАЕТ роль OTP, а не дополняет её). Отличить
+                            # эти случаи по тосту было нельзя — только по логам.
                             return jsonify({
-                                "error": "Недостаточно прав для этого действия",
+                                "error": "Недостаточно прав: нужно «%s»%s" % (
+                                    CAPABILITY_TITLES.get(capability, capability),
+                                    ' (права выданы ролью в вики: %s)' % ', '.join(
+                                        r.get('code') or '?' for r in context['wiki_roles'])
+                                    if context['wiki_roles'] else '',
+                                ),
                                 "code": "WIKI_FORBIDDEN",
                                 "required": capability,
                             }), 403

@@ -217,6 +217,10 @@ _STATEMENTS = [
         can_publish       BOOLEAN NOT NULL DEFAULT FALSE,
         can_approve       BOOLEAN NOT NULL DEFAULT FALSE,
         grant_subsections BOOLEAN NOT NULL DEFAULT TRUE,
+        -- Второе измерение правила: «отдел И не ниже такой-то должности».
+        -- Здесь, а не только миграцией ниже: на него опирается уникальный
+        -- индекс, который создаётся следующим же оператором.
+        min_role_level    INTEGER,
         created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
         created_at        TIMESTAMP NOT NULL DEFAULT %(now)s,
         updated_at        TIMESTAMP NOT NULL DEFAULT %(now)s,
@@ -227,10 +231,23 @@ _STATEMENTS = [
         )
     );
     """,
+    # Для БАЗ, созданных до появления уровня: колонка нужна раньше индекса,
+    # а ALTER в _ORG_STATEMENTS отработает уже вхолостую.
+    "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS min_role_level INTEGER;",
+    # Уровень должности входит в ключ уникальности С САМОГО НАЧАЛА, а не
+    # добавляется миграцией ниже. Раньше здесь создавался ключ БЕЗ уровня, а
+    # _ORG_STATEMENTS его дропал и ставил правильный. Пока на разделе не
+    # появлялось двух правил с одним субъектом и разными порогами, это молчало;
+    # стоило появиться (отдел СЗоВ «без порога» + он же «от тренера»), как
+    # CREATE INDEX начинал падать UniqueViolation на КАЖДОМ старте — а вся
+    # init_wiki_schema идёт одним савпоинтом, и откатывалась схема целиком.
+    # Симптом был неочевидный: приложение работает, таблицы на месте, но ни
+    # одна новая миграция раздела больше не применяется.
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_section_rule_subject_level
         ON wiki_section_access_rules(section_id, subject_type,
-                                     COALESCE(subject_id, -1), COALESCE(subject_role, ''));
+                                     COALESCE(subject_id, -1), COALESCE(subject_role, ''),
+                                     COALESCE(min_role_level, -1));
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_section_rules_subject ON wiki_section_access_rules(subject_type, subject_id);",
 

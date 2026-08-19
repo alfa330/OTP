@@ -14,9 +14,10 @@
 через ast, потому что его импорт поднимает пул к боевой базе.
 """
 
+import re
 import unittest
 
-from wiki import access
+from wiki import access, schema
 from wiki.access import (
     ROLE_LEVELS,
     capabilities_from_otp_role,
@@ -361,6 +362,48 @@ class GrantCeilingTest(unittest.TestCase):
         # директорского, иначе назначение роли ничего толком не даёт.
         self.assertTrue(access.may_grant_rule('sv', None, is_wiki_admin=True,
                                               target_role='super_admin'))
+
+
+class RuleUniquenessDDLTest(unittest.TestCase):
+    """Ключ уникальности правила заводится СРАЗУ с уровнем должности.
+
+    Инцидент 19.08.2026. Базовый DDL создавал ключ БЕЗ уровня, а миграция ниже
+    его дропала и ставила правильный. Пока на разделе не появлялось двух правил
+    с одним субъектом и разными порогами, расхождение молчало. Стоило владельцу
+    добавить строку «Тренер» рядом с «Оператор» на том же отделе — и
+    `CREATE UNIQUE INDEX uq_wiki_section_rule_subject` начал падать
+    UniqueViolation на КАЖДОМ старте прода.
+
+    Коварство в том, что приложение при этом работает: таблицы на месте, запросы
+    идут. Но вся init_wiki_schema обёрнута ОДНИМ савпоинтом, поэтому откатывалась
+    схема целиком — то есть ни одна новая миграция раздела больше не применялась
+    бы, и узналось бы об этом через недели, по отсутствию новой колонки.
+
+    Тест статический: гоняет текст DDL, базы не требует.
+    """
+
+    def ddl(self):
+        return '\n'.join(schema._STATEMENTS)
+
+    def test_base_ddl_does_not_create_level_less_unique_index(self):
+        created = re.findall(r'CREATE UNIQUE INDEX IF NOT EXISTS (\w+)', self.ddl())
+        self.assertNotIn('uq_wiki_section_rule_subject', created,
+                         'ключ без уровня снова создаётся базовым DDL — '
+                         'схема начнёт откатываться на каждом старте')
+        self.assertIn('uq_wiki_section_rule_subject_level', created)
+
+    def test_min_role_level_exists_before_the_index_needs_it(self):
+        """Колонка должна появиться раньше индекса по ней, иначе чистая база не встанет."""
+        ddl = self.ddl()
+        column = ddl.find('min_role_level')
+        index = ddl.find('uq_wiki_section_rule_subject_level')
+        self.assertGreater(column, -1, 'min_role_level пропал из базового DDL')
+        self.assertLess(column, index, 'индекс по min_role_level стоит раньше самой колонки')
+
+    def test_migration_still_drops_the_legacy_index(self):
+        """Базам, где старый ключ уже есть, он по-прежнему снимается."""
+        self.assertIn('DROP INDEX IF EXISTS uq_wiki_section_rule_subject;',
+                      '\n'.join(schema._ORG_STATEMENTS))
 
 
 if __name__ == '__main__':
