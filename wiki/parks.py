@@ -5,7 +5,9 @@
 акций ноль), поэтому переносится механика, а не содержимое.
 """
 
-_PARK_KEYS = ('id', 'slug', 'name', 'description', 'city', 'phone', 'address',
+# Телефона среди полей нет: номера парка живут в wiki_park_phones — по одному
+# на точку (офис или «онлайн»), потому что в одном офисе их бывает несколько.
+_PARK_KEYS = ('id', 'slug', 'name', 'description', 'city', 'address',
               'website', 'commission', 'logo_file_id', 'status', 'position',
               'promotions_count')
 
@@ -13,7 +15,7 @@ _PARK_KEYS = ('id', 'slug', 'name', 'description', 'city', 'phone', 'address',
 def list_parks(cursor, include_archived=False, query=None):
     cursor.execute(
         """
-        SELECT p.id, p.slug, p.name, p.description, p.city, p.phone, p.address,
+        SELECT p.id, p.slug, p.name, p.description, p.city, p.address,
                p.website, p.commission, p.logo_file_id, p.status, p.position,
                (SELECT count(*) FROM wiki_promotion_taxi_parks pp
                  JOIN wiki_promotions pr ON pr.id = pp.promotion_id
@@ -39,7 +41,7 @@ def list_parks(cursor, include_archived=False, query=None):
 def get_park(cursor, slug):
     cursor.execute(
         """
-        SELECT p.id, p.slug, p.name, p.description, p.city, p.phone, p.address,
+        SELECT p.id, p.slug, p.name, p.description, p.city, p.address,
                p.website, p.commission, p.logo_file_id, p.status, p.position, 0
           FROM wiki_taxi_parks p WHERE p.slug = %s
         """,
@@ -70,23 +72,23 @@ def get_park(cursor, slug):
 def create_park(cursor, *, slug, name, fields, created_by):
     cursor.execute(
         """
-        INSERT INTO wiki_taxi_parks (slug, name, description, city, phone, address,
+        INSERT INTO wiki_taxi_parks (slug, name, description, city, address,
                                      website, commission, logo_file_id, position, created_by)
-        VALUES (%(slug)s, %(name)s, %(description)s, %(city)s, %(phone)s, %(address)s,
+        VALUES (%(slug)s, %(name)s, %(description)s, %(city)s, %(address)s,
                 %(website)s, %(commission)s, %(logo)s,
                 COALESCE((SELECT max(position) + 1 FROM wiki_taxi_parks), 0), %(by)s)
         RETURNING id
         """,
         {'slug': slug, 'name': name, 'by': created_by,
          'description': fields.get('description'), 'city': fields.get('city'),
-         'phone': fields.get('phone'), 'address': fields.get('address'),
+         'address': fields.get('address'),
          'website': fields.get('website'), 'commission': fields.get('commission'),
          'logo': fields.get('logo_file_id')},
     )
     return cursor.fetchone()[0]
 
 
-_PARK_UPDATABLE = ('name', 'description', 'city', 'phone', 'address', 'website',
+_PARK_UPDATABLE = ('name', 'description', 'city', 'address', 'website',
                    'commission', 'logo_file_id', 'status', 'position', 'slug')
 
 

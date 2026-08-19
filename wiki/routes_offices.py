@@ -36,12 +36,17 @@ def _links(data):
         result = []
         for item in data['parks']:
             if isinstance(item, dict):
-                result.append({
+                link = {
                     'park_id': _int_or_none(item.get('park_id')),
-                    'phone': _clean(item.get('phone'), 64),
                     'schedule': item.get('schedule'),
                     'note': _clean(item.get('note'), 500),
-                })
+                }
+                # Номера правят из карточки парка; здесь их принимают, только
+                # если прислали, — иначе правка графика стирала бы телефоны.
+                phones = wiki_offices.link_phones(item)
+                if phones is not None:
+                    link['phones'] = phones
+                result.append(link)
             else:
                 result.append({'park_id': _int_or_none(item)})
         return [item for item in result if item['park_id']]

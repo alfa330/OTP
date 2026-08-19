@@ -18,6 +18,7 @@
     "test:wiki-car": "node --test tests/wiki_car_match.test.mjs",
     "test:wiki-section-picker": "node --test tests/wiki_section_picker.test.mjs",
     "test:wiki-office-schedule": "node --test tests/wiki_office_schedule.test.mjs",
+    "test:wiki-park-points": "node --test tests/wiki_park_points.test.mjs",
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",
     "test:telegram-text": "node --test tests/telegram_text.test.mjs",
     "test:kazakhstan-cities": "node --test tests/kazakhstan_cities.test.mjs",

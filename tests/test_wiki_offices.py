@@ -9,7 +9,8 @@
 import unittest
 
 from wiki.offices import (
-    DAY_CODES, normalize_schedule, parse_map_coords, resolve_map_link, tile_is_valid,
+    DAY_CODES, MAX_PHONES_PER_POINT, clean_phones, link_phones, normalize_schedule,
+    parse_map_coords, resolve_map_link, tile_is_valid,
 )
 
 
@@ -177,6 +178,66 @@ class TileBoundsTest(unittest.TestCase):
         self.assertFalse(tile_is_valid(16, 2 ** 16, 0))
         self.assertFalse(tile_is_valid(16, 0, 2 ** 16))
         self.assertTrue(tile_is_valid(16, 2 ** 16 - 1, 2 ** 16 - 1))
+
+
+class PhonesTest(unittest.TestCase):
+    """Номера точки.
+
+    Через эти две функции проходит всё, что попадает в wiki_park_phones: и
+    форма парка, и форма офиса, и скрипт переноса. Пустая строка, доехавшая до
+    базы, значит номер, по которому оператор не дозвонится, — а он видит его
+    как обычную строку справочника.
+    """
+
+    def test_empty_and_blank_are_dropped(self):
+        self.assertEqual(clean_phones(['+7 707 705 08 80', '', '   ', None]),
+                         ['+7 707 705 08 80'])
+
+    def test_inner_spaces_are_squeezed(self):
+        self.assertEqual(clean_phones(['  +7 707   705 08 80 ']), ['+7 707 705 08 80'])
+
+    def test_repeats_are_dropped_keeping_order(self):
+        self.assertEqual(
+            clean_phones(['+7 707 705 08 80', '+7 717 000 00 00', '+7 707 705 08 80']),
+            ['+7 707 705 08 80', '+7 717 000 00 00'])
+
+    def test_count_is_capped(self):
+        many = ['+7 700 000 00 %02d' % index for index in range(20)]
+        self.assertEqual(len(clean_phones(many)), MAX_PHONES_PER_POINT)
+
+    def test_none_and_garbage_are_empty(self):
+        self.assertEqual(clean_phones(None), [])
+        self.assertEqual(clean_phones([]), [])
+
+    def test_link_without_phones_asks_to_leave_them_alone(self):
+        # None — «ключа не было»: правка графика офиса не должна стирать номера.
+        self.assertIsNone(link_phones({'park_id': 1}))
+        self.assertIsNone(link_phones(None))
+
+    def test_link_with_empty_list_clears(self):
+        self.assertEqual(link_phones({'phones': []}), [])
+
+    def test_old_single_phone_is_understood(self):
+        self.assertEqual(link_phones({'phone': '+7 707 705 08 80'}), ['+7 707 705 08 80'])
+
+    def test_list_wins_over_single(self):
+        self.assertEqual(link_phones({'phones': ['+7 717 000 00 00'], 'phone': 'старый'}),
+                         ['+7 717 000 00 00'])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Статус за день
+# ─────────────────────────────────────────────────────────────────────────────
+
+_WORKDAY = {'from': '09:00', 'to': '19:00', 'break_from': '13:00', 'break_to': '14:00'}
+
+# Костанай из справочника: Пн–Пт полный день, суббота короткая, воскресенье
+# выходное. Те же данные проверяет tests/wiki_office_schedule.test.mjs.
+_KOSTANAY = {
+    'mon': _WORKDAY, 'tue': _WORKDAY, 'wed': _WORKDAY, 'thu': _WORKDAY, 'fri': _WORKDAY,
+    'sat': {'from': '10:00', 'to': '13:00'},
+    'sun': None,
+}
 
 
 if __name__ == '__main__':

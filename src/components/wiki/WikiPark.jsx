@@ -32,6 +32,15 @@ const promoPeriod = (promo) => {
     return null;
 };
 
+/* Номер набирают, а не читают: ссылка tel: с рабочего ноутбука бесполезна, а с
+   телефона это один тап вместо переписывания. */
+const PhoneLink = ({ phone }) => (
+    <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}
+       className="tabular-nums text-indigo-600 hover:underline">
+        {phone}
+    </a>
+);
+
 const ContactRow = ({ icon: Icon, label, children }) => (
     <div className="flex items-start gap-2.5 px-4 py-3">
         <div className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-500">
@@ -82,7 +91,9 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
         );
     }
 
-    const hasContacts = !!(park.city || park.phone || park.address || park.website);
+    const online = park.phones || [];
+    const offices = park.offices || [];
+    const hasContacts = !!(park.city || online.length || park.address || park.website);
 
     return (
         <div className="space-y-3">
@@ -154,14 +165,13 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
                                 {park.address && (
                                     <ContactRow icon={MapPin} label="Адрес">{park.address}</ContactRow>
                                 )}
-                                {park.phone && (
+                                {online.length > 0 && (
                                     <ContactRow icon={Phone} label="Телефон">
-                                        {/* tel: — с рабочего ноутбука бесполезно, а с телефона
-                                            это один тап вместо переписывания номера. */}
-                                        <a href={`tel:${park.phone.replace(/[^\d+]/g, '')}`}
-                                           className="text-indigo-600 hover:underline">
-                                            {park.phone}
-                                        </a>
+                                        <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+                                            {online.map((phone) => (
+                                                <PhoneLink key={phone} phone={phone} />
+                                            ))}
+                                        </div>
                                     </ContactRow>
                                 )}
                                 {park.website && (
@@ -179,6 +189,32 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
                             </div>
                         )}
                     </section>
+
+                    {offices.length > 0 && (
+                        <section className="space-y-1.5">
+                            <div className={`${iosGroupLabel} flex items-center gap-1.5`}>
+                                <MapPin size={12} /> Офисы парка
+                            </div>
+                            <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                                {offices.map((office) => (
+                                    <div key={office.office_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3">
+                                        <span className="text-[13.5px] font-medium text-slate-900">
+                                            {office.name}
+                                        </span>
+                                        {office.city && (
+                                            <span className="text-[12px] text-slate-400">{office.city}</span>
+                                        )}
+                                        {office.is_online && <IosBadge tone="blue">Только по телефону</IosBadge>}
+                                        <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-[13px]">
+                                            {(office.phones || []).map((phone) => (
+                                                <PhoneLink key={phone} phone={phone} />
+                                            ))}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        </section>
+                    )}
 
                     {park.promotions?.length > 0 && (
                         <section className="space-y-1.5">

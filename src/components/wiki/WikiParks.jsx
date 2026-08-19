@@ -10,6 +10,7 @@ import {
 } from '../ui/ios';
 import useStableCallback from './useStableCallback';
 import ParkEditor from './ParkEditor';
+import { parkDraftIssue, pointsFromPark, pointsPayload } from './parkPoints';
 
 /* Таксопарки и акции.
  *
@@ -26,94 +27,112 @@ const fmtDate = (iso) => (iso
     : null);
 
 const emptyPark = () => ({
-    name: '', city: '', phone: '', address: '', website: '', commission: '', description: '',
-    offices: [],
+    name: '', city: '', address: '', website: '', commission: '', description: '',
+    points: [],
 });
 
-const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => (
-    <div className={`${iosCard} p-4`}>
-        <div className="flex items-start gap-3">
-            <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 text-indigo-600">
-                {park.logo_url
-                    ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
-                    : <Building2 size={18} />}
-            </div>
-            <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[14.5px] font-semibold text-slate-900">{park.name}</span>
-                    {park.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
-                    {park.offices?.length > 0 && (
-                        <IosBadge tone="slate">
-                            <MapPin size={11} /> офисов: {park.offices.length}
-                        </IosBadge>
-                    )}
-                    {park.promotions_count > 0 && (
-                        <IosBadge tone="blue">
-                            <Tag size={11} /> акций: {park.promotions_count}
-                        </IosBadge>
-                    )}
+/* Номера парка одной строкой: сперва те, что без офиса, потом офисные.
+   Больше двух в карточку не влезает — остальные считаем числом, за ними всё
+   равно идут в саму карточку. */
+const parkPhones = (park) => [
+    ...(park.phones || []),
+    ...(park.offices || []).flatMap((link) => link.phones || []),
+];
+
+const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => {
+    const phones = parkPhones(park);
+    return (
+        <div className={`${iosCard} p-4`}>
+            <div className="flex items-start gap-3">
+                <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 text-indigo-600">
+                    {park.logo_url
+                        ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
+                        : <Building2 size={18} />}
                 </div>
-                {park.description && (
-                    <p className="mt-1 line-clamp-2 text-[12.5px] leading-relaxed text-slate-500">
-                        {park.description}
-                    </p>
+                <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[14.5px] font-semibold text-slate-900">{park.name}</span>
+                        {park.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
+                        {park.offices?.length > 0 && (
+                            <IosBadge tone="slate">
+                                <MapPin size={11} /> офисов: {park.offices.length}
+                            </IosBadge>
+                        )}
+                        {park.promotions_count > 0 && (
+                            <IosBadge tone="blue">
+                                <Tag size={11} /> акций: {park.promotions_count}
+                            </IosBadge>
+                        )}
+                    </div>
+                    {park.description && (
+                        <p className="mt-1 line-clamp-2 text-[12.5px] leading-relaxed text-slate-500">
+                            {park.description}
+                        </p>
+                    )}
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                        {park.city && <span className="flex items-center gap-1"><MapPin size={11} /> {park.city}</span>}
+                        {phones.slice(0, 2).map((phone) => (
+                            <span key={phone} className="flex items-center gap-1 tabular-nums">
+                                <Phone size={11} /> {phone}
+                            </span>
+                        ))}
+                        {phones.length > 2 && (
+                            <span className="text-slate-400">ещё номеров: {phones.length - 2}</span>
+                        )}
+                        {park.commission != null && (
+                            <span className="flex items-center gap-1 tabular-nums">
+                                <Percent size={11} /> комиссия {park.commission}%
+                            </span>
+                        )}
+                        {park.website && (
+                            <a
+                                href={park.website}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-1 text-indigo-600 hover:underline"
+                            >
+                                <Globe size={11} /> сайт
+                            </a>
+                        )}
+                    </div>
+                </div>
+                {canManage && (
+                    <div className="flex shrink-0 items-center gap-1">
+                        <button
+                            type="button"
+                            onClick={() => onEdit(park)}
+                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                            aria-label="Изменить парк"
+                        >
+                            <Pencil size={14} />
+                        </button>
+                        {park.status === 'active' ? (
+                            <button
+                                type="button"
+                                onClick={() => onArchive(park)}
+                                className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600"
+                                aria-label="Убрать в архив"
+                            >
+                                <Archive size={14} />
+                            </button>
+                        ) : (
+                            // Обратный ход обязателен рядом с архивированием: убрать
+                            // парк можно было одним нажатием, а вернуть — ничем.
+                            <button
+                                type="button"
+                                onClick={() => onRestore(park)}
+                                className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+                                aria-label="Вернуть из архива"
+                            >
+                                <ArchiveRestore size={14} />
+                            </button>
+                        )}
+                    </div>
                 )}
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
-                    {park.city && <span className="flex items-center gap-1"><MapPin size={11} /> {park.city}</span>}
-                    {park.phone && <span className="flex items-center gap-1"><Phone size={11} /> {park.phone}</span>}
-                    {park.commission != null && (
-                        <span className="flex items-center gap-1 tabular-nums">
-                            <Percent size={11} /> комиссия {park.commission}%
-                        </span>
-                    )}
-                    {park.website && (
-                        <a
-                            href={park.website}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="flex items-center gap-1 text-indigo-600 hover:underline"
-                        >
-                            <Globe size={11} /> сайт
-                        </a>
-                    )}
-                </div>
             </div>
-            {canManage && (
-                <div className="flex shrink-0 items-center gap-1">
-                    <button
-                        type="button"
-                        onClick={() => onEdit(park)}
-                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
-                        aria-label="Изменить парк"
-                    >
-                        <Pencil size={14} />
-                    </button>
-                    {park.status === 'active' ? (
-                        <button
-                            type="button"
-                            onClick={() => onArchive(park)}
-                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600"
-                            aria-label="Убрать в архив"
-                        >
-                            <Archive size={14} />
-                        </button>
-                    ) : (
-                        // Обратный ход обязателен рядом с архивированием: убрать
-                        // парк можно было одним нажатием, а вернуть — ничем.
-                        <button
-                            type="button"
-                            onClick={() => onRestore(park)}
-                            className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
-                            aria-label="Вернуть из архива"
-                        >
-                            <ArchiveRestore size={14} />
-                        </button>
-                    )}
-                </div>
-            )}
         </div>
-    </div>
-);
+    );
+};
 
 export default function WikiParks({ base, headers, showToast }) {
     const toast = useStableCallback(showToast);
@@ -154,14 +173,11 @@ export default function WikiParks({ base, headers, showToast }) {
         const payload = {
             name: draft.name,
             city: draft.city || null,
-            phone: draft.phone || null,
             address: draft.address || null,
             website: draft.website || null,
             description: draft.description || null,
             commission: draft.commission === '' ? null : Number(draft.commission),
-            offices: draft.offices.map((link) => ({
-                office_id: link.office_id, phone: link.phone || null,
-            })),
+            ...pointsPayload(draft.points),
         };
         setBusy(true);
         const request = draft.id
@@ -190,6 +206,7 @@ export default function WikiParks({ base, headers, showToast }) {
     };
 
     const running = useMemo(() => promotions.filter((p) => p.is_running), [promotions]);
+    const draftIssue = parkDraftIssue(draft);
 
     return (
         <div className="space-y-5">
@@ -275,12 +292,10 @@ export default function WikiParks({ base, headers, showToast }) {
                                 canManage={canManage}
                                 onEdit={(p) => setDraft({
                                     id: p.id, name: p.name, city: p.city || '',
-                                    phone: p.phone || '', address: p.address || '',
+                                    address: p.address || '',
                                     website: p.website || '', description: p.description || '',
                                     commission: p.commission ?? '',
-                                    offices: (p.offices || []).map((link) => ({
-                                        office_id: link.office_id, phone: link.phone || '',
-                                    })),
+                                    points: pointsFromPark(p),
                                 })}
                                 onArchive={archive}
                                 onRestore={restore}
@@ -297,13 +312,18 @@ export default function WikiParks({ base, headers, showToast }) {
                 maxWidth="max-w-xl"
                 footer={(
                     <>
+                        {draftIssue && (
+                            <span className="mr-auto max-w-[55%] text-left text-[11.5px] leading-snug text-amber-600">
+                                {draftIssue}
+                            </span>
+                        )}
                         <button type="button" className={iosBtnSecondary} onClick={() => setDraft(null)}>
                             Отмена
                         </button>
                         <button
                             type="button"
                             className={iosBtnPrimary}
-                            disabled={busy || !draft?.name?.trim()}
+                            disabled={busy || !!draftIssue}
                             onClick={save}
                         >
                             {busy && <Loader2 size={14} className="animate-spin" />} Сохранить

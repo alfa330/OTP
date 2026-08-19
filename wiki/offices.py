@@ -200,6 +200,89 @@ def normalize_schedule(value):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Номера парка
+#
+# Номер принадлежит паре «парк + точка», где точка — офис или NULL («онлайн»,
+# парк принимает только по телефону). Раньше номер был одной колонкой у связи,
+# и второй номер офиса записать было некуда: их сливали в одну строку через
+# слеш, а оператор потом набирал её целиком.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Потолок на точку. Не ограничение модели, а защита от вставки всего справочника
+# в одно поле: столбец из тридцати номеров карточку не помогает читать.
+MAX_PHONES_PER_POINT = 10
+
+
+def clean_phones(values):
+    """Список номеров: сжатие пробелов, отсев пустых, снятие повторов, потолок.
+
+    Повторы снимаются по видимому тексту, а не по цифрам: «+7 707 705 08 80» и
+    «8 707 705 08 80» это один номер, но записан он так, как его диктуют, и
+    приводить к одной форме здесь — значит спорить с тем, кто заполнял.
+    """
+    result = []
+    for value in values or []:
+        phone = ' '.join(str(value if value is not None else '').split())[:64]
+        if phone and phone not in result:
+            result.append(phone)
+        if len(result) >= MAX_PHONES_PER_POINT:
+            break
+    return result
+
+
+def link_phones(link):
+    """Номера из тела запроса. None — «ключа не было», трогать нечего.
+
+    Понимает и phones (список), и старый phone (строка): офисы заводит не только
+    форма — тем же телом пользуется скрипт переноса.
+    """
+    if isinstance(link, dict):
+        if isinstance(link.get('phones'), list):
+            return clean_phones(link['phones'])
+        if 'phone' in link:
+            return clean_phones([link.get('phone')])
+    return None
+
+
+def phones_by_park(cursor, park_ids):
+    """{park_id: {office_id | None: [номера]}} в порядке, заданном формой."""
+    if not park_ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT park_id, office_id, phone FROM wiki_park_phones
+         WHERE park_id = ANY(%s)
+         ORDER BY park_id, office_id NULLS FIRST, position, id
+        """,
+        (list(park_ids),),
+    )
+    result = {}
+    for park_id, office_id, phone in cursor.fetchall():
+        result.setdefault(park_id, {}).setdefault(office_id, []).append(phone)
+    return result
+
+
+def set_point_phones(cursor, park_id, office_id, phones):
+    """Переписывает номера одной точки парка. office_id=None — «онлайн»."""
+    cursor.execute(
+        'DELETE FROM wiki_park_phones '
+        ' WHERE park_id = %s AND office_id IS NOT DISTINCT FROM %s',
+        (park_id, office_id),
+    )
+    for position, phone in enumerate(clean_phones(phones)):
+        cursor.execute(
+            'INSERT INTO wiki_park_phones (park_id, office_id, phone, position) '
+            'VALUES (%s, %s, %s, %s)',
+            (park_id, office_id, phone, position),
+        )
+
+
+def set_park_online_phones(cursor, park_id, phones):
+    """Номера парка без офиса — то, что в форме помечено «онлайн»."""
+    set_point_phones(cursor, park_id, None, phones)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SQL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -259,7 +342,11 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
 
     cursor.execute(
         """
-        SELECT op.office_id, op.park_id, p.name, op.phone, op.schedule, op.note
+        SELECT op.office_id, op.park_id, p.name, op.schedule, op.note,
+               COALESCE((SELECT array_agg(ph.phone ORDER BY ph.position, ph.id)
+                           FROM wiki_park_phones ph
+                          WHERE ph.park_id = op.park_id
+                            AND ph.office_id = op.office_id), '{}')
           FROM wiki_office_taxi_parks op
           JOIN wiki_taxi_parks p ON p.id = op.park_id
          WHERE op.office_id = ANY(%s) AND p.status = 'active'
@@ -267,10 +354,10 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
         """,
         (list(by_id.keys()),),
     )
-    for office_id, park_id_, park_name, phone, schedule, note in cursor.fetchall():
+    for office_id, park_id_, park_name, schedule, note, phones in cursor.fetchall():
         by_id[office_id]['parks'].append({
-            'park_id': park_id_, 'name': park_name,
-            'phone': phone, 'schedule': schedule, 'note': note,
+            'park_id': park_id_, 'name': park_name, 'phones': list(phones or []),
+            'schedule': schedule, 'note': note,
         })
     return offices
 
@@ -356,10 +443,23 @@ def update_office(cursor, office_id, fields):
     return cursor.rowcount > 0
 
 
+def _link_ids(links, key):
+    """Порядок сохранён, повторы сняты: id из тела запроса, что пережили int()."""
+    result = []
+    for link in links or []:
+        try:
+            value = int(link.get(key))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if value not in result:
+            result.append(value)
+    return result
+
+
 def set_office_parks(cursor, office_id, links):
     """Переписывает привязку офиса к паркам.
 
-    links — список {park_id, phone, schedule, note}. Переписываем целиком, а не
+    links — список {park_id, phones, schedule, note}. Переписываем целиком, а не
     доливаем: иначе снятая в форме галочка парка не удалила бы связь.
 
     Сносим только связи с ЖИВЫМИ парками: архивных нет в форме, и общая
@@ -373,6 +473,17 @@ def set_office_parks(cursor, office_id, links):
         """,
         (office_id,),
     )
+    # Номера снятого парка уходят вместе со связью, а у оставшихся не трогаются:
+    # форму офиса открывают ради графика, и она номера вообще не присылает.
+    cursor.execute(
+        """
+        DELETE FROM wiki_park_phones ph
+         USING wiki_taxi_parks p
+         WHERE ph.park_id = p.id AND ph.office_id = %s AND p.status = 'active'
+           AND NOT (ph.park_id = ANY(%s))
+        """,
+        (office_id, _link_ids(links, 'park_id')),
+    )
     seen = set()
     for link in links or []:
         try:
@@ -384,17 +495,19 @@ def set_office_parks(cursor, office_id, links):
         seen.add(park_id)
         cursor.execute(
             """
-            INSERT INTO wiki_office_taxi_parks (office_id, park_id, phone, schedule, note)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO wiki_office_taxi_parks (office_id, park_id, schedule, note)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (office_id, park_id) DO UPDATE
-               SET phone = EXCLUDED.phone,
-                   schedule = EXCLUDED.schedule,
+               SET schedule = EXCLUDED.schedule,
                    note = EXCLUDED.note
             """,
-            (office_id, park_id, link.get('phone') or None,
+            (office_id, park_id,
              _schedule_param(normalize_schedule(link.get('schedule'))),
              link.get('note') or None),
         )
+        phones = link_phones(link)
+        if phones is not None:
+            set_point_phones(cursor, park_id, office_id, phones)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -460,7 +573,7 @@ def fetch_tile(z, x, y, attempts=3):
 
 
 def offices_by_park(cursor, park_ids):
-    """Офисы каждого парка. {park_id: [{office_id, name, city, is_online, phone, ...}]}
+    """Офисы каждого парка. {park_id: [{office_id, name, city, is_online, phones, ...}]}
 
     Зеркало list_offices: там к офису подтягиваются парки, здесь к парку —
     офисы. Связь и переопределения хранятся в одной таблице, меняется только
@@ -470,7 +583,11 @@ def offices_by_park(cursor, park_ids):
         return {}
     cursor.execute(
         """
-        SELECT op.park_id, o.id, o.name, o.city, o.is_online, op.phone, op.schedule, op.note
+        SELECT op.park_id, o.id, o.name, o.city, o.is_online, op.schedule, op.note,
+               COALESCE((SELECT array_agg(ph.phone ORDER BY ph.position, ph.id)
+                           FROM wiki_park_phones ph
+                          WHERE ph.park_id = op.park_id
+                            AND ph.office_id = op.office_id), '{}')
           FROM wiki_office_taxi_parks op
           JOIN wiki_offices o ON o.id = op.office_id
          WHERE op.park_id = ANY(%s) AND o.status = 'active'
@@ -480,10 +597,11 @@ def offices_by_park(cursor, park_ids):
     )
     result = {}
     for row in cursor.fetchall():
-        park_id, office_id, name, city, is_online, phone, schedule, note = row
+        park_id, office_id, name, city, is_online, schedule, note, phones = row
         result.setdefault(park_id, []).append({
             'office_id': office_id, 'name': name, 'city': city,
-            'is_online': is_online, 'phone': phone, 'schedule': schedule, 'note': note,
+            'is_online': is_online, 'phones': list(phones or []),
+            'schedule': schedule, 'note': note,
         })
     return result
 
@@ -491,8 +609,8 @@ def offices_by_park(cursor, park_ids):
 def set_park_offices(cursor, park_id, links):
     """Переписывает офисы парка.
 
-    links — список {office_id, phone, schedule, note}, где phone/schedule это
-    «у этого парка в этом офисе иначе» (NULL = как у офиса).
+    links — список {office_id, phones, schedule, note}: номера этого парка в
+    этом офисе и график, если он у парка свой (NULL = как у офиса).
 
     Сносим только связи с ЖИВЫМИ офисами: архивных нет в форме, и общая
     очистка оторвала бы их от парка молча.
@@ -505,6 +623,18 @@ def set_park_offices(cursor, park_id, links):
         """,
         (park_id,),
     )
+    # Номера снятого офиса уходят вместе со связью: иначе они остались бы висеть
+    # в таблице и вернулись бы, когда офис выберут заново. Номера оставшихся
+    # офисов перепишет set_point_phones ниже.
+    cursor.execute(
+        """
+        DELETE FROM wiki_park_phones ph
+         USING wiki_offices o
+         WHERE ph.office_id = o.id AND ph.park_id = %s AND o.status = 'active'
+           AND NOT (ph.office_id = ANY(%s))
+        """,
+        (park_id, _link_ids(links, 'office_id')),
+    )
     seen = set()
     for link in links or []:
         try:
@@ -516,17 +646,17 @@ def set_park_offices(cursor, park_id, links):
         seen.add(office_id)
         cursor.execute(
             """
-            INSERT INTO wiki_office_taxi_parks (office_id, park_id, phone, schedule, note)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO wiki_office_taxi_parks (office_id, park_id, schedule, note)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (office_id, park_id) DO UPDATE
-               SET phone = EXCLUDED.phone,
-                   schedule = EXCLUDED.schedule,
+               SET schedule = EXCLUDED.schedule,
                    note = EXCLUDED.note
             """,
-            (office_id, park_id, link.get('phone') or None,
+            (office_id, park_id,
              _schedule_param(normalize_schedule(link.get('schedule'))),
              link.get('note') or None),
         )
+        set_point_phones(cursor, park_id, office_id, link_phones(link) or [])
 
 
 def slug_is_free(cursor, slug, exclude_id=None):

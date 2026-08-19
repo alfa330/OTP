@@ -70,7 +70,7 @@ const StatusBadge = ({ schedule, isOnline, tick }) => {
 const OfficeCard = ({ base, office, canManage, onEdit, onArchive, onRestore, tick }) => {
     const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
     const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
-    const overrides = (office.parks || []).filter((link) => link.phone);
+    const parkPhones = (office.parks || []).filter((link) => link.phones?.length);
     const notes = (office.address_note || '').split('\n').map((s) => s.trim()).filter(Boolean);
 
     return (
@@ -198,15 +198,18 @@ const OfficeCard = ({ base, office, canManage, onEdit, onArchive, onRestore, tic
                         </div>
                     )}
 
-                    {overrides.length > 0 && (
+                    {/* Номер у парка в этом офисе свой: у одного адреса их
+                        столько же, сколько парков за ним сидит. */}
+                    {parkPhones.length > 0 && (
                         <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2">
                             <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                                Свой телефон у парков
+                                Телефоны парков
                             </div>
                             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[12.5px] text-slate-600">
-                                {overrides.map((link) => (
+                                {parkPhones.map((link) => (
                                     <span key={link.park_id} className="tabular-nums">
-                                        <span className="text-slate-400">{link.name}:</span> {link.phone}
+                                        <span className="text-slate-400">{link.name}:</span>{' '}
+                                        {link.phones.join(', ')}
                                     </span>
                                 ))}
                             </div>

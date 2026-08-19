@@ -673,6 +673,47 @@ _OFFICE_STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_office_parks_park ON wiki_office_taxi_parks(park_id);",
+    # Номера парка.
+    #
+    # Отдельная таблица, а не колонка phone у связи: у парка в одном офисе
+    # бывает несколько номеров, и второй номер некуда было положить. Строка без
+    # office_id — номер без офиса, «онлайн»: парк принимает только по телефону.
+    # Туда же переехал общий телефон парка (wiki_taxi_parks.phone) — иначе номер
+    # заводился бы в двух разных местах формы и расходился, как расходились
+    # телефоны офисов в статье «Адреса офисов».
+    """
+    CREATE TABLE IF NOT EXISTS wiki_park_phones (
+        id        SERIAL PRIMARY KEY,
+        park_id   INTEGER NOT NULL REFERENCES wiki_taxi_parks(id) ON DELETE CASCADE,
+        office_id INTEGER REFERENCES wiki_offices(id) ON DELETE CASCADE,
+        phone     VARCHAR(64) NOT NULL,
+        position  INTEGER NOT NULL DEFAULT 0
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_park_phones_park "
+    "ON wiki_park_phones(park_id, office_id, position, id);",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_park_phones_office ON wiki_park_phones(office_id);",
+    # Перенос: старый одиночный телефон становится первым номером и ОСУШАЕТСЯ
+    # в источнике. Без осушения удалённый в форме номер возвращался бы при
+    # каждом старте — старая колонка залила бы его заново.
+    """
+    INSERT INTO wiki_park_phones (park_id, office_id, phone, position)
+    SELECT op.park_id, op.office_id, btrim(op.phone), 0
+      FROM wiki_office_taxi_parks op
+     WHERE op.phone IS NOT NULL AND btrim(op.phone) <> ''
+       AND NOT EXISTS (SELECT 1 FROM wiki_park_phones ph
+                        WHERE ph.park_id = op.park_id AND ph.office_id = op.office_id);
+    """,
+    "UPDATE wiki_office_taxi_parks SET phone = NULL WHERE phone IS NOT NULL;",
+    """
+    INSERT INTO wiki_park_phones (park_id, office_id, phone, position)
+    SELECT p.id, NULL, btrim(p.phone), 0
+      FROM wiki_taxi_parks p
+     WHERE p.phone IS NOT NULL AND btrim(p.phone) <> ''
+       AND NOT EXISTS (SELECT 1 FROM wiki_park_phones ph
+                        WHERE ph.park_id = p.id AND ph.office_id IS NULL);
+    """,
+    "UPDATE wiki_taxi_parks SET phone = NULL WHERE phone IS NOT NULL;",
     # Кэш тайлов карты.
     #
     # Замер 12.08: 2ГИС отдаёт растровые тайлы без ключа, но пачку запросов
