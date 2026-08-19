@@ -2,8 +2,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { Bell, BookLock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, X } from 'lucide-react';
-import { APPLE_FONT } from '../ui/ios';
+import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
+import {
+    buildDesktopNotice,
+    desktopPermission as browserPermission,
+    desktopSupported,
+    readDesktopPref,
+    requestDesktopPermission,
+    shouldNotifyDesktop,
+    showDesktopNotice,
+    writeDesktopPref,
+} from './desktopNotifications.js';
 
 /* Колокол уведомлений.
  *
@@ -115,6 +125,12 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const [ringNonce, setRingNonce] = useState(0);
     const [toast, setToast] = useState(null);   // { item, extra } | null
     const [toastClosing, setToastClosing] = useState(false);
+    /* Дубль на рабочий стол. Состояний два, и они не заменяют друг друга:
+       разрешение выдаёт браузер (и отозвать его могут мимо нас, прямо в
+       настройках сайта), а выключатель — наш, чтобы замолчать можно было, не
+       отзывая разрешение: отозванное второй раз спросить уже не дадут. */
+    const [desktopPerm, setDesktopPerm] = useState('default');
+    const [desktopOn, setDesktopOn] = useState(false);
 
     const buttonRef = useRef(null);
     const panelRef = useRef(null);
@@ -130,6 +146,13 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const toastTimerRef = useRef(null);
     const toastCloseTimerRef = useRef(null);
     const announceRef = useRef(null);
+    /* Через ref, а не через зависимости: и разрешение, и выключатель меняются
+       кликом в панели, а announce стоит за SSE-каналом — пересборка рвала бы
+       живой поток и заново занимала слот из BELL_STREAM_LIMIT. */
+    const desktopRef = useRef({ enabled: false, permission: 'default' });
+    desktopRef.current = { enabled: desktopOn, permission: desktopPerm };
+    const onNavigateRef = useRef(onNavigate);
+    onNavigateRef.current = onNavigate;
     const openRef = useRef(false);
     openRef.current = open && !closing;
     const fetchedAtRef = useRef(0);
@@ -517,6 +540,42 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         }, 200);
     }, []);
 
+    /* Читаем при входе и при смене пользователя: за одним компьютером сидят
+       посменно, и чужая галочка не должна доставаться следующему. */
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        setDesktopPerm(browserPermission(window));
+        setDesktopOn(readDesktopPref(user?.id, window.localStorage));
+    }, [user?.id]);
+
+    const desktopIcon = `${import.meta.env.BASE_URL}favicon.ico`;
+
+    /* Системная плашка тем же составом, что и карточка в сайдбаре: всё уже
+       посчитано для неё, отдельного запроса это не стоит. */
+    const notifyDesktop = useCallback((notice) => {
+        if (typeof window === 'undefined') return;
+        const { enabled, permission } = desktopRef.current;
+        const allowed = shouldNotifyDesktop({
+            enabled,
+            permission,
+            hidden: document.visibilityState === 'hidden',
+            focused: document.hasFocus(),
+            panelOpen: openRef.current,
+        });
+        if (!allowed) return;
+        showDesktopNotice(
+            buildDesktopNotice({ ...notice, sourceLabel: SOURCE_META[notice.item?.source]?.label }),
+            {
+                win: window,
+                icon: desktopIcon,
+                onActivate: () => {
+                    const item = notice.item;
+                    if (item) onNavigateRef.current?.(item.view, item.target);
+                },
+            },
+        );
+    }, [desktopIcon]);
+
     const notificationKey = (item) => `${item.source}:${item.id}:${item.title}`;
 
     /* Пришедшее может не оказаться в показанной порции: список отсортирован по
@@ -591,20 +650,24 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
             toastCloseTimerRef.current = null;
         }
         setToastClosing(false);
-        setToast({
+        const notice = {
             item: fresh[0] || null,
             extra: Math.max(0, (fresh.length || (nextTotal - prevTotal)) - 1),
             added: nextTotal - prevTotal,
-        });
+        };
+        setToast(notice);
         // Гамбургер на телефоне узнаёт отсюда, что пора звенеть: сам колокол
         // в это время за краем экрана вместе с сайдбаром.
         onIncoming?.();
+        // И на рабочий стол — но только если человек сейчас смотрит не сюда,
+        // см. shouldNotifyDesktop.
+        notifyDesktop(notice);
         if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
         toastTimerRef.current = setTimeout(() => {
             toastTimerRef.current = null;
             closeToast();
         }, TOAST_VISIBLE_MS);
-    }, [closeToast, probeBeyondPage, onIncoming]);
+    }, [closeToast, probeBeyondPage, onIncoming, notifyDesktop]);
     announceRef.current = announce;
 
     const toggle = () => {
@@ -660,6 +723,62 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         close();
         onNavigate?.(item.view, item.target);
     };
+
+    /* Спрашиваем разрешение ТОЛЬКО отсюда, по клику. Запрос на голом открытии
+       страницы браузеры считают спамом: Chrome душит его беззвучно, Firefox
+       прячет под перечёркнутый колокольчик в адресной строке. И цена ошибки
+       несимметрична — отказ необратим, второй раз спросить не дадут, чинится
+       только руками в настройках сайта. */
+    const enableDesktop = async () => {
+        const result = await requestDesktopPermission(window);
+        setDesktopPerm(result);
+        if (result !== 'granted') return;
+        setDesktopOn(true);
+        writeDesktopPref(user?.id, true, window.localStorage);
+        /* Показываем образец в обход shouldNotifyDesktop: тот молчит, пока
+           человек смотрит в портал, а здесь именно это и нужно — увидеть
+           своими глазами, что разрешение сработало и как оно выглядит. */
+        showDesktopNotice(
+            {
+                title: 'Уведомления включены',
+                body: 'Так вы увидите новое, когда портал свёрнут или открыт в фоне',
+                tag: 'otp-bell-hello',
+            },
+            { win: window, icon: desktopIcon },
+        );
+    };
+
+    const toggleDesktop = (next) => {
+        setDesktopOn(next);
+        writeDesktopPref(user?.id, next, window.localStorage);
+    };
+
+    const desktopRow = desktopPerm === 'unsupported' ? null : (
+        <div className="shrink-0 border-t border-slate-100 px-4 py-2.5">
+            {desktopPerm === 'granted' ? (
+                <div className="flex items-center justify-between gap-3">
+                    <span className="text-[12.5px] text-slate-600">Показывать на рабочем столе</span>
+                    <IosToggle checked={desktopOn} onChange={toggleDesktop} />
+                </div>
+            ) : desktopPerm === 'denied' ? (
+                /* Отозвать отказ мы не можем — только объяснить, где он лежит.
+                   Кнопка здесь была бы обманом: клик ничего бы не сделал. */
+                <div className="text-[11.5px] leading-snug text-slate-400">
+                    Уведомления на рабочем столе заблокированы. Включить можно в настройках
+                    браузера для этого сайта.
+                </div>
+            ) : (
+                <button
+                    type="button"
+                    onClick={enableDesktop}
+                    className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-0.5 text-left transition hover:bg-slate-50"
+                >
+                    <span className="text-[12.5px] text-slate-600">Показывать на рабочем столе</span>
+                    <span className="shrink-0 text-[12px] font-medium text-blue-600">Включить</span>
+                </button>
+            )}
+        </div>
+    );
 
     /* Панель — absolute-потомок пункта, как дропдаун «Аккаунта»: она приклеена
        к сайдбару и едет вместе с ним, когда тот сворачивается или
@@ -756,6 +875,8 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                     </div>
                 )}
             </div>
+
+            {desktopRow}
         </div>
     ) : null;
 
