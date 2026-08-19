@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { EditorContent, useEditor } from '@tiptap/react';
+import { EditorContent, useEditor, useEditorState } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Image from '@tiptap/extension-image';
@@ -23,6 +23,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
+import WikiTableMenu from './WikiTableMenu';
 
 /* Редактор статьи на TipTap.
  *
@@ -92,6 +93,16 @@ export default function WikiEditor({
     // состояние, а сохранить в этом виде — молча выключить то, что включено.
     const [aiSupport, setAiSupport] = useState(!article?.ai_opt_out);
 
+    /* Название общего раздела — для подсказки под выбором раздела. Слаг тот же,
+       что знает сервер (wiki/edit.py: _FALLBACK_SECTION_SLUG); совпадение
+       намеренное, и расходиться им нельзя. */
+    const fallbackSection = useMemo(() => {
+        const section = (sections || []).find((s) => s.slug === 'obschiy-sotrudnik');
+        if (!section) return null;
+        const space = (spaces || []).find((sp) => sp.id === section.space_id);
+        return space ? `${space.name} › ${section.name}` : section.name;
+    }, [sections, spaces]);
+
     const editor = useEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
@@ -115,6 +126,33 @@ export default function WikiEditor({
             },
         },
     }, [article?.id]);
+
+    /* Подсветка активных кнопок тулбара.
+     *
+     * Читается через useEditorState, а не прямыми editor.isActive(...) в
+     * разметке: useEditor в TipTap 3 по умолчанию НЕ перерисовывает компонент
+     * на транзакциях (shouldRerenderOnTransaction: false), поэтому isActive в
+     * теле рендера возвращал значение на момент ОТКРЫТИЯ редактора и больше
+     * никогда не менялся — кнопки «жирный», «заголовок», «список» стояли
+     * подсвеченными или погашенными наугад, независимо от того, где курсор.
+     * Селектор пересчитывается на каждой транзакции, но перерисовывает только
+     * при фактической смене набора — deepEqual внутри хука. */
+    const active = useEditorState({
+        editor,
+        selector: ({ editor: ed }) => (ed ? {
+            bold: ed.isActive('bold'),
+            italic: ed.isActive('italic'),
+            underline: ed.isActive('underline'),
+            strike: ed.isActive('strike'),
+            heading: [1, 2, 3].find((level) => ed.isActive('heading', { level })) || null,
+            bulletList: ed.isActive('bulletList'),
+            orderedList: ed.isActive('orderedList'),
+            blockquote: ed.isActive('blockquote'),
+            codeBlock: ed.isActive('codeBlock'),
+            align: ['left', 'center', 'right'].find((a) => ed.isActive({ textAlign: a })) || null,
+            link: ed.isActive('link'),
+        } : null),
+    });
 
     // Предупреждаем о несохранённом при уходе со страницы. Внутри портала
     // навигация без перезагрузки, поэтому это только про закрытие вкладки.
@@ -319,6 +357,17 @@ export default function WikiEditor({
                                 value={sectionIds[0] || null}
                                 onChange={(id) => { setSectionIds(id ? [id] : []); setDirty(true); }}
                             />
+                            {/* Куда уедет статья, если раздел не выбрать.
+                                Раньше она оставалась вообще без раздела и
+                                пропадала из оглавления и поиска у всех, включая
+                                автора; теперь сервер кладёт её в общий отдел, и
+                                человек должен узнать об этом ДО сохранения, а
+                                не обнаружить статью в чужой ветке потом. */}
+                            {!sectionIds[0] && fallbackSection && (
+                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    Не выбран — статья попадёт в «{fallbackSection}».
+                                </p>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -372,19 +421,19 @@ export default function WikiEditor({
                         </ToolButton>
                         <Divider />
 
-                        <ToolButton title="Жирный" active={editor.isActive('bold')}
+                        <ToolButton title="Жирный" active={active?.bold}
                             onClick={() => editor.chain().focus().toggleBold().run()}>
                             <Bold size={15} />
                         </ToolButton>
-                        <ToolButton title="Курсив" active={editor.isActive('italic')}
+                        <ToolButton title="Курсив" active={active?.italic}
                             onClick={() => editor.chain().focus().toggleItalic().run()}>
                             <Italic size={15} />
                         </ToolButton>
-                        <ToolButton title="Подчёркнутый" active={editor.isActive('underline')}
+                        <ToolButton title="Подчёркнутый" active={active?.underline}
                             onClick={() => editor.chain().focus().toggleUnderline().run()}>
                             <UnderlineIcon size={15} />
                         </ToolButton>
-                        <ToolButton title="Зачёркнутый" active={editor.isActive('strike')}
+                        <ToolButton title="Зачёркнутый" active={active?.strike}
                             onClick={() => editor.chain().focus().toggleStrike().run()}>
                             <Strikethrough size={15} />
                         </ToolButton>
@@ -396,7 +445,7 @@ export default function WikiEditor({
                                 <ToolButton
                                     key={level}
                                     title={`Заголовок ${level}`}
-                                    active={editor.isActive('heading', { level })}
+                                    active={active?.heading === level}
                                     onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
                                 >
                                     <Icon size={15} />
@@ -405,19 +454,19 @@ export default function WikiEditor({
                         })}
                         <Divider />
 
-                        <ToolButton title="Маркированный список" active={editor.isActive('bulletList')}
+                        <ToolButton title="Маркированный список" active={active?.bulletList}
                             onClick={() => editor.chain().focus().toggleBulletList().run()}>
                             <List size={15} />
                         </ToolButton>
-                        <ToolButton title="Нумерованный список" active={editor.isActive('orderedList')}
+                        <ToolButton title="Нумерованный список" active={active?.orderedList}
                             onClick={() => editor.chain().focus().toggleOrderedList().run()}>
                             <ListOrdered size={15} />
                         </ToolButton>
-                        <ToolButton title="Цитата" active={editor.isActive('blockquote')}
+                        <ToolButton title="Цитата" active={active?.blockquote}
                             onClick={() => editor.chain().focus().toggleBlockquote().run()}>
                             <Quote size={15} />
                         </ToolButton>
-                        <ToolButton title="Код" active={editor.isActive('codeBlock')}
+                        <ToolButton title="Код" active={active?.codeBlock}
                             onClick={() => editor.chain().focus().toggleCodeBlock().run()}>
                             <Code size={15} />
                         </ToolButton>
@@ -429,7 +478,7 @@ export default function WikiEditor({
                                 <ToolButton
                                     key={align}
                                     title={`Выравнивание: ${align}`}
-                                    active={editor.isActive({ textAlign: align })}
+                                    active={active?.align === align}
                                     onClick={() => editor.chain().focus().setTextAlign(align).run()}
                                 >
                                     <Icon size={15} />
@@ -438,11 +487,11 @@ export default function WikiEditor({
                         })}
                         <Divider />
 
-                        <ToolButton title="Ссылка" active={editor.isActive('link')} onClick={setLink}>
+                        <ToolButton title="Ссылка" active={active?.link} onClick={setLink}>
                             <Link2 size={15} />
                         </ToolButton>
                         <ToolButton
-                            title="Таблица"
+                            title="Таблица 3×3 — строки и столбцы добавляются панелью у таблицы"
                             onClick={() => editor.chain().focus()
                                 .insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
                         >
@@ -481,6 +530,10 @@ export default function WikiEditor({
 
                     <div className="px-4 py-4 sm:px-6">
                         <EditorContent editor={editor} />
+                        {/* Панель команд таблицы: всплывает у той таблицы, в
+                            которой стоит курсор. Живёт рядом с EditorContent,
+                            потому что позиционируется от родителя редактора. */}
+                        <WikiTableMenu editor={editor} />
                     </div>
                 </div>
             </section>
