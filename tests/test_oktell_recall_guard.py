@@ -786,3 +786,13 @@ def test_stored_token_used_when_filename_has_none(tmp_path, monkeypatch):
     agent.save_personal_token("storedTokenValue1")
     monkeypatch.setattr(agent, "program_path", lambda: Path("C:/x/OktellRecallGuard.exe"))
     assert agent.resolve_agent_token() == "storedTokenValue1"
+
+
+def test_install_hands_over_to_the_installed_copy():
+    """Скачанная копия не должна жить долго: пока она ждёт нажатия OK, её
+    временную папку успевает занять антивирус, и упаковщик показывает
+    «Failed to remove temporary directory» — пугающее окно на ровном месте."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    handover = source.index('subprocess.Popen([str(target), "--install"]')
+    message = source.index('"Программа установлена и уже работает')
+    assert handover < message, "передача установки должна идти до показа окна"

@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -717,7 +717,13 @@ def show_message(text: str, title: str = APP_NAME, error: bool = False) -> None:
 
 
 def run_install(cfg: dict, start: bool = True) -> int:
-    """Разложить себя по местам. Ровно то, что делали install_*.bat."""
+    """Разложить себя по местам. Ровно то, что делали install_*.bat.
+
+    Скачанная копия делает МИНИМУМ: копирует себя и передаёт установку уже
+    установленной копии, после чего немедленно завершается. Так её одноразовая
+    папка распаковки живёт секунды и успевает удалиться — иначе упаковщик
+    показывал пугающее «Failed to remove temporary directory».
+    """
     setup_logging(cfg, "install.log")
     target = installed_path()
     source = program_path()
@@ -734,6 +740,17 @@ def run_install(cfg: dict, start: bool = True) -> int:
             time.sleep(1.5)
             shutil.copy2(source, target)
             logging.info("Скопирован в %s", target)
+            # Дальше всё делает установленная копия: автозапуск, ярлык, окно с
+            # результатом. Мы уходим сразу и ничего не держим.
+            try:
+                flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
+                subprocess.Popen([str(target), "--install"], cwd=str(target.parent),
+                                 creationflags=flags, close_fds=True)
+                return 0
+            except Exception:  # noqa: BLE001
+                logging.exception("Не удалось передать установку установленной копии")
+                # Не смогли передать — доделываем сами, окно всё равно нужнее
+                # аккуратного выхода.
         # Конфиг рядом со скачанным exe (если его положили) переносим тоже.
         local_cfg = source.parent / "config.json"
         if local_cfg.exists() and local_cfg.resolve() != (target.parent / "config.json").resolve():
