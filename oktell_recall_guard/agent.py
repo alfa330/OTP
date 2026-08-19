@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
