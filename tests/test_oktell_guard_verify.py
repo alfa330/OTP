@@ -93,3 +93,24 @@ def test_history_sql_is_readonly_and_scoped():
 def test_history_sql_escapes_quotes():
     sql = verify.build_history_sql("6612' OR 1=1 --", MOMENT, 180)
     assert "6612'' OR 1=1" in sql
+
+
+def test_utc_timestamp_from_browser_is_converted():
+    """Браузер пишет время по Гринвичу (`toISOString`), а история Oktell и наши
+    таблицы живут по Алматы. Без перевода сверка искала событие на пять часов
+    раньше и отклоняла каждый настоящий выброс."""
+    parsed = verify._parse_time('2026-08-19T05:25:00.000Z')
+    assert parsed.hour == 10 and parsed.minute == 25
+
+
+def test_local_timestamp_without_zone_is_left_alone():
+    parsed = verify._parse_time('2026-08-19 10:25:00')
+    assert parsed.hour == 10
+
+
+def test_real_violation_confirmed_with_utc_timestamp():
+    """Тот самый случай с прода: выброс в 10:25 местного, присланный как 05:25Z."""
+    rows = history((-240, True))
+    moment_utc = (MOMENT - timedelta(hours=5)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+    status, note = verify.verdict({'happened_at': moment_utc, 'seconds': 185, 'threshold_s': 180}, rows)
+    assert status == verify.CONFIRMED, note

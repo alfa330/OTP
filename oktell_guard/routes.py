@@ -341,7 +341,10 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
                 created = queries.record_violation(cursor, {
                     'user_id': (personal or {}).get('user_id'),
                     'sip_number': str(item.get('login') or sip)[:64],
-                    'happened_at': item.get('at'),
+                    # Время приводим к местному ЗДЕСЬ: браузер шлёт его по
+                    # Гринвичу, и без перевода запись ложилась в базу на пять
+                    # часов раньше — отчёт врал, а сверка ничего не находила.
+                    'happened_at': verify._parse_time(item.get('at')),
                     'seconds': int(item.get('seconds') or 0),
                     'threshold_s': int(item.get('threshold_s') or 0),
                     'reason': str(item.get('reason') or 'recall_timeout')[:64],

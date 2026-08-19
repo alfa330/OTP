@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.6"
+VERSION = "1.0.8"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -563,6 +563,31 @@ def release_mutex(name: str) -> None:
     _close_handle(_held_mutexes.pop(name, None))
 
 
+# Переменные, которые упаковщик выставляет ДЛЯ СЕБЯ. Дочернему процессу они
+# смертельны: путь к сертификатам указывает во временную папку родителя, а она
+# удаляется, когда родитель выходит. Установленный агент после этого падал на
+# КАЖДОМ запросе с «Could not find a suitable TLS CA certificate bundle» —
+# то есть молча переставал отчитываться.
+# ВАЖНО: `_PYI_APPLICATION_HOME_DIR` здесь быть НЕ должно. Её ставит первая
+# ступень загрузчика для второй, и если её вычистить, запуск падает с окном
+# «_PYI_APPLICATION_HOME_DIR environment variable is not defined!».
+# Вычищаем ровно то, из-за чего дочерний процесс брал файлы из чужой временной
+# папки: путь распаковки (по нему certifi ищет сертификаты) и явные указания
+# на файл сертификатов.
+_PYINSTALLER_ENV_KEYS = (
+    "_MEIPASS", "_MEIPASS2",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
+
+
+def child_env() -> dict:
+    """Окружение для дочернего процесса — без следов упаковщика."""
+    env = dict(os.environ)
+    for key in _PYINSTALLER_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
+
 def _self_command(*args: str) -> list[str]:
     if getattr(sys, "frozen", False):
         return [str(program_path()), *args]
@@ -573,7 +598,8 @@ def spawn_self(*args: str) -> None:
     cmd = _self_command(*args)
     try:
         flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
-        subprocess.Popen(cmd, cwd=str(program_path().parent), creationflags=flags, close_fds=True)
+        subprocess.Popen(cmd, cwd=str(program_path().parent), creationflags=flags,
+                         close_fds=True, env=child_env())
         logging.info("Запущен процесс: %s", " ".join(cmd))
     except Exception:  # noqa: BLE001
         logging.exception("Не удалось запустить %s", " ".join(cmd))
@@ -745,7 +771,7 @@ def run_install(cfg: dict, start: bool = True) -> int:
             try:
                 flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
                 subprocess.Popen([str(target), "--install"], cwd=str(target.parent),
-                                 creationflags=flags, close_fds=True)
+                                 creationflags=flags, close_fds=True, env=child_env())
                 return 0
             except Exception:  # noqa: BLE001
                 logging.exception("Не удалось передать установку установленной копии")
@@ -771,7 +797,8 @@ def run_install(cfg: dict, start: bool = True) -> int:
     if start:
         try:
             flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
-            subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags, close_fds=True)
+            subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags,
+                             close_fds=True, env=child_env())
         except Exception as exc:  # noqa: BLE001
             logging.exception("Не удалось запустить установленную копию")
             show_message(f"Программа установлена, но не запустилась.\n\n{exc}", error=True)
@@ -937,7 +964,8 @@ def apply_update(new_file: Path) -> bool:
     logging.info("Обновление установлено, перезапускаюсь")
     try:
         flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
-        subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags, close_fds=True)
+        subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags,
+                         close_fds=True, env=child_env())
     except Exception:  # noqa: BLE001
         logging.exception("Новая копия не запустилась")
         return False
@@ -1736,7 +1764,7 @@ class ManagedBrowser:
         args = self.launch_args(chrome)
         try:
             flags = CREATE_NO_WINDOW if IS_WINDOWS else 0
-            self.process = subprocess.Popen(args, creationflags=flags, close_fds=True)
+            self.process = subprocess.Popen(args, creationflags=flags, close_fds=True, env=child_env())
         except Exception:  # noqa: BLE001
             logging.exception("Не удалось запустить Chrome")
             return False
@@ -2380,7 +2408,7 @@ def run_open(cfg: dict) -> int:
         # Chrome уже был жив, но окна Oktell нет — открываем ещё одно.
         chrome = browser.chrome_path()
         if chrome:
-            subprocess.Popen(browser.launch_args(chrome), close_fds=True)
+            subprocess.Popen(browser.launch_args(chrome), close_fds=True, env=child_env())
     # Автозапуск watchdog: оператор открыл Oktell — контроль обязан быть поднят.
     if cfg.get("ensure_watchdog_alive", True) and not is_running_by_mutex(WATCHDOG_MUTEX_NAME):
         spawn_self()

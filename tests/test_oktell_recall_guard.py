@@ -796,3 +796,35 @@ def test_install_hands_over_to_the_installed_copy():
     handover = source.index('subprocess.Popen([str(target), "--install"]')
     message = source.index('"Программа установлена и уже работает')
     assert handover < message, "передача установки должна идти до показа окна"
+
+
+def test_child_env_drops_packer_variables(monkeypatch):
+    """Установленный агент падал на КАЖДОМ запросе: он унаследовал от
+    установщика путь к сертификатам во временную папку, а та удалялась вместе
+    с установщиком. Ни heartbeat, ни нарушения после этого не уходили."""
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", r"C:\Temp\_MEI329922\certifi\cacert.pem")
+    monkeypatch.setenv("_MEIPASS", r"C:\Temp\_MEI329922")
+    monkeypatch.setenv("SSL_CERT_FILE", r"C:\Temp\_MEI329922\cacert.pem")
+    monkeypatch.setenv("PATH", "нужное-сохраняем")
+
+    env = agent.child_env()
+    for poisoned in ("REQUESTS_CA_BUNDLE", "_MEIPASS", "SSL_CERT_FILE"):
+        assert poisoned not in env, poisoned
+    assert env["PATH"] == "нужное-сохраняем"
+
+
+def test_child_env_keeps_launcher_variable(monkeypatch):
+    """А эту переменную трогать нельзя: её ставит первая ступень загрузчика для
+    второй, и без неё запуск падает окном «_PYI_APPLICATION_HOME_DIR is not
+    defined». Вычистил её один раз — получил два окна с ошибкой у пользователя.
+    """
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", r"C:\Temp\_MEI1")
+    assert agent.child_env().get("_PYI_APPLICATION_HOME_DIR") == r"C:\Temp\_MEI1"
+
+
+def test_all_child_launches_use_clean_env():
+    """Чтобы правка не рассыпалась при следующем запуске процесса."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    launches = source.count("subprocess.Popen(")
+    cleaned = source.count("env=child_env()")
+    assert cleaned == launches, f"запусков {launches}, с чистым окружением {cleaned}"

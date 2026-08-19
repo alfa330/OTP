@@ -15,7 +15,7 @@
 тестами, не поднимая ни базы, ни сети.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 RECALL_STATE = 2      # перерыв
 RECALL_ICODE = 2      # подпричина «Перезвон»
@@ -35,15 +35,40 @@ CLOCK_SKEW_S = 90
 DURATION_TOLERANCE = 0.5
 
 
+LOCAL_TZ_NAME = 'Asia/Almaty'
+LOCAL_UTC_OFFSET_HOURS = 5   # запасной вариант, если база часовых поясов недоступна
+
+
+def to_local(moment: datetime) -> datetime:
+    """Момент по Гринвичу → местное время без метки пояса.
+
+    Браузер записывает время как `new Date().toISOString()`, то есть по
+    Гринвичу, а история Oktell и наши таблицы живут по Алматы. Без перевода
+    сверка искала событие на пять часов раньше и отклоняла КАЖДЫЙ настоящий
+    выброс со словами «в это время в Перезвоне не был».
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        return moment.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(LOCAL_TZ_NAME)).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001 — на машине может не быть базы поясов
+        return moment + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)
+
+
 def _parse_time(value):
+    """Разобрать время события. Метка `Z` означает Гринвич — переводим в местное."""
     if isinstance(value, datetime):
-        return value
-    text = str(value or '').strip().replace('T', ' ').replace('Z', '')
+        return value.replace(tzinfo=None) if value.tzinfo is None else to_local(
+            value.astimezone(timezone.utc).replace(tzinfo=None))
+    raw = str(value or '').strip()
+    is_utc = raw.endswith('Z') or raw.endswith('+00:00')
+    text = raw.replace('T', ' ').replace('Z', '').replace('+00:00', '').strip()
     for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M'):
         try:
-            return datetime.strptime(text[:26], fmt)
+            parsed = datetime.strptime(text[:26], fmt)
         except ValueError:
             continue
+        return to_local(parsed) if is_utc else parsed
     return None
 
 
