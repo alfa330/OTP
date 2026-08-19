@@ -32474,11 +32474,6 @@ async def chat_hourly_broadcast_job():
 # Цель по времени ответа осталась: она стоит пунктиром на левой оси и питает плитку «Часов в цели».
 SZOV_CHAT_WALLBOARD_TARGET_SECONDS = _env_int(
     'SZOV_CHAT_WALLBOARD_TARGET_SECONDS', 120, minimum=10, maximum=3600)
-# Сколько человек должен простоять на линии внутри часа, чтобы попасть в счёт людей (решение
-# владельца 18.08.2026). Забежал на минуту — на линии его, считай, не было: столбик обязан
-# показывать тех, кто час реально держал, а не всех, кто мелькнул в статусе «Онлайн».
-SZOV_CHAT_WALLBOARD_MIN_ONLINE_SECONDS = _env_int(
-    'SZOV_CHAT_WALLBOARD_MIN_ONLINE_SECONDS', 120, minimum=0, maximum=3600)
 # Квота Chat2Desk общая на компанию (~100 000 запросов/мес), а табло висит на стене весь день,
 # поэтому кэш здесь на порядок длиннее, чем у Oktell: статусы обновляем раз в 2 минуты, а
 # обращения за день (самая дорогая часть, 3-5 запросов) — раз в 10 минут.
@@ -32711,21 +32706,18 @@ def _szov_chat_wallboard_timelines(events, lookup):
     return timelines, sorted(unmatched)
 
 
-def _szov_chat_wallboard_online_per_person(timelines, now_seconds):
-    """{час: {имя: секунды на линии в этом часу}} по лентам статусов.
+def _szov_chat_wallboard_online_seconds(timelines, now_seconds):
+    """{час: человеко-секунды «на линии»} по лентам статусов.
 
-    Считаем ЛЮДЕЙ ПО ГОЛОВАМ, а не человеко-часы (решение владельца 18.08.2026): на стене
-    нужен ответ «сколько конкретных людей было в этом часу», а среднее вида «1,6 человека»
-    этих людей за дробью и прятало. Секунды здесь нужны не ради среднего, а ради порога: в
-    счёт идёт тот, кто держал линию дольше SZOV_CHAT_WALLBOARD_MIN_ONLINE_SECONDS внутри часа
-    (см. `_szov_chat_wallboard_hourly`). Отрезки одного человека складываются, поэтому перерыв
-    посреди часа его не удваивает, а смена через границу часа считается в обоих часах своими
-    частями.
-    Считаем только статус «онлайн»: ЗАНЯТ, тренинг, перерыв и отпуск линию не держат — на
-    линии человека в эти минуты нет, ровно та же граница, что у «Основы», где онлайн это
-    свободен или в разговоре."""
+    Из этих секунд получается FTE часа (см. `_szov_chat_wallboard_hourly`): сумма времени всей
+    смены, а не головы. Считать людей головами пробовали 18.08.2026 и вернулись обратно —
+    голова не отличает человека, простоявшего час, от заглянувшего на пару минут, а FTE
+    отличает.
+    Считаем только статус «онлайн»: занят, тренинг, перерыв и отпуск линию не держат — их
+    минуты в сумму не идут вовсе, ровно та же граница, что у «Основы», где онлайн это свободен
+    или в разговоре."""
     per_hour = {}
-    for name, entries in timelines.items():
+    for entries in timelines.values():
         for index, (start, status_key, _label, _raw) in enumerate(entries):
             if status_key != 'online':
                 continue
@@ -32736,8 +32728,7 @@ def _szov_chat_wallboard_online_per_person(timelines, now_seconds):
             for hour in range(start // 3600, (end - 1) // 3600 + 1):
                 overlap = min(end, (hour + 1) * 3600) - max(start, hour * 3600)
                 if overlap > 0:
-                    people = per_hour.setdefault(hour, {})
-                    people[name] = people.get(name, 0) + overlap
+                    per_hour[hour] = per_hour.get(hour, 0) + overlap
     return per_hour
 
 
@@ -32748,12 +32739,13 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now):
     обращения, начавшиеся внутри него, и время ответа считается ровно по ним. Та же нарезка,
     что в колонке «за час» почасового отчёта, — цифры обязаны совпадать.
     Только прошедшие часы сегодняшних суток плюс текущий, ещё неполный (решение владельца).
-    Число людей на линии — ГОЛОВЫ: сколько РАЗНЫХ чатников держало линию внутри часа дольше
-    порога в 2 минуты. Среднее по человеко-секундам отсюда убрано — оно показывало дробь
-    вместо людей, а на стене нужен ответ «сколько человек было» (решение владельца
-    18.08.2026)."""
+    Линия за час меряется в FTE (полных ставках, `fte`), а не в головах: человеко-секунды
+    «Онлайн» делятся на длину часа. 1,0 = линию весь час держал ровно один человек; двое по
+    полчаса дают ту же единицу, а голова тут соврала бы двойкой. Делим именно на ПРОЖИТЫЙ
+    кусок часа — иначе текущий час, прожитый на треть, показывал бы втрое меньше, чем на нём
+    реально работает."""
     now_seconds = max(1, now.hour * 3600 + now.minute * 60 + now.second)
-    online_per_person = _szov_chat_wallboard_online_per_person(timelines, now_seconds)
+    online_seconds = _szov_chat_wallboard_online_seconds(timelines, now_seconds)
     by_hour = {}
     for row in request_rows or []:
         hour = _szov_chat_wallboard_day_seconds(_chat_hourly_request_start(row))
@@ -32765,17 +32757,15 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now):
     for hour in range(0, now.hour + 1):
         hour_rows = by_hour.get(hour) or []
         first_reply, inner_reply = _chat_hourly_response_times(hour_rows)
-        # Порог не может быть больше уже прожитого куска часа: иначе первые две минуты каждого
-        # часа на стене стояли бы с нулём людей при полной линии.
         elapsed = max(1, min(now_seconds, (hour + 1) * 3600) - hour * 3600)
-        threshold = min(SZOV_CHAT_WALLBOARD_MIN_ONLINE_SECONDS, elapsed)
         rows.append({
             'hour': hour,
             'chats': len(hour_rows),
             'first_reply_seconds': first_reply,
             'inner_reply_seconds': inner_reply,
-            'operators_online': sum(1 for seconds in (online_per_person.get(hour) or {}).values()
-                                    if seconds >= threshold),
+            # Ключ не `operators_online`: у плитки «сейчас» это ЛЮДИ, а здесь ставки, и одно
+            # имя на две разные величины уже путало.
+            'fte': round(online_seconds.get(hour, 0) / elapsed, 2),
             'partial': hour == now.hour,
         })
     return rows
