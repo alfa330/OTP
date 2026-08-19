@@ -191,6 +191,15 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const spaceName = useMemo(
         () => new Map(spaces.map((sp) => [sp.id, sp.name])), [spaces]);
 
+    /* Из какого пространства раздел уезжает. Держим не в состоянии модалки, а
+       выводим из списка: состояние модалки правится на каждый ввод, и копия
+       исходного значения в нём разошлась бы с деревом после reload. */
+    const originalSpaceId = sectionModal?.id
+        ? sections.find((x) => x.id === sectionModal.id)?.space_id
+        : null;
+    const movingSection = !!originalSpaceId
+        && Number(sectionModal?.space_id) !== Number(originalSpaceId);
+
     const archiveSpace = (space) => {
         setBusy(true);
         axios.delete(`${base}/spaces/${space.id}`, { headers })
@@ -244,7 +253,12 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             : axios.post(`${base}/sections`, payload, { headers });
         request
             .then(() => {
-                showToast?.(sectionModal.id ? 'Раздел обновлён' : 'Раздел создан', 'success');
+                showToast?.(
+                    // Переезд называем переездом: «обновлён» на перенесённой
+                    // ветке не даёт понять, случилось ли главное.
+                    movingSection ? 'Раздел перенесён в другое пространство'
+                        : sectionModal.id ? 'Раздел обновлён' : 'Раздел создан',
+                    'success');
                 setSectionModal(null);
                 reload();
             })
@@ -639,6 +653,37 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 onChange={(e) => setSectionModal({ ...sectionModal, name: e.target.value })}
                                 placeholder="Например: Регламенты"
                             />
+                        </div>
+                        {/* Пространство. Раньше поля не было вовсе: раздел,
+                            созданный не там, приходилось заводить заново
+                            вручную вместе со всеми подразделами и правилами. */}
+                        <div>
+                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
+                                Пространство
+                            </label>
+                            <CustomSelect
+                                variant="ios"
+                                value={String(sectionModal.space_id || '')}
+                                onChange={(v) => setSectionModal({
+                                    ...sectionModal,
+                                    space_id: Number(v),
+                                    /* Родитель остался в прежнем дереве — в новом
+                                       пространстве его нет. Сбрасываем в корень,
+                                       иначе в поле висит имя раздела, которого в
+                                       выбранном пространстве не существует. */
+                                    parent_section_id: '',
+                                })}
+                                options={activeSpaces.map((sp) => ({
+                                    value: String(sp.id), label: sp.name,
+                                }))}
+                                ariaLabel="Пространство раздела"
+                            />
+                            {sectionModal.id && movingSection && (
+                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-amber-600">
+                                    Раздел переедет из пространства «{spaceName.get(originalSpaceId) || '—'}»
+                                    вместе со всеми подразделами. Права и статьи остаются при нём.
+                                </p>
+                            )}
                         </div>
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">

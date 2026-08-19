@@ -255,6 +255,80 @@ def section_exists(cursor, section_id):
     return row[0] if row else None
 
 
+def section_subtree_ids(cursor, section_id):
+    """Раздел и все его потомки, от корня вниз.
+
+    Нужен переезду в другое пространство: подразделы обязаны ехать вместе с
+    родителем (см. move_section_to_space).
+    """
+    cursor.execute(
+        """
+        WITH RECURSIVE down AS (
+            SELECT id, 0 AS depth FROM wiki_sections WHERE id = %s
+            UNION ALL
+            SELECT s.id, down.depth + 1
+              FROM wiki_sections s JOIN down ON s.parent_section_id = down.id
+        )
+        SELECT id FROM down ORDER BY depth, id
+        """,
+        (section_id,),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def move_section_to_space(cursor, section_id, *, space_id, parent_section_id=None):
+    """Перенести раздел в другое пространство ВМЕСТЕ С ПОДДЕРЕВОМ.
+
+    Почему space_id нет в _SECTION_UPDATABLE и переезд живёт отдельной функцией:
+    пространство хранится у КАЖДОГО раздела своим полем, а не выводится из
+    родителя. Увезти одну строку — значит оставить её подразделы числиться в
+    старом пространстве: вкладка «Разделы» строит дерево внутри пространства, и
+    ветка исчезла бы с обеих сторон — у родителя нет детей, у детей нет
+    родителя. Поэтому переезд всегда групповой, и обычный частичный UPDATE к
+    нему не подпускается.
+
+    Родителем становится parent_section_id (None — корень целевого
+    пространства); у остальных разделов поддерева родитель не меняется — он
+    едет вместе с ними.
+
+    Слаг уникален в пределах пространства, поэтому каждому переезжающему
+    разделу он пересчитывается: в целевом пространстве такой мог быть уже
+    занят, и переезд падал бы в обработчик ошибок вместо внятного ответа.
+    Возвращает число перенесённых разделов.
+    """
+    ids = section_subtree_ids(cursor, section_id)
+    if not ids:
+        return 0
+    cursor.execute('SELECT id, slug FROM wiki_sections WHERE id = ANY(%s)', (ids,))
+    slugs = dict(cursor.fetchall())
+    for member_id in ids:
+        # Слаг подбирается по одному и сразу записывается: следующий раздел
+        # поддерева обязан видеть занятое предыдущим.
+        slug = free_section_slug(cursor, space_id, slugs.get(member_id),
+                                 exclude_id=member_id)
+        if member_id == section_id:
+            cursor.execute(
+                """
+                UPDATE wiki_sections
+                   SET space_id = %s, parent_section_id = %s, slug = %s,
+                       updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                 WHERE id = %s
+                """,
+                (space_id, parent_section_id, slug, member_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE wiki_sections
+                   SET space_id = %s, slug = %s,
+                       updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                 WHERE id = %s
+                """,
+                (space_id, slug, member_id),
+            )
+    return len(ids)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Правила доступа к разделам
 # ─────────────────────────────────────────────────────────────────────────────

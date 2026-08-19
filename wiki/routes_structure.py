@@ -359,7 +359,8 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_section_item(cursor, ctx, section_id):
         cursor.execute(
             """
-            SELECT s.name, sp.department_id, s.space_id, s.parent_section_id
+            SELECT s.name, sp.department_id, s.space_id, s.parent_section_id,
+                   s.department_id
               FROM wiki_sections s JOIN wiki_spaces sp ON sp.id = s.space_id
              WHERE s.id = %s
             """,
@@ -372,6 +373,7 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": "Раздел относится к другому отделу"}), 403
         section_exists_space_id = row[2]
         section_parent_id = row[3]
+        section_department_id = row[4]
 
         if request.method == 'DELETE':
             structure.update_section(cursor, section_id, {'status': 'archived'})
@@ -381,13 +383,47 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"status": "archived"})
 
         data = _body()
+
+        # ── Переезд в другое пространство ────────────────────────────────
+        # Форма шлёт space_id при КАЖДОМ сохранении, поэтому переездом считается
+        # только отличие от текущего: иначе правка названия всякий раз тащила бы
+        # раздел в корень. Раньше ключ не читался вовсе — раздел оставался на
+        # месте, а ответ был «Раздел обновлён»: молчаливый отказ, худший из
+        # возможных, потому что человек уходит уверенным, что перенёс.
+        target_space_id = section_exists_space_id
+        moving = False
+        if 'space_id' in data:
+            requested = _int_or_none(data['space_id'])
+            if requested and requested != section_exists_space_id:
+                cursor.execute('SELECT department_id, status FROM wiki_spaces WHERE id = %s',
+                               (requested,))
+                target = cursor.fetchone()
+                if not target:
+                    return jsonify({"error": "Пространство не найдено"}), 404
+                # Право нужно на ОБА пространства: иначе глава отдела вывез бы
+                # свой раздел в чужое дерево (или чужой — к себе).
+                if not _may_manage_space(ctx, target[0]):
+                    return jsonify({
+                        "error": "Это пространство относится к другому отделу",
+                        "code": "WIKI_DEPARTMENT_SCOPE",
+                    }), 403
+                if target[1] != 'active':
+                    return jsonify({
+                        "error": "Пространство в архиве — сначала верните его из архива",
+                        "code": "WIKI_SPACE_ARCHIVED",
+                    }), 400
+                target_space_id = requested
+                moving = True
+
         fields = {}
         for key in ('name', 'description', 'icon'):
             if key in data:
                 fields[key] = _clean(data[key], 2000 if key == 'description' else 255)
         if 'slug' in data:
+            # Слаг уникален в пределах пространства — значит, свободный ищем в
+            # ЦЕЛЕВОМ, а не в том, из которого раздел уезжает.
             fields['slug'] = structure.free_section_slug(
-                cursor, section_exists_space_id, _clean(data['slug'], 200) or _slugify(row[0]),
+                cursor, target_space_id, _clean(data['slug'], 200) or _slugify(row[0]),
                 exclude_id=section_id)
         if data.get('visibility_scope') in ('public', 'restricted'):
             fields['visibility_scope'] = data['visibility_scope']
@@ -405,29 +441,69 @@ def register(bp, wiki_route, db, log_ip):
                     "code": "WIKI_SECTION_CYCLE",
                 }), 400
             fields['parent_section_id'] = parent
+
+        if moving:
+            # Родитель обязан жить в целевом пространстве. Пустой ключ — переезд
+            # в корень: это норма, а не ошибка, потому что дерева-источника в
+            # новом пространстве нет.
+            new_parent_id = fields.pop('parent_section_id', None)
+            if new_parent_id and structure.section_exists(
+                    cursor, new_parent_id) != target_space_id:
+                return jsonify({
+                    "error": "Родительский раздел лежит в другом пространстве",
+                    "code": "WIKI_SECTION_PARENT_SPACE",
+                }), 400
+        else:
+            new_parent_id = fields.get('parent_section_id', section_parent_id)
+
         # Отдел ветки: вид раздела выводим из него же, вторым полем не берём —
         # иначе пара «kind=department, department_id=NULL» проскочит мимо
         # уникального индекса и ветка перестанет быть веткой.
+        new_department_id = (_int_or_none(data['department_id'])
+                             if 'department_id' in data else section_department_id)
         if 'department_id' in data:
-            department_id = _int_or_none(data['department_id'])
+            fields['department_id'] = new_department_id
+            fields['section_kind'] = structure.section_kind_of(new_department_id)
+        # Проверяем и при переезде без смены отдела: uq_wiki_section_department
+        # висит на (пространство, родитель, отдел), и ветка «ОП» могла уже быть
+        # в целевом пространстве. Хватает проверки одного корня переезда —
+        # у остальных разделов поддерева родитель едет вместе с ними, а значит
+        # соседей за пределами поддерева у них не появляется.
+        if 'department_id' in data or moving:
             taken = structure.department_branch_taken(
-                cursor, space_id=section_exists_space_id,
-                parent_section_id=fields.get('parent_section_id', section_parent_id),
-                department_id=department_id, exclude_id=section_id)
+                cursor, space_id=target_space_id, parent_section_id=new_parent_id,
+                department_id=new_department_id, exclude_id=section_id)
             if taken:
                 return jsonify({
                     "error": "Ветка этого отдела здесь уже есть — «%s»" % taken,
                     "code": "WIKI_DEPARTMENT_BRANCH_TAKEN",
                 }), 400
-            fields['department_id'] = department_id
-            fields['section_kind'] = structure.section_kind_of(department_id)
 
-        if not structure.update_section(cursor, section_id, fields):
+        moved = 0
+        if moving:
+            moved = structure.move_section_to_space(
+                cursor, section_id, space_id=target_space_id,
+                parent_section_id=new_parent_id)
+
+        # Переезд — сам по себе изменение: без второго условия перенос без
+        # правки полей отвечал бы «Нечего обновлять» на выполненную работу.
+        if not structure.update_section(cursor, section_id, fields) and not moved:
             return jsonify({"error": "Нечего обновлять"}), 400
-        queries.log_action(cursor, actor_id=ctx['user_id'], action='section.update',
-                           entity_type='section', entity_id=section_id,
-                           details=fields, ip_address=log_ip())
-        return jsonify({"status": "ok"})
+        if moved:
+            queries.log_action(cursor, actor_id=ctx['user_id'], action='section.move',
+                               entity_type='section', entity_id=section_id,
+                               details={'name': row[0],
+                                        'from_space_id': section_exists_space_id,
+                                        'to_space_id': target_space_id,
+                                        'parent_section_id': new_parent_id,
+                                        'sections_moved': moved},
+                               ip_address=log_ip())
+        if fields:
+            queries.log_action(cursor, actor_id=ctx['user_id'], action='section.update',
+                               entity_type='section', entity_id=section_id,
+                               details=fields, ip_address=log_ip())
+        return jsonify({"status": "ok", "space_id": target_space_id,
+                        "sections_moved": moved})
 
     # ── Правила доступа ──────────────────────────────────────────────────
     # Гейт не одной способностью, а любой из двух: справочник нужен и форме

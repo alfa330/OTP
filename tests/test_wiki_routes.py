@@ -402,8 +402,9 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
         structure.department_branch_taken = lambda cursor, **kwargs: None
 
         client, cursor = self._admin()
-        # SELECT в начале обработчика: имя, отдел пространства, space_id, родитель.
-        cursor.fetchone.return_value = ('Оператор', None, 1, 5)
+        # SELECT в начале обработчика: имя, отдел пространства, space_id,
+        # родитель, отдел самого раздела.
+        cursor.fetchone.return_value = ('Оператор', None, 1, 5, None)
         response = client.patch('/api/wiki/sections/9', json={'department_id': None})
 
         self.assertEqual(response.status_code, 200)
