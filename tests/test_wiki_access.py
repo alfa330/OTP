@@ -288,6 +288,19 @@ class GrantCeilingTest(unittest.TestCase):
         self.assertEqual(self.granted('super_admin'),
                          ['Оператор', 'Тренер', 'Супервайзер', 'Руководитель'])
 
+    def test_commercial_director_reaches_every_role(self):
+        """«Может добавить ЛЮБОГО сотрудника» — включая админов и супер-админов.
+
+        Потолок 40 отрезал от списка пятерых супер-админов, и владелец не смог
+        выписать точечное правило на коллегу. Правило «никто не выдаёт своему
+        уровню» действует ниже по лестнице, но наверху смысла не имеет: над
+        директором никого нет, а супер-админ и так видит все разделы.
+        """
+        for role in ('operator', 'trainee', 'trainer', 'sv', 'admin', 'super_admin'):
+            self.assertTrue(
+                access.may_grant_rule('super_admin', None, target_role=role),
+                'директор должен уметь адресовать правило роли %s' % role)
+
     def test_head_grants_everyone_below(self):
         self.assertEqual(self.granted('admin'), ['Оператор', 'Тренер', 'Супервайзер'])
 
@@ -301,17 +314,23 @@ class GrantCeilingTest(unittest.TestCase):
         self.assertEqual(self.granted('operator'), [])
         self.assertEqual(self.granted('trainee'), [])
 
-    def test_nobody_grants_at_own_level(self):
-        """Никто не открывает раздел собственному уровню.
+    def test_middle_ranks_do_not_grant_at_own_level(self):
+        """Середина лестницы не открывает раздел собственному уровню.
 
         Иначе супервайзер выдал бы права всем супервайзерам компании, а
         руководитель — всем руководителям: это уже не делегирование, а
         расширение собственного круга.
+
+        Директор — намеренное исключение: он и есть верх лестницы, и владелец
+        сформулировал его право как «любого сотрудника». Раньше этот тест
+        включал и его — и тем закреплял ограничение, которого никто не просил.
         """
-        for role in ('super_admin', 'admin', 'sv'):
+        for role in ('admin', 'sv'):
             level = access.ROLE_LEVELS[role]
             self.assertFalse(access.may_grant_rule(role, level),
                              '%s не должен выдавать своему уровню' % role)
+        self.assertTrue(access.may_grant_rule('super_admin',
+                                              access.ROLE_LEVELS['super_admin']))
 
     def test_personal_rule_checks_target_role(self):
         """Правило на человека проверяется по РОЛИ адресата, а не только по порогу.
@@ -338,6 +357,10 @@ class GrantCeilingTest(unittest.TestCase):
         """Роль вики с can_manage_access назначают руками — она поднимает потолок."""
         self.assertFalse(access.may_grant_rule('sv', 40))
         self.assertTrue(access.may_grant_rule('sv', 40, is_wiki_admin=True))
+        # До самого верха: администратор вики не должен упираться в потолок ниже
+        # директорского, иначе назначение роли ничего толком не даёт.
+        self.assertTrue(access.may_grant_rule('sv', None, is_wiki_admin=True,
+                                              target_role='super_admin'))
 
 
 if __name__ == '__main__':

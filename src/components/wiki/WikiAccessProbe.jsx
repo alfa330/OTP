@@ -19,9 +19,14 @@ import CustomSelect from '../ui/CustomSelect';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Словарь портала, а не свой. Раньше здесь стояли «руководитель» и «директор»,
+   которых больше нигде в системе нет: поиск по слову «админ» не находил никого,
+   и выглядело это как «админов в списке нет» — хотя они были. Ровно эти же
+   подписи отдаёт справочник ролей в /access/subjects. */
 const ROLE_TITLE = {
-    operator: 'оператор', trainee: 'стажёр', trainer: 'тренер', sv: 'супервайзер',
-    supervisor: 'супервайзер', admin: 'руководитель', super_admin: 'директор',
+    operator: 'оператор', trainee: 'стажёр', trainer: 'тренер',
+    sv: 'супервайзер', supervisor: 'супервайзер',
+    admin: 'админ', super_admin: 'супер-админ',
 };
 
 export default function WikiAccessProbe({ base, headers, open, onClose }) {
