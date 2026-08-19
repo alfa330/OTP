@@ -113,19 +113,33 @@ test('состав неизвестен — говорим хотя бы о фа
     assert.equal(notice.tag, 'otp-bell-summary');
 });
 
-test('выключатель помнится по пользователю, а не по компьютеру', () => {
-    // За одним компьютером сидят посменно: чужая галочка не должна доставаться
-    // следующему оператору.
+test('по умолчанию ВКЛЮЧЕНО, пока человек не высказался', () => {
+    // Прежний opt-in означал два шага вместо одного: разрешение выдано, а
+    // переключатель серый — и функция «не работает».
     const storage = memoryStorage();
+    assert.equal(readDesktopPref(11, storage), true);
+});
+
+test('явное «выключить» переживает перезаход', () => {
+    // Ключ НЕ стирается: стёртый читался бы как «по умолчанию», то есть как
+    // «включено», и снятый флажок воскресал бы сам собой.
+    const storage = memoryStorage();
+    writeDesktopPref(11, false, storage);
+    assert.equal(storage.getItem(desktopPrefKey(11)), '0');
+    assert.equal(readDesktopPref(11, storage), false);
+
     writeDesktopPref(11, true, storage);
     assert.equal(readDesktopPref(11, storage), true);
-    assert.equal(readDesktopPref(12, storage), false);
-    assert.notEqual(desktopPrefKey(11), desktopPrefKey(12));
+});
 
+test('выключатель помнится по пользователю, а не по компьютеру', () => {
+    // За одним компьютером сидят посменно: чужой снятый флажок не должен
+    // доставаться следующему оператору.
+    const storage = memoryStorage();
     writeDesktopPref(11, false, storage);
     assert.equal(readDesktopPref(11, storage), false);
-    // Выключение стирает ключ, а не пишет '0' — чтобы хранилище не копило мусор.
-    assert.equal(storage.size(), 0);
+    assert.equal(readDesktopPref(12, storage), true);
+    assert.notEqual(desktopPrefKey(11), desktopPrefKey(12));
 });
 
 test('недоступное хранилище не роняет колокол', () => {
@@ -135,9 +149,9 @@ test('недоступное хранилище не роняет колокол
         setItem() { throw new Error('SecurityError'); },
         removeItem() { throw new Error('SecurityError'); },
     };
-    assert.equal(readDesktopPref(1, broken), false);
+    assert.equal(readDesktopPref(1, broken), true);
     assert.doesNotThrow(() => writeDesktopPref(1, true, broken));
-    assert.equal(readDesktopPref(1, undefined), false);
+    assert.equal(readDesktopPref(1, undefined), true);
 });
 
 test('браузер без Notification опознаётся, а не притворяется рабочим', () => {

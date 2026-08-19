@@ -18,19 +18,29 @@
 // Ключ с id: за одним компьютером сидят посменно разные операторы.
 export const desktopPrefKey = (userId) => `otp:desktop-notifications:${userId ?? 'anon'}`;
 
+/* По умолчанию ВКЛЮЧЕНО. Разрешение браузера всё равно спрашивается отдельно и
+   только по клику, так что само по себе это никого не потревожит: плашки
+   поедут лишь тем, кто разрешение уже дал. Прежний opt-in означал два шага
+   вместо одного, и второй никто не делал — разрешение выдано, а переключатель
+   стоит серым, и человек считает, что функция не работает.
+   Отсутствие ключа и явное «выключить» — РАЗНЫЕ вещи: первое значит «не
+   высказывался», второе пишется нулём и переживает перезаход. Поэтому
+   выключение больше НЕ стирает ключ: стёртый читался бы как «по умолчанию»,
+   то есть как «включено», и снятый флажок воскресал бы сам. */
 export const readDesktopPref = (userId, storage) => {
     try {
-        return storage?.getItem(desktopPrefKey(userId)) === '1';
+        const raw = storage?.getItem(desktopPrefKey(userId));
+        if (raw === null || raw === undefined) return true;
+        return raw === '1';
     } catch (e) {
         // Приватный режим и заблокированные куки роняют доступ к хранилищу.
-        return false;
+        return true;
     }
 };
 
 export const writeDesktopPref = (userId, value, storage) => {
     try {
-        if (value) storage?.setItem(desktopPrefKey(userId), '1');
-        else storage?.removeItem(desktopPrefKey(userId));
+        storage?.setItem(desktopPrefKey(userId), value ? '1' : '0');
     } catch (e) {
         /* см. выше — не смогли запомнить, работаем в рамках сессии */
     }
