@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, ArrowLeft, CheckCircle2, ChevronRight, Inbox, Loader2,
+    AlertCircle, ArrowLeft, CheckCircle2, ChevronRight, CornerUpLeft, Inbox, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
 } from 'lucide-react';
 import {
@@ -11,6 +11,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import TicketWizard from './TicketWizard';
 import { formatTicketBody } from './ticketBody';
+import { attachmentKind, authorTone, indexByTgId, messageSnippet, quoteOf } from './threadView';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
  *
@@ -183,24 +184,54 @@ const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
 
 /* ─── Сообщение в переписке ───────────────────────────────────────────────── */
 
-const MessageBubble = ({ message, apiBaseUrl, ticketId, headers, showToast }) => {
-    const outgoing = message.direction === 'out';
-    const note = message.direction === 'note';
+/* Вложение внутри пузыря. Картинки, видео и звук показываются сразу — как в
+ * «Чатах ЧатАпп» и «Чатах Верификаторов»; остальное остаётся файлом-кнопкой.
+ *
+ * Отличие от тех разделов в одном: там у файла есть прямая ссылка, а здесь файл
+ * лежит в Telegram, ссылка живёт около часа и запрос требует авторизации.
+ * Поэтому картинку сначала выкачиваем в память и показываем как объектную
+ * ссылку — и обязательно освобождаем её при размонтировании, иначе открытая
+ * переписка на сотню фото просто не отдаст память обратно.
+ */
+const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light }) => {
+    const kind = attachmentKind(message.attachment);
+    const inline = kind === 'image' || kind === 'video' || kind === 'audio';
+    const [url, setUrl] = useState(null);
+    const [failed, setFailed] = useState(false);
+    const [zoom, setZoom] = useState(false);
     const [downloading, setDownloading] = useState(false);
 
-    /* Вложение забираем через прокси раздела: файл лежит в Telegram, и прямую
-       ссылку сохранить нельзя — она живёт около часа. Скачиваем с заголовками
-       авторизации, поэтому обычный <a href> не подходит. */
-    const openAttachment = async () => {
+    const fetchFile = useCallback(async () => {
+        const response = await axios.get(
+            `${apiBaseUrl}/api/crm/tickets/${ticketId}/attachments/${message.id}`,
+            { headers: headers(), responseType: 'blob' },
+        );
+        return URL.createObjectURL(response.data);
+    }, [apiBaseUrl, headers, message.id, ticketId]);
+
+    useEffect(() => {
+        if (!inline) return undefined;
+        let alive = true;
+        let created = null;
+        fetchFile()
+            .then((next) => {
+                if (!alive) { URL.revokeObjectURL(next); return; }
+                created = next;
+                setUrl(next);
+            })
+            .catch(() => { if (alive) setFailed(true); });
+        return () => {
+            alive = false;
+            if (created) URL.revokeObjectURL(created);
+        };
+    }, [inline, fetchFile]);
+
+    const openFile = async () => {
         setDownloading(true);
         try {
-            const response = await axios.get(
-                `${apiBaseUrl}/api/crm/tickets/${ticketId}/attachments/${message.id}`,
-                { headers: headers(), responseType: 'blob' },
-            );
-            const url = URL.createObjectURL(response.data);
-            window.open(url, '_blank', 'noopener');
-            setTimeout(() => URL.revokeObjectURL(url), 60000);
+            const next = await fetchFile();
+            window.open(next, '_blank', 'noopener');
+            setTimeout(() => URL.revokeObjectURL(next), 60000);
         } catch (error) {
             showToast?.(errorText(error, 'Не удалось открыть вложение'), 'error');
         } finally {
@@ -208,8 +239,67 @@ const MessageBubble = ({ message, apiBaseUrl, ticketId, headers, showToast }) =>
         }
     };
 
+    if (inline && !failed) {
+        if (!url) {
+            return (
+                <div className={`mt-1.5 grid h-28 w-40 place-items-center rounded-xl ${
+                    light ? 'bg-white/15' : 'bg-white'
+                }`}>
+                    <Loader2 size={16} className="animate-spin opacity-60" />
+                </div>
+            );
+        }
+        if (kind === 'image') {
+            return (
+                <>
+                    <img src={url} alt={message.attachment.name || ''} loading="lazy"
+                         onError={() => setFailed(true)}
+                         onClick={() => setZoom(true)}
+                         className="mt-1.5 max-h-64 w-auto max-w-full cursor-zoom-in rounded-xl" />
+                    <IosModal open={zoom} onClose={() => setZoom(false)} title="Вложение"
+                              maxWidth="max-w-3xl">
+                        <img src={url} alt={message.attachment.name || ''}
+                             className="mx-auto max-h-[72vh] w-auto rounded-2xl" />
+                    </IosModal>
+                </>
+            );
+        }
+        if (kind === 'video') {
+            return <video controls preload="metadata" src={url} onError={() => setFailed(true)}
+                          className="mt-1.5 max-h-64 w-auto max-w-full rounded-xl" />;
+        }
+        return <audio controls preload="none" src={url} onError={() => setFailed(true)}
+                      className="mt-1.5 h-10 w-56 max-w-full" />;
+    }
+
     return (
-        <div className={`flex ${outgoing ? 'justify-end' : 'justify-start'}`}>
+        <button type="button" onClick={openFile} disabled={downloading}
+                className={`mt-1.5 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium transition ${
+                    light ? 'bg-white/15 hover:bg-white/25' : 'bg-white hover:bg-slate-50'
+                }`}>
+            {downloading ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />}
+            {message.attachment.name || 'Вложение'}
+        </button>
+    );
+};
+
+const MessageBubble = ({
+    message, quote, apiBaseUrl, ticketId, headers, showToast, onReply, onJumpTo,
+}) => {
+    const outgoing = message.direction === 'out';
+    const note = message.direction === 'note';
+
+    return (
+        <div id={`crm-msg-${message.id}`}
+             className={`group flex items-center gap-1.5 ${
+                 outgoing ? 'justify-end' : 'justify-start'
+             }`}>
+            {/* Кнопка ответа показывается по наведению и стоит со стороны поля
+                ввода: у исходящих слева, у входящих справа — так она не
+                перекрывает текст и не занимает место постоянно. */}
+            {outgoing && onReply && (
+                <ReplyHandle onClick={() => onReply(message)} />
+            )}
             <div className={`max-w-[76%] rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
                 note
                     ? 'bg-amber-50 text-amber-900 ring-1 ring-amber-100'
@@ -217,8 +307,35 @@ const MessageBubble = ({ message, apiBaseUrl, ticketId, headers, showToast }) =>
                         ? 'bg-blue-600 text-white'
                         : 'bg-slate-100 text-slate-800'
             }`}>
+                {quote && (
+                    <button type="button"
+                            disabled={!quote.id}
+                            onClick={() => quote.id && onJumpTo?.(quote.id)}
+                            className={`mb-1.5 flex w-full gap-2 rounded-lg border-l-[3px] px-2 py-1 text-left transition ${
+                                outgoing
+                                    ? 'border-white/60 bg-white/10 hover:bg-white/20'
+                                    : 'border-blue-400 bg-white/70 hover:bg-white'
+                            } ${quote.id ? 'cursor-pointer' : 'cursor-default'}`}>
+                        <span className="min-w-0">
+                            {quote.author && (
+                                <span className={`block text-[11px] font-semibold ${
+                                    outgoing ? 'text-white/90' : 'text-blue-700'
+                                }`}>
+                                    {quote.author}
+                                </span>
+                            )}
+                            <span className={`block truncate text-[12px] ${
+                                outgoing ? 'text-white/80' : 'text-slate-500'
+                            }`}>
+                                {quote.text}
+                            </span>
+                        </span>
+                    </button>
+                )}
                 {!outgoing && message.author_name && (
-                    <div className="mb-0.5 text-[11.5px] font-semibold text-slate-500">
+                    <div className={`mb-0.5 text-[11.5px] font-semibold ${
+                        note ? 'text-amber-700' : authorTone(message)
+                    }`}>
                         {message.author_name}
                     </div>
                 )}
@@ -230,17 +347,8 @@ const MessageBubble = ({ message, apiBaseUrl, ticketId, headers, showToast }) =>
                         <div className="text-[12px] italic opacity-70">без текста</div>
                     ))}
                 {message.attachment && (
-                    <button
-                        type="button"
-                        onClick={openAttachment}
-                        disabled={downloading}
-                        className={`mt-1.5 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium transition ${
-                            outgoing ? 'bg-white/15 hover:bg-white/25' : 'bg-white hover:bg-slate-50'
-                        }`}
-                    >
-                        {downloading ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />}
-                        {message.attachment.name || 'Вложение'}
-                    </button>
+                    <MessageMedia message={message} apiBaseUrl={apiBaseUrl} ticketId={ticketId}
+                                  headers={headers} showToast={showToast} light={outgoing} />
                 )}
                 <div className={`mt-1 text-right text-[10.5px] tabular-nums ${
                     outgoing ? 'text-white/70' : 'text-slate-400'
@@ -248,9 +356,21 @@ const MessageBubble = ({ message, apiBaseUrl, ticketId, headers, showToast }) =>
                     {fmtTime(message.created_at)}
                 </div>
             </div>
+            {!outgoing && onReply && (
+                <ReplyHandle onClick={() => onReply(message)} />
+            )}
         </div>
     );
 };
+
+/* Ответить на это сообщение. Появляется только по наведению: постоянная кнопка
+ * у каждой реплики — это шум на каждой строке переписки. */
+const ReplyHandle = ({ onClick }) => (
+    <button type="button" onClick={onClick} title="Ответить"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 focus:opacity-100 group-hover:opacity-100">
+        <CornerUpLeft size={14} />
+    </button>
+);
 
 /* ─── Карточка обращения ──────────────────────────────────────────────────── */
 
@@ -261,6 +381,8 @@ const TicketCard = ({
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [reply, setReply] = useState('');
+    // На какое сообщение отвечаем. null — на обращение целиком, как было.
+    const [replyTo, setReplyTo] = useState(null);
     const [sending, setSending] = useState(false);
     const [attachment, setAttachment] = useState(null);
     // История действий не приезжает вместе с карточкой: она нужна изредка и
@@ -304,6 +426,20 @@ const TicketCard = ({
     const ticket = data?.item;
     const permissions = data?.permissions || {};
 
+    /* Указатель «на что отвечали» строится один раз на всю нить: у каждого
+       сообщения искать цель перебором значило бы квадрат на длинной переписке. */
+    const quoteIndex = useMemo(() => indexByTgId(data?.messages), [data?.messages]);
+
+    /* Переход к оригиналу по клику на цитату — как в Telegram. Подсветку снимаем
+       сами: без неё сообщение осталось бы выделенным навсегда. */
+    const jumpToMessage = useCallback((messageId) => {
+        const node = document.getElementById(`crm-msg-${messageId}`);
+        if (!node) return;
+        node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        node.classList.add('ring-2', 'ring-blue-400', 'rounded-2xl');
+        setTimeout(() => node.classList.remove('ring-2', 'ring-blue-400', 'rounded-2xl'), 1400);
+    }, []);
+
     const send = async () => {
         const body = reply.trim();
         if (!body && !attachment) return;
@@ -311,6 +447,7 @@ const TicketCard = ({
         try {
             const form = new FormData();
             form.append('body', body);
+            if (replyTo) form.append('reply_to', String(replyTo.id));
             if (attachment) form.append('attachment', attachment);
             const response = await axios.post(
                 `${apiBaseUrl}/api/crm/tickets/${ticketId}/messages`, form,
@@ -318,6 +455,7 @@ const TicketCard = ({
             );
             setData((prev) => (prev ? { ...prev, messages: response.data.messages } : prev));
             setReply('');
+            setReplyTo(null);
             setAttachment(null);
             if (fileRef.current) fileRef.current.value = '';
             onChanged?.();
@@ -483,8 +621,11 @@ const TicketCard = ({
                     .filter((m, index) => !(index === 0 && m.direction === 'out' && m.body === ticket.body))
                     .map((message) => (
                         <MessageBubble key={message.id} message={message} ticketId={ticket.id}
+                                       quote={quoteOf(message, quoteIndex)}
                                        apiBaseUrl={apiBaseUrl} headers={headers}
-                                       showToast={showToast} />
+                                       showToast={showToast}
+                                       onReply={permissions.can_reply ? setReplyTo : null}
+                                       onJumpTo={jumpToMessage} />
                     ))}
                 {ticket.resolved_at && (
                     <div className="flex items-center justify-center gap-1.5 py-1 text-[11.5px] text-emerald-600">
@@ -506,6 +647,23 @@ const TicketCard = ({
                         <input ref={fileRef} type="file" className="hidden"
                                onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
                         <div className="min-w-0 flex-1">
+                            {replyTo && (
+                                <div className="mb-1.5 flex items-start gap-2 rounded-lg border-l-[3px] border-blue-400 bg-slate-50 px-2 py-1">
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block text-[11px] font-semibold text-blue-700">
+                                            Ответ: {replyTo.author_name
+                                                || (replyTo.direction === 'out' ? 'Оператор' : 'сообщение')}
+                                        </span>
+                                        <span className="block truncate text-[11.5px] text-slate-500">
+                                            {messageSnippet(replyTo, 70)}
+                                        </span>
+                                    </span>
+                                    <button type="button" onClick={() => setReplyTo(null)}
+                                            className="mt-0.5 shrink-0 text-slate-400 hover:text-slate-600">
+                                        <X size={12} />
+                                    </button>
+                                </div>
+                            )}
                             {attachment && (
                                 <div className="mb-1.5 inline-flex items-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1 text-[11.5px] text-slate-600">
                                     <Paperclip size={11} /> {attachment.name}

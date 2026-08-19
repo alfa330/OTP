@@ -167,21 +167,37 @@ def _result_file_id(result):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def post_operator_reply(db, ticket_id, body, *, author_user_id, author_name,
-                        attachment=None):
-    """Пишет из системы в группу реплаем к обращению. Возвращает (ok, error)."""
+                        attachment=None, reply_to=None):
+    """Пишет из системы в группу реплаем. Возвращает (ok, error).
+
+    reply_to — строка нити, на которую отвечают. Без неё отвечаем на корневое
+    сообщение обращения, как было. С ней сотрудник в группе видит ровно ту
+    реплику, к которой относится ответ: вся ветка обсуждения падает в одну нить,
+    и без адресата она читается как разговор нескольких людей сразу.
+
+    Номер сообщения берётся ИЗ БАЗЫ по нашему id и только в пределах этого
+    обращения: доверять номеру с клиента нельзя — им можно было бы заставить
+    бота ответить на любое сообщение в рабочей группе.
+    """
     with db._get_cursor() as cursor:
         payload = queries.delivery_payload(cursor, ticket_id)
+        target = (queries.message_of_ticket(cursor, ticket_id, reply_to)
+                  if reply_to else None)
     if not payload:
         return False, 'Обращение не найдено'
     if not payload['chat_id'] or not payload['tg_message_id']:
         return False, 'Обращение ещё не доставлено в группу'
+    if reply_to and not (target and target['tg_message_id']):
+        return False, 'Сообщение, на которое отвечаете, не найдено в этом обращении'
+
+    reply_to_tg = (target or {}).get('tg_message_id') or payload['tg_message_id']
 
     text = telegram.build_reply_message(
         ticket_id=ticket_id, author_name=author_name, body=body,
         iin=payload.get('iin'),
     )
     result, error = transport.send_message(
-        payload['chat_id'], text, reply_to_message_id=payload['tg_message_id'],
+        payload['chat_id'], text, reply_to_message_id=reply_to_tg,
     )
     if result is None:
         return False, error
@@ -191,6 +207,7 @@ def post_operator_reply(db, ticket_id, body, *, author_user_id, author_name,
             cursor, ticket_id=ticket_id, direction='out', body=body,
             author_user_id=author_user_id, author_name=author_name,
             tg_chat_id=payload['chat_id'], tg_message_id=result.get('message_id'),
+            reply_to_tg_message_id=reply_to_tg,
         )
         queries.touch_outbound(cursor, ticket_id)
         queries.add_event(cursor, ticket_id=ticket_id, kind='reply_sent',
@@ -245,6 +262,10 @@ def ingest_group_reply(db, *, chat_id, reply_to_message_id, message):
             tg_from_name=author,
             tg_username=get('username') if from_user is not None else None,
             attachment=attachment,
+            # Вся ветка обсуждения падает в одну нить, и без этой связи
+            # непонятно, кому именно отвечали: сотрудники отвечают и боту, и
+            # друг другу.
+            reply_to_tg_message_id=reply_to_message_id,
         )
         # Дубль апдейта — молча выходим: нить уже содержит этот ответ, и
         # повторно звонить автору не за что.
@@ -256,7 +277,6 @@ def ingest_group_reply(db, *, chat_id, reply_to_message_id, message):
     return {'ticket_id': ticket_id, 'announce': first_reply}
 
 
-# Кнопки в группе. Действие → (новый статус, вид уведомления, ответ нажавшему).
 # ─────────────────────────────────────────────────────────────────────────────
 # Смена статуса из системы
 # ─────────────────────────────────────────────────────────────────────────────

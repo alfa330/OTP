@@ -293,6 +293,15 @@ class SchemaContractTest(unittest.TestCase):
         # если парк потом переименуют или уберут из справочника.
         self.assertIn('SELECT p.name', sql)
 
+    def test_reply_link_column_is_migrated(self):
+        """Столбец добавлен ALTER'ом: на боевой базе таблица уже существует, и
+        CREATE TABLE IF NOT EXISTS её не тронет."""
+        migrations = ' '.join(schema._MIGRATIONS)
+        self.assertIn('crm_ticket_messages ADD COLUMN IF NOT EXISTS reply_to_tg_message_id',
+                      migrations)
+        ddl = ' '.join(' '.join(schema._STATEMENTS).split())
+        self.assertIn('reply_to_tg_message_id BIGINT', ddl)
+
     def test_iin_is_indexed_for_search(self):
         """Без индекса поиск по ИИН стал бы проходом по всей таблице."""
         ddl = ' '.join(' '.join(schema._STATEMENTS).split())
@@ -582,6 +591,24 @@ class ListContractTest(unittest.TestCase):
         self.assertIn('t.client_name ILIKE', sql)
         self.assertNotIn('t.id =', sql)
 
+    def test_thread_carries_who_answered_whom(self):
+        """В нить падает вся ветка обсуждения, и без этой связи непонятно, кому
+        отвечали: сотрудники отвечают и боту, и друг другу."""
+        cursor = RecordingCursor()
+        queries.list_messages(cursor, 1)
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('reply_to_tg_message_id', sql)
+        # Автор берётся по id из Telegram: имя сотрудник может сменить, а цвет
+        # в переписке от этого переезжать не должен.
+        self.assertIn('tg_from_id', sql)
+
+    def test_reply_target_is_fetched_within_the_ticket(self):
+        """Иначе оператор заставил бы бота ответить на чужое сообщение в группе."""
+        cursor = RecordingCursor()
+        queries.message_of_ticket(cursor, 1, 2)
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('WHERE id = %s AND ticket_id = %s', sql)
+
     def test_thread_has_a_ceiling(self):
         """Ушедшая в обсуждение группа не должна тянуть тысячу сообщений в браузер."""
         cursor = RecordingCursor()
@@ -635,6 +662,7 @@ class SqlComposesTest(unittest.TestCase):
         queries.taxi_parks(cursor)
         queries.find_ticket_by_tg_message(cursor, -1001, 2)
         queries.find_message_attachment(cursor, 1, 2)
+        queries.message_of_ticket(cursor, 1, 2)
         queries.unread_for_bell(cursor, 10, 5)
         queries.touch_inbound(cursor, 1)
         queries.touch_outbound(cursor, 1)

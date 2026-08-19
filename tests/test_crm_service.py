@@ -52,7 +52,7 @@ class FakeQueries:
     UNREAD_PROGRESS = 'progress'
 
     def __init__(self, db, payload=None, ticket=None, found=None,
-                 message_id=1, status_changed=True):
+                 message_id=1, status_changed=True, thread_message=None):
         self.db = db
         self.calls = []
         self._payload = payload
@@ -60,6 +60,7 @@ class FakeQueries:
         self._found = found
         self._message_id = message_id
         self._status_changed = status_changed
+        self._thread_message = thread_message
 
     def _record(self, name, **kwargs):
         # Любой вызов SQL-слоя обязан идти с открытым курсором.
@@ -74,6 +75,10 @@ class FakeQueries:
     def get_ticket(self, _cursor, ticket_id, viewer_id=None):
         self._record('get_ticket', ticket_id=ticket_id)
         return self._ticket
+
+    def message_of_ticket(self, _cursor, ticket_id, message_id):
+        self._record('message_of_ticket', ticket_id=ticket_id, message_id=message_id)
+        return self._thread_message
 
     def set_delivery(self, _cursor, ticket_id, **kwargs):
         self._record('set_delivery', ticket_id=ticket_id, **kwargs)
@@ -163,10 +168,11 @@ class ServiceCase(unittest.TestCase):
         service.transport = self._real_transport
 
     def wire(self, *, payload=None, ticket=None, found=None, message_id=1,
-             status_changed=True, result=None, error=None):
+             status_changed=True, result=None, error=None, thread_message=None):
         service.queries = FakeQueries(
             self.db, payload=payload, ticket=ticket, found=found,
             message_id=message_id, status_changed=status_changed,
+            thread_message=thread_message,
         )
         service.transport = FakeTransport(self.db, result=result, error=error)
         return service.queries, service.transport
@@ -270,6 +276,58 @@ class DeliveryTest(ServiceCase):
         # Курсор берётся короткими порциями, а не одним на всю операцию.
         self.assertGreaterEqual(self.db.opened, 2)
         self.assertEqual(self.db.max_depth, 1)
+
+
+class OperatorReplyTest(ServiceCase):
+    """Ответ оператора — в том числе на КОНКРЕТНОЕ сообщение нити.
+
+    В нить падает вся ветка обсуждения из группы, и «ответить вообще» там
+    читается как реплика в разговор нескольких людей сразу.
+    """
+
+    def test_without_a_target_answers_the_ticket_itself(self):
+        _queries, transport = self.wire(payload=dict(PAYLOAD, tg_message_id=555))
+        ok, error = service.post_operator_reply(
+            self.db, 42, 'уточняю', author_user_id=2, author_name='Руслан')
+        self.assertTrue(ok, error)
+        self.assertEqual(transport.sent[0]['reply_to_message_id'], 555)
+
+    def test_answers_the_chosen_message(self):
+        queries, transport = self.wire(
+            payload=dict(PAYLOAD, tg_message_id=555),
+            thread_message={'id': 7, 'tg_message_id': 777, 'body': 'а что с парком',
+                            'author_name': 'Гаухар'})
+        ok, error = service.post_operator_reply(
+            self.db, 42, 'по парку iTaxi', author_user_id=2, author_name='Руслан',
+            reply_to=7)
+        self.assertTrue(ok, error)
+        self.assertEqual(transport.sent[0]['reply_to_message_id'], 777)
+        added = queries.find('add_message')[0]
+        self.assertEqual(added['reply_to_tg_message_id'], 777)
+
+    def test_target_is_looked_up_in_this_ticket_only(self):
+        """Иначе оператор заставил бы бота ответить на любое сообщение в группе."""
+        queries, transport = self.wire(payload=dict(PAYLOAD, tg_message_id=555),
+                                       thread_message=None)
+        ok, error = service.post_operator_reply(
+            self.db, 42, 'текст', author_user_id=2, author_name='Руслан', reply_to=999)
+        self.assertFalse(ok)
+        self.assertIn('не найдено', error)
+        self.assertEqual(transport.sent, [], 'в группу всё равно ушло')
+        asked = queries.find('message_of_ticket')[0]
+        self.assertEqual(asked['ticket_id'], 42)
+        self.assertEqual(asked['message_id'], 999)
+
+    def test_target_without_a_telegram_number_is_rejected(self):
+        """Строка нити есть, а в Telegram её нет — отвечать не на что."""
+        _queries, transport = self.wire(
+            payload=dict(PAYLOAD, tg_message_id=555),
+            thread_message={'id': 7, 'tg_message_id': None, 'body': 'заметка',
+                            'author_name': None})
+        ok, _error = service.post_operator_reply(
+            self.db, 42, 'текст', author_user_id=2, author_name='Руслан', reply_to=7)
+        self.assertFalse(ok)
+        self.assertEqual(transport.sent, [])
 
 
 class IncomingReplyTest(ServiceCase):

@@ -535,7 +535,8 @@ def set_delivery(cursor, ticket_id, *, status, chat_id=None, message_id=None, er
 
 def add_message(cursor, *, ticket_id, direction, body=None, author_user_id=None,
                 author_name=None, tg_chat_id=None, tg_message_id=None, tg_from_id=None,
-                tg_from_name=None, tg_username=None, attachment=None):
+                tg_from_name=None, tg_username=None, attachment=None,
+                reply_to_tg_message_id=None):
     """Добавляет сообщение в нить. Возвращает id или None, если это дубль.
 
     Дубль — не ошибка: Telegram штатно повторяет апдейт, если не получил
@@ -548,15 +549,15 @@ def add_message(cursor, *, ticket_id, direction, body=None, author_user_id=None,
             (ticket_id, direction, body, author_user_id, author_name,
              tg_chat_id, tg_message_id, tg_from_id, tg_from_name, tg_username,
              attachment_kind, attachment_file_id, attachment_name,
-             attachment_mime, attachment_size)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             attachment_mime, attachment_size, reply_to_tg_message_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT DO NOTHING
         RETURNING id
         """,
         (int(ticket_id), direction, body, author_user_id, author_name,
          tg_chat_id, tg_message_id, tg_from_id, tg_from_name, tg_username,
          attachment.get('kind'), attachment.get('file_id'), attachment.get('name'),
-         attachment.get('mime'), attachment.get('size')),
+         attachment.get('mime'), attachment.get('size'), reply_to_tg_message_id),
     )
     row = cursor.fetchone()
     return row[0] if row else None
@@ -569,12 +570,35 @@ def add_message(cursor, *, ticket_id, direction, body=None, author_user_id=None,
 MESSAGES_LIMIT = 300
 
 
+def message_of_ticket(cursor, ticket_id, message_id):
+    """Строка нити ЭТОГО обращения — для ответа на конкретное сообщение.
+
+    Проверка обязательна и делается запросом, а не доверием клиенту: иначе
+    оператор смог бы заставить бота ответить на любое сообщение в рабочей
+    группе, подставив чужой номер.
+    """
+    cursor.execute(
+        """
+        SELECT id, tg_message_id, body, author_name, tg_from_name
+          FROM crm_ticket_messages
+         WHERE id = %s AND ticket_id = %s
+        """,
+        (int(message_id), int(ticket_id)),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {'id': row[0], 'tg_message_id': row[1], 'body': row[2],
+            'author_name': row[3] or row[4]}
+
+
 def list_messages(cursor, ticket_id, limit=MESSAGES_LIMIT):
     cursor.execute(
         """
         SELECT id, direction, body, author_user_id, author_name,
                tg_from_name, tg_username, attachment_kind, attachment_name,
-               attachment_mime, attachment_size, created_at, tg_message_id
+               attachment_mime, attachment_size, created_at, tg_message_id,
+               tg_from_id, reply_to_tg_message_id
           FROM (
             SELECT * FROM crm_ticket_messages
              WHERE ticket_id = %s
@@ -599,6 +623,13 @@ def list_messages(cursor, ticket_id, limit=MESSAGES_LIMIT):
         } if row[7] else None,
         'created_at': _iso(row[11]),
         'tg_message_id': row[12],
+        # Кто написал — для окраски имени: у сотрудника из Telegram id
+        # устойчив, а имя он может сменить.
+        'telegram_user_id': row[13],
+        # На какое сообщение это ответ. Саму цитату собирает интерфейс: вся нить
+        # уже у него на руках, и второй запрос за текстом соседней строки был бы
+        # платой за ничего.
+        'reply_to_tg_message_id': row[14],
     } for row in cursor.fetchall()]
 
 

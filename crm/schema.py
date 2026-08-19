@@ -282,6 +282,11 @@ _STATEMENTS = [
         tg_from_id        BIGINT,
         tg_from_name      VARCHAR(255),
         tg_username       VARCHAR(255),
+        -- На какое сообщение это ответ. Храним ИМЕННО telegram-номер, а не наш
+        -- id строки: реплай приходит из Telegram с чужим номером, и нашей
+        -- строки для него может ещё не быть (или не быть вовсе — ответили на
+        -- сообщение, которое мы не сохраняли). Нить связывается по (чат, номер).
+        reply_to_tg_message_id BIGINT,
 
         attachment_kind   VARCHAR(16),
         attachment_file_id TEXT,
@@ -336,6 +341,7 @@ _MIGRATIONS = [
     "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS scenario_key VARCHAR(64)",
     "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '{}'::jsonb",
     "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS flags JSONB NOT NULL DEFAULT '[]'::jsonb",
+    "ALTER TABLE crm_ticket_messages ADD COLUMN IF NOT EXISTS reply_to_tg_message_id BIGINT",
 ]
 
 # Очереди, которые нужны сценариям. Заводятся сами и БЕЗ Telegram-группы:

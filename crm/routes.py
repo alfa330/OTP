@@ -507,6 +507,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             db, ticket_id, body or '📎 Вложение',
             author_user_id=ctx['user_id'], author_name=ctx['name'],
             attachment=attachment,
+            reply_to=_int_or_none(data.get('reply_to')),
         )
         if not ok:
             return jsonify({"error": "Сообщение не ушло в Telegram: %s" % error}), 502
