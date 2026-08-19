@@ -186,7 +186,7 @@ const ParkPhones = ({ draft, setDraft, offices }) => {
         <div className="space-y-2">
             {points.length === 0 && (
                 <p className="rounded-xl bg-slate-50 px-3 py-2.5 text-[12.5px] leading-relaxed text-slate-500">
-                    Номеров пока нет. Добавьте номер и выберите, где по нему отвечают:
+                    Номеров пока нет. Добавьте строку и выберите, где по номеру отвечают:
                     в офисе из справочника или «онлайн» — если у парка адреса нет.
                 </p>
             )}
@@ -202,13 +202,20 @@ const ParkPhones = ({ draft, setDraft, offices }) => {
                 />
             ))}
 
+            {/* «Место», а не «номер»: кнопка заводит СТРОКУ (офис или онлайн), а
+                второй номер той же точке добавляет плюс внутри строки. Пока
+                она называлась «Добавить номер», в справочнике без офисов она
+                гасла ровно там, где номер добавить как раз можно. */}
             <button
                 type="button"
                 className={`${iosBtnGhost} w-full justify-center border border-dashed border-slate-300 disabled:opacity-40`}
                 onClick={add}
                 disabled={free <= 0}
+                title={free <= 0
+                    ? 'Все офисы справочника уже в списке. Ещё один номер той же точке добавляет плюс в её строке'
+                    : undefined}
             >
-                <Plus size={14} /> Добавить номер
+                <Plus size={14} /> Добавить офис или онлайн
             </button>
         </div>
     );
@@ -266,9 +273,10 @@ export default function ParkEditor({ draft, setDraft, offices }) {
                     <p className="px-1 text-[11.5px] leading-relaxed text-amber-600">{issue}</p>
                 ) : (
                     <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                        Адрес, карта и график живут в самом офисе — на вкладке «Офисы».
-                        Здесь выбирается, по каким номерам до парка дозваниваются в каждом
-                        из них.
+                        Строка — это место, куда звонят: офис из справочника или «онлайн»,
+                        если у парка адреса нет. Плюс рядом с полем добавляет второй номер
+                        той же точке. Адрес, карта и график живут в самом офисе — на
+                        вкладке «Офисы».
                     </p>
                 )}
             </section>
