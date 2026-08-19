@@ -216,7 +216,6 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
                                         {office.city && (
                                             <span className="text-[12px] text-slate-400">{office.city}</span>
                                         )}
-                                        {office.is_online && <IosBadge tone="blue">Только по телефону</IosBadge>}
                                         <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-[13px]">
                                             {(office.phones || []).map((phone) => (
                                                 <PhoneLink key={phone} phone={phone} />

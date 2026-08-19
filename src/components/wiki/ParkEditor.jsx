@@ -49,7 +49,6 @@ const OfficeSelect = ({ value, offices, onChange, placeholder, disabledId, inval
                         {items.map((item) => (
                             <option key={item.id} value={item.id} disabled={disabledId?.(item.id)}>
                                 {item.name}
-                                {item.is_online ? ' · только по телефону' : ''}
                             </option>
                         ))}
                     </optgroup>
