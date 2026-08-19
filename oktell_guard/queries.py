@@ -13,10 +13,13 @@ _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 # что придёт в запросе, игнорируется: whitelist, а не «сохрани что прислали».
 SETTINGS_FIELDS = (
     'enabled', 'dry_run', 'oktell_url', 'cert_spki', 'threshold_s',
-    'warn_before_s', 'recall_reason_id', 'call_state_strings', 'heartbeat_interval_s',
+    'warn_before_s', 'recall_reason_id', 'call_state_strings', 'call_state_ids',
+    'heartbeat_interval_s',
 )
 
-DEFAULT_CALL_STATES = ["talk", "dial", "call", "ring"]
+# usFullbusy (код 5) — состояние разговора в Oktell, проверено на живых звонках.
+DEFAULT_CALL_STATES = ["fullbusy", "talk", "dial", "call", "ring"]
+DEFAULT_CALL_STATE_IDS = [5]
 
 
 
@@ -76,12 +79,14 @@ def effective_rule(settings: dict, personal: dict | None) -> dict:
         threshold = settings.get('threshold_s')
     enabled = bool(settings.get('enabled')) and bool(personal.get('enabled', True))
     states = settings.get('call_state_strings') or DEFAULT_CALL_STATES
+    state_ids = settings.get('call_state_ids') or DEFAULT_CALL_STATE_IDS
     return {
         'enabled': enabled,
         'threshold_s': clamp_threshold(threshold),
         'warn_before_s': max(0, int(settings.get('warn_before_s') or 30)),
         'recall_lunch_reason_id': int(settings.get('recall_reason_id') or 2),
         'call_state_strings': list(states),
+        'call_state_ids': list(state_ids),
         'message': f"«Перезвон» дольше {clamp_threshold(threshold) // 60} мин — сессия будет закрыта",
     }
 
@@ -112,7 +117,8 @@ def agent_config_payload(settings: dict, personal: dict | None) -> dict:
 def get_settings(cursor) -> dict:
     cursor.execute("""
         SELECT id, enabled, dry_run, oktell_url, cert_spki, threshold_s, warn_before_s,
-               recall_reason_id, call_state_strings, heartbeat_interval_s, updated_by, updated_at
+               recall_reason_id, call_state_strings, call_state_ids, heartbeat_interval_s,
+               updated_by, updated_at
           FROM oktell_guard_settings WHERE id = 1
     """)
     return fetch_one(cursor) or {}

@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -139,8 +139,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "warn_before_s": 30,
         "recall_lunch_reason_id": 2,   # подпричина перерыва «Перезвон»
         # Накопленное время обнуляет только состоявшийся звонок.
-        "call_state_strings": ["talk", "dial", "call", "ring"],
-        "call_state_ids": [],
+        # usFullbusy (числовой код 5) — состояние разговора в Oktell.
+        "call_state_strings": ["fullbusy", "talk", "dial", "call", "ring"],
+        "call_state_ids": [5],
         "message": "«Перезвон» дольше 3 минут — сессия будет закрыта",
     },
 
@@ -1366,8 +1367,8 @@ def build_hook_js(rule=None) -> str:
             "dryRun": bool(rule.get("dry_run")),
             # Что считать звонком: строки состояния и/или числовые коды.
             # Обнуляет накопленное ТОЛЬКО это, смена статуса — нет.
-            "callStateStrings": list(rule.get("call_state_strings") or ["talk", "dial", "call", "ring"]),
-            "callStateIds": list(rule.get("call_state_ids") or []),
+            "callStateStrings": list(rule.get("call_state_strings") or ["fullbusy", "talk", "dial", "call", "ring"]),
+            "callStateIds": list(rule.get("call_state_ids") or [5]),
             "message": str(rule.get("message") or "«Перезвон» дольше нормы — сессия будет закрыта"),
             "sessionKeys": list(rule.get("session_keys") or DEFAULT_SESSION_KEYS),
         },

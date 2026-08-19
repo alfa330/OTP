@@ -52,7 +52,7 @@ def init_oktell_guard_schema(cursor) -> None:
             threshold_s         INTEGER NOT NULL DEFAULT 180,
             warn_before_s       INTEGER NOT NULL DEFAULT 30,
             recall_reason_id    INTEGER NOT NULL DEFAULT 2,
-            call_state_strings  JSONB NOT NULL DEFAULT '["talk","dial","call","ring"]'::jsonb,
+            call_state_strings  JSONB NOT NULL DEFAULT '["fullbusy","talk","dial","call","ring"]'::jsonb,
             heartbeat_interval_s INTEGER NOT NULL DEFAULT 60,
             updated_by          INTEGER REFERENCES users(id) ON DELETE SET NULL,
             updated_at          TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
@@ -67,6 +67,20 @@ def init_oktell_guard_schema(cursor) -> None:
     """)
 
     # threshold_s = NULL означает «общий порог из настроек».
+    # Состояние разговора у Oktell называется usFullbusy (числовой код 5) —
+    # выяснено на живых звонках 19.08.2026. Прежние догадки talk/dial/call/ring
+    # не совпадали ни с чем, поэтому звонок НЕ обнулял накопленное время, и
+    # оператор, честно отзвонивший смену, всё равно копил выброс.
+    cursor.execute("""
+        ALTER TABLE oktell_guard_settings
+        ADD COLUMN IF NOT EXISTS call_state_ids JSONB NOT NULL DEFAULT '[5]'::jsonb;
+    """)
+    cursor.execute("""
+        UPDATE oktell_guard_settings
+           SET call_state_strings = '["fullbusy","talk","dial","call","ring"]'::jsonb
+         WHERE call_state_strings = '["talk","dial","call","ring"]'::jsonb;
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS oktell_guard_user_rules (
             user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

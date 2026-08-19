@@ -269,3 +269,28 @@ test('у каждой записи есть ключ — повтор отпра
   assert.ok(list[0].key && list[0].key.includes('6612'));
   assert.equal(list[0].threshold_s, 180);
 });
+
+test('состояние разговора usFullbusy обнуляет накопленное', () => {
+  const env = makeEnv();
+  const { ws, rule } = runHook(env, { callStateStrings: ['fullbusy'], callStateIds: [5] });
+  ws.emit(frame(recall));
+  env.advanceSeconds(170);
+  ws.emit(frame({ userlogin: '6612', onlunch: false, lunchreasonid: null, userstate: 5, userstatestr: 'usFullbusy' }));
+  env.advanceSeconds(5);
+  ws.emit(frame(recall));
+  env.advanceSeconds(100);
+  assert.equal(rule.fired, false, 'после разговора отсчёт должен начаться заново');
+  assert.equal(rule.budget, 0);
+});
+
+test('разговор распознаётся и по числовому коду состояния', () => {
+  const env = makeEnv();
+  const { ws, rule } = runHook(env, { callStateStrings: [], callStateIds: [5] });
+  ws.emit(frame(recall));
+  env.advanceSeconds(170);
+  ws.emit(frame({ userlogin: '6612', onlunch: false, userstate: 5, userstatestr: 'какое-то-новое-имя' }));
+  env.advanceSeconds(5);
+  ws.emit(frame(recall));
+  env.advanceSeconds(100);
+  assert.equal(rule.fired, false, 'смена названия у вендора не должна ломать обнуление');
+});

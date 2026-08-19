@@ -69,3 +69,13 @@ def test_server_does_not_force_the_window_open():
     payload = queries.agent_config_payload(settings(), None)
     assert payload['browser']['keep_open'] is False
     assert payload['browser']['launch_on_start'] is False
+
+
+def test_call_state_is_the_real_one_from_oktell():
+    """usFullbusy (код 5) — состояние разговора, снято с живых звонков 19.08.2026.
+    Прежние догадки talk/dial/call/ring не совпадали ни с чем: звонок не
+    обнулял накопленное, и оператор, отзвонивший смену, всё равно копил выброс.
+    """
+    rule = queries.effective_rule(settings(call_state_strings=None), None)
+    assert 'fullbusy' in rule['call_state_strings']
+    assert 5 in rule['call_state_ids']
