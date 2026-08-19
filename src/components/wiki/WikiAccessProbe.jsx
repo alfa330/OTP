@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Loader2, UserSearch } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import {
-    iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge, IosModal,
+    iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge, IosModal,
 } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 
 /* «Почему этот человек видит этот раздел».
  *
@@ -18,12 +19,33 @@ import {
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+const ROLE_TITLE = {
+    operator: 'оператор', trainee: 'стажёр', trainer: 'тренер', sv: 'супервайзер',
+    supervisor: 'супервайзер', admin: 'руководитель', super_admin: 'директор',
+};
+
 export default function WikiAccessProbe({ base, headers, open, onClose }) {
     const [value, setValue] = useState('');
+    const [people, setPeople] = useState([]);
     const [probe, setProbe] = useState(null);
 
-    const run = () => {
-        const userId = value.trim();
+    // Список тянем при открытии, а не при монтировании: кнопка живёт в шапке
+    // вкладки, а заглядывают сюда изредка.
+    useEffect(() => {
+        if (!open) return;
+        axios.get(`${base}/access/people`, { headers })
+            .then((r) => setPeople(r.data?.items || []))
+            .catch(() => setPeople([]));
+    }, [open, base, headers]);
+
+    const options = useMemo(() => people.map((person) => ({
+        value: String(person.id),
+        label: [person.name, ROLE_TITLE[person.role] || person.role,
+                person.department_name].filter(Boolean).join(' · '),
+    })), [people]);
+
+    const run = (explicit) => {
+        const userId = String(explicit ?? value).trim();
         if (!userId) return;
         setProbe({ loading: true });
         axios.get(`${base}/access/effective`, { headers, params: { user_id: userId } })
@@ -45,7 +67,7 @@ export default function WikiAccessProbe({ base, headers, open, onClose }) {
                         Закрыть
                     </button>
                     <button type="button" className={iosBtnPrimary}
-                            disabled={!value.trim() || probe?.loading} onClick={run}>
+                            disabled={!value || probe?.loading} onClick={() => run()}>
                         {probe?.loading && <Loader2 size={14} className="animate-spin" />} Проверить
                     </button>
                 </>
@@ -54,20 +76,21 @@ export default function WikiAccessProbe({ base, headers, open, onClose }) {
             <div className="space-y-4">
                 <div>
                     <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                        ID сотрудника
+                        Сотрудник
                     </label>
-                    <div className="flex items-center gap-2">
-                        <input
-                            className={iosInput}
-                            inputMode="numeric"
-                            autoFocus
-                            value={value}
-                            onChange={(e) => setValue(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === 'Enter') run(); }}
-                            placeholder="Например: 42"
-                        />
-                        <UserSearch size={18} className="shrink-0 text-slate-300" />
-                    </div>
+                    <CustomSelect
+                        variant="ios"
+                        value={value}
+                        // Проверяем сразу по выбору: отдельное нажатие «Проверить»
+                        // после выбора человека — лишний шаг, кнопка остаётся
+                        // только чтобы перезапросить то же самое.
+                        onChange={(v) => { setValue(v); run(v); }}
+                        options={options}
+                        searchable
+                        placeholder="Выберите сотрудника…"
+                        searchPlaceholder="Поиск по имени…"
+                        ariaLabel="Сотрудник для проверки"
+                    />
                 </div>
 
                 {probe?.error && (

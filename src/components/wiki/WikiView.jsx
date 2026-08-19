@@ -109,6 +109,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const subjects = state?.subjects || {};
     const canManageStructure = !!(capabilities.can_manage_structure || capabilities.can_manage_access);
     const canManageAccess = !!capabilities.can_manage_access;
+    /* Право раздавать доступ живёт отдельно от способностей: у супервайзера нет
+       ни can_manage_structure, ни can_manage_access, но операторов он раздаёт —
+       значит вкладку «Структура» ему показать надо, пусть и без правки дерева. */
+    const canGrantAccess = state?.grant_ceiling != null;
     const canEdit = !!(capabilities.can_edit || capabilities.can_publish);
 
     const tabs = useMemo(() => ([
@@ -123,9 +127,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // Отдельной вкладки «Доступы» нет: права выдаются из строки раздела на
         // вкладке «Структура». Раздел там выбран тем, что человек на него нажал,
         // а не селектом из плоского списка, где ветки СЗоВ и ОП одноимённые.
-        { key: 'structure', label: 'Структура', icon: Layers, show: canManageStructure },
+        { key: 'structure', label: 'Структура', icon: Layers,
+          show: canManageStructure || canGrantAccess },
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
-    ].filter((t) => t.show)), [canManageStructure, canManageAccess]);
+    ].filter((t) => t.show)), [canManageStructure, canManageAccess, canGrantAccess]);
 
     // Если права сузились между заходами, активная вкладка может исчезнуть.
     useEffect(() => {
@@ -437,6 +442,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         structure={structure}
                         loading={structureLoading}
                         canManageAccess={canManageAccess}
+                        canManageStructure={canManageStructure}
                         reload={() => { loadStructure(); loadPing(); }}
                     />
                 )}

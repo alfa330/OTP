@@ -4,6 +4,10 @@
 управление содержимым структуры. Все функции принимают готовый курсор.
 """
 
+import json
+
+from .access import ROLE_LEVELS
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Пространства
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +343,74 @@ def delete_section_rule(cursor, rule_id):
     )
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def section_branch_department(cursor, section_id):
+    """Отдел ветки, в которой лежит раздел: его собственный или ближайшего предка.
+
+    Тем же способом фронт считает подпись «в отделе …» (branchDepartment в
+    WikiSectionAccess.jsx). Здесь это нужно для ГРАНИЦЫ: супервайзер и
+    руководитель настраивают доступ только внутри веток своего отдела, и
+    доверять расчёту на клиенте нельзя — запрос к API он не проходит.
+
+    None означает «раздел не в отделе» (например витрина верхнего уровня):
+    такие остаются за коммерческим директором.
+    """
+    cursor.execute(
+        """
+        WITH RECURSIVE up AS (
+            SELECT id, parent_section_id, department_id, 0 AS depth
+              FROM wiki_sections WHERE id = %s
+            UNION ALL
+            SELECT s.id, s.parent_section_id, s.department_id, up.depth + 1
+              FROM wiki_sections s JOIN up ON s.id = up.parent_section_id
+             -- Ограничитель на случай битого дерева: сервер петель не
+             -- допускает, но зациклиться здесь значит подвесить запрос.
+             WHERE up.depth < 50
+        )
+        SELECT department_id FROM up
+         WHERE department_id IS NOT NULL
+         ORDER BY depth LIMIT 1
+        """,
+        (section_id,),
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def grantable_people(cursor, *, max_role_level, department_ids=None):
+    """Сотрудники, которым этот человек вправе выдать доступ.
+
+    Заменяет поле «ID сотрудника»: вводить туда число можно было, только
+    подсмотрев его в базе, и опечатка выдавала доступ постороннему молча —
+    несуществующий id не проверялся вовсе.
+
+    Фильтр по status, а не по is_active: в боевой базе is_active снят почти у
+    всех (10 строк из 347), а работающих 174 — по is_active список оказался бы
+    почти пустым.
+
+    department_ids=None означает «без границы отдела» (коммерческий директор).
+    Порог должности отсекается в SQL по той же шкале ROLE_LEVELS, что и
+    правила: держать вторую копию шкалы в питоне значило бы дать ей разойтись.
+    """
+    cursor.execute(
+        """
+        SELECT u.id, u.name, u.role, d.name AS department_name
+          FROM users u
+          LEFT JOIN departments d ON d.id = u.department_id
+         WHERE u.status = 'working'
+           AND COALESCE(
+                   (%(levels)s::jsonb ->> lower(coalesce(u.role, '')))::int, 0
+               ) <= %(ceiling)s
+           AND (%(depts)s::int[] IS NULL OR u.department_id = ANY(%(depts)s::int[]))
+         ORDER BY u.name
+        """,
+        {'levels': json.dumps(ROLE_LEVELS),
+         'ceiling': max_role_level,
+         'depts': list(department_ids) if department_ids is not None else None},
+    )
+    return [{'id': r[0], 'name': r[1], 'role': r[2], 'department_name': r[3]}
+            for r in cursor.fetchall()]
 
 
 def subject_catalog(cursor):

@@ -257,6 +257,8 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
     const btnRef = React.useRef(null);
     const popRef = React.useRef(null);
 
+    // Пункты бывают условными (`cond && {...}`), и когда доступных не осталось,
+    // кнопка не должна оставаться пустой заглушкой — её просто нет.
     const shown = items.filter(Boolean);
 
     const recompute = React.useCallback(() => {
@@ -308,6 +310,8 @@ export const IosMenu = ({ items = [], label = 'Действия', align = 'right
             window.removeEventListener('resize', recompute);
         };
     }, [open, recompute]);
+
+    if (!shown.length) return null;
 
     return (
         <>

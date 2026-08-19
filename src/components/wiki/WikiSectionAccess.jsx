@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Building2, ChevronDown, Globe, Loader2, Plus, Trash2, TriangleAlert,
+    Building2, ChevronDown, Globe, Loader2, Lock, Plus, Trash2, TriangleAlert,
 } from 'lucide-react';
 import {
-    iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
+    iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosBadge, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
@@ -49,6 +49,11 @@ const ROLE_ROWS = [
     { key: 'sv', label: 'Супервайзер', hint: 'и выше', level: 30, role: 'sv' },
     { key: 'head', label: 'Руководитель группы', hint: 'и выше', level: 40, role: 'admin' },
 ];
+
+/* Правило без порога открывает раздел всем от оператора и выше — и «весит»
+   столько же. Ноль вместо уровня оператора прошёл бы любую проверку. */
+const OPERATOR_LEVEL = 10;
+const rowWeight = (row) => (row.level == null ? OPERATOR_LEVEL : row.level);
 
 const PERMISSIONS = [
     { key: 'can_read', label: 'Читать', note: 'видит раздел и его статьи' },
@@ -102,6 +107,11 @@ const SUBJECT_KINDS = [
 
 const SUBJECT_KIND_LABEL = Object.fromEntries(SUBJECT_KINDS.map((k) => [k.value, k.label]));
 
+const ROLE_TITLE = {
+    operator: 'оператор', trainee: 'стажёр', trainer: 'тренер', sv: 'супервайзер',
+    supervisor: 'супервайзер', admin: 'руководитель', super_admin: 'директор',
+};
+
 const ROLE_LEVEL_LABEL = {
     10: 'от оператора', 20: 'от тренера', 30: 'от СВ',
     40: 'от руководителя', 50: 'супер-админ',
@@ -136,16 +146,22 @@ const matrixKeyOf = (rule, department) => {
 };
 
 // ── Строка должности ────────────────────────────────────────────────────────
-const RoleRow = ({ row, draft, expanded, onToggleExpand, onChange }) => {
+const RoleRow = ({ row, draft, expanded, locked, onToggleExpand, onChange }) => {
     const preset = presetOf(draft.permissions);
     const granted = PERMISSIONS.filter((p) => draft.permissions[p.key]);
 
+    /* Строка выше потолка показана, но заперта, а не спрятана. Спрятанная
+       строка выглядит как «такой должности не бывает»; запертая объясняет, что
+       выдача есть, но не отсюда, — и к кому идти. */
     return (
         <div className={expanded ? 'bg-slate-50/70' : ''}>
             <button
                 type="button"
+                disabled={locked}
                 onClick={onToggleExpand}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50"
+                className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${
+                    locked ? 'cursor-default opacity-60' : 'hover:bg-slate-50'
+                }`}
             >
                 <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-baseline gap-x-2">
@@ -163,10 +179,16 @@ const RoleRow = ({ row, draft, expanded, onToggleExpand, onChange }) => {
                         )}
                     </div>
                 </div>
-                <ChevronDown
-                    size={16}
-                    className={`shrink-0 text-slate-300 transition-transform ${expanded ? 'rotate-180' : ''}`}
-                />
+                {locked ? (
+                    <span className="flex shrink-0 items-center gap-1 text-[11.5px] text-slate-400">
+                        <Lock size={12} /> не ваш уровень
+                    </span>
+                ) : (
+                    <ChevronDown
+                        size={16}
+                        className={`shrink-0 text-slate-300 transition-transform ${expanded ? 'rotate-180' : ''}`}
+                    />
+                )}
             </button>
 
             {expanded && (
@@ -240,6 +262,8 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
     const toast = useStableCallback(showToast);
 
     const [rules, setRules] = useState([]);
+    const [ceiling, setCeiling] = useState(null);
+    const [people, setPeople] = useState([]);
     const [catalog, setCatalog] = useState({});
     const [loading, setLoading] = useState(true);
     const [busy, setBusy] = useState(false);
@@ -261,7 +285,12 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         if (!sectionId) return;
         setLoading(true);
         axios.get(`${base}/access/section-rules`, { headers, params: { section_id: sectionId } })
-            .then((r) => setRules(r.data?.items || []))
+            .then((r) => {
+                setRules(r.data?.items || []);
+                // Потолок приезжает вместе со списком: он зависит и от должности,
+                // и от отдела раздела, поэтому считать его на клиенте нельзя.
+                setCeiling(r.data?.grant_ceiling ?? null);
+            })
             .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
             .finally(() => setLoading(false));
     }, [base, headers, sectionId, toast]);
@@ -272,6 +301,11 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         axios.get(`${base}/access/subjects`, { headers })
             .then((r) => setCatalog(r.data || {}))
             .catch(() => setCatalog({}));
+        // Сотрудники приходят уже отфильтрованными по потолку и отделу: форма
+        // не должна предлагать того, кого сервер потом отвергнет.
+        axios.get(`${base}/access/people`, { headers })
+            .then((r) => setPeople(r.data?.items || []))
+            .catch(() => setPeople([]));
     }, [base, headers]);
 
     /* Матрица должностей — производная от загруженных правил, но состояние
@@ -296,24 +330,29 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
 
     const dirty = useMemo(() => ROLE_ROWS.some((row) => {
         const state = matrix[row.key];
-        if (!state) return false;
+        if (!state || ceiling == null || rowWeight(row) > ceiling) return false;
         const rule = rules.find((r) => r.id === state.ruleId);
         const before = rule ? permissionsOf(rule) : { ...NO_PERMISSIONS };
         const deepBefore = rule ? !!rule.grant_subsections : false;
         return PERMISSIONS.some((p) => before[p.key] !== state.permissions[p.key])
             || (anyPermission(state.permissions) && deepBefore !== state.grant_subsections);
-    }), [matrix, rules]);
+    }), [matrix, rules, ceiling]);
 
     const ruleBody = (row) => (department
         ? { subject_type: 'department', subject_id: department.id,
             min_role_level: row.level }
         : { subject_type: 'otp_role', subject_role: row.role, min_role_level: null });
 
+    const isLocked = (row) => ceiling == null || rowWeight(row) > ceiling;
+
     const saveMatrix = () => {
         const jobs = [];
         ROLE_ROWS.forEach((row) => {
             const state = matrix[row.key];
-            if (!state) return;
+            // Запертую строку не отправляем, даже если она как-то оказалась
+            // изменена: сервер её всё равно отвергнет, а из-за одного отказа
+            // Promise.all потерял бы и остальные, уже корректные, правки.
+            if (!state || isLocked(row)) return;
             const rule = rules.find((r) => r.id === state.ruleId);
             const before = rule ? permissionsOf(rule) : { ...NO_PERMISSIONS };
             const changed = PERMISSIONS.some((p) => before[p.key] !== state.permissions[p.key])
@@ -368,6 +407,14 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
             .catch((e) => toast(errText(e, 'Не удалось удалить'), 'error'))
             .finally(() => setBusy(false));
     };
+
+    /* Должность в подписи не для красоты: тёзки в списке из 174 человек
+       неразличимы, а ошибка тут выдаёт доступ не тому. */
+    const peopleOptions = useMemo(() => people.map((person) => ({
+        value: String(person.id),
+        label: [person.name, ROLE_TITLE[person.role] || person.role,
+                person.department_name].filter(Boolean).join(' · '),
+    })), [people]);
 
     const subjectOptions = useMemo(() => {
         const kind = draft?.subject_type;
@@ -460,6 +507,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                     key={row.key}
                                     row={row}
                                     draft={matrix[row.key]}
+                                    locked={isLocked(row)}
                                     expanded={expanded === row.key}
                                     onToggleExpand={() => setExpanded(expanded === row.key ? null : row.key)}
                                     onChange={(next) => setMatrix({ ...matrix, [row.key]: next })}
@@ -588,18 +636,31 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                             />
                         </div>
 
+                        {/* Сотрудник выбирается поиском по имени, а не вводом id.
+                            Числовой id можно было узнать только заглянув в базу, а
+                            опечатка выдавала доступ постороннему молча — сервер
+                            несуществующий id даже не проверял. Список приходит уже
+                            обрезанным по потолку и отделу. */}
                         {draft.subject_type === 'user' && (
                             <div>
                                 <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                    ID сотрудника
+                                    Сотрудник
                                 </label>
-                                <input
-                                    className={iosInput}
-                                    inputMode="numeric"
+                                <CustomSelect
+                                    variant="ios"
                                     value={draft.subject_id}
-                                    onChange={(e) => setDraft({ ...draft, subject_id: e.target.value })}
-                                    placeholder="Например: 42"
+                                    onChange={(v) => setDraft({ ...draft, subject_id: v })}
+                                    options={peopleOptions}
+                                    searchable
+                                    placeholder="Выберите сотрудника…"
+                                    searchPlaceholder="Поиск по имени…"
+                                    ariaLabel="Сотрудник"
                                 />
+                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    {peopleOptions.length
+                                        ? 'В списке только те, кому вы вправе открыть раздел.'
+                                        : 'Открывать раздел отдельным людям вам пока некому.'}
+                                </p>
                             </div>
                         )}
 

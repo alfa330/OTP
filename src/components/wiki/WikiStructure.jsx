@@ -39,7 +39,7 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
    наведению (а на телефоне наведения нет), и мишени стоят вплотную, так что
    «в архив» ловится вместо «изменить». */
 const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
-                     onAccess, busy }) => {
+                     onAccess, canManageStructure, busy }) => {
     // Ветка отдела и должность внутри неё — разные сущности, и на глаз они
     // должны отличаться так же, как отличаются по смыслу.
     const isBranch = !!section.department_id;
@@ -99,12 +99,20 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                        вложенность задавалась только селектом внутри модалки,
                        которую открывала кнопка у пространства, — и «добавить
                        внутрь этого раздела» выглядело как отсутствующая
-                       возможность. */
-                    { key: 'child', label: 'Добавить подраздел', icon: Plus,
+                       возможность.
+
+                       Правка дерева — не то же самое, что выдача доступа:
+                       супервайзер раздаёт операторов, но структуру не трогает,
+                       и у него в меню остаётся один пункт. */
+                    canManageStructure && { key: 'child', label: 'Добавить подраздел', icon: Plus,
                       onSelect: () => onAddChild(section) },
-                    { key: 'edit', label: 'Изменить раздел', icon: Pencil,
+                    canManageStructure && { key: 'edit', label: 'Изменить раздел', icon: Pencil,
                       onSelect: () => onEdit(section) },
-                    onAccess && {
+                    /* Пункт есть, только если сервер сказал, что этот человек
+                       вправе раздавать доступ ИМЕННО ТУТ (can_grant_access):
+                       потолок должности и граница отдела считаются там же, где
+                       проверяются, а не второй раз на клиенте. */
+                    onAccess && section.can_grant_access && {
                         key: 'access', label: 'Кому открыт раздел', icon: KeyRound,
                         // Число правил прямо в пункте: у раздела без единого
                         // правила это единственное место, где видно, что
@@ -112,7 +120,7 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                         hint: orphan ? 'нет правил' : String(section.rules_count),
                         onSelect: () => onAccess(section),
                     },
-                    { key: 'archive', label: 'Убрать в архив', icon: Archive,
+                    canManageStructure && { key: 'archive', label: 'Убрать в архив', icon: Archive,
                       danger: true, separatorBefore: true,
                       onSelect: () => onArchive(section) },
                 ]}
@@ -122,7 +130,8 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
 };
 
 export default function WikiStructure({ base, headers, showToast, structure, reload, loading,
-                                        canManageAccess = false }) {
+                                        canManageAccess = false,
+                                        canManageStructure = true }) {
     const [departments, setDepartments] = useState([]);
     const [busy, setBusy] = useState(false);
 
@@ -136,10 +145,13 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const [probeOpen, setProbeOpen] = useState(false);
 
     useEffect(() => {
+        // Справочник нужен только форме раздела; кто структуру не правит —
+        // и форму не открывает, а лишний запрос отвечал бы 403 в консоль.
+        if (!canManageStructure) { setDepartments([]); return; }
         axios.get(`${base}/access/subjects`, { headers })
             .then((r) => setDepartments(r.data?.department || []))
             .catch(() => setDepartments([]));   // не админ — справочник недоступен, это норма
-    }, [base, headers]);
+    }, [base, headers, canManageStructure]);
 
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
@@ -275,7 +287,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             <UserSearch size={14} /> Проверить доступ
                         </button>
                     )}
-                    {tab === 'spaces' && (
+                    {tab === 'spaces' && canManageStructure && (
                         <button
                             type="button"
                             className={iosBtnPrimary}
@@ -289,12 +301,15 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
 
             <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
                 {[
-                    { key: 'spaces', label: 'Пространства', icon: Layers, count: activeSpaces.length },
+                    // Супервайзеру видны только «Разделы»: пространства и архив —
+                    // это правка дерева, которой у него нет.
+                    canManageStructure && { key: 'spaces', label: 'Пространства', icon: Layers,
+                      count: activeSpaces.length },
                     { key: 'sections', label: 'Разделы', icon: FolderTree,
                       count: sections.filter((x) => x.status !== 'archived').length },
-                    { key: 'archive', label: 'Архив', icon: Archive,
+                    canManageStructure && { key: 'archive', label: 'Архив', icon: Archive,
                       count: archivedSpaces.length + archivedSections.length },
-                ].map(({ key, label, icon: Icon, count }) => (
+                ].filter(Boolean).map(({ key, label, icon: Icon, count }) => (
                     <button
                         key={key}
                         type="button"
@@ -387,17 +402,19 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 <IosBadge tone="slate">{space.department_name}</IosBadge>
                             )}
                         </div>
-                        <button
-                            type="button"
-                            className={iosBtnGhost}
-                            onClick={() => setSectionModal({
-                                space_id: space.id, name: '', description: '',
-                                visibility_scope: 'restricted', parent_section_id: '',
-                                department_id: '',
-                            })}
-                        >
-                            <Plus size={13} /> Раздел
-                        </button>
+                        {canManageStructure && (
+                            <button
+                                type="button"
+                                className={iosBtnGhost}
+                                onClick={() => setSectionModal({
+                                    space_id: space.id, name: '', description: '',
+                                    visibility_scope: 'restricted', parent_section_id: '',
+                                    department_id: '',
+                                })}
+                            >
+                                <Plus size={13} /> Раздел
+                            </button>
+                        )}
                     </div>
 
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
@@ -427,7 +444,8 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     department_id: '',
                                 })}
                                 onArchive={archiveSection}
-                                onAccess={canManageAccess ? setAccessSection : null}
+                                onAccess={setAccessSection}
+                                canManageStructure={canManageStructure}
                             />
                         ))}
                     </div>

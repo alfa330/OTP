@@ -419,9 +419,111 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
         """
         client, _ = self.build(make_context('admin', headed=[7], department_id=7))
         self.assertEqual(client.get('/api/wiki/access/subjects').status_code, 200)
-        # Но выписывать правила он по-прежнему не может.
+        # Гейт правил он теперь проходит (потолок 30), спотыкается уже о пустое
+        # тело — 400, а не 403. Раньше здесь стоял 403: до появления лестницы
+        # правила раздавал только носитель мастер-ключа.
         self.assertEqual(
-            client.post('/api/wiki/access/section-rules', json={}).status_code, 403)
+            client.post('/api/wiki/access/section-rules', json={}).status_code, 400)
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
+    """Лестница выдачи на уровне HTTP.
+
+    Чистая логика проверена в test_wiki_access; здесь важно другое — что гейт
+    реально стоит на эндпоинте. Фронт гасит недоступные строки, но запрос можно
+    послать и мимо него, а «зернистость», которую держит только интерфейс, —
+    это отсутствие зернистости.
+    """
+
+    def _stub_section(self, department_id=1):
+        """Раздел существует и лежит в ветке указанного отдела."""
+        self.addCleanup(setattr, structure, 'section_exists', structure.section_exists)
+        structure.section_exists = lambda cursor, sid: 1
+        self.addCleanup(setattr, structure, 'section_branch_department',
+                        structure.section_branch_department)
+        structure.section_branch_department = lambda cursor, sid: department_id
+
+    def test_operator_and_trainer_cannot_grant(self):
+        for role in ('operator', 'trainer'):
+            client, _ = self.build(make_context(role, department_id=1))
+            r = client.post('/api/wiki/access/section-rules', json={
+                'section_id': 1, 'subject_type': 'department', 'subject_id': 1})
+            self.assertEqual(r.status_code, 403, role)
+            self.assertEqual(r.get_json().get('code'), 'WIKI_FORBIDDEN')
+            # И списка сотрудников им тоже не полагается.
+            self.assertEqual(client.get('/api/wiki/access/people').status_code, 403, role)
+
+    def test_supervisor_grants_operator_but_not_supervisor(self):
+        self._stub_section(department_id=1)
+        captured = {}
+        self.addCleanup(setattr, structure, 'upsert_section_rule', structure.upsert_section_rule)
+        structure.upsert_section_rule = lambda cursor, **kw: (captured.update(kw), 7)[1]
+
+        client, _ = self.build(make_context('sv', department_id=1))
+        ok = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'can_read': True})
+        self.assertEqual(ok.status_code, 201)
+        self.assertIsNone(captured['min_role_level'])
+
+        denied = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'min_role_level': 30, 'can_read': True})
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.get_json().get('code'), 'WIKI_GRANT_CEILING')
+
+    def test_supervisor_cannot_write_personal_rule_on_himself(self):
+        """Дыра, ради которой проверяется роль адресата, а не только порог.
+
+        Порог у правила на человека пуст, поэтому одна лишь проверка порога
+        пропустила бы «СВ выписывает правило на себя» — выдачу себе полного
+        доступа к разделу своего же отдела.
+        """
+        self._stub_section(department_id=1)
+        client, cursor = self.build(make_context('sv', department_id=1))
+        cursor.fetchone.return_value = ('sv', 1)      # роль и отдел адресата
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'user', 'subject_id': 42,
+            'can_read': True, 'can_delete': True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_CEILING')
+
+    def test_supervisor_stopped_at_foreign_department(self):
+        """Граница отдела: СЗоВ не настраивает ветки продаж."""
+        self._stub_section(department_id=367)        # раздел в чужом отделе
+        client, _ = self.build(make_context('sv', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'can_read': True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+
+    def test_director_has_no_department_border(self):
+        self._stub_section(department_id=367)
+        self.addCleanup(setattr, structure, 'upsert_section_rule', structure.upsert_section_rule)
+        structure.upsert_section_rule = lambda cursor, **kw: 9
+        client, _ = self.build(make_context('super_admin', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 367,
+            'min_role_level': 40, 'can_read': True})
+        self.assertEqual(r.status_code, 201)
+
+    def test_delete_checks_ladder_too(self):
+        """Снять чужое правило — такое же вмешательство, как его выписать.
+
+        Без этой проверки супервайзер отобрал бы доступ у руководителя своего
+        отдела: удаление гейтилось только мастер-ключом, которого у него нет,
+        а после открытия эндпоинта он попал бы туда беспрепятственно.
+        """
+        self.addCleanup(setattr, structure, 'section_branch_department',
+                        structure.section_branch_department)
+        structure.section_branch_department = lambda cursor, sid: 1
+        client, cursor = self.build(make_context('sv', department_id=1))
+        cursor.fetchone.return_value = (1, 40)       # правило на уровень руководителя
+        r = client.delete('/api/wiki/access/section-rules/5')
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_CEILING')
 
 
 if __name__ == '__main__':

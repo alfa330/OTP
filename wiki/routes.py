@@ -140,6 +140,15 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "capabilities": ctx['capabilities'],
             "access_mode": ctx['access_mode'],
             "wiki_roles": [r.get('code') for r in ctx['wiki_roles']],
+            # До какого уровня должности человек вправе открывать разделы;
+            # null — не вправе вовсе. Нужен интерфейсу, чтобы показать вкладку
+            # «Структура» супервайзеру: способностей can_manage_* у него нет, а
+            # операторов он раздавать должен.
+            "grant_ceiling": wiki_access.grant_ceiling(
+                ctx['otp_role'],
+                is_wiki_admin=bool(ctx['wiki_roles'])
+                and bool(ctx['capabilities'].get('can_manage_access')),
+            ),
             "subjects": wiki_access.collect_subjects(
                 user_id=ctx['user_id'],
                 otp_role=ctx['otp_role'],

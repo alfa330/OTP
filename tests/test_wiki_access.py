@@ -16,6 +16,7 @@
 
 import unittest
 
+from wiki import access
 from wiki.access import (
     ROLE_LEVELS,
     capabilities_from_otp_role,
@@ -261,6 +262,82 @@ class ArticlePermissionsTest(unittest.TestCase):
         perms = resolve_article_permissions(capabilities=capabilities_from_otp_role('operator'))
         self.assertFalse(any(permissions_only(perms).values()),
                          'без единого правила статья не видна никому')
+
+
+class GrantCeilingTest(unittest.TestCase):
+    """Лестница выдачи доступа (решение владельца 18.08.2026).
+
+        Коммерческий директор  → руководитель, СВ, тренер, оператор
+        Руководитель группы    → СВ, тренер, оператор
+        Супервайзер            → оператор
+        Тренер, оператор       → не раздают вовсе
+
+    Проверяется именно ТАБЛИЦА, а не «на ступень ниже»: у супервайзера
+    ступенька перепрыгивает тренера, и формула, которая «почти совпадает»,
+    разошлась бы с решением молча.
+    """
+
+    # Строки формы: подпись → порог правила (у нижней порога нет вовсе).
+    ROWS = ((None, 'Оператор'), (20, 'Тренер'), (30, 'Супервайзер'), (40, 'Руководитель'))
+
+    def granted(self, role):
+        return [name for level, name in self.ROWS
+                if access.may_grant_rule(role, level)]
+
+    def test_commercial_director_grants_everyone(self):
+        self.assertEqual(self.granted('super_admin'),
+                         ['Оператор', 'Тренер', 'Супервайзер', 'Руководитель'])
+
+    def test_head_grants_everyone_below(self):
+        self.assertEqual(self.granted('admin'), ['Оператор', 'Тренер', 'Супервайзер'])
+
+    def test_supervisor_grants_operators_only(self):
+        """Тренер супервайзеру НЕ достаётся — это решение, а не недосмотр."""
+        self.assertEqual(self.granted('sv'), ['Оператор'])
+        self.assertEqual(self.granted('supervisor'), ['Оператор'])
+
+    def test_trainer_and_operator_grant_nothing(self):
+        self.assertEqual(self.granted('trainer'), [])
+        self.assertEqual(self.granted('operator'), [])
+        self.assertEqual(self.granted('trainee'), [])
+
+    def test_nobody_grants_at_own_level(self):
+        """Никто не открывает раздел собственному уровню.
+
+        Иначе супервайзер выдал бы права всем супервайзерам компании, а
+        руководитель — всем руководителям: это уже не делегирование, а
+        расширение собственного круга.
+        """
+        for role in ('super_admin', 'admin', 'sv'):
+            level = access.ROLE_LEVELS[role]
+            self.assertFalse(access.may_grant_rule(role, level),
+                             '%s не должен выдавать своему уровню' % role)
+
+    def test_personal_rule_checks_target_role(self):
+        """Правило на человека проверяется по РОЛИ адресата, а не только по порогу.
+
+        Порог у такого правила обычно пуст, и без роли адресата супервайзер
+        выписал бы правило на самого себя — то есть выдал бы себе полный доступ.
+        """
+        self.assertTrue(access.may_grant_rule('sv', None, target_role='operator'))
+        self.assertFalse(access.may_grant_rule('sv', None, target_role='sv'))
+        self.assertFalse(access.may_grant_rule('sv', None, target_role='admin'))
+        # Руководителю supervisor адресуется, а другой руководитель — нет.
+        self.assertTrue(access.may_grant_rule('admin', None, target_role='sv'))
+        self.assertFalse(access.may_grant_rule('admin', None, target_role='admin'))
+
+    def test_unbounded_rule_weighs_as_operator(self):
+        """Правило без порога открывает раздел всем от оператора — и весит так же.
+
+        Ноль вместо уровня оператора пропустил бы любую проверку.
+        """
+        self.assertEqual(access.rule_grant_level(None), access.ROLE_LEVELS['operator'])
+        self.assertEqual(access.rule_grant_level(30), 30)
+
+    def test_wiki_admin_role_lifts_ceiling(self):
+        """Роль вики с can_manage_access назначают руками — она поднимает потолок."""
+        self.assertFalse(access.may_grant_rule('sv', 40))
+        self.assertTrue(access.may_grant_rule('sv', 40, is_wiki_admin=True))
 
 
 if __name__ == '__main__':
