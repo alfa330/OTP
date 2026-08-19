@@ -830,13 +830,6 @@ def test_all_child_launches_use_clean_env():
     assert cleaned == launches, f"запусков {launches}, с чистым окружением {cleaned}"
 
 
-def test_safety_task_is_not_every_minute():
-    """Каждый запуск onefile распаковывает 14 МБ. Ежеминутно это лишняя работа
-    и лишний шанс поймать момент подмены файла — тогда Windows показывает
-    «Failed to start embedded python interpreter», и так каждую минуту."""
-    assert agent.TASK_PERIOD_MINUTES >= 5
-
-
 def test_installer_becomes_the_watchdog_instead_of_exiting():
     """Короткоживущий процесс после модального окна упирался в антивирус,
     который уже держал его папку распаковки, — отсюда «Failed to remove
@@ -844,3 +837,19 @@ def test_installer_becomes_the_watchdog_instead_of_exiting():
     source = Path(agent.__file__).read_text(encoding="utf-8")
     body = source[source.index("def run_install("):source.index("def run_uninstall(")]
     assert "return run_watchdog(cfg)" in body
+
+
+def test_no_periodic_relaunch_task():
+    """Задачи-подстраховки больше нет.
+
+    Возвращать программу по расписанию бессмысленно: если оператор закрыл её и
+    ушёл в Oktell через свой браузер, воскресшая копия всё равно бессильна —
+    она умеет работать только со своим окном. Обход ловится сервером (агента
+    нет, а Oktell показывает человека в «Перезвоне»), а не борьбой с машиной.
+    Само удаление задачи оставлено: у прежних установок её надо снять.
+    """
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    assert "_register_task" not in source
+    assert "def _remove_task" in source
+    body = source[source.index("def run_install("):source.index("def run_uninstall(")]
+    assert "_remove_task()" in body, "установка должна снимать прежнюю задачу"

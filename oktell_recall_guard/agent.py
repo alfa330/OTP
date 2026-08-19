@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.11"
+VERSION = "1.0.13"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -689,24 +689,14 @@ def _stop_installed_copies(target: Path) -> None:
     _run_hidden(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], timeout=25)
 
 
-# Раз в 5 минут, а не раз в минуту. Каждый запуск onefile заново распаковывает
-# 14 МБ во временную папку; ежеминутно это лишняя работа на машине оператора и
-# лишний шанс столкнуться с только что заменённым файлом — тогда распаковка
-# ломается и Windows показывает «Failed to start embedded python interpreter».
-# Как подстраховка «убили обе копии» пять минут ничем не хуже минуты.
-TASK_PERIOD_MINUTES = 5
-
-
-def _register_task(target: Path) -> bool:
-    """Задача-подстраховка на случай, если убиты обе копии.
-    Админских прав такая задача не требует."""
-    return _run_hidden(
-        ["schtasks", "/Create", "/TN", TASK_NAME, "/SC", "MINUTE",
-         "/MO", str(TASK_PERIOD_MINUTES), "/TR", f'"{target}"', "/F"]
-    )
-
-
 def _remove_task() -> None:
+    """Снять задачу-подстраховку.
+
+    Она больше не заводится: возвращать программу по расписанию бессмысленно —
+    если оператор закрыл её и ушёл в Oktell через свой браузер, воскресшая
+    копия всё равно бессильна. Удаление оставлено, чтобы задача ушла у тех, кому
+    её успели поставить.
+    """
     _run_hidden(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
 
 
@@ -800,9 +790,9 @@ def run_install(cfg: dict, start: bool = True) -> int:
         return 1
 
     ok_run = _register_autostart(target)
-    ok_task = _register_task(target)
+    _remove_task()   # у прежних установок она есть — снимаем
     ok_link = _create_shortcut(target)
-    logging.info("Автозапуск: %s | задача: %s | ярлык: %s", ok_run, ok_task, ok_link)
+    logging.info("Автозапуск: %s | ярлык: %s", ok_run, ok_link)
 
     if ok_run:
         show_message(
