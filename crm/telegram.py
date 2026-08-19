@@ -14,6 +14,7 @@
 """
 
 import html
+import os
 
 PRIORITY_LABELS = {
     'low': 'Низкий',
@@ -46,6 +47,28 @@ MESSAGE_LIMIT = 4000
 CALLBACK_PREFIX = 'crm'
 CALLBACK_TAKE = 'crm:work:'
 CALLBACK_DONE = 'crm:done:'
+
+
+# Адрес интерфейса для ссылок из группы. Тот же, что у задач: пункт меню и
+# карточка живут в одном приложении, и второй переменной под тот же адрес не
+# нужно. Отдельная CRM_WEB_APP_BASE_URL оставлена на случай, если раздел когда-то
+# переедет.
+WEB_APP_BASE_URL = (os.getenv('CRM_WEB_APP_BASE_URL')
+                    or os.getenv('TASK_WEB_APP_BASE_URL')
+                    or 'https://alfa330.github.io/OTP').strip().rstrip('/')
+
+
+def ticket_link(ticket_id):
+    """Прямая ссылка на карточку обращения в iCORE.
+
+    Ставится на слова «Обращение №N» в сообщении группы: сотруднику из чата
+    нужен не раздел, а именно это обращение, и искать его в списке — лишний шаг.
+    Параметры те же, что у задач (?view=…&…_id=…), их читает src/App.jsx.
+    """
+    number = int(ticket_id or 0)
+    if number <= 0 or not WEB_APP_BASE_URL:
+        return ''
+    return '%s?view=crm_tickets&ticket_id=%d' % (WEB_APP_BASE_URL, number)
 
 
 def ticket_number(ticket_id):
@@ -102,12 +125,23 @@ def format_body(text):
 
 
 def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=None,
-                         priority='normal', author_name=None, department_name=None,
-                         client_name=None, client_phone=None, created_text=None,
-                         due_text=None):
-    """Текст исходного сообщения обращения (HTML-разметка Telegram)."""
+                         priority='normal', client_name=None, client_phone=None,
+                         due_text=None, own_wording=False):
+    """Текст исходного сообщения обращения (HTML-разметка Telegram).
+
+    own_wording — тематика сформулировала сообщение сама (у группы-получателя
+    свой заведённый формат). Тогда тема это ПРОСЬБА обычным текстом, а тело —
+    данные, и жирным выделяются они: взгляд должен падать на номер ВУ и город,
+    а не на слова «прошу проверить». В остальных тематиках наоборот: тема —
+    заголовок, тело — перечень с выделенными подписями.
+    """
     number = ticket_number(ticket_id)
-    lines = ['🎫 <b>Обращение %s</b> · %s' % (number, html.escape(str(queue_title or '')))]
+    # Номер — ссылка прямо в карточку: сотруднику из чата нужен не раздел, а это
+    # обращение. Отдельной строкой «открыть в iCORE» было бы лишнее место.
+    link = ticket_link(ticket_id)
+    title = ('<a href="%s">Обращение %s</a>' % (html.escape(link, quote=True), number)
+             if link else 'Обращение %s' % number)
+    lines = ['🎫 <b>%s</b> · %s' % (title, html.escape(str(queue_title or '')))]
 
     meta = []
     if topic_title:
@@ -122,25 +156,28 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=N
         lines.extend(meta)
 
     lines.append('')
-    lines.append('<b>%s</b>' % html.escape(_clip(subject, 300)))
+    clean_subject = html.escape(_clip(subject, 300))
+    lines.append(clean_subject if own_wording else '<b>%s</b>' % clean_subject)
     if body:
         lines.append('')
-        lines.append(format_body(_clip(body, 2500)))
+        lines.append('<b>%s</b>' % html.escape(_clip(body, 2500)) if own_wording
+                     else format_body(_clip(body, 2500)))
 
     client = ' · '.join([p for p in (client_name, client_phone) if p])
     if client:
         lines.append('')
         lines.append('👤 <b>Клиент:</b> %s' % html.escape(client))
 
-    signature = ' · '.join([p for p in (author_name, department_name, created_text) if p])
-    if signature:
-        lines.append('')
-        lines.append('<i>🙍 Обратился: %s</i>' % html.escape(signature))
+    # Кто обратился, из какого отдела и когда — в группе лишнее (просьба
+    # владельца 19.08.2026). Отвечают не человеку, а обращению; имя, отдел и
+    # время видны в карточке, куда ведёт ссылка в шапке.
 
     # Инструкция последней строкой и без неё нельзя: без реплая ответ не
-    # свяжется с обращением, а сотрудник об этом знать не обязан.
+    # свяжется с обращением, а сотрудник об этом знать не обязан. Обычным
+    # текстом, а не курсивом: курсив читался как примечание мелким шрифтом, и
+    # инструкцию пропускали.
     lines.append('')
-    lines.append('<i>↩️ Ответьте на это сообщение — ответ вернётся оператору в iCORE.</i>')
+    lines.append('↩️ <b>Ответьте на это сообщение</b> — ответ вернётся оператору в iCORE.')
 
     return _clip('\n'.join(lines), MESSAGE_LIMIT)
 

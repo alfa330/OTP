@@ -165,6 +165,7 @@ const SUPERVISOR_OPERATORS_SV_FILTER_KEY = 'supervisor_operators_sv_filter';
 const SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY = 'supervisor_operators_direction_filter';
 const APP_VIEW_QUERY_PARAM = 'view';
 const TASK_ID_QUERY_PARAM = 'task_id';
+const TICKET_ID_QUERY_PARAM = 'ticket_id';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
@@ -1605,6 +1606,21 @@ const readTaskIdFromUrl = (locationLike = null) => {
         return Number.isInteger(taskId) && taskId > 0 ? taskId : 0;
     } catch (error) {
         console.warn('Failed to read task id from URL', error);
+        return 0;
+    }
+};
+
+/* Обращение, открытое прямой ссылкой: её ставит бот на слова «Обращение №N»
+   в сообщении рабочей группы, чтобы из чата попадать сразу в карточку. */
+const readTicketIdFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return 0;
+    try {
+        const search = locationLike?.search ?? window.location.search;
+        const searchParams = new URLSearchParams(search || '');
+        const ticketId = Number(searchParams.get(TICKET_ID_QUERY_PARAM) || 0);
+        return Number.isInteger(ticketId) && ticketId > 0 ? ticketId : 0;
+    } catch (error) {
+        console.warn('Failed to read ticket id from URL', error);
         return 0;
     }
 };
@@ -35253,6 +35269,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => readTaskIdFromUrl(location),
                 [location.search]
             );
+            const requestedTicketIdFromLocation = useMemo(
+                () => readTicketIdFromUrl(location),
+                [location.search]
+            );
             const currentMonth = new Date().toISOString().slice(0, 7);
             const getStoredValue = (key, fallback) => {
                 try {
@@ -38836,6 +38856,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     requestId: Number(prev?.requestId || 0) + 1,
                 }));
             }, [user?.id, requestedViewFromLocation, requestedTaskIdFromLocation]);
+
+            /* Тем же механизмом, что у задач: ссылка из Telegram открывает не
+               просто раздел, а конкретное обращение. */
+            useEffect(() => {
+                if (!user?.id || requestedViewFromLocation !== 'crm_tickets'
+                    || !requestedTicketIdFromLocation) return;
+                setCrmFocusRequest((prev) => ({
+                    ticketId: requestedTicketIdFromLocation,
+                    requestId: Number(prev?.requestId || 0) + 1,
+                }));
+            }, [user?.id, requestedViewFromLocation, requestedTicketIdFromLocation]);
 
             useEffect(() => {
                 // Do not touch view while authentication is still initializing

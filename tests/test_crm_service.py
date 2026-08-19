@@ -145,7 +145,7 @@ PAYLOAD = {
     'created_by': 10, 'created_by_name': 'Иванов И.',
     'delivery_status': 'pending', 'tg_message_id': None,
     'chat_id': -1001, 'queue_title': 'iTaxi', 'topic_title': None,
-    'department_name': 'СЗоВ',
+    'department_name': 'СЗоВ', 'scenario_key': 'sapar_docs_missing',
 }
 
 

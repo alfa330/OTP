@@ -16,15 +16,7 @@
 import logging
 from datetime import datetime, timedelta
 
-from . import queries, telegram, transport
-
-
-def _now_text():
-    try:
-        from zoneinfo import ZoneInfo
-        return datetime.now(ZoneInfo('Asia/Almaty')).strftime('%d.%m.%Y %H:%M')
-    except Exception:
-        return datetime.now().strftime('%d.%m.%Y %H:%M')
+from . import queries, scenarios, telegram, transport
 
 
 def _due_text(due_at):
@@ -70,12 +62,10 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
         queue_title=payload['queue_title'],
         topic_title=payload['topic_title'],
         priority=payload['priority'],
-        author_name=payload['created_by_name'],
-        department_name=payload['department_name'],
         client_name=payload['client_name'],
         client_phone=payload['client_phone'],
-        created_text=_now_text(),
         due_text=_due_text(payload['due_at']),
+        own_wording=bool((scenarios.get(payload['scenario_key']) or {}).get('body_template')),
     )
     result, error = transport.send_message(
         payload['chat_id'], text,

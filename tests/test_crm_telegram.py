@@ -16,7 +16,7 @@ class TicketMessageTest(unittest.TestCase):
     def build(self, **kwargs):
         payload = dict(
             ticket_id=42, subject='Не приходит бонус', body='Водитель ждёт ответа',
-            queue_title='iTaxi', priority='normal', author_name='Иванов И.',
+            queue_title='iTaxi', priority='normal',
         )
         payload.update(kwargs)
         return telegram.build_ticket_message(**payload)
@@ -45,6 +45,43 @@ class TicketMessageTest(unittest.TestCase):
         self.assertNotIn('Клиент', message)
         self.assertNotIn('Тема:', message)
         self.assertNotIn('Ответ нужен до', message)
+
+    def test_no_author_department_or_time(self):
+        """Просьба владельца 19.08.2026: в группе это лишнее.
+
+        Отвечают не человеку, а обращению; кто завёл, из какого отдела и когда —
+        видно в карточке, куда ведёт ссылка на номере.
+        """
+        message = self.build()
+        for word in ('Обратился', 'СЗоВ', 'Иванов'):
+            self.assertNotIn(word, message, word)
+
+    def test_number_links_to_the_card(self):
+        """Из чата нужен не раздел, а именно это обращение."""
+        message = self.build()
+        self.assertIn('view=crm_tickets', message)
+        self.assertIn('ticket_id=42', message)
+        self.assertIn('>Обращение №42</a>', message)
+        self.assertEqual(telegram.ticket_link(0), '')
+
+    def test_link_is_escaped_for_an_attribute(self):
+        """Амперсанд между параметрами обязан быть &amp;, иначе Telegram ругнётся."""
+        self.assertIn('&amp;ticket_id=42', self.build())
+
+    def test_own_wording_flips_what_is_bold(self):
+        """Тематика формулирует сама → просьба обычным, данные жирным.
+
+        Взгляд должен падать на номер ВУ и город, а не на слова «прошу проверить».
+        """
+        plain = self.build(subject='Прошу проверить на выдачу термокороба',
+                           body='LL190044 · Астана', own_wording=True)
+        self.assertIn('Прошу проверить на выдачу термокороба', plain)
+        self.assertNotIn('<b>Прошу проверить', plain)
+        self.assertIn('<b>LL190044 · Астана</b>', plain)
+
+        usual = self.build(subject='Тема', body='Устройство: Android')
+        self.assertIn('<b>Тема</b>', usual)
+        self.assertIn('<b>Устройство:</b> Android', usual)
 
     def test_client_and_due_appear_when_given(self):
         message = self.build(client_name='Асель', client_phone='+7 700 000 00 00',
@@ -241,7 +278,7 @@ class EveryGroupMessageCarriesTheIinTest(unittest.TestCase):
             ticket_id=10, subject='Документы не поступили · ИИН %s' % self.IIN,
             body='''ИИН водителя: %s
 Таксопарк: iTaxi''' % self.IIN,
-            queue_title='iTaxi Sapar', author_name='Кастек Гаухар',
+            queue_title='iTaxi Sapar',
         )
         self.assertIn(self.IIN, text)
 
