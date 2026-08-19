@@ -9,6 +9,8 @@ import {
   groupCatalog,
   isAnswered,
   localVerdict,
+  referenceOptions,
+  rowsOfGroup,
   missingTarget,
   stepIsComplete,
   stepIsVisible,
@@ -136,10 +138,13 @@ test('обычная незаполненность ведёт на свой в�
 });
 
 test('при переходе в другую тематику общие ответы переносятся, частные — нет', () => {
-  const carried = carryOver({ iin: '123456789012', period: '2026-07', park: 'Алматы',
-                              docs_visible: 'no', error_text: 'ошибка' });
-  assert.deepEqual(Object.keys(carried).sort(), ['iin', 'park', 'period']);
+  const carried = carryOver({ iin: '123456789012', period: '2026-07', park: 'iTaxi',
+                              city: 'Алматы', docs_visible: 'no', error_text: 'ошибка' });
+  assert.deepEqual(Object.keys(carried).sort(), ['city', 'iin', 'park', 'period']);
   assert.equal(carried.iin, '123456789012');
+  // «Где» от смены тематики не меняется — переспрашивать парк и город незачем.
+  assert.equal(carried.park, 'iTaxi');
+  assert.equal(carried.city, 'Алматы');
 });
 
 test('значение достаётся одинаково из строки и из объекта', () => {
@@ -195,4 +200,96 @@ test('«да» по-прежнему требует уточнения, а «н�
   const step = { key: 'provider_changed', kind: 'yesno_date', allow_unknown: true };
   assert.equal(stepIsComplete(step, { answers: { provider_changed: { value: 'yes', detail: '' } } }), false);
   assert.equal(stepIsComplete(step, { answers: { provider_changed: { value: 'yes', detail: '2026-07-01' } } }), true);
+});
+
+/* ─── «Таксопарк» и «Город» рядом одной строкой ───────────────────────────── */
+
+const WHERE = {
+  key: 'where-demo',
+  attachment: 'none',
+  groups: ['Водитель и период'],
+  rules: [],
+  steps: [
+    { key: 'iin', kind: 'iin', group: 'Водитель и период' },
+    { key: 'period', kind: 'period', group: 'Водитель и период' },
+    { key: 'park', kind: 'taxi_park', half: true, group: 'Водитель и период' },
+    { key: 'city', kind: 'city', half: true, group: 'Водитель и период' },
+  ],
+};
+
+test('парк и город встают в одну строку, остальное — по одному', () => {
+  const rows = rowsOfGroup(WHERE, 'Водитель и период', {});
+  assert.deepEqual(rows.map((row) => row.map((s) => s.key)),
+                   [['iin'], ['period'], ['park', 'city']]);
+});
+
+test('одинокий половинный вопрос занимает всю ширину', () => {
+  const parcels = {
+    ...WHERE,
+    steps: [
+      { key: 'iin', kind: 'iin', group: 'Водитель и период' },
+      { key: 'city', kind: 'city', half: true, group: 'Водитель и период' },
+    ],
+  };
+  const rows = rowsOfGroup(parcels, 'Водитель и период', {});
+  assert.deepEqual(rows.map((row) => row.length), [1, 1]);
+});
+
+test('вложение в пару не берётся никогда', () => {
+  const withFile = {
+    ...WHERE,
+    groups: ['Вложение'],
+    steps: [
+      { key: 'park', kind: 'taxi_park', half: true, group: 'Вложение' },
+      { key: 'screenshot', kind: 'attachment', half: true, group: 'Вложение' },
+    ],
+  };
+  const rows = rowsOfGroup(withFile, 'Вложение', {});
+  assert.deepEqual(rows.map((row) => row.map((s) => s.key)), [['park'], ['screenshot']]);
+});
+
+test('раскладка не меняет состав вопросов экрана', () => {
+  const flat = rowsOfGroup(WHERE, 'Водитель и период', {}).flat().map((s) => s.key);
+  assert.deepEqual(flat, ['iin', 'period', 'park', 'city']);
+});
+
+test('скрытый зависимый вопрос в строки не попадает', () => {
+  const conditional = {
+    ...WHERE,
+    steps: [
+      { key: 'park', kind: 'taxi_park', half: true, group: 'Водитель и период' },
+      { key: 'city', kind: 'city', half: true, group: 'Водитель и период',
+        depends_on: ['park', 'iTaxi'] },
+    ],
+  };
+  assert.deepEqual(rowsOfGroup(conditional, 'Водитель и период', {}).map((r) => r.length), [1]);
+  assert.deepEqual(
+    rowsOfGroup(conditional, 'Водитель и период', { park: 'iTaxi' }).map((r) => r.length), [2]);
+});
+
+/* ─── Варианты из справочников ────────────────────────────────────────────── */
+
+test('таксопарки приходят с сервера, города берутся из справочника рядом', () => {
+  const parks = referenceOptions({ kind: 'taxi_park' }, { taxiParks: ['iTaxi', 'Qazaq'] });
+  assert.deepEqual(parks, [{ value: 'iTaxi', label: 'iTaxi' },
+                           { value: 'Qazaq', label: 'Qazaq' }]);
+
+  const cities = referenceOptions({ kind: 'city' }, {});
+  assert.ok(cities.length > 50, `городов подхватилось всего ${cities.length}`);
+  // groupLabel рисует заголовок области — без него длинный список не читается.
+  assert.deepEqual(cities.find((o) => o.value === 'Алматы'),
+                   { value: 'Алматы', label: 'Алматы',
+                     groupLabel: 'Города республиканского значения' });
+  assert.ok(cities.some((o) => o.groupLabel === 'Мангистауская область'));
+});
+
+test('обычный вопрос справочником не подменяется', () => {
+  assert.equal(referenceOptions({ kind: 'text' }, { taxiParks: ['iTaxi'] }), null);
+  assert.equal(referenceOptions({ kind: 'yesno' }, {}), null);
+  assert.equal(referenceOptions(null, {}), null);
+});
+
+test('пустой справочник парков не роняет мастер', () => {
+  assert.deepEqual(referenceOptions({ kind: 'taxi_park' }, {}), []);
+  assert.deepEqual(referenceOptions({ kind: 'taxi_park' }, { taxiParks: [] }), []);
 });

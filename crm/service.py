@@ -165,6 +165,7 @@ def post_operator_reply(db, ticket_id, body, *, author_user_id, author_name,
 
     text = telegram.build_reply_message(
         ticket_id=ticket_id, author_name=author_name, body=body,
+        iin=payload.get('iin'),
     )
     result, error = transport.send_message(
         payload['chat_id'], text, reply_to_message_id=payload['tg_message_id'],
@@ -313,6 +314,7 @@ def change_status_from_system(db, ticket_id, status, *, actor_user_id, actor_nam
         if actor_user_id:
             queries.mark_seen_by_author(cursor, ticket_id, actor_user_id)
         chat_id, message_id = ticket['tg_chat_id'], ticket['tg_message_id']
+        iin = (ticket.get('answers') or {}).get('iin')
 
     if not changed:
         return True, None
@@ -324,7 +326,7 @@ def change_status_from_system(db, ticket_id, status, *, actor_user_id, actor_nam
             transport.send_message(
                 chat_id,
                 telegram.build_status_notice(ticket_id=ticket_id, status=status,
-                                             actor_name=actor_name),
+                                             actor_name=actor_name, iin=iin),
                 reply_to_message_id=message_id,
             )
     return True, None

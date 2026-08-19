@@ -829,7 +829,8 @@ def delivery_payload(cursor, ticket_id):
                t.client_name, t.client_phone,
                t.created_by, t.created_by_name,
                t.delivery_status, t.tg_message_id,
-               q.chat_id, q.title, tp.title, d.name
+               q.chat_id, q.title, tp.title, d.name,
+               t.answers ->> 'iin'
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
@@ -847,8 +848,34 @@ def delivery_payload(cursor, ticket_id):
         'created_by': row[7], 'created_by_name': row[8],
         'delivery_status': row[9], 'tg_message_id': row[10],
         'chat_id': row[11], 'queue_title': row[12], 'topic_title': row[13],
+        # ИИН нужен уточнению в группе: специалист видит номер обращения, но
+        # без ИИН ему всё равно приходится открывать исходное сообщение.
+        'iin': row[15],
         'department_name': row[14],
     }
+
+
+def taxi_parks(cursor):
+    """Таксопарки для выбора в обращении.
+
+    Источник тот же, что у раздела «Парки» в вики (wiki_taxi_parks): второй
+    список парков означал бы, что оператор выбирает из одного набора, а
+    справочник компании живёт другим. Читаем только активные и только имя —
+    в обращении хранится название парка, а не ссылка на строку: обращение
+    остаётся читаемым, даже если парк потом переименуют или уберут.
+
+    Своя таблица здесь не нужна и вредна: парки заводит вики, и заводит их
+    один раз. Точно так же раздел берёт реестр чатов у заявок в IT (bot_chats).
+    """
+    cursor.execute(
+        """
+        SELECT p.name
+          FROM wiki_taxi_parks p
+         WHERE p.status = 'active'
+         ORDER BY p.position, p.name
+        """
+    )
+    return [row[0] for row in cursor.fetchall()]
 
 
 def bot_chats(cursor):

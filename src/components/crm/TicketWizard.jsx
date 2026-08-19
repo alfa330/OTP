@@ -12,7 +12,8 @@ import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
     MISSING_ATTACHMENT, answerValue, carryOver, groupCatalog, groupIsComplete,
-    groupsOf, localVerdict, missingGroup, stepIsComplete, stepsOfGroup,
+    groupsOf, localVerdict, missingGroup, referenceOptions, rowsOfGroup,
+    stepIsComplete,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -50,7 +51,7 @@ const errorText = (error, fallback) => (
 
 /* ─── Поле одного вопроса ─────────────────────────────────────────────────── */
 
-const Field = ({ step, value, onChange, autoFocus, problem }) => {
+const Field = ({ step, value, onChange, autoFocus, problem, options = null }) => {
     const raw = value;
     const current = raw && typeof raw === 'object' ? raw.value : raw;
     const detail = raw && typeof raw === 'object' ? raw.detail : '';
@@ -59,6 +60,17 @@ const Field = ({ step, value, onChange, autoFocus, problem }) => {
     useEffect(() => { if (autoFocus) inputRef.current?.focus(); }, [autoFocus, step.key]);
 
     const control = (() => {
+        // Вопрос из справочника: тот же селектор с поиском, что в остальном
+        // портале. Пятнадцать парков и полторы сотни городов руками не листают.
+        if (options) {
+            return (
+                <CustomSelect variant="ios" value={current || ''} options={options}
+                              onChange={onChange} searchable
+                              placeholder={step.placeholder || 'Выберите'}
+                              searchPlaceholder={`Поиск: ${step.label.toLowerCase()}`}
+                              ariaLabel={step.label} />
+            );
+        }
         if (step.kind === 'yesno' || step.kind === 'yesno_date') {
             return (
                 <div className="space-y-2">
@@ -156,8 +168,11 @@ const Field = ({ step, value, onChange, autoFocus, problem }) => {
         );
     })();
 
+    /* Колонка на всю высоту ячейки, поле прижато книзу: в строке из двух вопросов
+       подписи бывают разной длины, и без этого одно поле оказывалось на строку
+       ниже другого. В строке из одного вопроса ни то, ни другое ничего не меняет. */
     return (
-        <div>
+        <div className="flex h-full flex-col">
             <div className="mb-1.5 flex items-center gap-1.5">
                 <span className="text-[13px] font-medium leading-snug text-slate-800">
                     {step.label}
@@ -168,7 +183,7 @@ const Field = ({ step, value, onChange, autoFocus, problem }) => {
                     <span className="text-[11px] text-slate-400">необязательно</span>
                 )}
             </div>
-            {control}
+            <div className="mt-auto">{control}</div>
             {problem && (
                 <div className="mt-1 text-[11.5px] text-rose-600">{problem}</div>
             )}
@@ -232,7 +247,7 @@ const ClosedScreen = ({ verdict, onClose }) => (
 /* ─── Мастер ──────────────────────────────────────────────────────────────── */
 
 export default function TicketWizard({
-    open, onClose, catalog, apiBaseUrl, headers, showToast, onCreated,
+    open, onClose, catalog, taxiParks = [], apiBaseUrl, headers, showToast, onCreated,
 }) {
     const [scenarioKey, setScenarioKey] = useState('');
     const [phase, setPhase] = useState('pick');   // pick | checks | form | preview | closed
@@ -255,8 +270,8 @@ export default function TicketWizard({
     const catalogGroups = useMemo(() => groupCatalog(catalog), [catalog]);
     const groups = useMemo(() => groupsOf(scenario, answers), [scenario, answers]);
     const group = groups[groupIndex] || null;
-    const groupSteps = useMemo(
-        () => (scenario && group ? stepsOfGroup(scenario, group, answers) : []),
+    const groupRows = useMemo(
+        () => rowsOfGroup(scenario, group, answers),
         [scenario, group, answers],
     );
 
@@ -553,7 +568,13 @@ export default function TicketWizard({
                                         onSwitch={switchScenario} />
                         )}
 
-                        {groupSteps.map((step, index) => (
+                        {groupRows.map((row, rowIndex) => (
+                            /* Пара половинных вопросов — одной строкой; на узком
+                               экране всё равно друг под другом. */
+                            <div key={row.map((s) => s.key).join('+')}
+                                 className={row.length > 1
+                                     ? 'grid grid-cols-1 gap-4 sm:grid-cols-2' : undefined}>
+                                {row.map((step) => (
                             step.kind === 'attachment' ? (
                                 <div key={step.key}>
                                     <div className="mb-1.5 flex items-center gap-1.5">
@@ -593,10 +614,13 @@ export default function TicketWizard({
                                 </div>
                             ) : (
                                 <Field key={step.key} step={step} value={answers[step.key]}
-                                       autoFocus={index === 0}
+                                       autoFocus={rowIndex === 0 && step === row[0]}
                                        problem={missing[step.key]}
+                                       options={referenceOptions(step, { taxiParks })}
                                        onChange={(value) => setAnswer(step.key, value)} />
                             )
+                                ))}
+                            </div>
                         ))}
                     </div>
                 )}

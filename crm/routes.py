@@ -295,6 +295,13 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         Сюда же — готова ли очередь сценария: если Telegram-группа к ней не
         привязана, тематику нельзя предлагать оператору, иначе он пройдёт
         шестнадцать вопросов и упрётся в «отправлять некуда».
+
+        И справочники, из которых мастер даёт выбирать (сейчас — таксопарки).
+        Отдельным запросом их брать незачем: каталог запрашивается один раз при
+        открытии раздела, ровно тогда же, когда нужны и справочники, а второй
+        запрос за пятнадцатью названиями — плата за ничего. Города лежат в
+        интерфейсе (src/utils/kazakhstanCities.js) и с сервера не едут: это
+        справочник Казахстана, он не меняется от нашей базы.
         """
         catalog = scenarios.public_catalog()
         with db._get_cursor() as cursor:
@@ -306,9 +313,10 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                     'queue_title': (queue or {}).get('title'),
                     'is_ready': bool(queue and queue.get('is_ready')),
                 }
+            parks = queries.taxi_parks(cursor)
         for item in catalog:
             item.update(ready.get(item['queue_code'], {'is_ready': False}))
-        return jsonify({"items": catalog})
+        return jsonify({"items": catalog, "reference": {"taxi_parks": parks}})
 
     @crm_route('/scenarios/<key>/evaluate', methods=('POST',))
     def crm_scenario_evaluate(key, ctx):

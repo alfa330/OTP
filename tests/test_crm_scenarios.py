@@ -582,6 +582,63 @@ class RulesAreDecidableTest(unittest.TestCase):
         self.assertIsNone(sc.validate_step(step, {'iin': '060606202020'}))
         self.assertIsNotNone(sc.validate_step(step, {'iin': '٠٦٠٦٠٦٢٠٢٠٢٠'}))
 
+    def test_park_and_city_are_asked_separately(self):
+        """Просьба СЗоВ 19.08.2026: одно поле «Парк или регион» — два вопроса.
+
+        Свободное поле делало двойную работу, и на проде в нём лежит ровно то,
+        что из этого выходит: «iTaxi, Алматы», «ай», «ноль». Теперь парк и город
+        спрашиваются отдельно и оба — выбором из справочника.
+        """
+        for key in ('sapar_docs_missing', 'sapar_sign_error', 'sapar_payment_required',
+                    'sapar_sign_status', 'sapar_service_error'):
+            steps = {s['key']: s for s in sc.get(key)['steps']}
+            self.assertIn('park', steps, key)
+            self.assertIn('city', steps, key)
+            self.assertEqual(steps['park']['kind'], sc.TAXI_PARK, key)
+            self.assertEqual(steps['city']['kind'], sc.CITY, key)
+            # Один объект на все тематики: формулировка одного вопроса не должна
+            # жить в пяти местах.
+            self.assertIs(steps['park'], sc.STEP_PARK, key)
+            self.assertIs(steps['city'], sc.STEP_CITY, key)
+
+    def test_park_and_city_stand_side_by_side(self):
+        """Это одно «где», а не два разных вопроса, и места они занимают столько
+        же, сколько занимало прежнее общее поле."""
+        self.assertTrue(sc.STEP_PARK.get('half'))
+        self.assertTrue(sc.STEP_CITY.get('half'))
+        scenario = sc.get('sapar_docs_missing')
+        screen = [s['key'] for s in sc.steps_of_group(scenario, 'Водитель и период')]
+        self.assertEqual(screen[-2:], ['park', 'city'])
+
+    def test_parcel_city_comes_from_the_same_catalog(self):
+        """У посылок город — это город заказа, поэтому формулировка своя.
+
+        Справочник при этом общий: иначе в одной тематике выбирали бы из списка,
+        а в другой писали руками, и «алматы» с «Алматы» снова разошлись бы.
+        """
+        city = next(s for s in sc.get('parcel_location')['steps'] if s['key'] == 'city')
+        self.assertEqual(city['kind'], sc.CITY)
+        self.assertEqual(city['label'], 'Город, где выполнялся заказ')
+        self.assertIsNot(city, sc.STEP_CITY)
+
+    def test_reference_answers_are_required_but_not_checked_against_a_list(self):
+        """Строгость осталась ровно такой, какой была у свободного поля.
+
+        Членство в справочнике модуль не проверяет и не может: парки лежат в
+        базе, а он чистый. Значение вне списка ничего не открывает — это текст
+        для специалиста в группе. А вот пустым его оставить по-прежнему нельзя.
+        """
+        self.assertEqual(sc.validate_step(sc.STEP_PARK, {}), 'Не заполнено')
+        self.assertEqual(sc.validate_step(sc.STEP_CITY, {}), 'Не заполнено')
+        self.assertIsNone(sc.validate_step(sc.STEP_PARK, {'park': 'iTaxi'}))
+        self.assertIsNone(sc.validate_step(sc.STEP_CITY, {'city': 'Алматы'}))
+
+    def test_park_and_city_reach_the_group_as_written(self):
+        answers = full('sapar_docs_missing', park='Qazaq', city='Актау')
+        body = sc.render_body('sapar_docs_missing', answers)
+        self.assertIn('Таксопарк: Qazaq', body)
+        self.assertIn('Город: Актау', body)
+
     def test_every_flag_references_an_existing_step(self):
         for scenario in sc.SCENARIOS:
             keys = {step['key'] for step in scenario['steps']}

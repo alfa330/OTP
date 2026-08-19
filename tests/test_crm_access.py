@@ -274,6 +274,18 @@ class SchemaContractTest(unittest.TestCase):
         self.assertIn('uq_crm_queues_chat', ddl)
         self.assertIn('ON crm_queues(chat_id) WHERE chat_id IS NOT NULL', ddl)
 
+    def test_parks_come_from_the_wiki_catalog(self):
+        """Второй список парков означал бы, что оператор выбирает из одного
+        набора, а справочник компании живёт другим."""
+        cursor = RecordingCursor()
+        queries.taxi_parks(cursor)
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn('FROM wiki_taxi_parks', sql)
+        self.assertIn("p.status = 'active'", sql)
+        # В обращении хранится НАЗВАНИЕ парка: обращение остаётся читаемым, даже
+        # если парк потом переименуют или уберут из справочника.
+        self.assertIn('SELECT p.name', sql)
+
     def test_iin_is_indexed_for_search(self):
         """Без индекса поиск по ИИН стал бы проходом по всей таблице."""
         ddl = ' '.join(' '.join(schema._STATEMENTS).split())
@@ -605,6 +617,7 @@ class SqlComposesTest(unittest.TestCase):
         queries.list_queues(cursor, include_inactive=True, expose_chat_id=True)
         queries.delivery_payload(cursor, 1)
         queries.bot_chats(cursor)
+        queries.taxi_parks(cursor)
         queries.find_ticket_by_tg_message(cursor, -1001, 2)
         queries.find_message_attachment(cursor, 1, 2)
         queries.unread_for_bell(cursor, 10, 5)

@@ -170,5 +170,97 @@ class BotFilterTest(unittest.TestCase):
         self.assertTrue(crm_bot._is_group_reply(message))
 
 
+class ReplyMessageTest(unittest.TestCase):
+    """Уточнение оператора, которое уходит в рабочую группу реплаем."""
+
+    def build(self, **kwargs):
+        kwargs.setdefault('ticket_id', 10)
+        kwargs.setdefault('author_name', 'Кастек Гаухар')
+        kwargs.setdefault('body', 'Документы так и не пришли')
+        return telegram.build_reply_message(**kwargs)
+
+    def test_iin_stands_next_to_the_ticket_number(self):
+        """Просьба СЗоВ 19.08.2026.
+
+        Номер опознаёт обращение для нас, а специалист в группе работает по
+        водителю. Реплай в Telegram сворачивается в одну строку, поэтому
+        исходное сообщение с ИИН видно не всегда.
+        """
+        text = self.build(iin='060606202020')
+        self.assertIn('№10', text)
+        self.assertIn('ИИН 060606202020', text)
+        header = text.splitlines()[0]
+        self.assertIn('ИИН 060606202020', header)
+
+    def test_without_iin_the_header_stays_as_it_was(self):
+        """У обращения без ИИН лишнего разделителя в заголовке быть не должно."""
+        text = self.build(iin=None)
+        header = text.splitlines()[0]
+        self.assertNotIn('ИИН', header)
+        self.assertNotIn('·', header)
+
+    def test_iin_is_escaped_like_every_other_value(self):
+        """В заголовок идёт HTML: неэкранированное значение сломало бы разметку."""
+        text = self.build(iin='<b>060606202020')
+        self.assertIn('&lt;b&gt;060606202020', text)
+        self.assertNotIn('<b>060606202020', text)
+
+    def test_body_and_author_are_still_there(self):
+        text = self.build(iin='060606202020')
+        self.assertIn('Документы так и не пришли', text)
+        self.assertIn('Кастек Гаухар', text)
+
+
+class StatusNoticeTest(unittest.TestCase):
+    """Отбивка в группу о том, что обращение закрыли из системы."""
+
+    def test_iin_stands_next_to_the_number(self):
+        text = telegram.build_status_notice(ticket_id=10, status='resolved',
+                                            actor_name='Кастек Гаухар', iin='060606202020')
+        self.assertIn('№10 · ИИН 060606202020 — решено', text)
+        self.assertIn('Кастек Гаухар', text)
+
+    def test_without_iin_the_wording_stays_as_it_was(self):
+        text = telegram.build_status_notice(ticket_id=10, status='resolved')
+        self.assertEqual(text, '✅ Обращение №10 — решено')
+
+
+class EveryGroupMessageCarriesTheIinTest(unittest.TestCase):
+    """Просьба владельца 19.08.2026: ИИН — во всех сообщениях по обращению.
+
+    В группе идут обращения по разным водителям, и номер обращения опознаёт их
+    только для нас. Поэтому проверяется КАЖДОЕ исходящее сообщение: добавят
+    новый вид — тест напомнит, что ИИН в нём тоже нужен.
+    """
+
+    IIN = '060606202020'
+
+    def test_initial_message(self):
+        """У исходного ИИН приходит в теме — её собирает scenarios.render_subject."""
+        text = telegram.build_ticket_message(
+            ticket_id=10, subject='Документы не поступили · ИИН %s' % self.IIN,
+            body='''ИИН водителя: %s
+Таксопарк: iTaxi''' % self.IIN,
+            queue_title='iTaxi Sapar', author_name='Кастек Гаухар',
+        )
+        self.assertIn(self.IIN, text)
+
+    def test_clarification_message(self):
+        text = telegram.build_reply_message(ticket_id=10, author_name='Кастек Гаухар',
+                                            body='уточнение', iin=self.IIN)
+        self.assertIn(self.IIN, text)
+
+    def test_status_notice(self):
+        text = telegram.build_status_notice(ticket_id=10, status='resolved', iin=self.IIN)
+        self.assertIn(self.IIN, text)
+
+    def test_no_other_group_message_builder_appeared(self):
+        """Список видов сообщений закрыт: появится новый — этот тест упадёт, и
+        про ИИН в нём не забудут."""
+        builders = sorted(name for name in dir(telegram) if name.startswith('build_'))
+        self.assertEqual(builders, ['build_keyboard', 'build_reply_message',
+                                    'build_status_notice', 'build_ticket_message'])
+
+
 if __name__ == '__main__':
     unittest.main()

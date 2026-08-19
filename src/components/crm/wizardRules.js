@@ -11,6 +11,10 @@
  * право сказать «отправляем» остаётся за сервером (crm/scenarios.py::evaluate).
  */
 
+// Расширение в пути обязательно: модуль проверяется `node --test`, а его
+// ESM-резолвер, в отличие от Vite, безрасширочный путь не находит.
+import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities.js';
+
 // Синтетические ключи сервера: они не соответствуют ни одному шагу, поэтому
 // подсветить их «под вопросом» нельзя — им нужен свой адресат.
 export const MISSING_ATTACHMENT = '__attachment__';
@@ -104,8 +108,10 @@ export const missingTarget = (steps, missing) => {
 };
 
 /* Ответы, которые переносим при переходе в другую тематику: переспрашивать ИИН
- * и период после «это другая тематика» — гарантированное раздражение. */
-export const CARRY_OVER = ['iin', 'period', 'park', 'device', 'browser'];
+ * и период после «это другая тематика» — гарантированное раздражение. Город тут
+ * по той же причине, что и парк: это «где», а «где» от смены тематики не
+ * меняется. */
+export const CARRY_OVER = ['iin', 'period', 'park', 'city', 'device', 'browser'];
 
 export const carryOver = (answers) => {
     const carried = {};
@@ -168,6 +174,52 @@ export const groupIsComplete = (scenario, group, { answers = {}, attachment = nu
     stepsOfGroup(scenario, group, answers)
         .every((step) => stepIsComplete(step, { answers, attachment, scenario }))
 );
+
+/* Варианты для вопроса, который спрашивает значение из справочника.
+ *
+ * Справочники разные по природе, и это видно здесь: парки приходят с сервера
+ * (их заводит вики, они меняются без нас), города лежат рядом в интерфейсе —
+ * это справочник Казахстана, к нашей базе он отношения не имеет и незачем
+ * гонять его по сети на каждое открытие раздела.
+ *
+ * null означает «вопрос не из справочника» — рисуем обычным полем.
+ */
+export const referenceOptions = (step, { taxiParks = [] } = {}) => {
+    if (!step) return null;
+    if (step.kind === 'taxi_park') {
+        return taxiParks.map((name) => ({ value: name, label: name }));
+    }
+    if (step.kind === 'city') return KAZAKHSTAN_CITY_OPTIONS;
+    return null;
+};
+
+/* Вопросы экрана, разложенные по строкам.
+ *
+ * Нужно ровно для одного: «Таксопарк» и «Город» — это одно «где», а не два
+ * разных вопроса, и стоять они должны рядом, занимая столько же места, сколько
+ * занимало прежнее общее поле. Признак несёт сам вопрос (step.half), поэтому
+ * раскладка не зашита в разметку и не знает про конкретные ключи.
+ *
+ * Одинокий половинный вопрос занимает всю ширину: поле в пол-экрана без пары
+ * выглядит обрезанным. Так бывает у посылок — там город есть, а парка нет.
+ * Вложение в пару не берём никогда: у него своя механика выбора файла.
+ */
+export const rowsOfGroup = (scenario, group, answers) => {
+    const steps = stepsOfGroup(scenario, group, answers);
+    const rows = [];
+    for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index];
+        const next = steps[index + 1];
+        const pairable = (item) => Boolean(item) && item.half && item.kind !== 'attachment';
+        if (pairable(step) && pairable(next)) {
+            rows.push([step, next]);
+            index += 1;
+        } else {
+            rows.push([step]);
+        }
+    }
+    return rows;
+};
 
 /* На какой экран вернуть, когда сервер сказал «не хватает данных».
  * Возвращает {phase, group, message}. */

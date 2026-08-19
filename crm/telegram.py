@@ -120,9 +120,19 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=N
     return _clip('\n'.join(lines), MESSAGE_LIMIT)
 
 
-def build_reply_message(*, ticket_id, author_name, body):
-    """Сообщение оператора в уже открытую нить (уходит реплаем к исходному)."""
-    lines = ['💬 <b>Уточнение по обращению %s</b>' % ticket_number(ticket_id)]
+def build_reply_message(*, ticket_id, author_name, body, iin=None):
+    """Сообщение оператора в уже открытую нить (уходит реплаем к исходному).
+
+    ИИН стоит в заголовке рядом с номером обращения (просьба СЗоВ 19.08.2026).
+    Номер опознаёт обращение для НАС, а специалист в группе работает по
+    водителю: без ИИН он на каждое уточнение открывает исходное сообщение и
+    ищет его там. Реплай в Telegram при этом сворачивается в одну строку —
+    исходное сообщение видно не всегда.
+    """
+    header = '💬 <b>Уточнение по обращению %s</b>' % ticket_number(ticket_id)
+    if iin:
+        header += ' · <b>ИИН %s</b>' % html.escape(str(iin).strip())
+    lines = [header]
     lines.append('')
     lines.append(html.escape(_clip(body, 3000)))
     if author_name:
@@ -131,10 +141,18 @@ def build_reply_message(*, ticket_id, author_name, body):
     return _clip('\n'.join(lines), MESSAGE_LIMIT)
 
 
-def build_status_notice(*, ticket_id, status, actor_name=None):
-    """Короткая отбивка в группу о том, что обращение закрыли из системы."""
+def build_status_notice(*, ticket_id, status, actor_name=None, iin=None):
+    """Короткая отбивка в группу о том, что обращение закрыли из системы.
+
+    ИИН здесь по той же причине, что и в уточнении: в группе идут обращения по
+    разным водителям, и «Обращение №10 — решено» без ИИН специалисту ничего не
+    говорит, пока он не найдёт исходное сообщение.
+    """
     label = STATUS_LABELS.get(status, status)
-    text = '✅ Обращение %s — %s' % (ticket_number(ticket_id), label.lower())
+    text = '✅ Обращение %s' % ticket_number(ticket_id)
+    if iin:
+        text += ' · ИИН %s' % str(iin).strip()
+    text += ' — %s' % label.lower()
     if actor_name:
         text += ' (%s)' % actor_name
     return text
