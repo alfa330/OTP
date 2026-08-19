@@ -39,7 +39,20 @@ def transcribe_file(path: str, *, langs=None, diarize=True, timeout_s=300) -> li
             requests.delete(u, headers=h, timeout=30)
         except Exception:
             pass
-    return toks
+    return [_with_timing(t) for t in toks]
+
+
+def _with_timing(tok: dict) -> dict:
+    """Soniox называет границы токена start_ms/end_ms, остальной код ждёт *_time_ms.
+
+    Из-за расхождения имён тайминги молча терялись при сохранении: у транскриптов
+    в кэше duration_ms оставался нулём, а у реплик не было позиции в записи.
+    Держим оба имени: старые потребители не ломаются, новые получают тайминги.
+    """
+    for src, dst in (("start_ms", "start_time_ms"), ("end_ms", "end_time_ms")):
+        if tok.get(dst) is None and tok.get(src) is not None:
+            tok[dst] = tok[src]
+    return tok
 
 
 def assemble(toks: list[dict]) -> dict:
