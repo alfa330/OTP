@@ -32,6 +32,31 @@ export const valueFontSize = (size, scale) => {
     return `clamp(${(min * scale).toFixed(3)}rem, ${(mid * scale).toFixed(2)}vw, ${(max * scale).toFixed(3)}rem)`;
 };
 
+/*
+ * Сегментированный переключатель в стиле остальных разделов. Живёт здесь, а не в разделе:
+ * им переключаются и направления табло в шапке, и режим подсказки графика по чатам.
+ */
+export const SegmentedSwitch = ({ value, options, disabled, onChange, compact = false }) => (
+    <div className={`flex rounded-xl bg-slate-100 ${compact ? 'p-0.5' : 'p-1'}`}>
+        {options.map((option) => (
+            <button
+                key={option.key}
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (value !== option.key) onChange(option.key); }}
+                title={option.hint}
+                className={`rounded-[9px] font-semibold transition-all disabled:opacity-50 ${
+                    compact ? 'px-2.5 py-1 text-[12px]' : 'px-3 py-1.5 text-[12.5px]'} ${
+                    value === option.key
+                        ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                        : 'text-slate-500 hover:text-slate-700'}`}
+            >
+                {option.label}
+            </button>
+        ))}
+    </div>
+);
+
 /** Секция с подписью и иконкой; внутри — сетка плиток с отступами. */
 export const Section = ({ icon, title, right = null, children }) => (
     <div className={`${iosCard} p-5`}>

@@ -8,7 +8,7 @@ import math
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -33,6 +33,7 @@ CHAT_MANAGERS = {
 NAMES = {
     'SZOV_WALLBOARD_DEPARTMENT_CODE',
     'SZOV_CHAT_WALLBOARD_TARGET_SECONDS',
+    'SZOV_CHAT_WALLBOARD_ONLINE_MIN_SECONDS',
     'SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS',
     'SZOV_CHAT_WALLBOARD_REQUESTS_TTL_SECONDS',
     'SZOV_CHAT_WALLBOARD_STALE_MAX_SECONDS',
@@ -59,6 +60,7 @@ NAMES = {
     '_szov_chat_wallboard_timelines',
     '_szov_chat_wallboard_online_seconds',
     '_szov_chat_wallboard_hourly',
+    '_szov_chat_wallboard_display_names',
     '_szov_chat_wallboard_now',
     '_szov_chat_wallboard_fetch_events',
     '_szov_chat_wallboard_fetch_snapshot',
@@ -147,7 +149,7 @@ class _Harness:
             ),
         }
         # Ответ внутри чата считает боевая функция отчёта по чатам — берём её как есть.
-        _load_names(source, {'_chat_hourly_response_times'}, ns)
+        _load_names(source, {'_chat_hourly_response_times', '_chat_hourly_response_sums'}, ns)
         _load_names(source, NAMES, ns)
         ns['_SZOV_WALLBOARD_DEPARTMENT_CACHE'].update(ts=0.0, id=None)
         ns['_szov_chat_wallboard_events_cache'].update(day=None, rows={}, newest=None, truncated=False)
@@ -199,7 +201,9 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
         ns = self._namespace()
         timelines = {'Алия Тестова': [(8 * 3600 + 1800, 'online', 'Онлайн', '')]}
         per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600 + 900)
-        self.assertEqual(per_hour, {8: 1800, 9: 3600, 10: 900})
+        # Разбивка по людям: из неё считаются и голова часа, и ФИО в подсказке графика.
+        self.assertEqual(per_hour, {8: {'Алия Тестова': 1800}, 9: {'Алия Тестова': 3600},
+                                    10: {'Алия Тестова': 900}})
 
     def test_busy_and_training_do_not_hold_the_line(self):
         """Занят и тренинг — это НЕ на линии; отрезки одного человека внутри часа складываются."""
@@ -214,7 +218,7 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
             'Бекзат Примеров': [(9 * 3600, 'busy', 'Занят', '')],
             'Ерлан Учебный': [(9 * 3600, 'training', 'Тренинг', '')]}
         per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 10 * 3600)
-        self.assertEqual(per_hour, {9: 600 + 1800})
+        self.assertEqual(per_hour, {9: {'Алия Тестова': 600 + 1800}})
 
     def test_status_spellings_are_normalized(self):
         """Chat2Desk пишет один статус четырьмя способами — ключ должен получиться один."""
@@ -240,7 +244,7 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
         # Нераспознанный `tech.break` тянул бы «Онлайн» до самого «сейчас» — человек попал бы
         # ещё и в 10-й час.
         per_hour = ns['_szov_chat_wallboard_online_seconds'](timelines, 11 * 3600)
-        self.assertEqual(per_hour, {9: 1800})
+        self.assertEqual(per_hour, {9: {'Алия Тестова': 1800}})
 
     def test_truncated_events_do_not_backfill_the_night(self):
         """Выгрузка обрезалась — самое раннее событие уже не начало смены, достраивать нельзя."""
@@ -254,10 +258,11 @@ class ChatWallboardTimelineTests(_Harness, unittest.TestCase):
 
 
 class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
-    """Почасовые строки графика."""
+    """Почасовые строки графика: чаты, время ответа и КТО держал линию."""
 
-    def _rows(self, ns, timelines, requests, now):
-        return {row['hour']: row for row in ns['_szov_chat_wallboard_hourly'](requests, timelines, now)}
+    def _rows(self, ns, timelines, requests, now, **kwargs):
+        return {row['hour']: row
+                for row in ns['_szov_chat_wallboard_hourly'](requests, timelines, now, **kwargs)}
 
     def test_hours_stop_at_the_current_hour(self):
         ns = self._namespace()
@@ -267,8 +272,15 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         self.assertTrue(rows[-1]['partial'])
         self.assertFalse(rows[-2]['partial'])
 
-    def test_partial_hour_is_divided_by_the_lived_part(self):
-        """Час прожит на треть: двое на линии — это двое, а не 0,67 человека."""
+    def test_closed_day_covers_all_24_hours(self):
+        """Выгрузка за прошедший день: сутки закрыты, «час идёт» там некому идти."""
+        ns = self._namespace()
+        rows = ns['_szov_chat_wallboard_hourly']([], {}, None, full_day=True)
+        self.assertEqual([row['hour'] for row in rows], list(range(0, 24)))
+        self.assertFalse(any(row['partial'] for row in rows))
+
+    def test_people_are_counted_by_heads(self):
+        """Решение владельца 19.08.2026 (вечер): двое на линии — это 2, а не доля часа."""
         ns = self._namespace()
         now = datetime(2026, 8, 18, 13, 20, 0)
         timelines = {
@@ -276,10 +288,11 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
             'Бекзат Примеров': [(13 * 3600, 'online', 'Онлайн', '')],
         }
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[13]['operators_online'], 2.0)
+        self.assertEqual(rows[13]['operators_online'], 2)
+        self.assertIsInstance(rows[13]['operators_online'], int)
 
-    def test_two_half_shifts_make_one_person(self):
-        """Двое, сменившиеся по получасу, держали линию как один человек — головой было бы «два»."""
+    def test_two_half_shifts_count_as_two_people(self):
+        """Сменились по получасу — на линии в этом часу было двое (прежняя FTE давала 1,0)."""
         ns = self._namespace()
         now = datetime(2026, 8, 18, 10, 0, 0)
         timelines = {
@@ -289,22 +302,58 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
                                 (10 * 3600, 'logout', 'Не в системе', '')],
         }
         rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 1.0)
+        self.assertEqual(rows[9]['operators_online'], 2)
+        # Минуты смены остались рядом: по ним видно, что часа на двоих было ровно один.
+        self.assertEqual(rows[9]['online_seconds'], 3600)
 
-    def test_the_number_is_not_rounded(self):
-        """Дробь не округляем (решение владельца): 3,8 честнее четвёрки."""
+    def test_visit_under_a_minute_is_not_a_person_but_is_not_lost(self):
+        """Заглянул на 40 секунд — не человек часа; в счёт не идёт, но и не исчезает."""
+        ns = self._namespace()
+        now = datetime(2026, 8, 18, 10, 0, 0)
+        timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', ''),
+                                      (9 * 3600 + 40, 'logout', 'Не в системе', '')]}
+        rows = self._rows(ns, timelines, [], now)
+        self.assertEqual(rows[9]['operators_online'], 0)
+        self.assertEqual(rows[9]['operators'], [])
+        self.assertEqual(rows[9]['operators_under_minute'], 1)
+        self.assertEqual(rows[9]['online_seconds'], 40)
+
+    def test_a_full_minute_already_counts(self):
+        """Порог — минута и больше: ровно минута человека уже делает человеком часа."""
+        ns = self._namespace()
+        now = datetime(2026, 8, 18, 10, 0, 0)
+        timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', ''),
+                                      (9 * 3600 + 60, 'logout', 'Не в системе', '')]}
+        rows = self._rows(ns, timelines, [], now)
+        self.assertEqual(rows[9]['operators_online'], 1)
+        self.assertEqual(rows[9]['operators_under_minute'], 0)
+
+    def test_row_carries_the_people_by_name_and_minutes(self):
+        """Подсказка графика показывает ФИО: сверху те, кто держал линию дольше."""
         ns = self._namespace()
         now = datetime(2026, 8, 18, 10, 0, 0)
         timelines = {
-            'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', '')],
-            'Бекзат Примеров': [(9 * 3600, 'online', 'Онлайн', ''),
-                                (9 * 3600 + 2880, 'logout', 'Не в системе', '')],
+            'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', ''),
+                             (9 * 3600 + 1200, 'break', 'Перерыв', '')],
+            'Бекзат Примеров': [(9 * 3600, 'online', 'Онлайн', '')],
         }
-        rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 1.8)
+        names = {'Алия Тестова': 'Тестова Алия Тестовна',
+                 'Бекзат Примеров': 'Примеров Бекзат Примерулы'}
+        rows = self._rows(ns, timelines, [], now, names=names)
+        self.assertEqual([person['name'] for person in rows[9]['operators']],
+                         ['Примеров Бекзат Примерулы', 'Тестова Алия Тестовна'])
+        self.assertEqual([person['seconds'] for person in rows[9]['operators']], [3600, 1200])
+
+    def test_name_without_a_matched_employee_stays_itself(self):
+        """ФИО не нашли — оставляем имя учётки: минуты есть, а человека под ними быть обязано."""
+        ns = self._namespace()
+        now = datetime(2026, 8, 18, 10, 0, 0)
+        timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', '')]}
+        rows = self._rows(ns, timelines, [], now, names={})
+        self.assertEqual([person['name'] for person in rows[9]['operators']], ['Алия Тестова'])
 
     def test_row_carries_the_minutes_the_shift_stood_on_the_line(self):
-        """Рядом с дробью в подсказке — сколько всего минут смена простояла на линии в этом часу."""
+        """Рядом с головами — сколько всего минут смена простояла на линии в этом часу."""
         ns = self._namespace()
         now = datetime(2026, 8, 18, 10, 0, 0)
         timelines = {
@@ -314,25 +363,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         }
         rows = self._rows(ns, timelines, [], now)
         self.assertEqual(rows[9]['online_seconds'], 3600 + 1800)
-        self.assertEqual(rows[9]['operators_online'], 1.5)
-
-    def test_a_five_minute_visit_stays_a_fraction(self):
-        """Заглянул на пять минут — это 0,08 человека, а не «один на линии»."""
-        ns = self._namespace()
-        now = datetime(2026, 8, 18, 10, 0, 0)
-        timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', ''),
-                                      (9 * 3600 + 300, 'logout', 'Не в системе', '')]}
-        rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 0.08)
-        self.assertEqual(rows[9]['online_seconds'], 300)
-
-    def test_fresh_hour_is_not_diluted_by_the_whole_hour(self):
-        """Часу минута от роду: делим на прожитое, иначе полная линия выглядит пустой."""
-        ns = self._namespace()
-        now = datetime(2026, 8, 18, 9, 1, 0)
-        timelines = {'Алия Тестова': [(9 * 3600, 'online', 'Онлайн', '')]}
-        rows = self._rows(ns, timelines, [], now)
-        self.assertEqual(rows[9]['operators_online'], 1.0)
+        self.assertEqual(rows[9]['operators_online'], 2)
 
     def test_row_carries_chats_response_and_required(self):
         ns = self._namespace()
@@ -349,7 +380,7 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         self.assertEqual(rows[11]['chats'], 1)
         self.assertEqual(rows[12]['chats'], 1)
         self.assertEqual(rows[11]['inner_reply_seconds'], 240)
-        self.assertEqual(rows[11]['operators_online'], 2.0)
+        self.assertEqual(rows[11]['operators_online'], 2)
         self.assertNotIn('operators_required', rows[11])
 
     def test_hour_without_people_still_carries_the_chats(self):
@@ -357,7 +388,8 @@ class ChatWallboardHourlyTests(_Harness, unittest.TestCase):
         now = datetime(2026, 8, 18, 3, 0, 0)
         rows = self._rows(ns, {}, [_request('2026-08-18 02:10:00', 20, 3, 740)], now)
         self.assertEqual(rows[2]['chats'], 1)
-        self.assertEqual(rows[2]['operators_online'], 0.0)
+        self.assertEqual(rows[2]['operators_online'], 0)
+        self.assertEqual(rows[2]['operators'], [])
         self.assertEqual(rows[2]['online_seconds'], 0)
 
 
@@ -619,12 +651,13 @@ class ChatWallboardWiringTests(unittest.TestCase):
             self.assertIn(name, self.board, name)
 
     def test_the_hour_hint_pairs_people_with_minutes_on_the_line(self):
-        """Дробь не округляем, а рядом показываем минуты — из них она и получается."""
+        """Головы без минут врут: двое по часу и двое по десять минут — разные вещи."""
         self.assertIn("label={{ value: 'чатники'", self.board)
         self.assertIn("${formatPeople(row.online) || '0'} чел.", self.board)
         self.assertIn("{formatMinutes(row.onlineSeconds, 0)} на линии", self.board)
         self.assertIn('onlineSeconds: row.online_seconds ?? null', self.board)
-        self.assertNotIn('FTE', self.board)
+        # Не добравшие до минуты видны отдельной пометкой, а не растворяются в счётчике.
+        self.assertIn("{formatInt(row.underMinute)} меньше минуты", self.board)
 
     def test_required_staffing_is_gone_from_the_board(self):
         """Расчёт «сколько нужно под 2 минуты» убран: пропорция от факта завышала в разы."""
@@ -634,31 +667,61 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertNotIn('operators_required', api)
 
     def test_chat_direction_offers_the_excel_export(self):
-        """Кнопка выгрузки есть только у «Чата» и только когда снимок уже пришёл."""
+        """Выгрузка есть только у «Чата» и только когда снимок уже пришёл."""
         self.assertIn("/api/szov_wallboard/chat_export", self.view)
-        self.assertIn("<ChatExportButton", self.view)
+        self.assertIn("<ChatExportControls", self.view)
         line_board = self.view[self.view.index("const LineWallboard ="):
                                self.view.index("const chatExportFileName =")]
-        self.assertNotIn("ChatExportButton", line_board)
+        self.assertNotIn("ChatExportControls", line_board)
         chat_board = self.view[self.view.index("const ChatWallboard ="):
                                self.view.index("export default function SzovWallboardView")]
-        self.assertIn("{snapshot ? (\n                <ChatExportButton", chat_board)
+        self.assertIn("{snapshot ? (\n                <ChatExportControls", chat_board)
 
-    def test_export_file_name_carries_the_moment_of_the_data(self):
+    def test_export_period_uses_the_shared_picker(self):
+        """Пикер тот же, что в «Чатах ChatApp» — календарь на разделы один, а не копия."""
+        self.assertIn("import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';",
+                      self.view)
+        self.assertIn("<IosDateRangePicker", self.view)
+        self.assertIn("query.set('date_from', from)", self.view)
+        self.assertIn("query.set('date_to', to)", self.view)
+        # «Весь период» тут не годится: выгрузка качает Chat2Desk по дню на день.
+        self.assertIn("chatExportPresets", self.view)
+        self.assertNotIn("'Весь период'", self.view)
+        # Потолок периода гасит кнопку ДО запроса, а не после минуты ожидания.
+        self.assertIn("const CHAT_EXPORT_MAX_DAYS = 31;", self.view)
+        self.assertIn("disabled={busy || tooLong}", self.view)
+
+    def test_export_file_name_carries_the_period(self):
         """Имя собирает фронт: Content-Disposition через CORS сюда не доходит."""
-        self.assertIn("const chatExportFileName = (snapshot) => {", self.view)
+        self.assertIn("const chatExportFileName = (snapshot, from, to) => {", self.view)
+        self.assertIn("if (from && to && from !== to) return `szov_wallboard_chat_${day(from)}_${day(to)}.xlsx`;",
+                      self.view)
         self.assertIn("String(snapshot?.chat2desk_now || '').slice(11, 16)", self.view)
-        self.assertIn("szov_wallboard_chat_${stamp || 'now'}.xlsx", self.view)
 
     def test_export_failure_is_reported_by_toast(self):
         """showToast держим в ref: он новый на каждом рендере, а табло рендерится по опросу."""
         self.assertIn("Не удалось выгрузить показатели", self.view)
         self.assertIn("const toastRef = useRef(showToast);", self.view)
-        element = self.view[self.view.index("<ChatExportButton"):]
+        element = self.view[self.view.index("<ChatExportControls"):]
         element = element[:element.index("/>")]
         for prop in ('apiBaseUrl={apiBaseUrl}', 'withAccessTokenHeader={withAccessTokenHeader}',
                      'showToast={showToast}', 'snapshot={snapshot}'):
             self.assertIn(prop, element, prop)
+
+    def test_hourly_chart_can_show_who_was_on_the_line(self):
+        """Переключатель у «По часам»: график тот же, меняется только подсказка (запрос владельца)."""
+        self.assertIn("export const HOURLY_TOOLTIP_MODES = [", self.board)
+        self.assertIn("{ key: 'people', label: 'Кто на линии'", self.board)
+        self.assertIn("<SegmentedSwitch", self.board)
+        self.assertIn("tooltipMode === 'people' ? <PeopleTooltip /> : <ChartTooltip />", self.board)
+        self.assertIn("people: Array.isArray(row.operators) ? row.operators : []", self.board)
+        self.assertIn("underMinute: Number(row.operators_under_minute) || 0", self.board)
+
+    def test_people_on_the_line_are_whole_people(self):
+        """Дробей на графике больше нет: считаем головами (решение владельца 19.08.2026, вечер)."""
+        self.assertIn("return String(Math.round(number));", self.board)
+        self.assertNotIn("rounded.toFixed(1)", self.board)
+        self.assertIn('allowDecimals={false}', self.board)
 
     def test_chart_hours_are_labelled_as_intervals(self):
         """«12–13», как в почасовом отчёте: иначе непонятно, промежуток это или накопление."""
@@ -667,19 +730,27 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("rows || []", self.board)
 
 
-# Имена сборщика .xlsx. Отдельным набором: файл собирается из готового снимка, источники
+# Имена сборщика выгрузки. Отдельным набором: файл собирается из готовых дней, источники
 # Chat2Desk ему не нужны, и тянуть в namespace весь их обвес было бы шумом.
 EXPORT_NAMES = {
     'SZOV_CHAT_WALLBOARD_TARGET_SECONDS',
+    'SZOV_CHAT_EXPORT_MAX_DAYS',
+    'SZOV_CHAT_EXPORT_WORKERS',
     '_SZOV_CHAT_EXPORT_STATUS_FILL',
     '_szov_chat_export_minutes',
     '_szov_chat_export_hour_label',
+    '_szov_chat_export_parse_day',
+    '_szov_chat_export_period',
+    '_szov_chat_export_day_people',
+    '_szov_chat_export_finish_day',
+    '_szov_chat_export_today_block',
+    '_szov_chat_export_file_name',
     '_szov_chat_wallboard_workbook',
 }
 
 
 def _export_namespace():
-    """namespace для сборщика выгрузки: openpyxl настоящий, снимок подаём руками."""
+    """namespace для сборщика выгрузки: openpyxl настоящий, дни подаём руками."""
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
@@ -688,6 +759,7 @@ def _export_namespace():
     ns = {
         'math': math,
         'datetime': datetime,
+        'timedelta': timedelta,
         'ZoneInfo': ZoneInfo,
         'BytesIO': BytesIO,
         'Workbook': Workbook,
@@ -704,41 +776,99 @@ def _export_namespace():
     return ns
 
 
-def _export_snapshot(**overrides):
-    """Снимок направления «Чат» в том виде, в котором его отдаёт ручка табло."""
-    snapshot = {
-        'day': '2026-08-18',
-        'chat2desk_now': '2026-08-18 10:20:30',
-        'target_seconds': 120,
-        'now': {
-            'operators_online': 3, 'operators_busy': 1, 'operators_on_training': 1,
-            'operators_on_break': 2, 'operators_on_holiday': 1, 'operators_other': 0,
-            'operators_offline': 4, 'open_chats': 12,
-            'operators': [
-                {'operator_id': 235, 'name': 'Тестова Алия Тестовна', 'status': 'Онлайн',
-                 'status_key': 'online', 'since': '2026-08-18 09:50:00', 'seconds': 1800,
-                 'open_chats': 7},
-                {'operator_id': 18, 'name': 'Ночная Дана Сменовна', 'status': 'Онлайн',
-                 'status_key': 'online', 'since': '', 'seconds': None, 'open_chats': 5},
-                {'operator_id': 37, 'name': 'Учебный Ерлан Тренингулы', 'status': 'Тренинг',
-                 'status_key': 'training', 'since': '2026-08-18 10:10:30', 'seconds': 600,
-                 'open_chats': 0},
-            ],
-        },
-        'today': {'chats': 40, 'chats_open': 12, 'first_reply_seconds': 90.0,
-                  'inner_reply_seconds': 150.0},
-        'hourly': [
-            {'hour': 8, 'chats': 10, 'first_reply_seconds': 60.0, 'inner_reply_seconds': 90.0,
-             'operators_online': 3.84, 'online_seconds': 13824, 'partial': False},
-            {'hour': 9, 'chats': 0, 'first_reply_seconds': None, 'inner_reply_seconds': None,
-             'operators_online': 0, 'online_seconds': 0, 'partial': False},
-            {'hour': 10, 'chats': 30, 'first_reply_seconds': 120.0, 'inner_reply_seconds': 210.0,
-             'operators_online': 2.5, 'online_seconds': 3060, 'partial': True},
-        ],
-        'diagnostics': {'department_id': 1, 'unmatched_names': [], 'events_truncated': False},
+# Час выгрузки: люди уже посчитаны головами, как их отдаёт _szov_chat_wallboard_hourly.
+def _export_hour(hour, chats, inner, first, people, *, under=0, partial=False):
+    return {
+        'hour': hour, 'chats': chats, 'inner_reply_seconds': inner, 'first_reply_seconds': first,
+        'operators_online': len(people),
+        'operators': [{'name': name, 'seconds': seconds} for name, seconds in people],
+        'operators_under_minute': under,
+        'online_seconds': sum(seconds for _name, seconds in people),
+        'partial': partial,
     }
-    snapshot.update(overrides)
-    return snapshot
+
+
+ALIA, BEK, DANA = 'Тестова Алия Тестовна', 'Примеров Бекзат Примерулы', 'Ночная Дана Сменовна'
+
+
+def _export_day(ns, day, *, chats_open=None, error=None, truncated=False, unmatched=(),
+                partial_last=False):
+    hourly = [
+        _export_hour(9, 10, 90.0, 60.0, [(ALIA, 3600), (DANA, 1800)], under=1),
+        _export_hour(10, 30, 210.0, 120.0, [(ALIA, 3600), (BEK, 3600), (DANA, 900)]),
+        _export_hour(11, 0, None, None, []),
+        _export_hour(15, 6, 105.0, 75.0, [(ALIA, 1800)], partial=partial_last),
+    ]
+    return ns['_szov_chat_export_finish_day'](day, hourly, {
+        'chats': 46, 'chats_open': chats_open,
+        'first_reply_seconds': 90.0, 'inner_reply_seconds': 150.0,
+        'reply_sums': {'first_sum': 4140.0, 'first_count': 46,
+                       'inner_sum': 6900.0, 'inner_count': 46},
+    }, events_truncated=truncated, unmatched_names=unmatched, error=error)
+
+
+NOW_BLOCK = {
+    'operators_online': 3, 'operators_busy': 1, 'operators_on_training': 1,
+    'operators_on_break': 2, 'operators_on_holiday': 1, 'operators_other': 0,
+    'operators_offline': 4, 'open_chats': 12,
+    'operators': [
+        {'name': ALIA, 'status': 'Онлайн', 'status_key': 'online', 'seconds': 1800, 'open_chats': 7},
+        {'name': DANA, 'status': 'Онлайн', 'status_key': 'online', 'seconds': None, 'open_chats': 5},
+        {'name': 'Учебный Ерлан Тренингулы', 'status': 'Тренинг', 'status_key': 'training',
+         'seconds': 600, 'open_chats': 0},
+    ],
+}
+
+
+class ChatWallboardExportPeriodTests(unittest.TestCase):
+    """Период выгрузки: что разрешено просить и как это превращается в дни."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ns = _export_namespace()
+
+    def _period(self, date_from, date_to, today=date(2026, 8, 19)):
+        return self.ns['_szov_chat_export_period'](date_from, date_to, today)
+
+    def test_no_dates_mean_today(self):
+        """Самый частый случай — глянул на табло и забрал цифры: он не стоит ни одного запроса."""
+        self.assertEqual(self._period(None, None), ['2026-08-19'])
+
+    def test_period_is_expanded_day_by_day(self):
+        self.assertEqual(self._period('2026-08-17', '2026-08-19'),
+                         ['2026-08-17', '2026-08-18', '2026-08-19'])
+
+    def test_reversed_period_is_straightened(self):
+        self.assertEqual(self._period('2026-08-19', '2026-08-17'),
+                         ['2026-08-17', '2026-08-18', '2026-08-19'])
+
+    def test_one_date_is_a_single_day(self):
+        self.assertEqual(self._period('2026-08-17', None), ['2026-08-17'])
+        self.assertEqual(self._period(None, '2026-08-17'), ['2026-08-17'])
+
+    def test_tail_in_the_future_is_cut_off(self):
+        """Chat2Desk отдал бы пустые сутки, а в файле они читались бы как день простоя."""
+        self.assertEqual(self._period('2026-08-18', '2026-08-25'), ['2026-08-18', '2026-08-19'])
+
+    def test_broken_and_oversized_periods_are_refused(self):
+        for date_from, date_to in (('2026-13-01', None), (None, 'вчера')):
+            with self.assertRaises(ValueError):
+                self._period(date_from, date_to)
+        with self.assertRaises(ValueError):
+            self._period('2026-08-25', '2026-08-26')  # весь период в будущем
+        with self.assertRaises(ValueError):
+            self._period('2026-01-01', '2026-08-19')  # больше потолка суток
+
+    def test_file_name_says_what_is_inside(self):
+        name = self.ns['_szov_chat_export_file_name']
+        self.assertEqual(name({'from': '2026-08-17', 'to': '2026-08-19'}),
+                         'szov_wallboard_chat_20260817_20260819.xlsx')
+        # У сегодняшнего дня в имени стоит момент данных, а не скачивания.
+        self.assertEqual(name({'from': '2026-08-19', 'to': '2026-08-19', 'day': '2026-08-19',
+                               'chat2desk_now': '2026-08-19 15:20:30'}),
+                         'szov_wallboard_chat_20260819_1520.xlsx')
+        self.assertEqual(name({'from': '2026-08-17', 'to': '2026-08-17'}),
+                         'szov_wallboard_chat_20260817.xlsx')
 
 
 class ChatWallboardExcelExportTests(unittest.TestCase):
@@ -748,10 +878,29 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ns = _export_namespace()
 
-    def _workbook(self, snapshot=None):
+    def _payload(self, days, **overrides):
+        payload = {
+            'from': days[0]['day'], 'to': days[-1]['day'], 'today': '2026-08-19',
+            'days': days, 'target_seconds': 120, 'now': NOW_BLOCK,
+            'chat2desk_now': '2026-08-19 15:20:30', 'stale': False,
+            'generated_at': '2026-08-19 15:21',
+        }
+        payload.update(overrides)
+        return payload
+
+    def _workbook(self, payload):
         from openpyxl import load_workbook
-        content = self.ns['_szov_chat_wallboard_workbook'](snapshot or _export_snapshot())
-        return load_workbook(BytesIO(content))
+        return load_workbook(BytesIO(self.ns['_szov_chat_wallboard_workbook'](payload)))
+
+    def _today(self):
+        return self._payload([_export_day(self.ns, '2026-08-19', chats_open=12, partial_last=True)])
+
+    def _period(self):
+        return self._payload([
+            _export_day(self.ns, '2026-08-17', truncated=True, unmatched=['Посторонний Оператор']),
+            _export_day(self.ns, '2026-08-18'),
+            _export_day(self.ns, '2026-08-19', chats_open=12, partial_last=True),
+        ], stale=True, age_seconds=420, error='Chat2Desk не отвечает')
 
     def _find_row(self, sheet, label):
         for row in sheet.iter_rows(min_col=1, max_col=3, values_only=True):
@@ -773,82 +922,171 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertEqual(self.ns['_szov_chat_export_hour_label'](12), '12:00–13:00')
         self.assertEqual(self.ns['_szov_chat_export_hour_label'](23), '23:00–00:00')
 
-    def test_three_sheets_of_the_board(self):
-        wb = self._workbook()
-        self.assertEqual(wb.sheetnames, ['Показатели', 'По часам', 'Чатники'])
+    def test_single_day_has_no_day_sheet(self):
+        """На однодневной выгрузке лист «По дням» повторял бы сводку — его нет."""
+        self.assertEqual(self._workbook(self._today()).sheetnames,
+                         ['Показатели', 'По часам', 'Люди на линии', 'Чатники'])
+
+    def test_period_adds_the_day_sheet(self):
+        self.assertEqual(self._workbook(self._period()).sheetnames,
+                         ['Показатели', 'По дням', 'По часам', 'Люди на линии', 'Чатники'])
+
+    def test_shift_sheet_appears_only_with_today_inside(self):
+        """Состава смены «сейчас» у прошедшего дня не существует: живой список — только на сейчас."""
+        payload = self._payload([_export_day(self.ns, '2026-08-17')], now=None, chat2desk_now=None)
+        wb = self._workbook(payload)
+        self.assertNotIn('Чатники', wb.sheetnames)
+        with self.assertRaises(AssertionError):
+            self._find_row(wb['Показатели'], 'Открыто чатов')
+        self.assertEqual(self._find_row(wb['Показатели'], 'Дата')[1], '2026-08-17')
 
     def test_summary_repeats_the_tiles_of_the_board(self):
-        sheet = self._workbook()['Показатели']
-        self.assertEqual(self._find_row(sheet, 'Дата')[1], '2026-08-18')
-        self.assertEqual(self._find_row(sheet, 'Данные Chat2Desk на')[1], '2026-08-18 10:20:30')
+        sheet = self._workbook(self._today())['Показатели']
+        self.assertEqual(self._find_row(sheet, 'Дата')[1], '2026-08-19')
+        self.assertEqual(self._find_row(sheet, 'Данные Chat2Desk на')[1], '2026-08-19 15:20:30')
         self.assertEqual(self._find_row(sheet, 'Цель по ответу внутри чата, мин')[1], 2.0)
         self.assertEqual(self._find_row(sheet, 'Онлайн')[1], 3)
-        self.assertEqual(self._find_row(sheet, 'Занят')[1], 1)
         self.assertEqual(self._find_row(sheet, 'Не в системе')[1], 4)
         self.assertEqual(self._find_row(sheet, 'Открыто чатов')[1], 12)
-        self.assertEqual(self._find_row(sheet, 'Чатов за сутки')[1], 40)
+        self.assertEqual(self._find_row(sheet, 'Чатов')[1], 46)
+        self.assertEqual(self._find_row(sheet, 'Открыто сейчас')[1], 12)
         self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[1], 2.5)
         # Цель в пояснении — по-русски и без «,0»: файл читают глазами, а не только формулами.
         self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[2],
                          'Цель — не больше 2 мин')
         self.assertEqual(self._find_row(sheet, 'Первый ответ, мин')[1], 1.5)
-        # «Часов в цели» считается по тем же часам, что плитка на табло: измеренных два (08 и 10),
-        # в цель уложился один.
-        self.assertEqual(self._find_row(sheet, 'Часов измерено')[1], 2)
-        self.assertEqual(self._find_row(sheet, 'Часов в цели')[1], 1)
+        # Измеренных часов три (09, 10, 15), в цель уложились два.
+        self.assertEqual(self._find_row(sheet, 'Часов измерено')[1], 3)
+        self.assertEqual(self._find_row(sheet, 'Часов в цели')[1], 2)
 
-    def test_hours_carry_numbers_not_strings(self):
-        """По файлу считают дальше: минуты и люди — числа, а не «2,5 мин»."""
-        sheet = self._workbook()['По часам']
+    def test_summary_counts_people_as_heads(self):
+        """Людей — головами: трое разных за день и трое в самом плотном часу."""
+        sheet = self._workbook(self._today())['Показатели']
+        self.assertEqual(self._find_row(sheet, 'Людей на линии')[1], 3)
+        self.assertEqual(self._find_row(sheet, 'Максимум людей в часе')[1], 3)
+        self.assertEqual(self._find_row(sheet, 'На линии, мин')[1], 255.0)
+
+    def test_period_averages_go_by_requests_not_by_days(self):
+        """Среднее за период считается по обращениям всех дней, а не как среднее средних."""
+        days = [
+            _export_day(self.ns, '2026-08-17'),
+            _export_day(self.ns, '2026-08-18'),
+        ]
+        # Второй день: вдвое больше обращений и ответ по 4 минуты. Среднее средних дало бы
+        # 3,25 мин, среднее по обращениям — 3,5.
+        days[1]['reply_sums'] = {'first_sum': 100.0, 'first_count': 1,
+                                 'inner_sum': 240.0 * 92, 'inner_count': 92}
+        days[1]['inner_reply_seconds'] = 240.0
+        sheet = self._workbook(self._payload(days))['Показатели']
+        self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[1], 3.5)
+        self.assertEqual(self._find_row(sheet, 'Дней в периоде')[1], 2)
+
+    def test_hours_carry_numbers_and_names(self):
+        """По файлу считают дальше: минуты — числа, люди — целые, состав часа — ФИО."""
+        sheet = self._workbook(self._today())['По часам']
         header = [cell.value for cell in sheet[1]]
-        self.assertEqual(header[:5], ['Час', 'Чатов', 'Ответ внутри чата, мин',
-                                      'Первый ответ, мин', 'В цели'])
+        self.assertEqual(header, ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
+                                  'В цели', 'Людей на линии', 'На линии, мин', 'Кто на линии',
+                                  'Примечание'])
         first = [cell.value for cell in sheet[2]]
-        self.assertEqual(first[0], '08:00–09:00')
-        self.assertEqual(first[1:5], [10, 1.5, 1.0, 'да'])
-        # Дробь людей на линии не округляем (решение владельца 19.08.2026).
-        self.assertEqual(first[5], 3.84)
-        self.assertEqual(first[6], 230.0)
-        # Пустую строку openpyxl пишет пустой ячейкой — на прошедшем часе примечания нет.
-        self.assertFalse(first[7])
+        self.assertEqual(first[0], '09:00–10:00')
+        self.assertEqual(first[1:7], [10, 1.5, 1.0, 'да', 2, 90.0])
+        self.assertEqual(first[7], f'{ALIA}, {DANA}')
+        self.assertEqual(first[8], 'ещё 1 меньше минуты')
 
     def test_hour_without_answers_stays_empty_and_current_hour_is_marked(self):
-        sheet = self._workbook()['По часам']
-        empty = [cell.value for cell in sheet[3]]
+        sheet = self._workbook(self._today())['По часам']
+        empty = [cell.value for cell in sheet[4]]
         self.assertIsNone(empty[2])
         self.assertIsNone(empty[3])
         self.assertFalse(empty[4])
-        current = [cell.value for cell in sheet[4]]
-        self.assertEqual(current[4], 'нет')  # 3,5 мин против цели 2 мин
-        self.assertEqual(current[7], 'час идёт')
+        self.assertEqual(empty[5], 0)
+        current = [cell.value for cell in sheet[5]]
+        self.assertEqual(current[4], 'да')  # 105 c против цели 120 c
+        self.assertEqual(current[8], 'час идёт')
 
-    def test_daily_total_row_matches_the_day_tiles(self):
-        """Итог берётся из показателей дня, а не пересчитывается по часам."""
-        sheet = self._workbook()['По часам']
-        total = [cell.value for cell in sheet[5]]
+    def test_daily_total_row_keeps_heads_out_of_the_sum(self):
+        """В итоге по людям стоит максимум в часе: суммировать головы разных часов нельзя."""
+        sheet = self._workbook(self._today())['По часам']
+        total = [cell.value for cell in sheet[6]]
         self.assertEqual(total[0], 'За сутки')
-        self.assertEqual(total[1], 40)
+        self.assertEqual(total[1], 46)
         self.assertEqual(total[2], 2.5)
-        self.assertEqual(total[4], '1 из 2')
-        # Средняя занятость за сутки — из человеко-минут, а не среднее средних по часам.
-        self.assertEqual(total[6], 281.0)
-        self.assertAlmostEqual(total[5], round((13824 + 3060) / (3600 * 3), 2))
+        self.assertEqual(total[4], '2 из 3')
+        self.assertEqual(total[5], 3)
+        self.assertEqual(total[7], 'разных людей: 3')
         # Фильтр стоит только по часам: строка итога под ним.
-        self.assertEqual(sheet.auto_filter.ref, 'A1:H4')
+        self.assertEqual(sheet.auto_filter.ref, 'A1:I5')
+
+    def test_period_hours_carry_the_day(self):
+        sheet = self._workbook(self._period())['По часам']
+        self.assertEqual([cell.value for cell in sheet[1]][0], 'День')
+        self.assertEqual([cell.value for cell in sheet[2]][0], '2026-08-17')
+        self.assertEqual([cell.value for cell in sheet[6]][0], '2026-08-18')
+        total = [cell.value for cell in sheet[14]]
+        self.assertEqual(total[0], '2026-08-17 — 2026-08-19')
+        self.assertEqual(total[1], 'За период')
+
+    def test_day_sheet_lists_every_day_with_its_note(self):
+        sheet = self._workbook(self._period())['По дням']
+        rows = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2, max_col=9)]
+        self.assertEqual([row[0] for row in rows], ['2026-08-17', '2026-08-18', '2026-08-19'])
+        self.assertEqual(rows[0][1:8], [46, 2.5, 1.5, '2 из 3', 3, 3, 255.0])
+        self.assertEqual(rows[0][8], 'события обрезаны')
+        self.assertFalse(rows[1][8])
+
+    def test_failed_day_says_why_instead_of_showing_zeros(self):
+        """День не дался — в файле причина, а не нули: нули прочитались бы как простой смены."""
+        payload = self._payload([
+            self.ns['_szov_chat_export_finish_day']('2026-08-17', [], {},
+                                                    error='Chat2Desk HTTP 500'),
+            _export_day(self.ns, '2026-08-19', chats_open=12),
+        ])
+        wb = self._workbook(payload)
+        notes = [row[1] for row in wb['Показатели'].iter_rows(min_col=1, max_col=2, values_only=True)
+                 if row and row[0] == 'Внимание']
+        self.assertTrue(any('2026-08-17' in str(note) and 'HTTP 500' in str(note) for note in notes))
+        day_rows = [[cell.value for cell in row] for row in wb['По дням'].iter_rows(min_row=2, max_col=9)]
+        self.assertEqual(day_rows[0][1], 0)
+        self.assertIn('HTTP 500', day_rows[0][8])
+
+    def test_people_sheet_sums_the_line_time(self):
+        """Лист «Люди на линии»: сверху тот, кто держал линию дольше всех."""
+        sheet = self._workbook(self._today())['Люди на линии']
+        self.assertEqual([cell.value for cell in sheet[1]],
+                         ['Сотрудник', 'Часов на линии', 'На линии, мин'])
+        rows = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2, max_col=3)]
+        self.assertEqual(rows[0], [ALIA, 3, 150.0])
+        self.assertEqual(rows[1], [BEK, 1, 60.0])
+        self.assertEqual(rows[2], [DANA, 2, 45.0])
+
+    def test_people_sheet_counts_days_on_a_period(self):
+        sheet = self._workbook(self._period())['Люди на линии']
+        self.assertEqual([cell.value for cell in sheet[1]][3], 'Дней на линии')
+        rows = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2, max_col=4)]
+        self.assertEqual(rows[0], [ALIA, 9, 450.0, 3])
+
+    def test_day_people_follow_the_same_threshold_as_hours(self):
+        """Атом счёта один: день складывается из тех же людей, что стоят в подсказке часа."""
+        people = self.ns['_szov_chat_export_day_people']([
+            _export_hour(9, 0, None, None, [(ALIA, 3600)], under=2),
+            _export_hour(10, 0, None, None, [(ALIA, 600), (DANA, 1800)]),
+        ])
+        self.assertEqual(people, {ALIA: 4200, DANA: 1800})
 
     def test_shift_sheet_keeps_the_since_midnight_wording(self):
         """seconds=None — человек в статусе с начала суток; «0 мин» тут соврало бы."""
-        sheet = self._workbook()['Чатники']
+        sheet = self._workbook(self._today())['Чатники']
         rows = [[cell.value for cell in row] for row in sheet.iter_rows(min_row=2, max_col=4)]
-        self.assertEqual(rows[0], ['Тестова Алия Тестовна', 'Онлайн', 30.0, 7])
-        self.assertEqual(rows[1], ['Ночная Дана Сменовна', 'Онлайн', 'с начала суток', 5])
+        self.assertEqual(rows[0], [ALIA, 'Онлайн', 30.0, 7])
+        self.assertEqual(rows[1], [DANA, 'Онлайн', 'с начала суток', 5])
         self.assertEqual(rows[2], ['Учебный Ерлан Тренингулы', 'Тренинг', 10.0, 0])
         # Вышедшие в список не идут, но их число видно — иначе смена выглядит меньше.
         self.assertIn('Не в системе: 4',
                       [cell.value for cell in sheet['A'] if isinstance(cell.value, str)])
 
     def test_status_colour_matches_the_chip_on_the_board(self):
-        sheet = self._workbook()['Чатники']
+        sheet = self._workbook(self._today())['Чатники']
         self.assertIn(self.ns['_SZOV_CHAT_EXPORT_STATUS_FILL']['online'],
                       str(sheet.cell(row=2, column=2).fill.fgColor.rgb))
         self.assertIn(self.ns['_SZOV_CHAT_EXPORT_STATUS_FILL']['training'],
@@ -856,35 +1094,32 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
 
     def test_file_warns_about_stale_and_truncated_data(self):
         """Оговорки живут В ФАЙЛЕ: он уходит в переписку без экрана, с которого его сняли."""
-        snapshot = _export_snapshot(
-            stale=True, age_seconds=420, error='Chat2Desk не отвечает',
-            diagnostics={'department_id': 1, 'unmatched_names': ['Алия Тестова'],
-                         'events_truncated': True})
-        sheet = self._workbook(snapshot)['Показатели']
+        sheet = self._workbook(self._period())['Показатели']
         notes = [row[1] for row in sheet.iter_rows(min_col=1, max_col=2, values_only=True)
                  if row and row[0] == 'Внимание']
         self.assertEqual(len(notes), 3)
         self.assertIn('7 мин', notes[0])
         self.assertIn('Chat2Desk не отвечает', notes[0])
         self.assertIn('обрезаны', notes[1])
-        self.assertIn('Алия Тестова', notes[2])
+        self.assertIn('2026-08-17', notes[1])
+        self.assertIn('Посторонний Оператор', notes[2])
 
     def test_clean_snapshot_has_no_warnings(self):
         """Шум = брак: пока всё в порядке, строк «Внимание» в файле нет."""
-        sheet = self._workbook()['Показатели']
+        sheet = self._workbook(self._today())['Показатели']
         self.assertEqual([row[0] for row in sheet.iter_rows(min_col=1, max_col=1, values_only=True)
                           if row and row[0] == 'Внимание'], [])
 
     def test_empty_day_does_not_break_the_file(self):
-        """Ночь, чатов ещё нет: файл собирается, а не падает на делении на ноль."""
-        snapshot = _export_snapshot(
-            hourly=[], today={'chats': 0, 'chats_open': 0, 'first_reply_seconds': None,
-                              'inner_reply_seconds': None},
+        """Ночь, чатов ещё нет: файл собирается, а не падает на пустых списках."""
+        payload = self._payload(
+            [self.ns['_szov_chat_export_finish_day']('2026-08-19', [], {'chats': 0})],
             now={'operators_online': 0, 'operators_offline': 0, 'open_chats': 0, 'operators': []})
-        wb = self._workbook(snapshot)
+        wb = self._workbook(payload)
         self.assertEqual([cell.value for cell in wb['По часам'][2]][0], 'За сутки')
         self.assertIsNone(self._find_row(wb['Показатели'], 'Ответ внутри чата, мин')[1])
-
+        self.assertEqual(wb['Люди на линии'].cell(row=2, column=1).value,
+                         'Никто не выходил на линию')
 
 if __name__ == '__main__':
     unittest.main()

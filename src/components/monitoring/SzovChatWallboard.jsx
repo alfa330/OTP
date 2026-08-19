@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
     Bar,
     CartesianGrid,
@@ -14,7 +14,7 @@ import {
 } from 'recharts';
 import FaIcon from '../common/FaIcon';
 import { APPLE_FONT, iosCard } from '../ui/ios';
-import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
+import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
 import {
     CHAT_STATUS_STYLE,
     formatDuration,
@@ -97,17 +97,15 @@ const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
 };
 
 /*
- * Людей на линии считаем средней занятостью часа, поэтому число дробное — и таким остаётся:
- * округлять запрещено (решение владельца 19.08.2026), 3,8 честнее четвёрки. На стене «3,84» —
- * лишняя точность: показываем один знак и убираем его у целых. Ноль не подписываем: пустой час
- * и так пустой, цифра только шумит.
+ * Людей на линии считает сервер ГОЛОВАМИ: кто был онлайн минуту и больше, тот один человек
+ * (решение владельца 19.08.2026, вечер — прежняя дробная FTE-доля «3,84 человека» отменена).
+ * Здесь остаётся только подпись столбика: число уже целое, а ноль не подписываем — пустой час
+ * и так пустой, цифра в нём только шумит.
  */
 const formatPeople = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number) || number <= 0) return '';
-    // Сначала округляем, потом убираем «,0»: иначе рядом стоят «1» и «1,0» — это одно и то же.
-    const rounded = Math.round(number * 10) / 10;
-    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace('.', ',');
+    return String(Math.round(number));
 };
 
 /*
@@ -117,16 +115,81 @@ const formatPeople = (value) => {
  */
 const hourLabel = (hour) => `${String(hour).padStart(2, '0')}–${String((hour + 1) % 24).padStart(2, '0')}`;
 
+/*
+ * Режимы подсказки. График в обоих один и тот же — меняется только то, что показывают при
+ * наведении: цифры часа или состав смены этого часа по ФИО (запрос владельца 19.08.2026).
+ * Состав живёт в подсказке, а не на самом графике: 24 столбика с подписанными именами на стене
+ * прочитать невозможно, а под курсором нужен ровно один час.
+ */
+export const HOURLY_TOOLTIP_MODES = [
+    { key: 'metrics', label: 'Показатели', hint: 'Чаты, время ответа и сколько людей было на линии' },
+    { key: 'people', label: 'Кто на линии', hint: 'ФИО тех, кто держал линию в этом часу' },
+];
+
+// Сколько ФИО показываем под курсором. Чатников на смене около двух десятков, и при аварийном
+// часе список вылез бы за экран — остаток сворачиваем в «и ещё N».
+const TOOLTIP_NAMES_LIMIT = 12;
+
+/** Заголовок подсказки: час и пометка о том, что он ещё не закончился. */
+const TooltipHeader = ({ label, partial }) => (
+    <div className="mb-1 font-semibold text-slate-900">
+        {label}
+        {partial ? <span className="ml-1 font-normal text-slate-400">· час идёт</span> : null}
+    </div>
+);
+
+/** Режим «Кто на линии»: ФИО и сколько минут человек держал линию в этом часу. */
+const PeopleTooltip = ({ active, payload, label }) => {
+    if (!active || !payload?.length) return null;
+    const row = payload[0]?.payload || {};
+    const people = Array.isArray(row.people) ? row.people : [];
+    const shown = people.slice(0, TOOLTIP_NAMES_LIMIT);
+    return (
+        <div className="max-w-[24rem] rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-[12.5px] shadow-lg">
+            <TooltipHeader label={label} partial={row.partial} />
+            {people.length === 0 ? (
+                <div className="text-slate-400">Никого на линии</div>
+            ) : (
+                <>
+                    <div className="mb-1 text-slate-500">
+                        Держали линию:{' '}
+                        <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.online }}>
+                            {formatInt(people.length)}
+                        </span>
+                    </div>
+                    <ul className="space-y-0.5 text-slate-700">
+                        {shown.map((person) => (
+                            <li key={person.name} className="flex items-baseline justify-between gap-3">
+                                <span className="min-w-0">{person.name}</span>
+                                {/* Минуты рядом с ФИО: голова не отличает отработавшего час от
+                                    заглянувшего на две минуты, а под курсором это видно. */}
+                                <span className="shrink-0 tabular-nums text-slate-400">
+                                    {formatMinutes(person.seconds, 0)}
+                                </span>
+                            </li>
+                        ))}
+                    </ul>
+                    {people.length > shown.length ? (
+                        <div className="mt-0.5 text-slate-400">и ещё {formatInt(people.length - shown.length)}</div>
+                    ) : null}
+                </>
+            )}
+            {row.underMinute > 0 ? (
+                <div className="mt-1 border-t border-slate-100 pt-1 text-slate-400">
+                    Ещё {formatInt(row.underMinute)} были на линии меньше минуты — в счёт не идут
+                </div>
+            ) : null}
+        </div>
+    );
+};
+
 /** Подсказка графика: обе оси рядом, каждая со своей единицей — иначе их легко перепутать. */
 const ChartTooltip = ({ active, payload, label }) => {
     if (!active || !payload?.length) return null;
     const row = payload[0]?.payload || {};
     return (
         <div className="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 text-[12.5px] shadow-lg">
-            <div className="mb-1 font-semibold text-slate-900">
-                {label}
-                {row.partial ? <span className="ml-1 font-normal text-slate-400">· час идёт</span> : null}
-            </div>
+            <TooltipHeader label={label} partial={row.partial} />
             <div className="space-y-0.5 text-slate-600">
                 <div>Чатов начато: <span className="font-medium tabular-nums text-slate-900">{formatInt(row.chats)}</span></div>
                 <div>
@@ -142,8 +205,8 @@ const ChartTooltip = ({ active, payload, label }) => {
                     </span>
                 </div>
                 <div>
-                    {/* Рядом с дробью — сколько всего минут смена простояла на линии в этом часу:
-                        из них дробь и получается, и «3,8» перестаёт выглядеть выдумкой. */}
+                    {/* Рядом с головами — сколько ВСЕГО минут смена простояла на линии в этом
+                        часу: два человека по часу и два по десять минут — разные вещи. */}
                     Было на линии:{' '}
                     <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.online }}>
                         {row.online === null ? '—' : `${formatPeople(row.online) || '0'} чел.`}
@@ -153,6 +216,11 @@ const ChartTooltip = ({ active, payload, label }) => {
                             {' · '}{formatMinutes(row.onlineSeconds, 0)} на линии
                         </span>
                     )}
+                    {row.underMinute > 0 ? (
+                        <span className="tabular-nums text-slate-400">
+                            {' · ещё '}{formatInt(row.underMinute)} меньше минуты
+                        </span>
+                    ) : null}
                 </div>
             </div>
         </div>
@@ -165,7 +233,7 @@ const ChartTooltip = ({ active, payload, label }) => {
  * Столбик «сколько людей нужно под цель» отсюда убран: пропорция от факта завышала в разы,
  * и на стене это читалось как план найма, которым оно не было (решение владельца 18.08.2026).
  */
-const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
+const HourlyChart = ({ rows, targetSeconds, scale = 1, tooltipMode = 'metrics' }) => {
     const data = useMemo(() => (rows || []).map((row) => ({
         hour: hourLabel(row.hour),
         chats: row.chats,
@@ -175,6 +243,9 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
         firstSeconds: row.first_reply_seconds ?? null,
         online: row.operators_online ?? null,
         onlineSeconds: row.online_seconds ?? null,
+        // Состав часа по ФИО: его показывает подсказка в режиме «Кто на линии».
+        people: Array.isArray(row.operators) ? row.operators : [],
+        underMinute: Number(row.operators_under_minute) || 0,
         partial: Boolean(row.partial),
     })), [rows]);
 
@@ -201,7 +272,9 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
                            width={44 * scale}
                            label={{ value: 'чатники', position: 'top', offset: 12,
                                     fontSize: 11 * scale, fill: '#94a3b8' }} />
-                    <Tooltip content={<ChartTooltip />} cursor={{ fill: '#f8fafc' }} />
+                    {/* График в обоих режимах один и тот же — меняется только подсказка. */}
+                    <Tooltip content={tooltipMode === 'people' ? <PeopleTooltip /> : <ChartTooltip />}
+                             cursor={{ fill: '#f8fafc' }} />
                     <Legend verticalAlign="bottom" height={28} iconType="circle"
                             wrapperStyle={{ fontSize: 12 * scale, color: '#475569' }} />
                     {/* Число над столбиком: людей на линии единицы, и на глаз 3 от 4 не отличить. */}
@@ -224,6 +297,9 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
 
 /** Тело табло по чатам. Отдельный компонент, чтобы встроенный и полноэкранный режим шли одной разметкой. */
 export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
+    // Режим подсказки графика — состояние экрана, а не данных: в снимке ему делать нечего, а
+    // полноэкранный режим и встроенный переключаются каждый сам за себя.
+    const [tooltipMode, setTooltipMode] = useState(HOURLY_TOOLTIP_MODES[0].key);
     const now = snapshot?.now || {};
     const today = snapshot?.today || {};
     const targetSeconds = Number(snapshot?.target_seconds) || 120;
@@ -285,12 +361,24 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                     icon="fa-clock"
                     title="По часам"
                     right={(
-                        <span className="text-[12.5px] text-slate-400">
-                            время ответа внутри чата и сколько чатников держало линию; цель {formatMinutes(targetSeconds, 0)}
-                        </span>
+                        <div className="flex items-center gap-3">
+                            <span className="hidden text-[12.5px] text-slate-400 xl:inline">
+                                {tooltipMode === 'people'
+                                    ? 'наведите на час — покажем, кто держал линию'
+                                    : `время ответа внутри чата и сколько чатников держало линию; цель ${
+                                        formatMinutes(targetSeconds, 0)}`}
+                            </span>
+                            <SegmentedSwitch
+                                compact
+                                value={tooltipMode}
+                                options={HOURLY_TOOLTIP_MODES}
+                                onChange={setTooltipMode}
+                            />
+                        </div>
                     )}
                 >
-                    <HourlyChart rows={snapshot?.hourly} targetSeconds={targetSeconds} scale={scale} />
+                    <HourlyChart rows={snapshot?.hourly} targetSeconds={targetSeconds} scale={scale}
+                                 tooltipMode={tooltipMode} />
                 </Section>
             </div>
 

@@ -20,7 +20,8 @@ import {
     wallboardStaleNotice,
 } from './szovWallboardShared';
 import SzovChatWallboardBody from './SzovChatWallboard';
-import { Grid, KeyTile, Section, StatTile } from './SzovWallboardTiles';
+import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
+import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
 
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108) и чатов.
@@ -130,27 +131,6 @@ const BROADCAST_MODES = [
 ];
 
 const modeLabel = (key) => (BROADCAST_MODES.find((mode) => mode.key === key) || BROADCAST_MODES[0]).label;
-
-/** Сегментированный переключатель — тот же, что в остальных разделах. */
-const SegmentedSwitch = ({ value, options, disabled, onChange }) => (
-    <div className="flex rounded-xl bg-slate-100 p-1">
-        {options.map((option) => (
-            <button
-                key={option.key}
-                type="button"
-                disabled={disabled}
-                onClick={() => { if (value !== option.key) onChange(option.key); }}
-                title={option.hint}
-                className={`rounded-[9px] px-3 py-1.5 text-[12.5px] font-semibold transition-all disabled:opacity-50 ${
-                    value === option.key
-                        ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
-                        : 'text-slate-500 hover:text-slate-700'}`}
-            >
-                {option.label}
-            </button>
-        ))}
-    </div>
-);
 
 const ModeSwitch = (props) => <SegmentedSwitch options={BROADCAST_MODES} {...props} />;
 
@@ -660,39 +640,74 @@ const LineWallboard = ({
 };
 
 /*
- * Имя файла выгрузки. В нём стоит момент ДАННЫХ, а не скачивания: две выгрузки подряд в
- * пределах кэша содержат один и тот же снимок и различаться именами не должны. Имя собирает
- * фронт, а не сервер: Content-Disposition через CORS сюда не доходит (в Expose-Headers его нет).
+ * Имя файла выгрузки: одна дата на однодневной выгрузке, обе — на периоде. У сегодняшнего дня
+ * в имени стоит ещё и момент ДАННЫХ, а не скачивания: две выгрузки подряд в пределах кэша
+ * содержат один и тот же снимок и различаться именами не должны. Имя собирает фронт, а не
+ * сервер: Content-Disposition через CORS сюда не доходит (в Expose-Headers его нет).
  */
-const chatExportFileName = (snapshot) => {
-    const day = String(snapshot?.day || '').replace(/-/g, '');
-    const clock = String(snapshot?.chat2desk_now || '').slice(11, 16).replace(':', '');
-    const stamp = [day, clock].filter(Boolean).join('_');
+const chatExportFileName = (snapshot, from, to) => {
+    const day = (value) => String(value || '').replace(/-/g, '');
+    if (from && to && from !== to) return `szov_wallboard_chat_${day(from)}_${day(to)}.xlsx`;
+    const single = day(from || to || snapshot?.day);
+    const clock = single === day(snapshot?.day)
+        ? String(snapshot?.chat2desk_now || '').slice(11, 16).replace(':', '')
+        : '';
+    const stamp = [single, clock].filter(Boolean).join('_');
     return `szov_wallboard_chat_${stamp || 'now'}.xlsx`;
 };
 
 /*
- * Выгрузка показателей направления «Чат» в Excel. Файл собирает сервер по ТОМУ ЖЕ снимку,
- * что нарисован на экране (общий кэш направления), поэтому цифры в файле и на стене совпадают,
- * а квота Chat2Desk на выгрузку не тратится.
+ * Пресеты периода. «Весь период» здесь не годится: выгрузка качает Chat2Desk по дню на день,
+ * и пустой диапазон означал бы «за всё время», чего никто не дождётся.
  */
-const ChatExportButton = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapshot }) => {
+const chatExportPresets = [
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: '7 дней', range: () => ({ from: isoDate(new Date(Date.now() - 6 * 864e5)), to: isoDate(new Date()) }) },
+    { label: '30 дней', range: () => ({ from: isoDate(new Date(Date.now() - 29 * 864e5)), to: isoDate(new Date()) }) },
+];
+
+// Тот же потолок, что на сервере (SZOV_CHAT_EXPORT_MAX_DAYS): просить больше бессмысленно —
+// придёт 400. Проверяем и здесь, чтобы кнопка гасла до запроса, а не после минуты ожидания.
+const CHAT_EXPORT_MAX_DAYS = 31;
+
+const rangeDays = (from, to) => {
+    if (!from || !to) return 1;
+    return Math.round((new Date(to) - new Date(from)) / 864e5) + 1;
+};
+
+/*
+ * Выгрузка показателей направления «Чат» в Excel за выбранный период. Пикер — тот же, что в
+ * «Чатах ChatApp». Сегодняшний день сервер берёт из кэша табло (цифры совпадают с экраном и
+ * ни одного лишнего запроса к Chat2Desk), прошедшие дни качает по дню на день — поэтому долгий
+ * период честно предупреждает о времени в подсказке кнопки.
+ */
+const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapshot }) => {
     const [busy, setBusy] = useState(false);
+    const [range, setRange] = useState(() => ({ from: isoDate(new Date()), to: isoDate(new Date()) }));
     // showToast приходит новой функцией на каждый рендер родителя, а он перерисовывается раз в
     // 15 с по опросу табло: держим её в ref, чтобы не тянуть в зависимости.
     const toastRef = useRef(showToast);
     toastRef.current = showToast;
     const snapshotRef = useRef(snapshot);
     snapshotRef.current = snapshot;
+    const rangeRef = useRef(range);
+    rangeRef.current = range;
+
+    const days = rangeDays(range.from, range.to);
+    const tooLong = days > CHAT_EXPORT_MAX_DAYS;
 
     const download = useCallback(async () => {
+        const { from, to } = rangeRef.current || {};
         setBusy(true);
         try {
             const build = withAccessTokenHeader;
-            const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/chat_export`, {
-                credentials: 'include',
-                headers: build ? build() : {},
-            });
+            const query = new URLSearchParams();
+            if (from) query.set('date_from', from);
+            if (to) query.set('date_to', to);
+            const response = await fetch(
+                `${apiBaseUrl}/api/szov_wallboard/chat_export?${query.toString()}`,
+                { credentials: 'include', headers: build ? build() : {} },
+            );
             if (!response.ok) {
                 const payload = await response.json().catch(() => ({}));
                 throw new Error(payload?.error || `Сервер ответил ${response.status}`);
@@ -701,7 +716,7 @@ const ChatExportButton = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapsh
             const url = window.URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
-            link.download = chatExportFileName(snapshotRef.current);
+            link.download = chatExportFileName(snapshotRef.current, from, to);
             document.body.appendChild(link);
             link.click();
             link.remove();
@@ -713,12 +728,31 @@ const ChatExportButton = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapsh
         }
     }, [apiBaseUrl, withAccessTokenHeader]);
 
+    // Сколько ждать, говорим ДО нажатия: сегодня отдаётся из кэша мгновенно, а каждый прошедший
+    // день — это отдельная выкачка из Chat2Desk, и на месяце это минуты, а не секунды.
+    const hint = tooLong
+        ? `Период больше ${CHAT_EXPORT_MAX_DAYS} суток — выберите короче`
+        : (days > 1
+            ? `Показатели за ${rangeLabel(range.from, range.to)} в Excel · прошедшие дни качаются из Chat2Desk по дню, это ${
+                days > 7 ? 'займёт несколько минут' : 'займёт до минуты'}`
+            : 'Показатели табло в Excel: сводка, по часам, люди на линии и состав смены');
+
     return (
-        <button type="button" className={iosBtnGhost} onClick={download} disabled={busy}
-                title="Показатели табло за сегодня в Excel: сводка, по часам и состав смены">
-            <FaIcon className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
-            {busy ? 'Готовим…' : 'Выгрузить'}
-        </button>
+        <>
+            {/* Глубину не ограничиваем: потолок у выгрузки на длину периода, а не на давность. */}
+            <IosDateRangePicker
+                from={range.from}
+                to={range.to}
+                max={isoDate(new Date())}
+                presets={chatExportPresets}
+                onChange={(next) => setRange({ from: next.from || next.to, to: next.to || next.from })}
+            />
+            <button type="button" className={iosBtnGhost} onClick={download} disabled={busy || tooLong}
+                    title={hint}>
+                <FaIcon className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
+                {busy ? 'Готовим…' : 'Выгрузить'}
+            </button>
+        </>
     );
 };
 
@@ -743,9 +777,9 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
         >
-            {/* Пока снимка нет, выгружать нечего: кнопка появляется вместе с цифрами. */}
+            {/* Пока снимка нет, выгружать нечего: пикер и кнопка появляются вместе с цифрами. */}
             {snapshot ? (
-                <ChatExportButton
+                <ChatExportControls
                     apiBaseUrl={apiBaseUrl}
                     withAccessTokenHeader={withAccessTokenHeader}
                     showToast={showToast}
