@@ -662,13 +662,14 @@ const chatExportFileName = (snapshot, from, to) => {
  */
 const chatExportPresets = [
     { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: '3 дня', range: () => ({ from: isoDate(new Date(Date.now() - 2 * 864e5)), to: isoDate(new Date()) }) },
     { label: '7 дней', range: () => ({ from: isoDate(new Date(Date.now() - 6 * 864e5)), to: isoDate(new Date()) }) },
-    { label: '30 дней', range: () => ({ from: isoDate(new Date(Date.now() - 29 * 864e5)), to: isoDate(new Date()) }) },
 ];
 
 // Тот же потолок, что на сервере (SZOV_CHAT_EXPORT_MAX_DAYS): просить больше бессмысленно —
-// придёт 400. Проверяем и здесь, чтобы кнопка гасла до запроса, а не после минуты ожидания.
-const CHAT_EXPORT_MAX_DAYS = 31;
+// придёт 400. Проверяем и здесь, чтобы «Подтвердить» гасло до запроса, а не после ожидания.
+// Неделя — решение владельца: каждый прошедший день качается из Chat2Desk отдельно.
+const CHAT_EXPORT_MAX_DAYS = 7;
 
 const rangeDays = (from, to) => {
     if (!from || !to) return 1;
@@ -747,12 +748,11 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
     }, [apiBaseUrl, withAccessTokenHeader]);
 
     // Сколько ждать, говорим ДО нажатия: сегодня отдаётся из кэша мгновенно, а каждый прошедший
-    // день — это отдельная выкачка из Chat2Desk, и на месяце это минуты, а не секунды.
+    // день — это отдельная выкачка из Chat2Desk, то есть десятки секунд на неделю.
     const hint = tooLong
-        ? `Период больше ${CHAT_EXPORT_MAX_DAYS} суток — выберите короче`
+        ? `Максимум ${CHAT_EXPORT_MAX_DAYS} суток за раз — выберите период короче`
         : (days > 1
-            ? `Прошедшие дни качаются из Chat2Desk по дню — ${
-                days > 7 ? 'это займёт несколько минут' : 'это займёт до минуты'}`
+            ? 'Прошедшие дни качаются из Chat2Desk по дню — это займёт до минуты'
             : 'Сводка, по часам, люди на линии и состав смены');
 
     return (

@@ -694,8 +694,12 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("chatExportPresets", self.view)
         self.assertNotIn("'Весь период'", self.view)
         # Потолок периода гасит «Подтвердить» ДО запроса, а не после минуты ожидания.
-        self.assertIn("const CHAT_EXPORT_MAX_DAYS = 31;", self.view)
+        self.assertIn("const CHAT_EXPORT_MAX_DAYS = 7;", self.view)
         self.assertIn("disabled={tooLong}", self.view)
+        # Пресета длиннее потолка быть не должно: он всегда гасил бы «Подтвердить».
+        self.assertNotIn("'30 дней'", self.view)
+        for preset in ("{ label: 'Сегодня'", "{ label: '3 дня'", "{ label: '7 дней'"):
+            self.assertIn(preset, self.view, preset)
 
     def test_calendar_is_one_brick_for_every_section(self):
         """Календарь вынесен из чипа-пикера, а сам пикер построен на нём — копий быть не должно."""
@@ -873,6 +877,14 @@ class ChatWallboardExportPeriodTests(unittest.TestCase):
             self._period('2026-08-25', '2026-08-26')  # весь период в будущем
         with self.assertRaises(ValueError):
             self._period('2026-01-01', '2026-08-19')  # больше потолка суток
+
+    def test_week_is_the_ceiling(self):
+        """Потолок — неделя (решение владельца): каждый прошедший день качается отдельно."""
+        self.assertEqual(self.ns['SZOV_CHAT_EXPORT_MAX_DAYS'], 7)
+        self.assertEqual(len(self._period('2026-08-13', '2026-08-19')), 7)
+        with self.assertRaises(ValueError) as refused:
+            self._period('2026-08-12', '2026-08-19')  # восемь суток
+        self.assertIn('7 суток', str(refused.exception))
 
     def test_file_name_says_what_is_inside(self):
         name = self.ns['_szov_chat_export_file_name']

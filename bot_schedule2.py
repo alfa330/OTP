@@ -32516,7 +32516,10 @@ SZOV_CHAT_WALLBOARD_ONLINE_MIN_SECONDS = _env_int(
 # Выгрузка за период качает Chat2Desk по дню на день (~8-13 запросов на сутки), поэтому у неё
 # два ограничителя: сколько дней разрешено просить за раз и сколько дней тянуть одновременно.
 # Больше 4 потоков смысла нет — узкое место не мы, а квота и скорость самого Chat2Desk.
-SZOV_CHAT_EXPORT_MAX_DAYS = _env_int('SZOV_CHAT_EXPORT_MAX_DAYS', 31, minimum=1, maximum=92)
+# Потолок недели — решение владельца 19.08.2026: месяц — это ~400 запросов и минуты ожидания в
+# одном синхронном запросе, а квота Chat2Desk общая на компанию. Нужен период длиннее — поднять
+# env SZOV_CHAT_EXPORT_MAX_DAYS, но тогда сначала переделать выгрузку на фоновую задачу.
+SZOV_CHAT_EXPORT_MAX_DAYS = _env_int('SZOV_CHAT_EXPORT_MAX_DAYS', 7, minimum=1, maximum=92)
 SZOV_CHAT_EXPORT_WORKERS = _env_int('SZOV_CHAT_EXPORT_WORKERS', 4, minimum=1, maximum=8)
 
 # Событие статуса Chat2Desk / offline_type -> (ключ, подпись). Оба источника говорят одними и
