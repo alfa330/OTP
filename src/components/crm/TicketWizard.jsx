@@ -11,9 +11,9 @@ import {
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
-    MISSING_ATTACHMENT, answerValue, carryOver, groupCatalog, groupIsComplete,
-    groupsOf, localVerdict, missingGroup, referenceOptions, rowsOfGroup,
-    stepIsComplete,
+    MISSING_ATTACHMENT, answerValue, carryOver, checksAreComplete, checksPayload,
+    groupCatalog, groupIsComplete, groupsOf, localVerdict, missingGroup,
+    referenceOptions, rowsOfGroup, stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -254,6 +254,8 @@ export default function TicketWizard({
     const [groupIndex, setGroupIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [checksConfirmed, setChecksConfirmed] = useState(false);
+    // Номера отмеченных пунктов — для тематик, где по ТЗ отмечают каждый пункт.
+    const [checkedItems, setCheckedItems] = useState([]);
     const [attachment, setAttachment] = useState(null);
     const [verdict, setVerdict] = useState(null);
     const [dismissed, setDismissed] = useState(null);
@@ -268,6 +270,13 @@ export default function TicketWizard({
     );
 
     const catalogGroups = useMemo(() => groupCatalog(catalog), [catalog]);
+
+    const checksReady = useMemo(
+        () => checksAreComplete(scenario, {
+            confirmedAll: checksConfirmed, confirmedItems: checkedItems,
+        }),
+        [scenario, checksConfirmed, checkedItems],
+    );
     const groups = useMemo(() => groupsOf(scenario, answers), [scenario, answers]);
     const group = groups[groupIndex] || null;
     const groupRows = useMemo(
@@ -277,7 +286,7 @@ export default function TicketWizard({
 
     const reset = useCallback(() => {
         setScenarioKey(''); setPhase('pick'); setGroupIndex(0); setAnswers({});
-        setChecksConfirmed(false); setAttachment(null); setVerdict(null);
+        setChecksConfirmed(false); setCheckedItems([]); setAttachment(null); setVerdict(null);
         setDismissed(null); setMissing({}); setPreview(null);
         if (fileRef.current) fileRef.current.value = '';
     }, []);
@@ -349,7 +358,13 @@ export default function TicketWizard({
         try {
             const response = await axios.post(
                 `${apiBaseUrl}/api/crm/scenarios/${scenarioKey}/evaluate`,
-                { answers, has_attachment: Boolean(attachment), checks_confirmed: checksConfirmed },
+                {
+                    answers,
+                    has_attachment: Boolean(attachment),
+                    ...checksPayload(scenario, {
+                        confirmedAll: checksConfirmed, confirmedItems: checkedItems,
+                    }),
+                },
                 { headers: headers() },
             );
             const data = response.data;
@@ -386,7 +401,11 @@ export default function TicketWizard({
             const form = new FormData();
             form.append('scenario_key', scenarioKey);
             form.append('answers', JSON.stringify(answers));
-            form.append('checks_confirmed', checksConfirmed ? '1' : '0');
+            const checks = checksPayload(scenario, {
+                confirmedAll: checksConfirmed, confirmedItems: checkedItems,
+            });
+            form.append('checks_confirmed', checks.checks_confirmed ? '1' : '0');
+            form.append('checks_done', checks.checks_done.join(','));
             if (attachment) form.append('attachment', attachment);
             const response = await axios.post(`${apiBaseUrl}/api/crm/tickets`, form,
                 { headers: headers() });
@@ -412,7 +431,7 @@ export default function TicketWizard({
             return (
                 <>
                     <button type="button" onClick={reset} className={iosBtnSecondary}>Назад</button>
-                    <button type="button" disabled={!checksConfirmed}
+                    <button type="button" disabled={!checksReady}
                             onClick={() => { setPhase('form'); setGroupIndex(0); }}
                             className={iosBtnPrimary}>
                         <ShieldCheck size={14} /> Проверил — продолжить
@@ -511,15 +530,42 @@ export default function TicketWizard({
 
                 {phase === 'checks' && scenario && (
                     <div className="space-y-3">
+                        {/* Два вида чек-листа. Обычный — нумерованный перечень и одна
+                            галочка под ним. Тематика с checks_each отмечает каждый пункт
+                            отдельно: тогда номер уступает место флажку, а строка сама
+                            становится нажимаемой. Списка получается один, а не два. */}
                         <div className={`${iosCard} divide-y divide-slate-100`}>
-                            {scenario.checks.map((check, index) => (
-                                <div key={check} className="flex gap-2.5 px-4 py-2.5">
-                                    <span className="mt-[2px] grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold tabular-nums text-slate-500">
-                                        {index + 1}
-                                    </span>
-                                    <span className="text-[13px] leading-relaxed text-slate-700">{check}</span>
-                                </div>
-                            ))}
+                            {scenario.checks.map((check, index) => {
+                                const done = checkedItems.includes(index);
+                                const body = (
+                                    <>
+                                        {scenario.checks_each ? (
+                                            <input type="checkbox" checked={done} readOnly
+                                                   tabIndex={-1}
+                                                   className="mt-[3px] h-4 w-4 shrink-0 rounded accent-blue-600" />
+                                        ) : (
+                                            <span className="mt-[2px] grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold tabular-nums text-slate-500">
+                                                {index + 1}
+                                            </span>
+                                        )}
+                                        <span className={`text-[13px] leading-relaxed ${
+                                            scenario.checks_each && done ? 'text-slate-500' : 'text-slate-700'
+                                        }`}>
+                                            {check}
+                                        </span>
+                                    </>
+                                );
+                                return scenario.checks_each ? (
+                                    <button key={check} type="button"
+                                            aria-pressed={done}
+                                            onClick={() => setCheckedItems(toggleCheck(checkedItems, index))}
+                                            className="flex w-full cursor-pointer gap-2.5 px-4 py-2.5 text-left transition hover:bg-slate-50">
+                                        {body}
+                                    </button>
+                                ) : (
+                                    <div key={check} className="flex gap-2.5 px-4 py-2.5">{body}</div>
+                                );
+                            })}
                         </div>
 
                         {scenario.status_glossary?.length > 0 && (
@@ -541,18 +587,31 @@ export default function TicketWizard({
                             </div>
                         )}
 
-                        <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-blue-50/60 px-3.5 py-3">
-                            <input type="checkbox" checked={checksConfirmed}
-                                   onChange={(e) => setChecksConfirmed(e.target.checked)}
-                                   className="mt-0.5 h-4 w-4 rounded accent-blue-600" />
-                            <span className="text-[13px] leading-snug text-slate-700">
-                                Подтверждаю, что выполнил проверки
-                            </span>
-                            <InfoHint side="left">
-                                Если вопрос решился по ходу проверок — обращение отправлять не нужно,
-                                просто закройте это окно.
-                            </InfoHint>
-                        </label>
+                        {scenario.checks_each ? (
+                            <div className="flex items-center gap-1.5 px-1 text-[12.5px] text-slate-500">
+                                <span className="tabular-nums">
+                                    Отмечено {checkedItems.length} из {scenario.checks.length}
+                                </span>
+                                <InfoHint side="left">
+                                    Отметьте каждый пункт, который проверили. Если по условиям
+                                    термокороб водителю не положен — обращение отправлять не нужно,
+                                    просто закройте это окно.
+                                </InfoHint>
+                            </div>
+                        ) : (
+                            <label className="flex cursor-pointer items-start gap-2.5 rounded-xl bg-blue-50/60 px-3.5 py-3">
+                                <input type="checkbox" checked={checksConfirmed}
+                                       onChange={(e) => setChecksConfirmed(e.target.checked)}
+                                       className="mt-0.5 h-4 w-4 rounded accent-blue-600" />
+                                <span className="text-[13px] leading-snug text-slate-700">
+                                    Подтверждаю, что выполнил проверки
+                                </span>
+                                <InfoHint side="left">
+                                    Если вопрос решился по ходу проверок — обращение отправлять не нужно,
+                                    просто закройте это окно.
+                                </InfoHint>
+                            </label>
+                        )}
                     </div>
                 )}
 

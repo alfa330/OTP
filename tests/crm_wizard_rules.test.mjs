@@ -6,6 +6,8 @@ import {
   MISSING_CHECKS,
   answerValue,
   carryOver,
+  checksAreComplete,
+  checksPayload,
   groupCatalog,
   isAnswered,
   localVerdict,
@@ -14,6 +16,7 @@ import {
   missingTarget,
   stepIsComplete,
   stepIsVisible,
+  toggleCheck,
   visibleSteps,
 } from '../src/components/crm/wizardRules.js';
 
@@ -292,4 +295,51 @@ test('обычный вопрос справочником не подменяе
 test('пустой справочник парков не роняет мастер', () => {
   assert.deepEqual(referenceOptions({ kind: 'taxi_park' }, {}), []);
   assert.deepEqual(referenceOptions({ kind: 'taxi_park' }, { taxiParks: [] }), []);
+});
+
+/* ─── Чек-лист перед обращением (ТЗ термокоробов, задача #189) ─────────────── */
+
+const SIMPLE = { checks: ['раз', 'два', 'три'] };
+const EACH = { checks: ['раз', 'два', 'три'], checks_each: true };
+
+test('обычная тематика подтверждает проверки одной галочкой', () => {
+  assert.equal(checksAreComplete(SIMPLE, { confirmedAll: false }), false);
+  assert.equal(checksAreComplete(SIMPLE, { confirmedAll: true }), true);
+  // Отмеченные пункты в обычном режиме ничего не решают.
+  assert.equal(checksAreComplete(SIMPLE, { confirmedItems: [0, 1, 2] }), false);
+});
+
+test('тематика с checks_each требует отметить каждый пункт', () => {
+  assert.equal(checksAreComplete(EACH, { confirmedItems: [] }), false);
+  assert.equal(checksAreComplete(EACH, { confirmedItems: [0, 1] }), false);
+  assert.equal(checksAreComplete(EACH, { confirmedItems: [0, 1, 2] }), true);
+  // Общая галочка не должна подменять пункты — иначе смысл режима теряется.
+  assert.equal(checksAreComplete(EACH, { confirmedAll: true }), false);
+});
+
+test('лишние и повторяющиеся номера не проходят чек-лист за пункт', () => {
+  assert.equal(checksAreComplete(EACH, { confirmedItems: [0, 0, 1, 1, 9] }), false);
+  assert.equal(checksAreComplete(EACH, { confirmedItems: [0, 1, 2, 2, 7] }), true);
+});
+
+test('тематика без чек-листа проходит его пустой', () => {
+  assert.equal(checksAreComplete({ checks: [] }, {}), true);
+  assert.equal(checksAreComplete({}, {}), true);
+  assert.equal(checksAreComplete(null, {}), true);
+});
+
+test('серверу уходит то, что соответствует режиму тематики', () => {
+  assert.deepEqual(checksPayload(SIMPLE, { confirmedAll: true, confirmedItems: [0] }),
+                   { checks_confirmed: true, checks_done: [] });
+  assert.deepEqual(checksPayload(EACH, { confirmedAll: true, confirmedItems: [2, 0, 0, 1] }),
+                   { checks_confirmed: false, checks_done: [0, 1, 2] });
+});
+
+test('пункт отмечается и снимается, массив не меняется на месте', () => {
+  const before = [0, 2];
+  const after = toggleCheck(before, 1);
+  assert.deepEqual(after, [0, 1, 2]);
+  assert.deepEqual(before, [0, 2], 'исходный массив тронут');
+  assert.deepEqual(toggleCheck(after, 2), [0, 1]);
+  assert.deepEqual(toggleCheck(undefined, 3), [3]);
 });

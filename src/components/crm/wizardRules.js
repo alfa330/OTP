@@ -121,6 +121,47 @@ export const carryOver = (answers) => {
     return carried;
 };
 
+/* ─── Чек-лист перед обращением ───────────────────────────────────────────── */
+
+/* Пройден ли чек-лист.
+ *
+ * Тематики Sapar подтверждают проверки одной галочкой: их до восьми, и восемь
+ * нажатий вместо одного никто не просил. У термокороба ТЗ требует отмечать
+ * КАЖДЫЙ пункт отдельно — поэтому режим несёт тематика (checks_each), а не тип
+ * и не интерфейс.
+ *
+ * Тематика без чек-листа проходит его пустым: экрана проверок у неё нет вовсе.
+ */
+export const checksAreComplete = (
+    scenario, { confirmedAll = false, confirmedItems = [] } = {},
+) => {
+    const total = ((scenario && scenario.checks) || []).length;
+    if (!total) return true;
+    if (!scenario.checks_each) return Boolean(confirmedAll);
+    const done = new Set((confirmedItems || []).map(Number));
+    for (let index = 0; index < total; index += 1) {
+        if (!done.has(index)) return false;
+    }
+    return true;
+};
+
+/* Что отправить серверу о чек-листе. Оба поля сразу: сервер приводит их к одному
+ * множеству отмеченных пунктов, и решение всё равно принимает он. */
+export const checksPayload = (scenario, { confirmedAll = false, confirmedItems = [] } = {}) => ({
+    checks_confirmed: Boolean(scenario && scenario.checks_each ? false : confirmedAll),
+    checks_done: scenario && scenario.checks_each
+        ? [...new Set((confirmedItems || []).map(Number))].sort((a, b) => a - b)
+        : [],
+});
+
+/* Переключить один пункт чек-листа. Возвращает НОВЫЙ массив — состояние в React
+ * менять на месте нельзя. */
+export const toggleCheck = (confirmedItems, index) => {
+    const done = new Set((confirmedItems || []).map(Number));
+    if (done.has(index)) done.delete(index); else done.add(index);
+    return [...done].sort((a, b) => a - b);
+};
+
 /* ─── Картотека тематик по группам ────────────────────────────────────────── */
 
 /* Тематики в выборе «Новое обращение» сгруппированы по тому, КУДА уйдёт

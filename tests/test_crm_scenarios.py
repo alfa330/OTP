@@ -83,7 +83,8 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(
             [item['key'] for item in sc.SCENARIOS],
             ['sapar_docs_missing', 'sapar_sign_error', 'sapar_payment_required',
-             'sapar_sign_status', 'sapar_service_error', 'parcel_location'],
+             'sapar_sign_status', 'sapar_service_error', 'parcel_location',
+             'yandex_termobox'],
         )
 
     def test_sapar_topics_go_to_the_sapar_group(self):
@@ -107,6 +108,7 @@ class CatalogTest(unittest.TestCase):
             'sapar_sign_status': sc.ATTACH_NONE,            # «скриншот не обязателен»
             'sapar_service_error': sc.ATTACH_IMAGE_OR_VIDEO,  # скриншот или запись экрана
             'parcel_location': sc.ATTACH_NONE,
+            'yandex_termobox': sc.ATTACH_IMAGE,             # фото имеющегося термокороба
         }
         for key, kind in expected.items():
             self.assertEqual(sc.get(key)['attachment'], kind, key)
@@ -662,6 +664,114 @@ class RulesAreDecidableTest(unittest.TestCase):
                 self.assertIn(sc.ATTACHMENT, kinds, scenario['key'])
 
 
+class TermoboxTest(unittest.TestCase):
+    """ТЗ задачи #189: тематика «Термокороб» для Яндекс Доставки."""
+
+    KEY = 'yandex_termobox'
+
+    def base(self, action=None):
+        return {
+            'termobox_action': action or sc.TERMOBOX_ISSUE,
+            'iin': '060606202020',
+            'licence': '123456789',
+            'city': 'Актау',
+        }
+
+    def test_goes_to_the_yandex_group(self):
+        self.assertEqual(sc.get(self.KEY)['queue_code'], 'yandex_delivery')
+
+    def test_checklist_matches_the_specification(self):
+        """Три пункта, и каждый отмечается отдельно — прямое требование ТЗ."""
+        scenario = sc.get(self.KEY)
+        self.assertTrue(scenario['checks_each'])
+        self.assertEqual(len(scenario['checks']), 3)
+        joined = ' '.join(scenario['checks']).lower()
+        for word in ('таксопарк', 'google doc', 'депозит', 'норм'):
+            self.assertIn(word, joined, word)
+
+    def test_nothing_sends_until_every_check_is_ticked(self):
+        for done in ([], [0], [0, 1], [0, 1, 5]):
+            result = sc.evaluate(self.KEY, self.base(), has_attachment=False,
+                                 checks_done=done)
+            self.assertEqual(result['outcome'], sc.INCOMPLETE, done)
+            self.assertIn('__checks__', result['missing'], done)
+            self.assertIn('из 3', result['missing']['__checks__'], done)
+
+    def test_all_three_ticked_sends(self):
+        result = sc.evaluate(self.KEY, self.base(), has_attachment=False,
+                             checks_done=[0, 1, 2])
+        self.assertEqual(result['outcome'], sc.READY)
+
+    def test_two_categories_and_nothing_else(self):
+        action = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'termobox_action')
+        self.assertEqual(action['kind'], sc.CHOICE)
+        self.assertEqual(action['options'], [sc.TERMOBOX_ISSUE, sc.TERMOBOX_REPLACE])
+
+    def test_category_is_asked_before_the_fields(self):
+        """ТЗ: чек-лист → категория → поля. Категория своим экраном и первым."""
+        screens = sc.all_groups(sc.get(self.KEY))
+        self.assertEqual(screens[0], 'Что согласуем')
+        self.assertEqual([s['key'] for s in sc.steps_of_group(sc.get(self.KEY), screens[0],
+                                                              self.base())],
+                         ['termobox_action'])
+
+    def test_fields_of_both_categories(self):
+        keys = [s['key'] for s in sc.visible_steps(sc.get(self.KEY), self.base())]
+        self.assertEqual(keys, ['termobox_action', 'iin', 'licence', 'city'])
+        replace = [s['key'] for s in sc.visible_steps(sc.get(self.KEY),
+                                                      self.base(sc.TERMOBOX_REPLACE))]
+        self.assertEqual(replace,
+                         ['termobox_action', 'iin', 'licence', 'city', 'termobox_photo'])
+
+    def test_photo_is_required_only_for_replacement(self):
+        """При выдаче показывать нечего, и требовать фото значило бы держать
+        оператора на шаге, которого в его случае не существует."""
+        issue = sc.evaluate(self.KEY, self.base(sc.TERMOBOX_ISSUE), has_attachment=False,
+                            checks_done=[0, 1, 2])
+        self.assertEqual(issue['outcome'], sc.READY)
+
+        replace = sc.evaluate(self.KEY, self.base(sc.TERMOBOX_REPLACE), has_attachment=False,
+                              checks_done=[0, 1, 2])
+        self.assertEqual(replace['outcome'], sc.INCOMPLETE)
+        self.assertIn('__attachment__', replace['missing'])
+        self.assertIn('термокороб', replace['missing']['__attachment__'])
+
+        with_photo = sc.evaluate(self.KEY, self.base(sc.TERMOBOX_REPLACE), has_attachment=True,
+                                 checks_done=[0, 1, 2])
+        self.assertEqual(with_photo['outcome'], sc.READY)
+
+    def test_actual_city_explains_itself(self):
+        """ТЗ прямо просит подсказку: город не из карточки, а где выполнен заказ."""
+        city = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'city')
+        self.assertEqual(city['kind'], sc.CITY)
+        self.assertEqual(city['label'], 'Фактический город')
+        self.assertIn('последний заказ', city['hint'])
+
+    def test_every_field_is_mandatory(self):
+        for key in ('termobox_action', 'iin', 'licence', 'city'):
+            answers = self.base(sc.TERMOBOX_ISSUE)
+            answers.pop(key)
+            result = sc.evaluate(self.KEY, answers, has_attachment=False,
+                                 checks_done=[0, 1, 2])
+            self.assertEqual(result['outcome'], sc.INCOMPLETE, key)
+
+    def test_group_message_shows_what_is_being_approved(self):
+        body = sc.render_body(self.KEY, self.base(sc.TERMOBOX_REPLACE))
+        self.assertIn('Что нужно согласовать: Замену термокороба', body)
+        self.assertIn('Номер водительского удостоверения: 123456789', body)
+        self.assertIn('Фактический город: Актау', body)
+        self.assertIn('ИИН 060606202020', sc.render_subject(self.KEY,
+                                                            self.base(sc.TERMOBOX_REPLACE)))
+
+    def test_one_ticked_item_does_not_count_as_all(self):
+        """confirmed_checks приводит оба вида ответа к одному множеству."""
+        scenario = sc.get(self.KEY)
+        self.assertEqual(sc.confirmed_checks(scenario, checks_done=[0, 1, 2]), {0, 1, 2})
+        self.assertEqual(sc.confirmed_checks(scenario, checks_done=['0', '1']), {0, 1})
+        self.assertEqual(sc.confirmed_checks(scenario, checks_done=[0, 9, 'нет']), {0})
+        self.assertEqual(sc.confirmed_checks(scenario, checks_confirmed=True), {0, 1, 2})
+
+
 class ScreensTest(unittest.TestCase):
     """Вопросы разложены по экранам — но ни один не потерялся.
 
@@ -719,10 +829,20 @@ class ScreensTest(unittest.TestCase):
                 else:
                     self.assertNotEqual(item['group'], 'Вложение', scenario['key'])
 
-    def test_catalog_carries_screen_order(self):
+    def test_catalog_carries_every_screen_the_topic_can_show(self):
+        """В каталог уезжают ВСЕ экраны тематики, а не нужные при пустых ответах.
+
+        Интерфейс фильтрует присланный список по реально нужным экранам, поэтому
+        экрана, которого в списке нет, он не покажет никогда. У термокороба фото
+        просят только при замене — посчитай список по пустым ответам, и экран
+        «Вложение» стал бы недостижим, а обращение — неотправляемым.
+        """
         for item in sc.public_catalog():
             self.assertTrue(item['groups'], item['key'])
-            self.assertEqual(item['groups'], sc.groups_of(sc.get(item['key'])))
+            self.assertEqual(item['groups'], sc.all_groups(sc.get(item['key'])), item['key'])
+        termobox = next(i for i in sc.public_catalog() if i['key'] == 'yandex_termobox')
+        self.assertIn('Вложение', termobox['groups'])
+        self.assertNotIn('Вложение', sc.groups_of(sc.get('yandex_termobox')))
 
 
 if __name__ == '__main__':

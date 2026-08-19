@@ -451,6 +451,65 @@ PARCEL_LOCATION = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ТЕРМОКОРОБА (Яндекс Доставка)
+#
+# ТЗ отличается от тематик Sapar одним: чек-лист здесь не «подтверждаю, что всё
+# проверил» одной галочкой, а три пункта по отдельности («Оператор отмечает
+# галочками, что проверил КАЖДЫЙ из пунктов»). Отсюда флаг checks_each — не у
+# типа и не глобально, а у тематики: у Sapar до восьми пунктов, и превращать там
+# одно нажатие в восемь никто не просил.
+#
+# Категория (выдача или замена) — это ВОПРОС, а не две тематики в картотеке.
+# Двумя тематиками пришлось бы дважды написать один и тот же чек-лист и один и
+# тот же набор полей, а оператор выбирал бы категорию до того, как проверил
+# условия, — то есть в обратном ТЗ порядке. Вопросом же порядок выходит ровно
+# как в ТЗ: чек-лист → категория → поля → предпросмотр.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TERMOBOX_ISSUE = 'Выдачу термокороба'
+TERMOBOX_REPLACE = 'Замену термокороба'
+
+YANDEX_TERMOBOX = {
+    'key': 'yandex_termobox',
+    'queue_code': 'yandex_delivery',
+    'title': 'Термокороб: выдача или замена',
+    'when_to_use': 'Курьер просит корпоративный термокороб либо замену имеющегося. '
+                   'Обращение уходит представителям Яндекс Доставки на согласование.',
+    'attachment': ATTACH_IMAGE,
+    'attachment_hint': 'Фото термокороба, который сейчас у водителя',
+    # Каждый пункт отмечается отдельно, и пока не отмечены все — дальше нельзя.
+    'checks_each': True,
+    'checks': [
+        'Аккаунт водителя: водитель выполняет заказы в нашем таксопарке',
+        'Условия по Google Doc: норма заказов, требования к курьерам, какие типы '
+        'курьеров могут получить корпоративный термокороб, нужен ли депозит и в какой '
+        'сумме, по каким городам есть термокороба и по какому адресу',
+        'Выполнение нормы: сколько заказов водитель фактически выполнил за отчётный '
+        'период и соответствует ли это норме из Google Doc',
+    ],
+    'steps': [
+        step('termobox_action', 'Что нужно согласовать', CHOICE,
+             options=[TERMOBOX_ISSUE, TERMOBOX_REPLACE]),
+        # ИИН в ТЗ не назван, но он есть у каждой тематики раздела: по нему
+        # обращение находится поиском и попадает во все сообщения в группу.
+        # Аккаунт водителя оператор к этому моменту уже открыл — это первый
+        # пункт чек-листа.
+        STEP_IIN,
+        step('licence', 'Номер водительского удостоверения', TEXT,
+             placeholder='Например: 123456789'),
+        step('city', 'Фактический город', CITY,
+             hint='Не тот город, что указан в карточке или в диспетчерской, а тот, '
+                  'где водитель по факту выполнил последний заказ'),
+        # Фото — только при замене: при выдаче показывать нечего, и требовать
+        # его значило бы держать оператора на шаге, которого в его случае нет.
+        step('termobox_photo', 'Фото имеющегося термокороба', ATTACHMENT,
+             depends_on=('termobox_action', TERMOBOX_REPLACE)),
+    ],
+    'rules': [],
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Экраны мастера
 #
 # ТЗ требует задавать вопросы ПОСЛЕДОВАТЕЛЬНО — и это про порядок и про ранний
@@ -463,8 +522,12 @@ PARCEL_LOCATION = {
 # вопрос в разных тематиках относится к одному и тому же блоку, и держать это
 # в шести местах значило бы шесть шансов разойтись.
 STEP_GROUPS = {
+    # Что вообще согласуем — первый экран там, где категория решает состав полей
+    'termobox_action': 'Что согласуем',
+
     # Кто и за какой период
     'iin': 'Водитель и период',
+    'licence': 'Водитель и период',
     'period': 'Водитель и период',
     'park': 'Водитель и период',
     'city': 'Водитель и период',
@@ -511,6 +574,7 @@ STEP_GROUPS = {
 
     # Вложение всегда отдельным экраном: там своя механика выбора файла
     'screenshot': 'Вложение',
+    'termobox_photo': 'Вложение',
 }
 
 DEFAULT_GROUP = 'Подробности'
@@ -534,6 +598,7 @@ def _assign_groups(scenarios):
 # же), а разнобой в начале — меняет: оператор каждый раз ищет, с чего тут
 # начинают.
 GROUP_ORDER = [
+    'Что согласуем',
     'Водитель и период',
     'Что происходит',
     'Устройство и время',
@@ -541,6 +606,21 @@ GROUP_ORDER = [
     'Подробности',
     'Вложение',
 ]
+
+
+def all_groups(scenario):
+    """ВСЕ экраны, какие тематика может показать, в каноническом порядке.
+
+    Именно этот список уезжает в интерфейс, а не посчитанный по пустым ответам.
+    Разница видна на условном шаге: у термокороба фото просят только при замене,
+    и «Вложение» при пустых ответах отсутствует. Интерфейс фильтрует присланный
+    список по реально нужным экранам — значит экрана, которого в списке нет, он
+    не покажет НИКОГДА, сколько бы ответов оператор ни дал.
+    """
+    present = {item['group'] for item in scenario['steps']}
+    ordered = [name for name in GROUP_ORDER if name in present]
+    ordered += sorted(present - set(GROUP_ORDER))
+    return ordered
 
 
 def groups_of(scenario, answers=None):
@@ -566,6 +646,7 @@ SCENARIOS = [
     SAPAR_SIGN_STATUS,
     SAPAR_SERVICE_ERROR,
     PARCEL_LOCATION,
+    YANDEX_TERMOBOX,
 ]
 
 _assign_groups(SCENARIOS)
@@ -645,7 +726,32 @@ def visible_steps(scenario, answers):
     return result
 
 
-def evaluate(scenario_key, answers, *, has_attachment=False, checks_confirmed=False):
+def confirmed_checks(scenario, checks_confirmed=False, checks_done=None):
+    """Какие пункты проверки оператор отметил. Возвращает множество номеров.
+
+    Ответ приходит в двух видах, и оба означают одно и то же множество: одна
+    галочка «подтверждаю всё» (тематики Sapar) либо перечень отмеченных номеров
+    (термокороба, где по ТЗ каждый пункт отмечается отдельно). Приводим к одному
+    виду здесь, чтобы дальше правило было одно: отмечены все или нет.
+    """
+    total = len(scenario.get('checks') or [])
+    if not total:
+        return set()
+    if checks_confirmed:
+        return set(range(total))
+    result = set()
+    for value in (checks_done or ()):
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < total:
+            result.add(index)
+    return result
+
+
+def evaluate(scenario_key, answers, *, has_attachment=False, checks_confirmed=False,
+             checks_done=None):
     """Что делать с обращением: отправлять, вернуть, закрыть или перевести.
 
     Порядок разбора не случаен и повторяет логику ТЗ:
@@ -690,14 +796,26 @@ def evaluate(scenario_key, answers, *, has_attachment=False, checks_confirmed=Fa
         if problem:
             missing[item['key']] = problem
 
-    needs_file = scenario['attachment'] != ATTACH_NONE
+    # Вложение требуется, только если шаг с ним СЕЙЧАС имеет смысл. У термокороба
+    # фото просят при замене и не просят при выдаче: иначе оператор упирался бы в
+    # обязательный шаг, которого в его случае не существует.
+    needs_file = (scenario['attachment'] != ATTACH_NONE
+                  and any(item['kind'] == ATTACHMENT for item in steps))
     if needs_file and not has_attachment:
+        wanted = next((item['label'] for item in steps if item['kind'] == ATTACHMENT), None)
         missing['__attachment__'] = (
-            'Приложите скриншот' if scenario['attachment'] == ATTACH_IMAGE
+            'Приложите %s%s' % (wanted[0].lower(), wanted[1:]) if wanted
+            else 'Приложите скриншот' if scenario['attachment'] == ATTACH_IMAGE
             else 'Приложите скриншот или видео')
 
-    if scenario.get('checks') and not checks_confirmed:
-        missing['__checks__'] = 'Подтвердите, что выполнили обязательные проверки'
+    checks = scenario.get('checks') or []
+    if checks:
+        confirmed = confirmed_checks(scenario, checks_confirmed, checks_done)
+        if len(confirmed) < len(checks):
+            missing['__checks__'] = (
+                'Отметьте все пункты проверки: %d из %d' % (len(confirmed), len(checks))
+                if scenario.get('checks_each')
+                else 'Подтвердите, что выполнили обязательные проверки')
 
     if missing:
         return {'outcome': INCOMPLETE, 'message': 'Заполнены не все обязательные данные',
@@ -800,8 +918,9 @@ def public_catalog():
         'attachment': item['attachment'],
         'attachment_hint': item.get('attachment_hint'),
         'checks': item.get('checks', []),
+        'checks_each': bool(item.get('checks_each')),
         'steps': item['steps'],
-        'groups': groups_of(item),
+        'groups': all_groups(item),
         'rules': [{'when': list(r['when']), 'outcome': r['outcome'], 'message': r['message'],
                    'switch_to': r.get('switch_to')} for r in item.get('rules', [])],
         'status_glossary': [{'status': s, 'meaning': m}

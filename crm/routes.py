@@ -333,6 +333,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             key, answers,
             has_attachment=_bool(data.get('has_attachment')),
             checks_confirmed=_bool(data.get('checks_confirmed')),
+            checks_done=_int_list(data.get('checks_done')),
         )
         # Предпросмотр показываем только когда отправлять действительно можно:
         # иначе оператор редактирует в голове текст, который никуда не пойдёт.
@@ -391,6 +392,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             scenario_key, answers,
             has_attachment=attachment is not None,
             checks_confirmed=_bool(data.get('checks_confirmed')),
+            checks_done=_int_list(data.get('checks_done')),
         )
         if verdict['outcome'] != scenarios.READY:
             return jsonify({
@@ -621,3 +623,32 @@ def _bool(value):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _int_list(value):
+    """Список номеров из тела запроса.
+
+    Приезжает либо массивом (JSON), либо строкой «0,1,2» — при multipart тело
+    везёт форма, и списка в ней нет. Разбираем оба вида здесь, чтобы обработчики
+    об этом не думали: тот же приём уже применён к answers.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith('['):
+            try:
+                value = json.loads(text)
+            except (TypeError, ValueError):
+                return []
+        else:
+            value = [part for part in text.replace(' ', '').split(',') if part]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    result = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
