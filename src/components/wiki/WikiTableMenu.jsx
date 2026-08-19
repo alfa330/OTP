@@ -3,10 +3,10 @@ import { useEditorState } from '@tiptap/react';
 import { BubbleMenu } from '@tiptap/react/menus';
 import {
     ArrowDownToLine, ArrowLeftToLine, ArrowRightToLine, ArrowUpToLine,
-    Combine, Heading, Split, Trash2, X,
+    Heading, SquareMinus, TableCellsMerge, TableCellsSplit, Trash2,
 } from 'lucide-react';
 
-/* Панель управления таблицей — всплывает, когда курсор внутри таблицы.
+/* Панель управления таблицей — всплывает под таблицей, когда курсор внутри неё.
  *
  * До неё вставка таблицы была дорогой в один конец: кнопка в тулбаре давала
  * 3×3 с шапкой, и на этом всё. Ни строки добавить, ни столбец убрать, ни саму
@@ -14,14 +14,15 @@ import {
  * или начинал статью заново. Тянуть можно было только ширину колонок.
  *
  * Почему всплывающая панель, а не ещё одна группа кнопок в общем тулбаре:
- * команд тринадцать, и в постоянной панели они занимали бы целую строку,
- * которая девяносто процентов времени неактивна. Здесь они появляются ровно
- * тогда, когда есть над чем работать, и рядом с той таблицей, к которой
- * относятся.
+ * команд десять, и в постоянной панели они занимали бы целую строку, которая
+ * девяносто процентов времени неактивна. Здесь они появляются ровно тогда,
+ * когда есть над чем работать, и рядом с той таблицей, к которой относятся.
  *
- * placement='bottom': сверху таблицы обычно шапка со смыслом, а снизу —
- * свободное место; вдобавок собственный липкий тулбар редактора стоит именно
- * сверху и перекрывал бы панель на прокрутке.
+ * Кнопки подписаны словами «Строка» и «Столбец». Первый вариант был без
+ * подписей, и на скриншоте прода стало видно, почему так нельзя: крестик
+ * «удалить столбец» (тот же значок, повёрнутый на 45°) читается как «плюс», то
+ * есть кнопка удаления выглядит кнопкой добавления. Иконка-подсказка в title
+ * не спасает — до неё надо додуматься навести.
  */
 
 const Btn = ({ title, onClick, disabled, tone = 'plain', children }) => (
@@ -44,7 +45,13 @@ const Btn = ({ title, onClick, disabled, tone = 'plain', children }) => (
     </button>
 );
 
-const Sep = () => <span className="mx-0.5 h-4 w-px shrink-0 bg-slate-200" />;
+const Label = ({ children }) => (
+    <span className="shrink-0 pl-1 pr-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-slate-400">
+        {children}
+    </span>
+);
+
+const Sep = () => <span className="mx-1 h-4 w-px shrink-0 bg-slate-200" />;
 
 export default function WikiTableMenu({ editor }) {
     /* Доступность команд читаем через useEditorState, а не прямым
@@ -64,6 +71,22 @@ export default function WikiTableMenu({ editor }) {
 
     const run = (command) => () => command(editor.chain().focus()).run();
 
+    /* Панель привязана к ТАБЛИЦЕ, а не к выделенной ячейке.
+     *
+     * По умолчанию BubbleMenu считает положение от выделения, и панель ложилась
+     * поверх следующей строки таблицы — то есть закрывала собой ровно то, что
+     * человек правит. От таблицы целиком она встаёт под её нижним краем и
+     * ничего не перекрывает. */
+    const tableRect = () => {
+        const { state: pmState, view } = editor;
+        const at = view.domAtPos(pmState.selection.from)?.node;
+        const start = at instanceof HTMLElement ? at : at?.parentElement;
+        const table = start?.closest('table');
+        if (!table) return null;
+        return { getBoundingClientRect: () => table.getBoundingClientRect(),
+                 contextElement: table };
+    };
+
     return (
         <BubbleMenu
             editor={editor}
@@ -72,32 +95,36 @@ export default function WikiTableMenu({ editor }) {
             // у обычного BubbleMenu условие — непустое выделение, а в таблице
             // человек чаще просто стоит курсором в ячейке.
             shouldShow={({ editor: ed }) => ed.isEditable && ed.isActive('table')}
-            options={{ placement: 'bottom', offset: 8 }}
+            getReferencedVirtualElement={tableRect}
+            options={{ placement: 'bottom-start', offset: 8 }}
             className="flex items-center gap-0.5 rounded-xl border border-slate-200 bg-white/95 px-1.5 py-1 shadow-lg shadow-slate-900/10 backdrop-blur-xl"
         >
-            <Btn title="Строка выше" onClick={run((c) => c.addRowBefore())}>
+            <Label>Строка</Label>
+            <Btn title="Добавить строку выше" onClick={run((c) => c.addRowBefore())}>
                 <ArrowUpToLine size={14} />
             </Btn>
-            <Btn title="Строка ниже" onClick={run((c) => c.addRowAfter())}>
+            <Btn title="Добавить строку ниже" onClick={run((c) => c.addRowAfter())}>
                 <ArrowDownToLine size={14} />
             </Btn>
             <Btn title="Удалить строку" tone="danger" onClick={run((c) => c.deleteRow())}>
-                <X size={14} />
+                <SquareMinus size={14} />
             </Btn>
             <Sep />
 
-            <Btn title="Столбец слева" onClick={run((c) => c.addColumnBefore())}>
+            <Label>Столбец</Label>
+            <Btn title="Добавить столбец слева" onClick={run((c) => c.addColumnBefore())}>
                 <ArrowLeftToLine size={14} />
             </Btn>
-            <Btn title="Столбец справа" onClick={run((c) => c.addColumnAfter())}>
+            <Btn title="Добавить столбец справа" onClick={run((c) => c.addColumnAfter())}>
                 <ArrowRightToLine size={14} />
             </Btn>
             <Btn title="Удалить столбец" tone="danger" onClick={run((c) => c.deleteColumn())}>
-                <X size={14} className="rotate-45" />
+                <SquareMinus size={14} />
             </Btn>
             <Sep />
 
-            <Btn title="Строка-шапка" onClick={run((c) => c.toggleHeaderRow())}>
+            <Btn title="Строка-шапка: включить или убрать"
+                 onClick={run((c) => c.toggleHeaderRow())}>
                 <Heading size={14} />
             </Btn>
             {/* Объединение и разбиение — двумя кнопками, а не одной
@@ -105,18 +132,18 @@ export default function WikiTableMenu({ editor }) {
                 выделения, и человек не знает заранее, что нажимает. Здесь
                 неприменимая команда просто гаснет. */}
             <Btn
-                title="Объединить ячейки"
+                title="Объединить выделенные ячейки"
                 disabled={!state?.canMerge}
                 onClick={run((c) => c.mergeCells())}
             >
-                <Combine size={14} />
+                <TableCellsMerge size={14} />
             </Btn>
             <Btn
-                title="Разбить ячейку"
+                title="Разбить объединённую ячейку"
                 disabled={!state?.canSplit}
                 onClick={run((c) => c.splitCell())}
             >
-                <Split size={14} />
+                <TableCellsSplit size={14} />
             </Btn>
             <Sep />
 
@@ -124,7 +151,7 @@ export default function WikiTableMenu({ editor }) {
                 а эта сносит всю работу целиком, и отменять её пришлось бы
                 через Ctrl+Z, о котором вспоминают не все. */}
             <Btn
-                title="Удалить таблицу"
+                title="Удалить таблицу целиком"
                 tone="danger"
                 onClick={() => {
                     if (!window.confirm('Удалить таблицу вместе с содержимым?')) return;
