@@ -23,7 +23,11 @@ const cleanPhones = (phones) => [...new Set((phones || [])
 export const emptyPoint = (officeId) => ({ key: nextKey(), office_id: officeId, phones: [''] });
 
 /* Точки для формы: сперва онлайн — это общий номер парка, за ним офисы в том
-   порядке, в котором их отдал сервер (город, позиция). */
+   порядке, в котором их отдал сервер (город, позиция).
+
+   У парка без номеров строка всё равно одна, пустая: номер обязателен (решение
+   владельца), и форма, открывающаяся с пустотой и одной кнопкой, об этом не
+   говорит — она выглядит так, будто заполнять нечего. */
 export const pointsFromPark = (park) => {
     const points = [];
     if (park.phones?.length) {
@@ -34,8 +38,15 @@ export const pointsFromPark = (park) => {
         office_id: link.office_id,
         phones: link.phones?.length ? [...link.phones] : [''],
     }));
-    return points;
+    return points.length ? points : [emptyPoint(undefined)];
 };
+
+/* Строка «онлайн» — та, у которой места в справочнике нет. undefined значит
+   «офис ещё не выбран», и путать эти два состояния нельзя. */
+export const isOnline = (point) => point?.office_id === null;
+
+export const isBlank = (point) => (
+    point?.office_id === undefined && cleanPhones(point?.phones).length === 0);
 
 /* Обратное преобразование: офисы отдельно, номера без офиса отдельно — так их
    и хранит сервер (wiki_park_phones с office_id = NULL).
@@ -67,6 +78,10 @@ export const parkDraftIssue = (draft) => {
     if (!draft) return null;
     if (!draft.name?.trim()) return 'Укажите название парка';
     const points = draft.points || [];
+    // Парк без единого номера — справочник, по которому не позвонить.
+    if (points.length === 0 || points.every(isBlank)) {
+        return 'Нужен хотя бы один номер';
+    }
     if (points.some((point) => point.office_id === undefined)) {
         return 'В одной из строк не выбрано, куда звонят';
     }

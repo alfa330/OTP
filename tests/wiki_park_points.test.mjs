@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    ONLINE, emptyPoint, parkDraftIssue, pointsFromPark, pointsPayload,
+    ONLINE, emptyPoint, isBlank, isOnline, parkDraftIssue, pointsFromPark, pointsPayload,
 } from '../src/components/wiki/parkPoints.js';
 
 /* Точки парка: строка формы = «куда звонят» + номера этой точки.
@@ -34,8 +34,14 @@ test('офис без номеров открывается с пустым по
     assert.deepEqual(points[0].phones, ['']);
 });
 
-test('парк без номеров даёт пустой список точек', () => {
-    assert.deepEqual(pointsFromPark({}), []);
+test('парк без номеров открывается с одной пустой строкой, а не с пустотой', () => {
+    // Номер обязателен, и форма обязана показать это полем: пустая секция с
+    // одной кнопкой читается как «заполнять нечего».
+    const points = pointsFromPark({});
+    assert.equal(points.length, 1);
+    assert.equal(points[0].office_id, undefined);
+    assert.deepEqual(points[0].phones, ['']);
+    assert.ok(isBlank(points[0]));
 });
 
 test('тело запроса делит точки на офисы и номера без офиса', () => {
@@ -62,8 +68,13 @@ test('парк без онлайн-номера шлёт пустой списо
     assert.deepEqual(pointsPayload([]).phones, []);
 });
 
-test('строка без выбранного места сохранить не даёт', () => {
-    const draft = { name: 'iTaxi', points: [emptyPoint(undefined)] };
+test('номер есть, а место не выбрано — сохранить не даёт', () => {
+    // Пустая строка целиком — это «номера нет» и своё сообщение; здесь номер
+    // уже вписан, и не хватает ровно офиса или переключателя «Онлайн».
+    const draft = {
+        name: 'iTaxi',
+        points: [{ key: 'a', office_id: undefined, phones: ['+7 700 000 00 00'] }],
+    };
     assert.match(parkDraftIssue(draft), /не выбрано/);
 });
 
@@ -78,7 +89,24 @@ test('название важнее строк с номерами', () => {
 
 test('заполненный парк проходит', () => {
     assert.equal(parkDraftIssue({ name: 'iTaxi', points: pointsFromPark(PARK) }), null);
-    assert.equal(parkDraftIssue({ name: 'iTaxi', points: [] }), null);
+});
+
+test('парк без единого номера сохранить нельзя', () => {
+    assert.match(parkDraftIssue({ name: 'iTaxi', points: pointsFromPark({}) }), /хотя бы один номер/);
+    assert.match(parkDraftIssue({ name: 'iTaxi', points: [] }), /хотя бы один номер/);
+});
+
+test('онлайн отличается от «офис не выбран»', () => {
+    // Переключатель ставит null, пустой селектор — undefined. Спутать их
+    // значит записать номер без офиса как номер неизвестно куда.
+    assert.ok(isOnline({ office_id: null, phones: ['+7 700 000 00 00'] }));
+    assert.ok(!isOnline(emptyPoint(undefined)));
+    assert.ok(!isOnline({ office_id: 3, phones: [] }));
+});
+
+test('строка с номером, но без офиса, пустой не считается', () => {
+    assert.ok(!isBlank({ office_id: undefined, phones: ['+7 700 000 00 00'] }));
+    assert.ok(!isBlank({ office_id: 2, phones: [''] }));
 });
 
 test('онлайн — отдельное значение селектора, а не офис', () => {

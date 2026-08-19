@@ -28,7 +28,9 @@ const fmtDate = (iso) => (iso
 
 const emptyPark = () => ({
     name: '', city: '', address: '', website: '', commission: '', description: '',
-    points: [],
+    // Одна пустая строка сразу: номер у парка обязателен, и форма должна
+    // показывать это полем, а не пустым местом с кнопкой.
+    points: pointsFromPark({}),
 });
 
 /* Номера парка одной строкой: сперва те, что без офиса, потом офисные.
