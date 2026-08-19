@@ -67,10 +67,27 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
         due_text=_due_text(payload['due_at']),
         own_wording=bool((scenarios.get(payload['scenario_key']) or {}).get('body_template')),
     )
-    result, error = transport.send_message(
-        payload['chat_id'], text,
-        reply_markup=telegram.build_keyboard(ticket_id, payload['status']),
-    )
+    # Фото уходит ОДНИМ сообщением вместе с текстом, а не следом за ним:
+    # раньше подпись к медиа (1024 символа) текст обращения не вмещала, а после
+    # того как текст сократили — вмещает. Два сообщения там, где хватает одного,
+    # в рабочей группе только мешают. Не влезло — отправляем как раньше, двумя.
+    as_caption = attachment is not None and len(text) <= transport.CAPTION_LIMIT
+    if as_caption:
+        result, error = transport.send_attachment(
+            payload['chat_id'],
+            file_name=attachment.get('filename') or 'attachment',
+            stream=attachment.get('stream'),
+            mimetype=attachment.get('mimetype'),
+            caption=text,
+            parse_mode='HTML',
+        )
+        if result is None:
+            # Отказ на файле не должен терять обращение: шлём текстом.
+            logging.warning('crm: обращение %s не ушло с фото (%s), отправляю текстом',
+                            ticket_id, error)
+            as_caption = False
+    if not as_caption:
+        result, error = transport.send_message(payload['chat_id'], text)
 
     if result is None:
         with db._get_cursor() as cursor:
@@ -89,17 +106,28 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
             cursor, ticket_id=ticket_id, direction='out', body=payload['body'],
             author_user_id=payload['created_by'], author_name=payload['created_by_name'],
             tg_chat_id=payload['chat_id'], tg_message_id=message_id,
+            attachment=_attachment_row(result, attachment) if as_caption else None,
         )
         queries.add_event(cursor, ticket_id=ticket_id, kind='sent',
                           actor_user_id=payload['created_by'],
                           actor_name=payload['created_by_name'],
                           payload={'queue': payload['queue_title']})
 
-    if attachment is not None:
+    if attachment is not None and not as_caption:
         _send_attachment(db, ticket_id, payload['chat_id'], message_id, attachment,
                          author_user_id=payload['created_by'],
                          author_name=payload['created_by_name'])
     return True, None
+
+
+def _attachment_row(result, attachment):
+    """Описание вложения для строки переписки — одно на оба пути отправки."""
+    return {
+        'kind': 'photo' if result.get('photo') else 'document',
+        'file_id': _result_file_id(result),
+        'name': attachment.get('filename'),
+        'mime': attachment.get('mimetype'),
+    }
 
 
 def _send_attachment(db, ticket_id, chat_id, reply_to_message_id, attachment,
@@ -121,12 +149,7 @@ def _send_attachment(db, ticket_id, chat_id, reply_to_message_id, attachment,
             cursor, ticket_id=ticket_id, direction='out',
             author_user_id=author_user_id, author_name=author_name,
             tg_chat_id=chat_id, tg_message_id=result.get('message_id'),
-            attachment={
-                'kind': 'photo' if result.get('photo') else 'document',
-                'file_id': _result_file_id(result),
-                'name': attachment.get('filename'),
-                'mime': attachment.get('mimetype'),
-            },
+            attachment=_attachment_row(result, attachment),
         )
     return True, None
 
@@ -234,49 +257,6 @@ def ingest_group_reply(db, *, chat_id, reply_to_message_id, message):
 
 
 # Кнопки в группе. Действие → (новый статус, вид уведомления, ответ нажавшему).
-_GROUP_ACTIONS = {
-    'work': ('in_progress', queries.UNREAD_PROGRESS, 'Взяли в работу — оператор увидит'),
-    'done': ('resolved', queries.UNREAD_DONE, 'Отмечено выполненным — оператор уведомлён'),
-}
-
-
-def apply_group_action(db, action, ticket_id, from_user):
-    """Нажали кнопку под обращением в группе. Возвращает (текст ответа, ok).
-
-    Именно этот путь даёт оператору «мгновенное уведомление о выполнении»:
-    сотрудник в группе нажимает «Выполнено», статус меняется, триггер колокола
-    будит вкладку оператора.
-    """
-    known = _GROUP_ACTIONS.get(action)
-    if not known:
-        return 'Неизвестное действие', False
-    status, unread_kind, reply = known
-    actor = telegram.sender_name(from_user)
-
-    with db._get_cursor() as cursor:
-        ticket = queries.get_ticket(cursor, ticket_id)
-        if not ticket:
-            return 'Обращение не найдено', False
-        changed = queries.set_status(
-            cursor, ticket_id, status, actor_name=actor,
-            notify_author=True, unread_kind=unread_kind,
-        )
-        if not changed:
-            return 'Уже отмечено', True
-        queries.add_event(cursor, ticket_id=ticket_id, kind='status',
-                          actor_name=actor,
-                          payload={'status': status, 'via': 'telegram'})
-        chat_id, message_id = ticket['tg_chat_id'], ticket['tg_message_id']
-
-    # Кнопки обновляем ПОСЛЕ коммита и молча: сообщение могли удалить из чата,
-    # и отказ Telegram не должен отменять уже изменённый статус.
-    if chat_id and message_id:
-        transport.edit_reply_markup(
-            chat_id, message_id, telegram.build_keyboard(ticket_id, status),
-        )
-    return reply, True
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Смена статуса из системы
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,14 +289,11 @@ def change_status_from_system(db, ticket_id, status, *, actor_user_id, actor_nam
     if not changed:
         return True, None
 
-    if chat_id and message_id:
-        transport.edit_reply_markup(chat_id, message_id,
-                                    telegram.build_keyboard(ticket_id, status))
-        if notify_group and status in ('resolved', 'cancelled'):
-            transport.send_message(
-                chat_id,
-                telegram.build_status_notice(ticket_id=ticket_id, status=status,
-                                             actor_name=actor_name, iin=iin),
-                reply_to_message_id=message_id,
-            )
+    if chat_id and message_id and notify_group and status in ('resolved', 'cancelled'):
+        transport.send_message(
+            chat_id,
+            telegram.build_status_notice(ticket_id=ticket_id, status=status,
+                                         actor_name=actor_name, iin=iin),
+            reply_to_message_id=message_id,
+        )
     return True, None

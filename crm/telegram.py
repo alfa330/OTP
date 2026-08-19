@@ -46,9 +46,10 @@ STATUS_LABELS = {
 # Режем с запасом — HTML-теги тоже считаются.
 MESSAGE_LIMIT = 4000
 
-CALLBACK_PREFIX = 'crm'
-CALLBACK_TAKE = 'crm:work:'
-CALLBACK_DONE = 'crm:done:'
+# Кнопок «Беру в работу» и «Выполнено» под сообщением больше нет: владелец
+# убрал их 19.08.2026 — из группы они выглядели так, будто ничего не делают.
+# Нажатие отвечало всплывающей подсказкой на пару секунд и меняло сами кнопки,
+# а в чате после него не оставалось ничего. Статус обращения ведут в iCORE.
 
 
 # Адрес интерфейса для ссылок из группы. Тот же, что у задач: пункт меню и
@@ -76,24 +77,6 @@ def ticket_link(ticket_id):
 def ticket_number(ticket_id):
     """Номер обращения в человеческом виде. Одно место правды на весь раздел."""
     return '№%d' % int(ticket_id)
-
-
-def parse_callback(data):
-    """('work'|'done', ticket_id) из callback_data кнопки, либо None.
-
-    Отдельной функцией, потому что разбор чужого ввода — самое подходящее место
-    для тихой ошибки: кнопка из старого сообщения, обрезанные данные, чужой
-    префикс. Всё это должно давать None, а не исключение в обработчике бота.
-    """
-    text = str(data or '')
-    for prefix, action in ((CALLBACK_TAKE, 'work'), (CALLBACK_DONE, 'done')):
-        if text.startswith(prefix):
-            raw = text[len(prefix):]
-            try:
-                return action, int(raw)
-            except (TypeError, ValueError):
-                return None
-    return None
 
 
 def _clip(text, limit):
@@ -213,24 +196,6 @@ def build_status_notice(*, ticket_id, status, actor_name=None, iin=None):
     if actor_name:
         text += ' (%s)' % actor_name
     return text
-
-
-def build_keyboard(ticket_id, status='open'):
-    """Кнопки под сообщением обращения — как inline_keyboard для Telegram API.
-
-    Возвращаем готовую структуру (а не объект aiogram): сообщение отправляется
-    обычным HTTP-запросом, тем же путём, что и заявки в IT.
-
-    У решённого обращения кнопок нет вовсе: нажимать больше нечего, а «мёртвая»
-    кнопка под сообщением — источник лишних кликов и недоумения.
-    """
-    if status in ('resolved', 'cancelled'):
-        return None
-    buttons = []
-    if status == 'open':
-        buttons.append({'text': '👀 Беру в работу', 'callback_data': CALLBACK_TAKE + str(int(ticket_id))})
-    buttons.append({'text': '✅ Выполнено', 'callback_data': CALLBACK_DONE + str(int(ticket_id))})
-    return {'inline_keyboard': [buttons]}
 
 
 def sender_name(from_user):

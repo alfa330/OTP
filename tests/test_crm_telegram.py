@@ -105,34 +105,21 @@ class TicketMessageTest(unittest.TestCase):
         self.assertIn('ticket_id=42', message)
 
 
-class KeyboardTest(unittest.TestCase):
-    def test_new_ticket_offers_both_actions(self):
-        keyboard = telegram.build_keyboard(42, 'open')
-        labels = [b['text'] for b in keyboard['inline_keyboard'][0]]
-        self.assertEqual(len(labels), 2)
-        self.assertTrue(any('Выполнено' in label for label in labels))
+class NoButtonsTest(unittest.TestCase):
+    """Кнопок под сообщением больше нет (решение владельца 19.08.2026).
 
-    def test_ticket_in_progress_offers_only_completion(self):
-        """«Беру в работу» второй раз бессмысленно."""
-        keyboard = telegram.build_keyboard(42, 'in_progress')
-        self.assertEqual(len(keyboard['inline_keyboard'][0]), 1)
+    Из группы они выглядели так, будто ничего не делают: нажатие отвечало
+    всплывающей подсказкой на пару секунд и меняло сами кнопки, а в чате после
+    него не оставалось ничего. Статус обращения ведут в iCORE.
+    """
 
-    def test_closed_ticket_has_no_buttons(self):
-        """Мёртвая кнопка под сообщением — источник лишних кликов."""
-        for status in ('resolved', 'cancelled'):
-            self.assertIsNone(telegram.build_keyboard(42, status), status)
+    def test_keyboard_builder_is_gone(self):
+        self.assertFalse(hasattr(telegram, 'build_keyboard'))
 
-    def test_callback_roundtrip(self):
-        for status, action in (('open', 'work'), ('answered', 'done')):
-            keyboard = telegram.build_keyboard(7, status)
-            data = keyboard['inline_keyboard'][0][0]['callback_data']
-            self.assertEqual(telegram.parse_callback(data)[1], 7)
-            del action
-
-    def test_bad_callback_never_raises(self):
-        """Кнопка из старого сообщения не должна ронять обработчик."""
-        for data in (None, '', 'crm:', 'crm:done:', 'crm:done:абв', 'other:done:1', 'crm:unknown:1'):
-            self.assertIsNone(telegram.parse_callback(data), repr(data))
+    def test_callback_parsing_is_gone(self):
+        self.assertFalse(hasattr(telegram, 'parse_callback'))
+        self.assertFalse(hasattr(telegram, 'CALLBACK_TAKE'))
+        self.assertFalse(hasattr(telegram, 'CALLBACK_DONE'))
 
 
 class Message(dict):
@@ -302,8 +289,8 @@ class EveryGroupMessageCarriesTheIinTest(unittest.TestCase):
         """Список видов сообщений закрыт: появится новый — этот тест упадёт, и
         про ИИН в нём не забудут."""
         builders = sorted(name for name in dir(telegram) if name.startswith('build_'))
-        self.assertEqual(builders, ['build_keyboard', 'build_reply_message',
-                                    'build_status_notice', 'build_ticket_message'])
+        self.assertEqual(builders, ['build_reply_message', 'build_status_notice',
+                                    'build_ticket_message'])
 
 
 class BodyMarkupTest(unittest.TestCase):

@@ -45,8 +45,7 @@ def _call(method, *, json_payload=None, params=None, timeout=DEFAULT_TIMEOUT):
         return None, str(error)
 
 
-def send_message(chat_id, text, *, reply_to_message_id=None, reply_markup=None,
-                 parse_mode='HTML'):
+def send_message(chat_id, text, *, reply_to_message_id=None, parse_mode='HTML'):
     """Отправляет сообщение. При отказе разметки повторяет без неё.
 
     Повтор нужен потому, что текст обращения пишет человек: незакрытый «<»
@@ -60,8 +59,6 @@ def send_message(chat_id, text, *, reply_to_message_id=None, reply_markup=None,
         payload['reply_to_message_id'] = reply_to_message_id
         # Реплай на удалённое сообщение иначе отменяет всю отправку.
         payload['allow_sending_without_reply'] = True
-    if reply_markup:
-        payload['reply_markup'] = reply_markup
 
     result, error = _call('sendMessage', json_payload=payload)
     if result is not None or not parse_mode:
@@ -73,20 +70,19 @@ def send_message(chat_id, text, *, reply_to_message_id=None, reply_markup=None,
     return _call('sendMessage', json_payload=payload)
 
 
-def edit_reply_markup(chat_id, message_id, reply_markup=None):
-    """Обновляет кнопки под сообщением обращения (или убирает их)."""
-    payload = {'chat_id': chat_id, 'message_id': message_id}
-    if reply_markup:
-        payload['reply_markup'] = reply_markup
-    return _call('editMessageReplyMarkup', json_payload=payload)
+# Предел подписи к медиа у Telegram — 1024 символа, HTML-теги считаются тоже.
+# Режем с запасом, как и текст сообщения.
+CAPTION_LIMIT = 1000
 
 
 def send_attachment(chat_id, *, file_name, stream, mimetype=None,
-                    reply_to_message_id=None, caption=None):
-    """Вложение оператора уходит отдельным сообщением-реплаем к обращению.
+                    reply_to_message_id=None, caption=None, parse_mode=None):
+    """Отправляет файл. С caption он уходит ОДНИМ сообщением вместе с текстом.
 
-    Как и у заявок в IT: подпись к медиа ограничена 1024 символами, а текст
-    обращения длиннее, поэтому файл идёт вторым сообщением, а не подписью.
+    Подпись к медиа ограничена 1024 символами (Telegram), и раньше текст
+    обращения в неё не помещался — файл шёл вторым сообщением. После того как
+    текст сократили, он туда влезает, и решение «одним или двумя» принимает
+    вызывающий (crm.service): здесь только транспорт.
     """
     token = _token()
     if not token:
@@ -100,7 +96,9 @@ def send_attachment(chat_id, *, file_name, stream, mimetype=None,
         data['reply_to_message_id'] = reply_to_message_id
         data['allow_sending_without_reply'] = True
     if caption:
-        data['caption'] = caption[:1000]
+        data['caption'] = caption[:CAPTION_LIMIT]
+        if parse_mode:
+            data['parse_mode'] = parse_mode
     try:
         response = requests.post(
             '%s/bot%s/%s' % (API_ROOT, token, method),

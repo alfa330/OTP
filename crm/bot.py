@@ -91,25 +91,4 @@ def register(dp, db, pool, types_module):
         except Exception:
             logging.debug('crm: расписка об ответе не ушла', exc_info=True)
 
-    @dp.callback_query_handler(
-        lambda call: str(getattr(call, 'data', '') or '').startswith(telegram.CALLBACK_PREFIX + ':'),
-        state='*',
-    )
-    async def crm_group_action(call):
-        parsed = telegram.parse_callback(getattr(call, 'data', ''))
-        if not parsed:
-            await call.answer('Кнопка устарела')
-            return
-        action, ticket_id = parsed
-        try:
-            text, ok = await _run(
-                service.apply_group_action, db, action, ticket_id, call.from_user,
-            )
-        except Exception:
-            logging.exception('crm: кнопка обращения %s не отработала', ticket_id)
-            await call.answer('Не получилось — попробуйте ещё раз')
-            return
-        # show_alert только на отказе: успех не должен требовать лишнего клика.
-        await call.answer(text, show_alert=not ok)
-
     logging.info('Раздел «Обращения»: обработчики бота подключены')

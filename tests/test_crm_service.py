@@ -18,7 +18,7 @@
 import unittest
 from contextlib import contextmanager
 
-from crm import service
+from crm import service, transport
 
 
 class PoolViolation(AssertionError):
@@ -113,12 +113,17 @@ class FakeQueries:
 class FakeTransport:
     """Сеть. Падает, если её позвали с открытым курсором."""
 
-    def __init__(self, db, result=None, error=None):
+    # Подделка обязана повторять поверхность настоящего модуля: по этому пределу
+    # сервис решает, уместить ли текст в подпись к фото.
+    CAPTION_LIMIT = transport.CAPTION_LIMIT
+
+    def __init__(self, db, result=None, error=None, file_error=None):
         self.db = db
         self.sent = []
-        self.edited = []
+        self.files = []
         self._result = result if result is not None else {'message_id': 555}
         self._error = error
+        self._file_error = file_error
 
     def _guard(self):
         if self.db.depth != 0:
@@ -129,14 +134,12 @@ class FakeTransport:
         self.sent.append({'chat_id': chat_id, 'text': text, **kwargs})
         return (None, self._error) if self._error else (self._result, None)
 
-    def edit_reply_markup(self, chat_id, message_id, markup=None):
-        self._guard()
-        self.edited.append((chat_id, message_id, markup))
-        return {}, None
-
     def send_attachment(self, chat_id, **kwargs):
         self._guard()
-        return self._result, None
+        self.files.append({'chat_id': chat_id, **kwargs})
+        if self._file_error:
+            return None, self._file_error
+        return dict(self._result, photo=[{'file_id': 'ph1'}]), None
 
 
 PAYLOAD = {
@@ -184,14 +187,48 @@ class DeliveryTest(ServiceCase):
         self.assertEqual(added[0]['tg_message_id'], 555)
         self.assertEqual(added[0]['tg_chat_id'], -1001)
 
-    def test_message_carries_buttons(self):
-        """Кнопка «Выполнено» и есть «мгновенное уведомление о выполнении»."""
+    def test_no_buttons_under_the_message(self):
+        """Кнопок больше нет — убраны решением владельца 19.08.2026."""
         _queries, transport = self.wire(payload=dict(PAYLOAD))
         service.deliver_ticket(self.db, 42)
-        markup = transport.sent[0].get('reply_markup')
-        self.assertIsNotNone(markup)
-        labels = [b['text'] for b in markup['inline_keyboard'][0]]
-        self.assertTrue(any('Выполнено' in label for label in labels))
+        self.assertNotIn('reply_markup', transport.sent[0])
+
+    def test_photo_goes_with_the_text_in_one_message(self):
+        """Просьба владельца: не отдельным сообщением.
+
+        Раньше подпись к медиа (1024 символа) текст обращения не вмещала. После
+        того как текст сократили — вмещает, и два сообщения там, где хватает
+        одного, в группе только мешают.
+        """
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
+        service.deliver_ticket(self.db, 42, attachment={
+            'filename': 'shot.png', 'stream': b'x', 'mimetype': 'image/png'})
+        self.assertEqual(len(transport.files), 1)
+        self.assertEqual(transport.sent, [], 'текст ушёл вторым сообщением')
+        self.assertIn('Обращение №42', transport.files[0]['caption'])
+        self.assertEqual(transport.files[0]['parse_mode'], 'HTML')
+        # Файл — часть корневого сообщения, а не отдельная строка переписки.
+        messages = [kwargs for name, kwargs in _queries.calls if name == 'add_message']
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]['attachment']['kind'], 'photo')
+
+    def test_long_text_falls_back_to_two_messages(self):
+        """Подпись к медиа ограничена, и терять текст из-за этого нельзя."""
+        payload = dict(PAYLOAD, body='я' * 3000)
+        _queries, transport = self.wire(payload=payload)
+        service.deliver_ticket(self.db, 42, attachment={
+            'filename': 'shot.png', 'stream': b'x', 'mimetype': 'image/png'})
+        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual(len(transport.files), 1)
+
+    def test_photo_failure_still_delivers_the_ticket(self):
+        """Отказ на файле не должен терять обращение — уходит текстом."""
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
+        transport._file_error = 'file too big'
+        ok, error = service.deliver_ticket(self.db, 42, attachment={
+            'filename': 'shot.png', 'stream': b'x', 'mimetype': 'image/png'})
+        self.assertTrue(ok, error)
+        self.assertEqual(len(transport.sent), 1)
 
     def test_failed_delivery_keeps_the_ticket(self):
         """Telegram лежит — обращение остаётся с пометкой, а не пропадает."""
@@ -300,62 +337,6 @@ class IncomingReplyTest(ServiceCase):
 
         self.assertEqual(accepted['ticket_id'], 42)
         self.assertEqual(queries.find('add_message')[0]['attachment']['file_id'], 'big')
-
-
-class GroupButtonTest(ServiceCase):
-    TICKET = {'tg_chat_id': -1001, 'tg_message_id': 555, 'status': 'open', 'created_by': 10}
-
-    def test_done_resolves_and_notifies_the_author(self):
-        queries, transport = self.wire(ticket=dict(self.TICKET))
-        text, ok = service.apply_group_action(self.db, 'done', 42, {'first_name': 'Аружан'})
-
-        self.assertTrue(ok)
-        self.assertIn('уведомлён', text)
-        changed = queries.find('set_status')[0]
-        self.assertEqual(changed['status'], 'resolved')
-        self.assertTrue(changed['notify_author'])
-        self.assertEqual(changed['unread_kind'], 'done')
-
-    def test_take_moves_to_in_progress(self):
-        queries, _transport = self.wire(ticket=dict(self.TICKET))
-        _text, ok = service.apply_group_action(self.db, 'work', 42, {'username': 'aru'})
-        self.assertTrue(ok)
-        self.assertEqual(queries.find('set_status')[0]['status'], 'in_progress')
-
-    def test_repeated_press_changes_nothing(self):
-        """Второе «Выполнено» — не событие: ни истории, ни звонка автору."""
-        queries, transport = self.wire(ticket=dict(self.TICKET), status_changed=False)
-        text, ok = service.apply_group_action(self.db, 'done', 42, {'first_name': 'А'})
-
-        self.assertTrue(ok)
-        self.assertEqual(text, 'Уже отмечено')
-        self.assertEqual(queries.find('add_event'), [])
-        self.assertEqual(transport.edited, [])
-
-    def test_buttons_are_refreshed_after_the_status_changed(self):
-        _queries, transport = self.wire(ticket=dict(self.TICKET))
-        service.apply_group_action(self.db, 'done', 42, {'first_name': 'А'})
-        self.assertEqual(len(transport.edited), 1)
-        # У решённого кнопок нет — Telegram получает пустую разметку.
-        self.assertIsNone(transport.edited[0][2])
-
-    def test_unknown_action_is_rejected_without_touching_the_ticket(self):
-        queries, _transport = self.wire(ticket=dict(self.TICKET))
-        _text, ok = service.apply_group_action(self.db, 'delete_everything', 42, None)
-        self.assertFalse(ok)
-        self.assertEqual(queries.calls, [])
-
-    def test_missing_ticket_is_reported(self):
-        self.wire(ticket=None)
-        text, ok = service.apply_group_action(self.db, 'done', 42, None)
-        self.assertFalse(ok)
-        self.assertIn('не найдено', text)
-
-    def test_editing_buttons_happens_outside_the_cursor(self):
-        self.wire(ticket=dict(self.TICKET))
-        service.apply_group_action(self.db, 'done', 42, {'first_name': 'А'})
-        self.assertEqual(self.db.depth, 0)
-        self.assertEqual(self.db.max_depth, 1)
 
 
 class SystemStatusTest(ServiceCase):
