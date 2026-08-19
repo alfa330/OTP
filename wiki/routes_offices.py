@@ -7,6 +7,7 @@
 
 from flask import Response, g, jsonify, request
 
+from . import access as wiki_access
 from . import offices as wiki_offices
 from . import queries
 from .routes_structure import _clean, _int_or_none, _slugify
@@ -98,11 +99,23 @@ def _fields(data, *, partial):
 
 def register(bp, wiki_route, db, log_ip):
 
+    def _may_edit(ctx):
+        """Справочник правит всякий, у кого есть что-то сверх чтения.
+
+        То же правило, что у парков (routes_parks._may_edit): офисы и парки —
+        один справочник, разнесённый по двум экранам, и разные пороги на них
+        читались бы как случайность.
+        """
+        return wiki_access.has_write_capability(ctx['capabilities'])
+
+    def _forbidden():
+        return jsonify({"error": "Справочник правит тот, у кого есть права сверх чтения",
+                        "code": "WIKI_FORBIDDEN"}), 403
+
     @wiki_route('/offices', methods=('GET', 'POST'))
     def wiki_offices_list(cursor, ctx):
         if request.method == 'GET':
-            can_manage = bool(ctx['capabilities'].get('can_manage_structure')
-                              or ctx['capabilities'].get('can_manage_access'))
+            can_manage = _may_edit(ctx)
             return jsonify({
                 'items': wiki_offices.list_offices(
                     cursor,
@@ -115,9 +128,8 @@ def register(bp, wiki_route, db, log_ip):
                 'can_manage': can_manage,
             })
 
-        if not ctx['capabilities'].get('can_manage_structure'):
-            return jsonify({"error": "Нет права управлять справочником",
-                            "code": "WIKI_FORBIDDEN"}), 403
+        if not _may_edit(ctx):
+            return _forbidden()
 
         data = _body()
         name = _clean(data.get('name'))
@@ -140,9 +152,10 @@ def register(bp, wiki_route, db, log_ip):
                            details={'name': name}, ip_address=log_ip())
         return jsonify({"id": office_id, "slug": slug}), 201
 
-    @wiki_route('/offices/<int:office_id>', methods=('PATCH', 'DELETE'),
-                capability='can_manage_structure')
+    @wiki_route('/offices/<int:office_id>', methods=('PATCH', 'DELETE'))
     def wiki_office_item(cursor, ctx, office_id):
+        if not _may_edit(ctx):
+            return _forbidden()
         if request.method == 'DELETE':
             # Архивируем, как парки и акции: за офисом стоят связи с парками,
             # физическое удаление снесло бы их каскадом без следа в журнале.
@@ -173,8 +186,7 @@ def register(bp, wiki_route, db, log_ip):
                            details={'fields': sorted(fields.keys())}, ip_address=log_ip())
         return jsonify({"status": "ok"})
 
-    @wiki_route('/offices/resolve-map', methods=('POST',),
-                capability='can_manage_structure')
+    @wiki_route('/offices/resolve-map', methods=('POST',))
     def wiki_office_resolve_map(cursor, ctx):
         """Ссылка 2ГИС → координаты.
 
@@ -182,6 +194,8 @@ def register(bp, wiki_route, db, log_ip):
         Location, а редирект браузеру виден не будет (ответ без CORS-заголовков
         для чтения заголовков).
         """
+        if not _may_edit(ctx):
+            return _forbidden()
         result = wiki_offices.resolve_map_link(_clean(_body().get('url'), 1000))
         if 'error' in result:
             return jsonify(result), 400

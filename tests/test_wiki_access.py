@@ -364,6 +364,48 @@ class GrantCeilingTest(unittest.TestCase):
                                               target_role='super_admin'))
 
 
+class DirectoryWriteCapabilityTest(unittest.TestCase):
+    """Кто правит справочники «Парки» и «Офисы» (решение владельца 19.08.2026).
+
+    Правит всякий, у кого есть ХОТЬ ЧТО-ТО сверх чтения. Прежний гейт
+    can_manage_structure оставлял снаружи супервайзера и тренера: статью они
+    завести могли, а поправить телефон парка — нет, хотя это тот же справочный
+    контент и следить за ним, кроме них, некому.
+    """
+
+    def test_writers_may_edit_directories(self):
+        for role in ('super_admin', 'admin', 'sv', 'supervisor', 'trainer'):
+            self.assertTrue(
+                access.has_write_capability(access.capabilities_from_otp_role(role)),
+                '%s должен править справочники' % role)
+
+    def test_readers_may_not(self):
+        for role in ('operator', 'trainee', ''):
+            self.assertFalse(
+                access.has_write_capability(access.capabilities_from_otp_role(role)),
+                '%s правит справочники, а не должен' % role)
+
+    def test_department_head_included(self):
+        caps = access.capabilities_from_otp_role('admin', is_department_head=True)
+        self.assertTrue(access.has_write_capability(caps))
+
+    def test_read_alone_is_not_enough(self):
+        """Именно «сверх чтения»: одного can_read мало, любой другой — достаточно."""
+        self.assertFalse(access.has_write_capability({'can_read': True}))
+        for name in ('can_create', 'can_edit', 'can_delete', 'can_publish',
+                     'can_approve', 'can_manage_structure', 'can_manage_access'):
+            self.assertTrue(access.has_write_capability({name: True}), name)
+
+    def test_capability_from_wiki_role_counts(self):
+        """Способность может прийти от роли вики — такой человек тоже правит.
+
+        Поэтому правило считается по фактическим способностям, а не по списку
+        ролей OTP.
+        """
+        caps = access.resolve_capabilities('operator', [{'can_edit': True}])
+        self.assertTrue(access.has_write_capability(caps))
+
+
 class RuleUniquenessDDLTest(unittest.TestCase):
     """Ключ уникальности правила заводится СРАЗУ с уровнем должности.
 

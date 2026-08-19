@@ -6,6 +6,7 @@
 
 from flask import jsonify, request
 
+from . import access as wiki_access
 from . import offices as wiki_offices
 from . import parks as wiki_parks
 from . import queries
@@ -26,12 +27,25 @@ def _decimal_or_none(value):
 
 def register(bp, wiki_route, db, log_ip):
 
+    def _may_edit(ctx):
+        """Справочники правит всякий, у кого есть что-то сверх чтения.
+
+        Решение владельца 19.08.2026. Прежний гейт can_manage_structure
+        оставлял снаружи супервайзера и тренера: статью они завести могли, а
+        поправить телефон парка — нет, хотя это тот же справочный контент и
+        следить за ним, кроме них, некому.
+        """
+        return wiki_access.has_write_capability(ctx['capabilities'])
+
+    def _forbidden():
+        return jsonify({"error": "Справочник правит тот, у кого есть права сверх чтения",
+                        "code": "WIKI_FORBIDDEN"}), 403
+
     # ── Парки ────────────────────────────────────────────────────────────
     @wiki_route('/parks', methods=('GET', 'POST'))
     def wiki_parks_list(cursor, ctx):
         if request.method == 'GET':
-            can_manage = bool(ctx['capabilities'].get('can_manage_structure')
-                              or ctx['capabilities'].get('can_manage_access'))
+            can_manage = _may_edit(ctx)
             items = wiki_parks.list_parks(cursor, include_archived=can_manage,
                                           query=request.args.get('q'))
             # Офисы парка едут вместе со списком: связью управляют из карточки
@@ -41,9 +55,8 @@ def register(bp, wiki_route, db, log_ip):
                 park['offices'] = by_park.get(park['id'], [])
             return jsonify({'items': items, 'can_manage': can_manage})
 
-        if not ctx['capabilities'].get('can_manage_structure'):
-            return jsonify({"error": "Нет права управлять справочником",
-                            "code": "WIKI_FORBIDDEN"}), 403
+        if not _may_edit(ctx):
+            return _forbidden()
 
         data = _body()
         name = _clean(data.get('name'))
@@ -78,13 +91,14 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_park_detail(cursor, ctx, slug):
         park = wiki_parks.get_park(cursor, slug)
         if not park or (park['status'] == 'archived'
-                        and not ctx['capabilities'].get('can_manage_structure')):
+                        and not _may_edit(ctx)):
             return jsonify({"error": "Парк не найден"}), 404
         return jsonify(park)
 
-    @wiki_route('/parks/<int:park_id>', methods=('PATCH', 'DELETE'),
-                capability='can_manage_structure')
+    @wiki_route('/parks/<int:park_id>', methods=('PATCH', 'DELETE'))
     def wiki_park_item(cursor, ctx, park_id):
+        if not _may_edit(ctx):
+            return _forbidden()
         if request.method == 'DELETE':
             # Архивируем: за парком могут стоять акции, а физическое удаление
             # снесло бы их связи каскадом.
@@ -125,15 +139,14 @@ def register(bp, wiki_route, db, log_ip):
     @wiki_route('/promotions', methods=('GET', 'POST'))
     def wiki_promotions(cursor, ctx):
         if request.method == 'GET':
-            can_manage = bool(ctx['capabilities'].get('can_manage_structure'))
+            can_manage = _may_edit(ctx)
             return jsonify({
                 'items': wiki_parks.list_promotions(cursor, include_archived=can_manage),
                 'can_manage': can_manage,
             })
 
-        if not ctx['capabilities'].get('can_manage_structure'):
-            return jsonify({"error": "Нет права управлять справочником",
-                            "code": "WIKI_FORBIDDEN"}), 403
+        if not _may_edit(ctx):
+            return _forbidden()
 
         data = _body()
         title = _clean(data.get('title'))
@@ -155,9 +168,10 @@ def register(bp, wiki_route, db, log_ip):
                            details={'title': title}, ip_address=log_ip())
         return jsonify({"id": promotion_id}), 201
 
-    @wiki_route('/promotions/<int:promotion_id>', methods=('PATCH', 'DELETE'),
-                capability='can_manage_structure')
+    @wiki_route('/promotions/<int:promotion_id>', methods=('PATCH', 'DELETE'))
     def wiki_promotion_item(cursor, ctx, promotion_id):
+        if not _may_edit(ctx):
+            return _forbidden()
         if request.method == 'DELETE':
             if not wiki_parks.update_promotion(cursor, promotion_id, {'status': 'archived'}):
                 return jsonify({"error": "Акция не найдена"}), 404

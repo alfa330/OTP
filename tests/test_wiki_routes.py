@@ -526,5 +526,68 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
         self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_CEILING')
 
 
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class DirectoryRouteTest(_RouteHarness, unittest.TestCase):
+    """Гейт справочников на уровне HTTP.
+
+    Чистое правило проверено в test_wiki_access; здесь важно, что оно реально
+    стоит на КАЖДОЙ точке записи. Их семь (парк, акция, офис — создание,
+    правка, архив, плюс разбор ссылки 2ГИС), и раньше половина гейтилась
+    декоратором, половина проверкой внутри: пропустить одну легко.
+    """
+
+    WRITE_ROUTES = (
+        ('post', '/api/wiki/parks'),
+        ('patch', '/api/wiki/parks/1'),
+        ('delete', '/api/wiki/parks/1'),
+        ('post', '/api/wiki/promotions'),
+        ('patch', '/api/wiki/promotions/1'),
+        ('delete', '/api/wiki/promotions/1'),
+        ('post', '/api/wiki/offices'),
+        ('patch', '/api/wiki/offices/1'),
+        ('delete', '/api/wiki/offices/1'),
+        ('post', '/api/wiki/offices/resolve-map'),
+    )
+
+    def test_operator_is_refused_everywhere(self):
+        client, _ = self.build(make_context('operator'))
+        for method, url in self.WRITE_ROUTES:
+            r = getattr(client, method)(url, json={'name': 'x'})
+            self.assertEqual(r.status_code, 403, '%s %s' % (method, url))
+            self.assertEqual(r.get_json().get('code'), 'WIKI_FORBIDDEN',
+                             '%s %s' % (method, url))
+
+    def test_supervisor_passes_the_gate_everywhere(self):
+        """Супервайзер проходит гейт: дальше он спотыкается о данные, не о права.
+
+        Проверяем именно «не 403»: за гейтом идут запросы к подменённому
+        курсору, и осмысленного 2xx там не выйдет — важно, что отказ по правам
+        больше не наступает.
+        """
+        client, _ = self.build(make_context('sv'))
+        for method, url in self.WRITE_ROUTES:
+            r = getattr(client, method)(url, json={'name': 'Парк'})
+            self.assertNotEqual(r.status_code, 403, '%s %s' % (method, url))
+
+    def test_trainer_passes_the_gate_too(self):
+        client, _ = self.build(make_context('trainer'))
+        r = client.post('/api/wiki/parks', json={'name': 'Парк'})
+        self.assertNotEqual(r.status_code, 403)
+
+    def test_can_manage_flag_follows_the_same_rule(self):
+        """Флаг для интерфейса и гейт считаются одинаково.
+
+        Разойдись они — супервайзер получил бы экран без кнопок «Изменить»
+        (или наоборот, кнопки с отказом по нажатию).
+        """
+        for role, expected in (('sv', True), ('trainer', True), ('operator', False)):
+            client, cursor = self.build(make_context(role))
+            cursor.fetchall.return_value = []
+            for url in ('/api/wiki/parks', '/api/wiki/offices'):
+                body = client.get(url).get_json()
+                self.assertEqual(body.get('can_manage'), expected,
+                                 '%s %s' % (role, url))
+
+
 if __name__ == '__main__':
     unittest.main()
