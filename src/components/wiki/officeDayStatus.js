@@ -9,6 +9,10 @@
  *      был сегодняшним;
  *   4. недельный график — расчёт, когда за день ничего не записано.
  *
+ * Пометки «только по телефону» у офиса больше нет: телефон без офиса теперь
+ * заводится на стороне парка («Онлайн — без офиса» в его номерах), и держать
+ * то же самое второй записью значило бы снова разводить источники правды.
+ *
  * Пункты 2 и 3 приезжают одним полем office.day и различаются source:
  * 'manual' против 'auto'.
  */
@@ -19,13 +23,11 @@ export const DAY_STATE_LABELS = {
     open: 'Открыт',
     closed: 'Закрыт',
     absent: 'Офиса в городе нет',
-    online: 'Только по телефону',
     none: 'Нет графика',
 };
 
-/* Легенда ТЗ: три состояния, которые несут цвет. «Только по телефону» и «нет
- * графика» в легенду не идут — цветом они не кодируются, и строки в ней были бы
- * шумом. */
+/* Легенда ТЗ: три состояния, которые несут цвет. «Нет графика» в неё не идёт —
+ * цветом оно не кодируется, и строка в легенде была бы шумом. */
 export const DAY_LEGEND = [
     { state: 'open', label: 'Открыт', dot: 'bg-emerald-500' },
     { state: 'closed', label: 'Закрыт', dot: 'bg-rose-500' },
@@ -33,7 +35,7 @@ export const DAY_LEGEND = [
 ];
 
 export const DAY_STATE_TONE = {
-    open: 'green', closed: 'red', absent: 'slate', online: 'blue', none: 'slate',
+    open: 'green', closed: 'red', absent: 'slate', none: 'slate',
 };
 
 /* Заливка строки таблицы. Требование ТЗ буквальное: «строка окрашивается
@@ -42,7 +44,6 @@ export const DAY_STATE_ROW = {
     open: 'bg-emerald-50/70',
     closed: 'bg-rose-50/80',
     absent: 'bg-slate-200/70',
-    online: '',
     none: '',
 };
 
@@ -52,7 +53,6 @@ export const DAY_STATE_EDGE = {
     open: 'before:bg-emerald-400',
     closed: 'before:bg-rose-400',
     absent: 'before:bg-slate-400',
-    online: 'before:bg-blue-300',
     none: 'before:bg-slate-200',
 };
 
@@ -84,10 +84,6 @@ export function officeDayStatus(office, dayISO) {
             source: day.source === 'manual' ? 'record' : 'snapshot',
             recordedOn: day.recorded_on || null,
         };
-    }
-
-    if (office?.is_online) {
-        return { state: 'online', label: DAY_STATE_LABELS.online, source: 'record', recordedOn: null };
     }
 
     const status = officeStatusOn(office?.schedule, dayISO);

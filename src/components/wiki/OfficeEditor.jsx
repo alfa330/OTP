@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { Loader2, MapPin, MapPinOff, Phone, Wifi } from 'lucide-react';
+import { Loader2, MapPin, MapPinOff, Phone } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
 import OfficeMap from './OfficeMap';
 import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
@@ -230,40 +230,25 @@ export default function OfficeEditor({ draft, setDraft, base, headers, showToast
                 </p>
             ) : (
                 <>
-                    <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                        <span className="flex items-center gap-2 text-[13px] text-slate-700">
-                            <Wifi size={15} className="text-slate-400" />
-                            Только по телефону (ОНЛАЙН)
-                        </span>
-                        <IosToggle
-                            checked={!!draft.is_online}
-                            onChange={(next) => setDraft((prev) => ({ ...prev, is_online: next }))}
+                    <Field label="Адрес">
+                        <input
+                            className={iosInput}
+                            value={draft.address}
+                            placeholder="Проспект Сарыарка, 31, угол улицы Алиби Жангельдин"
+                            onChange={(e) => setDraft((prev) => ({ ...prev, address: e.target.value }))}
                         />
-                    </label>
+                    </Field>
 
-                    {!draft.is_online && (
-                        <>
-                            <Field label="Адрес">
-                                <input
-                                    className={iosInput}
-                                    value={draft.address}
-                                    placeholder="Проспект Сарыарка, 31, угол улицы Алиби Жангельдин"
-                                    onChange={(e) => setDraft((prev) => ({ ...prev, address: e.target.value }))}
-                                />
-                            </Field>
+                    <Field label="Ориентиры" hint="Каждый с новой строки — как в справочнике: вход, этаж, кабинет, что рядом.">
+                        <textarea
+                            className={`${iosInput} min-h-[72px] resize-y`}
+                            value={draft.address_note}
+                            placeholder={'Головной офис\nвход со стороны улицы Сарыарка'}
+                            onChange={(e) => setDraft((prev) => ({ ...prev, address_note: e.target.value }))}
+                        />
+                    </Field>
 
-                            <Field label="Ориентиры" hint="Каждый с новой строки — как в справочнике: вход, этаж, кабинет, что рядом.">
-                                <textarea
-                                    className={`${iosInput} min-h-[72px] resize-y`}
-                                    value={draft.address_note}
-                                    placeholder={'Головной офис\nвход со стороны улицы Сарыарка'}
-                                    onChange={(e) => setDraft((prev) => ({ ...prev, address_note: e.target.value }))}
-                                />
-                            </Field>
-
-                            <MapField draft={draft} setDraft={setDraft} base={base} headers={headers} showToast={showToast} />
-                        </>
-                    )}
+                    <MapField draft={draft} setDraft={setDraft} base={base} headers={headers} showToast={showToast} />
 
                     <Field label="Телефон">
                         <input
@@ -274,14 +259,12 @@ export default function OfficeEditor({ draft, setDraft, base, headers, showToast
                         />
                     </Field>
 
-                    {!draft.is_online && (
-                        <Field label="График работы">
-                            <ScheduleEditor
-                                schedule={draft.schedule}
-                                onChange={(schedule) => setDraft((prev) => ({ ...prev, schedule }))}
-                            />
-                        </Field>
-                    )}
+                    <Field label="График работы">
+                        <ScheduleEditor
+                            schedule={draft.schedule}
+                            onChange={(schedule) => setDraft((prev) => ({ ...prev, schedule }))}
+                        />
+                    </Field>
 
                     <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
                         <span className="flex items-center gap-2 text-[13px] text-slate-700">

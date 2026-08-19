@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, Building2, CalendarClock, Clock, Coffee, Columns2,
-    Loader2, MapPin, Pencil, Phone, Plus, Rows3, Search, Table2, Wifi,
+    Archive, ArchiveRestore, Building2, CalendarClock, ChevronLeft, ChevronRight,
+    Clock, Coffee, Columns2, Copy, Loader2, MapPin, Pencil, Phone, Plus, Rows3,
+    Search, Table2,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary,
@@ -14,7 +15,9 @@ import OfficeEditor from './OfficeEditor';
 import OfficeFilters, { DEFAULT_FILTERS, SORT_OPTIONS } from './OfficeFilters';
 import OfficeTable from './OfficeTable';
 import OfficeDayModal from './OfficeDayModal';
-import { breakLines, officeStatus, officeTodayISO, scheduleLines } from './officeSchedule';
+import {
+    breakLines, dayHoursOn, officeStatus, officeTodayISO, scheduleLines,
+} from './officeSchedule';
 import {
     DAY_LEGEND, DAY_STATE_EDGE, DAY_STATE_TONE, formatDay, officeDayStatus,
 } from './officeDayStatus';
@@ -36,7 +39,7 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
 const emptyDraft = () => ({
     name: '', city: '', address: '', address_note: '', phone: '',
     map_url: '', map_resolved_url: null, lat: null, lon: null,
-    schedule: {}, is_online: false, no_office: false,
+    schedule: {}, no_office: false,
     kind: 'park', partner_label: '',
 });
 
@@ -52,7 +55,6 @@ const draftFrom = (office) => ({
     lat: office.lat ?? null,
     lon: office.lon ?? null,
     schedule: office.schedule || {},
-    is_online: !!office.is_online,
     no_office: !!office.no_office,
     kind: office.kind || 'park',
     partner_label: office.partner_label || '',
@@ -60,11 +62,10 @@ const draftFrom = (office) => ({
 
 const STATUS_TONE = { open: 'green', break: 'amber', closed: 'slate' };
 
-const StatusBadge = ({ schedule, isOnline, tick }) => {
+const StatusBadge = ({ schedule, tick }) => {
     // tick только заставляет пересчитать: время берётся из часов, а не из него.
     const status = useMemo(() => officeStatus(schedule), [schedule, tick]);
 
-    if (isOnline) return <IosBadge tone="blue"><Wifi size={11} /> Только по телефону</IosBadge>;
     if (status.state === 'none') return null;
 
     return (
@@ -91,13 +92,16 @@ const DayBadge = ({ status }) => (
 );
 
 const OfficeCard = ({
-    base, office, canManage, onEdit, onArchive, onRestore, onMarkDay,
+    base, office, canManage, onEdit, onArchive, onRestore, onMarkDay, onCopyAddress,
     dayISO, isToday, showCity, tick,
 }) => {
     const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
     const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
     const parkPhones = (office.parks || []).filter((link) => link.phones?.length);
     const notes = (office.address_note || '').split('\n').map((s) => s.trim()).filter(Boolean);
+
+    const hours = useMemo(() => dayHoursOn(office.schedule, dayISO), [office.schedule, dayISO]);
+    const [weekOpen, setWeekOpen] = useState(false);
 
     const status = officeDayStatus(office, dayISO);
     const absent = status.state === 'absent';
@@ -138,11 +142,7 @@ const OfficeCard = ({
                                     <IosBadge tone="blue">{office.partner_label || 'Партнёрский'}</IosBadge>
                                 )}
                                 {isToday && !marked ? (
-                                    <StatusBadge
-                                        schedule={office.schedule}
-                                        isOnline={office.is_online}
-                                        tick={tick}
-                                    />
+                                    <StatusBadge schedule={office.schedule} tick={tick} />
                                 ) : (
                                     <DayBadge status={status} />
                                 )}
@@ -155,7 +155,18 @@ const OfficeCard = ({
                             ) : office.address && (
                                 <p className="mt-1 flex items-start gap-1.5 text-[13px] leading-relaxed text-slate-600">
                                     <MapPin size={13} className="mt-0.5 shrink-0 text-slate-400" />
-                                    <span>{office.address}</span>
+                                    {/* Адрес копируется щелчком: оператор его диктует и
+                                        пересылает, а выделять мышью текст в карточке —
+                                        лишняя работа десятки раз за смену. */}
+                                    <button
+                                        type="button"
+                                        onClick={() => onCopyAddress(office)}
+                                        title="Скопировать адрес"
+                                        className="group flex items-start gap-1.5 text-left hover:text-blue-600"
+                                    >
+                                        <span>{office.address}</span>
+                                        <Copy size={12} className="mt-0.5 shrink-0 text-slate-300 transition group-hover:text-blue-500" />
+                                    </button>
                                 </p>
                             )}
 
@@ -230,35 +241,76 @@ const OfficeCard = ({
                         )}
                     </div>
 
-                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-slate-600">
-                        {office.phone && (
-                            <a
-                                href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
-                                className="flex items-center gap-1.5 font-medium tabular-nums hover:text-blue-600"
-                            >
-                                <Phone size={12} className="text-slate-400" /> {office.phone}
-                            </a>
-                        )}
-                        {week.length > 0 && (
-                            <span className="flex flex-wrap items-center gap-1.5">
-                                <Clock size={12} className="text-slate-400" />
-                                {week.map((line, index) => (
-                                    <React.Fragment key={line.days}>
-                                        {index > 0 && <span className="text-slate-300">·</span>}
-                                        <span className={line.isDayOff ? 'text-slate-400' : ''}>
-                                            {line.days}&nbsp;{line.time}
+                    {/* Часы — за выбранный день, а не вся неделя: оператору отвечают
+                        «до скольки сегодня». Неделя нужна реже, поэтому она под
+                        раскрытием, и карточка перестала быть простыней из семи дней. */}
+                    {!absent && (
+                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-slate-600">
+                            {office.phone && (
+                                <a
+                                    href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
+                                    className="flex items-center gap-1.5 font-medium tabular-nums hover:text-blue-600"
+                                >
+                                    <Phone size={12} className="text-slate-400" /> {office.phone}
+                                </a>
+                            )}
+                            {/* За сегодня часы дня не печатаем: бейдж рядом уже сказал
+                                «Открыто до 19:00» — это то же самое, только точнее.
+                                Обед показываем всегда: «когда у них перерыв» спрашивают
+                                заранее, а в бейдж он попадает только когда уже идёт. */}
+                            {hours ? (
+                                <>
+                                    {!isToday && (
+                                        <span className="flex items-center gap-1.5 tabular-nums">
+                                            <Clock size={12} className="text-slate-400" />
+                                            {formatDay(dayISO)} {hours.from}–{hours.to}
                                         </span>
-                                    </React.Fragment>
+                                    )}
+                                    {hours.breakFrom && (
+                                        <span className="flex items-center gap-1.5 tabular-nums text-slate-500">
+                                            <Coffee size={12} className="text-slate-400" />
+                                            обед {hours.breakFrom}–{hours.breakTo}
+                                        </span>
+                                    )}
+                                </>
+                            ) : !isToday && week.length > 0 && (
+                                <span className="flex items-center gap-1.5 text-slate-400">
+                                    <Clock size={12} /> {formatDay(dayISO)} выходной
+                                </span>
+                            )}
+                            {week.length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => setWeekOpen((v) => !v)}
+                                    className="text-[12px] font-medium text-blue-600 hover:underline"
+                                >
+                                    {weekOpen ? 'скрыть неделю' : 'вся неделя'}
+                                </button>
+                            )}
+                        </div>
+                    )}
+
+                    {weekOpen && week.length > 0 && (
+                        <div className="mt-1.5 rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] text-slate-600">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 tabular-nums">
+                                {week.map((line) => (
+                                    <span key={line.days} className={line.isDayOff ? 'text-slate-400' : ''}>
+                                        {line.days}&nbsp;{line.time}
+                                    </span>
                                 ))}
-                            </span>
-                        )}
-                        {lunch.map((line) => (
-                            <span key={line.days || 'all'} className="flex items-center gap-1.5 text-slate-500">
-                                <Coffee size={12} className="text-slate-400" />
-                                обед {line.days ? `${line.days} ` : ''}{line.time}
-                            </span>
-                        ))}
-                    </div>
+                            </div>
+                            {lunch.length > 0 && (
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-slate-500">
+                                    {lunch.map((line) => (
+                                        <span key={line.days || 'all'} className="flex items-center gap-1.5">
+                                            <Coffee size={12} className="text-slate-400" />
+                                            обед {line.days ? `${line.days} ` : ''}{line.time}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Список только показывает привязку; меняют её в карточке парка. */}
                     {office.parks?.length > 0 && (
@@ -301,6 +353,15 @@ const VIEWS = [
 
 const PREFS_KEY = 'wiki.offices.view';
 
+/** Сдвиг календарной даты на дни. UTC-полдень, чтобы переход через месяц и
+ *  летнее время не уводили день на соседний. */
+const shiftDay = (dayISO, days) => {
+    const [y, m, d] = String(dayISO).split('-').map(Number);
+    const date = new Date(Date.UTC(y, m - 1, d));
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+};
+
 /* Поле даты набрано классами iosInput без w-full: рядом с w-full класс w-auto
    ничего не перебивает (побеждает порядок в CSS, а не в атрибуте), и поле
    растягивалось на всю строку панели. */
@@ -339,6 +400,7 @@ export default function WikiOffices({ base, headers, showToast }) {
     const [view, setView] = useState(prefs.view);
     const [dayISO, setDayISO] = useState(officeTodayISO);
     const [dayTarget, setDayTarget] = useState(null);
+    const [stateFilter, setStateFilter] = useState('');
     const [draft, setDraft] = useState(null);
     const [tick, setTick] = useState(0);
 
@@ -399,7 +461,6 @@ export default function WikiOffices({ base, headers, showToast }) {
             lat: draft.lat,
             lon: draft.lon,
             schedule: draft.schedule,
-            is_online: !!draft.is_online,
             no_office: !!draft.no_office,
             kind: draft.kind,
             partner_label: draft.kind === 'partner' ? (draft.partner_label || null) : null,
@@ -428,6 +489,20 @@ export default function WikiOffices({ base, headers, showToast }) {
             .then(() => { toast('Офис возвращён из архива', 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
+    };
+
+    const copyAddress = (office) => {
+        const text = [office.city, office.address].filter(Boolean).join(', ');
+        if (!text) return;
+        // clipboard.writeText есть не всюду (http-контекст, старые вебвью), и
+        // молчаливый отказ выглядел бы как «кнопка не работает».
+        const done = () => toast('Адрес скопирован', 'success');
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(text).then(done)
+                .catch(() => toast('Не удалось скопировать — выделите адрес вручную', 'error'));
+            return;
+        }
+        toast('Копирование недоступно в этом браузере', 'error');
     };
 
     const markDay = (state, note) => {
@@ -472,6 +547,24 @@ export default function WikiOffices({ base, headers, showToast }) {
         return items;
     }, [offices, filters.sort, dayISO, collator]);
 
+    /* Сколько офисов в каком состоянии на выбранную дату. Считается по всей
+       загруженной выборке, а не по отфильтрованной — иначе счётчик менялся бы
+       от собственного нажатия. */
+    const counts = useMemo(() => {
+        const result = { open: 0, closed: 0, absent: 0, none: 0 };
+        offices.forEach((office) => {
+            const state = officeDayStatus(office, dayISO).state;
+            result[state] = (result[state] || 0) + 1;
+        });
+        return result;
+    }, [offices, dayISO]);
+
+    const visible = useMemo(() => (
+        stateFilter
+            ? sorted.filter((office) => officeDayStatus(office, dayISO).state === stateFilter)
+            : sorted
+    ), [sorted, stateFilter, dayISO]);
+
     /* Заголовки городов остаются только там, где город и задаёт порядок:
        внутри групп сортировка по названию или статусу была бы не видна, и
        выбранный пункт фильтра выглядел бы сломанным. */
@@ -482,13 +575,13 @@ export default function WikiOffices({ base, headers, showToast }) {
         if (!grouped) return null;
         const order = [];
         const byCity = new Map();
-        sorted.forEach((office) => {
+        visible.forEach((office) => {
             const key = office.city || 'Без города';
             if (!byCity.has(key)) { byCity.set(key, []); order.push(key); }
             byCity.get(key).push(office);
         });
         return order.map((key) => ({ city: key, items: byCity.get(key) }));
-    }, [sorted, grouped]);
+    }, [visible, grouped]);
 
     // Одна карточка в ряд или две — выбор человека, а не порог экрана: прежняя
     // сетка включала вторую колонку сама от 2xl и никого не спрашивала. На узком
@@ -507,6 +600,7 @@ export default function WikiOffices({ base, headers, showToast }) {
             onArchive={archive}
             onRestore={restore}
             onMarkDay={setDayTarget}
+            onCopyAddress={copyAddress}
             dayISO={dayISO}
             isToday={isToday}
             showCity={!grouped}
@@ -528,15 +622,45 @@ export default function WikiOffices({ base, headers, showToast }) {
                 </div>
 
                 {/* Дата — «на какой день смотрим». Вперёд смотреть нечего:
-                    статус будущего дня — это график, а не факт. */}
-                <input
-                    type="date"
-                    className={dateInput}
-                    value={dayISO}
-                    max={today}
-                    onChange={(e) => setDayISO(e.target.value || today)}
-                    aria-label="Дата, на которую показан статус"
-                />
+                    статус будущего дня — это график, а не факт. Стрелки нужны
+                    затем, что типовой вопрос — «а позавчера?», и открывать ради
+                    одного дня календарь незачем. */}
+                <div className="flex shrink-0 items-center gap-1">
+                    <button
+                        type="button"
+                        onClick={() => setDayISO(shiftDay(dayISO, -1))}
+                        className="grid h-9 w-8 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                        aria-label="Предыдущий день"
+                    >
+                        <ChevronLeft size={16} />
+                    </button>
+                    <input
+                        type="date"
+                        className={dateInput}
+                        value={dayISO}
+                        max={today}
+                        onChange={(e) => setDayISO(e.target.value || today)}
+                        aria-label="Дата, на которую показан статус"
+                    />
+                    <button
+                        type="button"
+                        onClick={() => setDayISO(shiftDay(dayISO, 1))}
+                        disabled={isToday}
+                        className="grid h-9 w-8 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent"
+                        aria-label="Следующий день"
+                    >
+                        <ChevronRight size={16} />
+                    </button>
+                    {!isToday && (
+                        <button
+                            type="button"
+                            onClick={() => setDayISO(today)}
+                            className="rounded-xl bg-slate-100 px-2.5 py-2 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200"
+                        >
+                            Сегодня
+                        </button>
+                    )}
+                </div>
 
                 <OfficeFilters
                     value={filters}
@@ -573,19 +697,37 @@ export default function WikiOffices({ base, headers, showToast }) {
                 )}
             </div>
 
-            {/* Легенда: цветовую кодировку новый оператор должен читать без
-                обучения (п. 4.4 ТЗ). Пустой список объяснять нечем. */}
+            {/* Легенда и счётчики — одной строкой, и она же фильтр. Цветовую
+                кодировку новый оператор читает без обучения (п. 4.4 ТЗ), а
+                «где закрыто» находится одним нажатием вместо перебора списка.
+                Отдельная легенда и отдельные счётчики были бы двумя строками
+                про одно и то же. */}
             {!loading && offices.length > 0 && (
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[12px] text-slate-500">
-                    {DAY_LEGEND.map((item) => (
-                        <span key={item.state} className="flex items-center gap-1.5">
-                            <span className={`h-2 w-2 rounded-full ${item.dot}`} />
-                            {item.label}
-                        </span>
-                    ))}
+                <div className="flex flex-wrap items-center gap-1.5 px-1">
+                    {DAY_LEGEND.map((item) => {
+                        const count = counts[item.state] || 0;
+                        const active = stateFilter === item.state;
+                        return (
+                            <button
+                                key={item.state}
+                                type="button"
+                                disabled={!count && !active}
+                                onClick={() => setStateFilter(active ? '' : item.state)}
+                                className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] transition disabled:opacity-40 ${
+                                    active
+                                        ? 'bg-slate-900 text-white'
+                                        : 'text-slate-500 hover:bg-slate-100 enabled:hover:text-slate-700'
+                                }`}
+                            >
+                                <span className={`h-2 w-2 rounded-full ${item.dot}`} />
+                                {item.label}
+                                <span className="tabular-nums font-semibold">{count}</span>
+                            </button>
+                        );
+                    })}
                     {!isToday && (
-                        <span className="text-slate-400">
-                            Статус показан на {formatDay(dayISO)}
+                        <span className="ml-1 text-[12px] text-slate-400">
+                            на {formatDay(dayISO)}
                         </span>
                     )}
                 </div>
@@ -598,16 +740,17 @@ export default function WikiOffices({ base, headers, showToast }) {
                 </div>
             )}
 
-            {!loading && offices.length === 0 && (
+            {!loading && visible.length === 0 && (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                         <MapPin size={22} />
                     </div>
                     <div className="text-[15px] font-semibold text-slate-900">
-                        {query || filters.city || filters.parkId ? 'Ничего не найдено' : 'Офисов пока нет'}
+                        {query || filters.city || filters.parkId || stateFilter
+                            ? 'Ничего не найдено' : 'Офисов пока нет'}
                     </div>
                     <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
-                        {query || filters.city || filters.parkId
+                        {query || filters.city || filters.parkId || stateFilter
                             ? 'Попробуйте изменить условия поиска.'
                             : canManage
                                 ? 'Добавьте офис: адрес, ссылку 2ГИС, телефон и график. Парки привяжете в той же форме.'
@@ -616,9 +759,9 @@ export default function WikiOffices({ base, headers, showToast }) {
                 </div>
             )}
 
-            {!loading && offices.length > 0 && view === 'table' && (
+            {!loading && visible.length > 0 && view === 'table' && (
                 <OfficeTable
-                    offices={sorted}
+                    offices={visible}
                     dayISO={dayISO}
                     canManage={canManage}
                     onEdit={(item) => setDraft(draftFrom(item))}
@@ -628,7 +771,7 @@ export default function WikiOffices({ base, headers, showToast }) {
                 />
             )}
 
-            {!loading && offices.length > 0 && view !== 'table' && (
+            {!loading && visible.length > 0 && view !== 'table' && (
                 groups
                     ? groups.map((group) => (
                         <section key={group.city} className="space-y-1.5">
@@ -638,7 +781,7 @@ export default function WikiOffices({ base, headers, showToast }) {
                             </div>
                         </section>
                     ))
-                    : <div className={grid}>{sorted.map(renderCard)}</div>
+                    : <div className={grid}>{visible.map(renderCard)}</div>
             )}
 
             <IosModal

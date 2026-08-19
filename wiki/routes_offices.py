@@ -74,7 +74,6 @@ def _fields(data, *, partial):
     take('phone', lambda v: _clean(v, 64))
     take('partner_label', lambda v: _clean(v, 120))
     take('schedule', wiki_offices.normalize_schedule)
-    take('is_online', bool)
     take('all_parks', bool)
     take('no_office', bool)
 
@@ -103,7 +102,7 @@ def _fields(data, *, partial):
     if fields.get('no_office'):
         fields.update({'address': None, 'phone': None, 'schedule': None,
                        'map_url': None, 'map_resolved_url': None,
-                       'lat': None, 'lon': None, 'is_online': False})
+                       'lat': None, 'lon': None})
 
     if data.get('status') in ('active', 'archived'):
         fields['status'] = data['status']

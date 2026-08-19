@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    breakLines, dayIndexOf, officeNow, officeStatus, officeStatusOn, officeTodayISO,
+    breakLines, dayHoursOn, dayIndexOf, officeNow, officeStatus, officeStatusOn,
+    officeTodayISO,
     scheduleLines,
 } from '../src/components/wiki/officeSchedule.js';
 
@@ -173,4 +174,18 @@ test('разный обед — разные строки, соседние дн
         // Пятница отдельно: четверг без обеда, серия прерывается.
         { days: 'Пт', time: '13:00–14:00' },
     ]);
+});
+
+test('часы дня отдаются вместе с обедом', () => {
+    assert.deepEqual(dayHoursOn(KOSTANAY, '2026-08-17'), // понедельник
+        { from: '09:00', to: '19:00', breakFrom: '13:00', breakTo: '14:00' });
+    // Суббота короткая и без обеда.
+    assert.deepEqual(dayHoursOn(KOSTANAY, '2026-08-15'),
+        { from: '10:00', to: '13:00', breakFrom: null, breakTo: null });
+});
+
+test('в выходной и без графика часов нет', () => {
+    assert.equal(dayHoursOn(KOSTANAY, '2026-08-16'), null);
+    assert.equal(dayHoursOn(null, '2026-08-17'), null);
+    assert.equal(dayHoursOn(KOSTANAY, 'вчера'), null);
 });

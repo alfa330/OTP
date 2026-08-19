@@ -154,6 +154,30 @@ export function officeStatusOn(schedule, dayISO) {
     return { state: 'open', from: fmt(interval.from), until: fmt(interval.to) };
 }
 
+/**
+ * Часы конкретного дня: { from, to, breakFrom, breakTo } либо null (выходной или
+ * график не заполнен).
+ *
+ * Нужны карточке: оператору отвечают «до скольки сегодня», а вся неделя — это
+ * ответ на другой, более редкий вопрос, и ей место под раскрытием.
+ */
+export function dayHoursOn(schedule, dayISO) {
+    const index = dayIndexOf(dayISO);
+    if (index === null || !schedule) return null;
+
+    const day = schedule[DAY_CODES[index]];
+    const interval = dayInterval(day);
+    if (!interval) return null;
+
+    const lunch = breakInterval(day);
+    return {
+        from: fmt(interval.from),
+        to: fmt(interval.to),
+        breakFrom: lunch ? fmt(lunch.from) : null,
+        breakTo: lunch ? fmt(lunch.to) : null,
+    };
+}
+
 const sameDay = (left, right) => {
     if (!left || !right) return left === right || (!left && !right);
     return ['from', 'to', 'break_from', 'break_to']

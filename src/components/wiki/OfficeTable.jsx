@@ -18,6 +18,10 @@ import {
 
 const CELL = 'px-3 py-2.5 text-[13px] align-middle';
 
+/* Шапка липкая: в таблице на двадцать городов заголовки уезжают вверх, и
+   «19.08.2026» в четвёртой колонке перестаёт быть понятно чем. */
+const HEAD = 'sticky top-0 z-10 bg-slate-50 px-3 py-2.5 text-[11px] align-middle';
+
 export default function OfficeTable({
     offices, dayISO, canManage, onEdit, onArchive, onRestore, onMarkDay,
 }) {
@@ -26,14 +30,15 @@ export default function OfficeTable({
             {/* Прокрутка внутри рамки: сжимать текст в узком окне нельзя (п. 6 ТЗ),
                 а горизонтальная прокрутка всей страницы ломала бы раздел. */}
             <div className="overflow-x-auto">
-                <table className="w-full min-w-[640px] border-collapse">
+                <table className="w-full min-w-[760px] border-collapse">
                     <thead>
-                        <tr className="bg-slate-50 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                            <th className={`${CELL} font-semibold`}>Город</th>
-                            <th className={`${CELL} font-semibold`}>Адрес офиса</th>
-                            <th className={`${CELL} font-semibold`}>Статус на дату</th>
-                            <th className={`${CELL} font-semibold`}>Обновлено</th>
-                            {canManage && <th className={`${CELL} w-1`} aria-label="Действия" />}
+                        <tr className="text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                            <th className={`${HEAD} font-semibold`}>Город</th>
+                            <th className={`${HEAD} font-semibold`}>Адрес офиса</th>
+                            <th className={`${HEAD} font-semibold`}>Телефон</th>
+                            <th className={`${HEAD} font-semibold`}>Статус на дату</th>
+                            <th className={`${HEAD} font-semibold`}>Обновлено</th>
+                            {canManage && <th className={`${HEAD} w-1`} aria-label="Действия" />}
                         </tr>
                     </thead>
                     <tbody>
@@ -79,6 +84,19 @@ export default function OfficeTable({
                                         )}
                                         {status.note && (
                                             <div className="text-[11.5px] text-slate-500">{status.note}</div>
+                                        )}
+                                    </td>
+
+                                    <td className={`${CELL} tabular-nums`}>
+                                        {office.phone ? (
+                                            <a
+                                                href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
+                                                className="font-medium text-slate-700 hover:text-blue-600"
+                                            >
+                                                {office.phone}
+                                            </a>
+                                        ) : (
+                                            <span className="text-slate-400">—</span>
                                         )}
                                     </td>
 
