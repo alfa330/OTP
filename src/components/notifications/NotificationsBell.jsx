@@ -341,6 +341,23 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         let pokeTimer = null;
         let watchdogTimer = null;
         let attempt = 0;
+        // Канал сейчас читается. Нужен, чтобы возврат во вкладку не рвал поток,
+        // переживший сворачивание, и не занимал слот заново.
+        let live = false;
+
+        /* Обычно скрытая вкладка отпускает слот: их всего BELL_STREAM_LIMIT на
+           ~96 нитей waitress, и держать канал ради никем не видимой страницы
+           расточительно. Но у включивших плашки на рабочем столе всё наоборот:
+           свёрнутое окно — это ровно тот случай, ради которого их включали, а
+           без канала сводка не перечитывается и сообщать не о чем. Поэтому
+           пауза по скрытию — для всех, КРОМЕ них. Переполнение лимита не
+           авария: сервер отдаёт 503, и клиент откатывается на обновление по
+           фокусу, то есть на сегодняшнее поведение. */
+        const wantsHiddenStream = () => {
+            const { enabled, permission } = desktopRef.current;
+            return enabled && permission === 'granted';
+        };
+        const streamPaused = () => document.visibilityState === 'hidden' && !wantsHiddenStream();
 
         const clearWatchdog = () => {
             if (!watchdogTimer) return;
@@ -357,7 +374,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         };
 
         const connect = async () => {
-            if (cancelled || document.visibilityState === 'hidden') return;
+            if (cancelled || streamPaused()) return;
             clearWatchdog();
             abortController?.abort();
             const controller = new AbortController();
@@ -367,7 +384,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 clearWatchdog();
                 watchdogTimer = setTimeout(() => {
                     watchdogTimer = null;
-                    if (cancelled || document.visibilityState === 'hidden'
+                    if (cancelled || streamPaused()
                         || abortController !== controller) return;
                     watchdogExpired = true;
                     controller.abort();
@@ -396,6 +413,7 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                     throw new Error('bell stream auth expired');
                 }
                 if (!response.ok || !response.body) throw new Error('bell stream failed');
+                live = true;
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder('utf-8');
                 let buffer = '';
@@ -421,24 +439,37 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                         .split('\n')
                         .some((line) => line.startsWith('event: reload')));
                     if (poked && !pokeTimer) {
-                        // Джиттер размазывает перечитки после широковещательного
-                        // тычка (новый пост «Ивентов» будит все вкладки разом), а
-                        // таймер-гард склеивает всплеск тычков в одну перечитку.
-                        pokeTimer = setTimeout(() => {
-                            pokeTimer = null;
-                            if (!cancelled && document.visibilityState !== 'hidden') load();
-                        }, Math.random() * 2000);
+                        /* Свёрнутое окно читает СРАЗУ, без джиттера. Chrome
+                           прижимает таймеры фоновой вкладки до одного
+                           срабатывания в минуту, и плашка приехала бы с
+                           опозданием на минуту — при том что ради неё канал и
+                           держали. fetch такому прижиму не подвержен. Размазывать
+                           тут нечего: фоновых каналов мало, их держит лимит слотов. */
+                        if (document.visibilityState === 'hidden') {
+                            if (!cancelled) load();
+                        } else {
+                            // Джиттер размазывает перечитки после широковещательного
+                            // тычка (новый пост «Ивентов» будит все вкладки разом), а
+                            // таймер-гард склеивает всплеск тычков в одну перечитку.
+                            pokeTimer = setTimeout(() => {
+                                pokeTimer = null;
+                                if (!cancelled && !streamPaused()) load();
+                            }, Math.random() * 2000);
+                        }
                     }
                 }
             } catch (e) {
-                if (cancelled || document.visibilityState === 'hidden') return;
+                if (cancelled || streamPaused()) return;
                 // visibility/unmount/new connect отменяют канал намеренно;
                 // watchdog-abort, напротив, должен пройти к retry ниже.
                 if (e?.name === 'AbortError' && !watchdogExpired) return;
             } finally {
-                if (abortController === controller) clearWatchdog();
+                if (abortController === controller) {
+                    live = false;
+                    clearWatchdog();
+                }
             }
-            if (!cancelled && document.visibilityState !== 'hidden') {
+            if (!cancelled && !streamPaused()) {
                 attempt += 1;
                 scheduleRetry(Math.min(60000, 2000 * (2 ** Math.min(attempt, 5))) + Math.random() * 1000);
             }
@@ -450,11 +481,14 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
                 clearTimeout(retryTimer);
                 retryTimer = null;
             }
-            if (document.visibilityState === 'hidden') {
+            if (streamPaused()) {
                 clearWatchdog();
                 abortController?.abort();
                 return;
             }
+            /* Канал пережил сворачивание — переподключаться незачем: это лишний
+               разрыв, заново занятый слот и потерянные тычки в промежутке. */
+            if (live) return;
             /* Небольшая пауза перед переподключением. Освобождение слота на
                сервере отстаёт от разрыва (поток узнаёт о нём на ближайшей
                записи в сокет), поэтому щёлканье вкладками без паузы копило бы
