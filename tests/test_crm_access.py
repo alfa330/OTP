@@ -47,17 +47,18 @@ def ticket(created_by=10, department_id=1, queue_department_id=None,
 
 class ScopeTest(unittest.TestCase):
     def test_operator_sees_only_own(self):
-        me = ctx(role='operator', user_id=10)
+        # Вне СЗоВ: внутри отдела раздел открыт всем, и периметр там общий.
+        me = ctx(role='operator', user_id=10, department_code='op')
         self.assertEqual(access.visibility_scope(me), access.SCOPE_OWN)
         self.assertTrue(access.can_view_ticket(me, ticket(created_by=10)))
         self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)))
 
-    def test_trainer_and_trainee_are_no_wider_than_operator(self):
+    def test_trainer_sees_nothing_even_inside_the_department(self):
         """Тренер видит «всё» в других разделах, но переписка — не его дело."""
-        for role in ('trainer', 'trainee'):
-            me = ctx(role=role, user_id=10)
-            self.assertEqual(access.visibility_scope(me), access.SCOPE_OWN, role)
-            self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)), role)
+        me = ctx(role='trainer', user_id=10, department_code='szov')
+        self.assertFalse(access.can_open_section(me))
+        self.assertEqual(access.visibility_scope(me), access.SCOPE_OWN)
+        self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)))
 
     def test_everyone_admitted_to_the_section_sees_every_ticket(self):
         """Просьба СЗоВ 18.08.2026 (задача #181).
@@ -112,38 +113,42 @@ class ScopeTest(unittest.TestCase):
 
 
 class SectionGateTest(unittest.TestCase):
-    """Кого пускают в раздел на время выката: СЗоВ, админы и один пилот.
+    """Кого пускают в раздел: весь отдел СЗоВ и глобальные админы.
 
     Проверяется отдельно от видимости обращений: это два разных вопроса —
     «открыт ли раздел» и «что в нём видно».
     """
 
-    def test_pilot_operator_is_let_in(self):
-        pilot = sorted(access.PILOT_USER_IDS)[0]
-        self.assertTrue(access.can_open_section(ctx(role='operator', user_id=pilot)))
+    def test_every_role_of_the_department_is_let_in(self):
+        """Решение владельца 19.08.2026: раздел открыт всему СЗоВ.
 
-    def test_other_operators_are_not(self):
-        """Иначе раздел уехал бы на всю компанию до настройки очередей."""
-        self.assertFalse(access.can_open_section(ctx(role='operator', user_id=99999)))
+        Роль внутри отдела значения не имеет — обращение заводит тот, у кого
+        возник вопрос, а не «ответственный за обращения».
+        """
+        for role in ('operator', 'trainee', 'sv', 'supervisor'):
+            self.assertTrue(access.can_open_section(
+                ctx(role=role, user_id=99999, department_code='szov')), role)
+
+    def test_other_departments_are_not(self):
+        """«Только СЗоВ» — граница отдела строгая, как у «Табло СЗоВ»."""
+        for code in ('tez', 'op', 'front_office', 'marketing', None, ''):
+            self.assertFalse(access.can_open_section(
+                ctx(role='operator', user_id=99999, department_code=code)), repr(code))
+
+    def test_trainer_is_the_only_exception_inside_the_department(self):
+        """Тренер видит «всё» в других разделах, но переписка не его дело."""
         self.assertFalse(access.can_open_section(
-            ctx(role='trainee', user_id=99999)))
-
-    def test_supervisor_of_the_department_is_let_in(self):
-        self.assertTrue(access.can_open_section(
-            ctx(role='sv', user_id=30, department_code='szov', groups=(1,))))
-
-    def test_supervisor_of_another_department_is_not(self):
-        """Граница отдела строгая — как у «Табло СЗоВ» и переписки ТЭЗ."""
-        self.assertFalse(access.can_open_section(
-            ctx(role='sv', user_id=31, department_code='tez', groups=(2,))))
+            ctx(role='trainer', user_id=77, department_code='szov')))
 
     def test_head_of_the_department_is_let_in(self):
         self.assertTrue(access.can_open_section(
-            ctx(role='admin', user_id=1, headed=(1,), headed_codes=['szov'])))
+            ctx(role='admin', user_id=1, headed=(1,), headed_codes=['szov'],
+                department_code='szov')))
 
     def test_head_of_another_department_is_not(self):
         self.assertFalse(access.can_open_section(
-            ctx(role='admin', user_id=2, headed=(560,), headed_codes=['tez'])))
+            ctx(role='admin', user_id=2, headed=(560,), headed_codes=['tez'],
+                department_code='tez')))
 
     def test_global_admins_are_let_in(self):
         for role in ('super_admin', 'admin'):
@@ -152,15 +157,16 @@ class SectionGateTest(unittest.TestCase):
 
     def test_creating_requires_the_section(self):
         """Кнопку «Новое обращение» нельзя дать тому, кому раздел закрыт."""
-        self.assertFalse(access.can_create_ticket(ctx(role='operator', user_id=99999)))
+        self.assertFalse(access.can_create_ticket(
+            ctx(role='operator', user_id=99999, department_code='tez')))
         self.assertTrue(access.can_create_ticket(
-            ctx(role='operator', user_id=sorted(access.PILOT_USER_IDS)[0])))
+            ctx(role='operator', user_id=99999, department_code='szov')))
 
     def test_capabilities_report_the_gate(self):
         """Фронт рисует раздел по этой сводке, а не по роли."""
         self.assertTrue(access.capabilities(ctx(role='super_admin'))['can_open'])
         self.assertFalse(access.capabilities(
-            ctx(role='operator', user_id=99999))['can_open'])
+            ctx(role='operator', user_id=99999, department_code='tez'))['can_open'])
 
 
 class ActionsTest(unittest.TestCase):
@@ -184,7 +190,7 @@ class ActionsTest(unittest.TestCase):
 
     def test_outsider_writes_nothing(self):
         """Виден тикет или нет — решает периметр; невидимый неприкасаем."""
-        me = ctx(role='operator', user_id=10)
+        me = ctx(role='operator', user_id=10, department_code='op')
         alien = ticket(created_by=11)
         self.assertFalse(access.can_reply(me, alien))
         self.assertFalse(access.can_change_status(me, alien))
@@ -206,7 +212,8 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
         self.assertEqual(sql, 'TRUE')
 
     def test_own_scope_filters_by_author_only(self):
-        sql, params = queries.visibility_sql(ctx(role='operator', user_id=10))
+        sql, params = queries.visibility_sql(
+            ctx(role='operator', user_id=10, department_code='op'))
         self.assertIn('t.created_by = %(viewer_id)s', sql)
         self.assertNotIn('group_operator_memberships', sql)
         self.assertNotIn('department_id', sql)
@@ -239,7 +246,7 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
 
     def test_author_clause_present_in_every_narrow_scope(self):
         """Свои обращения видны при любом периметре, иначе СВ потерял бы свои же."""
-        for me in (ctx(role='operator', user_id=10),
+        for me in (ctx(role='operator', user_id=10, department_code='op'),
                    ctx(role='sv', user_id=10, groups=(5,), department_code='op'),
                    ctx(role='admin', user_id=10, headed=(3,), headed_codes=['op'],
                        department_code='op')):
@@ -409,13 +416,21 @@ class FrontendContractTest(unittest.TestCase):
         # Сам раздел тоже за предикатом: спрятанный пункт — это не доступ.
         self.assertIn('view === "crm_tickets" && canAccessCrmSection', app)
 
-    def test_pilot_id_matches_the_backend(self):
-        """Два списка пилотов разошлись бы молча: пункт есть, а API отдаёт 403."""
+    def test_pilot_list_is_gone_from_the_frontend_too(self):
+        """Пилот закончился. Оставшийся список id молча сужал бы периметр."""
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
-        block = re.search(r'CRM_PILOT_USER_IDS = new Set\(\[([^\]]*)\]\)', app)
-        self.assertIsNotNone(block, 'во фронте пропал список пилотов')
-        frontend = {int(x) for x in re.findall(r'\d+', block.group(1))}
-        self.assertEqual(frontend, set(access.PILOT_USER_IDS))
+        self.assertNotIn('CRM_PILOT_USER_IDS', app)
+
+    def test_frontend_gate_has_no_role_condition_beyond_the_trainer(self):
+        """Пункт меню и API обязаны сходиться: раздел открыт всему отделу.
+
+        Разойдись они — получим «пункт виден, а API отдаёт 403» либо наоборот,
+        и оба случая человек увидит раньше нас.
+        """
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        gate = app.split('const canAccessCrmSectionForUser')[1].split('};')[0]
+        self.assertIn("role === 'trainer'", gate)
+        self.assertNotIn('isSupervisorRole', gate)
 
     def test_department_code_matches_the_backend(self):
         app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')

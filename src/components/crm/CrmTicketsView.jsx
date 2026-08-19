@@ -1063,7 +1063,11 @@ export default function CrmTicketsView({
                     </div>
 
                     <div className={`${iosCard} overflow-hidden`}>
-                        <div className="flex min-h-[560px] flex-col lg:flex-row">
+                        {/* Высота задана, а не только минимальная: без неё колонка
+                            карточки росла под переписку, лента внутри никогда не
+                            переполнялась и не скроллилась — вместо неё ехала вся
+                            страница. min-h остаётся полом для низких экранов. */}
+                        <div className="flex min-h-[560px] flex-col lg:h-[calc(100vh-300px)] lg:flex-row">
                             {/* Лента */}
                             <div className={`flex w-full shrink-0 flex-col border-slate-200/70 lg:w-[360px] lg:border-r ${
                                 selectedId ? 'hidden lg:flex' : 'flex'
@@ -1106,7 +1110,7 @@ export default function CrmTicketsView({
                             {/* Карточка */}
                             <div className={`min-w-0 flex-1 ${selectedId ? 'flex' : 'hidden lg:flex'}`}>
                                 {selectedId ? (
-                                    <div className="w-full">
+                                    <div className="h-full min-h-0 w-full">
                                         <TicketCard
                                             key={selectedId}
                                             ticketId={selectedId}

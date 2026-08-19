@@ -1481,13 +1481,12 @@ const canAccessSzovWallboardForUser = (userLike) => {
    держим по КОДУ, а не по id: id СЗоВ засеян миграцией и в разных окружениях
    разный, а /api/admin/departments оператору недоступен.
 
-   Пилот задан списком id, а не «ролью оператор в СЗоВ»: смысл выката в том,
-   чтобы обкатать механику на живых обращениях, не выдавая раздел сотне человек
-   до того, как настроены очереди. Ту же границу держит crm/access.py
-   (SECTION_DEPARTMENT_CODE + PILOT_USER_IDS) — там она и обязательная, а здесь
-   только про то, показывать ли пункт меню. */
+   Роль внутри отдела значения не имеет: обращение заводит тот, у кого возник
+   вопрос. Исключение одно — тренер: он видит «всё» в других разделах, но
+   переписка с рабочими группами не его дело. Ту же границу держит
+   crm/access.py::can_open_section — там она и обязательная, а здесь только про
+   то, показывать ли пункт меню. */
 const CRM_SECTION_DEPARTMENT_CODE = 'szov';
-const CRM_PILOT_USER_IDS = new Set([20]);   // Хайрихан Шерзад Зуритдинулы
 
 const isCrmSectionDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
@@ -1497,14 +1496,13 @@ const isCrmSectionDepartmentHead = (userLike) => (
 const canAccessCrmSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
+    if (role === 'trainer') return false;
     // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
     // отделов обращения СЗоВ не нужны (глава СЗоВ проходит проверкой ниже).
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isCrmSectionDepartmentHead(userLike)) return true;
-    if (CRM_PILOT_USER_IDS.has(Number(userLike?.id))) return true;
-    return isSupervisorRole(role)
-        && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
-            === CRM_SECTION_DEPARTMENT_CODE;
+    return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
+        === CRM_SECTION_DEPARTMENT_CODE;
 };
 
 const canManageSzovBroadcastForUser = (userLike) => {
