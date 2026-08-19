@@ -828,3 +828,19 @@ def test_all_child_launches_use_clean_env():
     launches = source.count("subprocess.Popen(")
     cleaned = source.count("env=child_env()")
     assert cleaned == launches, f"запусков {launches}, с чистым окружением {cleaned}"
+
+
+def test_safety_task_is_not_every_minute():
+    """Каждый запуск onefile распаковывает 14 МБ. Ежеминутно это лишняя работа
+    и лишний шанс поймать момент подмены файла — тогда Windows показывает
+    «Failed to start embedded python interpreter», и так каждую минуту."""
+    assert agent.TASK_PERIOD_MINUTES >= 5
+
+
+def test_installer_becomes_the_watchdog_instead_of_exiting():
+    """Короткоживущий процесс после модального окна упирался в антивирус,
+    который уже держал его папку распаковки, — отсюда «Failed to remove
+    temporary directory». Долгоживущий сторож такой гонки не создаёт."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_install("):source.index("def run_uninstall(")]
+    assert "return run_watchdog(cfg)" in body

@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 APP_NAME = "Oktell Recall Guard"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -689,11 +689,20 @@ def _stop_installed_copies(target: Path) -> None:
     _run_hidden(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], timeout=25)
 
 
+# Раз в 5 минут, а не раз в минуту. Каждый запуск onefile заново распаковывает
+# 14 МБ во временную папку; ежеминутно это лишняя работа на машине оператора и
+# лишний шанс столкнуться с только что заменённым файлом — тогда распаковка
+# ломается и Windows показывает «Failed to start embedded python interpreter».
+# Как подстраховка «убили обе копии» пять минут ничем не хуже минуты.
+TASK_PERIOD_MINUTES = 5
+
+
 def _register_task(target: Path) -> bool:
-    """Задача «раз в минуту» — подстраховка, если убиты обе копии.
-    Такая задача админских прав не требует."""
+    """Задача-подстраховка на случай, если убиты обе копии.
+    Админских прав такая задача не требует."""
     return _run_hidden(
-        ["schtasks", "/Create", "/TN", TASK_NAME, "/SC", "MINUTE", "/MO", "1", "/TR", f'"{target}"', "/F"]
+        ["schtasks", "/Create", "/TN", TASK_NAME, "/SC", "MINUTE",
+         "/MO", str(TASK_PERIOD_MINUTES), "/TR", f'"{target}"', "/F"]
     )
 
 
@@ -795,16 +804,6 @@ def run_install(cfg: dict, start: bool = True) -> int:
     ok_link = _create_shortcut(target)
     logging.info("Автозапуск: %s | задача: %s | ярлык: %s", ok_run, ok_task, ok_link)
 
-    if start:
-        try:
-            flags = (CREATE_NO_WINDOW | DETACHED_PROCESS) if IS_WINDOWS else 0
-            subprocess.Popen([str(target)], cwd=str(target.parent), creationflags=flags,
-                             close_fds=True, env=child_env())
-        except Exception as exc:  # noqa: BLE001
-            logging.exception("Не удалось запустить установленную копию")
-            show_message(f"Программа установлена, но не запустилась.\n\n{exc}", error=True)
-            return 1
-
     if ok_run:
         show_message(
             "Программа установлена и уже работает.\n\n"
@@ -818,7 +817,17 @@ def run_install(cfg: dict, start: bool = True) -> int:
             f"Подробности: {app_dir() / 'install.log'}",
             error=True,
         )
-    return 0 if ok_run else 1
+
+    if not start:
+        return 0 if ok_run else 1
+
+    # Дальше НЕ завершаемся, а сами становимся сторожем. Раньше здесь
+    # запускалась ещё одна копия, а эта выходила сразу после нажатия OK — и
+    # упиралась в антивирус, уже державший её папку распаковки: пользователь
+    # видел «Failed to remove temporary directory». Долгоживущий процесс такой
+    # гонки не создаёт: он держит папку всё время работы и убирает при выходе.
+    logging.info("Установка завершена, продолжаю работу сторожем")
+    return run_watchdog(cfg)
 
 
 def run_uninstall(cfg: dict) -> int:
