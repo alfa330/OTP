@@ -487,14 +487,19 @@ YANDEX_TERMOBOX = {
         'Выполнение нормы: сколько заказов водитель фактически выполнил за отчётный '
         'период и соответствует ли это норме из Google Doc',
     ],
+    # Сообщение в группу эта тематика собирает САМА, а не перечнем «вопрос:
+    # ответ». Так у представителей Яндекс Доставки заведено: «Прошу проверить на
+    # выдачу термокороба / LL190044 Астана» — и постановщик прямо попросила
+    # оставить обращение в таком коротком виде (возврат по задаче #189 19.08.2026).
+    # Перечень им тут не нужен: согласование решается двумя значениями.
+    'subject_template': 'Прошу проверить на {termobox_action!l}',
+    'body_template': '{licence} · {city}',
     'steps': [
         step('termobox_action', 'Что нужно согласовать', CHOICE,
              options=[TERMOBOX_ISSUE, TERMOBOX_REPLACE]),
-        # ИИН в ТЗ не назван, но он есть у каждой тематики раздела: по нему
-        # обращение находится поиском и попадает во все сообщения в группу.
-        # Аккаунт водителя оператор к этому моменту уже открыл — это первый
-        # пункт чек-листа.
-        STEP_IIN,
+        # ИИН здесь не спрашиваем: в ТЗ его нет, и постановщик подтвердила, что
+        # группе достаточно номера ВУ и города. Плата известная — обращения по
+        # термокоробам не находятся поиском по ИИН водителя.
         step('licence', 'Номер водительского удостоверения', TEXT,
              placeholder='Например: 123456789'),
         step('city', 'Фактический город', CITY,
@@ -944,6 +949,29 @@ def _lower_first(text):
     return text[:1].lower() + text[1:]
 
 
+def _fill_template(scenario, template, answers):
+    """Подставляет ответы в шаблон сообщения.
+
+    {ключ}   — ответ как есть. Номер ВУ «LL190044» понижать регистр нельзя.
+    {ключ!l} — ответ со строчной буквы: значение стоит посреди фразы («Прошу
+               проверить на выдачу термокороба»), а кнопка называлась «Выдачу
+               термокороба» — с заглавной, как и положено кнопке.
+
+    Регистр решает шаблон, а не подстановка: делать это на все значения разом
+    уже пробовали, и «LL190044» превращалось в «lL190044».
+    """
+    result = template
+    for item in scenario['steps']:
+        value = format_answer(item, answers)
+        if value == '—':
+            value = ''
+        for token, text in (('{%s!l}' % item['key'], _lower_first(value)),
+                            ('{%s}' % item['key'], value)):
+            if token in result:
+                result = result.replace(token, text)
+    return ' '.join(result.split()).strip(' ·')
+
+
 def _context_line(scenario, answers):
     """Парк, город и период — одной строкой.
 
@@ -991,6 +1019,15 @@ def render_body(scenario_key, answers, *, flags=()):
     warnings = ['⚠️ %s' % FLAG_LABELS[flag] for flag in (flags or ()) if flag in FLAG_LABELS]
     if warnings:
         blocks.append(warnings)
+
+    # Тематика может собирать сообщение сама — когда у группы-получателя есть
+    # свой заведённый формат и перечень «вопрос: ответ» ей только мешает.
+    # Ничего не теряется: тест требует, чтобы каждый вопрос такой тематики
+    # попал либо в тему, либо в тело.
+    if scenario.get('body_template'):
+        blocks.append([_fill_template(scenario, scenario['body_template'], answers)])
+        line, gap = chr(10), chr(10) * 2
+        return gap.join(line.join(block) for block in blocks)
 
     context = _context_line(scenario, answers)
     if context:
@@ -1068,6 +1105,8 @@ def render_subject(scenario_key, answers):
     scenario = get(scenario_key)
     if not scenario:
         return ''
+    if scenario.get('subject_template'):
+        return _fill_template(scenario, scenario['subject_template'], answers or {})
     iin = _value(answers or {}, 'iin')
     if iin:
         return '%s · ИИН %s' % (scenario['title'], str(iin).strip())

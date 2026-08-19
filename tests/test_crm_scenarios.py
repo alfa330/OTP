@@ -717,6 +717,37 @@ class RulesAreDecidableTest(unittest.TestCase):
         # Парк и город стоят в строке контекста, а не отдельными подписями.
         self.assertEqual(body.split('\n')[0], 'Qazaq · Актау · период июль 2026')
 
+    def test_templated_topics_lose_no_question(self):
+        """Тематика может собирать сообщение сама — но не терять при этом ответы.
+
+        Шаблон фиксирован, а список вопросов растёт: добавят вопрос и забудут
+        вписать его в шаблон — ответ оператора просто не доедет до группы, и
+        никто этого не заметит. Поэтому каждый вопрос обязан быть либо в теме,
+        либо в теле.
+        """
+        for scenario in sc.SCENARIOS:
+            templates = ' '.join(filter(None, (scenario.get('subject_template'),
+                                               scenario.get('body_template'))))
+            if not templates:
+                continue
+            for item in scenario['steps']:
+                if item['kind'] == sc.ATTACHMENT:
+                    continue
+                self.assertTrue('{%s}' % item['key'] in templates
+                                or '{%s!l}' % item['key'] in templates,
+                                '%s: вопрос «%s» никуда не попадает'
+                                % (scenario['key'], item['key']))
+
+    def test_templates_reference_existing_questions(self):
+        """Опечатка в ключе шаблона оставила бы в сообщении «{licence}»."""
+        import re as _re
+        for scenario in sc.SCENARIOS:
+            keys = {item['key'] for item in scenario['steps']}
+            for template in (scenario.get('subject_template'),
+                             scenario.get('body_template')):
+                for name in _re.findall(r'\{([a-z_]+)(?:!l)?\}', template or ''):
+                    self.assertIn(name, keys, scenario['key'])
+
     def test_every_flag_references_an_existing_step(self):
         for scenario in sc.SCENARIOS:
             keys = {step['key'] for step in scenario['steps']}
@@ -748,9 +779,8 @@ class TermoboxTest(unittest.TestCase):
     def base(self, action=None):
         return {
             'termobox_action': action or sc.TERMOBOX_ISSUE,
-            'iin': '060606202020',
-            'licence': '123456789',
-            'city': 'Актау',
+            'licence': 'LL190044',
+            'city': 'Астана',
         }
 
     def test_goes_to_the_yandex_group(self):
@@ -793,11 +823,17 @@ class TermoboxTest(unittest.TestCase):
 
     def test_fields_of_both_categories(self):
         keys = [s['key'] for s in sc.visible_steps(sc.get(self.KEY), self.base())]
-        self.assertEqual(keys, ['termobox_action', 'iin', 'licence', 'city'])
+        self.assertEqual(keys, ['termobox_action', 'licence', 'city'])
         replace = [s['key'] for s in sc.visible_steps(sc.get(self.KEY),
                                                       self.base(sc.TERMOBOX_REPLACE))]
-        self.assertEqual(replace,
-                         ['termobox_action', 'iin', 'licence', 'city', 'termobox_photo'])
+        self.assertEqual(replace, ['termobox_action', 'licence', 'city', 'termobox_photo'])
+
+    def test_iin_is_not_asked_here(self):
+        """В ТЗ его нет, и постановщик подтвердила: группе хватает ВУ и города.
+
+        Плата известная и осознанная — по ИИН такие обращения не найдутся.
+        """
+        self.assertNotIn('iin', [s['key'] for s in sc.get(self.KEY)['steps']])
 
     def test_photo_is_required_only_for_replacement(self):
         """При выдаче показывать нечего, и требовать фото значило бы держать
@@ -824,20 +860,28 @@ class TermoboxTest(unittest.TestCase):
         self.assertIn('последний заказ', city['hint'])
 
     def test_every_field_is_mandatory(self):
-        for key in ('termobox_action', 'iin', 'licence', 'city'):
+        for key in ('termobox_action', 'licence', 'city'):
             answers = self.base(sc.TERMOBOX_ISSUE)
             answers.pop(key)
             result = sc.evaluate(self.KEY, answers, has_attachment=False,
                                  checks_done=[0, 1, 2])
             self.assertEqual(result['outcome'], sc.INCOMPLETE, key)
 
-    def test_group_message_shows_what_is_being_approved(self):
-        body = sc.render_body(self.KEY, self.base(sc.TERMOBOX_REPLACE))
-        self.assertIn('Согласовать: Замену термокороба', body)
-        self.assertIn('Водительское удостоверение: 123456789', body)
-        self.assertEqual(body.split('\n')[0], 'Актау')
-        self.assertIn('ИИН 060606202020', sc.render_subject(self.KEY,
-                                                            self.base(sc.TERMOBOX_REPLACE)))
+    def test_group_message_is_as_short_as_they_write_it_themselves(self):
+        """Возврат по задаче 19.08.2026: «обращение вот в таком коротком формате».
+
+        У представителей Яндекс Доставки заведено «Прошу проверить на выдачу
+        термокороба / LL190044 Астана», и перечень «вопрос: ответ» им тут мешает.
+        """
+        self.assertEqual(sc.render_subject(self.KEY, self.base(sc.TERMOBOX_ISSUE)),
+                         'Прошу проверить на выдачу термокороба')
+        self.assertEqual(sc.render_subject(self.KEY, self.base(sc.TERMOBOX_REPLACE)),
+                         'Прошу проверить на замену термокороба')
+        self.assertEqual(sc.render_body(self.KEY, self.base()), 'LL190044 · Астана')
+
+    def test_licence_keeps_its_case(self):
+        """Понижать регистр у всего подряд уже пробовали: «LL190044» стало «lL190044»."""
+        self.assertIn('LL190044', sc.render_body(self.KEY, self.base()))
 
     def test_one_ticked_item_does_not_count_as_all(self):
         """confirmed_checks приводит оба вида ответа к одному множеству."""
