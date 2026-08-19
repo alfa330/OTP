@@ -26106,9 +26106,7 @@ class Database:
             """, (bool(unlocked), bool(unlocked), session_id, user_id))
             return cursor.fetchone() is not None
 
-    def is_session_sensitive_access_unlocked(self, session_id, user_id):
-        with self._get_cursor() as cursor:
-            cursor.execute("""
+    SENSITIVE_ACCESS_SQL = """
                 SELECT sensitive_data_unlocked
                 FROM user_sessions
                 WHERE session_id = %s
@@ -26116,8 +26114,24 @@ class Database:
                   AND revoked_at IS NULL
                   AND expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 LIMIT 1
-            """, (session_id, user_id))
+    """
+
+    def is_session_sensitive_access_unlocked(self, session_id, user_id, cursor=None):
+        """Подтверждена ли сессия QR-кодом.
+
+        cursor — уже открытый курсор вызывающего. Нужен разделам «Вики» и
+        «Обращения»: они проверяют подтверждение внутри своего запроса, и свой
+        коннект здесь означал бы ДВА слота пула на один запрос. Пул общий и
+        небольшой (MAX_CONN), его же делит SSE аукциона смен, и именно на таком
+        удержании двух слотов он однажды и захлебнулся.
+        """
+        if cursor is not None:
+            cursor.execute(self.SENSITIVE_ACCESS_SQL, (session_id, user_id))
             row = cursor.fetchone()
+            return bool(row[0]) if row else False
+        with self._get_cursor() as own_cursor:
+            own_cursor.execute(self.SENSITIVE_ACCESS_SQL, (session_id, user_id))
+            row = own_cursor.fetchone()
             return bool(row[0]) if row else False
 
     def list_user_sessions(self, user_id):

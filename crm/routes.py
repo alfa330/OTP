@@ -31,7 +31,16 @@ ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 
 
 def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                        resolve_requester):
+                        resolve_requester, sensitive_access_granted):
+    """Собирает Blueprint раздела.
+
+    sensitive_access_granted — (user_id) -> bool: подтверждена ли ТЕКУЩАЯ
+    сессия QR-кодом. Приходит аргументом, а не импортом: сам ключ живёт в
+    bot_schedule2 (там сессии, токены и подтверждение админом), а обратный
+    импорт оттуда был бы циклом. Аргумент обязательный, без значения по
+    умолчанию: забытая зависимость должна уронить сборку блюпринта на старте
+    (раздел тогда просто не поднимется), а не тихо открыть раздел всем.
+    """
     bp = Blueprint('crm', __name__, url_prefix='/api/crm')
 
     def crm_route(rule, methods=('GET',), manage=False):
@@ -66,6 +75,16 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         return jsonify({
                             "error": "Раздел «Обращения» вам не открыт",
                             "code": "CRM_SECTION_CLOSED",
+                        }), 403
+                    # Второй гейт — QR-подтверждение сессии оператора. Стоит
+                    # здесь, а не во фронте: экран с замком — это удобство, а
+                    # доступом является ответ сервера.
+                    if (access.requires_sensitive_qr(ctx)
+                            and not sensitive_access_granted(ctx['user_id'])):
+                        return jsonify({
+                            "error": "Раздел «Обращения» откроется после "
+                                     "QR-подтверждения доступа",
+                            "code": "SENSITIVE_ACCESS_REQUIRED",
                         }), 403
                     if manage and not access.can_manage_queues(ctx):
                         return jsonify({

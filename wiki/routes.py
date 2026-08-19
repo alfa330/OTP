@@ -39,8 +39,8 @@ CAPABILITY_TITLES = {
 
 
 def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
-                         resolve_requester, client_ip=None, gcs=None,
-                         session_id_provider=None):
+                         resolve_requester, sensitive_access_granted,
+                         client_ip=None, gcs=None, session_id_provider=None):
     """Собирает Blueprint раздела.
 
     Все зависимости приходят аргументами — импортировать их из bot_schedule2
@@ -51,6 +51,15 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     build_cors_preflight_response— ответ на OPTIONS;
     resolve_requester            — () -> (user_id, user_row, error),
                                    где error = (message, status_code) или None;
+    sensitive_access_granted     — (user_id, cursor=...) -> bool: подтверждена
+                                   ли ТЕКУЩАЯ сессия QR-кодом. Курсор отдаём
+                                   свой — иначе на запрос уходило бы два слота
+                                   пула. Ключ живёт в bot_schedule2
+                                   (там сессии и подтверждение админом), и
+                                   импортировать его сюда нельзя — цикл.
+                                   Без значения по умолчанию намеренно: забытая
+                                   зависимость обязана уронить сборку блюпринта
+                                   на старте, а не тихо открыть раздел всем;
     client_ip                    — () -> str, для журнала;
     gcs                          — {'signed_url': fn, 'bucket_name': fn} для
                                    прокси файлов: подпись выдаётся на каждый
@@ -117,6 +126,23 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                             return jsonify({
                                 "error": "Раздел «Вики» не выдан вашему отделу",
                                 "code": "WIKI_DEPARTMENT_DISABLED",
+                            }), 403
+
+                        # QR-подтверждение сессии оператора. Стоит после
+                        # тумблера отдела (иначе человеку из отдела без вики
+                        # предложили бы открыть то, чего у отдела нет) и до
+                        # прав: подтверждение открывает прежний периметр, а не
+                        # расширяет его. Проверка на сервере, а не только во
+                        # фронте: экран с замком — удобство, доступом является
+                        # ответ сервера.
+                        if wiki_access.requires_sensitive_qr(
+                                context['otp_role'],
+                                is_department_head=bool(context['headed_department_ids']),
+                        ) and not sensitive_access_granted(context['user_id'], cursor=cursor):
+                            return jsonify({
+                                "error": "Раздел «Вики» откроется после "
+                                         "QR-подтверждения доступа",
+                                "code": "SENSITIVE_ACCESS_REQUIRED",
                             }), 403
 
                         if capability and not capabilities.get(capability):

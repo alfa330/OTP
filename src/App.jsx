@@ -32,6 +32,7 @@ import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
+import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
@@ -1504,6 +1505,14 @@ const canAccessCrmSectionForUser = (userLike) => {
     return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
         === CRM_SECTION_DEPARTMENT_CODE;
 };
+
+// Разделы «Обращения» и «Вики» оператор открывает только после того, как админ
+// или супервайзер подтвердил его QR-код — тем же ключом, что открывает записи в
+// «Моих оценках». Правило повторяет серверное (crm/access.py, wiki/access.py):
+// экран с замком — удобство, а доступом является ответ сервера.
+const sensitiveSectionQrRequiredFor = (userLike) => (
+    normalizeRole(userLike?.role) === 'operator' && !isDepartmentHead(userLike)
+);
 
 const canManageSzovBroadcastForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
@@ -35374,6 +35383,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const initialViewFromUrl = readAppViewFromUrl();
                 return initialViewFromUrl || 'hours';
             });
+            // Текущий раздел для колбэков, которые переживают рендер: опрос
+            // статуса QR тикает интервалом и решает по НЫНЕШНЕМУ разделу, а не
+            // по тому, в котором его завели.
+            const viewRef = useRef(view);
+            useEffect(() => { viewRef.current = view; }, [view]);
             const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users', 'manage_trainers'].includes(view);
             const [pinnedTask, setPinnedTask] = useState(null);
             const [pinnedTaskPool, setPinnedTaskPool] = useState([]);
@@ -35733,13 +35747,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [birthdayGreetingError, setBirthdayGreetingError] = useState('');
             const [showBirthdayGreetingModal, setShowBirthdayGreetingModal] = useState(false);
             const [birthdayBannerDismissed, setBirthdayBannerDismissed] = useState(false);
-            const [sensitiveAccess, setSensitiveAccess] = useState({ required: false, granted: false, loading: false });
+            // checked — ответ сервера уже приходил. Без него закрытый раздел мигал бы
+            // замком тому, кто доступ давно подтвердил: granted стартует с false.
+            const [sensitiveAccess, setSensitiveAccess] = useState({ required: false, granted: false, loading: false, checked: false });
             const [showSensitiveQrModal, setShowSensitiveQrModal] = useState(false);
             const [sensitiveQrUrl, setSensitiveQrUrl] = useState('');
             const [sensitiveQrImage, setSensitiveQrImage] = useState('');
             const [sensitiveQrExpiresAt, setSensitiveQrExpiresAt] = useState('');
             const [sensitiveQrError, setSensitiveQrError] = useState('');
             const sensitiveQrPollRef = useRef(null);
+            // Замок на «Обращениях» и «Вики»: у оператора они открываются тем же
+            // QR-подтверждением сессии, что и данные в «Моих оценках».
+            const sensitiveSectionsLocked = sensitiveSectionQrRequiredFor(user) && !sensitiveAccess.granted;
+            const sensitiveSectionsChecking = sensitiveSectionsLocked && !sensitiveAccess.checked;
             const [qrApproveInput, setQrApproveInput] = useState('');
             const [qrApproveLoading, setQrApproveLoading] = useState(false);
             const [qrApproveResult, setQrApproveResult] = useState('');
@@ -43621,7 +43641,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
             const fetchSensitiveAccessStatus = useCallback(async () => {
                 if (!user) {
-                    setSensitiveAccess({ required: false, granted: false, loading: false });
+                    setSensitiveAccess({ required: false, granted: false, loading: false, checked: false });
                     return;
                 }
 
@@ -43636,18 +43656,24 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         setSensitiveAccess({
                             required: !!data.required,
                             granted: !!data.granted,
-                            loading: false
+                            loading: false,
+                            checked: true
                         });
                         if (user.role === 'operator' && data.granted) {
                             clearSensitiveQrPolling();
                             setShowSensitiveQrModal(false);
-                            fetchOperatorData();
+                            // Оценки перечитываем только в самих «Моих оценках»: тем же
+                            // ключом теперь открываются «Обращения» и «Вики», и запрос
+                            // за оценками оттуда был бы лишним.
+                            if (viewRef.current === 'evaluation') fetchOperatorData();
                         }
                     } else {
-                        setSensitiveAccess(prev => ({ ...prev, loading: false }));
+                        setSensitiveAccess(prev => ({ ...prev, loading: false, checked: true }));
                     }
                 } catch (err) {
-                    setSensitiveAccess(prev => ({ ...prev, loading: false }));
+                    // Не узнали статус — считаем закрытым: у оператора останется
+                    // кнопка «Сгенерировать QR», а не пустой экран.
+                    setSensitiveAccess(prev => ({ ...prev, loading: false, checked: true }));
                 }
             }, [user, clearSensitiveQrPolling]);
 
@@ -43964,6 +43990,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 if (view === 'evaluation') {
                     fetchOperatorData();
+                    fetchSensitiveAccessStatus();
+                    return;
+                }
+
+                // «Обращения» и «Вики» закрыты тем же ключом. Статус спрашиваем
+                // до отрисовки раздела: иначе замок мигнёт тому, кто доступ уже
+                // подтвердил, а сам раздел успеет получить 403.
+                if (view === 'crm_tickets' || view === 'wiki') {
                     fetchSensitiveAccessStatus();
                 }
             }, [user?.id, currentUserRole, isScopedDepartmentHead, selectedMonth, view, isOpSalaryDept, isTezSalaryDept]);
@@ -45674,7 +45708,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
-                        {view === "crm_tickets" && canAccessCrmSection && (
+                        {view === "crm_tickets" && canAccessCrmSection && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Обращения"
+                                description="Здесь переписка с рабочими группами по живым водителям — телефоны, адреса, суммы. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка обращений…</div>}>
                                 <CrmTicketsView
                                     apiBaseUrl={API_BASE_URL}
@@ -45685,7 +45726,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     focusRequest={crmFocusRequest}
                                 />
                             </Suspense>
-                        )}
+                        ))}
                         {view === "szov_wallboard" && canAccessSzovWallboardSection && (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка табло…</div>}>
                                 <SzovWallboardView
@@ -45699,7 +45740,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         )}
-                        {view === "wiki" && (
+                        {view === "wiki" && (sensitiveSectionsLocked ? (
+                            <SensitiveSectionGate
+                                sectionTitle="Вики"
+                                description="База знаний компании: регламенты, тарифы, инструкции, контакты офисов и парков. Раздел открывается после подтверждения доступа старшим."
+                                checking={sensitiveSectionsChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        ) : (
                             <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка Вики…</div>}>
                                 <WikiView
                                     user={user}
@@ -45710,7 +45758,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     onInitialArticleConsumed={clearWikiInitialSlug}
                                 />
                             </Suspense>
-                        )}
+                        ))}
                         {(view === "shift_auction" && (
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <ShiftAuctionView
@@ -51881,7 +51929,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </button>
                                 </div>
                                 <p className="text-sm text-gray-600 mb-4">
-                                    Покажите этот QR администратору или супервайзеру в разделе "QR доступ". После подтверждения полный номер и аудио откроются только в вашей текущей сессии.
+                                    Покажите этот QR администратору или супервайзеру в разделе "QR доступ". После подтверждения закрытые разделы и данные — «Обращения», «Вики», записи и переписки в оценках — откроются только в вашей текущей сессии.
                                 </p>
                                 {sensitiveQrError && (
                                     <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-2">

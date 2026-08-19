@@ -1689,14 +1689,32 @@ def _decode_sensitive_qr_token(token):
     }
 
 
-def _is_sensitive_access_unlocked(user_id, session_id):
+def _is_sensitive_access_unlocked(user_id, session_id, cursor=None):
     if not user_id or not session_id:
         return False
     try:
-        return db.is_session_sensitive_access_unlocked(session_id=session_id, user_id=user_id)
+        return db.is_session_sensitive_access_unlocked(
+            session_id=session_id, user_id=user_id, cursor=cursor)
     except Exception as exc:
         logging.error(f"Failed to check sensitive session access: {exc}")
         return False
+
+
+def _sensitive_access_granted_for_user(user_id, cursor=None):
+    """Подтверждена ли QR-кодом ТЕКУЩАЯ сессия этого пользователя.
+
+    Разделам «Обращения» и «Вики» отдаётся именно эта функция, а не флаг из их
+    собственных таблиц: ключ у портала один — тот же, что открывает записи и
+    переписки в «Моих оценках». Сессия берётся из access-токена запроса, так
+    что подтверждение не переносится ни на другое устройство, ни на повторный
+    вход.
+
+    cursor — курсор вызывающего, если он у того уже открыт (вики проверяет
+    гейт внутри своего запроса). Своим коннектом это стоило бы двух слотов
+    пула на один запрос.
+    """
+    return bool(_is_sensitive_access_unlocked(
+        user_id, _current_session_id_from_access_token(), cursor=cursor))
 
 
 def _sanitize_evaluations_for_access(evaluations, reveal_sensitive, hide_hidden_operator_comments=False):
@@ -49576,6 +49594,9 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Оператор входит в раздел только после QR-подтверждения сессии —
+        # тем же ключом, что открывает записи в «Моих оценках».
+        sensitive_access_granted=_sensitive_access_granted_for_user,
         client_ip=_client_ip,
         # Файлы раздела живут в том же GCS, что LMS/Ивенты/аватарки.
         # Подпись выдаётся на каждый запрос через прокси /api/wiki/file/<id>,
@@ -49607,6 +49628,9 @@ try:
         require_api_key=require_api_key,
         build_cors_preflight_response=_build_cors_preflight_response,
         resolve_requester=_resolve_requester,
+        # Тот же ключ, что у вики и «Моих оценок»: подтверждение сессии
+        # оператора QR-кодом у админа или супервайзера.
+        sensitive_access_granted=_sensitive_access_granted_for_user,
     ))
     logging.info("Раздел «Обращения»: Blueprint подключён на /api/crm")
 except Exception:

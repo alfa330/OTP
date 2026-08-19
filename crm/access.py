@@ -104,6 +104,30 @@ def can_open_section(ctx):
     return own_code == SECTION_DEPARTMENT_CODE
 
 
+def requires_sensitive_qr(ctx):
+    """Нужно ли подтвердить сессию QR-кодом, прежде чем раздел откроется.
+
+    Оператору — да. «Обращения» — это переписка с рабочими группами по живым
+    водителям: телефоны, адреса, суммы. Открывать её должен человек за своим
+    рабочим местом и с ведома старшего, а не любая забытая открытой сессия.
+
+    Ключ тот же, что у «Моих оценок» (bot_schedule2: sensitive-access): QR
+    генерирует сам оператор, подтверждает админ или супервайзер, доступ живёт
+    до конца ЭТОЙ сессии. Своего второго ключа раздел не заводит намеренно —
+    два разных QR на один и тот же экран человек не различит.
+
+    Кого гейт не касается: главы отдела и глобального админа — им подтверждать
+    доступ не у кого, а также супервайзера и тренера (тренера сюда и так не
+    пускает can_open_section).
+
+    Незнакомая роль подпадает под гейт: normalize_role сводит её к 'operator',
+    и это правильная сторона ошибки — закрыто, а не открыто.
+    """
+    if is_global_admin(ctx) or is_department_head(ctx):
+        return False
+    return normalize_role(ctx.get('role')) == 'operator'
+
+
 def visibility_scope(ctx):
     """Насколько широкий список обращений положен пользователю.
 
@@ -216,4 +240,5 @@ def capabilities(ctx):
         'is_global_admin': is_global_admin(ctx),
         'is_department_head': is_department_head(ctx),
         'is_supervisor': is_supervisor(ctx),
+        'requires_qr': requires_sensitive_qr(ctx),
     }

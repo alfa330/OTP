@@ -117,6 +117,9 @@ class EditGuardTest(unittest.TestCase):
             db=db, require_api_key=lambda f: f,
             build_cors_preflight_response=lambda: ('', 204),
             resolve_requester=lambda: (context['user_id'], None, None),
+            # Гейт QR-подтверждения здесь всегда открыт: эти наборы
+            # проверяют права раздела, а сам гейт — test_sensitive_section_qr_gate.
+            sensitive_access_granted=lambda _user_id, cursor=None: True,
             client_ip=lambda: '127.0.0.1',
             gcs={'signed_url': lambda *a, **k: 'https://x'},
             session_id_provider=lambda: 'None',
