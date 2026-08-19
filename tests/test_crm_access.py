@@ -59,21 +59,44 @@ class ScopeTest(unittest.TestCase):
             self.assertEqual(access.visibility_scope(me), access.SCOPE_OWN, role)
             self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)), role)
 
-    def test_supervisor_sees_own_group_members(self):
-        me = ctx(role='sv', user_id=10, groups=(5, 6))
-        self.assertEqual(access.visibility_scope(me), access.SCOPE_GROUPS)
-        self.assertTrue(access.can_view_ticket(
-            me, ticket(created_by=11, author_group_ids=(6,))))
-        self.assertFalse(access.can_view_ticket(
-            me, ticket(created_by=11, author_group_ids=(7,))))
+    def test_everyone_admitted_to_the_section_sees_every_ticket(self):
+        """Просьба СЗоВ 18.08.2026 (задача #181).
 
-    def test_department_head_is_bounded_by_department(self):
-        """Назначение главой заменяет базовую роль admin — это семантика портала."""
-        head = ctx(role='admin', user_id=10, headed=(3,))
+        По одному водителю несколько сотрудников заводили несколько одинаковых
+        обращений: найти уже открытое было нельзя, потому что чужое не
+        показывалось. Теперь периметр один — вход в раздел.
+        """
+        for me in (ctx(role='sv', user_id=10, groups=(5,)),
+                   ctx(role='admin', user_id=10, headed=(3,)),
+                   ctx(role='operator', user_id=20),          # пилотный оператор
+                   ctx(role='super_admin', user_id=1)):
+            self.assertTrue(access.can_open_section(me), me['role'])
+            self.assertEqual(access.visibility_scope(me), access.SCOPE_ALL, me['role'])
+            self.assertTrue(access.can_view_ticket(
+                me, ticket(created_by=999, department_id=4, author_group_ids=(7,))), me['role'])
+
+    def test_narrow_scopes_still_apply_outside_the_section(self):
+        """Периметры «отдел» и «свои группы» никуда не делись.
+
+        Они выключены не потому, что от них отказались, а потому, что сейчас
+        раздел выкатан на один отдел и вход в него и есть периметр. Расширится
+        выкат — правило снова заработает, поэтому оно проверяется.
+        """
+        head = ctx(role='admin', user_id=10, headed=(3,), headed_codes=['op'],
+                   department_code='op')
+        self.assertFalse(access.can_open_section(head))
         self.assertFalse(access.is_global_admin(head))
         self.assertEqual(access.visibility_scope(head), access.SCOPE_DEPARTMENT)
         self.assertTrue(access.can_view_ticket(head, ticket(created_by=11, department_id=3)))
         self.assertFalse(access.can_view_ticket(head, ticket(created_by=11, department_id=4)))
+
+        sv = ctx(role='sv', user_id=10, groups=(5, 6), department_code='op')
+        self.assertFalse(access.can_open_section(sv))
+        self.assertEqual(access.visibility_scope(sv), access.SCOPE_GROUPS)
+        self.assertTrue(access.can_view_ticket(
+            sv, ticket(created_by=11, author_group_ids=(6,))))
+        self.assertFalse(access.can_view_ticket(
+            sv, ticket(created_by=11, author_group_ids=(7,))))
 
     def test_department_head_sees_queue_of_own_department(self):
         """Обращение сотрудника чужого отдела в НАШУ очередь глава видит."""
@@ -189,16 +212,26 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
         self.assertNotIn('department_id', sql)
         self.assertEqual(params['viewer_id'], 10)
 
+    def test_section_members_get_no_filter(self):
+        """Кого пустили в раздел, тот видит всё — и в списке тоже (#181)."""
+        for me in (ctx(role='sv', user_id=10, groups=(5,)),
+                   ctx(role='admin', user_id=10, headed=(3,))):
+            sql, _params = queries.visibility_sql(me)
+            self.assertEqual(sql, 'TRUE', me['role'])
+
     def test_department_scope_covers_both_sides(self):
         """Как и в Python: и отдел автора, и отдел очереди."""
-        sql, params = queries.visibility_sql(ctx(role='admin', user_id=10, headed=(3, 4)))
+        sql, params = queries.visibility_sql(
+            ctx(role='admin', user_id=10, headed=(3, 4), headed_codes=['op'],
+                department_code='op'))
         self.assertIn('t.department_id = ANY(%(headed_departments)s)', sql)
         self.assertIn('q.department_id = ANY(%(headed_departments)s)', sql)
         self.assertEqual(params['headed_departments'], [3, 4])
 
     def test_group_scope_uses_current_membership_only(self):
         """Ушедший из группы уносит переписку с собой — как в can_view_ticket."""
-        sql, params = queries.visibility_sql(ctx(role='sv', user_id=10, groups=(5,)))
+        sql, params = queries.visibility_sql(
+            ctx(role='sv', user_id=10, groups=(5,), department_code='op'))
         self.assertIn('group_operator_memberships', sql)
         self.assertIn('gom.start_date <= CURRENT_DATE', sql)
         self.assertIn('gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE', sql)
@@ -207,8 +240,9 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
     def test_author_clause_present_in_every_narrow_scope(self):
         """Свои обращения видны при любом периметре, иначе СВ потерял бы свои же."""
         for me in (ctx(role='operator', user_id=10),
-                   ctx(role='sv', user_id=10, groups=(5,)),
-                   ctx(role='admin', user_id=10, headed=(3,))):
+                   ctx(role='sv', user_id=10, groups=(5,), department_code='op'),
+                   ctx(role='admin', user_id=10, headed=(3,), headed_codes=['op'],
+                       department_code='op')):
             sql, _params = queries.visibility_sql(me)
             self.assertIn('t.created_by = %(viewer_id)s', sql)
 
@@ -239,6 +273,17 @@ class SchemaContractTest(unittest.TestCase):
         ddl = ' '.join(schema._STATEMENTS)
         self.assertIn('uq_crm_queues_chat', ddl)
         self.assertIn('ON crm_queues(chat_id) WHERE chat_id IS NOT NULL', ddl)
+
+    def test_iin_is_indexed_for_search(self):
+        """Без индекса поиск по ИИН стал бы проходом по всей таблице."""
+        ddl = ' '.join(' '.join(schema._STATEMENTS).split())
+        self.assertIn('idx_crm_tickets_iin_trgm', ddl)
+        self.assertIn("ON crm_tickets USING gin ((answers ->> 'iin') gin_trgm_ops)", ddl)
+
+    def test_scenario_queues_are_seeded(self):
+        """Очередь ищется сценарием по коду: не засеяли — тематика недоступна."""
+        codes = {code for code, _title, _descr, _order in schema._SEED_QUEUES}
+        self.assertEqual(codes, {'itaxi_sapar', 'parcels', 'yandex_delivery'})
 
     def test_unread_has_a_partial_index(self):
         """Колокол спрашивает только непрочитанное — полный индекс тут лишний."""
@@ -455,6 +500,33 @@ class ListContractTest(unittest.TestCase):
         cursor = RecordingCursor()
         queries.list_tickets(cursor, ctx(role='super_admin'), search='77001234567')
         self.assertIsNone(cursor.params['search_id'])
+
+    def test_iin_search_finds_every_ticket_of_one_driver(self):
+        """Просьба СЗоВ 18.08.2026 (задача #182).
+
+        Двенадцатизначный ИИН — это цифры, поэтому он попадал в числовую ветку,
+        а та смотрела только номер обращения и телефон: обращение с этим ИИН в
+        теме существовало, а поиск отдавал пусто.
+        """
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), search='060606202020')
+        sql = ' '.join(cursor.queries[0].split())
+        self.assertIn("(t.answers ->> 'iin') ILIKE %(search)s", sql)
+        self.assertEqual(cursor.params['search'], '%060606202020%')
+
+    def test_iin_search_uses_the_same_expression_as_its_index(self):
+        """Индекс по выражению не подходит запросу по столбцу — уже наступали.
+
+        Поэтому условие поиска и определение индекса сверяются буквально: разойдись
+        они пробелом или кавычкой — поиск снова пошёл бы проходом по таблице, и
+        заметили бы это не тестом, а секундами ожидания на проде.
+        """
+        cursor = RecordingCursor()
+        queries.list_tickets(cursor, ctx(role='super_admin'), search='060606202020')
+        sql = ' '.join(cursor.queries[0].split())
+        ddl = ' '.join(' '.join(schema._STATEMENTS).split())
+        self.assertIn("(answers ->> 'iin') gin_trgm_ops", ddl)
+        self.assertIn("(t.answers ->> 'iin')", sql)
 
     def test_word_search_never_touches_the_number(self):
         """Смешанное ИЛИ заставляло базу идти по таблице: замер 270 мс."""

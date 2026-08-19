@@ -798,7 +798,10 @@ export default function CrmTicketsView({
 
     const [stateFilter, setStateFilter] = useState('active');
     const [queueFilter, setQueueFilter] = useState('');
-    const [mine, setMine] = useState(true);
+    // По умолчанию открыт ОБЩИЙ список, а не «Мои»: раздел нужен ровно для того,
+    // чтобы по одному водителю было одно обращение, а найти чужое можно только
+    // если оно на виду (просьба СЗоВ 18.08.2026). «Мои» остаются сегментом рядом.
+    const [mine, setMine] = useState(false);
     const [search, setSearch] = useState('');
     const [offset, setOffset] = useState(0);
 
@@ -1020,7 +1023,7 @@ export default function CrmTicketsView({
                         <div className="relative min-w-[180px] flex-1 sm:max-w-[280px]">
                             <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                             <input value={search} onChange={(e) => setSearch(e.target.value)}
-                                   placeholder="Номер, тема, телефон"
+                                   placeholder="ИИН, номер, тема, телефон"
                                    className={`${iosInput} pl-9`} />
                         </div>
                     </div>

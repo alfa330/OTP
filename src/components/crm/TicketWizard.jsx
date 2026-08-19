@@ -11,8 +11,8 @@ import {
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
-    MISSING_ATTACHMENT, answerValue, carryOver, groupIsComplete, groupsOf,
-    localVerdict, missingGroup, stepIsComplete, stepsOfGroup,
+    MISSING_ATTACHMENT, answerValue, carryOver, groupCatalog, groupIsComplete,
+    groupsOf, localVerdict, missingGroup, stepIsComplete, stepsOfGroup,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -62,8 +62,13 @@ const Field = ({ step, value, onChange, autoFocus, problem }) => {
         if (step.kind === 'yesno' || step.kind === 'yesno_date') {
             return (
                 <div className="space-y-2">
-                    <div className="flex gap-2">
-                        {[['yes', 'Да'], ['no', 'Нет']].map(([code, label]) => (
+                    <div className="flex flex-wrap gap-2">
+                        {/* Третий вариант — только там, где вопрос его допускает
+                            (step.allow_unknown): оператор не всегда может
+                            проверить ответ сам, но выдумывать «нет» он не должен. */}
+                        {[['yes', 'Да'], ['no', 'Нет'],
+                            ...(step.allow_unknown ? [['unknown', 'Неизвестно']] : [])
+                        ].map(([code, label]) => (
                             <button key={code} type="button"
                                     onClick={() => onChange(step.kind === 'yesno_date'
                                         ? { value: code, detail: code === 'yes' ? detail || '' : '' }
@@ -125,6 +130,7 @@ const Field = ({ step, value, onChange, autoFocus, problem }) => {
         if (step.kind === 'longtext') {
             return (
                 <textarea ref={inputRef} value={current || ''} rows={3}
+                          placeholder={step.placeholder || undefined}
                           onChange={(e) => onChange(e.target.value)}
                           className={`${iosInput} resize-y`} />
             );
@@ -138,6 +144,10 @@ const Field = ({ step, value, onChange, autoFocus, problem }) => {
         }
         return (
             <input ref={inputRef} type="text" value={current || ''}
+                   /* Пример показываем подсказкой в самом поле: он виден, пока
+                      поле пустое, и исчезает при вводе — постоянного места на
+                      экране не занимает. */
+                   placeholder={step.placeholder || undefined}
                    inputMode={step.kind === 'iin' ? 'numeric' : undefined}
                    maxLength={step.kind === 'iin' ? 12 : undefined}
                    onChange={(e) => onChange(step.kind === 'iin'
@@ -241,6 +251,8 @@ export default function TicketWizard({
         () => (catalog || []).find((item) => item.key === scenarioKey) || null,
         [catalog, scenarioKey],
     );
+
+    const catalogGroups = useMemo(() => groupCatalog(catalog), [catalog]);
     const groups = useMemo(() => groupsOf(scenario, answers), [scenario, answers]);
     const group = groups[groupIndex] || null;
     const groupSteps = useMemo(
@@ -441,27 +453,40 @@ export default function TicketWizard({
                 )}
 
                 {phase === 'pick' && (
-                    <div className="space-y-1.5">
-                        {(catalog || []).map((item) => (
-                            <button key={item.key} type="button" disabled={!item.is_ready}
-                                    onClick={() => startScenario(item.key)}
-                                    className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
-                                        item.is_ready
-                                            ? 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
-                                            : 'cursor-not-allowed bg-slate-50/60 opacity-60'
-                                    }`}>
-                                <span className="min-w-0 flex-1 text-[14px] font-medium text-slate-900">
-                                    {item.title}
-                                </span>
-                                {/* «Когда используется» — под «i»: в списке из шести
-                                    тематик шесть абзацев мешают выбирать. */}
-                                <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
-                                {item.is_ready
-                                    ? <ChevronRight size={15} className="shrink-0 text-slate-400" />
-                                    : <IosBadge tone="amber">Нет группы</IosBadge>}
-                            </button>
+                    <div className="space-y-4">
+                        {/* Тематики сгруппированы по рабочей группе-получателю:
+                            оператор сразу видит, кого побеспокоит обращение, а
+                            заголовок один на группу — вместо повторения её
+                            названия в каждой строке. */}
+                        {catalogGroups.map((group) => (
+                            <div key={group.code}>
+                                {catalogGroups.length > 1 && group.title && (
+                                    <div className={`${iosGroupLabel} mb-1.5`}>{group.title}</div>
+                                )}
+                                <div className="space-y-1.5">
+                                    {group.items.map((item) => (
+                                        <button key={item.key} type="button" disabled={!item.is_ready}
+                                                onClick={() => startScenario(item.key)}
+                                                className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
+                                                    item.is_ready
+                                                        ? 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
+                                                        : 'cursor-not-allowed bg-slate-50/60 opacity-60'
+                                                }`}>
+                                            <span className="min-w-0 flex-1 text-[14px] font-medium text-slate-900">
+                                                {item.title}
+                                            </span>
+                                            {/* «Когда используется» — под «i»: в списке
+                                                тематик столько же абзацев мешают выбирать. */}
+                                            <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
+                                            {item.is_ready
+                                                ? <ChevronRight size={15} className="shrink-0 text-slate-400" />
+                                                : <IosBadge tone="amber">Нет группы</IosBadge>}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         ))}
-                        {!(catalog || []).length && (
+                        {!catalogGroups.length && (
                             <div className="py-10 text-center text-[13px] text-slate-400">
                                 Тематики не настроены
                             </div>

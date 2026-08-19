@@ -36,6 +36,16 @@ LONGTEXT = 'longtext'       # многострочное описание
 CHOICE = 'choice'           # один вариант из списка
 YESNO = 'yesno'             # да / нет
 YESNO_DATE = 'yesno_date'   # да / нет, при «да» — дата
+
+# Третий ответ у «да/нет»: allow_unknown=True добавляет «Неизвестно».
+#
+# Он не украшение и не «на всякий случай». Часть вопросов оператор физически не
+# может проверить сам и опирается на слова водителя: заставлять его выбрать «да»
+# или «нет» там, где ответа нет, — значит получать выдуманные данные, и в группу
+# уйдёт не «мы не знаем», а уверенное «нет». Поэтому вариант объявляется у
+# конкретного вопроса, а не включён у всех: где ответ обязан быть точным,
+# уклониться по-прежнему нельзя.
+UNKNOWN = 'unknown'
 DATETIME = 'datetime'       # дата и время
 ATTACHMENT = 'attachment'   # вложение (скриншот / видео)
 
@@ -55,7 +65,9 @@ INCOMPLETE = 'incomplete'  # не хватает ответов или влож�
 FLAG_MASS_OUTAGE = 'mass_outage'
 FLAG_LABELS = {FLAG_MASS_OUTAGE: 'Возможный массовый сбой'}
 
-_IIN_RE = re.compile(r'^\d{12}$')
+# [0-9], а не \d: питоновский \d принимает и, например, восточноарабские цифры,
+# а такой «ИИН» сохранился бы в обращении и не нашёлся бы потом никаким поиском.
+_IIN_RE = re.compile(r'^[0-9]{12}$')
 _PERIOD_RE = re.compile(r'^\d{4}-(0[1-9]|1[0-2])$')  # YYYY-MM
 
 
@@ -90,6 +102,18 @@ STEP_PERIOD = step('period', 'Отчётный период', PERIOD,
                         'где видно, что комиссия парка снималась именно в нём')
 STEP_PARK = step('park', 'Парк или регион', TEXT)
 
+# Устройство и браузер спрашивают две технические тематики. Примеры к ним —
+# просьба СЗоВ: без образца операторы пишут «телефон» и «браузер», и в группе
+# по такому ответу воспроизвести ошибку нечем. Один пример стоит подсказкой в
+# самом поле (виден, пока поле пустое, и исчезает при вводе), полный список —
+# под «i», чтобы не занимать место постоянно.
+STEP_DEVICE = step('device', 'Устройство и операционная система', TEXT,
+                   placeholder='Например: iPhone 15, iOS 18 или ПК, Windows 11',
+                   hint='iPhone 15, iOS 18 · Samsung Galaxy S24, Android 15 · ПК, Windows 11')
+STEP_BROWSER = step('browser', 'Название браузера', TEXT,
+                    placeholder='Например: Google Chrome, Safari, Яндекс Браузер',
+                    hint='Google Chrome · Safari · Яндекс Браузер')
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ТЕМАТИКИ SAPAR
@@ -117,8 +141,10 @@ SAPAR_DOCS_MISSING = {
         step('trips_in_park', 'Были ли поездки в нашем парке', YESNO),
         step('commission_charged', 'Списывалась ли комиссия', YESNO),
         step('corp_or_bonus', 'Были ли корпоративные поездки или начислялись бонусы', YESNO),
+        # Оператор не видит историю провайдера сам и опирается на слова
+        # водителя, поэтому здесь разрешено «Неизвестно» (просьба СЗоВ).
         step('provider_changed', 'Менялся ли провайдер', YESNO_DATE,
-             date_label='Дата смены провайдера'),
+             date_label='Дата смены провайдера', allow_unknown=True),
         step('relogin_done', 'Выполнен ли повторный вход в Sapar', YESNO),
         step('docs_after_relogin', 'Появились ли документы после повторного входа', YESNO,
              depends_on=('relogin_done', 'yes')),
@@ -168,8 +194,8 @@ SAPAR_SIGN_ERROR = {
         ]),
         step('error_text', 'Дословный текст ошибки', TEXT),
         step('last_try_at', 'Дата и время последней попытки', DATETIME),
-        step('device', 'Устройство и операционная система', TEXT),
-        step('browser', 'Название браузера', TEXT),
+        STEP_DEVICE,
+        STEP_BROWSER,
         step('cache_cleared', 'Выполнена ли очистка кэша и какой результат', YESNO_DATE,
              date_label='Результат после очистки кэша', date_kind=TEXT),
         step('other_browser', 'Выполнена ли проверка через другой браузер и какой результат',
@@ -319,8 +345,8 @@ SAPAR_SERVICE_ERROR = {
         STEP_IIN,
         step('park', 'Парк', TEXT),
         step('where', 'Где возникает ошибка', CHOICE, options=['На сайте', 'В приложении']),
-        step('device', 'Устройство и операционная система', TEXT),
-        step('browser', 'Название браузера', TEXT),
+        STEP_DEVICE,
+        STEP_BROWSER,
         step('last_try_at', 'Дата и время последней попытки', DATETIME),
         step('error_text', 'Дословный текст ошибки или описание результата', TEXT),
         step('multiple_drivers', 'Проблема у одного водителя или у нескольких', CHOICE,
@@ -379,14 +405,16 @@ PARCEL_LOCATION = {
         'Уточнить номер отправителя',
         'Проверить город',
         'Уточнить дату отправки',
-        'Уточнить, поступало ли получателю уведомление или звонок',
     ],
     'steps': [
+        # ИИН спрашиваем и здесь (просьба СЗоВ): по нему обращение попадает в
+        # тему и находится поиском, а значит по одному водителю видно всё сразу
+        # и второе такое же обращение никто не заводит.
+        STEP_IIN,
         step('contact_number', 'Номер отправителя или получателя', TEXT),
         step('parcel_description', 'Описание посылки', LONGTEXT),
         step('city', 'Город, где выполнялся заказ', TEXT),
         step('order_date', 'Дата заказа', DATETIME, date_only=True),
-        step('notified', 'Поступало ли получателю уведомление или звонок', YESNO, optional=True),
     ],
     'rules': [],
 }
@@ -427,7 +455,6 @@ STEP_GROUPS = {
     'parcel_description': 'Что происходит',
     'city': 'Что происходит',
     'order_date': 'Что происходит',
-    'notified': 'Что происходит',
 
     # Техника — только у технических тематик
     'device': 'Устройство и время',
@@ -541,6 +568,11 @@ def _value(answers, key):
     return raw
 
 
+def yesno_values(item):
+    """Допустимые ответы вопроса «да/нет» — с «неизвестно», если оно разрешено."""
+    return ('yes', 'no', UNKNOWN) if item.get('allow_unknown') else ('yes', 'no')
+
+
 def validate_step(item, answers):
     """Что не так с ответом на конкретный шаг. None — всё в порядке."""
     kind = item['kind']
@@ -556,8 +588,9 @@ def validate_step(item, answers):
         return 'Укажите месяц и год отчётного периода'
     if kind == CHOICE and str(value) not in (item.get('options') or []):
         return 'Выберите вариант из списка'
-    if kind in (YESNO, YESNO_DATE) and str(value) not in ('yes', 'no'):
-        return 'Ответьте «да» или «нет»'
+    if kind in (YESNO, YESNO_DATE) and str(value) not in yesno_values(item):
+        return ('Ответьте «да», «нет» или «неизвестно»' if item.get('allow_unknown')
+                else 'Ответьте «да» или «нет»')
     if kind == YESNO_DATE and str(value) == 'yes':
         extra = raw.get('detail') if isinstance(raw, dict) else None
         if not (extra or '').strip():
@@ -649,7 +682,7 @@ def evaluate(scenario_key, answers, *, has_attachment=False, checks_confirmed=Fa
 # Готовый текст обращения
 # ─────────────────────────────────────────────────────────────────────────────
 
-_YESNO_WORDS = {'yes': 'да', 'no': 'нет'}
+_YESNO_WORDS = {'yes': 'да', 'no': 'нет', UNKNOWN: 'неизвестно'}
 
 
 def format_answer(item, answers):

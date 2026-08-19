@@ -388,7 +388,32 @@ class ParcelTest(unittest.TestCase):
 
     def test_asks_what_the_specification_lists(self):
         keys = [s['key'] for s in sc.get(self.KEY)['steps']]
-        self.assertEqual(keys[:4], ['contact_number', 'parcel_description', 'city', 'order_date'])
+        self.assertEqual(keys, ['iin', 'contact_number', 'parcel_description',
+                                'city', 'order_date'])
+
+    def test_asks_for_the_driver_iin(self):
+        """Просьба СЗоВ 18.08.2026 (задача #173).
+
+        ИИН здесь не для красоты: он попадает в тему обращения и в поиск, и
+        только поэтому по одному водителю видно все его обращения сразу.
+        """
+        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'iin')
+        self.assertEqual(step['kind'], sc.IIN)
+        self.assertFalse(step.get('optional'), 'ИИН обязателен, иначе поиск по нему дырявый')
+        self.assertIn('ИИН 060606202020',
+                      sc.render_subject(self.KEY, full(self.KEY, iin='060606202020')))
+
+    def test_receiver_notification_question_is_gone(self):
+        """Просьба СЗоВ 18.08.2026 (задача #183): «убрать категорию 4».
+
+        Вопрос убран и из списка проверок, и из интервью — иначе оператор
+        по-прежнему обязан был бы что-то на него ответить.
+        """
+        scenario = sc.get(self.KEY)
+        self.assertNotIn('notified', [s['key'] for s in scenario['steps']])
+        self.assertFalse([c for c in scenario['checks'] if 'уведомлени' in c.lower()],
+                         scenario['checks'])
+        self.assertNotIn('notified', sc.STEP_GROUPS)
 
     def test_sends_when_data_is_filled(self):
         self.assertEqual(verdict(self.KEY, full(self.KEY), has_attachment=False)['outcome'],
@@ -494,9 +519,68 @@ class RulesAreDecidableTest(unittest.TestCase):
                 key, expected = item['when']
                 step = steps[key]
                 if step['kind'] in (sc.YESNO, sc.YESNO_DATE):
-                    self.assertIn(expected, ('yes', 'no'), '%s/%s' % (scenario['key'], key))
+                    self.assertIn(expected, sc.yesno_values(step),
+                                  '%s/%s' % (scenario['key'], key))
                 elif step['kind'] == sc.CHOICE:
                     self.assertIn(expected, step['options'], '%s/%s' % (scenario['key'], key))
+
+    def test_unknown_is_allowed_only_where_the_question_permits_it(self):
+        """Задача #172: третий ответ там, где оператор не может проверить сам.
+
+        Именно у вопроса, а не у типа: там, где ответ обязан быть точным,
+        уклониться по-прежнему нельзя, иначе «неизвестно» расползётся по всем
+        проверкам и обращение уйдёт в группу пустым.
+        """
+        docs = sc.get('sapar_docs_missing')
+        provider = next(s for s in docs['steps'] if s['key'] == 'provider_changed')
+        self.assertEqual(sc.yesno_values(provider), ('yes', 'no', 'unknown'))
+        self.assertIsNone(sc.validate_step(provider, {'provider_changed': {'value': 'unknown'}}))
+
+        strict = next(s for s in docs['steps'] if s['key'] == 'trips_in_park')
+        self.assertEqual(sc.yesno_values(strict), ('yes', 'no'))
+        self.assertIsNotNone(sc.validate_step(strict, {'trips_in_park': 'unknown'}))
+
+    def test_unknown_provider_still_sends(self):
+        """Незнание провайдера не должно останавливать обращение."""
+        answers = full('sapar_docs_missing', provider_changed={'value': 'unknown'})
+        self.assertEqual(verdict('sapar_docs_missing', answers)['outcome'], sc.READY)
+
+    def test_unknown_reaches_the_group_as_a_word(self):
+        """В группе должно быть видно «неизвестно», а не код и не «нет»."""
+        answers = full('sapar_docs_missing', provider_changed={'value': 'unknown'})
+        body = sc.render_body('sapar_docs_missing', answers)
+        self.assertIn('Менялся ли провайдер: неизвестно', body)
+
+    def test_device_and_browser_carry_examples(self):
+        """Задача #174: без образца операторы пишут «телефон» и «браузер».
+
+        Вопрос повторяется в двух тематиках, поэтому он объявлен один раз:
+        разъехавшиеся примеры к одному и тому же вопросу — это две разные
+        инструкции оператору.
+        """
+        for key in ('sapar_sign_error', 'sapar_service_error'):
+            steps = {s['key']: s for s in sc.get(key)['steps']}
+            self.assertIs(steps['device'], sc.STEP_DEVICE, key)
+            self.assertIs(steps['browser'], sc.STEP_BROWSER, key)
+        self.assertIn('iPhone 15, iOS 18', sc.STEP_DEVICE['placeholder'])
+        self.assertIn('Windows 11', sc.STEP_DEVICE['placeholder'])
+        self.assertIn('Samsung Galaxy S24, Android 15', sc.STEP_DEVICE['hint'])
+        self.assertIn('Google Chrome', sc.STEP_BROWSER['placeholder'])
+        self.assertIn('Яндекс Браузер', sc.STEP_BROWSER['placeholder'])
+
+    def test_catalog_carries_examples_and_the_third_answer_to_the_client(self):
+        """Интерфейс рисует поля по каталогу — не доехало туда, значит нет его."""
+        catalog = {item['key']: item for item in sc.public_catalog()}
+        steps = {s['key']: s for s in catalog['sapar_sign_error']['steps']}
+        self.assertTrue(steps['device'].get('placeholder'))
+        provider = {s['key']: s for s in catalog['sapar_docs_missing']['steps']}['provider_changed']
+        self.assertTrue(provider.get('allow_unknown'))
+
+    def test_iin_takes_only_plain_digits(self):
+        """ИИН стал ключом поиска: «цифра» не из [0-9] сделала бы обращение ненаходимым."""
+        step = sc.STEP_IIN
+        self.assertIsNone(sc.validate_step(step, {'iin': '060606202020'}))
+        self.assertIsNotNone(sc.validate_step(step, {'iin': '٠٦٠٦٠٦٢٠٢٠٢٠'}))
 
     def test_every_flag_references_an_existing_step(self):
         for scenario in sc.SCENARIOS:

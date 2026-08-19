@@ -6,6 +6,7 @@ import {
   MISSING_CHECKS,
   answerValue,
   carryOver,
+  groupCatalog,
   isAnswered,
   localVerdict,
   missingTarget,
@@ -145,4 +146,53 @@ test('значение достаётся одинаково из строки �
   assert.equal(answerValue({ a: 'да' }, 'a'), 'да');
   assert.equal(answerValue({ a: { value: 'yes', detail: 'x' } }, 'a'), 'yes');
   assert.equal(answerValue({}, 'нет такого'), undefined);
+});
+
+/* ─── Картотека тематик по группам (задачи #183/#184) ─────────────────────── */
+
+const CATALOG = [
+  { key: 'sapar_docs_missing', queue_code: 'itaxi_sapar', queue_title: 'iTaxi Sapar', is_ready: true },
+  { key: 'sapar_sign_error', queue_code: 'itaxi_sapar', queue_title: 'iTaxi Sapar', is_ready: true },
+  { key: 'parcel_location', queue_code: 'parcels', queue_title: 'Посылки', is_ready: false },
+];
+
+test('тематики разложены по рабочим группам, а не одним списком', () => {
+  const groups = groupCatalog(CATALOG);
+  assert.deepEqual(groups.map((g) => g.code), ['itaxi_sapar', 'parcels']);
+  assert.deepEqual(groups.map((g) => g.title), ['iTaxi Sapar', 'Посылки']);
+  assert.deepEqual(groups[0].items.map((i) => i.key),
+                   ['sapar_docs_missing', 'sapar_sign_error']);
+});
+
+test('порядок групп и тематик берётся с сервера, а не сортируется заново', () => {
+  const reversed = [...CATALOG].reverse();
+  const groups = groupCatalog(reversed);
+  assert.deepEqual(groups.map((g) => g.code), ['parcels', 'itaxi_sapar']);
+  assert.deepEqual(groups[1].items.map((i) => i.key),
+                   ['sapar_sign_error', 'sapar_docs_missing']);
+});
+
+test('недоступная тематика остаётся в своей группе, а не пропадает', () => {
+  const groups = groupCatalog(CATALOG);
+  const parcels = groups.find((g) => g.code === 'parcels');
+  assert.equal(parcels.items.length, 1);
+  assert.equal(parcels.items[0].is_ready, false);
+});
+
+test('пустая картотека не роняет раскладку', () => {
+  assert.deepEqual(groupCatalog(null), []);
+  assert.deepEqual(groupCatalog([]), []);
+});
+
+/* ─── Третий ответ «Неизвестно» (задача #172) ─────────────────────────────── */
+
+test('«неизвестно» — полноценный ответ, шаг считается пройденным', () => {
+  const step = { key: 'provider_changed', kind: 'yesno_date', allow_unknown: true };
+  assert.equal(stepIsComplete(step, { answers: { provider_changed: { value: 'unknown' } } }), true);
+});
+
+test('«да» по-прежнему требует уточнения, а «неизвестно» — нет', () => {
+  const step = { key: 'provider_changed', kind: 'yesno_date', allow_unknown: true };
+  assert.equal(stepIsComplete(step, { answers: { provider_changed: { value: 'yes', detail: '' } } }), false);
+  assert.equal(stepIsComplete(step, { answers: { provider_changed: { value: 'yes', detail: '2026-07-01' } } }), true);
 });
