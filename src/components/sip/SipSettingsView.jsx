@@ -32,15 +32,33 @@ const EMPTY_FORM = {
     fop2_enabled: true,
 };
 
-// Массово меняются только пароль и домен: номера у каждого свои.
+// Массово меняются пароль, домен и вход в FOP2: номера у каждого свои.
 const BULK_FIELDS = [
     { key: 'sip_domain', label: 'Домен основного номера', secret: false },
     { key: 'sip_password', label: 'Пароль основного номера', secret: true },
     { key: 'autodial_domain', label: 'Домен автодозвона', secret: false },
     { key: 'autodial_password', label: 'Пароль автодозвона', secret: true },
+    // Не текст, а состояние: у выключателя нет «общего» значения, к которому
+    // возвращает пустая строка, — поэтому и выбор из двух вариантов, а не поле.
+    { key: 'fop2_enabled', label: 'Вход в FOP2', flag: true },
 ];
 
-const EMPTY_BULK = BULK_FIELDS.reduce((acc, f) => ({ ...acc, [f.key]: { on: false, value: '' } }), {});
+// Выключатель — не текст: «пусто» для него ничего не возвращает, зато нужно
+// третье состояние «не трогать». Одним переключателем на три положения, а не
+// тумблером «менять это поле» рядом с подписью «Вход в FOP2»: зелёный тумблер
+// там читался бы как сам вход, и «Не входит» ниже противоречило бы ему.
+const BULK_FLAG_CHOICES = [
+    { on: false, value: false, label: 'Не менять' },
+    { on: true, value: true, label: 'Входит' },
+    { on: true, value: false, label: 'Не входит' },
+];
+
+const bulkFlagPicked = (state, choice) => (
+    state.on === choice.on && (!choice.on || state.value === choice.value)
+);
+
+const EMPTY_BULK = BULK_FIELDS.reduce(
+    (acc, f) => ({ ...acc, [f.key]: { on: false, value: f.flag ? false : '' } }), {});
 
 const formFromOperator = (op) => ({
     sip_number: op?.sip_number || '',
@@ -509,7 +527,10 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         setBulkSaving(true);
         try {
             const body = { user_ids: [...selected] };
-            bulkChanges.forEach((f) => { body[f.key] = bulkForm[f.key].value.trim(); });
+            bulkChanges.forEach((f) => {
+                const { value } = bulkForm[f.key];
+                body[f.key] = f.flag ? Boolean(value) : value.trim();
+            });
             const resp = await fetch(`${apiBaseUrl}/api/sip_config/operators/bulk`, {
                 method: 'PUT',
                 credentials: 'include',
@@ -792,8 +813,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 onClick={openBulk}
                                 className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-3 py-1.5 text-[13px] font-semibold transition hover:bg-blue-500 active:scale-[0.98]"
                             >
-                                <FaIcon className="fas fa-key" style={{ width: 12, height: 12 }} />
-                                Пароль и домен
+                                <FaIcon className="fas fa-sliders" style={{ width: 12, height: 12 }} />
+                                Изменить
                             </button>
                         )}
                         <button
@@ -1053,13 +1074,16 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                 const s = h.settings || {};
                                 const parts = h.target_user_id
                                     ? [
-                                        s.sip_number ? `номер ${s.sip_number}` : 'номер снят',
+                                        // Массовая правка номеров не касается, и ключа sip_number
+                                        // в её снимке нет: «номер снят» было бы неправдой.
+                                        s.sip_number ? `номер ${s.sip_number}` : (s.bulk ? null : 'номер снят'),
                                         s.autodial_number ? `автодозвон ${s.autodial_number}` : null,
                                         s.sip_domain ? `домен ${s.sip_domain}` : null,
                                         s.sip_password ? 'свой пароль' : null,
                                         // Флаг меняет, доходят ли до сотрудника звонки из
                                         // очередей, — в истории он обязан быть виден.
                                         s.fop2_enabled === false ? 'FOP2 выключен' : null,
+                                        s.bulk ? 'массово' : null,
                                     ]
                                     : [
                                         s.sip_server ? `сервер ${s.sip_server}` : 'сервер общий',
@@ -1198,11 +1222,11 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                 </div>
             </IosModal>
 
-            {/* Массовое изменение пароля и домена */}
+            {/* Массовое изменение пароля, домена и входа в FOP2 */}
             <IosModal
                 open={bulkOpen}
                 onClose={() => setBulkOpen(false)}
-                title="Пароль и домен для выбранных"
+                title="Настройки для выбранных"
                 subtitle={`Сотрудников: ${selected.size}`}
                 footer={(
                     <>
@@ -1223,6 +1247,47 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                         {BULK_FIELDS.map((field) => {
                             const state = bulkForm[field.key];
+                            if (field.flag) {
+                                return (
+                                    <div key={field.key} className="px-4 py-3">
+                                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                                            <span className="text-[13.5px] font-medium text-slate-700">{field.label}</span>
+                                            <div className="flex items-center gap-1 rounded-xl bg-slate-100 p-1">
+                                                {BULK_FLAG_CHOICES.map((choice) => (
+                                                    <button
+                                                        key={choice.label}
+                                                        type="button"
+                                                        disabled={!canEdit}
+                                                        aria-pressed={bulkFlagPicked(state, choice)}
+                                                        onClick={() => setBulkForm((f) => ({
+                                                            ...f, [field.key]: { on: choice.on, value: choice.value },
+                                                        }))}
+                                                        className={`flex-1 whitespace-nowrap rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+                                                            bulkFlagPicked(state, choice)
+                                                                ? 'bg-white text-slate-900 shadow-sm'
+                                                                : 'text-slate-500 hover:text-slate-800'
+                                                        }`}
+                                                    >
+                                                        {choice.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        {/* Предупреждение то же, что в карточке сотрудника: без него
+                                            массовое выключение выглядит безобиднее, чем оно есть. */}
+                                        {state.on && !state.value && (
+                                            <p className="mt-2 flex items-start gap-1.5 rounded-xl bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-700">
+                                                <FaIcon className="fas fa-triangle-exclamation mt-0.5 shrink-0" style={{ width: 11, height: 11 }} />
+                                                <span>
+                                                    Выбранные перестанут вставать в очереди Asterisk: статусы
+                                                    «Перерыв», «Тренинг» и «Техническая пауза» больше не будут
+                                                    снимать их с очередей. Режим автодозвона не затрагивается.
+                                                </span>
+                                            </p>
+                                        )}
+                                    </div>
+                                );
+                            }
                             return (
                                 <div key={field.key} className="px-4 py-3">
                                     <div className="flex items-center justify-between gap-3">
@@ -1260,8 +1325,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     </div>
                     <p className="px-1 text-[11.5px] text-slate-500">
                         Меняются только включённые поля, остальное у каждого остаётся своим.
-                        Пустое значение возвращает настройки отдела (или общие): домен АТС и пароль «база + номер».
-                        Номера массово не меняются — они у каждого свои.
+                        Пустой пароль или домен возвращает настройки отдела (или общие): домен АТС
+                        и пароль «база + номер». Номера массово не меняются — они у каждого свои.
                     </p>
 
                     <section className="space-y-1.5">

@@ -57,7 +57,7 @@ def _database_namespace(method_names):
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
         if isinstance(node, ast.FunctionDef) and node.name in (
-            "normalize_sip_identifier", "build_sip_password",
+            "normalize_sip_identifier", "build_sip_password", "parse_sip_flag",
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
     for node in DATABASE_CLASS.body:
@@ -359,18 +359,19 @@ class SaveUserSipSettingsTests(unittest.TestCase):
 
 
 class BulkUpdateSipOverridesTests(unittest.TestCase):
-    """Массовое проставление пароля/домена выбранным (Ctrl-выбор в списке)."""
+    """Массовое изменение пароля/домена и входа в FOP2 (Ctrl-выбор в списке)."""
 
     def setUp(self):
         self.ns = _database_namespace({
             "bulk_update_user_sip_overrides", "_mask_sip_secret", "normalize_sip_domain",
         })
         # (id, name, sip_password, sip_domain, autodial_number, autodial_password,
-        #  autodial_domain, sip_number, department_sip_server, department_autodial_server)
+        #  autodial_domain, sip_number, department_sip_server, department_autodial_server,
+        #  fop2_enabled)
         rows = [
-            (1, 'Иван', '', '', '2024', '', '', '1024', '', ''),        # автодозвон есть, персональных нет
-            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', '', ''),  # были персональные значения
-            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', '', ''),    # уже с нужным доменом — не трогаем
+            (1, 'Иван', '', '', '2024', '', '', '1024', '', '', True),        # автодозвон есть, персональных нет
+            (2, 'Пётр', 'own', 'pbx.old', '', '', '', '1088', '', '', True),  # были персональные значения
+            (3, 'Мария', '', 'pbx.new', '', '', '', '1099', '', '', True),    # уже с нужным доменом — не трогаем
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -425,7 +426,7 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def test_department_domain_is_the_default_in_bulk_too(self):
         """Сотрудник отдела с своей АТС считается на её домене, а не на общем."""
-        rows = [(1, 'Иван', '', '', '', '', '', '1024', 'pbx.sales', '')]
+        rows = [(1, 'Иван', '', '', '', '', '', '1024', 'pbx.sales', '', True)]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
         self.db.get_sip_config = lambda: {
@@ -439,8 +440,8 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
 
     def test_two_selected_landing_on_one_number_and_domain_are_refused(self):
         rows = [
-            (1, 'Иван', '', '', '', '', '', '1024', '', ''),
-            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', ''),   # тот же номер, но другая АТС
+            (1, 'Иван', '', '', '', '', '', '1024', '', '', True),
+            (2, 'Пётр', '', 'pbx.old', '', '', '', '1024', '', '', True),   # тот же номер, но другая АТС
         ]
         self.db = _StubDb(self.ns, _FakeCursor(rows))
         self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
@@ -481,6 +482,125 @@ class BulkUpdateSipOverridesTests(unittest.TestCase):
         self.assertNotIn("supersecret", snapshot)
         self.assertTrue(json.loads(snapshot)["bulk"])
         self.assertIn("%s::jsonb", template)
+
+
+    # ── Вход в FOP2 мультивыбором ────────────────────────────────────────────
+    # Ради этого раздел и получил массовую правку: выключать FOP2 приходилось
+    # заходя в карточку каждого сотрудника по отдельности.
+
+    def _only_fop2_off(self, sip_password='', sip_domain=''):
+        """Подменяет выборку на одного Петра с выключенным FOP2."""
+        rows = [(2, 'Пётр', sip_password, sip_domain, '', '', '', '1088', '', '', False)]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
+        self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+
+    def test_the_flag_alone_is_a_valid_bulk_change(self):
+        """Один только выключатель — уже повод для записи, а не «нет полей»."""
+        self._bulk({"fop2_enabled": False})
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual({1, 2, 3}, {row[0] for row in values})
+        self.assertEqual([False, False, False], [row[6] for row in values])
+        # Пароль и домен у каждого остались своими: их в payload'е не было.
+        by_id = {row[0]: row for row in values}
+        self.assertEqual("own", by_id[2][1])
+        self.assertEqual("pbx.old", by_id[2][2])
+
+    def test_flag_only_change_does_not_recheck_the_numbers(self):
+        """Номера не двигаются, значит и сверять занятость нечего: иначе давно
+        задвоенная в данных пара завалила бы всю пачку чужим номером."""
+        self._bulk({"fop2_enabled": False})
+        self.assertEqual([], self.checked)
+
+    def test_conflicting_numbers_do_not_block_turning_fop2_off(self):
+        """Два выбранных с одним номером на одной АТС — не повод отказать в
+        выключении FOP2: пара как была задвоена, так и останется."""
+        rows = [
+            (1, 'Иван', '', '', '', '', '', '1024', '', '', True),
+            (2, 'Пётр', '', '', '', '', '', '1024', '', '', True),
+        ]
+        self.db = _StubDb(self.ns, _FakeCursor(rows))
+        self.db.normalize_sip_domain = self.ns["normalize_sip_domain"]
+        self.db.get_sip_config = lambda: {
+            "sip_server": "sip.local", "autodial_server": "", "autodial_base_password": ""}
+        self.db.get_sip_operators_by_ids = lambda ids: [{"id": i} for i in ids]
+        self.db.find_sip_number_owners = lambda entries, exclude_user_ids=None: {}
+        self._bulk({"fop2_enabled": False}, ids=(1, 2))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertEqual({1, 2}, {row[0] for row in values})
+
+    def test_a_string_from_the_form_turns_the_flag_off(self):
+        """JSON присылает bool, multipart — '0': str(False) сошла бы за истину."""
+        self._bulk({"fop2_enabled": "0"}, ids=(1,))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertIs(False, values[0][6])
+
+    def test_an_unchanged_flag_writes_nothing(self):
+        """FOP2 у всех и так включён — повторное «включить» ничего не пишет."""
+        self._bulk({"fop2_enabled": True})
+        self.assertIsNone(self._batched("INSERT INTO user_sip_settings"))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        self.assertIsNone(self._batched("INSERT INTO sip_config_history"))
+
+    def test_clearing_overrides_keeps_the_row_of_someone_without_fop2(self):
+        """Тот самый молчаливый откат: чистка пароля удаляла строку целиком, и
+        сотрудник, снятый с очередей, возвращался в них сам собой."""
+        self._only_fop2_off(sip_password='own', sip_domain='pbx.old')
+        self._bulk({"sip_password": "", "sip_domain": ""}, ids=(2,))
+        self.assertIsNone(self._batched("DELETE FROM user_sip_settings"))
+        _, values, _ = self._batched("INSERT INTO user_sip_settings")
+        self.assertIs(False, values[0][6])
+
+    def test_turning_the_flag_back_on_releases_the_row(self):
+        """Выключатель был единственным персональным значением — пустышку не храним."""
+        self._only_fop2_off()
+        self._bulk({"fop2_enabled": True}, ids=(2,))
+        deletes = [c for c in self.db.cursor.calls if "DELETE FROM user_sip_settings" in c[0]]
+        self.assertEqual(1, len(deletes))
+        self.assertEqual(([2],), deletes[0][1])
+
+    def test_the_flag_is_written_to_history(self):
+        """Флаг решает, доходят ли до сотрудника звонки из очередей, — в истории
+        обязано быть видно, кто и когда его снял, даже в массовой правке."""
+        self._bulk({"fop2_enabled": False}, ids=(1,))
+        _, values, _ = self._batched("INSERT INTO sip_config_history")
+        snapshot = json.loads(values[0][2])
+        self.assertIs(False, snapshot["fop2_enabled"])
+        self.assertTrue(snapshot["bulk"])
+
+    def test_the_upsert_carries_the_flag_column(self):
+        """Колонка обязана быть и в списке INSERT, и в DO UPDATE: без второго
+        массовая правка пароля возвращала бы FOP2 всем, кому его выключали."""
+        self._bulk({"fop2_enabled": False}, ids=(1,))
+        sql, values, template = self._batched("INSERT INTO user_sip_settings")
+        self.assertIn("fop2_enabled, updated_by, updated_at", sql)
+        self.assertIn("fop2_enabled = EXCLUDED.fop2_enabled", sql)
+        # Плейсхолдеров ровно столько же, сколько полей в кортеже.
+        self.assertEqual(len(values[0]), template.count("%s"))
+
+
+class ParseSipFlagTests(unittest.TestCase):
+    """Разбор булева поля из payload'а — общий у карточки и массовой правки."""
+
+    def setUp(self):
+        self.parse = _database_namespace(set())["parse_sip_flag"]
+
+    def test_absent_value_keeps_the_default(self):
+        self.assertIs(True, self.parse(None, True))
+        self.assertIs(False, self.parse(None, False))
+
+    def test_bool_passes_through(self):
+        self.assertIs(False, self.parse(False))
+        self.assertIs(True, self.parse(True))
+
+    def test_form_strings_are_understood(self):
+        for value in ('0', 'false', 'FALSE', 'no', 'off', '', '  '):
+            self.assertIs(False, self.parse(value), value)
+        for value in ('1', 'true', 'on', 'yes'):
+            self.assertIs(True, self.parse(value), value)
 
 
 class FindSipNumberOwnersTests(unittest.TestCase):
@@ -960,11 +1080,36 @@ class SipSectionFrontendTests(unittest.TestCase):
         self.assertIn("if (event.shiftKey)", view)                   # диапазон
         self.assertIn("/api/sip_config/operators/bulk", view)
         self.assertIn("Выбрано: {selected.size}", view)
-        # Массово меняются только пароль и домен — номера у каждого свои.
+        # Массово меняются пароль, домен и FOP2 — номера у каждого свои.
         bulk_fields = view.split("const BULK_FIELDS = [", 1)[1].split("];", 1)[0]
         self.assertIn("sip_domain", bulk_fields)
         self.assertIn("autodial_password", bulk_fields)
         self.assertNotIn("sip_number", bulk_fields)
+
+    def test_fop2_is_switched_for_the_whole_selection(self):
+        """Ради этого правка и делалась: раньше выключатель жил только в карточке,
+        и снимать людей с очередей приходилось по одному."""
+        view = _read(VIEW_PATH)
+        bulk_fields = view.split("const BULK_FIELDS = [", 1)[1].split("];", 1)[0]
+        self.assertIn("key: 'fop2_enabled'", bulk_fields)
+        self.assertIn("flag: true", bulk_fields)
+        # У флага своё «пусто»: пустая строка ушла бы на бэкенд как «включён».
+        self.assertIn("value: f.flag ? false : ''", view)
+        self.assertIn("body[f.key] = f.flag ? Boolean(value) : value.trim();", view)
+        # Три положения одним переключателем, а не тумблер «менять это поле»:
+        # зелёный тумблер рядом с «Вход в FOP2» читался бы как сам вход, и
+        # выбранное «Не входит» ниже противоречило бы ему.
+        choices = view.split("const BULK_FLAG_CHOICES = [", 1)[1].split("];", 1)[0]
+        self.assertIn("on: false, value: false, label: 'Не менять'", choices)
+        self.assertIn("on: true, value: true, label: 'Входит'", choices)
+        self.assertIn("on: true, value: false, label: 'Не входит'", choices)
+        self.assertIn("const bulkFlagPicked = (state, choice) =>", view)
+        # «Не менять» — состояние по умолчанию: применить, не выбрав, нельзя.
+        self.assertIn("(acc, f) => ({ ...acc, [f.key]: { on: false, value: f.flag ? false : '' } })", view)
+        # Последствия те же, что в карточке, — предупреждение обязано быть и здесь.
+        self.assertIn("перестанут вставать в очереди Asterisk", view)
+        # Массовая правка номеров не касается: в истории не должно быть «номер снят».
+        self.assertIn("(s.bulk ? null : 'номер снят')", view)
 
 
 if __name__ == "__main__":

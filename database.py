@@ -178,6 +178,23 @@ def build_sip_password(template, number) -> str:
     return f'{template}{number}'
 
 
+SIP_FLAG_FALSE = ('', '0', 'false', 'no', 'off')
+
+
+def parse_sip_flag(value, default=True) -> bool:
+    """Булев флаг из payload'а: None = «не меняем», строку разбираем руками.
+
+    Отдельно от текстовых полей, потому что str(False).strip() дал бы непустую
+    строку 'False' — то есть «истину», и выключатель никогда бы не выключался.
+    JSON присылает bool, multipart-форма — '0'/'1'.
+    """
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        return value.strip().lower() not in SIP_FLAG_FALSE
+    return bool(value)
+
+
 def normalize_sip_identifier(value, field="SIP-номер"):
     """Нормализует SIP-номер/код: '' если пусто, иначе валидирует набор символов."""
     if value is None:
@@ -24077,15 +24094,10 @@ class Database:
             return str(payload[key]).strip()
 
         def _flag(key, default):
-            """Флаг разбираем отдельно от _field: str(False).strip() дал бы
-            непустую строку 'False', то есть «истину», и выключатель никогда бы
-            не выключался. JSON присылает bool, multipart-форма — '0'/'1'."""
-            value = payload.get(key)
-            if value is None:
-                return bool(default)
-            if isinstance(value, str):
-                return value.strip().lower() not in ('', '0', 'false', 'no', 'off')
-            return bool(value)
+            # Разбор вынесен в parse_sip_flag: тем же правилам подчиняется
+            # массовое изменение, а два разных «что считать выключенным»
+            # разошлись бы при первой же правке.
+            return parse_sip_flag(payload.get(key), default)
 
         sip_number = normalize_sip_identifier(_field('sip_number', current['sip_number']), field="SIP-номер")
         autodial_number = normalize_sip_identifier(
@@ -24197,7 +24209,7 @@ class Database:
     _SIP_OVERRIDE_FIELDS = ('sip_password', 'sip_domain', 'autodial_password', 'autodial_domain')
 
     def bulk_update_user_sip_overrides(self, user_ids, payload: dict, changed_by=None) -> list:
-        """Массово проставить персональные пароль/домен выбранным сотрудникам.
+        """Массово проставить пароль/домен и вход в FOP2 выбранным сотрудникам.
 
         Меняем только переданные поля — остальные (в том числе номера, они
         уникальны у каждого) остаются как есть. Пустое значение = «вернуть
@@ -24213,6 +24225,10 @@ class Database:
             for key in self._SIP_OVERRIDE_FIELDS
             if payload.get(key) is not None
         }
+        # Флаг идёт мимо текстового разбора: у него своя семантика пустоты
+        # (см. parse_sip_flag), а «не передали» по-прежнему значит «не меняем».
+        if payload.get('fop2_enabled') is not None:
+            fields['fop2_enabled'] = parse_sip_flag(payload['fop2_enabled'])
         if not fields:
             raise ValueError("Не выбрано ни одного поля для изменения")
 
@@ -24226,7 +24242,8 @@ class Database:
                        COALESCE(s.sip_password, ''), COALESCE(s.sip_domain, ''),
                        COALESCE(s.autodial_number, ''), COALESCE(s.autodial_password, ''),
                        COALESCE(s.autodial_domain, ''), COALESCE(u.sip_number, ''),
-                       COALESCE(dc.sip_server, ''), COALESCE(dc.autodial_server, '')
+                       COALESCE(dc.sip_server, ''), COALESCE(dc.autodial_server, ''),
+                       COALESCE(s.fop2_enabled, TRUE)
                 FROM users u
                 LEFT JOIN user_sip_settings s ON s.user_id = u.id
                 LEFT JOIN sip_department_config dc ON dc.department_id = u.department_id
@@ -24237,6 +24254,10 @@ class Database:
                 current[r[0]] = {
                     "sip_password": r[2], "sip_domain": r[3], "autodial_number": r[4],
                     "autodial_password": r[5], "autodial_domain": r[6],
+                    # Флаг обязан ехать в current даже когда его не меняют: иначе
+                    # чистка пароля удалила бы строку и молча вернула FOP2 тем,
+                    # кому его выключали (COALESCE отдаёт TRUE без строки).
+                    "fop2_enabled": bool(r[10]),
                 }
                 names[r[0]] = r[1] or ""
                 numbers[r[0]] = r[7]
@@ -24265,6 +24286,11 @@ class Database:
             if after == before:
                 continue
             targets[user_id] = after
+            # Выключатель FOP2 номеров не касается: если у сотрудника поменялся
+            # только он, сверять занятость нечего — а пара, давно задвоенная в
+            # данных, иначе завалила бы всю пачку сообщением про чужой номер.
+            if all(after[key] == before[key] for key in self._SIP_OVERRIDE_FIELDS):
+                continue
             pairs = (
                 (numbers.get(user_id, ''), _effective(after['sip_domain'], user_id)),
                 (after['autodial_number'], _effective_autodial(after['autodial_domain'], user_id)),
@@ -24288,11 +24314,16 @@ class Database:
         with self._get_cursor() as cur:
             upserts, deletes, history = [], [], []
             for user_id, after in targets.items():
-                if any(after.values()):
+                # Выключенный FOP2 — тоже повод хранить строку, поэтому считаем
+                # не any(after.values()): там лежит и fop2_enabled=True, который
+                # сам по себе строку не оправдывает (это состояние по умолчанию).
+                if any((after['sip_password'], after['sip_domain'], after['autodial_number'],
+                        after['autodial_password'], after['autodial_domain'],
+                        not after['fop2_enabled'])):
                     upserts.append((
                         user_id, after['sip_password'], after['sip_domain'],
                         after['autodial_number'], after['autodial_password'],
-                        after['autodial_domain'], changed_by,
+                        after['autodial_domain'], after['fop2_enabled'], changed_by,
                     ))
                 else:
                     deletes.append(user_id)
@@ -24302,6 +24333,7 @@ class Database:
                     "autodial_number": after['autodial_number'],
                     "autodial_password": self._mask_sip_secret(after['autodial_password']),
                     "autodial_domain": after['autodial_domain'],
+                    "fop2_enabled": after['fop2_enabled'],
                     "bulk": True,
                 })))
 
@@ -24309,7 +24341,8 @@ class Database:
                 execute_values(cur, """
                     INSERT INTO user_sip_settings (
                         user_id, sip_password, sip_domain,
-                        autodial_number, autodial_password, autodial_domain, updated_by, updated_at)
+                        autodial_number, autodial_password, autodial_domain,
+                        fop2_enabled, updated_by, updated_at)
                     VALUES %s
                     ON CONFLICT (user_id) DO UPDATE SET
                         sip_password = EXCLUDED.sip_password,
@@ -24317,10 +24350,11 @@ class Database:
                         autodial_number = EXCLUDED.autodial_number,
                         autodial_password = EXCLUDED.autodial_password,
                         autodial_domain = EXCLUDED.autodial_domain,
+                        fop2_enabled = EXCLUDED.fop2_enabled,
                         updated_by = EXCLUDED.updated_by,
                         updated_at = EXCLUDED.updated_at
                 """, upserts,
-                    template="(%s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))")
+                    template="(%s, %s, %s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))")
             if deletes:
                 cur.execute("DELETE FROM user_sip_settings WHERE user_id = ANY(%s)", (deletes,))
             if history:

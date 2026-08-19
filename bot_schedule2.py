@@ -22070,10 +22070,11 @@ def _sip_target_in_scope(target, department_ids, supervisor_id) -> bool:
 @app.route('/api/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])
 @require_api_key
 def sip_config_operators_bulk_endpoint():
-    """Массово проставить персональные пароль/домен выбранным сотрудникам.
+    """Массово изменить пароль/домен и вход в FOP2 выбранным сотрудникам.
 
     Номера остаются персональными — массово меняются только пароль и домен
-    (основного номера и номера автодозвона). Пустое значение возвращает общие."""
+    (основного номера и номера автодозвона) и выключатель FOP2. Пустое значение
+    возвращает общие; непереданное поле не трогаем."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     try:
