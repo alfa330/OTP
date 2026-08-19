@@ -76,7 +76,7 @@ const SearchHit = ({ article, onOpen }) => (
 );
 
 export default function WikiLibrary({ base, headers, showToast, structure, counters,
-                                      canCreate, canEdit = false,
+                                      canCreate, canEdit = false, canManageAccess = false,
                                       createTick = 0, homeTick = 0,
                                       onOpenParks,
                                       initialSlug, onInitialSlugConsumed,
@@ -109,6 +109,17 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const [parksCanManage, setParksCanManage] = useState(false);
     const [found, setFound] = useState(null);   // null = поиска не было
     const [loading, setLoading] = useState(false);
+    /* Периметр витрины: личный или всё содержимое портала.
+     *
+     * По умолчанию личный — человек видит то, к чему имеет отношение. Сервер
+     * умеет отдавать и всё (?scope=all для can_manage_access), но до сих пор
+     * этого никто не просил: переключателя не было ни здесь, ни где-то ещё, а
+     * без него статья БЕЗ РАЗДЕЛА в режиме «наследовать» не видна НИКОМУ, кроме
+     * автора, — её периметр пуст по построению. Найти и починить такую статью
+     * было нельзя: ни в оглавлении, ни в поиске, ни в черновиках. */
+    const [showAll, setShowAll] = useState(false);
+    const wideScope = canManageAccess && showAll;
+    const scopeParams = useMemo(() => (wideScope ? { scope: 'all' } : {}), [wideScope]);
 
     const isEditor = !!(canCreate || canEdit);
 
@@ -197,14 +208,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         if (term.length < 2) { setFound(null); return; }
 
         setLoading(true);
-        axios.get(`${base}/search`, { headers, params: { q: term } })
+        axios.get(`${base}/search`, { headers, params: { q: term, ...scopeParams } })
             .then((r) => setFound(r.data?.items || []))
             .catch((e) => {
                 setFound([]);
                 toast(errText(e, 'Поиск не сработал'), 'error');
             })
             .finally(() => setLoading(false));
-    }, [base, headers, query, toast]);
+    }, [base, headers, query, toast, scopeParams]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -216,11 +227,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
        остаются рабочим способом сузить выборку. */
     const loadIndex = useCallback(() => {
         setIndexLoading(true);
-        return axios.get(`${base}/articles`, { headers, params: { limit: 200 } })
+        return axios.get(`${base}/articles`, { headers, params: { limit: 200, ...scopeParams } })
             .then((r) => setIndex(r.data?.items || []))
             .catch(() => setIndex([]))
             .finally(() => setIndexLoading(false));
-    }, [base, headers]);
+    }, [base, headers, scopeParams]);
 
     const loadHome = useCallback(() => {
         setHomeLoading(true);
@@ -232,10 +243,11 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
 
     const loadDrafts = useCallback(() => {
         if (!isEditor) { setDrafts([]); return Promise.resolve(); }
-        return axios.get(`${base}/articles`, { headers, params: { status: 'draft', limit: 8 } })
+        return axios.get(`${base}/articles`, { headers,
+                                              params: { status: 'draft', limit: 8, ...scopeParams } })
             .then((r) => setDrafts(r.data?.items || []))
             .catch(() => setDrafts([]));
-    }, [base, headers, isEditor]);
+    }, [base, headers, isEditor, scopeParams]);
 
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
@@ -489,6 +501,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                 articles={index}
                 onOpen={openArticle}
                 loading={indexLoading}
+                canShowAll={canManageAccess}
+                showAll={showAll}
+                onShowAllChange={setShowAll}
             />
         </div>
     );
