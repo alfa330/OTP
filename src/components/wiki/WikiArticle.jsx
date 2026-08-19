@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
+import { absolutizeFileUrls } from './fileUrls';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
 
@@ -199,9 +200,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         return () => { cancelled = true; };
     }, [base, headers, slug]);
 
+    /* Адреса файлов раскрываем до абсолютных ПОСЛЕ санитайзера: фронт и API на
+       разных доменах, и относительный `/api/wiki/file/<id>` браузер искал бы на
+       домене страницы (см. fileUrls.js). Порядок важен — подстановка идёт по
+       уже очищенному HTML и мимо DOMPurify ничего не проносит. */
     const safeHtml = useMemo(
-        () => (article?.content ? wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS)) : ''),
-        [article?.content],
+        () => (article?.content
+            ? absolutizeFileUrls(
+                wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS)), base)
+            : ''),
+        [article?.content, base],
     );
 
     // Оглавление собираем после того, как контент оказался в DOM.

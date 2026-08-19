@@ -21,6 +21,7 @@ import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
 import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
@@ -118,7 +119,10 @@ export default function WikiEditor({
             TableHeader,
             TableCell,
         ],
-        content: article?.content || '',
+        // Тот же разворот адресов, что и при чтении: иначе в редакторе картинки
+        // уже загруженной статьи стоят битыми (см. fileUrls.js). Обратно они
+        // сворачиваются при сохранении.
+        content: absolutizeFileUrls(article?.content || '', base),
         onUpdate: () => setDirty(true),
         editorProps: {
             attributes: {
@@ -172,7 +176,9 @@ export default function WikiEditor({
         const payload = {
             title: title.trim(),
             summary: summary.trim() || null,
-            content: editor.getHTML(),
+            // Сворачиваем адреса файлов обратно в относительные: в базе тело
+            // статьи не должно зависеть от домена API.
+            content: relativizeFileUrls(editor.getHTML()),
             article_type: articleType,
             section_ids: sectionIds.map(Number).filter(Boolean),
             ai_support: aiSupport,
@@ -214,7 +220,7 @@ export default function WikiEditor({
                 const data = r.data || {};
                 if (!title.trim() && data.title) setTitle(data.title);
                 if (!summary.trim() && data.summary) setSummary(data.summary);
-                editor.commands.setContent(data.content || '');
+                editor.commands.setContent(absolutizeFileUrls(data.content || '', base));
                 setDirty(true);
                 const extra = data.images?.length
                     ? `, картинок: ${data.images.length}` : '';
@@ -389,7 +395,7 @@ export default function WikiEditor({
                     // описание человек уже выверил, и перезаписывать их
                     // машинным вариантом было бы потерей его работы.
                     if (typeof content === 'string') {
-                        editor?.commands.setContent(content);
+                        editor?.commands.setContent(absolutizeFileUrls(content, base));
                         setDirty(true);
                     }
                 }}
@@ -399,7 +405,7 @@ export default function WikiEditor({
                     // значило бы получить статью с двумя вступлениями.
                     if (data.title) setTitle(data.title);
                     if (data.summary) setSummary(data.summary);
-                    editor?.commands.setContent(data.content || '');
+                    editor?.commands.setContent(absolutizeFileUrls(data.content || '', base));
                     setDirty(true);
                 }}
             />
