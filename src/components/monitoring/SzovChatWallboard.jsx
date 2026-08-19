@@ -30,7 +30,7 @@ import {
  *   - счётчики «сейчас» — сколько чатников на линии, сколько заняты и сколько на тренинге
  *     (запрос владельца); открытые чаты в этом ряду играют роль очереди с «Основы»;
  *   - график по часам — среднее время ответа ВНУТРИ чата (левая ось, минуты) против того,
- *     сколько ставок держало линию в этот час (правая ось, FTE; занятые и на тренинге линию
+ *     сколько чатников держало линию в этот час (правая ось, люди; занятые и на тренинге линию
  *     не держат, их минуты в сумму не идут).
  *
  * Оси две, и это осознанно: минуты и люди — разные величины, но смысл графика именно в их
@@ -97,18 +97,10 @@ const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
 };
 
 /*
- * Линия за час меряется в FTE (полных ставках), а не в головах: человеко-минуты «Онлайн»,
- * делённые на длину часа. Головы пробовали 18.08.2026 и вернулись обратно — они не отличают
- * человека, отработавшего час, от заглянувшего на пять минут, поэтому число дробное, и
- * называть его людьми нельзя. На стене «1,63» — лишняя точность: один знак, у целых убираем
- * запятую. Ноль не подписываем: пустой час и так пустой, цифра только шумит.
+ * Людей на линии сервер уже округлил до целого (средняя занятость часа), здесь остаётся только
+ * не подписывать ноль: пустой час и так пустой, цифра над ним только шумит.
  */
-const formatFte = (value) => {
-    const number = Number(value);
-    if (!Number.isFinite(number) || number <= 0) return '';
-    const rounded = Math.round(number * 10) / 10;
-    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace('.', ',');
-};
+const formatPeople = (value) => (Number(value) > 0 ? formatInt(value) : '');
 
 /*
  * Час — промежуток, а не момент: в столбик идут чаты, начавшиеся с 12:00:00 по 12:59:59.
@@ -144,16 +136,9 @@ const ChartTooltip = ({ active, payload, label }) => {
                 <div>
                     Было на линии:{' '}
                     <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.online }}>
-                        {row.fte === null ? '—' : `${formatFte(row.fte) || '0'} FTE`}
+                        {row.online === null ? '—' : `${formatInt(row.online)} чел.`}
                     </span>
                 </div>
-                {/* Расшифровка прямо в подсказке: «1,6 FTE» без неё читается как «1,6 человека»,
-                    а это разные вещи — двое по полчаса дают ту же единицу, что один целый час. */}
-                {row.fte === null ? null : (
-                    <div className="pt-0.5 text-[11.5px] leading-snug text-slate-400">
-                        человеко-минуты на линии ÷ длину часа
-                    </div>
-                )}
             </div>
         </div>
     );
@@ -173,7 +158,7 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
             ? null : Number((row.inner_reply_seconds / 60).toFixed(2)),
         innerSeconds: row.inner_reply_seconds ?? null,
         firstSeconds: row.first_reply_seconds ?? null,
-        fte: row.fte ?? null,
+        online: row.operators_online ?? null,
         partial: Boolean(row.partial),
     })), [rows]);
 
@@ -195,18 +180,18 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1 }) => {
                            tickLine={false} axisLine={false} width={44 * scale}
                            label={{ value: 'мин', position: 'top', offset: 12,
                                     fontSize: 11 * scale, fill: '#94a3b8' }} />
-                    <YAxis yAxisId="right" orientation="right"
+                    <YAxis yAxisId="right" orientation="right" allowDecimals={false}
                            tick={{ fontSize: 11 * scale, fill: '#94a3b8' }} tickLine={false} axisLine={false}
                            width={44 * scale}
-                           label={{ value: 'FTE', position: 'top', offset: 12,
+                           label={{ value: 'чатники', position: 'top', offset: 12,
                                     fontSize: 11 * scale, fill: '#94a3b8' }} />
                     <Tooltip content={<ChartTooltip />} cursor={{ fill: '#f8fafc' }} />
                     <Legend verticalAlign="bottom" height={28} iconType="circle"
                             wrapperStyle={{ fontSize: 12 * scale, color: '#475569' }} />
-                    {/* Число над столбиком: ставок на линии единицы, и на глаз 1,6 от 2,1 не отличить. */}
-                    <Bar yAxisId="right" dataKey="fte" name="Ставок на линии (FTE)"
+                    {/* Число над столбиком: людей на линии единицы, и на глаз 3 от 4 не отличить. */}
+                    <Bar yAxisId="right" dataKey="online" name="Чатников на линии"
                          fill={CHART_COLORS.online} radius={[4, 4, 0, 0]} maxBarSize={26}>
-                        <LabelList dataKey="fte" position="top" formatter={formatFte}
+                        <LabelList dataKey="online" position="top" formatter={formatPeople}
                                    style={{ fontSize: 10.5 * scale, fill: '#1d4ed8', fontWeight: 600 }} />
                     </Bar>
                     <ReferenceLine yAxisId="left" y={targetSeconds / 60} stroke={CHART_COLORS.target}
@@ -285,8 +270,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                     title="По часам"
                     right={(
                         <span className="text-[12.5px] text-slate-400">
-                            время ответа внутри чата и линия в ставках (FTE = человеко-минуты ÷ длина часа);
-                            цель {formatMinutes(targetSeconds, 0)}
+                            время ответа внутри чата и сколько чатников держало линию; цель {formatMinutes(targetSeconds, 0)}
                         </span>
                     )}
                 >
