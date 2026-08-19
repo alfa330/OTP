@@ -227,9 +227,53 @@ def restore_version(cursor, article_id, version_id, *, editor_id, session_id):
     return True
 
 
+# Общий отдел — дом для статьи, которой не выбрали раздел. Ищем по слагу
+# раздела и по названию отдела: слаг задаётся переносом и правкам названия не
+# подвержен, название — запасной путь для базы, собранной руками.
+_FALLBACK_SECTION_SLUG = 'obschiy-sotrudnik'
+_FALLBACK_SPACE_NAME = 'Общий отдел'
+
+
+def default_section_id(cursor):
+    """Раздел «Общий отдел → Общий сотрудник» — куда падает статья без раздела.
+
+    Статья вообще без раздела — ловушка, а не свобода: в режиме «наследовать»
+    ей не от чего наследовать права, и её не видит НИКТО, кроме автора. Такую
+    статью нельзя было ни найти в оглавлении, ни отыскать поиском, ни положить
+    в раздел — на проде так залипли три штуки. Раньше от этого спасал
+    переключатель «Всё содержимое» у администратора доступов; теперь спасать не
+    от чего — раздел проставляется сам.
+
+    Возвращает None, если общего отдела в базе нет. Сами его не создаём:
+    молча заведённый публичный раздел раздал бы права шире, чем кто-либо
+    просил, а это то самое, что отзывается труднее всего.
+    """
+    cursor.execute(
+        """
+        SELECT s.id
+          FROM wiki_sections s
+          JOIN wiki_spaces sp ON sp.id = s.space_id
+         WHERE s.status = 'active' AND sp.status = 'active'
+           AND (s.slug = %(slug)s OR sp.name = %(space)s)
+         ORDER BY (s.slug = %(slug)s) DESC, (sp.name = %(space)s) DESC,
+                  s.position, s.id
+         LIMIT 1
+        """,
+        {'slug': _FALLBACK_SECTION_SLUG, 'space': _FALLBACK_SPACE_NAME},
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def set_sections(cursor, article_id, section_ids):
+    wanted = {int(s) for s in (section_ids or []) if s}
+    if not wanted:
+        fallback = default_section_id(cursor)
+        if fallback:
+            wanted = {fallback}
+
     cursor.execute('DELETE FROM wiki_article_sections WHERE article_id = %s', (article_id,))
-    for section_id in {int(s) for s in (section_ids or []) if s}:
+    for section_id in wanted:
         cursor.execute(
             'INSERT INTO wiki_article_sections (article_id, section_id) VALUES (%s, %s) '
             'ON CONFLICT DO NOTHING',

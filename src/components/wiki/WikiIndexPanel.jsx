@@ -97,9 +97,7 @@ const toggled = (set, key) => {
     return next;
 };
 
-export default function WikiIndexPanel({ tree, articles, onOpen, loading,
-                                         canShowAll = false, showAll = false,
-                                         onShowAllChange = null }) {
+export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
     const [filter, setFilter] = useState('');
     const [openSections, setOpenSections] = useState(() => new Set());
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
@@ -120,8 +118,10 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading,
         return map;
     }, [articles]);
 
-    /* Статьи без раздела (или в разделе за периметром) иначе исчезли бы из
-       оглавления совсем — а открыть их можно, и они есть в поиске. */
+    /* Статьи в разделе ЗА ПЕРИМЕТРОМ (например, открытые персональным правилом)
+       иначе исчезли бы из оглавления совсем — а открыть их можно, и они есть в
+       поиске. Статей совсем без раздела здесь больше не бывает: сервер кладёт
+       такую в общий отдел при сохранении (wiki/edit.py: set_sections). */
     const orphans = useMemo(() => {
         const known = new Set();
         tree.forEach(({ rows }) => rows.forEach(({ section }) => known.add(section.id)));
@@ -281,38 +281,6 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading,
                     </span>
                 </div>
 
-                {/* Периметр витрины. Переключатель есть только у того, кто
-                    раздаёт доступы: сервер проверяет ту же способность, и от
-                    постороннего ?scope=all ничего не открывает.
-
-                    Он нужен не «на всякий случай»: статья без раздела в режиме
-                    «наследовать» не видна никому, кроме автора, — наследовать ей
-                    не от чего. Без этой кнопки такую статью нельзя было ни
-                    найти, ни положить в раздел. */}
-                {canShowAll && (
-                    <div className="mx-2.5 mb-1.5 flex gap-0.5 rounded-lg bg-slate-100 p-0.5">
-                        {[
-                            { key: false, label: 'Моё', hint: 'То, к чему у вас есть отношение' },
-                            { key: true, label: 'Всё содержимое', hint: 'Все статьи портала, включая чужие отделы и статьи без раздела' },
-                        ].map(({ key, label, hint }) => (
-                            <button
-                                key={String(key)}
-                                type="button"
-                                title={hint}
-                                aria-pressed={showAll === key}
-                                onClick={() => onShowAllChange?.(key)}
-                                className={`flex-1 rounded-[7px] px-2 py-1 text-[11px] font-semibold transition ${
-                                    showAll === key
-                                        ? 'bg-white text-slate-900 shadow-sm'
-                                        : 'text-slate-500 hover:text-slate-700'
-                                }`}
-                            >
-                                {label}
-                            </button>
-                        ))}
-                    </div>
-                )}
-
                 <div className="mx-2.5 mb-1.5 flex items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5">
                     <Search size={12} className="shrink-0 text-slate-400" />
                     <input
@@ -334,7 +302,7 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading,
 
                     {!loading && spaces}
 
-                    {/* Статьи, не попавшие ни в один доступный раздел, — своей
+                    {/* Статьи, не попавшие ни в один ДОСТУПНЫЙ раздел, — своей
                         группой того же вида: иначе они висели бы без заголовка,
                         как будто принадлежат последнему отделу в списке. */}
                     {!loading && shownOrphans.length > 0 && (
