@@ -1,8 +1,10 @@
-import React, { useMemo } from 'react';
-import { ChevronDown, MapPin, Phone, Plus, Trash2, Wifi, X } from 'lucide-react';
-import { iosInput, iosGroupLabel, iosBtnGhost, IosBadge, IosToggle } from '../ui/ios';
+import React, { useMemo, useState } from 'react';
+import { ChevronDown, MapPin, Phone, Plus, StickyNote, Trash2 } from 'lucide-react';
+import { iosInput, iosGroupLabel, IosBadge } from '../ui/ios';
 import { Field } from './formField';
-import { ONLINE, emptyPoint, isOnline, parkDraftIssue } from './parkPoints';
+import {
+    PHONE_DIGITS, digitsOf, emptyNumber, formatDigits, parkDraftIssue, toPhone,
+} from './parkPoints';
 
 /* Форма таксопарка: о парке, номера по точкам, условия.
  *
@@ -20,7 +22,7 @@ import { ONLINE, emptyPoint, isOnline, parkDraftIssue } from './parkPoints';
 /* Селектор офиса из справочника. Один на форму: им выбирают и место для
    номера, и адрес самого парка — списки обязаны быть одинаковыми, иначе в
    одной форме появятся два разных перечня офисов. */
-const OfficeSelect = ({ value, offices, onChange, placeholder, disabledId, invalid = false }) => {
+const OfficeSelect = ({ value, offices, onChange, placeholder, className = '' }) => {
     // Города в порядке появления: список офисов уже отсортирован сервером, и
     // пересортировка тут развела бы одинаковые списки в двух вкладках.
     const byCity = useMemo(() => {
@@ -35,20 +37,19 @@ const OfficeSelect = ({ value, offices, onChange, placeholder, disabledId, inval
     }, [offices]);
 
     return (
-        <div className="relative min-w-0 flex-1">
+        <div className={`relative min-w-0 ${className}`}>
             <select
-                className={`${iosInput} h-10 appearance-none py-0 pr-9 ${
-                    invalid ? 'ring-2 ring-amber-400/80' : ''
-                }`}
+                className={`${iosInput} h-10 appearance-none py-0 pr-9`}
                 value={value ?? ''}
-                onChange={(e) => onChange(e.target.value === '' ? undefined : Number(e.target.value))}
+                onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
             >
-                <option value="">{offices.length ? placeholder : 'Офисов в справочнике нет'}</option>
+                <option value="">{placeholder}</option>
                 {byCity.map(([city, items]) => (
                     <optgroup key={city} label={city}>
                         {items.map((item) => (
-                            <option key={item.id} value={item.id} disabled={disabledId?.(item.id)}>
+                            <option key={item.id} value={item.id}>
                                 {item.name}
+                                {item.is_online ? ' · только по телефону' : ''}
                             </option>
                         ))}
                     </optgroup>
@@ -62,193 +63,152 @@ const OfficeSelect = ({ value, offices, onChange, placeholder, disabledId, inval
     );
 };
 
-const PointRow = ({ point, offices, taken, onChange, onRemove, canRemove }) => {
-    const office = offices.find((item) => item.id === point.office_id);
-    const online = isOnline(point);
-    const unset = point.office_id === undefined;
-    // Онлайн-строка у парка одна: все номера без офиса лежат в одной пачке
-    // (wiki_park_phones с office_id = NULL), второй такой строке некуда деться.
-    const onlineTaken = !online && taken(ONLINE);
-
-    const setPhone = (index, value) => onChange({
-        phones: point.phones.map((phone, position) => (position === index ? value : phone)),
-    });
-
-    const addPhone = () => onChange({ phones: [...point.phones, ''] });
-
-    const dropPhone = (index) => onChange({
-        phones: point.phones.filter((phone, position) => position !== index),
-    });
+/* Строка номера: сам номер, его место и записка.
+ *
+ * Плоско, по строке на номер: место у номера своё, и «офис → его номера»
+ * заставляло сначала заводить место, а уже потом номер — хотя заполняют
+ * наоборот. Офисный селектор появляется, только когда в справочнике есть что
+ * выбирать: на пустом справочнике он говорил «Офисов в справочнике нет» и
+ * мешал единственному, что здесь нужно, — вводу номера. */
+const NumberRow = ({ number, offices, onChange, onRemove, onAdd, canRemove, isLast, showAddress }) => {
+    const office = offices.find((item) => item.id === number.office_id);
+    const digits = digitsOf(number.phone);
+    const short = digits.length > 0 && digits.length < PHONE_DIGITS;
+    const [noteOpen, setNoteOpen] = useState(!!number.note);
 
     return (
         <div className="space-y-1.5 rounded-xl border border-slate-200 bg-white p-2.5">
-            <div className="flex items-center gap-2">
-                {/* Онлайн — переключатель, а не пункт в списке офисов: это не
-                    ещё один адрес, а его отсутствие, и в одном перечне с
-                    «Алматы Навигатор» он читался как офис с таким названием. */}
-                {online ? (
-                    <div className="flex h-10 min-w-0 flex-1 items-center gap-1.5 rounded-xl bg-blue-50 px-3 text-[13px] font-medium text-blue-700">
-                        <Wifi size={13} className="shrink-0" />
-                        <span className="truncate">Без офиса — принимают только по телефону</span>
-                    </div>
-                ) : (
+            <div className="flex flex-wrap items-center gap-1.5">
+                {/* +7 не редактируется: у всех номеров справочника один код
+                    страны, а руками его писали то как «+7», то как «8». */}
+                <div className={`flex h-10 min-w-[190px] flex-1 items-center gap-2 rounded-xl bg-slate-100 px-3 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/70 ${
+                    short ? 'ring-2 ring-amber-400/80' : ''
+                }`}
+                >
+                    <span className="shrink-0 text-[14px] font-medium tabular-nums text-slate-500">+7</span>
+                    <input
+                        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[14px] tabular-nums text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-0"
+                        inputMode="numeric"
+                        autoComplete="off"
+                        value={formatDigits(digits)}
+                        placeholder="707 705 08 80"
+                        onChange={(e) => onChange({ phone: toPhone(digitsOf(e.target.value)) })}
+                    />
+                </div>
+
+                {offices.length > 0 && (
                     <OfficeSelect
-                        value={point.office_id}
+                        className="flex-1 basis-[170px]"
+                        value={number.office_id}
                         offices={offices}
-                        placeholder="Выберите офис"
-                        invalid={unset}
-                        disabledId={taken}
+                        placeholder="Без офиса (онлайн)"
                         onChange={(office_id) => onChange({ office_id })}
                     />
                 )}
 
-                <div
-                    className={`flex shrink-0 items-center gap-1.5 ${onlineTaken ? 'opacity-40' : ''}`}
-                    title={onlineTaken
-                        ? 'Строка без офиса уже есть — все номера без адреса собираются в ней'
-                        : 'Номер без офиса: парк принимает только по телефону'}
+                <button
+                    type="button"
+                    onClick={() => setNoteOpen((open) => !open)}
+                    className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl transition ${
+                        number.note || noteOpen
+                            ? 'bg-amber-50 text-amber-600'
+                            : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+                    }`}
+                    aria-label="Записка к номеру"
+                    title="Записка к номеру"
                 >
-                    <span className="text-[12.5px] text-slate-500">Онлайн</span>
-                    <IosToggle
-                        checked={online}
-                        disabled={onlineTaken}
-                        onChange={(next) => onChange({ office_id: next ? null : undefined })}
-                    />
-                </div>
+                    <StickyNote size={15} />
+                </button>
 
-                {canRemove && (
-                    <button
-                        type="button"
-                        onClick={onRemove}
-                        className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-slate-400 transition hover:bg-rose-50 hover:text-rose-500"
-                        aria-label="Убрать строку"
-                        title="Убрать строку целиком"
-                    >
-                        <Trash2 size={15} />
-                    </button>
-                )}
+                <button
+                    type="button"
+                    onClick={onRemove}
+                    disabled={!canRemove}
+                    className="grid h-9 w-9 shrink-0 place-items-center rounded-xl text-slate-400 transition hover:bg-rose-50 hover:text-rose-500 disabled:invisible"
+                    aria-label="Убрать номер"
+                    title="Убрать номер"
+                >
+                    <Trash2 size={15} />
+                </button>
+
+                <button
+                    type="button"
+                    onClick={onAdd}
+                    className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 ${
+                        isLast ? '' : 'invisible'
+                    }`}
+                    tabIndex={isLast ? 0 : -1}
+                    aria-label="Добавить ещё номер"
+                    title="Добавить ещё номер"
+                >
+                    <Plus size={15} />
+                </button>
             </div>
+
+            {noteOpen && (
+                <input
+                    className={`${iosInput} h-9 text-[13px]`}
+                    value={number.note || ''}
+                    maxLength={200}
+                    placeholder="Записка: «звонить после 10», «только WhatsApp»"
+                    onChange={(e) => onChange({ note: e.target.value })}
+                />
+            )}
 
             {/* Адрес под селектором: названия офисов в справочнике похожи
                 («Алматы Навигатор» и «Алматы Навигатор 2»), и адрес — это
-                единственная подпись, по которой видно, что выбран тот. */}
-            {!online && office?.address && (
+                единственная подпись, по которой видно, что выбран тот. Показываем
+                его один раз на офис: у второго номера того же офиса он ничего не
+                добавляет, только удлиняет список. */}
+            {showAddress && office?.address && (
                 <p className="flex items-start gap-1.5 px-1 text-[11.5px] leading-relaxed text-slate-400">
                     <MapPin size={11} className="mt-0.5 shrink-0" /> {office.address}
                 </p>
             )}
-
-            {point.phones.map((phone, index) => (
-                // eslint-disable-next-line react/no-array-index-key
-                <div key={index} className="flex items-center gap-1.5">
-                    <div className="relative min-w-0 flex-1">
-                        <Phone
-                            size={13}
-                            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-                        />
-                        <input
-                            className={`${iosInput} h-10 pl-8 tabular-nums`}
-                            inputMode="tel"
-                            value={phone}
-                            placeholder={office?.phone
-                                ? `телефон офиса: ${office.phone}`
-                                : '+7 700 000 00 00'}
-                            onChange={(e) => setPhone(index, e.target.value)}
-                        />
-                    </div>
-                    {/* Обе кнопки занимают место всегда, даже когда не нужны:
-                        иначе строка с двумя кнопками становится короче
-                        соседней, и поля перестают стоять в столбик. */}
-                    <button
-                        type="button"
-                        onClick={() => dropPhone(index)}
-                        className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl text-slate-400 transition hover:bg-rose-50 hover:text-rose-500 ${
-                            point.phones.length > 1 ? '' : 'invisible'
-                        }`}
-                        tabIndex={point.phones.length > 1 ? 0 : -1}
-                        aria-label="Убрать номер"
-                        title="Убрать номер"
-                    >
-                        <X size={15} />
-                    </button>
-                    <button
-                        type="button"
-                        onClick={addPhone}
-                        className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 ${
-                            index === point.phones.length - 1 ? '' : 'invisible'
-                        }`}
-                        tabIndex={index === point.phones.length - 1 ? 0 : -1}
-                        aria-label="Добавить ещё номер"
-                        title="Ещё номер на эту точку"
-                    >
-                        <Plus size={15} />
-                    </button>
-                </div>
-            ))}
         </div>
     );
 };
 
-const ParkPhones = ({ draft, setDraft, offices }) => {
-    const points = draft.points || [];
-
-    const used = useMemo(() => new Set(points.map((point) => (
-        point.office_id === null ? ONLINE : point.office_id))), [points]);
-
-    // Занята точка или нет, считаем без учёта самой строки: иначе выбранный
-    // офис оказывался бы недоступен в собственном селекторе.
-    const takenBy = (key) => (value) => used.has(value) && value !== key;
+const ParkNumbers = ({ draft, setDraft }) => {
+    const numbers = draft.numbers || [];
 
     const update = (key, patch) => setDraft((prev) => ({
         ...prev,
-        points: prev.points.map((point) => (point.key === key ? { ...point, ...patch } : point)),
+        numbers: prev.numbers.map((item) => (item.key === key ? { ...item, ...patch } : item)),
     }));
 
     const remove = (key) => setDraft((prev) => ({
         ...prev,
-        points: prev.points.filter((point) => point.key !== key),
+        numbers: prev.numbers.filter((item) => item.key !== key),
     }));
 
-    const add = () => setDraft((prev) => ({
-        ...prev,
-        points: [...prev.points, emptyPoint(undefined)],
-    }));
-
-    // Считаем по числу строк, а не по занятым местам: две строки без выбранного
-    // офиса — это два undefined, и в Set они схлопываются в одну. По used.size
-    // кнопка оставалась бы живой, а строки уводили бы в тупик, где в селекторе
-    // всё занято. Мест ровно столько, сколько офисов, плюс одно «без офиса».
-    const free = offices.length + 1 - points.length;
+    // Новая строка наследует место соседней: номера одного офиса обычно вводят
+    // подряд, и переспрашивать про офис на каждом — лишняя работа.
+    const add = (afterKey) => setDraft((prev) => {
+        const index = prev.numbers.findIndex((item) => item.key === afterKey);
+        const source = index >= 0 ? prev.numbers[index] : null;
+        const fresh = emptyNumber(source ? source.office_id : null);
+        const next = [...prev.numbers];
+        next.splice(index >= 0 ? index + 1 : next.length, 0, fresh);
+        return { ...prev, numbers: next };
+    });
 
     return (
         <div className="space-y-2">
-            {/* Строка есть всегда: номер обязателен, и пустая секция с одной
-                кнопкой об этом молчала — выглядела как «заполнять нечего».
-                Поэтому же у единственной строки нет корзины. */}
-            {points.map((point) => (
-                <PointRow
-                    key={point.key}
-                    point={point}
-                    offices={offices}
-                    taken={takenBy(point.office_id === null ? ONLINE : point.office_id)}
-                    onChange={(patch) => update(point.key, patch)}
-                    onRemove={() => remove(point.key)}
-                    canRemove={points.length > 1}
+            {numbers.map((number, index) => (
+                <NumberRow
+                    key={number.key}
+                    number={number}
+                    offices={draft.offices || []}
+                    onChange={(patch) => update(number.key, patch)}
+                    onRemove={() => remove(number.key)}
+                    onAdd={() => add(number.key)}
+                    canRemove={numbers.length > 1}
+                    isLast={index === numbers.length - 1}
+                    showAddress={numbers.findIndex(
+                        (item) => item.office_id === number.office_id) === index}
                 />
             ))}
-
-            <button
-                type="button"
-                className={`${iosBtnGhost} w-full justify-center border border-dashed border-slate-300 disabled:opacity-40`}
-                onClick={add}
-                disabled={free <= 0}
-                title={free <= 0
-                    ? 'Мест больше нет: все офисы справочника уже в списке, строка без офиса тоже. '
-                      + 'Ещё один номер той же точке добавляет плюс в её строке'
-                    : 'Номер в другом офисе или без офиса'}
-            >
-                <Plus size={14} /> Ещё номер в другом месте
-            </button>
         </div>
     );
 };
@@ -256,7 +216,7 @@ const ParkPhones = ({ draft, setDraft, offices }) => {
 export default function ParkEditor({ draft, setDraft, offices }) {
     const set = (key) => (e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }));
     const issue = parkDraftIssue(draft);
-    const points = draft.points || [];
+    const numbers = draft.numbers || [];
     const headOffice = offices.find((office) => office.id === draft.head_office_id);
 
     return (
@@ -295,22 +255,21 @@ export default function ParkEditor({ draft, setDraft, offices }) {
             <section className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
                     <div className={`${iosGroupLabel} flex items-center gap-1.5`}>
-                        <Phone size={12} /> Номера и офисы
+                        <Phone size={12} /> Номера
                     </div>
-                    {points.length > 0 && (
-                        <IosBadge tone="blue">точек: {points.length}</IosBadge>
+                    {numbers.length > 1 && (
+                        <IosBadge tone="blue">номеров: {numbers.length}</IosBadge>
                     )}
                 </div>
-                <ParkPhones draft={draft} setDraft={setDraft} offices={offices} />
+                <ParkNumbers draft={{ ...draft, offices }} setDraft={setDraft} />
                 {issue && issue !== 'Укажите название парка' ? (
                     <p className="px-1 text-[11.5px] leading-relaxed text-amber-600">{issue}</p>
                 ) : (
                     <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
-                        В строке выбирается офис, куда звонят по этому номеру, либо
-                        включается «Онлайн» — если у парка адреса нет и принимают только
-                        по телефону. Плюс рядом с полем добавляет этой же точке второй
-                        номер. Адрес, карта и график живут в самом офисе — на вкладке
-                        «Офисы».
+                        Плюс справа добавляет следующий номер. Если по номеру отвечают в
+                        офисе — выберите его в строке; без офиса номер считается общим,
+                        по нему принимают только по телефону. Значок записки вешает на
+                        номер пометку вроде «звонить после 10».
                     </p>
                 )}
             </section>

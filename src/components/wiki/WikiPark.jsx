@@ -34,11 +34,14 @@ const promoPeriod = (promo) => {
 
 /* Номер набирают, а не читают: ссылка tel: с рабочего ноутбука бесполезна, а с
    телефона это один тап вместо переписывания. */
-const PhoneLink = ({ phone }) => (
-    <a href={`tel:${phone.replace(/[^\d+]/g, '')}`}
-       className="tabular-nums text-indigo-600 hover:underline">
-        {phone}
-    </a>
+const PhoneLink = ({ number }) => (
+    <span className="inline-flex items-baseline gap-1.5">
+        <a href={`tel:${number.phone.replace(/[^\d+]/g, '')}`}
+           className="tabular-nums text-indigo-600 hover:underline">
+            {number.phone}
+        </a>
+        {number.note && <span className="text-[12px] text-slate-400">{number.note}</span>}
+    </span>
 );
 
 const ContactRow = ({ icon: Icon, label, children }) => (
@@ -91,7 +94,10 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
         );
     }
 
-    const online = park.phones || [];
+    // Номер приезжает парой {phone, note}; строки остались у записей, заведённых
+    // до появления записок.
+    const asNumber = (item) => (typeof item === 'string' ? { phone: item, note: null } : item);
+    const online = (park.phones || []).map(asNumber);
     const offices = park.offices || [];
     // Адрес парка — его офис из справочника; собственный текст остался только у
     // записей, заведённых до перехода на выбор офиса.
@@ -180,8 +186,8 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
                                 {online.length > 0 && (
                                     <ContactRow icon={Phone} label="Телефон">
                                         <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-                                            {online.map((phone) => (
-                                                <PhoneLink key={phone} phone={phone} />
+                                            {online.map((number) => (
+                                                <PhoneLink key={number.phone} number={number} />
                                             ))}
                                         </div>
                                     </ContactRow>
@@ -217,8 +223,8 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
                                             <span className="text-[12px] text-slate-400">{office.city}</span>
                                         )}
                                         <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-[13px]">
-                                            {(office.phones || []).map((phone) => (
-                                                <PhoneLink key={phone} phone={phone} />
+                                            {(office.phones || []).map(asNumber).map((number) => (
+                                                <PhoneLink key={number.phone} number={number} />
                                             ))}
                                         </span>
                                     </div>

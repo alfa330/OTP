@@ -693,6 +693,11 @@ _OFFICE_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_park_phones_park "
     "ON wiki_park_phones(park_id, office_id, position, id);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_park_phones_office ON wiki_park_phones(office_id);",
+    # Записка у номера: «звонить после 10», «только WhatsApp», «спросить Асель».
+    # У связи «парк ↔ офис» своя note (примечание к офису целиком), а эта —
+    # к конкретному номеру, потому что у одной точки номеров несколько и
+    # относится записка обычно к одному из них.
+    "ALTER TABLE wiki_park_phones ADD COLUMN IF NOT EXISTS note VARCHAR(200);",
     # Адрес парка — ссылка на офис, а не текст.
     #
     # Пока это было свободное поле, оно повторяло адрес, уже записанный в

@@ -193,15 +193,29 @@ class PhonesTest(unittest.TestCase):
 
     def test_empty_and_blank_are_dropped(self):
         self.assertEqual(clean_phones(['+7 707 705 08 80', '', '   ', None]),
-                         ['+7 707 705 08 80'])
+                         [{'phone': '+7 707 705 08 80', 'note': None}])
 
     def test_inner_spaces_are_squeezed(self):
-        self.assertEqual(clean_phones(['  +7 707   705 08 80 ']), ['+7 707 705 08 80'])
+        self.assertEqual(clean_phones(['  +7 707   705 08 80 ']),
+                         [{'phone': '+7 707 705 08 80', 'note': None}])
 
     def test_repeats_are_dropped_keeping_order(self):
         self.assertEqual(
             clean_phones(['+7 707 705 08 80', '+7 717 000 00 00', '+7 707 705 08 80']),
-            ['+7 707 705 08 80', '+7 717 000 00 00'])
+            [{'phone': '+7 707 705 08 80', 'note': None},
+             {'phone': '+7 717 000 00 00', 'note': None}])
+
+    def test_note_travels_with_the_number(self):
+        self.assertEqual(
+            clean_phones([{'phone': '+7 707 705 08 80', 'note': '  только WhatsApp '}]),
+            [{'phone': '+7 707 705 08 80', 'note': 'только WhatsApp'}])
+
+    def test_repeat_keeps_the_note_it_had(self):
+        # Записку у повтора терять нельзя: человек мог дописать её вторым вводом.
+        self.assertEqual(
+            clean_phones([{'phone': '+7 707 705 08 80'},
+                          {'phone': '+7 707 705 08 80', 'note': 'звонить после 10'}]),
+            [{'phone': '+7 707 705 08 80', 'note': 'звонить после 10'}])
 
     def test_count_is_capped(self):
         many = ['+7 700 000 00 %02d' % index for index in range(20)]
@@ -220,11 +234,12 @@ class PhonesTest(unittest.TestCase):
         self.assertEqual(link_phones({'phones': []}), [])
 
     def test_old_single_phone_is_understood(self):
-        self.assertEqual(link_phones({'phone': '+7 707 705 08 80'}), ['+7 707 705 08 80'])
+        self.assertEqual(link_phones({'phone': '+7 707 705 08 80'}),
+                         [{'phone': '+7 707 705 08 80', 'note': None}])
 
     def test_list_wins_over_single(self):
         self.assertEqual(link_phones({'phones': ['+7 717 000 00 00'], 'phone': 'старый'}),
-                         ['+7 717 000 00 00'])
+                         [{'phone': '+7 717 000 00 00', 'note': None}])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

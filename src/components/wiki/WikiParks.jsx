@@ -10,7 +10,7 @@ import {
 } from '../ui/ios';
 import useStableCallback from './useStableCallback';
 import ParkEditor from './ParkEditor';
-import { parkDraftIssue, pointsFromPark, pointsPayload } from './parkPoints';
+import { numbersFromPark, numbersPayload, parkDraftIssue } from './parkPoints';
 
 /* Таксопарки и акции.
  *
@@ -31,7 +31,7 @@ const emptyPark = () => ({
     head_office_id: undefined,
     // Одна пустая строка сразу: номер у парка обязателен, и форма должна
     // показывать это полем, а не пустым местом с кнопкой.
-    points: pointsFromPark({}),
+    numbers: numbersFromPark({}),
 });
 
 /* Номера парка одной строкой: сперва те, что без офиса, потом офисные.
@@ -40,7 +40,7 @@ const emptyPark = () => ({
 const parkPhones = (park) => [
     ...(park.phones || []),
     ...(park.offices || []).flatMap((link) => link.phones || []),
-];
+].map((item) => (typeof item === 'string' ? { phone: item, note: null } : item));
 
 const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => {
     const phones = parkPhones(park);
@@ -74,9 +74,10 @@ const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => {
                     )}
                     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-slate-500">
                         {park.city && <span className="flex items-center gap-1"><MapPin size={11} /> {park.city}</span>}
-                        {phones.slice(0, 2).map((phone) => (
-                            <span key={phone} className="flex items-center gap-1 tabular-nums">
-                                <Phone size={11} /> {phone}
+                        {phones.slice(0, 2).map((number) => (
+                            <span key={number.phone} className="flex items-center gap-1 tabular-nums">
+                                <Phone size={11} /> {number.phone}
+                                {number.note && <span className="text-slate-400">· {number.note}</span>}
                             </span>
                         ))}
                         {phones.length > 2 && (
@@ -181,7 +182,7 @@ export default function WikiParks({ base, headers, showToast }) {
             website: draft.website || null,
             description: draft.description || null,
             commission: draft.commission === '' ? null : Number(draft.commission),
-            ...pointsPayload(draft.points),
+            numbers: numbersPayload(draft.numbers),
         };
         setBusy(true);
         const request = draft.id
@@ -300,7 +301,7 @@ export default function WikiParks({ base, headers, showToast }) {
                                     head_office_id: p.head_office?.id ?? undefined,
                                     website: p.website || '', description: p.description || '',
                                     commission: p.commission ?? '',
-                                    points: pointsFromPark(p),
+                                    numbers: numbersFromPark(p),
                                 })}
                                 onArchive={archive}
                                 onRestore={restore}

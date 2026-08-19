@@ -1,75 +1,85 @@
-/* Точки парка: номер принадлежит паре «парк + место», где место это офис из
- * справочника или «онлайн» — парк без адреса, принимающий только по телефону.
+/* Номера парка: плоский список, где у каждого номера своё место — офис из
+ * справочника или «онлайн» (парк без адреса, принимают только по телефону) — и
+ * необязательная записка вроде «звонить после 10».
+ *
+ * Плоско, а не «место → его номера», потому что так их и заводят: сначала
+ * номер, потом ему выбирают офис. Два номера одного офиса — обычное дело.
  *
  * Отдельный модуль, а не часть ParkEditor: правила «что можно сохранить» и
  * преобразование формы в тело запроса нужны и форме, и списку парков, и тесту
  * (tests/wiki_park_points.test.mjs) — а тест не поднимет JSX.
  */
 
-export const ONLINE = 'online';
-
 /* Ключ строки нужен React'у, а id у новой строки ещё нет: индекс массива в
    роли ключа перепутал бы поля при удалении строки посередине. */
 let sequence = 0;
-const nextKey = () => { sequence += 1; return `point-${sequence}`; };
+const nextKey = () => { sequence += 1; return `number-${sequence}`; };
 
-/* Повтор снимается и здесь, а не только на сервере (wiki/offices.clean_phones):
-   иначе форма показывала бы номер дважды, а после сохранения он оставался бы
-   один — и это читается как «правка не сохранилась». */
-const cleanPhones = (phones) => [...new Set((phones || [])
-    .map((phone) => phone.trim())
-    .filter(Boolean))];
+/* Все номера казахстанские: код страны +7 задан жёстко, человек набирает
+   только десять цифр после него. Так номер нельзя записать «8 707…» в одной
+   строке и «+7 707…» в другой — а в старом справочнике было и то и другое. */
+export const PHONE_DIGITS = 10;
 
-export const emptyPoint = (officeId) => ({ key: nextKey(), office_id: officeId, phones: [''] });
-
-/* Точки для формы: сперва онлайн — это общий номер парка, за ним офисы в том
-   порядке, в котором их отдал сервер (город, позиция).
-
-   У парка без номеров строка всё равно одна, пустая: номер обязателен (решение
-   владельца), и форма, открывающаяся с пустотой и одной кнопкой, об этом не
-   говорит — она выглядит так, будто заполнять нечего. */
-export const pointsFromPark = (park) => {
-    const points = [];
-    if (park.phones?.length) {
-        points.push({ key: nextKey(), office_id: null, phones: [...park.phones] });
-    }
-    (park.offices || []).forEach((link) => points.push({
-        key: nextKey(),
-        office_id: link.office_id,
-        phones: link.phones?.length ? [...link.phones] : [''],
-    }));
-    return points.length ? points : [emptyPoint(undefined)];
+export const digitsOf = (phone) => {
+    const digits = String(phone || '').replace(/\D/g, '');
+    // «+7 707…», «8 707…» и «707…» — одно и то же: код страны отбрасываем.
+    const local = digits.length > PHONE_DIGITS && /^[78]/.test(digits)
+        ? digits.slice(digits.length - PHONE_DIGITS)
+        : digits;
+    return local.slice(0, PHONE_DIGITS);
 };
 
-/* Строка «онлайн» — та, у которой места в справочнике нет. undefined значит
-   «офис ещё не выбран», и путать эти два состояния нельзя. */
-export const isOnline = (point) => point?.office_id === null;
+/* 707 705 08 80 — как номер диктуют вслух. */
+export const formatDigits = (digits) => {
+    const parts = [digits.slice(0, 3), digits.slice(3, 6), digits.slice(6, 8), digits.slice(8, 10)];
+    return parts.filter(Boolean).join(' ');
+};
 
-export const isBlank = (point) => (
-    point?.office_id === undefined && cleanPhones(point?.phones).length === 0);
+export const toPhone = (digits) => (digits ? `+7 ${formatDigits(digits)}` : '');
 
-/* Обратное преобразование: офисы отдельно, номера без офиса отдельно — так их
-   и хранит сервер (wiki_park_phones с office_id = NULL).
+export const isOnline = (number) => number?.office_id === null;
 
-   Строки с одним и тем же офисом сливаются в одну. В форме такого не собрать —
-   занятый офис в селекторе недоступен, — но на сервере пара «парк + офис»
-   одна, и вторую строку он молча отбросил бы вместе с её номерами. */
-export const pointsPayload = (points) => {
-    const offices = [];
-    (points || [])
-        .filter((point) => typeof point.office_id === 'number')
-        .forEach((point) => {
-            const phones = cleanPhones(point.phones);
-            const same = offices.find((office) => office.office_id === point.office_id);
-            if (same) same.phones = cleanPhones([...same.phones, ...phones]);
-            else offices.push({ office_id: point.office_id, phones });
+export const emptyNumber = (officeId = null) => ({
+    key: nextKey(), office_id: officeId, phone: '', note: '',
+});
+
+/* Номера для формы: сперва те, что без офиса, за ними офисные — в порядке,
+   который отдал сервер (город, позиция). Пустой парк открывается одной пустой
+   строкой: номер обязателен, и форма должна показать это полем, а не пустотой. */
+export const numbersFromPark = (park) => {
+    const rows = [];
+    const push = (officeId, list) => (list || []).forEach((item) => rows.push({
+        key: nextKey(),
+        office_id: officeId,
+        phone: typeof item === 'string' ? item : (item?.phone || ''),
+        note: (typeof item === 'string' ? '' : (item?.note || '')),
+    }));
+
+    push(null, park.phones);
+    (park.offices || []).forEach((link) => push(link.office_id, link.phones));
+    return rows.length ? rows : [emptyNumber()];
+};
+
+/* Тело запроса: тот же плоский список, но нормализованный — номер в единой
+   форме «+7 …», пустые строки выброшены, повторы одного номера в одном месте
+   сняты (на сервере они всё равно схлопнутся, и форма не должна обещать
+   другого). */
+export const numbersPayload = (numbers) => {
+    const seen = new Set();
+    const result = [];
+    (numbers || []).forEach((number) => {
+        const digits = digitsOf(number.phone);
+        if (digits.length !== PHONE_DIGITS) return;
+        const key = `${number.office_id ?? 'online'}:${digits}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        result.push({
+            office_id: number.office_id ?? null,
+            phone: toPhone(digits),
+            note: (number.note || '').trim() || null,
         });
-    return {
-        offices,
-        phones: cleanPhones((points || [])
-            .filter((point) => point.office_id === null)
-            .flatMap((point) => point.phones)),
-    };
+    });
+    return result;
 };
 
 /* Что мешает сохранить. Строкой, а не булевым: кнопка гаснет, и без причины
@@ -77,20 +87,13 @@ export const pointsPayload = (points) => {
 export const parkDraftIssue = (draft) => {
     if (!draft) return null;
     if (!draft.name?.trim()) return 'Укажите название парка';
-    const points = draft.points || [];
+
+    const numbers = draft.numbers || [];
+    const filled = numbers.filter((number) => digitsOf(number.phone).length > 0);
     // Парк без единого номера — справочник, по которому не позвонить.
-    if (points.length === 0 || points.every(isBlank)) {
-        return 'Нужен хотя бы один номер';
-    }
-    if (points.some((point) => point.office_id === undefined)) {
-        return 'В одной из строк не выбрано, куда звонят';
-    }
-    if (points.some((point) => cleanPhones(point.phones).length === 0)) {
-        return 'В каждой строке нужен хотя бы один номер';
-    }
-    const places = points.map((point) => (point.office_id === null ? ONLINE : point.office_id));
-    if (new Set(places).size !== places.length) {
-        return 'Одно и то же место выбрано дважды — соберите его номера в одной строке';
+    if (filled.length === 0) return 'Нужен хотя бы один номер';
+    if (filled.some((number) => digitsOf(number.phone).length !== PHONE_DIGITS)) {
+        return 'После +7 нужно десять цифр';
     }
     return null;
 };

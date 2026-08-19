@@ -17,6 +17,27 @@ def _body():
     return request.get_json(silent=True) or {}
 
 
+def _numbers(data):
+    """Плоский список номеров из тела запроса. None — ключа не было.
+
+    [{office_id: int | None, phone, note}]. Номер без телефона отбрасывается: в
+    справочнике он выглядел бы рабочей строкой, по которой не позвонить.
+    """
+    if not isinstance(data.get('numbers'), list):
+        return None
+    result = []
+    for item in data['numbers']:
+        if not isinstance(item, dict):
+            continue
+        phone = _clean(item.get('phone'), 64)
+        if not phone:
+            continue
+        result.append({'office_id': _int_or_none(item.get('office_id')),
+                       'phone': phone,
+                       'note': _clean(item.get('note'), 200) or None})
+    return result
+
+
 def _office_links(data):
     """Офисы парка из тела запроса. (links, error)
 
@@ -50,6 +71,28 @@ def _decimal_or_none(value):
     except (TypeError, ValueError):
         return None
     return round(number, 2) if 0 <= number <= 100 else None
+
+
+def _write_numbers(cursor, park_id, numbers, links, data):
+    """Пишет номера парка. True, если что-то записали.
+
+    Форма шлёт плоский список numbers; старая форма и скрипт переноса — offices
+    со списками телефонов плюс phones для номеров без офиса. Поддерживаются оба:
+    ломать внешние вызовы ради формы незачем.
+    """
+    if numbers is not None:
+        wiki_offices.set_park_numbers(cursor, park_id, numbers)
+        return True
+
+    wrote = False
+    if links is not None:
+        wiki_offices.set_park_offices(cursor, park_id, links)
+        wrote = True
+    online = wiki_offices.link_phones(data)
+    if online is not None:
+        wiki_offices.set_park_online_phones(cursor, park_id, online)
+        wrote = True
+    return wrote
 
 
 def register(bp, wiki_route, db, log_ip):
@@ -93,7 +136,8 @@ def register(bp, wiki_route, db, log_ip):
         if not name:
             return jsonify({"error": "Укажите название парка"}), 400
 
-        links, error = _office_links(data)
+        numbers = _numbers(data)
+        links, error = (None, None) if numbers is not None else _office_links(data)
         if error:
             return jsonify({"error": error}), 400
 
@@ -113,11 +157,7 @@ def register(bp, wiki_route, db, log_ip):
                                              'logo_file_id': data.get('logo_file_id') or None,
                                              'head_office_id': _int_or_none(data.get('head_office_id')),
                                          })
-        if links is not None:
-            wiki_offices.set_park_offices(cursor, park_id, links)
-        online = wiki_offices.link_phones(data)
-        if online is not None:
-            wiki_offices.set_park_online_phones(cursor, park_id, online)
+        _write_numbers(cursor, park_id, numbers, links, data)
 
         queries.log_action(cursor, actor_id=ctx['user_id'], action='park.create',
                            entity_type='park', entity_id=park_id,
@@ -149,7 +189,8 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"status": "archived"})
 
         data = _body()
-        links, error = _office_links(data)
+        numbers = _numbers(data)
+        links, error = (None, None) if numbers is not None else _office_links(data)
         if error:
             return jsonify({"error": error}), 400
 
@@ -171,12 +212,7 @@ def register(bp, wiki_route, db, log_ip):
             fields['position'] = _int_or_none(data['position']) or 0
 
         changed = wiki_parks.update_park(cursor, park_id, fields) if fields else False
-        if links is not None:
-            wiki_offices.set_park_offices(cursor, park_id, links)
-            changed = True
-        online = wiki_offices.link_phones(data)
-        if online is not None:
-            wiki_offices.set_park_online_phones(cursor, park_id, online)
+        if _write_numbers(cursor, park_id, numbers, links, data):
             changed = True
 
         if not changed:

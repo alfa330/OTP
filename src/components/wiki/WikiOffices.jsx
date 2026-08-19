@@ -333,7 +333,11 @@ const OfficeCard = ({
                                 {parkPhones.map((link) => (
                                     <span key={link.park_id} className="tabular-nums">
                                         <span className="text-slate-400">{link.name}:</span>{' '}
-                                        {link.phones.join(', ')}
+                                        {link.phones
+                                            .map((item) => (typeof item === 'string'
+                                                ? item
+                                                : [item.phone, item.note].filter(Boolean).join(' · ')))
+                                            .join(', ')}
                                     </span>
                                 ))}
                             </div>

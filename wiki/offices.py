@@ -333,18 +333,37 @@ def snapshot_offices_day(cursor, day):
 MAX_PHONES_PER_POINT = 10
 
 
-def clean_phones(values):
-    """Список номеров: сжатие пробелов, отсев пустых, снятие повторов, потолок.
+def _text(value, limit):
+    return ' '.join(str(value if value is not None else '').split())[:limit]
 
-    Повторы снимаются по видимому тексту, а не по цифрам: «+7 707 705 08 80» и
-    «8 707 705 08 80» это один номер, но записан он так, как его диктуют, и
-    приводить к одной форме здесь — значит спорить с тем, кто заполнял.
+
+def clean_phones(values):
+    """Номера точки: [{phone, note}]. Пустые отсеиваются, повторы снимаются.
+
+    Принимает и голые строки, и пары с запиской — тело запроса приходит из трёх
+    мест (форма парка, форма офиса, скрипт переноса), и требовать от каждого
+    одинаковой формы дороже, чем разобрать обе здесь.
+
+    Повторы снимаются по видимому тексту номера, а не по цифрам: «+7 707 705 08 80»
+    и «8 707 705 08 80» это один номер, но записан он так, как его диктуют, и
+    приводить к одной форме здесь — значит спорить с тем, кто заполнял. Записка
+    остаётся от первого вхождения, если у повтора её нет.
     """
-    result = []
+    result, seen = [], {}
     for value in values or []:
-        phone = ' '.join(str(value if value is not None else '').split())[:64]
-        if phone and phone not in result:
-            result.append(phone)
+        if isinstance(value, dict):
+            phone = _text(value.get('phone'), 64)
+            note = _text(value.get('note'), 200) or None
+        else:
+            phone, note = _text(value, 64), None
+        if not phone:
+            continue
+        if phone in seen:
+            if note and not seen[phone]['note']:
+                seen[phone]['note'] = note
+            continue
+        seen[phone] = {'phone': phone, 'note': note}
+        result.append(seen[phone])
         if len(result) >= MAX_PHONES_PER_POINT:
             break
     return result
@@ -370,15 +389,16 @@ def phones_by_park(cursor, park_ids):
         return {}
     cursor.execute(
         """
-        SELECT park_id, office_id, phone FROM wiki_park_phones
+        SELECT park_id, office_id, phone, note FROM wiki_park_phones
          WHERE park_id = ANY(%s)
          ORDER BY park_id, office_id NULLS FIRST, position, id
         """,
         (list(park_ids),),
     )
     result = {}
-    for park_id, office_id, phone in cursor.fetchall():
-        result.setdefault(park_id, {}).setdefault(office_id, []).append(phone)
+    for park_id, office_id, phone, note in cursor.fetchall():
+        (result.setdefault(park_id, {}).setdefault(office_id, [])
+               .append({'phone': phone, 'note': note}))
     return result
 
 
@@ -389,12 +409,79 @@ def set_point_phones(cursor, park_id, office_id, phones):
         ' WHERE park_id = %s AND office_id IS NOT DISTINCT FROM %s',
         (park_id, office_id),
     )
-    for position, phone in enumerate(clean_phones(phones)):
+    for position, number in enumerate(clean_phones(phones)):
         cursor.execute(
-            'INSERT INTO wiki_park_phones (park_id, office_id, phone, position) '
-            'VALUES (%s, %s, %s, %s)',
-            (park_id, office_id, phone, position),
+            'INSERT INTO wiki_park_phones (park_id, office_id, phone, note, position) '
+            'VALUES (%s, %s, %s, %s, %s)',
+            (park_id, office_id, number['phone'], number['note'], position),
         )
+
+
+def set_park_numbers(cursor, park_id, numbers):
+    """Переписывает номера парка одним плоским списком.
+
+    numbers — [{office_id: int | None, phone, note}] в том порядке, в котором
+    они стоят в форме. Плоско, а не «офис → его номера», потому что так их и
+    заводят: сначала номер, потом ему выбирают офис или оставляют без офиса.
+    Два номера одного офиса — обычное дело и сливаются в одну точку.
+
+    Заодно синхронизируется связь «парк ↔ офис»: она нужна офисной стороне
+    (карточка офиса показывает, какие парки за ним сидят), но у неё есть свои
+    переопределения графика и примечание — их форма парка не присылает, поэтому
+    существующие строки не трогаем (ON CONFLICT DO NOTHING).
+    """
+    grouped, order = {}, []
+    for item in numbers or []:
+        if not isinstance(item, dict):
+            continue
+        office_id = item.get('office_id')
+        try:
+            office_id = int(office_id) if office_id is not None else None
+        except (TypeError, ValueError):
+            continue
+        if office_id not in grouped:
+            grouped[office_id] = []
+            order.append(office_id)
+        grouped[office_id].append(item)
+
+    office_ids = [office_id for office_id in order if office_id is not None]
+
+    # Офис, из которого убрали последний номер, отвязывается от парка.
+    cursor.execute(
+        """
+        DELETE FROM wiki_office_taxi_parks op
+         USING wiki_offices o
+         WHERE op.office_id = o.id AND op.park_id = %s AND o.status = 'active'
+           AND NOT (op.office_id = ANY(%s))
+        """,
+        (park_id, office_ids),
+    )
+    for office_id in office_ids:
+        cursor.execute(
+            'INSERT INTO wiki_office_taxi_parks (office_id, park_id) VALUES (%s, %s) '
+            'ON CONFLICT (office_id, park_id) DO NOTHING',
+            (office_id, park_id),
+        )
+
+    # Сами номера переписываем целиком — по точке за раз, чтобы не потерять
+    # номера, привязанные к архивным офисам: их в форме нет.
+    cursor.execute(
+        """
+        DELETE FROM wiki_park_phones ph
+         WHERE ph.park_id = %s
+           AND (ph.office_id IS NULL
+                OR EXISTS (SELECT 1 FROM wiki_offices o
+                            WHERE o.id = ph.office_id AND o.status = 'active'))
+        """,
+        (park_id,),
+    )
+    for office_id in order:
+        for position, number in enumerate(clean_phones(grouped[office_id])):
+            cursor.execute(
+                'INSERT INTO wiki_park_phones (park_id, office_id, phone, note, position) '
+                'VALUES (%s, %s, %s, %s, %s)',
+                (park_id, office_id, number['phone'], number['note'], position),
+            )
 
 
 def set_park_online_phones(cursor, park_id, phones):
@@ -486,10 +573,11 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
     cursor.execute(
         """
         SELECT op.office_id, op.park_id, p.name, op.schedule, op.note,
-               COALESCE((SELECT array_agg(ph.phone ORDER BY ph.position, ph.id)
+               COALESCE((SELECT json_agg(json_build_object('phone', ph.phone, 'note', ph.note)
+                                          ORDER BY ph.position, ph.id)
                            FROM wiki_park_phones ph
                           WHERE ph.park_id = op.park_id
-                            AND ph.office_id = op.office_id), '{}')
+                            AND ph.office_id = op.office_id), '[]'::json)
           FROM wiki_office_taxi_parks op
           JOIN wiki_taxi_parks p ON p.id = op.park_id
          WHERE op.office_id = ANY(%s) AND p.status = 'active'
@@ -729,10 +817,11 @@ def offices_by_park(cursor, park_ids):
     cursor.execute(
         """
         SELECT op.park_id, o.id, o.name, o.city, o.is_online, op.schedule, op.note,
-               COALESCE((SELECT array_agg(ph.phone ORDER BY ph.position, ph.id)
+               COALESCE((SELECT json_agg(json_build_object('phone', ph.phone, 'note', ph.note)
+                                          ORDER BY ph.position, ph.id)
                            FROM wiki_park_phones ph
                           WHERE ph.park_id = op.park_id
-                            AND ph.office_id = op.office_id), '{}')
+                            AND ph.office_id = op.office_id), '[]'::json)
           FROM wiki_office_taxi_parks op
           JOIN wiki_offices o ON o.id = op.office_id
          WHERE op.park_id = ANY(%s) AND o.status = 'active'
