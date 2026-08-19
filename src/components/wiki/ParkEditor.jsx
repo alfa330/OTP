@@ -17,14 +17,10 @@ import { ONLINE, emptyPoint, isOnline, parkDraftIssue } from './parkPoints';
  * бывает несколько: плюс рядом с полем добавляет следующий.
  */
 
-const PointRow = ({ point, offices, taken, onChange, onRemove, canRemove }) => {
-    const office = offices.find((item) => item.id === point.office_id);
-    const online = isOnline(point);
-    const unset = point.office_id === undefined;
-    // Онлайн-строка у парка одна: все номера без офиса лежат в одной пачке
-    // (wiki_park_phones с office_id = NULL), второй такой строке некуда деться.
-    const onlineTaken = !online && taken(ONLINE);
-
+/* Селектор офиса из справочника. Один на форму: им выбирают и место для
+   номера, и адрес самого парка — списки обязаны быть одинаковыми, иначе в
+   одной форме появятся два разных перечня офисов. */
+const OfficeSelect = ({ value, offices, onChange, placeholder, disabledId, invalid = false }) => {
     // Города в порядке появления: список офисов уже отсортирован сервером, и
     // пересортировка тут развела бы одинаковые списки в двух вкладках.
     const byCity = useMemo(() => {
@@ -37,6 +33,43 @@ const PointRow = ({ point, offices, taken, onChange, onRemove, canRemove }) => {
         });
         return groups;
     }, [offices]);
+
+    return (
+        <div className="relative min-w-0 flex-1">
+            <select
+                className={`${iosInput} h-10 appearance-none py-0 pr-9 ${
+                    invalid ? 'ring-2 ring-amber-400/80' : ''
+                }`}
+                value={value ?? ''}
+                onChange={(e) => onChange(e.target.value === '' ? undefined : Number(e.target.value))}
+            >
+                <option value="">{offices.length ? placeholder : 'Офисов в справочнике нет'}</option>
+                {byCity.map(([city, items]) => (
+                    <optgroup key={city} label={city}>
+                        {items.map((item) => (
+                            <option key={item.id} value={item.id} disabled={disabledId?.(item.id)}>
+                                {item.name}
+                                {item.is_online ? ' · только по телефону' : ''}
+                            </option>
+                        ))}
+                    </optgroup>
+                ))}
+            </select>
+            <ChevronDown
+                size={15}
+                className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+            />
+        </div>
+    );
+};
+
+const PointRow = ({ point, offices, taken, onChange, onRemove, canRemove }) => {
+    const office = offices.find((item) => item.id === point.office_id);
+    const online = isOnline(point);
+    const unset = point.office_id === undefined;
+    // Онлайн-строка у парка одна: все номера без офиса лежат в одной пачке
+    // (wiki_park_phones с office_id = NULL), второй такой строке некуда деться.
+    const onlineTaken = !online && taken(ONLINE);
 
     const setPhone = (index, value) => onChange({
         phones: point.phones.map((phone, position) => (position === index ? value : phone)),
@@ -60,37 +93,14 @@ const PointRow = ({ point, offices, taken, onChange, onRemove, canRemove }) => {
                         <span className="truncate">Без офиса — принимают только по телефону</span>
                     </div>
                 ) : (
-                    <div className="relative min-w-0 flex-1">
-                        <select
-                            className={`${iosInput} h-10 appearance-none py-0 pr-9 ${
-                                unset ? 'ring-2 ring-amber-400/80' : ''
-                            }`}
-                            value={point.office_id ?? ''}
-                            onChange={(e) => onChange({
-                                office_id: e.target.value === '' ? undefined : Number(e.target.value),
-                            })}
-                        >
-                            {unset && (
-                                <option value="">
-                                    {offices.length ? 'Выберите офис' : 'Офисов в справочнике нет'}
-                                </option>
-                            )}
-                            {byCity.map(([city, items]) => (
-                                <optgroup key={city} label={city}>
-                                    {items.map((item) => (
-                                        <option key={item.id} value={item.id} disabled={taken(item.id)}>
-                                            {item.name}
-                                            {item.is_online ? ' · только по телефону' : ''}
-                                        </option>
-                                    ))}
-                                </optgroup>
-                            ))}
-                        </select>
-                        <ChevronDown
-                            size={15}
-                            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-                        />
-                    </div>
+                    <OfficeSelect
+                        value={point.office_id}
+                        offices={offices}
+                        placeholder="Выберите офис"
+                        invalid={unset}
+                        disabledId={taken}
+                        onChange={(office_id) => onChange({ office_id })}
+                    />
                 )}
 
                 <div
@@ -248,6 +258,7 @@ export default function ParkEditor({ draft, setDraft, offices }) {
     const set = (key) => (e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }));
     const issue = parkDraftIssue(draft);
     const points = draft.points || [];
+    const headOffice = offices.find((office) => office.id === draft.head_office_id);
 
     return (
         <div className="space-y-5">
@@ -334,13 +345,35 @@ export default function ParkEditor({ draft, setDraft, offices }) {
                         </div>
                     </Field>
                 </div>
-                <Field label="Адрес" hint="Юридический или головной. Адреса, куда ходят водители, — в офисах.">
-                    <input
-                        className={iosInput}
-                        value={draft.address}
-                        placeholder="Алматы, улица Жамбыла, 172"
-                        onChange={set('address')}
+                {/* Адрес выбирается офисом, а не набирается: тот же адрес уже
+                    записан в справочнике офисов, и второй его экземпляр здесь
+                    неизбежно разошёлся бы с первым. */}
+                <Field
+                    label="Адрес"
+                    hint={headOffice
+                        ? 'Адрес и карта берутся из карточки офиса — правятся на вкладке «Офисы»'
+                        : 'Главный офис парка из справочника. Нужного нет — заведите его на вкладке «Офисы»'}
+                >
+                    <OfficeSelect
+                        value={draft.head_office_id}
+                        offices={offices}
+                        placeholder="Офис не выбран"
+                        onChange={(head_office_id) => setDraft((prev) => ({ ...prev, head_office_id }))}
                     />
+                    {headOffice && (
+                        <p className="mt-1 flex items-start gap-1.5 px-1 text-[11.5px] leading-relaxed text-slate-500">
+                            <MapPin size={11} className="mt-0.5 shrink-0 text-slate-400" />
+                            {headOffice.address || 'Адрес у этого офиса не заполнен'}
+                        </p>
+                    )}
+                    {/* Старый свободный адрес не выбрасываем молча: пока офис не
+                        выбран, показываем, что было записано руками. */}
+                    {!headOffice && draft.address && (
+                        <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-amber-600">
+                            Записано вручную: {draft.address}. Выберите офис — текст заменится
+                            адресом из справочника.
+                        </p>
+                    )}
                 </Field>
             </section>
         </div>

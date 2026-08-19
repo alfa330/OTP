@@ -28,6 +28,7 @@ const fmtDate = (iso) => (iso
 
 const emptyPark = () => ({
     name: '', city: '', address: '', website: '', commission: '', description: '',
+    head_office_id: undefined,
     // Одна пустая строка сразу: номер у парка обязателен, и форма должна
     // показывать это полем, а не пустым местом с кнопкой.
     points: pointsFromPark({}),
@@ -175,7 +176,8 @@ export default function WikiParks({ base, headers, showToast }) {
         const payload = {
             name: draft.name,
             city: draft.city || null,
-            address: draft.address || null,
+            // Адрес парка — ссылка на офис; null снимает её.
+            head_office_id: draft.head_office_id ?? null,
             website: draft.website || null,
             description: draft.description || null,
             commission: draft.commission === '' ? null : Number(draft.commission),
@@ -295,6 +297,7 @@ export default function WikiParks({ base, headers, showToast }) {
                                 onEdit={(p) => setDraft({
                                     id: p.id, name: p.name, city: p.city || '',
                                     address: p.address || '',
+                                    head_office_id: p.head_office?.id ?? undefined,
                                     website: p.website || '', description: p.description || '',
                                     commission: p.commission ?? '',
                                     points: pointsFromPark(p),

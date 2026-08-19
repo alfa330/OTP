@@ -693,6 +693,15 @@ _OFFICE_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_park_phones_park "
     "ON wiki_park_phones(park_id, office_id, position, id);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_park_phones_office ON wiki_park_phones(office_id);",
+    # Адрес парка — ссылка на офис, а не текст.
+    #
+    # Пока это было свободное поле, оно повторяло адрес, уже записанный в
+    # справочнике офисов: та же болезнь, от которой ушла статья «Адреса офисов»
+    # — один адрес в двух местах расходится, и правят тот, который попался.
+    # ON DELETE SET NULL: офис архивируют, а не удаляют, но если запись всё же
+    # исчезнет, парк должен остаться без адреса, а не пропасть каскадом.
+    "ALTER TABLE wiki_taxi_parks ADD COLUMN IF NOT EXISTS head_office_id INTEGER "
+    "REFERENCES wiki_offices(id) ON DELETE SET NULL;",
     # Перенос: старый одиночный телефон становится первым номером и ОСУШАЕТСЯ
     # в источнике. Без осушения удалённый в форме номер возвращался бы при
     # каждом старте — старая колонка залила бы его заново.

@@ -93,7 +93,11 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
 
     const online = park.phones || [];
     const offices = park.offices || [];
-    const hasContacts = !!(park.city || online.length || park.address || park.website);
+    // Адрес парка — его офис из справочника; собственный текст остался только у
+    // записей, заведённых до перехода на выбор офиса.
+    const head = park.head_office;
+    const address = head?.address || park.address;
+    const hasContacts = !!(park.city || online.length || address || park.website);
 
     return (
         <div className="space-y-3">
@@ -162,8 +166,16 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
                                 {park.city && (
                                     <ContactRow icon={MapPin} label="Город">{park.city}</ContactRow>
                                 )}
-                                {park.address && (
-                                    <ContactRow icon={MapPin} label="Адрес">{park.address}</ContactRow>
+                                {address && (
+                                    <ContactRow icon={MapPin} label="Адрес">
+                                        {address}
+                                        {head?.name && (
+                                            <span className="mt-0.5 block text-[12px] text-slate-400">
+                                                {head.name}
+                                                {head.city ? ` · ${head.city}` : ''}
+                                            </span>
+                                        )}
+                                    </ContactRow>
                                 )}
                                 {online.length > 0 && (
                                     <ContactRow icon={Phone} label="Телефон">

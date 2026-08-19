@@ -9,7 +9,32 @@
 # на точку (офис или «онлайн»), потому что в одном офисе их бывает несколько.
 _PARK_KEYS = ('id', 'slug', 'name', 'description', 'city', 'address',
               'website', 'commission', 'logo_file_id', 'status', 'position',
-              'promotions_count')
+              'promotions_count', 'head_office_id', 'head_office_name',
+              'head_office_city', 'head_office_address')
+
+# Адрес парка — ссылка на офис, а не текст: свободное поле повторяло адрес,
+# который уже записан в справочнике офисов, и повторы расходятся — ровно та
+# болезнь, от которой ушла статья «Адреса офисов». Поэтому оба запроса ниже
+# джойнят wiki_offices как ho.
+
+
+def _park_row(row):
+    """Строка парка в словарь.
+
+    Собственный address парка остаётся как след старого свободного поля: его
+    показывают, только если офис не выбран, — чтобы введённый ранее текст не
+    исчез с экрана молча.
+    """
+    park = dict(zip(_PARK_KEYS, row))
+    park['commission'] = float(park['commission']) if park['commission'] is not None else None
+    park['logo_url'] = ('/api/wiki/file/%s' % park['logo_file_id']) if park['logo_file_id'] else None
+    name = park.pop('head_office_name', None)
+    city = park.pop('head_office_city', None)
+    address = park.pop('head_office_address', None)
+    park['head_office'] = ({'id': park['head_office_id'], 'name': name,
+                            'city': city, 'address': address}
+                           if park['head_office_id'] else None)
+    return park
 
 
 def list_parks(cursor, include_archived=False, query=None):
@@ -19,8 +44,10 @@ def list_parks(cursor, include_archived=False, query=None):
                p.website, p.commission, p.logo_file_id, p.status, p.position,
                (SELECT count(*) FROM wiki_promotion_taxi_parks pp
                  JOIN wiki_promotions pr ON pr.id = pp.promotion_id
-                WHERE pp.park_id = p.id AND pr.status = 'active')
+                WHERE pp.park_id = p.id AND pr.status = 'active'),
+               p.head_office_id, ho.name, ho.city, ho.address
           FROM wiki_taxi_parks p
+          LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id
          WHERE (%(archived)s OR p.status = 'active')
            AND (%(query)s::text IS NULL
                 OR p.name ILIKE '%%' || %(query)s::text || '%%'
@@ -29,30 +56,25 @@ def list_parks(cursor, include_archived=False, query=None):
         """,
         {'archived': include_archived, 'query': query or None},
     )
-    rows = []
-    for row in cursor.fetchall():
-        item = dict(zip(_PARK_KEYS, row))
-        item['commission'] = float(item['commission']) if item['commission'] is not None else None
-        item['logo_url'] = ('/api/wiki/file/%s' % item['logo_file_id']) if item['logo_file_id'] else None
-        rows.append(item)
-    return rows
+    return [_park_row(row) for row in cursor.fetchall()]
 
 
 def get_park(cursor, slug):
     cursor.execute(
         """
         SELECT p.id, p.slug, p.name, p.description, p.city, p.address,
-               p.website, p.commission, p.logo_file_id, p.status, p.position, 0
-          FROM wiki_taxi_parks p WHERE p.slug = %s
+               p.website, p.commission, p.logo_file_id, p.status, p.position, 0,
+               p.head_office_id, ho.name, ho.city, ho.address
+          FROM wiki_taxi_parks p
+          LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id
+         WHERE p.slug = %s
         """,
         (slug,),
     )
     row = cursor.fetchone()
     if not row:
         return None
-    park = dict(zip(_PARK_KEYS, row))
-    park['commission'] = float(park['commission']) if park['commission'] is not None else None
-    park['logo_url'] = ('/api/wiki/file/%s' % park['logo_file_id']) if park['logo_file_id'] else None
+    park = _park_row(row)
 
     cursor.execute(
         """
@@ -73,9 +95,10 @@ def create_park(cursor, *, slug, name, fields, created_by):
     cursor.execute(
         """
         INSERT INTO wiki_taxi_parks (slug, name, description, city, address,
-                                     website, commission, logo_file_id, position, created_by)
+                                     website, commission, logo_file_id, head_office_id,
+                                     position, created_by)
         VALUES (%(slug)s, %(name)s, %(description)s, %(city)s, %(address)s,
-                %(website)s, %(commission)s, %(logo)s,
+                %(website)s, %(commission)s, %(logo)s, %(head_office)s,
                 COALESCE((SELECT max(position) + 1 FROM wiki_taxi_parks), 0), %(by)s)
         RETURNING id
         """,
@@ -83,13 +106,14 @@ def create_park(cursor, *, slug, name, fields, created_by):
          'description': fields.get('description'), 'city': fields.get('city'),
          'address': fields.get('address'),
          'website': fields.get('website'), 'commission': fields.get('commission'),
-         'logo': fields.get('logo_file_id')},
+         'logo': fields.get('logo_file_id'), 'head_office': fields.get('head_office_id')},
     )
     return cursor.fetchone()[0]
 
 
 _PARK_UPDATABLE = ('name', 'description', 'city', 'address', 'website',
-                   'commission', 'logo_file_id', 'status', 'position', 'slug')
+                   'commission', 'logo_file_id', 'status', 'position', 'slug',
+                   'head_office_id')
 
 
 def update_park(cursor, park_id, fields):

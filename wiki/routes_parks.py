@@ -111,6 +111,7 @@ def register(bp, wiki_route, db, log_ip):
                                              'website': _clean(data.get('website'), 500),
                                              'commission': _decimal_or_none(data.get('commission')),
                                              'logo_file_id': data.get('logo_file_id') or None,
+                                             'head_office_id': _int_or_none(data.get('head_office_id')),
                                          })
         if links is not None:
             wiki_offices.set_park_offices(cursor, park_id, links)
@@ -161,6 +162,9 @@ def register(bp, wiki_route, db, log_ip):
             fields['commission'] = _decimal_or_none(data['commission'])
         if 'logo_file_id' in data:
             fields['logo_file_id'] = data['logo_file_id'] or None
+        # Ключ есть, а значение пустое — «адрес снят», а не «поле не прислали».
+        if 'head_office_id' in data:
+            fields['head_office_id'] = _int_or_none(data['head_office_id'])
         if data.get('status') in ('active', 'archived'):
             fields['status'] = data['status']
         if 'position' in data:
