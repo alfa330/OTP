@@ -443,16 +443,21 @@ def _annotate_audio(item: dict) -> dict:
         path = os.path.join(td, f"voice{suffix}")
         with open(path, "wb") as fh:
             fh.write(raw)
-        tokens = soniox.transcribe_file(path, diarize=False)
-    asm = soniox.assemble(tokens)
+        got = soniox.transcribe_file_full(path, diarize=False)
+    asm = soniox.assemble(got["tokens"], got["meta"])
     text = " ".join(line["text"] for line in asm["lines"] if line.get("text")).strip()
     if not text:
         return {"status": "failed", "error": "Soniox вернул пустой транскрипт",
-                "source_bytes": len(raw),
+                "source_bytes": len(raw), "audio_duration_ms": asm.get("duration_ms"),
+                "asr_meta": got["meta"],
                 "latency_ms": round((time.perf_counter() - started) * 1000)}
     langs = "/".join(asm["languages"].keys()) if asm.get("languages") else ""
     prefix = f"[{langs}] " if langs else ""
+    # тайминги реплик и метаданные вендора сохраняем: за них уже заплачено
     return {"status": "ready", "annotation": f"{prefix}{text}", "source_bytes": len(raw),
+            "audio_duration_ms": asm.get("duration_ms"), "mean_conf": asm.get("mean_conf"),
+            "lines": asm.get("lines"), "low_conf_spans": asm.get("low_conf_spans"),
+            "asr_meta": got["meta"],
             "latency_ms": round((time.perf_counter() - started) * 1000)}
 
 

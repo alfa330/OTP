@@ -26,8 +26,8 @@ def evaluate_call(call: dict, direction: dict) -> dict:
     with tempfile.TemporaryDirectory() as td:
         dst = os.path.join(td, "audio.mp3")
         _download_gcs(call["audio_path"], dst)
-        toks = soniox.transcribe_file(dst)
-    tr = soniox.assemble(toks)
+        got = soniox.transcribe_file_full(dst)
+    tr = soniox.assemble(got["tokens"], got["meta"])
     ev = evaluator.evaluate(tr["text"], direction, asr_low_spans=tr["low_conf_spans"])
     review = queue.needs_review(ev, direction, tr["mean_conf"])
     return {"call_id": call["id"], "asr": tr, "evaluation": ev, "needs_review": review}

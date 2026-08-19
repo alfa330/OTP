@@ -274,27 +274,32 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
                 with tempfile.TemporaryDirectory() as td:
                     dest = os.path.join(td, "audio.mp3")
                     _download(call["audio_path"], dest)
-                    toks = soniox.transcribe_file(dest)
-                assembled = soniox.assemble(toks)
+                    got = soniox.transcribe_file_full(dest)
+                toks, asr_meta = got["tokens"], got["meta"]
+                assembled = soniox.assemble(toks, asr_meta)
                 slim = [{k: t.get(k) for k in (
                     "text", "speaker", "language", "confidence",
-                    "start_time_ms", "end_time_ms") if t.get(k) is not None}
+                    "start_time_ms", "end_time_ms", "is_audio_event") if t.get(k) is not None}
                         for t in toks]
                 asm = {"text": assembled["text"], "languages": assembled["languages"],
                        "mean_conf": assembled["mean_conf"],
-                       "low_conf_spans": assembled["low_conf_spans"]}
+                       "low_conf_spans": assembled["low_conf_spans"],
+                       "duration_ms": assembled.get("duration_ms"),
+                       "audio_events": assembled.get("audio_events"),
+                       "asr_meta": asr_meta}
                 rec = {"call_id": call["id"], "subject_kind": config.SUBJECT_CALL,
                        "toks": slim, "asm": asm}
             segments = rec.get("segments") or _lines_from_tokens(slim)
             transcript_hash = content_hash(asm["text"])
-            duration_ms = max((int(token.get("end_time_ms") or 0) for token in slim),
-                              default=None)
+            duration_ms = asm.get("duration_ms") or max(
+                (int(token.get("end_time_ms") or 0) for token in slim), default=None)
             transcript_cache_id = runtime_store.put_transcript(
                 call_id=call["id"], audio_fingerprint_value=audio_fp,
                 asr_provider="soniox", asr_model=config.SONIOX_MODEL,
                 asr_config_hash=asr_cfg_hash, transcript_hash=transcript_hash,
                 text=asm["text"], segments=segments, tokens=slim,
-                payload={"asr_config": asr_cfg, "source": "batch"},
+                payload={"asr_config": asr_cfg, "source": "batch",
+                         "asr_meta": asm.get("asr_meta"), "audio_events": asm.get("audio_events")},
                 languages=asm.get("languages"), mean_conf=asm.get("mean_conf"),
                 low_conf_spans=asm.get("low_conf_spans"), duration_ms=duration_ms,
                 subject_kind=config.SUBJECT_CALL,

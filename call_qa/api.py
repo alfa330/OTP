@@ -1063,20 +1063,26 @@ def _resolve_call_source(subject: dict, model: str) -> dict:
             with tempfile.TemporaryDirectory() as td:
                 dest = os.path.join(td, "audio.mp3")
                 _download(audio_path, dest)
-                raw_tokens = soniox.transcribe_file(dest)
-            full = soniox.assemble(raw_tokens)
+                got = soniox.transcribe_file_full(dest)
+            raw_tokens, asr_meta = got["tokens"], got["meta"]
+            full = soniox.assemble(raw_tokens, asr_meta)
             asm = {"text": full["text"], "languages": full["languages"],
-                   "mean_conf": full["mean_conf"], "low_conf_spans": full["low_conf_spans"]}
+                   "mean_conf": full["mean_conf"], "low_conf_spans": full["low_conf_spans"],
+                   "duration_ms": full.get("duration_ms"), "audio_events": full.get("audio_events"),
+                   "asr_meta": asr_meta}
             lines = _lines_from_tokens(raw_tokens)
             tokens = _slim_asr_tokens(raw_tokens)
         transcript_hash = content_hash(asm["text"])
-        duration_ms = max((int(token.get("end_time_ms") or 0) for token in (tokens or [])), default=None)
+        # длительность: биллинговая от вендора, иначе по последнему токену
+        duration_ms = asm.get("duration_ms") or max(
+            (int(token.get("end_time_ms") or 0) for token in (tokens or [])), default=None)
         try:
             transcript_cache_id = runtime_store.put_transcript(
                 call_id=call_id, audio_fingerprint_value=audio_fp, asr_provider="soniox",
                 asr_model=config.SONIOX_MODEL, asr_config_hash=asr_cfg_hash,
                 transcript_hash=transcript_hash, text=asm["text"], segments=lines,
-                tokens=tokens, payload={"asr_config": asr_cfg},
+                tokens=tokens, payload={"asr_config": asr_cfg, "asr_meta": asm.get("asr_meta"),
+                                        "audio_events": asm.get("audio_events")},
                 languages=asm.get("languages"), mean_conf=asm.get("mean_conf"),
                 low_conf_spans=asm.get("low_conf_spans"), duration_ms=duration_ms,
                 subject_kind=config.SUBJECT_CALL)
