@@ -677,19 +677,34 @@ class ChatWallboardWiringTests(unittest.TestCase):
                                self.view.index("export default function SzovWallboardView")]
         self.assertIn("{snapshot ? (\n                <ChatExportControls", chat_board)
 
-    def test_export_period_uses_the_shared_picker(self):
-        """Пикер тот же, что в «Чатах ChatApp» — календарь на разделы один, а не копия."""
-        self.assertIn("import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';",
+    def test_export_period_is_chosen_inside_the_button(self):
+        """Запрос владельца: период выбирается по нажатию «Выгрузить», под ним «Подтвердить».
+
+        Календарь — общий кирпич из «Чатов ChatApp», а не копия; чипа с датой в шапке табло нет,
+        иначе на стене висел бы элемент управления, который смотрящим не нужен."""
+        self.assertIn("import { IosDateRangeCalendar, isoDate, rangeLabel } from '../ui/DateRangePicker';",
                       self.view)
-        self.assertIn("<IosDateRangePicker", self.view)
+        self.assertIn("<IosDateRangeCalendar", self.view)
+        self.assertNotIn("<IosDateRangePicker", self.view)
+        self.assertIn("Подтвердить", self.view)
+        self.assertIn("onClick={() => download(range.from, range.to)}", self.view)
         self.assertIn("query.set('date_from', from)", self.view)
         self.assertIn("query.set('date_to', to)", self.view)
         # «Весь период» тут не годится: выгрузка качает Chat2Desk по дню на день.
         self.assertIn("chatExportPresets", self.view)
         self.assertNotIn("'Весь период'", self.view)
-        # Потолок периода гасит кнопку ДО запроса, а не после минуты ожидания.
+        # Потолок периода гасит «Подтвердить» ДО запроса, а не после минуты ожидания.
         self.assertIn("const CHAT_EXPORT_MAX_DAYS = 31;", self.view)
-        self.assertIn("disabled={busy || tooLong}", self.view)
+        self.assertIn("disabled={tooLong}", self.view)
+
+    def test_calendar_is_one_brick_for_every_section(self):
+        """Календарь вынесен из чипа-пикера, а сам пикер построен на нём — копий быть не должно."""
+        picker = (ROOT / "src" / "components" / "ui" / "DateRangePicker.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("export function IosDateRangeCalendar(", picker)
+        self.assertIn("export function IosDateRangePicker(", picker)
+        self.assertIn("<IosDateRangeCalendar", picker)
+        # Сетка месяца существует в одном экземпляре: в чипе её больше нет.
+        self.assertEqual(picker.count("daysInMonth(view.y, view.m)"), 1)
 
     def test_export_file_name_carries_the_period(self):
         """Имя собирает фронт: Content-Disposition через CORS сюда не доходит."""

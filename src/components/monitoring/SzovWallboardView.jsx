@@ -20,7 +20,7 @@ import {
     wallboardStaleNotice,
 } from './szovWallboardShared';
 import SzovChatWallboardBody from './SzovChatWallboard';
-import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
+import { IosDateRangeCalendar, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
 
 /*
@@ -676,28 +676,46 @@ const rangeDays = (from, to) => {
 };
 
 /*
- * Выгрузка показателей направления «Чат» в Excel за выбранный период. Пикер — тот же, что в
- * «Чатах ChatApp». Сегодняшний день сервер берёт из кэша табло (цифры совпадают с экраном и
- * ни одного лишнего запроса к Chat2Desk), прошедшие дни качает по дню на день — поэтому долгий
- * период честно предупреждает о времени в подсказке кнопки.
+ * Выгрузка показателей направления «Чат» в Excel за выбранный период. Календарь — тот же, что в
+ * «Чатах ChatApp», но раскрывается из самой кнопки «Выгрузить», а под ним стоит «Подтвердить»
+ * (так попросил владелец): на стене табло чипу с датой места нет, а выгрузка — действие редкое,
+ * и период выбирается ровно в момент, когда он нужен.
+ * Сегодняшний день сервер берёт из кэша табло (цифры совпадают с экраном и ни одного лишнего
+ * запроса к Chat2Desk), прошедшие дни качает по дню на день — поэтому долгий период честно
+ * предупреждает о времени под кнопкой.
  */
 const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snapshot }) => {
+    const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
     const [range, setRange] = useState(() => ({ from: isoDate(new Date()), to: isoDate(new Date()) }));
+    const ref = useRef(null);
     // showToast приходит новой функцией на каждый рендер родителя, а он перерисовывается раз в
     // 15 с по опросу табло: держим её в ref, чтобы не тянуть в зависимости.
     const toastRef = useRef(showToast);
     toastRef.current = showToast;
     const snapshotRef = useRef(snapshot);
     snapshotRef.current = snapshot;
-    const rangeRef = useRef(range);
-    rangeRef.current = range;
+
+    // Клик мимо и Esc закрывают панель — как у чипа-пикера в остальных разделах.
+    useEffect(() => {
+        if (!open) return undefined;
+        const onDown = (event) => {
+            if (ref.current && !ref.current.contains(event.target)) setOpen(false);
+        };
+        const onKey = (event) => { if (event.key === 'Escape') setOpen(false); };
+        document.addEventListener('mousedown', onDown);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', onDown);
+            document.removeEventListener('keydown', onKey);
+        };
+    }, [open]);
 
     const days = rangeDays(range.from, range.to);
     const tooLong = days > CHAT_EXPORT_MAX_DAYS;
 
-    const download = useCallback(async () => {
-        const { from, to } = rangeRef.current || {};
+    const download = useCallback(async (from, to) => {
+        setOpen(false);
         setBusy(true);
         try {
             const build = withAccessTokenHeader;
@@ -733,26 +751,45 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
     const hint = tooLong
         ? `Период больше ${CHAT_EXPORT_MAX_DAYS} суток — выберите короче`
         : (days > 1
-            ? `Показатели за ${rangeLabel(range.from, range.to)} в Excel · прошедшие дни качаются из Chat2Desk по дню, это ${
-                days > 7 ? 'займёт несколько минут' : 'займёт до минуты'}`
-            : 'Показатели табло в Excel: сводка, по часам, люди на линии и состав смены');
+            ? `Прошедшие дни качаются из Chat2Desk по дню — ${
+                days > 7 ? 'это займёт несколько минут' : 'это займёт до минуты'}`
+            : 'Сводка, по часам, люди на линии и состав смены');
 
     return (
-        <>
-            {/* Глубину не ограничиваем: потолок у выгрузки на длину периода, а не на давность. */}
-            <IosDateRangePicker
-                from={range.from}
-                to={range.to}
-                max={isoDate(new Date())}
-                presets={chatExportPresets}
-                onChange={(next) => setRange({ from: next.from || next.to, to: next.to || next.from })}
-            />
-            <button type="button" className={iosBtnGhost} onClick={download} disabled={busy || tooLong}
-                    title={hint}>
+        <div ref={ref} className="relative">
+            <button type="button" className={`${iosBtnGhost} ${open ? 'bg-slate-100 text-slate-900' : ''}`}
+                    onClick={() => setOpen((value) => !value)} disabled={busy}
+                    title="Показатели табло в Excel за выбранный период">
                 <FaIcon className={`fas ${busy ? 'fa-spinner fa-spin' : 'fa-file-excel'}`}></FaIcon>
                 {busy ? 'Готовим…' : 'Выгрузить'}
             </button>
-        </>
+            {open ? (
+                /* Панель прижата к правому краю кнопки: кнопка стоит у правого края шапки, и
+                   раскрытие влево увело бы календарь за экран. */
+                <div className="absolute right-0 top-full z-[60] mt-2">
+                    <IosDateRangeCalendar
+                        from={range.from}
+                        to={range.to}
+                        max={isoDate(new Date())}
+                        presets={chatExportPresets}
+                        onChange={(next) => setRange({ from: next.from || next.to, to: next.to || next.from })}
+                        footer={(
+                            <div className="mt-2.5 border-t border-slate-100 pt-2.5">
+                                <button type="button" className={`${iosBtnPrimary} w-full`} disabled={tooLong}
+                                        onClick={() => download(range.from, range.to)}>
+                                    <FaIcon className="fas fa-file-excel"></FaIcon>
+                                    Подтвердить
+                                </button>
+                                <p className={`mt-1.5 text-center text-[11px] ${
+                                    tooLong ? 'text-rose-500' : 'text-slate-400'}`}>
+                                    {rangeLabel(range.from, range.to)} · {hint}
+                                </p>
+                            </div>
+                        )}
+                    />
+                </div>
+            ) : null}
+        </div>
     );
 };
 

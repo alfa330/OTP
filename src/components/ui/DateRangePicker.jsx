@@ -5,7 +5,13 @@ import { Calendar, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
  * клика (начало → конец) с подсветкой полосы по курсору и пресетами.
  *
  * Жил внутри WazzupChatsView; вынесен сюда, когда такой же понадобился разделу
- * «Чаты ChatApp» — чтобы календарь был один на оба, а не две копии. */
+ * «Чаты ChatApp» — чтобы календарь был один на оба, а не две копии.
+ *
+ * Внутри две части: `IosDateRangeCalendar` — сам календарь без обёртки (месяц,
+ * сетка, пресеты и место под свою кнопку), `IosDateRangePicker` — привычный
+ * чип-поповер над ним. Разделение появилось, когда выгрузке табло СЗоВ
+ * понадобился тот же календарь, но раскрывающимся из кнопки «Выгрузить» и с
+ * «Подтвердить» под ним: чипа с датой на стене быть не должно. */
 
 const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
     'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
@@ -38,35 +44,23 @@ export const rangeLabel = (from, to) => {
 
 /* `presets` — [{label, range: () => ({from, to})}]; по умолчанию «Сегодня» и
  * «Весь период». Раздел, которому пустой диапазон не подходит (например синк
- * ChatApp), передаёт свои и не отдаёт вариант «Весь период». */
-export function IosDateRangePicker({ from, to, max, min, onChange, presets = null }) {
+ * ChatApp), передаёт свои и не отдаёт вариант «Весь период».
+ *
+ * `footer` — место под своей кнопкой (например «Подтвердить»). Когда его нет,
+ * выбор считается применённым сразу по второму клику, и обёртка закрывается.
+ *
+ * Черновик выбора инициализируется при МОНТИРОВАНИИ: обе обёртки рисуют
+ * календарь только раскрытым, поэтому закрытие и открытие сами возвращают его
+ * в исходное состояние — отдельная синхронизация по `open` не нужна. */
+export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = null, footer = null }) {
     const today = isoDate(new Date());
-    const [open, setOpen] = useState(false);
-    const [draft, setDraft] = useState({ from, to });   // выбор внутри поповера
+    const [draft, setDraft] = useState({ from, to });   // выбор внутри календаря
     const [step, setStep] = useState(0);                // 0 — ждём начало, 1 — конец
     const [hover, setHover] = useState(null);
     const [view, setView] = useState(() => {
         const [y, m] = (to || from || today).split('-').map(Number);
         return { y, m: m - 1 };
     });
-    const ref = useRef(null);
-
-    // при открытии — синхронизируем черновик и показываем месяц конца диапазона
-    useEffect(() => {
-        if (!open) return;
-        setDraft({ from, to });
-        setStep(0);
-        setHover(null);
-        const [y, m] = (to || from || today).split('-').map(Number);
-        setView({ y, m: m - 1 });
-    }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    useEffect(() => {
-        if (!open) return undefined;
-        const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-        document.addEventListener('mousedown', h);
-        return () => document.removeEventListener('mousedown', h);
-    }, [open]);
 
     const pickDay = (iso, disabled) => {
         if (disabled) return;
@@ -74,17 +68,22 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
             setDraft({ from: iso, to: iso });
             setStep(1);
             setHover(iso);
-        } else {
-            const start = draft.from || iso;
-            const next = iso < start ? { from: iso, to: start } : { from: start, to: iso };
-            setStep(0);
-            setHover(null);
-            onChange(next);
-            setOpen(false);
+            return;
         }
+        const start = draft.from || iso;
+        const next = iso < start ? { from: iso, to: start } : { from: start, to: iso };
+        setStep(0);
+        setHover(null);
+        setDraft(next);
+        onChange(next);
     };
 
-    const setPreset = (next) => { onChange(next); setOpen(false); };
+    const setPreset = (next) => {
+        setDraft(next);
+        setStep(0);
+        setHover(null);
+        onChange(next);
+    };
     const prevMonth = () => setView((v) => (v.m === 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m: v.m - 1 }));
     const nextMonth = () => setView((v) => (v.m === 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m: v.m + 1 }));
 
@@ -125,10 +124,62 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
         );
     }
 
-    const footer = presets || [
+    const footerPresets = presets || [
         { label: 'Сегодня', range: () => ({ from: today, to: today }) },
         { label: 'Весь период', range: () => ({ from: '', to: '' }) },
     ];
+
+    return (
+        <div className="w-[268px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70">
+            <div className="mb-2 flex items-center justify-between">
+                <button type="button" onClick={prevMonth}
+                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100">
+                    <ChevronLeft size={16} />
+                </button>
+                <span className="text-[13.5px] font-semibold text-slate-900">
+                    {MONTHS_RU[view.m]} {view.y}
+                </span>
+                <button type="button" onClick={nextMonth}
+                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100">
+                    <ChevronRight size={16} />
+                </button>
+            </div>
+            <div className="mb-1 grid grid-cols-7">
+                {DAYS_SHORT.map((d) => (
+                    <div key={d} className="flex h-7 w-9 items-center justify-center text-[10.5px] font-semibold uppercase text-slate-400">
+                        {d}
+                    </div>
+                ))}
+            </div>
+            <div className="grid grid-cols-7 gap-y-0.5">{cells}</div>
+            <div className="mt-2.5 flex items-center gap-2 border-t border-slate-100 pt-2.5">
+                {footerPresets.map((p) => (
+                    <button key={p.label} type="button" onClick={() => setPreset(p.range())}
+                            className="flex-1 rounded-lg bg-slate-100 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200/80">
+                        {p.label}
+                    </button>
+                ))}
+            </div>
+            <p className="mt-2 text-center text-[11px] text-slate-400">
+                {step === 0 ? 'Выберите начало периода' : 'Выберите конец периода'}
+            </p>
+            {footer}
+        </div>
+    );
+}
+
+/* Чип с диапазоном и календарь под ним. Выбор применяется сразу: второй клик по
+ * дню (или пресет) отдаёт диапазон разделу и закрывает поповер. */
+export function IosDateRangePicker({ from, to, max, min, onChange, presets = null }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+
+    useEffect(() => {
+        if (!open) return undefined;
+        const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+        document.addEventListener('mousedown', h);
+        return () => document.removeEventListener('mousedown', h);
+    }, [open]);
 
     return (
         <div ref={ref} className="relative">
@@ -141,39 +192,11 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
                 <ChevronUp size={13} className={`text-slate-400 transition-transform ${open ? '' : 'rotate-180'}`} />
             </button>
             {open && (
-                <div className="absolute left-0 top-full z-50 mt-2 w-[268px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70">
-                    <div className="mb-2 flex items-center justify-between">
-                        <button type="button" onClick={prevMonth}
-                                className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100">
-                            <ChevronLeft size={16} />
-                        </button>
-                        <span className="text-[13.5px] font-semibold text-slate-900">
-                            {MONTHS_RU[view.m]} {view.y}
-                        </span>
-                        <button type="button" onClick={nextMonth}
-                                className="grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100">
-                            <ChevronRight size={16} />
-                        </button>
-                    </div>
-                    <div className="mb-1 grid grid-cols-7">
-                        {DAYS_SHORT.map((d) => (
-                            <div key={d} className="flex h-7 w-9 items-center justify-center text-[10.5px] font-semibold uppercase text-slate-400">
-                                {d}
-                            </div>
-                        ))}
-                    </div>
-                    <div className="grid grid-cols-7 gap-y-0.5">{cells}</div>
-                    <div className="mt-2.5 flex items-center gap-2 border-t border-slate-100 pt-2.5">
-                        {footer.map((p) => (
-                            <button key={p.label} type="button" onClick={() => setPreset(p.range())}
-                                    className="flex-1 rounded-lg bg-slate-100 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200/80">
-                                {p.label}
-                            </button>
-                        ))}
-                    </div>
-                    <p className="mt-2 text-center text-[11px] text-slate-400">
-                        {step === 0 ? 'Выберите начало периода' : 'Выберите конец периода'}
-                    </p>
+                <div className="absolute left-0 top-full z-50 mt-2">
+                    <IosDateRangeCalendar
+                        from={from} to={to} max={max} min={min} presets={presets}
+                        onChange={(next) => { onChange(next); setOpen(false); }}
+                    />
                 </div>
             )}
         </div>
