@@ -26,6 +26,11 @@ import WikiAccessProbe from './WikiAccessProbe';
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
+/* Список отделов публичного раздела. Через хелпер, а не напрямую: поле пришло
+   позже самого раздела, и у ответа, отданного старым сервером, его нет вовсе —
+   а .length по undefined роняет всю вкладку. */
+const publicDepts = (x) => x?.public_department_ids || [];
+
 /* Строка живого раздела. Архивные сюда не попадают — у них своя вкладка,
    поэтому ни ветки «вернуть», ни бейджа «в архиве» здесь нет.
 
@@ -69,9 +74,18 @@ const SectionRow = ({ section, depth, department, onEdit, onAddChild, onArchive,
                         всех разделов, и повторять его в каждой строке — шум.
                         Отмечаем только исключение — публичный раздел. */}
                     {section.visibility_scope === 'public' && (
-                        <IosBadge tone="green" title="Виден всем сотрудникам без правил">
-                            <Globe size={11} /> Публичный
-                        </IosBadge>
+                        publicDepts(section).length > 0 ? (
+                            <IosBadge
+                                tone="green"
+                                title={`Публичный, но только для ${publicDepts(section).length} отд.`}
+                            >
+                                <Globe size={11} /> Публичный · {publicDepts(section).length} отд.
+                            </IosBadge>
+                        ) : (
+                            <IosBadge tone="green" title="Виден всем сотрудникам без правил">
+                                <Globe size={11} /> Публичный
+                            </IosBadge>
+                        )
                     )}
                     {/* Раздел без единого правила не видит никто, кроме админов.
                         Молчать об этом нельзя: у веток «Супервайзер» и
@@ -246,6 +260,11 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             // Ключ шлём всегда, в том числе пустым: сняли отдел — раздел обязан
             // перестать быть веткой, а без ключа сервер просто не тронет поле.
             department_id: sectionModal.department_id || null,
+            // Тем же порядком: пустой список означает «виден всем», и он обязан
+            // доехать до сервера, иначе снятие отделов не сохранится.
+            public_department_ids: sectionModal.visibility_scope === 'public'
+                ? publicDepts(sectionModal)
+                : [],
         };
         setBusy(true);
         const request = sectionModal.id
@@ -389,7 +408,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                               onSelect: () => setSectionModal({
                                   space_id: space.id, name: '', description: '',
                                   visibility_scope: 'restricted', parent_section_id: '',
-                                  department_id: '',
+                                  department_id: '', public_department_ids: [],
                               }) },
                             { key: 'edit', label: 'Изменить пространство', icon: Pencil,
                               onSelect: () => setSpaceModal({
@@ -423,7 +442,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 onClick={() => setSectionModal({
                                     space_id: space.id, name: '', description: '',
                                     visibility_scope: 'restricted', parent_section_id: '',
-                                    department_id: '',
+                                    department_id: '', public_department_ids: [],
                                 })}
                             >
                                 <Plus size={13} /> Раздел
@@ -450,12 +469,13 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                     visibility_scope: x.visibility_scope,
                                     parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
                                     department_id: x.department_id ? String(x.department_id) : '',
+                                    public_department_ids: x.public_department_ids || [],
                                 })}
                                 onAddChild={(x) => setSectionModal({
                                     space_id: x.space_id, name: '', description: '',
                                     visibility_scope: 'restricted',
                                     parent_section_id: String(x.id),
-                                    department_id: '',
+                                    department_id: '', public_department_ids: [],
                                 })}
                                 onArchive={archiveSection}
                                 onAccess={setAccessSection}
@@ -780,23 +800,101 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             )}
                         </div>
 
-                        <div className={`${iosCard} flex items-start justify-between gap-3 p-3.5`}>
-                            <div className="min-w-0">
-                                <div className="text-[13.5px] font-medium text-slate-900">
-                                    Публичный раздел
+                        <div className={`${iosCard} p-3.5`}>
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <div className="text-[13.5px] font-medium text-slate-900">
+                                        Публичный раздел
+                                    </div>
+                                    <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
+                                        Виден без единого правила доступа. Для служебной
+                                        информации оставьте выключенным.
+                                    </p>
                                 </div>
-                                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-500">
-                                    Виден всем сотрудникам без единого правила. Для служебной
-                                    информации оставьте выключенным.
-                                </p>
+                                <IosToggle
+                                    checked={sectionModal.visibility_scope === 'public'}
+                                    onChange={(v) => setSectionModal({
+                                        ...sectionModal,
+                                        visibility_scope: v ? 'public' : 'restricted',
+                                    })}
+                                />
                             </div>
-                            <IosToggle
-                                checked={sectionModal.visibility_scope === 'public'}
-                                onChange={(v) => setSectionModal({
-                                    ...sectionModal,
-                                    visibility_scope: v ? 'public' : 'restricted',
-                                })}
-                            />
+
+                            {/* Кому именно виден. «Публичный» раньше означало
+                                «всем в компании» без вариантов, и «Общий
+                                сотрудник» открывался в том числе отделам, кому
+                                вики не предназначена. Пустой список сохраняет
+                                прежний смысл — виден всем. */}
+                            {sectionModal.visibility_scope === 'public' && (
+                                <div className="mt-3 border-t border-slate-100 pt-3">
+                                    <div className="flex gap-1 rounded-xl bg-slate-100 p-1">
+                                        {[
+                                            { key: 'all', label: 'Всем отделам' },
+                                            { key: 'some', label: 'Выбранным' },
+                                        ].map(({ key, label }) => {
+                                            const active = key === 'some'
+                                                ? publicDepts(sectionModal).length > 0
+                                                : publicDepts(sectionModal).length === 0;
+                                            return (
+                                                <button
+                                                    key={key}
+                                                    type="button"
+                                                    onClick={() => setSectionModal({
+                                                        ...sectionModal,
+                                                        // «Выбранным» без выбора — это «всем», поэтому
+                                                        // при переключении отмечаем все отделы разом:
+                                                        // дальше человек снимает лишние.
+                                                        public_department_ids: key === 'all'
+                                                            ? []
+                                                            : departments.map((d) => d.id),
+                                                    })}
+                                                    className={`flex-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-[12.5px] font-medium transition ${
+                                                        active
+                                                            ? 'bg-white text-slate-900 shadow-sm'
+                                                            : 'text-slate-500 hover:text-slate-700'
+                                                    }`}
+                                                >
+                                                    {label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {publicDepts(sectionModal).length > 0 && (
+                                        <div className="mt-2 divide-y divide-slate-100 rounded-xl bg-slate-50">
+                                            {departments.map((d) => {
+                                                const on = publicDepts(sectionModal).includes(d.id);
+                                                return (
+                                                    <label
+                                                        key={d.id}
+                                                        className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2"
+                                                    >
+                                                        <span className="min-w-0 flex-1 truncate text-[13px] text-slate-800">
+                                                            {d.name}
+                                                        </span>
+                                                        <IosToggle
+                                                            checked={on}
+                                                            onChange={(v) => setSectionModal({
+                                                                ...sectionModal,
+                                                                public_department_ids: v
+                                                                    ? [...publicDepts(sectionModal), d.id]
+                                                                    : publicDepts(sectionModal)
+                                                                        .filter((x) => x !== d.id),
+                                                            })}
+                                                        />
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+
+                                    <p className="mt-1.5 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                        {publicDepts(sectionModal).length === 0
+                                            ? 'Раздел увидят сотрудники всех отделов.'
+                                            : `Раздел увидят только отмеченные отделы (${publicDepts(sectionModal).length}). Остальным его не будет видно вовсе.`}
+                                    </p>
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}

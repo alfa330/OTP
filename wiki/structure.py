@@ -95,6 +95,49 @@ def list_sections(cursor, space_id=None, include_archived=False):
     return [dict(zip(_SECTION_KEYS, row)) for row in cursor.fetchall()]
 
 
+def public_departments_by_section(cursor, section_ids):
+    """{section_id: [department_id, ...]} — кому виден публичный раздел.
+
+    Одним запросом на всё дерево, а не по разделу: иначе вкладка «Структура»
+    повторила бы N+1, от которого весь этот модуль и уходил.
+    """
+    ids = list(section_ids or ())
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT section_id, department_id
+          FROM wiki_section_public_departments
+         WHERE section_id = ANY(%s)
+         ORDER BY section_id, department_id
+        """,
+        (ids,),
+    )
+    result = {}
+    for section_id, department_id in cursor.fetchall():
+        result.setdefault(section_id, []).append(department_id)
+    return result
+
+
+def set_public_departments(cursor, section_id, department_ids):
+    """Переписать список отделов публичного раздела.
+
+    Пустой список означает «виден всем» — тогда строк не остаётся вовсе, и
+    периметр видит отсутствие ограничения (см. _AUTO_SECTIONS_SQL). Хранить
+    «пусто» как отдельный маркер было бы вторым способом сказать то же самое.
+    """
+    cursor.execute('DELETE FROM wiki_section_public_departments WHERE section_id = %s',
+                   (section_id,))
+    wanted = sorted({int(x) for x in (department_ids or []) if x})
+    if not wanted:
+        return
+    cursor.executemany(
+        'INSERT INTO wiki_section_public_departments (section_id, department_id) '
+        'VALUES (%s, %s) ON CONFLICT DO NOTHING',
+        [(section_id, dep) for dep in wanted],
+    )
+
+
 def article_counts_by_section(cursor, article_ids):
     """Сколько статей из переданного множества лежит в каждом разделе.
 

@@ -155,6 +155,12 @@ def subject_params(subjects, user_id):
 
 # Разделы, доступные на чтение в АВТОМАТИЧЕСКОМ режиме.
 #
+# «Публичный» раздел с недавних пор не обязательно значит «всем в компании»:
+# у него может быть список отделов (wiki_section_public_departments). Пустой
+# список сохраняет прежний смысл — виден всем; заполненный сужает до
+# перечисленных отделов. Понадобилось, потому что «Общий сотрудник» открывался
+# и Тез КЦ, которому вики не предназначена.
+#
 # Один рекурсивный CTE вместо двух расходившихся вычислителей оригинала
 # (getRuleAllowedSectionIds и getUserAllowedSections считали доступ по-разному,
 # из-за чего дерево навигации и список статей показывали разное).
@@ -184,7 +190,16 @@ SELECT id FROM subtree
 UNION
 SELECT section_id FROM rule_hits
 UNION
-SELECT id FROM wiki_sections WHERE status = 'active' AND visibility_scope = 'public'
+SELECT s.id FROM wiki_sections s
+ WHERE s.status = 'active' AND s.visibility_scope = 'public'
+   AND (
+        -- Список отделов не заведён — раздел публичен «как раньше», для всех.
+        NOT EXISTS (SELECT 1 FROM wiki_section_public_departments d
+                     WHERE d.section_id = s.id)
+        OR EXISTS (SELECT 1 FROM wiki_section_public_departments d
+                    WHERE d.section_id = s.id
+                      AND d.department_id = ANY(%(departments)s))
+   )
 UNION
 SELECT id FROM wiki_sections WHERE status = 'active' AND owner_user_id = %(user_id)s
 UNION
@@ -221,7 +236,16 @@ subtree AS (
 )
 SELECT id FROM subtree
 UNION
-SELECT id FROM wiki_sections WHERE status = 'active' AND visibility_scope = 'public'
+SELECT s.id FROM wiki_sections s
+ WHERE s.status = 'active' AND s.visibility_scope = 'public'
+   AND (
+        -- Список отделов не заведён — раздел публичен «как раньше», для всех.
+        NOT EXISTS (SELECT 1 FROM wiki_section_public_departments d
+                     WHERE d.section_id = s.id)
+        OR EXISTS (SELECT 1 FROM wiki_section_public_departments d
+                    WHERE d.section_id = s.id
+                      AND d.department_id = ANY(%(departments)s))
+   )
 UNION
 SELECT id FROM wiki_sections WHERE status = 'active' AND owner_user_id = %(user_id)s
 UNION

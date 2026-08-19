@@ -1057,6 +1057,26 @@ _ORG_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_sections_department "
     "ON wiki_sections (department_id) WHERE department_id IS NOT NULL;",
 
+    # ──────────────────────────────────────────────────────────────────
+    # КОМУ ВИДЕН ПУБЛИЧНЫЙ РАЗДЕЛ
+    #
+    # «Публичный» до сих пор означало «вообще всем в компании», и другого
+    # варианта не было: раздел «Общий сотрудник» открывался в том числе Тез КЦ,
+    # которому вики не предназначена вовсе.
+    #
+    # ПУСТОЙ список = виден всем. Это не лень, а обратная совместимость: у всех
+    # существующих публичных разделов списка нет, и они обязаны продолжать
+    # работать как раньше. Заведён список — раздел виден только этим отделам.
+    """
+    CREATE TABLE IF NOT EXISTS wiki_section_public_departments (
+        section_id    INTEGER NOT NULL REFERENCES wiki_sections(id) ON DELETE CASCADE,
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        PRIMARY KEY (section_id, department_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_public_dept_section "
+    "ON wiki_section_public_departments (section_id);",
+
     "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS "
     "min_role_level INTEGER;",
     # Уровень входит в КЛЮЧ правила, а не просто в его поля. Иначе на одном

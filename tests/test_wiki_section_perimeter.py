@@ -48,9 +48,20 @@ wiki_guest_access AS (
            revoked_at::timestamp, expires_at::timestamp
       FROM (VALUES {guests}) AS t(section_id, user_id, revoked_at, expires_at)
 ),
+-- Кому виден публичный раздел. По умолчанию заглушка ПУСТАЯ: это и есть
+-- прежний смысл «публичного» — виден всем, — и все сценарии ниже опираются
+-- на него. Наполняется только там, где проверяется само сужение.
+wiki_section_public_departments AS (
+    SELECT section_id::int, department_id::int
+      FROM (VALUES {public_departments}) AS t(section_id, department_id)
+     WHERE section_id IS NOT NULL
+),
 """
 
 _EMPTY_GUESTS = "(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp)"
+
+# Пустой список отделов у публичных разделов = «виден всем», прежнее поведение.
+_EMPTY_PUBLIC_DEPARTMENTS = "(NULL::int, NULL::int)"
 
 # Дерево, которое собирают руками во вкладке «Структура»:
 # Коммерческий директор → отдел (СЗоВ / ОП) → должность (рук / СВ / оператор).
@@ -92,11 +103,13 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         cls.conn = prod_db.connection()
 
     def sections(self, *, role, department_id=None, headed=(), user_id=10,
-                 rules=None, tree=None, guests=()):
+                 rules=None, tree=None, guests=(), public_departments=()):
         stub = _STUBS.format(
             rules=', '.join(rules if rules is not None else _RULES),
             sections=', '.join(tree if tree is not None else _TREE),
             guests=', '.join(guests) if guests else _EMPTY_GUESTS,
+            public_departments=(', '.join(public_departments) if public_departments
+                                else _EMPTY_PUBLIC_DEPARTMENTS),
         )
         # Боевой запрос начинается с "WITH RECURSIVE rule_hits AS (" —
         # заглушки встают первыми элементами того же WITH, текст запроса не меняется.
@@ -180,6 +193,59 @@ class SectionPerimeterSqlTest(unittest.TestCase):
     def test_user_without_department_sees_only_public(self):
         got = self.sections(role='operator', department_id=None)
         self.assertEqual(got, {COMMON})
+
+    # ── Кому виден публичный раздел ──────────────────────────────────────
+    #
+    # «Публичный» перестал автоматически значить «всем в компании»: раздел
+    # «Общий сотрудник» открывался в том числе Тез КЦ, которому вики не
+    # предназначена. Список отделов сужает публичность; пустой список
+    # сохраняет прежний смысл — на нём стоят все остальные сценарии файла.
+
+    def test_public_without_list_stays_visible_to_everyone(self):
+        """Обратная совместимость: у существующих публичных разделов списка нет."""
+        got = self.sections(role='operator', department_id=999)
+        self.assertIn(COMMON, got)
+
+    def test_public_list_opens_only_to_listed_departments(self):
+        allowed = self.sections(role='operator', department_id=DEPT_OP,
+                                public_departments=['(%d, %d)' % (COMMON, DEPT_OP)])
+        self.assertIn(COMMON, allowed)
+
+        denied = self.sections(role='operator', department_id=DEPT_OTP,
+                               public_departments=['(%d, %d)' % (COMMON, DEPT_OP)])
+        self.assertNotIn(COMMON, denied,
+                         'отдел вне списка не должен видеть публичный раздел')
+
+    def test_public_list_does_not_leak_to_user_without_department(self):
+        """Сотрудник без отдела под сужение не подпадает.
+
+        subject_params подставляет для пустого списка отделов -1, и раздел
+        не должен совпасть с ним по случайности.
+        """
+        got = self.sections(role='operator', department_id=None,
+                            public_departments=['(%d, %d)' % (COMMON, DEPT_OP)])
+        self.assertNotIn(COMMON, got)
+
+    def test_public_list_does_not_touch_rule_based_access(self):
+        """Сужение публичности не отбирает то, что выдано правилом.
+
+        У оператора ОП ветка открыта правилом; список на «Общем сотруднике»
+        к ней отношения не имеет.
+        """
+        got = self.sections(role='operator', department_id=DEPT_OP,
+                            public_departments=['(%d, %d)' % (COMMON, DEPT_OTP)])
+        self.assertNotIn(COMMON, got)
+        self.assertIn(OPERATOR, got, 'правило отдела должно продолжать работать')
+
+    def test_head_of_listed_department_sees_it(self):
+        """Глава отдела подпадает под список так же, как его сотрудники.
+
+        collect_subjects кладёт возглавляемые отделы в тот же список
+        departments, и отдельной ветки для главы здесь быть не должно.
+        """
+        got = self.sections(role='admin', department_id=None, headed=[DEPT_OP],
+                            public_departments=['(%d, %d)' % (COMMON, DEPT_OP)])
+        self.assertIn(COMMON, got)
 
     # ── Родитель не раздаёт вглубь ───────────────────────────────────────
     def test_operator_parent_rule_does_not_open_sibling_branch(self):

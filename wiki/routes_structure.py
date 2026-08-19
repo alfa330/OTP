@@ -151,6 +151,10 @@ def register(bp, wiki_route, db, log_ip):
 
         spaces = structure.list_spaces(cursor, include_archived=can_manage)
         sections = structure.list_sections(cursor, include_archived=can_manage)
+        # Кому виден публичный раздел: форме нужно проставить галочки, а списку —
+        # показать, что «публичный» здесь не значит «всем».
+        public_departments = structure.public_departments_by_section(
+            cursor, [s['id'] for s in sections])
 
         # Право раздавать доступ: потолок должности и граница отдела. Считаем
         # один раз на запрос, а отдел ветки — по уже загруженному дереву, а не
@@ -216,6 +220,7 @@ def register(bp, wiki_route, db, log_ip):
             # однажды разошлась бы — а расходится она всегда в сторону «показали
             # кнопку, а API ответил 403».
             section['can_grant_access'] = can_grant_here
+            section['public_department_ids'] = public_departments.get(section['id'], [])
             visible.append(section)
 
         used_spaces = {s['space_id'] for s in visible}
@@ -346,6 +351,8 @@ def register(bp, wiki_route, db, log_ip):
             owner_user_id=_int_or_none(data.get('owner_user_id')),
             created_by=ctx['user_id'],
         )
+        if scope == 'public' and isinstance(data.get('public_department_ids'), list):
+            structure.set_public_departments(cursor, section_id, data['public_department_ids'])
         queries.log_action(cursor, actor_id=ctx['user_id'], action='section.create',
                            entity_type='section', entity_id=section_id,
                            details={'name': name, 'space_id': space_id,
@@ -485,9 +492,23 @@ def register(bp, wiki_route, db, log_ip):
                 cursor, section_id, space_id=target_space_id,
                 parent_section_id=new_parent_id)
 
+        # Кому виден публичный раздел. Список чистится, когда раздел перестаёт
+        # быть публичным: иначе он тихо переживёт выключение тумблера и
+        # всплывёт при повторном включении — с отделами, которых уже никто
+        # не выбирал.
+        public_changed = False
+        if fields.get('visibility_scope') == 'restricted':
+            structure.set_public_departments(cursor, section_id, [])
+            public_changed = True
+        elif isinstance(data.get('public_department_ids'), list):
+            structure.set_public_departments(cursor, section_id,
+                                             data['public_department_ids'])
+            public_changed = True
+
         # Переезд — сам по себе изменение: без второго условия перенос без
         # правки полей отвечал бы «Нечего обновлять» на выполненную работу.
-        if not structure.update_section(cursor, section_id, fields) and not moved:
+        if (not structure.update_section(cursor, section_id, fields)
+                and not moved and not public_changed):
             return jsonify({"error": "Нечего обновлять"}), 400
         if moved:
             queries.log_action(cursor, actor_id=ctx['user_id'], action='section.move',
