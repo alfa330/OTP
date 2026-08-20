@@ -12,7 +12,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import TicketWizard from './TicketWizard';
 import {
-    BLOCK_CHECKS, BLOCK_CONTEXT, BLOCK_WARNING, describeBody,
+    BLOCK_CHECKS, BLOCK_CONTEXT, BLOCK_WARNING, bodyDigest, describeBody,
 } from './ticketBody';
 import {
     attachmentKind, authorBadge, continuesRun, groupByDay, indexByTgId, messageSnippet, quoteOf,
@@ -21,6 +21,7 @@ import {
     isOverdue, markTicketSeen, mergeTicketsById, previewAuthor, previewText,
     queueMonogram, queueTile, rowBadges, unreadLabel,
 } from './ticketList';
+import { fitHeight, measureShell } from './layout';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
  *
@@ -363,7 +364,7 @@ const MessageBubble = ({
                     </span>
                 )
                 : <span className="h-7 w-7 shrink-0" />)}
-            <div className={`max-w-[76%] px-3.5 py-2.5 text-[13px] leading-relaxed ${
+            <div className={`max-w-[76%] px-3.5 py-2 text-[13px] leading-snug ${
                 note
                     ? 'rounded-2xl bg-amber-50 text-amber-900 ring-1 ring-amber-100'
                     : outgoing
@@ -404,28 +405,45 @@ const MessageBubble = ({
                     </button>
                 )}
                 {!outgoing && message.author_name && !grouped && (
-                    <div className={`mb-0.5 text-[11.5px] font-semibold ${
+                    <div className={`text-[11.5px] font-semibold ${
                         note ? 'text-amber-700' : badge ? badge.tone : 'text-slate-600'
                     }`}>
                         {message.author_name}
                     </div>
                 )}
+                {/* Время стоит В СТРОКЕ с текстом, а не отдельной строкой под
+                    ним. Отдельной оно занимало свою высоту плюс отступ — около
+                    двадцати пикселей, и пузырь с одним словом «Ок» получался
+                    вдвое выше самого слова. В мессенджерах время дописывается к
+                    последней строке и переносится только если не влезло; тут
+                    ровно это и происходит — inline-block уходит на новую строку
+                    сам, когда места нет.
+
+                    У сообщения с вложением время всё-таки отдельной строкой:
+                    приписать его к тексту НАД картинкой значило бы поставить
+                    подпись не туда. */}
                 {message.body
-                    ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
+                    ? (
+                        <div className="whitespace-pre-wrap break-words">
+                            {message.body}
+                            {!message.attachment && <BubbleTime message={message} outgoing={outgoing} inline />}
+                        </div>
+                    )
                     : (!message.attachment && (
                         // Вложение уходит отдельным сообщением с пустым телом —
                         // без этого в переписке висел бы пустой пузырь.
-                        <div className="text-[12px] italic opacity-70">без текста</div>
+                        <div className="text-[12px] italic opacity-70">
+                            без текста
+                            <BubbleTime message={message} outgoing={outgoing} inline />
+                        </div>
                     ))}
                 {message.attachment && (
-                    <MessageMedia message={message} apiBaseUrl={apiBaseUrl} ticketId={ticketId}
-                                  headers={headers} showToast={showToast} light={outgoing} />
+                    <>
+                        <MessageMedia message={message} apiBaseUrl={apiBaseUrl} ticketId={ticketId}
+                                      headers={headers} showToast={showToast} light={outgoing} />
+                        <BubbleTime message={message} outgoing={outgoing} />
+                    </>
                 )}
-                <div className={`mt-1 text-right text-[10.5px] tabular-nums ${
-                    outgoing ? 'text-white/70' : 'text-slate-400'
-                }`}>
-                    {fmtTime(message.created_at)}
-                </div>
             </div>
             {!outgoing && onReply && (
                 <ReplyHandle onClick={() => onReply(message)} />
@@ -433,6 +451,18 @@ const MessageBubble = ({
         </div>
     );
 };
+
+/* Время отправки. inline — дописывается к последней строке текста; без inline
+ * стоит своей строкой (сообщение с вложением). */
+const BubbleTime = ({ message, outgoing, inline = false }) => (
+    <span className={`text-[10.5px] tabular-nums ${
+        outgoing ? 'text-white/70' : 'text-slate-400'
+    } ${inline
+        ? 'ml-1.5 inline-block translate-y-[1px] align-baseline'
+        : 'mt-0.5 block text-right'}`}>
+        {fmtTime(message.created_at)}
+    </span>
+);
 
 /* Ответить на это сообщение. Появляется только по наведению: постоянная кнопка
  * у каждой реплики — это шум на каждой строке переписки. */
@@ -915,21 +945,43 @@ const TicketCard = ({
                 <div className="relative flex min-h-0 min-w-0 flex-1">
                 <div ref={threadRef} onScroll={onThreadScroll}
                      className="crm-thread min-h-0 w-full overflow-y-auto px-4 pb-4">
-                    {/* Текст обращения в начале переписки. Панель справа его не
-                        отменяет: там он для слежения во время чата, здесь — как
-                        начало разговора, с которого всё и пошло. */}
-                    <div className="mt-3 rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.06)]">
-                        <div className="mb-2 flex items-center gap-1.5">
-                            <FileText size={12} className="text-slate-400" />
-                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                    {/* Текст обращения в начале переписки — то, с чего разговор
+                        начался.
+
+                        Когда открыта панель, он сворачивается в одну строку: тот
+                        же текст, показанный дважды рядом, это не «удобнее», а
+                        два раза съеденное место. В строке остаётся то, чем
+                        обращение опознают (парк · город · период), а сам текст в
+                        полутора сантиметрах справа. */}
+                    {asideOpen ? (
+                        <button type="button" onClick={toggleAside}
+                                title="Свернуть панель обращения"
+                                className="mt-3 flex w-full items-center gap-2 rounded-xl bg-white/80 px-3 py-2 text-left ring-1 ring-slate-200/70 transition hover:bg-white">
+                            <FileText size={12} className="shrink-0 text-slate-400" />
+                            <span className="shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                                 Обращение
                             </span>
-                            <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+                            <span className="min-w-0 flex-1 truncate text-[12px] text-slate-500">
+                                {bodyDigest(ticket.body)}
+                            </span>
+                            <span className="shrink-0 text-[11px] tabular-nums text-slate-400">
                                 {fmtDateTime(ticket.created_at)}
                             </span>
+                        </button>
+                    ) : (
+                        <div className="mt-3 rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.06)]">
+                            <div className="mb-2 flex items-center gap-1.5">
+                                <FileText size={12} className="text-slate-400" />
+                                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                    Обращение
+                                </span>
+                                <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+                                    {fmtDateTime(ticket.created_at)}
+                                </span>
+                            </div>
+                            <TicketBody body={ticket.body} />
                         </div>
-                        <TicketBody body={ticket.body} />
-                    </div>
+                    )}
 
                     {days.map((day) => (
                         <div key={day.key}>
@@ -1364,6 +1416,39 @@ export default function CrmTicketsView({
     const searchTimer = useRef(null);
     const [searchApplied, setSearchApplied] = useState('');
 
+    /* Карточка занимает всё место до низа экрана. Раньше высота была
+       `calc(100vh-300px)`, где 300 — прикидка шапки с фильтрами: под карточкой
+       оставалась полоса пустоты, а на другом разрешении поле ответа уехало бы
+       под край. Считаем по факту (см. layout.js) и пересчитываем, когда
+       что-нибудь поехало. */
+    const shellRef = useRef(null);
+    const headerRef = useRef(null);
+    const filtersRef = useRef(null);
+    const [shellHeight, setShellHeight] = useState(null);
+
+    useEffect(() => {
+        const node = shellRef.current;
+        if (!node || typeof ResizeObserver === 'undefined') return undefined;
+        const recompute = () => setShellHeight(fitHeight(measureShell(node)));
+        recompute();
+        /* Наблюдаем за прокрутчиком И за всем, что стоит НАД карточкой: её
+           положение зависит именно от них. Первого измерения мало — на узком
+           экране фильтры переносятся в три ряда уже после первого кадра, и
+           карточка, посчитанная по короткой шапке, свисала за край на 67 px.
+           window.resize этого не ловит: размеры окна не менялись.
+           Ни один из наблюдаемых узлов не зависит от высоты карточки, так что
+           обратной связи «пересчёт → новый размер → пересчёт» здесь нет. */
+        const observer = new ResizeObserver(recompute);
+        observer.observe(node.closest('.main-content') || document.body);
+        if (headerRef.current) observer.observe(headerRef.current);
+        if (filtersRef.current) observer.observe(filtersRef.current);
+        window.addEventListener('resize', recompute);
+        return () => {
+            observer.disconnect();
+            window.removeEventListener('resize', recompute);
+        };
+    }, [tab, selectedId]);
+
     // Во время поиска выборка не сужается до «моих», поэтому и сегмент показывает
     // «Все»: подсвеченные «Мои» над списком с чужими обращениями — это не фильтр,
     // а неверная подпись к тому, что человек видит.
@@ -1504,7 +1589,8 @@ export default function CrmTicketsView({
 
     return (
         <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
+            <div ref={headerRef}
+                 className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
                 <div>
                     <h2 className="text-lg font-semibold tracking-tight text-slate-900">Обращения</h2>
                     <p className="text-xs text-slate-500">
@@ -1556,9 +1642,10 @@ export default function CrmTicketsView({
                         не отбирает очередь. Три ряда фильтров съедали половину
                         экрана, оставляя нити 200 px — это меньше трёх реплик.
                         Назад к списку (и к фильтрам) ведёт стрелка в шапке. */}
-                    <div className={`mb-3 flex-wrap items-center gap-2 px-1 lg:flex ${
-                        selectedId ? 'hidden' : 'flex'
-                    }`}>
+                    <div ref={filtersRef}
+                         className={`mb-3 flex-wrap items-center gap-2 px-1 lg:flex ${
+                             selectedId ? 'hidden' : 'flex'
+                         }`}>
                         <div className="flex rounded-xl bg-slate-100 p-1">
                             {STATE_FILTERS.map((item) => (
                                 <button key={item.key} type="button"
@@ -1628,15 +1715,16 @@ export default function CrmTicketsView({
                             оказывалось где-то далеко внизу страницы — в
                             мессенджере оно всегда под рукой.
 
-                            dvh, а не vh: на телефоне адресная строка браузера
-                            то есть, то нет, и на 100vh поле ответа уезжало бы
-                            под неё. Вычитаемое — шапка раздела с фильтрами
-                            (замерено: 310 px со фильтрами, 165 без них на
-                            ширине 390); min-h остаётся полом на низких
-                            экранах. */}
-                        <div className={`flex min-h-[420px] flex-col lg:h-[calc(100vh-300px)] lg:flex-row ${
-                            selectedId ? 'h-[calc(100dvh-175px)]' : 'h-[calc(100dvh-320px)]'
-                        }`}>
+                            Само число приходит из измерения (shellHeight), а не
+                            из calc с прикидкой: высота шапки над карточкой не
+                            постоянна — фильтры переносятся по строкам, у части
+                            людей сверху баннер дня рождения, а на телефоне при
+                            открытом обращении фильтров нет вовсе. Пока первого
+                            измерения нет, работает запасное значение в классе:
+                            без него карточка на один кадр была бы нулевой. */}
+                        <div ref={shellRef}
+                             style={shellHeight ? { height: shellHeight } : undefined}
+                             className="flex h-[calc(100dvh-320px)] min-h-[380px] flex-col lg:flex-row">
                             {/* Лента.
                                 min-h-0 обязателен: у элемента flex по умолчанию
                                 min-height:auto, то есть он не умеет стать ниже
@@ -1663,11 +1751,20 @@ export default function CrmTicketsView({
                                             Обращений нет
                                         </EmptyBlock>
                                     )}
-                                    {tickets.map((ticket) => (
-                                        <TicketRow key={ticket.id} ticket={ticket}
-                                                   active={ticket.id === selectedId}
-                                                   onSelect={setSelectedId} />
-                                    ))}
+                                    {/* Волосяная линия между обращениями. Она
+                                        была в старой ленте, и без неё строки из
+                                        трёх строк текста каждая слипаются в
+                                        абзац. divide-y, а не рамка у строки:
+                                        тогда линия не рисуется ни после
+                                        последней строки, ни второй раз рядом с
+                                        рамкой подвала «Показано N». */}
+                                    <div className="divide-y divide-slate-100">
+                                        {tickets.map((ticket) => (
+                                            <TicketRow key={ticket.id} ticket={ticket}
+                                                       active={ticket.id === selectedId}
+                                                       onSelect={setSelectedId} />
+                                        ))}
+                                    </div>
                                     {hasMore && (
                                         <button type="button"
                                                 onClick={() => loadTickets(offset + PAGE_SIZE)}

@@ -29,6 +29,7 @@
     "test:crm-body": "node --test tests/crm_ticket_body.test.mjs",
     "test:crm-thread": "node --test tests/crm_thread_view.test.mjs",
     "test:crm-list": "node --test tests/crm_ticket_list.test.mjs",
+    "test:crm-layout": "node --test tests/crm_layout.test.mjs",
     "test:salary-osnova": "node --test tests/salary_osnova.test.mjs",
     "test:salary-potok": "node --test tests/salary_potok.test.mjs"
   },
