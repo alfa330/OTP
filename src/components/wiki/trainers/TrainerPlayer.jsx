@@ -5,6 +5,7 @@ import { HelpCircle, RotateCcw, X } from 'lucide-react';
 
 import { APPLE_FONT } from '../../ui/ios';
 import SnowLeopard from './SnowLeopard';
+import { StatusIcons, StatusTime } from './PhoneChrome';
 import {
     currentStep, expectedTap, isFinished, progressPercent, restart, speech, stageCount,
     startRun, stepGoal, takeHint, tap, toggle,
@@ -74,10 +75,37 @@ const HOURS = () => {
     return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 };
 
-export function TrainerPlayer({ scenario, onClose = null }) {
+/* Появление тренажёра разложено на три такта, и порядок здесь смысловой:
+ *
+ *   'rise'  — телефон выезжает снизу поверх статьи. Фон ещё чистый: читатель
+ *             видит, ОТКУДА взялся экран, и не теряет место в тексте.
+ *   'peek'  — телефон доехал. Только теперь появляется полупрозрачная подложка
+ *             (статья остаётся видна, но уходит на второй план), а из-за
+ *             телефона слева выглядывает барс.
+ *   'done'  — из-за телефона выезжают карточки помощника и прогресса, барс
+ *             занимает своё место в карточке.
+ *
+ * Такты, а не один общий переход: когда всё выезжает разом, глазу не за чем
+ * следить и появление читается как мигание. */
+export function TrainerPlayer({
+    scenario, onClose = null, animateEntrance = true, leaving = false, onExited = null,
+}) {
     const [run, setRun] = useState(() => startRun(scenario));
     const phoneRef = useRef(null);
     const stages = useMemo(() => stageCount(scenario), [scenario]);
+    const reduceMotion = useReducedMotion();
+    const [phase, setPhase] = useState(
+        animateEntrance && !reduceMotion ? 'rise' : 'done');
+
+    // Выключили анимации в системе уже после открытия — доигрывать нечего.
+    useEffect(() => { if (reduceMotion) setPhase('done'); }, [reduceMotion]);
+
+    const shown = phase !== 'rise';
+    const settled = phase === 'done';
+
+    /* Плавность одна на все такты: та же кривая, что у модалок портала
+       (ui/ios.jsx) — быстрый старт, мягкое приземление. */
+    const EASE = [0.16, 1, 0.3, 1];
 
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
     useEffect(() => { setRun(startRun(scenario)); }, [scenario]);
@@ -116,11 +144,34 @@ export function TrainerPlayer({ scenario, onClose = null }) {
 
     return (
         <div className="wt-root" style={{ fontFamily: APPLE_FONT }}>
+            {/* Полупрозрачная подложка. Появляется ПОСЛЕ того, как телефон
+                доехал: пока он едет, статья под ним видна целиком, и переход
+                читается как «экран поднялся поверх текста», а не как «страница
+                моргнула». Сквозь подложку статья остаётся различима — тренажёр
+                открыт из неё и туда же возвращает. */}
+            <motion.div
+                className="wt-veil"
+                aria-hidden="true"
+                initial={{ opacity: animateEntrance && !reduceMotion ? 0 : 1 }}
+                animate={{ opacity: leaving ? 0 : (shown ? 1 : 0) }}
+                transition={{ duration: reduceMotion ? 0 : (leaving ? 0.26 : 0.34), ease: 'easeOut' }}
+            />
+
             {/* ── СЛЕВА: помощник ────────────────────────────────────────────
                 Барс и его реплика занимают целую колонку, и текст здесь крупнее,
                 чем в остальном портале: это не подпись к картинке, а то, ради
-                чего экран открыт, — человек читает объяснение и идёт делать. */}
-            <aside className="wt-helper">
+                чего экран открыт, — человек читает объяснение и идёт делать.
+                Выезжает из-за телефона: карточка стартует сдвинутой ВПРАВО, к
+                телефону, и уходит на своё место влево. */}
+            <motion.aside
+                className="wt-helper"
+                initial={animateEntrance && !reduceMotion
+                    ? { opacity: 0, x: 120, scale: 0.94 } : false}
+                animate={leaving
+                    ? { opacity: 0, x: 120, scale: 0.94 }
+                    : (settled ? { opacity: 1, x: 0, scale: 1 } : {})}
+                transition={{ duration: leaving ? 0.26 : 0.46, ease: EASE }}
+            >
                 <div className="wt-helper__leo">
                     <SnowLeopard state={finished ? 'success' : (MOOD[said.tone] || 'speak')} />
                 </div>
@@ -142,13 +193,42 @@ export function TrainerPlayer({ scenario, onClose = null }) {
                 <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
                     <HelpCircle size={15} /> Подсказка
                 </button>
-            </aside>
+            </motion.aside>
 
             {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
                 Высота считается от окна, ширина — от пропорций корпуса, поэтому
                 на большом экране телефон крупный, а на маленьком не вылезает. */}
             <div className="wt-stage">
-                <div className="wt-phone" ref={phoneRef} data-screen={step.screen}>
+                <div className="wt-phone-wrap">
+                    {/* Барс подглядывает ИЗ-ЗА телефона: он лежит ниже корпуса по
+                        слою и наполовину им закрыт. Это тот же приём, что у
+                        карточек, — движение начинается из одной точки, поэтому
+                        экран собирается на глазах, а не появляется собранным. */}
+                    {!settled && (
+                        <motion.div
+                            className="wt-peek"
+                            aria-hidden="true"
+                            initial={{ x: 70, opacity: 0 }}
+                            animate={shown ? { x: 0, opacity: 1 } : {}}
+                            transition={{ duration: 0.44, ease: [0.34, 1.4, 0.64, 1] }}
+                            onAnimationComplete={() => { if (shown) setPhase('done'); }}
+                        >
+                            <SnowLeopard state="idle" />
+                        </motion.div>
+                    )}
+
+                <motion.div
+                    className="wt-phone"
+                    ref={phoneRef}
+                    data-screen={step.screen}
+                    initial={animateEntrance && !reduceMotion ? { y: '110%' } : false}
+                    animate={{ y: leaving ? '112%' : 0 }}
+                    transition={{ duration: reduceMotion ? 0 : (leaving ? 0.42 : 0.62), ease: EASE }}
+                    onAnimationComplete={() => {
+                        if (leaving) onExited?.();
+                        else setPhase((p) => (p === 'rise' ? 'peek' : p));
+                    }}
+                >
                     {/* Боковые клавиши и вырез — корпус должен читаться телефоном,
                         а не прямоугольником: учебный экран тем и работает, что
                         человек узнаёт в нём своё устройство. */}
@@ -163,8 +243,8 @@ export function TrainerPlayer({ scenario, onClose = null }) {
                             <i className="wt-phone__cam" />
                         </div>
                         <div className="wt-phone__status" aria-hidden="true">
-                            <span>{HOURS()}</span>
-                            <span>LTE ▮</span>
+                            <StatusTime time={HOURS()} />
+                            <StatusIcons battery={90} />
                         </div>
                         <div className="wt-phone__app">
                             {Screen ? (
@@ -187,6 +267,7 @@ export function TrainerPlayer({ scenario, onClose = null }) {
                             )}
                         </div>
                     </div>
+                </motion.div>
                 </div>
             </div>
 
@@ -194,8 +275,16 @@ export function TrainerPlayer({ scenario, onClose = null }) {
                 Полоса, доля и список шагов инструкции вместе: полоса отвечает
                 «сколько осталось», список — «что именно осталось». В отдельной
                 колонке список помещается целиком, поэтому прятать его больше
-                не нужно. */}
-            <aside className="wt-side">
+                не нужно. Выезжает из-за телефона зеркально помощнику. */}
+            <motion.aside
+                className="wt-side"
+                initial={animateEntrance && !reduceMotion
+                    ? { opacity: 0, x: -120, scale: 0.94 } : false}
+                animate={leaving
+                    ? { opacity: 0, x: -120, scale: 0.94 }
+                    : (settled ? { opacity: 1, x: 0, scale: 1 } : {})}
+                transition={{ duration: leaving ? 0.26 : 0.46, ease: EASE }}
+            >
                 <header className="wt-side__head">
                     <span>{scenario.subtitle}</span>
                     <strong>{scenario.title}</strong>
@@ -243,7 +332,7 @@ export function TrainerPlayer({ scenario, onClose = null }) {
                         )}
                     </div>
                 </div>
-            </aside>
+            </motion.aside>
         </div>
     );
 }
@@ -263,14 +352,31 @@ export function TrainerPlayer({ scenario, onClose = null }) {
  */
 export default function TrainerModal({ scenario, onClose }) {
     const reduceMotion = useReducedMotion();
+    /* Закрытие тоже анимируется — тем же движением, что и открытие, только в
+       обратную сторону: экран, который выехал снизу, обязан туда же и уехать.
+       Поэтому onClose зовётся не сразу: сначала «уходим», потом размонтируемся. */
+    const [leaving, setLeaving] = useState(false);
+    const requestClose = useCallback(() => {
+        if (reduceMotion) { onClose?.(); return; }
+        setLeaving(true);
+    }, [reduceMotion, onClose]);
 
     // Esc закрывает. Слушатель на документе, потому что фокус в момент нажатия
     // стоит на кнопке внутри учебного телефона.
     useEffect(() => {
-        const onKey = (event) => { if (event.key === 'Escape') onClose?.(); };
+        const onKey = (event) => { if (event.key === 'Escape') requestClose(); };
         document.addEventListener('keydown', onKey);
         return () => document.removeEventListener('keydown', onKey);
-    }, [onClose]);
+    }, [requestClose]);
+
+    /* Страховка: если анимация почему-то не доиграет (вкладку свернули, кадры не
+       идут), окно всё равно закроется. Молча «не закрывается» — худший исход из
+       возможных, а лишний таймер стоит ничего. */
+    useEffect(() => {
+        if (!leaving) return undefined;
+        const timer = setTimeout(() => onClose?.(), 900);
+        return () => clearTimeout(timer);
+    }, [leaving, onClose]);
 
     /* Страница под тренажёром не прокручивается: экран занят целиком, и вторая
        полоса прокрутки за ним — это прокрутка «не того», как в режиме чтения во
@@ -284,17 +390,14 @@ export default function TrainerModal({ scenario, onClose }) {
     if (!scenario) return null;
 
     return createPortal(
-        <motion.div
-            className="wt-overlay"
-            role="dialog"
-            aria-modal="true"
-            aria-label={scenario.title}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }}
-        >
-            <TrainerPlayer scenario={scenario} onClose={onClose} />
-        </motion.div>,
+        <div className="wt-overlay" role="dialog" aria-modal="true" aria-label={scenario.title}>
+            <TrainerPlayer
+                scenario={scenario}
+                onClose={requestClose}
+                leaving={leaving}
+                onExited={() => onClose?.()}
+            />
+        </div>,
         document.body,
     );
 }

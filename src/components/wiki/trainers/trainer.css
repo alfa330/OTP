@@ -50,7 +50,6 @@
     padding: clamp(12px, 2vw, 26px);
     overflow: auto;
     color: var(--wt-ink);
-    background: var(--wt-canvas);
     -webkit-font-smoothing: antialiased;
 }
 
@@ -64,7 +63,30 @@
     inset: 0;
     z-index: 95;
     display: flex;
-    background: var(--wt-canvas);
+    /* Фон рисует не оверлей, а вуаль под ним: она появляется отдельным тактом,
+       уже после того, как телефон выехал. */
+    background: transparent;
+}
+
+/* Полупрозрачная подложка поверх статьи. Не глухая заливка: сквозь неё видно
+   текст, из которого тренажёр открыли, — так понятно, что это не переход на
+   другую страницу и что возврат близко. Размытие держит текст различимым, но
+   нечитаемым, иначе он спорит за внимание с учебным экраном. */
+.wt-veil {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background: rgba(238, 241, 246, 0.72);
+    backdrop-filter: blur(16px) saturate(120%);
+    -webkit-backdrop-filter: blur(16px) saturate(120%);
+}
+
+/* Колонки и сцена — над вуалью. */
+.wt-helper,
+.wt-side,
+.wt-stage {
+    position: relative;
+    z-index: 1;
 }
 
 /* Сцена телефона — просто центровка: размеры задаёт сам корпус. */
@@ -76,6 +98,29 @@
     min-height: 0;
     height: 100%;
 }
+
+/* Обёртка телефона задаёт систему координат для барса, который выглядывает
+   из-за корпуса: сам корпус лежит выше по слою и закрывает его правую часть. */
+.wt-phone-wrap {
+    position: relative;
+    display: flex;
+    max-width: 100%;
+    min-height: 0;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+}
+
+.wt-peek {
+    position: absolute;
+    bottom: 6%;
+    left: -76px;
+    z-index: 0;
+    width: 156px;
+    pointer-events: none;
+}
+
+.wt-peek .wt-leo { width: 100%; }
 
 /* ── Учебный телефон ──────────────────────────────────────────────────────
    Корпус нарисован по референсу владельца: тонкая рамка, вырез сверху,
@@ -94,6 +139,7 @@
     height: min(100%, 880px);
     aspect-ratio: 390 / 844;
     max-width: 100%;
+    z-index: 1;
     padding: 11px;
     background: linear-gradient(155deg, #3c5348 0%, #22322b 38%, #16211c 72%, #2b3d34 100%);
     border-radius: 52px;
@@ -186,13 +232,23 @@
     flex: 0 0 auto;
     align-items: center;
     justify-content: space-between;
-    height: 30px;
-    padding: 0 20px;
-    font-size: 11.5px;
-    font-weight: 600;
+    height: 32px;
+    padding: 0 18px 0 22px;
+    font-size: 13px;
+    font-weight: 650;
     color: var(--wt-ink);
     font-variant-numeric: tabular-nums;
 }
+
+.wt-phone__time,
+.wt-phone__icons {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.wt-phone__icons { gap: 5px; }
+.wt-phone__time svg { opacity: 0.75; }
 
 .wt-phone__app {
     display: flex;
@@ -1417,6 +1473,11 @@
         min-height: 380px;
     }
 
+    .wt-phone-wrap { height: auto; }
+
+    /* На узком экране барс выглядывает меньше — иначе он вылезает за край. */
+    .wt-peek { left: -44px; width: 104px; bottom: 4%; }
+
     /* Помощник на узком экране компактнее: он объясняет шаг, а не занимает
        собой первый экран. Длинная реплика (самая длинная — вступление) не
        растягивает карточку, а прокручивается внутри пузыря. */
@@ -1424,7 +1485,10 @@
     .wt-leo { width: 72px; }
 
     .wt-bubble {
-        max-height: 8.4em;
+        /* Ровно пять строк плюс подпись «БАРС» и поля: высота считается по
+           строкам, а не «на глаз», иначе последняя строка обрезается пополам и
+           карточка выглядит сломанной, а не прокручиваемой. */
+        max-height: calc(17px + 5 * 1.45em + 22px);
         padding: 11px 13px;
         overflow-y: auto;
         font-size: 13.5px;
