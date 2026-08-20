@@ -6,9 +6,6 @@
 обратные ссылки.
 """
 
-import re
-from urllib.parse import quote
-
 from flask import jsonify, redirect, request
 
 from . import access as wiki_access
@@ -252,10 +249,6 @@ def register(bp, wiki_route, db, log_ip, gcs):
         article['permissions'] = wiki_access.permissions_only(permissions)
         article['why'] = permissions['_reason']
         article['backlinks'] = wiki_articles.backlinks(cursor, article['id'], visible)
-        # Приложения к статье — то, что читатель скачивает под текстом. Список
-        # отдаётся всем, кто открыл статью: файл прикладывают именно затем,
-        # чтобы его забрали, а прав на сам файл сверх прав на статью нет.
-        article['attachments'] = wiki_articles.list_attachments(cursor, article['id'])
         article['is_favorite'] = wiki_articles.is_favorite(
             cursor, ctx['user_id'], article['id'])
         return jsonify(article)
@@ -296,24 +289,10 @@ def register(bp, wiki_route, db, log_ip, gcs):
             # только у того, кто его загрузил.
             return jsonify({"error": "Файл не найден"}), 404
 
-        # ?download=1 — «скачать», без него «открыть». Разница только в
-        # Content-Disposition, и ставит его подпись GCS, а не наш ответ: браузер
-        # идёт к файлу по редиректу, и наши заголовки до него не доезжают.
-        # Имя пишем дважды: filename= понимают все, но он обязан быть ASCII,
-        # поэтому кириллическое «Заявление.docx» едет в filename* (RFC 5987), а
-        # в ASCII-варианте остаётся заменителем — без него имя файла
-        # превратилось бы в путь блоба вида wiki/files/2026/08/20/ab12_file.
-        disposition = 'inline'
-        if request.args.get('download') in ('1', 'true', 'yes'):
-            name = str(record.get('original_name') or 'file')
-            ascii_name = re.sub(r'[^A-Za-z0-9._-]+', '_', name) or 'file'
-            disposition = 'attachment; filename="%s"; filename*=UTF-8\'\'%s' % (
-                ascii_name, quote(name, safe=''))
-
         url = gcs['signed_url'](
             record['bucket'], record['blob_path'],
             expires_minutes=60,
-            response_disposition=disposition,
+            response_disposition='inline',
             response_type=record['content_type'] or None,
         )
         if not url:

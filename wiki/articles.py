@@ -486,48 +486,6 @@ def get_file(cursor, file_id):
                      'original_name', 'content_type', 'uploaded_by'), row))
 
 
-def list_attachments(cursor, article_id):
-    """Приложения статьи — то, что читатель скачивает под текстом.
-
-    Только помеченные вложениями: в этой же таблице лежат картинки тела статьи,
-    и без фильтра список приложений к инструкции состоял бы из её иллюстраций.
-
-    Адреса отдаём ОТНОСИТЕЛЬНЫМИ (/api/wiki/file/<id>) — по той же причине, по
-    которой они относительны внутри тела статьи: домен API меняется, а ссылка
-    живёт годами. Абсолютным адрес делает фронт перед показом
-    (src/components/wiki/fileUrls.js).
-    """
-    cursor.execute(
-        """
-        SELECT f.id, f.original_name, f.content_type, f.file_size, f.created_at,
-               f.uploaded_by, u.name
-          FROM wiki_files f
-          LEFT JOIN users u ON u.id = f.uploaded_by
-         WHERE f.article_id = %s AND f.is_attachment
-         ORDER BY f.sort_order, f.created_at
-        """,
-        (article_id,),
-    )
-    items = []
-    for row in cursor.fetchall():
-        file_id = str(row[0])
-        items.append({
-            'id': file_id,
-            'name': row[1],
-            'content_type': row[2],
-            'size': int(row[3] or 0),
-            'created_at': row[4],
-            'uploaded_by': row[5],
-            'uploaded_by_name': row[6],
-            'url': '/api/wiki/file/%s' % file_id,
-            # Отдельный адрес, а не флажок на фронте: скачивание и просмотр
-            # различаются заголовком Content-Disposition, который ставит уже
-            # подпись GCS, — значит решать должен сервер, а не тег <a>.
-            'download_url': '/api/wiki/file/%s?download=1' % file_id,
-        })
-    return items
-
-
 def register_file(cursor, *, article_id, bucket, blob_path, original_name,
                   content_type, file_size, width, height, uploaded_by):
     cursor.execute(

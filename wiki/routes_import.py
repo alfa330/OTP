@@ -58,21 +58,12 @@ _TRUE = ('1', 'true', 'yes', 'on', 'да')
 # получил бы невнятную ошибку транспорта вместо понятного «файл слишком большой».
 _VISION_MAX_BYTES = 12 * 1024 * 1024
 
-# Что нельзя приложить к статье ни при каких условиях: файлы, которые система
-# ОТКРЫВАЕТ ЗАПУСКОМ, а не показом. Это не замена антивирусу, а защита от
-# нечаянной раздачи: вики читают сотни человек, и «инструкция.exe», скачанная с
-# корпоративного портала, по умолчанию выглядит доверенной.
-_FORBIDDEN_ATTACHMENT_EXT = {
-    '.exe', '.msi', '.com', '.scr', '.bat', '.cmd', '.ps1', '.vbs', '.js',
-    '.jse', '.wsf', '.hta', '.jar', '.apk', '.sh', '.dll', '.pif', '.reg',
-}
-
 
 def register(bp, wiki_route, db, log_ip, gcs):
 
-    def _store_file_record(cursor, *, data, filename, content_type, uploaded_by,
-                           article_id=None):
-        """Кладёт файл в GCS и заводит запись. Возвращает (id, постоянный адрес).
+    def _store_file(cursor, *, data, filename, content_type, uploaded_by,
+                    article_id=None):
+        """Кладёт файл в GCS и заводит запись, возвращая постоянный адрес.
 
         Постоянный, а не подписанный: подпись живёт часы, а статья — годами.
         Именно поэтому картинки внутри уроков LMS со временем перестают
@@ -80,7 +71,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         """
         bucket = gcs['bucket_name']() if gcs.get('bucket_name') else None
         if not bucket:
-            return None, None
+            return None
 
         blob_path = wiki_importer.blob_path_for(filename, content_type)
         client = gcs['client']()
@@ -93,11 +84,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
             content_type=content_type, file_size=len(data),
             width=None, height=None, uploaded_by=uploaded_by,
         )
-        return file_id, '/api/wiki/file/%s' % file_id
-
-    def _store_file(cursor, **kwargs):
-        """Тот же store, когда нужен только адрес (импорт и картинки в тексте)."""
-        return _store_file_record(cursor, **kwargs)[1]
+        return '/api/wiki/file/%s' % file_id
 
     # ── Импорт документа ─────────────────────────────────────────────────
     @wiki_route('/import', methods=('POST',), capability='can_create')
@@ -480,61 +467,3 @@ def register(bp, wiki_route, db, log_ip, gcs):
         if not url:
             return jsonify({"error": "Хранилище файлов не настроено"}), 503
         return jsonify({"url": url}), 201
-
-    # ── Приложение к статье ──────────────────────────────────────────────
-    #
-    # Отдельный роут, хотя хранилище то же. /upload берёт только изображения и
-    # существует ради тела статьи; здесь наоборот — рабочий документ, который
-    # читатель скачивает целиком. Свести их в один роут значило бы либо пустить
-    # произвольный файл в <img>, либо запретить приложить бланк.
-    #
-    # Файл кладётся НИЧЕЙНЫМ (article_id = NULL) и до сохранения статьи виден
-    # одному загрузившему. Иначе приложение появлялось бы у читателей раньше
-    # текста, к которому его прикладывают, а у новой статьи и id ещё нет.
-    # Привязку делает сохранение статьи (routes_edit: attachment_ids).
-    @wiki_route('/attachments', methods=('POST',), capability='can_create')
-    def wiki_attachment_upload(cursor, ctx):
-        uploaded = request.files.get('file')
-        if not uploaded or not uploaded.filename:
-            return jsonify({"error": "Файл не выбран"}), 400
-
-        name = os.path.basename(str(uploaded.filename))[:255]
-        ext = os.path.splitext(name)[1].lower()
-        if ext in _FORBIDDEN_ATTACHMENT_EXT:
-            return jsonify({
-                "error": "Файлы %s прикладывать нельзя: они запускаются, а не читаются" % ext,
-                "code": "WIKI_FILE_FORBIDDEN",
-            }), 400
-
-        data = uploaded.read()
-        if not data:
-            return jsonify({"error": "Файл пустой"}), 400
-        # Предел тот же, что у импорта: он упирается не в хранилище, а в тело
-        # запроса, которое обязано пройти через Render целиком.
-        if len(data) > wiki_importer.MAX_FILE_BYTES:
-            return jsonify({
-                "error": "Файл больше %d МБ" % (wiki_importer.MAX_FILE_BYTES // (1024 * 1024)),
-                "code": "WIKI_FILE_TOO_BIG",
-            }), 400
-
-        file_id, url = _store_file_record(
-            cursor, data=data, filename=name,
-            content_type=(uploaded.mimetype or '').strip() or None,
-            uploaded_by=ctx['user_id'])
-        if not url:
-            return jsonify({"error": "Хранилище файлов не настроено"}), 503
-
-        queries.log_action(cursor, actor_id=ctx['user_id'], action='article.attach',
-                           entity_type='file', entity_id=None,
-                           details={'file': name, 'size': len(data)},
-                           ip_address=log_ip())
-        # Отдаём карточку целиком: редактор рисует строку приложения сразу, до
-        # сохранения статьи, и вычислять размер с типом ему больше неоткуда.
-        return jsonify({
-            "id": str(file_id),
-            "url": url,
-            "download_url": "%s?download=1" % url,
-            "name": name,
-            "size": len(data),
-            "content_type": (uploaded.mimetype or '').strip() or None,
-        }), 201

@@ -258,15 +258,6 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             ai_opt_out=(not data['ai_support']) if 'ai_support' in data
                        else bool(data.get('ai_opt_out')),
         )
-        # ПРИЛОЖЕНИЯ. Файлы уже в хранилище — их загрузил редактор через
-        # /attachments, пока статьи ещё не существовало. Здесь они получают
-        # хозяина и порядок; до этого шага их видел один загрузивший.
-        attachments = 0
-        if 'attachment_ids' in data:
-            attachments, _detached = wiki_edit.set_attachments(
-                cursor, article_id, data.get('attachment_ids'),
-                uploaded_by=ctx['user_id'])
-
         # СТАТУС ПРИ СОЗДАНИИ. Раньше он игнорировался молча: create_article
         # всегда пишет 'draft', а кнопка «Опубликовать» в редакторе присылала
         # status='published' — статья оставалась черновиком, но интерфейс
@@ -296,7 +287,6 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                            entity_type='article', entity_id=article_id,
                            details={'title': title, 'slug': slug,
                                     'status': status or 'draft',
-                                    'attachments': attachments,
                                     'ai_index': indexed.get('action')},
                            ip_address=log_ip())
         # Статус возвращается ВСЕГДА: интерфейс должен говорить о том, что
@@ -395,14 +385,6 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
         if 'tags' in data:
             wiki_edit.set_tags(cursor, article_id, data['tags'])
             changed = True
-        # Приложения приходят ПОЛНЫМ списком, а не «добавить/удалить»: редактор
-        # показывает их одним перечнем, и любая правка этого перечня — это
-        # новое состояние целиком. Пропавшие открепляются (wiki_edit.set_attachments).
-        attachments = None
-        if 'attachment_ids' in data:
-            attachments, detached = wiki_edit.set_attachments(
-                cursor, article_id, data['attachment_ids'], uploaded_by=ctx['user_id'])
-            changed = True
 
         if not changed:
             return jsonify({"error": "Нечего обновлять"}), 400
@@ -422,9 +404,6 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                            entity_type='article', entity_id=article_id,
                            details={'fields': sorted(fields.keys()),
                                     'title': article['title'],
-                                    **({'attachments': attachments,
-                                        'attachments_removed': detached}
-                                       if attachments is not None else {}),
                                     'ai_index': indexed.get('action')},
                            ip_address=log_ip())
         return jsonify({"status": "ok", "ai_index": indexed})

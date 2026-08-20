@@ -35,60 +35,6 @@ def link_content_files(cursor, article_id, content):
     return cursor.rowcount
 
 
-_UUID_RE = re.compile(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
-
-
-def set_attachments(cursor, article_id, file_ids, *, uploaded_by):
-    """Приложения статьи в заданном порядке. Возвращает (привязано, откреплено).
-
-    Привязать можно ТОЛЬКО свой ещё ничей файл либо файл, уже принадлежащий этой
-    статье. Проверка обязательна: идентификатор приложения — обычный UUID из
-    ответа загрузки, и без неё чужой файл достаточно было бы «приложить» к своей
-    статье, чтобы прочитать его в обход прав на чужую.
-
-    Пропавшие из списка ОТКРЕПЛЯЮТСЯ, а не удаляются: файл возвращается в то же
-    состояние, в каком был сразу после загрузки, — виден одному загрузившему
-    (эта ветка описана в routes_articles.wiki_file). Значит опечатка в списке
-    стоит одной повторной привязки, а не потерянного документа. Сносить блоб в
-    GCS отсюда всё равно нечем: хранилище живёт в слое роутов.
-
-    Порядок хранится номером, а не временем загрузки: приложения к регламенту
-    нумерованные, и перезалитое «Приложение 2» не должно вставать первым.
-    """
-    ids, seen = [], set()
-    for value in (file_ids or []):
-        text = str(value or '').strip()
-        if _UUID_RE.match(text) and text.lower() not in seen:
-            seen.add(text.lower())
-            ids.append(text)
-
-    # Сначала снимаем лишние — иначе статья на мгновение осталась бы с двумя
-    # наборами приложений, а порядковые номера столкнулись бы между собой.
-    cursor.execute(
-        """
-        UPDATE wiki_files SET article_id = NULL, is_attachment = FALSE
-         WHERE article_id = %s AND is_attachment AND NOT (id = ANY(%s::uuid[]))
-        """,
-        (article_id, ids),
-    )
-    detached = cursor.rowcount
-
-    attached = 0
-    for order, file_id in enumerate(ids):
-        cursor.execute(
-            """
-            UPDATE wiki_files
-               SET article_id = %s, is_attachment = TRUE, sort_order = %s
-             WHERE id = %s::uuid
-               AND (article_id = %s OR (article_id IS NULL AND uploaded_by = %s))
-            """,
-            (article_id, order, file_id, article_id, uploaded_by),
-        )
-        attached += cursor.rowcount
-    return attached, detached
-
-
 def _next_version(cursor, article_id):
     cursor.execute(
         'SELECT COALESCE(max(version_number), 0) + 1 FROM wiki_article_versions WHERE article_id = %s',
