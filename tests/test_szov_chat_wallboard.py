@@ -711,14 +711,20 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("query.set('date_to', to)", self.view)
         # «Весь период» тут не годится: выгрузка качает Chat2Desk по дню на день.
         self.assertIn("chatExportPresets", self.view)
-        self.assertNotIn("'Весь период'", self.view)
+        # Пресеты ищем в САМОМ списке выгрузки, а не по всему файлу: в нём живут и другие
+        # наборы периодов (журнал перерывов, задача #114), и поиск по тексту принимал бы
+        # их подписи за пресеты выгрузки.
+        presets = re.search(r"const chatExportPresets = \[.*?\];", self.view, flags=re.DOTALL)
+        self.assertIsNotNone(presets, "не нашёл список пресетов выгрузки")
+        presets = presets.group(0)
+        self.assertNotIn("'Весь период'", presets)
         # Потолок периода гасит «Подтвердить» ДО запроса, а не после минуты ожидания.
         self.assertIn("const CHAT_EXPORT_MAX_DAYS = 7;", self.view)
         self.assertIn("disabled={tooLong}", self.view)
         # Пресета длиннее потолка быть не должно: он всегда гасил бы «Подтвердить».
-        self.assertNotIn("'30 дней'", self.view)
+        self.assertNotIn("'30 дней'", presets)
         for preset in ("{ label: 'Сегодня'", "{ label: '3 дня'", "{ label: '7 дней'"):
-            self.assertIn(preset, self.view, preset)
+            self.assertIn(preset, presets, preset)
 
     def test_calendar_is_one_brick_for_every_section(self):
         """Календарь вынесен из чипа-пикера, а сам пикер построен на нём — копий быть не должно."""

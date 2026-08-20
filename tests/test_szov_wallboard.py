@@ -1196,7 +1196,7 @@ class SzovBroadcastTests(unittest.TestCase):
         {'hh': 2, 'served': 9, 'arrived': 10, 'lost': 1, 'greet_drop': 0, 'talk_seconds': 3609},
     ]
 
-    def _namespace(self, hourly_raw=None, snapshot=None, shift_rows=None):
+    def _namespace(self, hourly_raw=None, snapshot=None, shift_rows=None, break_violations=None):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
 
         def fake_oktell(sql, timeout=None):
@@ -1214,6 +1214,11 @@ class SzovBroadcastTests(unittest.TestCase):
             '_szov_wallboard_snapshot': (lambda: snapshot) if snapshot is not None else no_snapshot,
             # смены считает отдельный серверный расчёт — в этих тестах он не участвует
             '_szov_broadcast_shift_rows': lambda day_iso: (shift_rows or {}),
+            # журнал перерывов лежит в БД, его наполняет отдельный разбор (задача #114);
+            # здесь подставляем готовые строки, а сборку текста проверяем настоящую
+            '_szov_broadcast_break_violations': (
+                lambda hour_to=None, scheduled=False: list(break_violations or [])
+            ),
         }
         _load_names(source, {
             '_OKTELL_GREETING_ABANDON', '_OKTELL_FAILED_CALL',
@@ -1229,6 +1234,9 @@ class SzovBroadcastTests(unittest.TestCase):
             '_szov_broadcast_stale_note', '_szov_broadcast_deviations',
             '_szov_broadcast_notes', '_szov_broadcast_text',
             '_szov_broadcast_parse_times', '_szov_broadcast_send_times',
+            'SZOV_BREAK_NOTE_LIMIT',
+            'SZOV_BREAK_KIND_OFF_SCHEDULE', 'SZOV_BREAK_KIND_NOT_PLANNED', 'SZOV_BREAK_KIND_NO_SHIFT',
+            '_szov_break_violation_detail', '_szov_break_violation_notes',
         }, ns)
         return ns
 
@@ -1414,6 +1422,32 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertIn('на перерыве', notes)
         self.assertIn('Среднее время разговора', notes)
 
+    def test_break_violations_reach_the_hourly_broadcast(self):
+        """Задача #114: уведомление приходит тем же почасовым отчётом, что уже шлёт бот."""
+        ns = self._calm(break_violations=[{
+            'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
+            'kind': 'off_schedule', 'planned_start_minutes': 14 * 60,
+        }])
+        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect']())
+        self.assertIn('Обратите внимание: Иванов Иван вышел(а) на перерыв не по графику', text)
+        self.assertIn('по графику в 14:00', text)
+
+    def test_break_violation_is_a_deviation_not_a_routine_line(self):
+        """Ради этого чат руководства и стоит в режиме «только при отклонениях»."""
+        ns = self._calm(break_violations=[{
+            'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
+            'kind': 'not_planned', 'planned_start_minutes': None,
+        }])
+        deviations = ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']())
+        self.assertEqual(len(deviations), 1)
+        self.assertIn('перерывов в графике на этот день нет', deviations[0])
+
+    def test_no_break_violations_no_line_at_all(self):
+        """Тихий час не должен добавлять в сообщение ни строки о перерывах."""
+        ns = self._calm(break_violations=[])
+        text = ns['_szov_broadcast_text'](ns['_szov_broadcast_collect']())
+        self.assertNotIn('не по графику', text)
+
     def test_notes_keep_the_frozen_data_line_last(self):
         ns = self._namespace(snapshot={'now': {}, 'today': {'sl_ratio': 0.4},
                                        'stale': True, 'age_seconds': 12 * 60})
@@ -1511,9 +1545,11 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])", self.api)
         # табло + настройка + тестовая отправка закрыты одним и тем же гейтом
         self.assertIn("@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])", self.api)
-        # оба табло (линия и чаты) и выгрузка показателей чатов — на своём гейте, вся отбивка
-        # (настройка, предпросмотр, отправка) — на строгом
-        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 3)
+        # журнал нарушений перерывов смотрят те же, кто смотрит табло, — гейт табло
+        self.assertIn("@app.route('/api/szov_wallboard/break_violations', methods=['GET', 'OPTIONS'])", self.api)
+        # оба табло (линия и чаты), выгрузка показателей чатов и журнал перерывов — на своём
+        # гейте, вся отбивка (настройка, предпросмотр, отправка) — на строгом
+        self.assertEqual(self.api.count("requester_id, err = _szov_wallboard_guard()"), 4)
         self.assertEqual(self.api.count("requester_id, err = _szov_broadcast_guard()"), 3)
 
     def test_preview_never_sends_anything(self):
@@ -1550,6 +1586,41 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("prepare=_szov_chat_broadcast_prepare", self.api)
         self.assertIn("for _hour, _minute in _szov_chat_broadcast_send_times():", self.api)
         self.assertIn("id=f'szov_chat_wallboard_broadcast_{_hour:02d}{_minute:02d}'", self.api)
+
+    def test_break_scan_runs_before_the_broadcast_itself(self):
+        """Журнал нарушений в iCore наполняется, даже когда отбивку никто не получает:
+        разбор стоит в джобе ДО раннера, а тот выходит сразу, если получателей нет."""
+        block = re.search(r"async def szov_broadcast_job\(\).*?(?=\n# ===)", self.api,
+                          flags=re.DOTALL).group(0)
+        self.assertLess(block.index("_szov_break_violations_scan"),
+                        block.index("_szov_broadcast_run_job"))
+
+    def test_break_scan_belongs_to_the_line_only(self):
+        """Перерывы по графику есть только у линии. В общем раннере разбор запускался бы
+        дважды — второй раз за счёт направления «Чат»."""
+        runner = re.search(r"async def _szov_broadcast_run_job\(.*?(?=\nasync def )", self.api,
+                           flags=re.DOTALL).group(0)
+        self.assertNotIn("_szov_break_violations_scan", runner)
+        chat_job = re.search(r"async def szov_chat_broadcast_job\(\).*?(?=\n\n\n)", self.api,
+                             flags=re.DOTALL).group(0)
+        self.assertNotIn("_szov_break_violations_scan", chat_job)
+        self.assertNotIn("break_violations", chat_job)
+
+    def test_violations_are_marked_reported_only_after_a_successful_send(self):
+        """Упавшая отправка не должна проглотить предупреждения молча."""
+        runner = re.search(r"async def _szov_broadcast_run_job\(.*?(?=\nasync def )", self.api,
+                           flags=re.DOTALL).group(0)
+        self.assertIn("if delivered and on_delivered is not None:", runner)
+        block = re.search(r"async def _szov_break_violations_mark_reported\(.*?(?=\nasync def )",
+                          self.api, flags=re.DOTALL).group(0)
+        self.assertIn("db.mark_szov_break_violations_reported", block)
+        self.assertIn("on_delivered=_szov_break_violations_mark_reported", self.api)
+
+    def test_scan_touches_oktell_once_per_run(self):
+        """Разбор перерывов — ровно один запрос к прокси: он низкоконкурентный."""
+        block = re.search(r"def _szov_break_violations_scan\(.*?(?=\ndef )", self.api,
+                          flags=re.DOTALL).group(0)
+        self.assertEqual(block.count("_oktell_query("), 1)
 
     def test_one_dead_chat_does_not_stop_the_rest(self):
         block = re.search(r"for chat in targets:.*?(?=\n    except Exception)", self.api,

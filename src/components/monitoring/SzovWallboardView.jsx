@@ -174,6 +174,164 @@ const historyLine = (settings) => {
 };
 
 /*
+ * Журнал выходов на перерыв мимо графика (задача #114).
+ *
+ * Сами нарушения находит бэкенд раз в час и в тот же час пишет о них в отбивку табло; здесь —
+ * их полный список «для дальнейшего учёта», который в сообщение не помещается. Список живёт в
+ * модалке, а не на самом табло: экран висит на стене и показывает нагрузку линии, а разбор
+ * персональной дисциплины смотрят по запросу.
+ */
+const BREAK_VIOLATION_PERIODS = [
+    { key: 'today', label: 'Сегодня', days: 1 },
+    { key: 'week', label: '7 дней', days: 7 },
+    { key: 'month', label: '30 дней', days: 30 },
+];
+
+/** «1 нарушение / 2 нарушения / 5 нарушений» — иначе счётчик читается как опечатка. */
+const plural = (count, one, few, many) => {
+    const value = Math.abs(Number(count) || 0);
+    if (value % 10 === 1 && value % 100 !== 11) return one;
+    if (value % 10 >= 2 && value % 10 <= 4 && !(value % 100 >= 12 && value % 100 <= 14)) return few;
+    return many;
+};
+
+/** Минуты от полуночи -> «14:05». Пусто -> null: Number(null) даёт 0, то есть ложные «00:00». */
+const minutesToClock = (value) => {
+    if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return null;
+    const total = ((Math.round(Number(value)) % 1440) + 1440) % 1440;
+    return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+};
+
+/* Чем именно перерыв разошёлся с графиком. Формулировки те же, что уходят в Telegram. */
+const breakViolationDetail = (item) => {
+    if (item?.kind === 'not_planned') return 'перерывов в графике на этот день нет';
+    if (item?.kind === 'no_shift') return 'смены в графике на этот день нет';
+    const planned = minutesToClock(item?.planned_start_minutes);
+    return planned ? `по графику в ${planned}` : 'в графике на это время перерыва нет';
+};
+
+const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, showToast }) => {
+    const [period, setPeriod] = useState('today');
+    const [state, setState] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const headersRef = useRef(withAccessTokenHeader);
+    headersRef.current = withAccessTokenHeader;
+    // showToast приходит новой функцией на каждый рендер родителя (а он перерисовывается раз
+    // в 15 с по опросу табло) — в зависимостях эффекта это перезапрашивало бы журнал.
+    const toastRef = useRef(showToast);
+    toastRef.current = showToast;
+
+    useEffect(() => {
+        if (!open) return undefined;
+        const days = (BREAK_VIOLATION_PERIODS.find((item) => item.key === period) || BREAK_VIOLATION_PERIODS[0]).days;
+        const to = isoDate(new Date());
+        const from = isoDate(new Date(Date.now() - (days - 1) * 864e5));
+        let cancelled = false;
+        setLoading(true);
+        const build = headersRef.current;
+        const headers = build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' };
+        fetch(`${apiBaseUrl}/api/szov_wallboard/break_violations?date_from=${from}&date_to=${to}`, {
+            headers, credentials: 'include',
+        })
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
+                return data;
+            })
+            .then((data) => { if (!cancelled) setState(data); })
+            .catch((error) => {
+                if (!cancelled) toastRef.current?.(error.message || 'Не удалось загрузить журнал', 'error');
+            })
+            .finally(() => { if (!cancelled) setLoading(false); });
+        return () => { cancelled = true; };
+    }, [open, period, apiBaseUrl]);
+
+    const violations = state?.violations || [];
+
+    /* Дни сверху вниз, внутри дня — по времени. Группировку считаем из уже полученного
+       списка, а не отдельным запросом. */
+    const byDay = useMemo(() => {
+        const groups = new Map();
+        violations.forEach((item) => {
+            const day = item.violation_date || String(item.started_at || '').slice(0, 10);
+            if (!groups.has(day)) groups.set(day, []);
+            groups.get(day).push(item);
+        });
+        return [...groups.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
+    }, [violations]);
+
+    const operators = useMemo(
+        () => new Set(violations.map((item) => item.operator_id)).size,
+        [violations],
+    );
+
+    const rules = state?.rules;
+    return (
+        <IosModal
+            open={open}
+            onClose={onClose}
+            title="Перерывы не по графику"
+            subtitle={rules
+                ? `Перерыв короче ${rules.min_minutes} мин не считаем, допуск к плановому времени ±${rules.tolerance_minutes} мин`
+                : 'Сверка фактических перерывов Oktell с «Графиками работы»'}
+            maxWidth="max-w-3xl"
+            footer={<button type="button" className={iosBtnSecondary} onClick={onClose}>Готово</button>}
+        >
+            <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <SegmentedSwitch
+                        value={period}
+                        options={BREAK_VIOLATION_PERIODS}
+                        disabled={loading}
+                        onChange={setPeriod}
+                    />
+                    {violations.length > 0 ? (
+                        <div className="text-[13px] tabular-nums text-slate-500">
+                            {`${formatInt(violations.length)} `}
+                            {plural(violations.length, 'нарушение', 'нарушения', 'нарушений')}
+                            {` у ${formatInt(operators)} `}
+                            {plural(operators, 'оператора', 'операторов', 'операторов')}
+                        </div>
+                    ) : null}
+                </div>
+
+                {loading && !state ? (
+                    <div className="py-6 text-center text-[13px] text-slate-500">Загружаем журнал…</div>
+                ) : violations.length === 0 ? (
+                    <div className={`${iosCard} px-4 py-5 text-[13.5px] text-slate-500`}>
+                        Нарушений нет: все перерывы за период шли по графику.
+                    </div>
+                ) : byDay.map(([day, items]) => (
+                    <div key={day} className="space-y-2">
+                        <div className="px-1 text-[12px] font-semibold uppercase tracking-wide text-slate-400">
+                            {day.split('-').reverse().join('.')}
+                        </div>
+                        <div className={`${iosCard} divide-y divide-slate-100`}>
+                            {items.map((item) => (
+                                <div key={item.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3">
+                                    <span className="w-12 shrink-0 text-[14px] font-semibold text-slate-900 tabular-nums">
+                                        {String(item.started_at || '').slice(11, 16)}
+                                    </span>
+                                    <span className="min-w-[10rem] flex-1 truncate text-[14px] text-slate-900">
+                                        {item.operator_name || `Оператор ${item.operator_id}`}
+                                    </span>
+                                    <span className="text-[13px] text-slate-500">{breakViolationDetail(item)}</span>
+                                    {Number.isFinite(Number(item.duration_minutes)) ? (
+                                        <span className="text-[13px] text-slate-400 tabular-nums">
+                                            {item.duration_minutes} мин
+                                        </span>
+                                    ) : null}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </IosModal>
+    );
+};
+
+/*
  * Настройка отбивки показателей в Telegram. Живёт в модалке, а не на самом табло:
  * табло смотрят, а не настраивают, и форма поверх экрана, который висит на стене, — лишний шум.
  */
@@ -629,6 +787,7 @@ const LineWallboard = ({
     // Снимок и опрос общие с виджетом: один запрос к Oktell на оба экрана, одни цифры в обоих.
     const { snapshot, error, loading, refresh } = useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
+    const [violationsOpen, setViolationsOpen] = useState(false);
 
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error), [error, snapshot]);
 
@@ -645,6 +804,10 @@ const LineWallboard = ({
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
         >
+            <button type="button" className={iosBtnGhost} onClick={() => setViolationsOpen(true)}>
+                <FaIcon className="fas fa-user-clock"></FaIcon>
+                Перерывы
+            </button>
             {canManageBroadcast ? (
                 <BroadcastControls
                     direction={direction}
@@ -656,19 +819,37 @@ const LineWallboard = ({
         </WallboardHeader>
     );
 
+    /* Через портал, как и полноэкранный режим: модалка не должна зависеть от вертикальных
+       отступов шапки, а шапка рисуется во всех трёх состояниях экрана. Модалка отбивки
+       живёт внутри BroadcastControls, поэтому здесь остаётся только журнал перерывов. */
+    const violationsModal = createPortal(
+        <BreakViolationsModal
+            open={violationsOpen}
+            onClose={() => setViolationsOpen(false)}
+            apiBaseUrl={apiBaseUrl}
+            withAccessTokenHeader={withAccessTokenHeader}
+            showToast={showToast}
+        />,
+        document.body,
+    );
+
     if (!snapshot) {
         return (
-            <WallboardPlaceholder
-                header={header}
-                message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
-                tone={loading ? 'muted' : 'error'}
-            />
+            <>
+                <WallboardPlaceholder
+                    header={header}
+                    message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
+                    tone={loading ? 'muted' : 'error'}
+                />
+                {violationsModal}
+            </>
         );
     }
 
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
+            {violationsModal}
             <WallboardBody snapshot={snapshot} scale={1} />
             {fullscreen ? createPortal(
                 <FullscreenSheet

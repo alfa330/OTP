@@ -4065,6 +4065,43 @@ class Database:
                     CONSTRAINT szov_wallboard_snapshot_singleton CHECK (id = 1)
                 );
             """)
+            # Выходы на перерыв мимо графика (задача #114). Пишем ТОЛЬКО нарушения: перерыв,
+            # совпавший с графиком, — это норма, и хранить её незачем.
+            #   kind: off_schedule — перерыв есть в графике, но в другое время;
+            #         not_planned  — смена в графике есть, перерывов в ней нет;
+            #         no_shift     — на этот день смены в графике вообще нет.
+            # UNIQUE(operator_id, started_at) делает почасовой разбор идемпотентным: он
+            # перекрывает окна, и один и тот же перерыв не должен превратиться в два нарушения.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS szov_break_violations (
+                    id SERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    violation_date DATE NOT NULL,
+                    started_at TIMESTAMP NOT NULL,
+                    ended_at TIMESTAMP NULL,
+                    duration_minutes INTEGER NULL,
+                    kind VARCHAR(24) NOT NULL,
+                    planned_start_minutes INTEGER NULL,
+                    planned_end_minutes INTEGER NULL,
+                    deviation_minutes INTEGER NULL,
+                    detected_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    reported_at TIMESTAMP NULL,
+                    CONSTRAINT szov_break_violations_kind CHECK (
+                        kind IN ('off_schedule', 'not_planned', 'no_shift')),
+                    CONSTRAINT szov_break_violations_episode UNIQUE (operator_id, started_at)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_szov_break_violations_day
+                ON szov_break_violations(violation_date DESC, started_at DESC);
+            """)
+            # Отбивка забирает только то, о чём ещё не писала: частичный индекс держит выборку
+            # короткой независимо от того, сколько нарушений накопилось за месяцы.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_szov_break_violations_unreported
+                ON szov_break_violations(started_at)
+                WHERE reported_at IS NULL;
+            """)
             # Общий код автодозвона: номер, на который оператор один раз звонит,
             # чтобы телефон подключился к режиму автодозвона. Один на всех.
             cursor.execute("""
@@ -23707,6 +23744,180 @@ class Database:
             "changed_by_name": r[2],
             "settings": r[3] or {},
         } for r in rows]
+
+    # --- Выходы на перерыв мимо графика (задача #114) ---------------------------------------
+
+    def get_planned_breaks_for_days(self, operator_ids, days):
+        """Плановые перерывы и наличие смены по (оператор, дата).
+
+        Возвращает (breaks, shift_days):
+          breaks     — {(operator_id, 'YYYY-MM-DD'): [(start_minutes, end_minutes), ...]}
+          shift_days — {(operator_id, 'YYYY-MM-DD'), ...} — где смена в графике вообще есть.
+
+        Минуты считаются от полуночи ДАТЫ СМЕНЫ и у ночной смены уходят за 1440 — так их
+        хранит shift_breaks, и так же их разворачивает сверка (ночной хвост вчерашней смены
+        приезжает вместе с датой минус сутки)."""
+        op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
+        day_objs = sorted({self._normalize_schedule_date(day) for day in (days or [])})
+        if not op_ids or not day_objs:
+            return {}, set()
+        breaks = {}
+        shift_days = set()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT ws.operator_id, ws.shift_date, sb.start_minutes, sb.end_minutes
+                FROM work_shifts ws
+                LEFT JOIN shift_breaks sb ON sb.shift_id = ws.id
+                WHERE ws.operator_id = ANY(%s) AND ws.shift_date = ANY(%s)
+            """, (op_ids, day_objs))
+            for operator_id, shift_date, start_minutes, end_minutes in (cursor.fetchall() or []):
+                key = (int(operator_id), shift_date.strftime('%Y-%m-%d'))
+                shift_days.add(key)
+                if start_minutes is None or end_minutes is None:
+                    continue
+                start_value, end_value = int(start_minutes), int(end_minutes)
+                if end_value > start_value:
+                    breaks.setdefault(key, []).append((start_value, end_value))
+        for value in breaks.values():
+            value.sort()
+        return breaks, shift_days
+
+    def save_szov_break_violations(self, rows) -> int:
+        """Записать найденные нарушения. Возвращает число НОВЫХ строк.
+
+        Разбор идёт с перекрытием окон (перерыв, начавшийся в 12:58, во время первой проверки
+        мог ещё длиться), поэтому запись обязана быть идемпотентной: повтор того же перерыва
+        не создаёт второе нарушение, а лишь уточняет конец и длительность. `reported_at` при
+        этом не трогаем — о чём уже написали, о том второй раз не пишем."""
+        payload = []
+        for row in (rows or []):
+            try:
+                payload.append((
+                    int(row['operator_id']),
+                    self._normalize_schedule_date(row['violation_date']),
+                    row['started_at'],
+                    row.get('ended_at'),
+                    None if row.get('duration_minutes') is None else int(row['duration_minutes']),
+                    str(row.get('kind') or 'off_schedule'),
+                    None if row.get('planned_start_minutes') is None else int(row['planned_start_minutes']),
+                    None if row.get('planned_end_minutes') is None else int(row['planned_end_minutes']),
+                    None if row.get('deviation_minutes') is None else int(row['deviation_minutes']),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not payload:
+            return 0
+        inserted = 0
+        with self._get_cursor() as cursor:
+            for item in payload:
+                cursor.execute("""
+                    INSERT INTO szov_break_violations
+                        (operator_id, violation_date, started_at, ended_at, duration_minutes,
+                         kind, planned_start_minutes, planned_end_minutes, deviation_minutes)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (operator_id, started_at) DO UPDATE
+                    SET ended_at = EXCLUDED.ended_at,
+                        duration_minutes = EXCLUDED.duration_minutes
+                    RETURNING (xmax = 0)
+                """, item)
+                result = cursor.fetchone()
+                if result and result[0]:
+                    inserted += 1
+        return inserted
+
+    _SZOV_BREAK_VIOLATION_COLUMNS = """
+        v.id, v.operator_id, u.name, v.violation_date, v.started_at, v.ended_at,
+        v.duration_minutes, v.kind, v.planned_start_minutes, v.planned_end_minutes,
+        v.deviation_minutes, v.detected_at, v.reported_at
+    """
+
+    @staticmethod
+    def _szov_break_violation_row(row):
+        return {
+            "id": row[0],
+            "operator_id": row[1],
+            "operator_name": row[2] or "",
+            "violation_date": row[3].strftime('%Y-%m-%d') if row[3] else None,
+            "started_at": row[4].isoformat(timespec='seconds') if row[4] else None,
+            "ended_at": row[5].isoformat(timespec='seconds') if row[5] else None,
+            "duration_minutes": row[6],
+            "kind": row[7],
+            "planned_start_minutes": row[8],
+            "planned_end_minutes": row[9],
+            "deviation_minutes": row[10],
+            "detected_at": row[11].isoformat(timespec='seconds') if row[11] else None,
+            "reported_at": row[12].isoformat(timespec='seconds') if row[12] else None,
+        }
+
+    def get_szov_break_violations(self, date_from=None, date_to=None, limit: int = 500) -> list:
+        """Нарушения за период — журнал для раздела «Табло СЗоВ»."""
+        limit = max(1, min(int(limit or 500), 2000))
+        clauses, params = [], []
+        if date_from:
+            clauses.append("v.violation_date >= %s")
+            params.append(self._normalize_schedule_date(date_from))
+        if date_to:
+            clauses.append("v.violation_date <= %s")
+            params.append(self._normalize_schedule_date(date_to))
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT {self._SZOV_BREAK_VIOLATION_COLUMNS}
+                FROM szov_break_violations v
+                LEFT JOIN users u ON u.id = v.operator_id
+                {where}
+                ORDER BY v.started_at DESC, v.id DESC
+                LIMIT %s
+            """, tuple(params))
+            rows = cursor.fetchall() or []
+        return [self._szov_break_violation_row(row) for row in rows]
+
+    def get_szov_break_violations_for_hour(self, day, hour) -> list:
+        """Нарушения одного часа — срез для команды «/tablo ЧЧ:ММ» и предпросмотра."""
+        day_obj = self._normalize_schedule_date(day)
+        start = datetime.combine(day_obj, dt_time(hour=max(0, min(23, int(hour)))))
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT {self._SZOV_BREAK_VIOLATION_COLUMNS}
+                FROM szov_break_violations v
+                LEFT JOIN users u ON u.id = v.operator_id
+                WHERE v.started_at >= %s AND v.started_at < %s
+                ORDER BY v.started_at, v.id
+            """, (start, start + timedelta(hours=1)))
+            rows = cursor.fetchall() or []
+        return [self._szov_break_violation_row(row) for row in rows]
+
+    def get_unreported_szov_break_violations(self, max_age_hours: int = 24, now=None) -> list:
+        """Нарушения, о которых отбивка ещё не писала, — не старше max_age_hours.
+
+        Ограничение по возрасту обязательно: если получателей отбивки не было неделю,
+        первое же сообщение вывалило бы сотни строк за всю неделю."""
+        moment = now or datetime.now()
+        since = moment - timedelta(hours=max(1, int(max_age_hours or 24)))
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT {self._SZOV_BREAK_VIOLATION_COLUMNS}
+                FROM szov_break_violations v
+                LEFT JOIN users u ON u.id = v.operator_id
+                WHERE v.reported_at IS NULL AND v.started_at >= %s
+                ORDER BY v.started_at, v.id
+            """, (since,))
+            rows = cursor.fetchall() or []
+        return [self._szov_break_violation_row(row) for row in rows]
+
+    def mark_szov_break_violations_reported(self, violation_ids) -> int:
+        """Отметить, что об этих нарушениях отбивка уже написала."""
+        ids = sorted({int(v) for v in (violation_ids or []) if v is not None})
+        if not ids:
+            return 0
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE szov_break_violations
+                SET reported_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = ANY(%s) AND reported_at IS NULL
+            """, (ids,))
+            return cursor.rowcount or 0
 
     def list_bot_group_chats(self) -> list:
         """Группы/каналы, в которых бот состоит (их же авто-находит IT-заявочный хук).

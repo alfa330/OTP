@@ -31620,6 +31620,41 @@ def api_szov_wallboard_snapshot():
         return jsonify({"error": "Не удалось получить данные Oktell", "detail": str(exc)[:300]}), 502
 
 
+@app.route('/api/szov_wallboard/break_violations', methods=['GET', 'OPTIONS'])
+@require_api_key
+def api_szov_wallboard_break_violations():
+    """Журнал выходов на перерыв мимо графика за период (задача #114).
+
+    Только чтение: строки пишет почасовой разбор отбивки, к Oktell эта ручка не ходит.
+    Доступ тот же, что у самого табло: нарушения смотрят те же СВ и руководители."""
+    if request.method == 'OPTIONS':
+        return _build_cors_preflight_response()
+    requester_id, err = _szov_wallboard_guard()
+    if err:
+        return err
+    today = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
+    date_from = (request.args.get('date_from') or '').strip() or today
+    date_to = (request.args.get('date_to') or '').strip() or date_from
+    if date_to < date_from:
+        date_from, date_to = date_to, date_from
+    try:
+        violations = db.get_szov_break_violations(date_from, date_to)
+    except Exception as exc:
+        logging.error("Перерывы вне графика: журнал не прочитан: %s", exc)
+        return jsonify({"error": "Не удалось получить журнал", "detail": str(exc)[:300]}), 500
+    return jsonify({
+        "date_from": date_from,
+        "date_to": date_to,
+        "violations": violations,
+        # Порог и допуск показываем рядом со списком: без них непонятно, почему перерыв
+        # в 10 минут от плана в журнал не попал.
+        "rules": {
+            "min_minutes": SZOV_BREAK_MIN_MINUTES,
+            "tolerance_minutes": SZOV_BREAK_TOLERANCE_MINUTES,
+        },
+    })
+
+
 # === Отбивка показателей «Табло СЗоВ» в Telegram ================================================
 # Каждый час в выбранные чаты уходит: картинка с почасовой таблицей, картинка табло,
 # текст с показателями и примечания об отклонениях. Данные — те же, что на экране.
@@ -31732,13 +31767,295 @@ def _szov_broadcast_shift_rows(day_iso):
     return rows
 
 
-def _szov_broadcast_collect(hour_to=None):
+# --- Выходы на перерыв мимо графика (задача #114) ----------------------------------------------
+# Сверяем, совпал ли фактический выход оператора на перерыв с перерывом, расставленным ему в
+# «Графиках работы». Не совпал — строка в журнале iCore (szov_break_violations) и предупреждение
+# в ближайшей почасовой отбивке табло.
+#
+# ПОЧЕМУ ТОЛЬКО ICode = 4. State=2 в Oktell — это любая пауза, и причина лежит в ICode. Замер за
+# 13–19.08.2026 (A_UserStateHistory): ICode 2 «Перезвон» — 8691 эпизод, ICode -1 (автопереход,
+# средняя длительность 0 с, максимум 9 с) — 3177, ICode 4 «Перерыв» — 1102, 3 «Тренинг» — 107,
+# 1003 (служебная учётка) — 95, 1 «Тех.причина» — 61. Перерыв из графика — это ровно ICode 4;
+# остальные причины к расстановке перерывов отношения не имеют и дали бы сплошной ложный поток.
+SZOV_BREAK_ICODE = 4
+# Короче трёх минут — не перерыв, а мерцание статуса: из 787 эпизодов ICode=4 за пять дней 419
+# длились меньше двух минут, а 333 — меньше минуты.
+SZOV_BREAK_MIN_MINUTES = _env_int('SZOV_BREAK_MIN_MINUTES', 3, minimum=1, maximum=60)
+# Допуск к плановому окну. Перерывы стоят на пятиминутной сетке, и «вышел на пару минут раньше»
+# нарушением не считается; ±10 минут оставляет в нарушениях реальные сдвиги, а не округление.
+SZOV_BREAK_TOLERANCE_MINUTES = _env_int('SZOV_BREAK_TOLERANCE_MINUTES', 10, minimum=0, maximum=120)
+# Разрыв, при котором два эпизода считаются одним перерывом (оператор вышел, вернулся на минуту
+# и снова вышел). Больше — это уже два разных перерыва, и сверять их надо по отдельности.
+SZOV_BREAK_MERGE_GAP_MINUTES = _env_int('SZOV_BREAK_MERGE_GAP_MINUTES', 2, minimum=0, maximum=30)
+# Глубина одного разбора. Окна перекрываются намеренно: перерыв, который в прошлый час ещё шёл,
+# на этом заходе доедет с настоящей длительностью, а пропущенный запуск (деплой, рестарт)
+# наверстается сам. Запись идемпотентна, повтор нового нарушения не создаёт.
+SZOV_BREAK_SCAN_LOOKBACK_HOURS = _env_int('SZOV_BREAK_SCAN_LOOKBACK_HOURS', 3, minimum=1, maximum=12)
+# Насколько старое нарушение ещё имеет смысл упоминать в отбивке. Без этой границы отбивка
+# после недели без получателей вывалила бы за неделю разом.
+SZOV_BREAK_REPORT_MAX_AGE_HOURS = _env_int('SZOV_BREAK_REPORT_MAX_AGE_HOURS', 24, minimum=1, maximum=168)
+# Сколько нарушений выписываем поимённо. Замер: в час их обычно 2 (90-й перцентиль — 5,
+# максимум за неделю — 8), так что до шести помещается почти всегда; остальные — счётчиком,
+# полный список в iCore.
+SZOV_BREAK_NOTE_LIMIT = _env_int('SZOV_BREAK_NOTE_LIMIT', 6, minimum=1, maximum=30)
+
+SZOV_BREAK_KIND_OFF_SCHEDULE = 'off_schedule'   # перерыв в графике есть, но в другое время
+SZOV_BREAK_KIND_NOT_PLANNED = 'not_planned'     # смена есть, перерывов в ней не запланировано
+SZOV_BREAK_KIND_NO_SHIFT = 'no_shift'           # смены на этот день в графике нет вовсе
+
+
+def _oktell_break_episodes_sql(window_from, window_to):
+    """Эпизоды статуса «Перерыв» за окно: кто, когда вышел и когда вернулся.
+
+    Конец эпизода — время СЛЕДУЮЩЕЙ записи истории того же оператора (LEAD), поэтому окно
+    подзапроса берётся целиком, а фильтр по причине навешивается снаружи: иначе «следующей»
+    оказалась бы следующая пауза, а не возврат на линию. Открытый эпизод (оператор всё ещё на
+    перерыве) приезжает с пустым ended_at — это нормально, длительность уточнит следующий заход.
+
+    Формат 126 (ISO 8601) вместо 'YYYYMMDD': локаль сервера dmy, а тут нужны и часы."""
+    return (
+        "SELECT oi.Name AS operator_name, "
+        "CONVERT(varchar(19), x.TimeChange, 120) AS started_at, "
+        "CONVERT(varchar(19), x.next_change, 120) AS ended_at "
+        "FROM (SELECT h.UserId, h.State, h.ICode, h.TimeChange, "
+        "LEAD(h.TimeChange) OVER (PARTITION BY h.UserId ORDER BY h.Enumerator) AS next_change "
+        "FROM oktell.dbo.A_UserStateHistory h "
+        f"WHERE h.TimeChange >= CONVERT(datetime, '{window_from.strftime('%Y-%m-%dT%H:%M:%S')}', 126) "
+        f"AND h.TimeChange < CONVERT(datetime, '{window_to.strftime('%Y-%m-%dT%H:%M:%S')}', 126)) x "
+        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = x.UserId "
+        f"WHERE x.State = 2 AND x.ICode = {int(SZOV_BREAK_ICODE)} "
+        "ORDER BY oi.Name, x.TimeChange"
+    )
+
+
+def _szov_break_parse_time(value):
+    """'YYYY-MM-DD HH:MM:SS' из Oktell -> datetime. Пусто/мусор -> None."""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return None
+
+
+def _szov_break_merge_episodes(episodes):
+    """Склеить эпизоды одного оператора, разделённые паузой не больше допустимой.
+
+    Оператор, снявший статус на минуту и вернувший его обратно, ушёл на ОДИН перерыв.
+    Без склейки такой перерыв дважды сверялся бы с графиком и давал бы два нарушения."""
+    by_operator = {}
+    for episode in (episodes or []):
+        by_operator.setdefault(episode['operator_id'], []).append(episode)
+    merged = []
+    gap = timedelta(minutes=SZOV_BREAK_MERGE_GAP_MINUTES)
+    for items in by_operator.values():
+        items.sort(key=lambda item: item['started_at'])
+        current = None
+        for item in items:
+            previous_end = current and (current['ended_at'] or current['started_at'])
+            if current is not None and item['started_at'] - previous_end <= gap:
+                # Открытый эпизод «съедает» продолжение: конец у объединённого — конец последнего.
+                current['ended_at'] = item['ended_at']
+                continue
+            if current is not None:
+                merged.append(current)
+            current = dict(item)
+        if current is not None:
+            merged.append(current)
+    merged.sort(key=lambda item: (item['started_at'], item['name']))
+    return merged
+
+
+def _szov_break_planned_for_day(planned_breaks, operator_id, day):
+    """Плановые перерывы оператора на календарный день, в минутах от его полуночи.
+
+    Ночная смена хранит перерывы на ДАТЕ СМЕНЫ и уводит минуты за 1440, поэтому хвост
+    вчерашней смены приезжает сюда со сдвигом на сутки назад."""
+    day_iso = day.strftime('%Y-%m-%d')
+    previous_iso = (day - timedelta(days=1)).strftime('%Y-%m-%d')
+    plan = list(planned_breaks.get((operator_id, day_iso)) or [])
+    plan += [(start - 1440, end - 1440)
+             for start, end in (planned_breaks.get((operator_id, previous_iso)) or [])
+             if start >= 1440]
+    plan.sort()
+    return plan
+
+
+def _szov_break_classify(episodes, planned_breaks, shift_days, now):
+    """Эпизоды перерывов -> строки нарушений. Совпавшие с графиком не возвращаются вовсе.
+
+    Правило ровно то, что в постановке: в момент, когда сотрудник вышел на перерыв, график
+    должен показывать перерыв ИМЕННО У НЕГО. Не показывает — нарушение."""
+    violations = []
+    for episode in (episodes or []):
+        started_at = episode['started_at']
+        ended_at = episode.get('ended_at')
+        # Открытый перерыв судим по уже отсиженному: если он ещё короче порога, решение
+        # откладывается до следующего захода — окна перекрываются, эпизод не потеряется.
+        duration = ((ended_at or now) - started_at).total_seconds() / 60.0
+        if duration < SZOV_BREAK_MIN_MINUTES:
+            continue
+        day = started_at.date()
+        start_minutes = started_at.hour * 60 + started_at.minute
+        plan = _szov_break_planned_for_day(planned_breaks, episode['operator_id'], day)
+        row = {
+            'operator_id': episode['operator_id'],
+            'operator_name': episode['name'],
+            'violation_date': day,
+            'started_at': started_at,
+            'ended_at': ended_at,
+            'duration_minutes': None if ended_at is None else int(duration),
+            'planned_start_minutes': None,
+            'planned_end_minutes': None,
+            'deviation_minutes': None,
+        }
+        if not plan:
+            has_shift = (episode['operator_id'], day.strftime('%Y-%m-%d')) in (shift_days or set())
+            row['kind'] = SZOV_BREAK_KIND_NOT_PLANNED if has_shift else SZOV_BREAK_KIND_NO_SHIFT
+            violations.append(row)
+            continue
+        tolerance = SZOV_BREAK_TOLERANCE_MINUTES
+        if any(start - tolerance <= start_minutes < end + tolerance for start, end in plan):
+            continue
+        nearest = min(plan, key=lambda item: abs(item[0] - start_minutes))
+        row['kind'] = SZOV_BREAK_KIND_OFF_SCHEDULE
+        row['planned_start_minutes'] = nearest[0]
+        row['planned_end_minutes'] = nearest[1]
+        row['deviation_minutes'] = start_minutes - nearest[0]
+        violations.append(row)
+    return violations
+
+
+def _szov_break_now():
+    """«Сейчас» в часовом поясе отбивки, без tzinfo — в этой же шкале живёт история Oktell."""
+    return datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).replace(tzinfo=None, microsecond=0)
+
+
+def _szov_break_violations_scan(now=None):
+    """Разобрать перерывы за последние часы и записать те, что не совпали с графиком.
+
+    Ровно ОДИН запрос к Oktell на заход. Считается отдельно от отправки сообщения: журнал
+    нарушений в iCore обязан наполняться и тогда, когда отбивку никто не получает."""
+    now = now or _szov_break_now()
+    window_from = now - timedelta(hours=SZOV_BREAK_SCAN_LOOKBACK_HOURS)
+    lookup, _department_id = _szov_wallboard_operator_lookup()
+    if not lookup:
+        logging.warning("Перерывы вне графика: состав отдела СЗоВ пуст, разбор пропущен")
+        return 0
+    raw = _oktell_query(_oktell_break_episodes_sql(window_from, now + timedelta(minutes=1)),
+                        timeout=SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS) or []
+    if len(raw) >= OKTELL_API_PAGE_SIZE:
+        # Прокси режет ответ по 1000 строк молча. За три часа по всей компании перерывов
+        # десятки, так что упереться в потолок можно только раздув окно через env — и тогда
+        # часть перерывов просто не доехала бы, а журнал выглядел бы полным.
+        logging.warning("Перерывы вне графика: ответ Oktell упёрся в %d строк — окно разбора "
+                        "(%d ч) слишком широкое, часть перерывов не разобрана",
+                        OKTELL_API_PAGE_SIZE, SZOV_BREAK_SCAN_LOOKBACK_HOURS)
+    episodes = []
+    for item in raw:
+        oktell_name = str(item.get('operator_name') or '').strip()
+        started_at = _szov_break_parse_time(item.get('started_at'))
+        if not oktell_name or started_at is None:
+            continue
+        matches = _status_import_resolve_operator_matches(oktell_name, lookup)
+        if len(matches) != 1:
+            # Не сотрудник СЗоВ (служебная учётка, другой отдел) либо имя неоднозначно.
+            continue
+        episodes.append({
+            'operator_id': int(matches[0]['id']),
+            'name': matches[0].get('name') or oktell_name,
+            'started_at': started_at,
+            'ended_at': _szov_break_parse_time(item.get('ended_at')),
+        })
+    if not episodes:
+        return 0
+    merged = _szov_break_merge_episodes(episodes)
+    operator_ids = {episode['operator_id'] for episode in merged}
+    days = set()
+    for episode in merged:
+        day = episode['started_at'].date()
+        days.add(day)
+        days.add(day - timedelta(days=1))   # ночной хвост вчерашней смены
+    planned_breaks, shift_days = db.get_planned_breaks_for_days(operator_ids, days)
+    violations = _szov_break_classify(merged, planned_breaks, shift_days, now)
+    if not violations:
+        return 0
+    inserted = db.save_szov_break_violations(violations)
+    if inserted:
+        logging.info("Перерывы вне графика: найдено %d новых нарушений из %d перерывов",
+                     inserted, len(merged))
+    return inserted
+
+
+def _szov_break_violation_detail(item):
+    """Чем именно перерыв разошёлся с графиком — хвост строки уведомления."""
+    kind = str(item.get('kind') or '')
+    if kind == SZOV_BREAK_KIND_NOT_PLANNED:
+        return 'перерывов в графике на этот день нет'
+    if kind == SZOV_BREAK_KIND_NO_SHIFT:
+        return 'смены в графике на этот день нет'
+    start = item.get('planned_start_minutes')
+    if start is None:
+        return 'в графике на это время перерыва нет'
+    return f"по графику в {(start // 60) % 24:02d}:{start % 60:02d}"
+
+
+def _szov_break_violation_notes(violations):
+    """Строки отбивки о перерывах не по графику. Пустой список — сверять не о чем.
+
+    Одно нарушение — ровно та фраза, что стоит в постановке. Несколько — заголовок и список:
+    шесть раз подряд «Обратите внимание» читается как шум, а не как предупреждение."""
+    items = list(violations or [])
+    if not items:
+        return []
+    if len(items) == 1:
+        item = items[0]
+        started = str(item.get('started_at') or '')[11:16]
+        return [f"Обратите внимание: {item.get('operator_name') or 'оператор'} вышел(а) на перерыв "
+                f"не по графику — в {started}, {_szov_break_violation_detail(item)}."]
+    shown = items[:SZOV_BREAK_NOTE_LIMIT]
+    lines = [f"Обратите внимание: {len(items)} "
+             f"{_szov_plural(len(items), 'оператор вышел', 'оператора вышли', 'операторов вышли')} "
+             f"на перерыв не по графику:"]
+    for item in shown:
+        started = str(item.get('started_at') or '')[11:16]
+        lines.append(f"• {started} {item.get('operator_name') or 'оператор'} — "
+                     f"{_szov_break_violation_detail(item)}")
+    hidden = len(items) - len(shown)
+    if hidden > 0:
+        lines.append(f"…и ещё {hidden} — полный список в iCore, «Табло СЗоВ» → «Перерывы».")
+    return ['\n'.join(lines)]
+
+
+def _szov_broadcast_break_violations(hour_to=None, scheduled=False, now=None):
+    """Нарушения для одного сообщения отбивки.
+
+    Плановая отбивка берёт всё, о чём ещё не писала (в том числе перерыв, который в прошлый
+    час ещё шёл и разбора не прошёл). Команда «/tablo» и предпросмотр берут срез часа и
+    ничего не помечают — иначе ручной запрос отбирал бы строки у плановой отправки."""
+    try:
+        if scheduled:
+            return db.get_unreported_szov_break_violations(SZOV_BREAK_REPORT_MAX_AGE_HOURS,
+                                                           now=now or _szov_break_now())
+        moment = now or _szov_break_now()
+        return db.get_szov_break_violations_for_hour(
+            moment.date(), moment.hour if hour_to is None else hour_to)
+    except Exception as exc:
+        # Звонковые показатели важнее: журнал перерывов не должен уронить отбивку.
+        logging.warning("Отбивка табло: нарушения перерывов недоступны: %s", exc)
+        return []
+
+
+def _szov_broadcast_collect(hour_to=None, scheduled=False):
     """Всё, что нужно отбивке: почасовая таблица, итоги дня и статусы операторов.
 
     Чаты Chat2Desk сюда не входят — они уехали в отдельный почасовой отчёт
     (`_chat_hourly_*`), где показываются целиком, а не одним числом.
     Статусы операторов существуют только «на сейчас», поэтому для среза на прошедший час
-    они в примечания не попадают (см. _szov_broadcast_notes)."""
+    они в примечания не попадают (см. _szov_broadcast_notes).
+    scheduled — собираем плановую отправку: тогда нарушения перерывов берутся «о чём ещё не
+    писали», а не срезом часа."""
     hourly = _szov_broadcast_hourly_rows(hour_to)
     # Смены (прогноз/план/факт) приклеиваем к часам звонков — так таблица остаётся одной.
     day_iso = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
@@ -31784,6 +32101,7 @@ def _szov_broadcast_collect(hour_to=None):
         'snapshot_stale': bool((snapshot or {}).get('stale')),
         'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
         'snapshot': snapshot,
+        'break_violations': _szov_broadcast_break_violations(hour_to, scheduled=scheduled),
     }
 
 
@@ -31842,7 +32160,9 @@ def _szov_broadcast_deviations(data):
     ему пишем не по расписанию, а когда есть о чём написать. Норма здесь ровно та же,
     что красит плитки на табло, — коридор AR 3…5 % и SL не ниже порога «Биллинга»,
     иначе одна и та же цифра считалась бы отклонением на экране и нормой в отбивке.
-    Молчание Oktell тоже отклонение: цифры не обновляются, и знать об этом надо."""
+    Молчание Oktell тоже отклонение: цифры не обновляются, и знать об этом надо.
+    Выход на перерыв мимо графика — тоже отклонение, а не дежурная строка: это нарушение,
+    ради которого чат с режимом «только при отклонениях» и подписан (задача #114)."""
     notes = []
     totals = data['totals']
     ar = totals['ar_ratio']
@@ -31868,6 +32188,8 @@ def _szov_broadcast_deviations(data):
         notes.append(
             f"Обратите внимание: SL ниже нормы ({SZOV_SL_MIN_PERCENT:g}%) — {_szov_format_percent(sl)}."
         )
+
+    notes.extend(_szov_break_violation_notes(data.get('break_violations')))
 
     stale = _szov_broadcast_stale_note(data)
     if stale:
@@ -32166,7 +32488,7 @@ def _bot_event_loop():
     return None
 
 
-async def _szov_broadcast_prepare(hour_to=None):
+async def _szov_broadcast_prepare(hour_to=None, scheduled=False):
     """Собрать отбивку целиком: данные, текст и обе картинки.
 
     Отдельно от отправки, потому что получателей несколько: прокси Oktell
@@ -32174,7 +32496,7 @@ async def _szov_broadcast_prepare(hour_to=None):
     Данные тянем в пуле потоков: Oktell — синхронный requests, и держать на нём
     event loop бота недопустимо."""
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(executor_pool, _szov_broadcast_collect, hour_to)
+    data = await loop.run_in_executor(executor_pool, _szov_broadcast_collect, hour_to, scheduled)
     text = _szov_broadcast_text(data)
 
     media = []
@@ -32245,14 +32567,17 @@ def _szov_broadcast_send_times():
     return _szov_broadcast_parse_times(SZOV_BROADCAST_SEND_TIMES, "Отбивка табло")
 
 
-async def _szov_broadcast_run_job(*, direction, label, prepare, deviations):
+async def _szov_broadcast_run_job(*, direction, label, prepare, deviations, on_delivered=None):
     """Плановая отбивка одного направления. Молчит, если получателей нет.
 
     Общая на «Линию» и «Чат»: различаются только сбор данных и правило отклонений, а
     обход получателей одинаков и разъехаться не должен. Данные собираем ОДИН раз на всех —
     прокси Oktell низкоконкурентный, а квота Chat2Desk общая на компанию, и повторять сбор
     на каждый чат нельзя. Получатель в режиме «только при отклонениях» стоит в том же
-    расписании, но сообщение получает, лишь когда показатели вышли из нормы."""
+    расписании, но сообщение получает, лишь когда показатели вышли из нормы.
+
+    on_delivered — что направление доделывает ПОСЛЕ удачной отправки хотя бы в один чат.
+    Линия помечает им нарушения перерывов прочитанными (задача #114); чату это не нужно."""
     try:
         loop = asyncio.get_event_loop()
         chats = await loop.run_in_executor(
@@ -32268,26 +32593,59 @@ async def _szov_broadcast_run_job(*, direction, label, prepare, deviations):
             logging.info("%s: отклонений нет, %d чатам с режимом «только при "
                          "отклонениях» не пишем", label, len(recipients))
             return
+        delivered = False
         for chat in targets:
             # Один недоступный чат (бота выгнали из группы) не должен лишать отбивки остальных.
             try:
                 await _szov_broadcast_deliver(int(chat['chat_id']), text, media)
+                delivered = True
                 logging.info("%s отправлена в чат %s (%s)", label,
                              chat['chat_id'], chat.get('mode'))
             except Exception as exc:
                 logging.error("%s: чат %s не получил сообщение: %s", label,
                               chat['chat_id'], exc)
+        if delivered and on_delivered is not None:
+            await on_delivered(data)
     except Exception as exc:
         logging.error("%s: плановая отправка не удалась: %s", label, exc, exc_info=True)
 
 
+async def _szov_broadcast_prepare_scheduled():
+    """Сбор плановой отбивки «Линии». Отдельная обёртка, а не partial: «плановая» здесь
+    означает ещё и «взять нарушения перерывов, о которых мы ещё не писали»."""
+    return await _szov_broadcast_prepare(scheduled=True)
+
+
+async def _szov_break_violations_mark_reported(data):
+    """О чём отбивка написала, о том второй раз не пишем.
+
+    Вызывается только после удачной отправки: иначе разом упавшая доставка проглотила бы
+    предупреждения, и о них не написали бы никогда."""
+    violation_ids = [item.get('id') for item in (data.get('break_violations') or [])]
+    if not violation_ids:
+        return
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        executor_pool, db.mark_szov_break_violations_reported, violation_ids)
+
+
 async def szov_broadcast_job():
     """Плановая отбивка направления «Линия»."""
+    # Разбор перерывов — до самой отбивки и независимо от неё: журнал нарушений в iCore
+    # обязан наполняться, даже когда отбивку никто не получает (задача #114). Живёт здесь,
+    # а не в общем раннере, чтобы у направления «Чат» он не запускался второй раз: перерывы
+    # по графику существуют только у линии.
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor_pool, _szov_break_violations_scan)
+    except Exception as exc:
+        logging.error("Перерывы вне графика: разбор не удался: %s", exc)
     await _szov_broadcast_run_job(
         direction=SZOV_BROADCAST_DIRECTION_LINE,
         label="Отбивка табло",
-        prepare=_szov_broadcast_prepare,
-        deviations=_szov_broadcast_deviations)
+        prepare=_szov_broadcast_prepare_scheduled,
+        deviations=_szov_broadcast_deviations,
+        on_delivered=_szov_break_violations_mark_reported)
 
 
 # === Почасовой отчёт по чатам ===================================================================
