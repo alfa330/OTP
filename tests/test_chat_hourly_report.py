@@ -267,10 +267,13 @@ class ChatHourlyOnlineTests(unittest.TestCase):
 
     def test_operators_on_a_status_are_listed_apart(self):
         """«Онлайн» на табло — это свободные и в разговоре, перерыв туда не входит."""
-        self.assertEqual(self.on_status, [{'name': 'Ерсын Досанбаев', 'status': 'отпуск'}])
+        self.assertEqual(self.on_status,
+                         [{'name': 'Ерсын Досанбаев', 'status': 'закрытие чатов'}])
 
     def test_status_labels_are_russian(self):
-        self.assertEqual(self.states['Ерсын Досанбаев']['status'], 'отпуск')
+        # `holiday` — не отпуск: в справочнике Chat2Desk (GET /v1/operators/statuses) это
+        # «Закрытие чатов», человек в системе и дорабатывает открытые чаты.
+        self.assertEqual(self.states['Ерсын Досанбаев']['status'], 'закрытие чатов')
         self.assertEqual(self.states['Асан Тестбаев']['status'], 'онлайн')
         self.assertEqual(self.states['Мади Кыдырбай']['status'], 'офлайн')
 

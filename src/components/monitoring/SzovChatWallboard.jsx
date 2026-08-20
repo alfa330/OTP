@@ -17,6 +17,8 @@ import { APPLE_FONT, iosCard } from '../ui/ios';
 import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboardTiles';
 import {
     CHAT_STATUS_STYLE,
+    WALLBOARD_TONE_TEXT,
+    chatReplyTone,
     formatDuration,
     formatInt,
     formatMinutes,
@@ -45,8 +47,13 @@ const CHART_COLORS = {
     target: '#059669',
 };
 
-/** Правая колонка: кто сейчас на смене, в каком статусе и сколько у него открытых чатов. */
-const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
+/*
+ * Правая колонка: кто сейчас на смене, в каком статусе, сколько у него чатов в работе и как
+ * он на них отвечает. Время ответа тут — ЗА СУТКИ, а не «сейчас» (по одному чату оно скачет
+ * от минуты до получаса), и стоит рядом с занятостью намеренно: «7 в работе» у того, кто
+ * отвечает за минуту, и у того, кто держит клиента десять, — это разные семь чатов.
+ */
+const ChatPeopleColumn = ({ people, offline, targetSeconds, scale = 1 }) => {
     const items = Array.isArray(people) ? people : [];
     const nameSize = `clamp(1rem, ${(1.25 * scale).toFixed(2)}vw, ${(1.375 * scale).toFixed(3)}rem)`;
     return (
@@ -75,13 +82,51 @@ const ChatPeopleColumn = ({ people, offline, scale = 1 }) => {
                                         {item.status}
                                     </span>
                                 </div>
-                                <div className="mt-0.5 flex items-center gap-2 text-[14px] font-medium tabular-nums text-slate-400">
-                                    <span>{item.seconds === null || item.seconds === undefined
+                                {/* flex-wrap + whitespace-nowrap обязательны в паре: без них
+                                    строка не переносится ЦЕЛИКОМ, а сжимает каждый кусок по
+                                    отдельности, и «с начала суток · 7 в работе» рассыпается
+                                    на три колонки с перенесённым внутри словом. */}
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[14px] font-medium tabular-nums text-slate-400">
+                                    <span className="whitespace-nowrap">{item.seconds === null || item.seconds === undefined
                                         ? 'с начала суток'
                                         : formatDuration(item.seconds)}</span>
                                     <span className="text-slate-300">·</span>
-                                    <span>{formatInt(item.open_chats)} в работе</span>
+                                    <span className="whitespace-nowrap text-slate-600">{formatInt(item.open_chats)} в работе</span>
+                                    {/* Чатов за сутки стоит рядом с занятостью, а не у времени
+                                        ответа, — но нужен именно ему: средняя минута по двум
+                                        чатам и по полутора сотням весит по-разному. */}
+                                    {item.chats ? (
+                                        <>
+                                            <span className="text-slate-300">·</span>
+                                            <span className="whitespace-nowrap">{formatInt(item.chats)} за сутки</span>
+                                        </>
+                                    ) : null}
                                 </div>
+                                {/* Строка времени ответа появляется только у того, кто сегодня
+                                    брал чаты: у остальных она была бы парой прочерков, то есть
+                                    шумом на месте показателя. Строку держим КОРОТКОЙ — в колонке
+                                    19rem всё лишнее переносится, и список идёт рваными рядами. */}
+                                {item.chats ? (
+                                    <div className="mt-1 flex flex-wrap items-baseline gap-x-2 text-[13px] tabular-nums text-slate-400">
+                                        <span className="whitespace-nowrap">
+                                            первый{' '}
+                                            <span className="font-medium text-slate-600">
+                                                {formatMinutes(item.first_reply_seconds, 1, false)}
+                                            </span>
+                                        </span>
+                                        <span className="text-slate-300">·</span>
+                                        <span className="whitespace-nowrap">
+                                            внутри{' '}
+                                            {/* Единственный оценочный цвет в колонке: у ответа
+                                                внутри чата есть цель, у первого ответа — нет. */}
+                                            <span className={`font-medium ${WALLBOARD_TONE_TEXT[
+                                                chatReplyTone(item.inner_reply_seconds, targetSeconds)]}`}>
+                                                {formatMinutes(item.inner_reply_seconds, 1, false)}
+                                            </span>
+                                        </span>
+                                        <span>мин</span>
+                                    </div>
+                                ) : null}
                             </li>
                         );
                     })}
@@ -307,17 +352,13 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     const innerTone = inner === null || inner === undefined
         ? 'neutral' : (Number(inner) <= targetSeconds ? 'good' : 'bad');
 
-    // Часы с измеренным ответом внутри чата и доля тех, где уложились в цель.
-    const measuredHours = (snapshot?.hourly || []).filter(
-        (row) => row.inner_reply_seconds !== null && row.inner_reply_seconds !== undefined);
-    const hoursMeasured = measuredHours.length;
-    const hoursInTarget = measuredHours.filter((row) => row.inner_reply_seconds <= targetSeconds).length;
-
-    // Отпуск и «не в системе» своих плиток не имеют — как тренинг и тех.причина на «Линии»,
-    // показываем их приглушённой строкой и только когда есть кого показывать.
+    // «Закрытие чатов» и «не в системе» своих плиток не имеют — как тренинг и тех.причина на
+    // «Линии», показываем их приглушённой строкой и только когда есть кого показывать.
     const asideParts = [
         [Number(now.operators_on_break) || 0, 'на перерыве'],
-        [Number(now.operators_on_holiday) || 0, 'в отпуске'],
+        // `holiday` в Chat2Desk — не отпуск, а «Закрытие чатов»: человек дорабатывает открытые
+        // и новых не берёт. Подпись сверена со справочником Chat2Desk, см. CHAT_STATUS_STYLE.
+        [Number(now.operators_on_holiday) || 0, 'на закрытии чатов'],
         // «Прочее» — статус, которого мы ещё не видели: Chat2Desk завёл новый или переименовал.
         // Человек в нём не пропадает с табло, хотя своей плитки у такого статуса нет.
         [Number(now.operators_other) || 0, 'в прочих статусах'],
@@ -342,14 +383,12 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                 </Section>
 
                 <Section icon="fa-chart-bar" title="Показатели за день">
-                    <Grid>
+                    {/* Плиток три, а не четыре: «Часов в цели» убрана по решению владельца
+                        20.08.2026. Доля часов в цели — оценка дня задним числом, со стены по
+                        ней ничего не сделаешь, а место она занимала наравне с показателями,
+                        на которые смена реагирует прямо сейчас. */}
+                    <Grid cols={3}>
                         <StatTile label="Чатов за сутки" value={formatInt(today.chats)} scale={scale} />
-                        {/* Не «открыто сейчас»: это число почти совпадает с плиткой «Открыто чатов»
-                            выше, и два одинаковых на вид счётчика рядом только сбивают. Полезнее
-                            итог дня по цели — в скольких часах в неё уложились. */}
-                        <StatTile label="Часов в цели" value={formatInt(hoursInTarget)}
-                                  unit={`из ${formatInt(hoursMeasured)}`}
-                                  tone={hoursInTarget === hoursMeasured ? 'good' : 'neutral'} scale={scale} />
                         <StatTile label="Ответ внутри чата" value={formatMinutes(inner, 1, false)} unit="мин"
                                   tone={innerTone} scale={scale} />
                         <StatTile label="Первый ответ" value={formatMinutes(today.first_reply_seconds, 1, false)}
@@ -382,7 +421,8 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                 </Section>
             </div>
 
-            <ChatPeopleColumn people={now.operators} offline={Number(now.operators_offline) || 0} scale={scale} />
+            <ChatPeopleColumn people={now.operators} offline={Number(now.operators_offline) || 0}
+                              targetSeconds={targetSeconds} scale={scale} />
         </div>
     );
 }

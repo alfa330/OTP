@@ -71,8 +71,16 @@ export const Section = ({ icon, title, right = null, children }) => (
     </div>
 );
 
-export const Grid = ({ children }) => (
-    <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{children}</div>
+/*
+ * Сетка плиток. По умолчанию четыре в ряд, `cols` нужен там, где показателей ровно три: иначе
+ * четвёртая ячейка остаётся пустой дырой и со стены читается как «сюда что-то не приехало».
+ * Классы перечислены целиком, а не склеены из числа: Tailwind собирает их по тексту файла и
+ * имени, собранного в рантайме, в бандле просто не окажется.
+ */
+const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4' };
+
+export const Grid = ({ cols = 4, children }) => (
+    <div className={`grid grid-cols-2 gap-4 ${GRID_COLS[cols] || GRID_COLS[4]}`}>{children}</div>
 );
 
 /** Ключевая плитка: цветной фон, самая крупная цифра. */

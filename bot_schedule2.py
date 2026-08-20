@@ -32674,11 +32674,14 @@ CHAT_HOURLY_CACHE_SECONDS = _env_int('CHAT_HOURLY_CACHE_SECONDS', 120, minimum=0
 # после диалога. Считаем только 'common'.
 CHAT_HOURLY_REQUEST_TYPE = 'common'
 # Статусы Chat2Desk (offline_type) по-русски. Оператор с любым из них залогинен, но не на линии.
+# Подписи — из справочника Chat2Desk (`GET /v1/operators/statuses`), строчными под стиль
+# таблицы отчёта. `holiday` — «закрытие чатов», а не отпуск: человек в системе и дорабатывает
+# открытые чаты, просто новых не берёт.
 CHAT_HOURLY_STATUS_LABELS = {
     'break': 'перерыв',
     'busy': 'занят',
-    'study': 'обучение',
-    'holiday': 'отпуск',
+    'study': 'тренинг',
+    'holiday': 'закрытие чатов',
     'tech brake': 'тех. перерыв',
     'tech break': 'тех. перерыв',
 }
@@ -33387,6 +33390,11 @@ SZOV_CHAT_EXPORT_WORKERS = _env_int('SZOV_CHAT_EXPORT_WORKERS', 4, minimum=1, ma
 # `tech break`, `tech_break`, `tech.break` и `status.tech.break`; на этом уже обжигался учёт
 # статусов чат-менеджеров (CHAT2DESK_STATUS_EVENT_MAP выше). `brake` — не опечатка: так пишет
 # offline_type в живом списке операторов.
+# Подписи взяты из СПРАВОЧНИКА самого Chat2Desk (`GET /v1/operators/statuses`), а не придуманы:
+# он отдаёт «Работает», «Занят», «Перерыв», «Тренинг», «Тех. перерыв», «Закрытие чатов», и на
+# стене должны стоять ровно те слова, которые чатник видит у себя в Chat2Desk. Так, `holiday`
+# — это НЕ отпуск (мы так его и подписывали, и супервайзеры читали табло неверно), а
+# «Закрытие чатов»: человек в системе, новых чатов не берёт и дорабатывает открытые.
 _SZOV_CHAT_WALLBOARD_STATUSES = {
     'online': ('online', 'Онлайн'),
     'login': ('online', 'Онлайн'),
@@ -33396,7 +33404,7 @@ _SZOV_CHAT_WALLBOARD_STATUSES = {
     'break': ('break', 'Перерыв'),
     'tech.break': ('tech', 'Тех. перерыв'),
     'tech.brake': ('tech', 'Тех. перерыв'),
-    'holiday': ('holiday', 'Отпуск'),
+    'holiday': ('holiday', 'Закрытие чатов'),
     'logout': ('offline', 'Не в системе'),
     'offline': ('offline', 'Не в системе'),
 }
@@ -33623,6 +33631,40 @@ def _szov_chat_wallboard_online_seconds(timelines, now_seconds):
     return per_hour
 
 
+def _szov_chat_wallboard_reply_sums(request_rows):
+    """{имя учётки Chat2Desk: {chats, first_sum, first_count, inner_sum, inner_count}}.
+
+    Разрез времени ответа по чатникам считаем ТЕМИ ЖЕ функциями, что и итог (`_chat_hourly_*`),
+    просто на подмножестве обращений: у одного показателя не должно быть двух формул.
+    Отдаём СУММЫ, а не средние, потому что выше по течению их складывают: час дня, день
+    периода, оператор за неделю. «Среднее средних» дало бы третью цифру, не сходящуюся ни с
+    табло, ни с почасовым отчётом, — ту же ловушку показатели дня уже обходят через
+    `reply_sums`.
+    Обращения без оператора (никто не взял, бот закрыл сам) в разрез не идут: приписать их
+    некому. В итог дня они при этом входят как входили — разрез по людям и итог по чатам
+    сходиться не обязаны, и в файле это подписано."""
+    grouped = {}
+    for row in request_rows or []:
+        if not isinstance(row, dict):
+            continue
+        name = _chat_hourly_operator_name(row)
+        if name:
+            grouped.setdefault(name, []).append(row)
+    sums = {}
+    for name, rows in grouped.items():
+        first_sum, first_count, inner_sum, inner_count = _chat_hourly_response_sums(rows)
+        sums[name] = {'chats': len(rows), 'first_sum': first_sum, 'first_count': first_count,
+                      'inner_sum': inner_sum, 'inner_count': inner_count}
+    return sums
+
+
+def _szov_chat_wallboard_reply_average(sums, kind):
+    """Среднее время ответа из сумм. None — не «ноль», а «мерить было не по чему»."""
+    sums = sums or {}
+    count = int(sums.get('%s_count' % kind) or 0)
+    return (float(sums.get('%s_sum' % kind) or 0.0) / count) if count else None
+
+
 def _szov_chat_wallboard_hourly(request_rows, timelines, now, *, names=None, full_day=False):
     """Строки графика: час -> чаты, время ответа и КТО держал линию в этом часу.
 
@@ -33636,6 +33678,11 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now, *, names=None, ful
     и стоит в подсказке отдельной строкой.
     Рядом отдаём `operators` — ФИО с минутами, по ним подсказка графика показывает состав
     часа, — и `online_seconds`, сколько ВСЕГО минут смена простояла на линии в этом часу.
+    Отдельным списком идёт `operators_reply` — время ответа КАЖДОГО чатника в этом часу
+    (суммами, см. `_szov_chat_wallboard_reply_sums`): из него выгрузка строит два листа
+    «оператор × час». Списки намеренно разные и совпадать не обязаны: `operators` — кто держал
+    линию по статусам, `operators_reply` — кто отвечал в чатах; чатник может отвечать в час,
+    в котором линию не держал (дописывал начатое), и наоборот.
     `names` — {имя в Chat2Desk: ФИО в OTP}; без него в списке останется имя учётки.
     `full_day=True` — сутки закрыты (выгрузка за прошлый день): считаем все 24 часа целиком,
     иначе — только прошедшие часы сегодняшних суток плюс текущий, ещё неполный."""
@@ -33665,6 +33712,11 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now, *, names=None, ful
             ((lookup_names.get(name) or name, int(seconds))
              for name, seconds in people.items() if seconds >= threshold),
             key=lambda item: (-item[1], item[0]))
+        # Разрез по отвечавшим: сверху тот, кто взял больше чатов в этом часу.
+        replies = sorted(
+            (dict(sums, name=(lookup_names.get(name) or name))
+             for name, sums in _szov_chat_wallboard_reply_sums(hour_rows).items()),
+            key=lambda item: (-int(item.get('chats') or 0), item['name']))
         rows.append({
             'hour': hour,
             'chats': len(hour_rows),
@@ -33672,6 +33724,7 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now, *, names=None, ful
             'inner_reply_seconds': inner_reply,
             'operators_online': len(counted),
             'operators': [{'name': name, 'seconds': seconds} for name, seconds in counted],
+            'operators_reply': replies,
             'operators_under_minute': sum(1 for seconds in people.values() if seconds < threshold),
             'online_seconds': int(sum(people.values())),
             'partial': (not full_day) and hour == now.hour,
@@ -33679,12 +33732,17 @@ def _szov_chat_wallboard_hourly(request_rows, timelines, now, *, names=None, ful
     return rows
 
 
-def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
+def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds, *, replies=None):
     """Счётчики и список людей «на сейчас» по чат-менеджерам СЗоВ.
 
     Статус берём из последнего события за сутки, а из живого списка учёток — открытые чаты и
     тех, у кого сегодня событий ещё не было: ночная смена, начатая вчера, событий сегодня не
-    даёт, но линию держит."""
+    даёт, но линию держит.
+    `replies` — разрез времени ответа по чатникам за сутки (`_szov_chat_wallboard_reply_sums`).
+    Он едет рядом с каждым человеком в списке смены: со стены должно быть видно не только
+    «сколько у него сейчас чатов», но и как он на них отвечает — иначе занятость читается без
+    качества, и один и тот же «7 в работе» одинаково выглядит у того, кто отвечает за минуту,
+    и у того, кто держит клиента десять."""
     counts = {key: 0 for key in _SZOV_CHAT_WALLBOARD_STATUS_ORDER}
     people = []
     seen = set()
@@ -33722,6 +33780,7 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
         seen.add(oktell_name)
         if status_key != 'offline':
             open_chats_total += open_chats
+            own_replies = (replies or {}).get(oktell_name) or {}
             people.append({
                 'operator_id': operator.get('id'),
                 'name': operator.get('name') or oktell_name,
@@ -33730,6 +33789,11 @@ def _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds):
                 'since': raw_since,
                 'seconds': since_seconds,
                 'open_chats': open_chats,
+                # Ниже — уже НЕ «сейчас», а сутки целиком: время ответа по одному чату
+                # прыгает от минуты до получаса, и мгновенное значение ничего не сказало бы.
+                'chats': int(own_replies.get('chats') or 0),
+                'first_reply_seconds': _szov_chat_wallboard_reply_average(own_replies, 'first'),
+                'inner_reply_seconds': _szov_chat_wallboard_reply_average(own_replies, 'inner'),
             })
     # Учётка могла быть отключена посреди дня — в живом списке её уже нет, а события за сутки
     # остались. На линии такой человек не стоит (учётки больше нет), поэтому считаем его
@@ -33774,14 +33838,16 @@ def _szov_chat_wallboard_day_requests(day_str):
     return rows
 
 
-def _szov_chat_wallboard_display_names(timelines, lookup):
-    """{имя в Chat2Desk: ФИО в OTP} по лентам статусов.
+def _szov_chat_wallboard_display_names(chat2desk_names, lookup):
+    """{имя в Chat2Desk: ФИО в OTP} по именам учёток.
 
-    Список часа на табло и в выгрузке идёт человеческими ФИО, а ленты статусов ключуются
-    именем учётки Chat2Desk — здесь их и сводим. Не сопоставленное имя остаётся собой:
-    выкидывать его нельзя, иначе минуты на линии есть, а человека под ними нет."""
+    Список часа на табло и в выгрузке идёт человеческими ФИО, а и ленты статусов, и обращения
+    ключуются именем учётки Chat2Desk — здесь их и сводим. Не сопоставленное имя остаётся
+    собой: выкидывать его нельзя, иначе минуты на линии есть, а человека под ними нет.
+    На вход берём любой набор имён (ленты статусов, разрез обращений или их объединение):
+    отвечать в чатах может и тот, у кого сегодня не было ни одного события статуса."""
     names = {}
-    for oktell_name in timelines or {}:
+    for oktell_name in chat2desk_names or ():
         operator = _szov_chat_wallboard_resolve(oktell_name, lookup)
         if operator and operator.get('name'):
             names[oktell_name] = operator['name']
@@ -33812,7 +33878,9 @@ def _szov_chat_wallboard_fetch_snapshot():
         if _szov_chat_wallboard_resolve(oktell_name, lookup) is not None:
             timelines[oktell_name] = [(0, 'online', 'Онлайн', f'{day_str} 00:00:00')]
 
-    now_block = _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds)
+    reply_sums = _szov_chat_wallboard_reply_sums(request_rows)
+    now_block = _szov_chat_wallboard_now(timelines, operator_rows, lookup, now_seconds,
+                                         replies=reply_sums)
     first_sum, first_count, inner_sum, inner_count = _chat_hourly_response_sums(request_rows)
     return {
         'day': day_str,
@@ -33831,7 +33899,7 @@ def _szov_chat_wallboard_fetch_snapshot():
         },
         'hourly': _szov_chat_wallboard_hourly(
             request_rows, timelines, now,
-            names=_szov_chat_wallboard_display_names(timelines, lookup)),
+            names=_szov_chat_wallboard_display_names(set(timelines) | set(reply_sums), lookup)),
         'diagnostics': {
             'department_id': department_id,
             # Имя учётки Chat2Desk разошлось с ФИО в OTP — человек молча выпал из счётчиков.
@@ -33886,6 +33954,9 @@ def api_szov_wallboard_chat_snapshot():
 # Состава смены «сейчас» у прошедшего дня нет и быть не может: живой список учёток Chat2Desk
 # существует только на сейчас. Поэтому лист «Чатники» появляется, только если в период входит
 # сегодня, — пустой лист с обещанием состава хуже его отсутствия.
+# Время ответа лежит в файле дважды и по-разному: листом «По часам» — итогом смены за час, и
+# двумя листами «оператор × час» — по каждому чатнику. Это не дубль: по первому видно, где
+# провалилась линия, по вторым — кто именно в этот час отвечал долго.
 
 # Цвет статуса в файле — тот же, что у чипа на табло (CHAT_STATUS_STYLE во фронте): столбец
 # статуса должен читаться одним взглядом так же, как список смены на стене.
@@ -33895,7 +33966,10 @@ _SZOV_CHAT_EXPORT_STATUS_FILL = {
     'training': 'D1FAE5',
     'break': 'FFEDD5',
     'tech': 'FFEDD5',
-    'holiday': 'F1F5F9',
+    # «Закрытие чатов» — янтарный, рядом с перерывом, и это не случайность: смысл у них общий
+    # («в системе, новых чатов не берёт»), а различает их слово в самой ячейке. Серым, как
+    # отсутствие, он был подписан по ошибке — вместе с неверной подписью «Отпуск».
+    'holiday': 'FEF3C7',
     'offline': 'F1F5F9',
 }
 
@@ -34031,7 +34105,8 @@ def _szov_chat_export_past_block(day_str, lookup):
     hourly = _szov_chat_wallboard_hourly(
         # now здесь не при чём: сутки закрыты, границу часов задаёт full_day.
         request_rows, timelines, None, full_day=True,
-        names=_szov_chat_wallboard_display_names(timelines, lookup))
+        names=_szov_chat_wallboard_display_names(
+            set(timelines) | set(_szov_chat_wallboard_reply_sums(request_rows)), lookup))
     return _szov_chat_export_finish_day(day_str, hourly, {
         'chats': len(request_rows),
         # «Открыто сейчас» у закрытых суток смысла не имеет (обращение либо давно закрыто, либо
@@ -34093,9 +34168,9 @@ def _szov_chat_export_collect(date_from=None, date_to=None):
 def _szov_chat_wallboard_workbook(payload):
     """Показатели табло по чатам в .xlsx (bytes).
 
-    Листы: сводка, дни (если период больше суток), часы, люди на линии и состав смены (если в
-    период входит сегодня). Один день или тридцать — раскладка одна: у выгрузки не должно быть
-    двух разных лиц."""
+    Листы: сводка, дни (если период больше суток), часы, два разреза «оператор × час» по
+    времени ответа и состав смены (если в период входит сегодня). Один день или неделя —
+    раскладка одна: у выгрузки не должно быть двух разных лиц."""
     payload = payload or {}
     days = [day for day in (payload.get('days') or []) if isinstance(day, dict)]
     now_block = payload.get('now') or {}
@@ -34139,25 +34214,42 @@ def _szov_chat_wallboard_workbook(payload):
         period_inner_font = good_font if period_inner <= target_seconds else bad_font
 
     hour_rows = [(day.get('day') or '', row) for day in days for row in (day.get('hourly') or [])]
-    measured = [row for _day, row in hour_rows if row.get('inner_reply_seconds') is not None]
-    hours_in_target = sum(1 for row in measured
-                          if float(row.get('inner_reply_seconds') or 0) <= target_seconds)
     chats_total = sum(_int(day.get('chats')) for day in days)
     online_seconds_total = sum(_int(day.get('online_seconds')) for day in days)
     peak_online = max((_int(day.get('peak_online')) for day in days), default=0)
 
-    # Люди периода: секунды на линии, часов на линии и в скольких днях человек выходил.
-    people_seconds, people_hours, people_days = {}, {}, {}
+    # Разные люди на линии за период: из них считается «Людей на линии» в сводке.
+    people_seconds = {}
     for day in days:
         for name, seconds in (day.get('people') or {}).items():
             people_seconds[name] = people_seconds.get(name, 0) + _int(seconds)
-            people_days[name] = people_days.get(name, 0) + 1
+
+    # Разрез «оператор × час» под два листа времени ответа. Складываем СУММЫ, а не средние:
+    # клетка периода — это один и тот же час РАЗНЫХ дней, и среднее средних разошлось бы и с
+    # листом «По часам», и со сводкой. Ровно та же причина, по которой у дней есть reply_sums.
+    reply_matrix, reply_totals, reply_hour_chats = {}, {}, {}
     for _day, row in hour_rows:
-        for item in (row.get('operators') or []):
+        hour = _int(row.get('hour'))
+        reply_hour_chats[hour] = reply_hour_chats.get(hour, 0) + _int(row.get('chats'))
+        for item in (row.get('operators_reply') or []):
             name = str((item or {}).get('name') or '').strip()
-            if name:
-                people_hours[name] = people_hours.get(name, 0) + 1
-    people_order = sorted(people_seconds, key=lambda name: (-people_seconds[name], name))
+            if not name:
+                continue
+            # Клетка часа и итог оператора копятся одним проходом: разойтись им нельзя.
+            for bucket in (reply_matrix.setdefault(name, {}).setdefault(hour, {}),
+                           reply_totals.setdefault(name, {})):
+                for key in ('chats', 'first_count', 'inner_count'):
+                    bucket[key] = _int(bucket.get(key)) + _int(item.get(key))
+                for key in ('first_sum', 'inner_sum'):
+                    bucket[key] = float(bucket.get(key) or 0.0) + float(item.get(key) or 0.0)
+    # Колонки — только часы, в которые чаты вообще приходили. Ночная смена принимает единицы
+    # обращений, и восемь заведомо пустых колонок из 24 читаются хуже, чем те же данные без них.
+    reply_hours = sorted(hour for hour, chats in reply_hour_chats.items() if chats > 0)
+    reply_order = sorted(reply_totals,
+                         key=lambda name: (-_int(reply_totals[name].get('chats')), name))
+    # Чаты, которые никто не взял (бот закрыл сам): в разрез по людям они не идут, и разница
+    # между итогом дня и суммой колонки «Чатов» должна быть подписана, а не оставлена загадкой.
+    unassigned_chats = chats_total - sum(_int(sums.get('chats')) for sums in reply_totals.values())
 
     wb = Workbook()
 
@@ -34262,9 +34354,6 @@ def _szov_chat_wallboard_workbook(payload):
                                       if target_minutes is not None else '—'),
          period_inner_font),
         ('Первый ответ, мин', _szov_chat_export_minutes(period_first), '', None),
-        ('Часов измерено', len(measured), 'Часы, в которых был хотя бы один ответ', None),
-        ('Часов в цели', hours_in_target, 'Из %d измеренных' % len(measured),
-         good_font if measured and hours_in_target == len(measured) else None),
         ('Людей на линии', len(people_seconds),
          'Разных людей, кто держал линию минуту и больше хотя бы в одном часу', None),
         ('Максимум людей в часе', peak_online, 'Самый плотный час периода', None),
@@ -34290,15 +34379,11 @@ def _szov_chat_wallboard_workbook(payload):
     # Только когда дней больше одного: на однодневной выгрузке этот лист повторял бы сводку.
     if multi:
         ws_days = wb.create_sheet('По дням')
-        headers = ['День', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин', 'Часов в цели',
+        headers = ['День', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
                    'Людей на линии', 'Максимум в часе', 'На линии, мин', 'Примечание']
-        _sheet_head(ws_days, headers, [13, 10, 22, 20, 14, 16, 17, 15, 34])
+        _sheet_head(ws_days, headers, [13, 10, 22, 20, 16, 17, 15, 34])
         for offset, day in enumerate(days):
             inner = day.get('inner_reply_seconds')
-            day_measured = [row for row in (day.get('hourly') or [])
-                            if row.get('inner_reply_seconds') is not None]
-            day_in_target = sum(1 for row in day_measured
-                                if float(row.get('inner_reply_seconds') or 0) <= target_seconds)
             note = []
             if day.get('error'):
                 note.append('не выгрузился: %s' % day['error'])
@@ -34309,7 +34394,6 @@ def _szov_chat_wallboard_workbook(payload):
                 _int(day.get('chats')),
                 _szov_chat_export_minutes(inner),
                 _szov_chat_export_minutes(day.get('first_reply_seconds')),
-                '%d из %d' % (day_in_target, len(day_measured)) if day_measured else '',
                 len(day.get('people') or {}),
                 _int(day.get('peak_online')),
                 _szov_chat_export_minutes(day.get('online_seconds'), 0),
@@ -34379,7 +34463,7 @@ def _szov_chat_wallboard_workbook(payload):
         chats_total,
         period_inner_minutes,
         _szov_chat_export_minutes(period_first),
-        '%d из %d' % (hours_in_target, len(measured)) if measured else '',
+        '',
         # В итоге по людям стоит максимум в часе, а не сумма голов: складывать головы разных
         # часов нельзя — один и тот же человек попал бы в итог столько раз, сколько отработал.
         peak_online,
@@ -34399,43 +34483,112 @@ def _szov_chat_wallboard_workbook(payload):
     # Фильтр — только по часам: итоговая строка под ним и в отбор попадать не должна.
     ws_hours.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), last_hour_row)
 
-    # ── Лист «Люди на линии» ─────────────────────────────────────────────────────────────────
-    ws_people = wb.create_sheet('Люди на линии')
-    headers = ['Сотрудник', 'Часов на линии', 'На линии, мин']
-    widths = [34, 16, 15]
-    if multi:
-        headers.append('Дней на линии')
-        widths.append(16)
-    _sheet_head(ws_people, headers, widths)
-    for offset, name in enumerate(people_order):
-        values = [name, _int(people_hours.get(name)),
-                  _szov_chat_export_minutes(people_seconds.get(name), 0)]
-        if multi:
-            values.append(_int(people_days.get(name)))
-        for index, value in enumerate(values, start=1):
-            cell = ws_people.cell(row=2 + offset, column=index, value=value)
+    # ── Листы «оператор × час» ───────────────────────────────────────────────────────────────
+    # Два листа одной раскладки: строка — чатник, колонка — час, в клетке минуты. Первый ответ
+    # и ответ внутри чата разведены по разным листам намеренно: это разные показатели, и в
+    # одной таблице их пришлось бы либо чередовать колонками (48 столбцов), либо ставить парами
+    # в клетку — и то и другое не читается и не считается формулами.
+    # Прежнего листа «Люди на линии» здесь больше нет (решение владельца 20.08.2026): минуты на
+    # линии видны в «По часам» и в сводке, а времени ответа по людям не было нигде.
+    def _reply_sheet(title, kind, *, against_target=False):
+        """Лист времени ответа `kind` ('first' | 'inner') в разрезе «оператор × час»."""
+        sheet = wb.create_sheet(title)
+        headers = ['Сотрудник', 'Чатов', 'Среднее, мин'] + [
+            _szov_chat_export_hour_label(hour) for hour in reply_hours]
+        _sheet_head(sheet, headers, [34, 10, 15] + [13] * len(reply_hours))
+
+        def _put(excel_row, column, sums, *, bold=False):
+            """Клетка со средним. Пусто — «в этот час не отвечал», а не «ответил мгновенно»."""
+            seconds = _szov_chat_wallboard_reply_average(sums, kind)
+            cell = sheet.cell(row=excel_row, column=column,
+                              value=_szov_chat_export_minutes(seconds))
             cell.border = border
+            cell.alignment = center
+            if bold:
+                cell.font = total_font
+            # Цветом красим только ответ внутри чата: цель задана ему одному, а красить
+            # первый ответ той же меркой значило бы придумать ему норму, которой нет.
+            if against_target and seconds is not None:
+                cell.font = good_font if seconds <= target_seconds else bad_font
+            return cell
+
+        for offset, name in enumerate(reply_order):
+            excel_row = 2 + offset
+            totals_sums = reply_totals.get(name) or {}
+            for index, value in enumerate((name, _int(totals_sums.get('chats'))), start=1):
+                cell = sheet.cell(row=excel_row, column=index, value=value)
+                cell.border = border
+                cell.alignment = center if index > 1 else left
+            _put(excel_row, 3, totals_sums)
+            hours = reply_matrix.get(name) or {}
+            for index, hour in enumerate(reply_hours, start=4):
+                _put(excel_row, index, hours.get(hour))
+
+        # Итоговая строка — сумма колонки, а не отдельный расчёт: обращения без оператора
+        # времени ответа не несут вовсе, поэтому эти средние сходятся с листом «По часам»
+        # и со сводкой до цифры.
+        total_row = len(reply_order) + 2
+        total_chats = sum(_int((reply_totals.get(name) or {}).get('chats')) for name in reply_order)
+        for index, value in enumerate(('Все чатники', total_chats), start=1):
+            cell = sheet.cell(row=total_row, column=index, value=value)
+            cell.border = border
+            cell.fill = total_fill
+            cell.font = total_font
             cell.alignment = center if index > 1 else left
-    ws_people.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
-                                             max(1, len(people_order) + 1))
-    if not people_order:
-        ws_people.cell(row=2, column=1, value='Никто не выходил на линию').font = hint_font
+
+        def _column_sums(hour=None):
+            """Сумма клеток колонки по всем чатникам: час периода или весь период целиком."""
+            merged = {}
+            for name in reply_order:
+                sums = (reply_matrix.get(name) or {}).get(hour) if hour is not None \
+                    else reply_totals.get(name)
+                for key, value in (sums or {}).items():
+                    merged[key] = (merged.get(key) or 0) + value
+            return merged
+
+        _put(total_row, 3, _column_sums(), bold=True).fill = total_fill
+        for index, hour in enumerate(reply_hours, start=4):
+            _put(total_row, index, _column_sums(hour), bold=True).fill = total_fill
+        # Фильтр — только по чатникам: итоговая строка под ним и в отбор попадать не должна.
+        sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
+                                             max(1, len(reply_order) + 1))
+        sheet.freeze_panes = 'D2'  # ФИО, чаты и среднее держим на виду, часы уезжают вбок
+        if not reply_order:
+            sheet.cell(row=total_row + 1, column=1,
+                       value='За период никто не отвечал в чатах').font = hint_font
+        elif unassigned_chats > 0:
+            # Число ставим ПОСЛЕ слова: «131 чатов» по-русски не сходится ни в одном падеже,
+            # а подбирать окончание под каждое число ради одной строки — лишняя механика.
+            sheet.cell(row=total_row + 2, column=1,
+                       value='Чатов без оператора (никто не взял): %d — времени ответа у них '
+                             'нет, и в разрез они не идут' % unassigned_chats).font = hint_font
+
+    _reply_sheet('Первый ответ по часам', 'first')
+    _reply_sheet('Ответ внутри чата по часам', 'inner', against_target=True)
 
     # ── Лист «Чатники» (состав смены сейчас) ─────────────────────────────────────────────────
     if now_block:
         ws_shift = wb.create_sheet('Чатники')
-        headers = ['Сотрудник', 'Статус', 'В статусе, мин', 'Чатов в работе']
-        _sheet_head(ws_shift, headers, [34, 18, 16, 16])
+        # Лист повторяет правую колонку табло, и повторяет целиком: занятость без качества
+        # читается неверно — «7 в работе» у отвечающего за минуту и у держащего клиента десять
+        # это разные семь чатов. Время ответа тут за СУТКИ, а не «сейчас», как и на стене.
+        headers = ['Сотрудник', 'Статус', 'В статусе, мин', 'Чатов в работе', 'Чатов за сутки',
+                   'Первый ответ, мин', 'Ответ внутри чата, мин']
+        _sheet_head(ws_shift, headers, [34, 18, 16, 16, 16, 20, 22])
         people = [item for item in (now_block.get('operators') or []) if isinstance(item, dict)]
         for offset, item in enumerate(people):
             # seconds=None — событий за сутки не было: человек в этом статусе с начала суток, и
             # выдавать это числом нельзя, иначе «0 мин» прочитается как «только что зашёл».
             since = item.get('seconds')
+            inner_seconds = item.get('inner_reply_seconds')
             values = [
                 item.get('name') or '',
                 item.get('status') or '',
                 'с начала суток' if since is None else _szov_chat_export_minutes(since),
                 _int(item.get('open_chats')),
+                _int(item.get('chats')),
+                _szov_chat_export_minutes(item.get('first_reply_seconds')),
+                _szov_chat_export_minutes(inner_seconds),
             ]
             for index, value in enumerate(values, start=1):
                 cell = ws_shift.cell(row=2 + offset, column=index, value=value)
@@ -34445,6 +34598,8 @@ def _szov_chat_wallboard_workbook(payload):
                     fill = _SZOV_CHAT_EXPORT_STATUS_FILL.get(item.get('status_key'))
                     if fill:
                         cell.fill = PatternFill('solid', fgColor=fill)
+                if index == len(headers) and inner_seconds is not None:
+                    cell.font = good_font if float(inner_seconds) <= target_seconds else bad_font
         ws_shift.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
                                                 max(1, len(people) + 1))
         # Вышедшие в список не идут (как и на табло), но их число видно — иначе смена в файле
