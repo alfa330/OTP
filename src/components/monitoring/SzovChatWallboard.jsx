@@ -22,6 +22,7 @@ import {
     formatDuration,
     formatInt,
     formatMinutes,
+    pluralRu,
 } from './szovWallboardShared';
 
 /*
@@ -91,21 +92,21 @@ const ChatPeopleColumn = ({ people, offline, targetSeconds, scale = 1 }) => {
                                         ? 'с начала суток'
                                         : formatDuration(item.seconds)}</span>
                                     <span className="text-slate-300">·</span>
-                                    <span className="whitespace-nowrap text-slate-600">{formatInt(item.open_chats)} в работе</span>
-                                    {/* Чатов за сутки стоит рядом с занятостью, а не у времени
-                                        ответа, — но нужен именно ему: средняя минута по двум
-                                        чатам и по полутора сотням весит по-разному. */}
-                                    {item.chats ? (
-                                        <>
-                                            <span className="text-slate-300">·</span>
-                                            <span className="whitespace-nowrap">{formatInt(item.chats)} за сутки</span>
-                                        </>
-                                    ) : null}
+                                    {/* «12 чатов в работе», а не «12 в работе» (запрос владельца
+                                        20.08.2026): со стены должно быть видно, ЧТО человек
+                                        обрабатывает, а не просто счётчик неизвестно чего. */}
+                                    <span className="whitespace-nowrap text-slate-600">
+                                        {formatInt(item.open_chats)}{' '}
+                                        {pluralRu(item.open_chats, 'чат', 'чата', 'чатов')} в работе
+                                    </span>
                                 </div>
                                 {/* Строка времени ответа появляется только у того, кто сегодня
                                     брал чаты: у остальных она была бы парой прочерков, то есть
                                     шумом на месте показателя. Строку держим КОРОТКОЙ — в колонке
-                                    19rem всё лишнее переносится, и список идёт рваными рядами. */}
+                                    19rem всё лишнее переносится, и список идёт рваными рядами.
+                                    Числа чатов за сутки тут поэтому нет: со словом «чатов» в
+                                    строке выше оно перестало влезать, а знаменатель к среднему
+                                    есть в выгрузке (колонка «Чатов» на обоих разрезах). */}
                                 {item.chats ? (
                                     <div className="mt-1 flex flex-wrap items-baseline gap-x-2 text-[13px] tabular-nums text-slate-400">
                                         <span className="whitespace-nowrap">

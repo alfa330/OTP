@@ -775,7 +775,9 @@ class ChatWallboardWiringTests(unittest.TestCase):
         и как он на них отвечает — первый ответ и ответ внутри чата за сутки."""
         column = self.board[self.board.index('const ChatPeopleColumn'):
                             self.board.index('const formatPeople')]
-        self.assertIn('{formatInt(item.open_chats)} в работе', column)
+        # Со стены должно быть видно, ЧТО человек обрабатывает: «12 чатов в работе», а не
+        # «12 в работе» (запрос владельца 20.08.2026). Склонение обязательно — иначе «1 чатов».
+        self.assertIn("{pluralRu(item.open_chats, 'чат', 'чата', 'чатов')} в работе", column)
         self.assertIn('{formatMinutes(item.first_reply_seconds, 1, false)}', column)
         self.assertIn('{formatMinutes(item.inner_reply_seconds, 1, false)}', column)
         # Оценочный цвет — только у ответа внутри чата: цель задана ему одному.
@@ -1123,7 +1125,7 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         ], stale=True, age_seconds=420, error='Chat2Desk не отвечает')
 
     def _find_row(self, sheet, label):
-        for row in sheet.iter_rows(min_col=1, max_col=3, values_only=True):
+        for row in sheet.iter_rows(min_col=1, max_col=2, values_only=True):
             if row and row[0] == label:
                 return row
         raise AssertionError(f'строка «{label}» не найдена')
@@ -1171,10 +1173,27 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertEqual(self._find_row(sheet, 'Чатов')[1], 46)
         self.assertEqual(self._find_row(sheet, 'Открыто сейчас')[1], 12)
         self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[1], 2.5)
-        # Цель в пояснении — по-русски и без «,0»: файл читают глазами, а не только формулами.
-        self.assertEqual(self._find_row(sheet, 'Ответ внутри чата, мин')[2],
-                         'Цель — не больше 2 мин')
         self.assertEqual(self._find_row(sheet, 'Первый ответ, мин')[1], 1.5)
+
+    def test_summary_has_no_column_of_explanations(self):
+        """Пояснительных слов в выгрузке нет (решение владельца 20.08.2026): подписи
+        показателей говорят сами за себя, а колонка текста рядом с числами удлиняла лист."""
+        sheet = self._workbook(self._today())['Показатели']
+        headers = [row for row in sheet.iter_rows(min_col=1, max_col=3, values_only=True)
+                   if row and row[0] == 'Показатель']
+        self.assertTrue(headers, 'не нашёл шапку блока')
+        for header in headers:
+            self.assertEqual(header[1], 'Значение')
+            self.assertIsNone(header[2], 'колонка пояснений вернулась')
+
+    def test_vacation_counter_is_gone_from_the_file(self):
+        """Отпуска в Chat2Desk не существует вовсе (`holiday` — это «Закрытие чатов»),
+        отдельной строкой он не нужен — решение владельца 20.08.2026. Сами люди не теряются:
+        они стоят на листе «Чатники» со своим статусом."""
+        wb = self._workbook(self._today())
+        with self.assertRaises(AssertionError):
+            self._find_row(wb['Показатели'], 'В отпуске')
+        self.assertNotIn('Отпуск', str([cell.value for cell in wb['Показатели']['A']]))
 
     def test_hours_in_target_is_gone_from_the_file(self):
         """«Часов в цели» убран по решению владельца 20.08.2026 — и со стены, и из файла.
@@ -1186,8 +1205,9 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self._find_row(wb['Показатели'], label)
         self.assertNotIn('Часов в цели', [cell.value for cell in wb['По дням'][1]])
-        # Разбор часа «В цели» (да/нет) остаётся: это не убранный показатель, а признак часа.
-        self.assertIn('В цели', [cell.value for cell in wb['По часам'][1]])
+        # Колонка «В цели» (да/нет) с листа «По часам» тоже убрана 20.08.2026: она повторяла
+        # словами то, что уже видно цветом самой минуты.
+        self.assertNotIn('В цели', [cell.value for cell in wb['По часам'][1]])
 
     def test_summary_counts_people_as_heads(self):
         """Людей — головами: трое разных за день и трое в самом плотном часу."""
@@ -1216,24 +1236,25 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         sheet = self._workbook(self._today())['По часам']
         header = [cell.value for cell in sheet[1]]
         self.assertEqual(header, ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
-                                  'В цели', 'Людей на линии', 'На линии, мин', 'Кто на линии',
+                                  'Людей на линии', 'На линии, мин', 'Кто на линии',
                                   'Примечание'])
         first = [cell.value for cell in sheet[2]]
         self.assertEqual(first[0], '09:00–10:00')
-        self.assertEqual(first[1:7], [10, 1.5, 1.0, 'да', 2, 90.0])
-        self.assertEqual(first[7], f'{ALIA}, {DANA}')
-        self.assertEqual(first[8], 'ещё 1 меньше минуты')
+        self.assertEqual(first[1:6], [10, 1.5, 1.0, 2, 90.0])
+        self.assertEqual(first[6], f'{ALIA}, {DANA}')
+        self.assertEqual(first[7], 'ещё 1 меньше минуты')
 
     def test_hour_without_answers_stays_empty_and_current_hour_is_marked(self):
         sheet = self._workbook(self._today())['По часам']
         empty = [cell.value for cell in sheet[4]]
         self.assertIsNone(empty[2])
         self.assertIsNone(empty[3])
-        self.assertFalse(empty[4])
-        self.assertEqual(empty[5], 0)
+        self.assertEqual(empty[4], 0)
         current = [cell.value for cell in sheet[5]]
-        self.assertEqual(current[4], 'да')  # 105 c против цели 120 c
-        self.assertEqual(current[8], 'час идёт')
+        # Уложились в цель (105 c против 120 c) — теперь это видно цветом самой минуты,
+        # а не отдельной колонкой «В цели».
+        self.assertEqual(sheet.cell(row=5, column=3).font.color.rgb[-6:], '15803D')
+        self.assertEqual(current[7], 'час идёт')
 
     def test_daily_total_row_keeps_heads_out_of_the_sum(self):
         """В итоге по людям стоит максимум в часе: суммировать головы разных часов нельзя."""
@@ -1242,12 +1263,11 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertEqual(total[0], 'За сутки')
         self.assertEqual(total[1], 46)
         self.assertEqual(total[2], 2.5)
-        self.assertFalse(total[4])  # счётчик часов в цели убран вместе с показателем
-        self.assertEqual(total[5], 3)
-        self.assertEqual(total[7], 'разных людей: 3')
+        self.assertEqual(total[4], 3)
+        self.assertEqual(total[6], 'разных людей: 3')
         # Фильтр стоит только по часам: строка итога под ним.
-        self.assertEqual(sheet.auto_filter.ref, 'A1:I5')
-        self.assertEqual(len([cell.value for cell in sheet[1]]), 9)
+        self.assertEqual(sheet.auto_filter.ref, 'A1:H5')
+        self.assertEqual(len([cell.value for cell in sheet[1]]), 8)
 
     def test_period_hours_carry_the_day(self):
         sheet = self._workbook(self._period())['По часам']
@@ -1332,8 +1352,7 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         day['chats'] = 50  # четыре чата закрылись сами, оператора у них не было
         sheet = self._workbook(self._payload([day]))['Первый ответ по часам']
         notes = [cell.value for cell in sheet['A'] if isinstance(cell.value, str)]
-        self.assertIn('Чатов без оператора (никто не взял): 4 — времени ответа у них нет, '
-                      'и в разрез они не идут', notes)
+        self.assertIn('Чатов без оператора: 4', notes)
 
     def test_reply_sheet_survives_a_day_nobody_answered(self):
         """Ночь без чатов: лист собирается и говорит об этом словами, а не пустой сеткой."""

@@ -34429,8 +34429,10 @@ def _szov_chat_wallboard_workbook(payload):
     ws = wb.active
     ws.title = 'Показатели'
     ws.column_dimensions['A'].width = 34
-    ws.column_dimensions['B'].width = 20
-    ws.column_dimensions['C'].width = 56
+    # B пошире прежнего: колонки пояснений больше нет, и строки «Внимание» живут теперь в ней.
+    # Ширину C не задаём намеренно — пустая соседка даёт длинной оговорке перелиться вправо,
+    # вместо того чтобы обрезаться по границе.
+    ws.column_dimensions['B'].width = 26
     ws['A1'] = 'Табло СЗоВ · чаты'
     ws['A1'].font = title_font
 
@@ -34474,66 +34476,59 @@ def _szov_chat_wallboard_workbook(payload):
         row += 1
 
     def _block(title, entries):
-        """Блок «шапка + показатель/значение/пояснение». Пояснения те же, что подписи плиток."""
+        """Блок «шапка + показатель/значение». Колонки с пояснениями нет по решению владельца
+        20.08.2026: подписи показателей говорят сами за себя, а колонка текста рядом с числами
+        только удлиняла лист."""
         nonlocal row
         row += 1
         ws.cell(row=row, column=1, value=title).font = group_font
         row += 1
-        for column, name in ((1, 'Показатель'), (2, 'Значение'), (3, 'Пояснение')):
+        for column, name in ((1, 'Показатель'), (2, 'Значение')):
             cell = ws.cell(row=row, column=column, value=name)
             cell.fill = header_fill
             cell.font = header_font
             cell.border = border
             cell.alignment = center if column == 2 else left
         row += 1
-        for label, value, hint, font in entries:
+        for label, value, font in entries:
             ws.cell(row=row, column=1, value=label).border = border
             value_cell = ws.cell(row=row, column=2, value=value)
             value_cell.border = border
             value_cell.alignment = center
             if font is not None:
                 value_cell.font = font
-            hint_cell = ws.cell(row=row, column=3, value=hint or '')
-            hint_cell.border = border
-            hint_cell.font = hint_font
             row += 1
 
     # Состав смены «сейчас» есть только у сегодняшнего дня — и блок, и лист появляются вместе.
     if now_block:
+        # Счётчика «В отпуске» здесь нет: отпуска в Chat2Desk не существует вовсе (его статус
+        # `holiday` — это «Закрытие чатов»), и отдельной строкой он не нужен — решение владельца
+        # 20.08.2026. Сами люди из этого статуса никуда не деваются: они стоят на листе
+        # «Чатники» со своим статусом, как и все остальные.
         _block('Чатники · сейчас', [
-            ('Онлайн', _int(now_block.get('operators_online')), 'Держат линию', None),
-            ('Занят', _int(now_block.get('operators_busy')), 'В системе, но не на линии', None),
-            ('Тренинг', _int(now_block.get('operators_on_training')), '', None),
-            ('На перерыве', _int(now_block.get('operators_on_break')),
-             'Перерыв и тех. перерыв', None),
-            ('В отпуске', _int(now_block.get('operators_on_holiday')), '', None),
-            ('В прочих статусах', _int(now_block.get('operators_other')),
-             'Статус Chat2Desk, которого нет в справочнике', None),
-            ('Не в системе', _int(now_block.get('operators_offline')), '', None),
-            ('Открыто чатов', _int(now_block.get('open_chats')), 'В работе у чатников', None),
+            ('Онлайн', _int(now_block.get('operators_online')), None),
+            ('Занят', _int(now_block.get('operators_busy')), None),
+            ('Тренинг', _int(now_block.get('operators_on_training')), None),
+            ('На перерыве', _int(now_block.get('operators_on_break')), None),
+            ('В прочих статусах', _int(now_block.get('operators_other')), None),
+            ('Не в системе', _int(now_block.get('operators_offline')), None),
+            ('Открыто чатов', _int(now_block.get('open_chats')), None),
         ])
 
     period_rows = [
-        ('Чатов', chats_total, 'Обращения с типом «common», как в почасовом отчёте', None),
+        ('Чатов', chats_total, None),
     ]
     if len(days) == 1 and days[0].get('chats_open') is not None:
-        period_rows.append(('Открыто сейчас', _int(days[0].get('chats_open')),
-                            'Из чатов за сутки ещё не закрыты', None))
+        period_rows.append(('Открыто сейчас', _int(days[0].get('chats_open')), None))
     period_rows.extend([
-        ('Ответ внутри чата, мин', period_inner_minutes,
-         # В пояснении цель стоит по-русски и без хвоста «,0»: «не больше 2 мин», а не «2.0».
-         'Цель — не больше %s мин' % (('%g' % target_minutes).replace('.', ',')
-                                      if target_minutes is not None else '—'),
-         period_inner_font),
-        ('Первый ответ, мин', _szov_chat_export_minutes(period_first), '', None),
-        ('Людей на линии', len(people_seconds),
-         'Разных людей, кто держал линию минуту и больше хотя бы в одном часу', None),
-        ('Максимум людей в часе', peak_online, 'Самый плотный час периода', None),
-        ('На линии, мин', _szov_chat_export_minutes(online_seconds_total, 0),
-         'Сумма времени всей смены', None),
+        ('Ответ внутри чата, мин', period_inner_minutes, period_inner_font),
+        ('Первый ответ, мин', _szov_chat_export_minutes(period_first), None),
+        ('Людей на линии', len(people_seconds), None),
+        ('Максимум людей в часе', peak_online, None),
+        ('На линии, мин', _szov_chat_export_minutes(online_seconds_total, 0), None),
     ])
     if multi:
-        period_rows.append(('Дней в периоде', len(days), '', None))
+        period_rows.append(('Дней в периоде', len(days), None))
     _block('Показатели за период' if multi else 'Показатели за день', period_rows)
 
     def _sheet_head(sheet, headers, widths):
@@ -34581,9 +34576,12 @@ def _szov_chat_wallboard_workbook(payload):
 
     # ── Лист «По часам» ──────────────────────────────────────────────────────────────────────
     ws_hours = wb.create_sheet('По часам')
-    headers = ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин', 'В цели',
+    # Колонки «В цели» (да/нет) здесь нет по решению владельца 20.08.2026 — она повторяла
+    # словами то, что уже видно цветом самой минуты, и добавляла столбец на ровном месте.
+    # Сама цель никуда не делась: по ней по-прежнему красится «Ответ внутри чата».
+    headers = ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
                'Людей на линии', 'На линии, мин', 'Кто на линии', 'Примечание']
-    widths = [15, 10, 22, 20, 9, 16, 15, 62, 26]
+    widths = [15, 10, 22, 20, 16, 15, 62, 26]
     if multi:
         headers.insert(0, 'День')
         widths.insert(0, 13)
@@ -34592,7 +34590,6 @@ def _szov_chat_wallboard_workbook(payload):
     # арифметикой по индексам красились бы соседние столбцы.
     names_column = headers.index('Кто на линии') + 1
     inner_column = headers.index('Ответ внутри чата, мин') + 1
-    target_column = headers.index('В цели') + 1
     for offset, (day_str, hour_row) in enumerate(hour_rows):
         excel_row = 2 + offset
         inner_seconds = hour_row.get('inner_reply_seconds')
@@ -34608,7 +34605,6 @@ def _szov_chat_wallboard_workbook(payload):
             _int(hour_row.get('chats')),
             _szov_chat_export_minutes(inner_seconds),
             _szov_chat_export_minutes(hour_row.get('first_reply_seconds')),
-            '' if in_target is None else ('да' if in_target else 'нет'),
             # Людей считаем головами (решение владельца 19.08.2026): кто был на линии минуту и
             # больше — один человек, дробей в этой колонке нет.
             _int(hour_row.get('operators_online')),
@@ -34626,7 +34622,7 @@ def _szov_chat_wallboard_workbook(payload):
                 cell.alignment = wrap
             else:
                 cell.alignment = center if index > (2 if multi else 1) else left
-            if in_target is not None and index in (inner_column, target_column):
+            if in_target is not None and index == inner_column:
                 cell.font = good_font if in_target else bad_font
 
     last_hour_row = max(1, len(hour_rows) + 1)
@@ -34635,7 +34631,6 @@ def _szov_chat_wallboard_workbook(payload):
         chats_total,
         period_inner_minutes,
         _szov_chat_export_minutes(period_first),
-        '',
         # В итоге по людям стоит максимум в часе, а не сумма голов: складывать головы разных
         # часов нельзя — один и тот же человек попал бы в итог столько раз, сколько отработал.
         peak_online,
@@ -34729,11 +34724,11 @@ def _szov_chat_wallboard_workbook(payload):
             sheet.cell(row=total_row + 1, column=1,
                        value='За период никто не отвечал в чатах').font = hint_font
         elif unassigned_chats > 0:
-            # Число ставим ПОСЛЕ слова: «131 чатов» по-русски не сходится ни в одном падеже,
-            # а подбирать окончание под каждое число ради одной строки — лишняя механика.
+            # Только цифра, без объяснений (решение владельца 20.08.2026): разницу между итогом
+            # дня и суммой колонки «Чатов» подписать надо, а растолковывать — нет.
+            # Число ставим ПОСЛЕ слова: «131 чатов» по-русски не сходится ни в одном падеже.
             sheet.cell(row=total_row + 2, column=1,
-                       value='Чатов без оператора (никто не взял): %d — времени ответа у них '
-                             'нет, и в разрез они не идут' % unassigned_chats).font = hint_font
+                       value='Чатов без оператора: %d' % unassigned_chats).font = hint_font
 
     _reply_sheet('Первый ответ по часам', 'first')
     _reply_sheet('Ответ внутри чата по часам', 'inner', against_target=True)
