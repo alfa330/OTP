@@ -165,3 +165,40 @@ export const markTicketSeen = (tickets, ticketId) => {
     });
     return changed ? next : tickets;
 };
+
+/* Сколько бейджей помещается в строку ленты, не перенося её. Два.
+ *
+ * Число не из головы: на ленте 360 px третий бейдж уезжает на новую строку, и
+ * ряды становятся рваными — 79 px, 98, 79, 98. Сорок строк одной высоты
+ * читаются заметно быстрее сорока разных, даже если в каждой стало на одно
+ * слово меньше. Всё, что не поместилось, видно в самой карточке. */
+export const BADGE_LIMIT = 2;
+
+/* Какие бейджи показать в строке. Порядок — порядок важности:
+ *   что сломано (не ушло / просрочено) → насколько срочно → в каком контексте.
+ *
+ * Подписи статуса и приоритета приходят снаружи: их словарь — дело интерфейса,
+ * а здесь решается ЧТО показать и сколько.
+ *
+ * Статус не дублируется, когда рядом уже висит пузырёк непрочитанного: «Есть
+ * ответ» и число ответов — одно и то же сообщение, сказанное дважды.
+ */
+export const rowBadges = (ticket, meta = {}, now = Date.now()) => {
+    if (!ticket) return [];
+    const badges = [];
+    const alert = rowAlert(ticket, now);
+    if (alert === 'failed') {
+        badges.push({ key: 'failed', tone: 'red', label: 'Не доставлено' });
+    } else if (alert === 'overdue') {
+        badges.push({ key: 'overdue', tone: 'amber', label: 'Просрочено' });
+    } else if (!ticket.unread && meta.status && meta.status.tone) {
+        badges.push({ key: 'status', tone: meta.status.tone, label: meta.status.label });
+    }
+    if (meta.priority && meta.priority.tone) {
+        badges.push({ key: 'priority', tone: meta.priority.tone, label: meta.priority.label });
+    }
+    if ((ticket.flags || []).includes('mass_outage')) {
+        badges.push({ key: 'mass_outage', tone: 'red', label: 'Массовый сбой' });
+    }
+    return badges.slice(0, BADGE_LIMIT);
+};

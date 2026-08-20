@@ -10,7 +10,9 @@ import {
   queueMonogram,
   queueTile,
   rowAlert,
+  rowBadges,
   unreadLabel,
+  BADGE_LIMIT,
 } from '../src/components/crm/ticketList.js';
 
 /* Строка ленты обращений. Проверяется здесь, а не глазами в разделе, по той же
@@ -130,4 +132,48 @@ test('гасить нечего — массив тот же самый (лен�
   const tickets = [{ id: 1, unread: false, unread_count: 0 }];
   assert.equal(markTicketSeen(tickets, 1), tickets);
   assert.equal(markTicketSeen(tickets, 777), tickets);
+});
+
+/* Бейджи в строке. Их число — не вкусовщина: третий переносит строку, и ряды в
+ * ленте становятся рваными (замерено: 79 / 98 / 79 / 98 px). */
+
+const meta = (status, priority) => ({ status, priority });
+const TONE = { label: 'Есть ответ', tone: 'blue' };
+const NEUTRAL = { label: 'Отправлено', tone: null };
+const NORMAL = { label: 'Обычный', tone: null };
+const NOW = Date.parse('2026-08-20T12:00:00');
+const labels = (ticket, m) => rowBadges(ticket, m, NOW).map((b) => b.label);
+
+test('бейджей никогда больше двух', () => {
+  const ticket = {
+    status: 'in_progress', due_at: '2026-08-18T15:00:00',
+    delivery_status: 'sent', flags: ['mass_outage'],
+  };
+  assert.equal(BADGE_LIMIT, 2);
+  assert.deepEqual(labels(ticket, meta({ label: 'В работе', tone: 'amber' },
+                                       { label: 'Критический', tone: 'red' })),
+                   ['Просрочено', 'Критический']);
+});
+
+test('статус не дублирует пузырёк непрочитанного', () => {
+  const ticket = { status: 'answered', delivery_status: 'sent', flags: [] };
+  assert.deepEqual(labels({ ...ticket, unread: true }, meta(TONE, NORMAL)), []);
+  assert.deepEqual(labels(ticket, meta(TONE, NORMAL)), ['Есть ответ']);
+});
+
+test('недоставленное вытесняет статус, но не приоритет', () => {
+  const ticket = { status: 'open', delivery_status: 'failed', flags: [] };
+  assert.deepEqual(labels(ticket, meta(TONE, { label: 'Высокий', tone: 'amber' })),
+                   ['Не доставлено', 'Высокий']);
+});
+
+test('нейтральный статус и обычный приоритет бейджей не рождают', () => {
+  assert.deepEqual(labels({ status: 'open', delivery_status: 'sent', flags: [] },
+                          meta(NEUTRAL, NORMAL)), []);
+  assert.deepEqual(rowBadges(null), []);
+});
+
+test('массовый сбой показывается, когда есть место', () => {
+  const ticket = { status: 'answered', delivery_status: 'sent', flags: ['mass_outage'], unread: true };
+  assert.deepEqual(labels(ticket, meta(TONE, NORMAL)), ['Массовый сбой']);
 });

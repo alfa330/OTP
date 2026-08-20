@@ -19,7 +19,7 @@ import {
 } from './threadView';
 import {
     isOverdue, markTicketSeen, mergeTicketsById, previewAuthor, previewText,
-    queueMonogram, queueTile, rowAlert, unreadLabel,
+    queueMonogram, queueTile, rowBadges, unreadLabel,
 } from './ticketList';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
@@ -141,15 +141,14 @@ const LoadingBlock = () => (
  * иначе сорок строк снова превращаются в светофор.
  */
 const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
-    const status = statusMeta(ticket.status);
-    const priority = priorityMeta(ticket.priority);
-    const alert = rowAlert(ticket);
     const unread = ticket.unread;
     const count = unreadLabel(ticket.unread_count);
     const last = ticket.last_message;
     const author = previewAuthor(last);
     const preview = previewText(last);
-    const massOutage = (ticket.flags || []).includes('mass_outage');
+    const badges = rowBadges(ticket, {
+        status: statusMeta(ticket.status), priority: priorityMeta(ticket.priority),
+    });
 
     return (
         <button
@@ -200,24 +199,21 @@ const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
                                 ? <>{author && <span className="font-medium text-slate-500">{author}: </span>}{preview}</>
                                 : <span className="text-slate-400">{ticket.queue_title}</span>}
                         </span>
-                        <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-slate-400">
-                            <span className="tabular-nums">№{ticket.id}</span>
-                            <span className="text-slate-300">·</span>
-                            <span className="truncate">{ticket.topic_title || ticket.queue_title}</span>
-                            {alert === 'failed' && (
-                                <IosBadge tone="red" className="!py-0 !text-[10px]">Не доставлено</IosBadge>
-                            )}
-                            {alert === 'overdue' && (
-                                <IosBadge tone="amber" className="!py-0 !text-[10px]">Просрочено</IosBadge>
-                            )}
-                            {!alert && status.tone && (
-                                <IosBadge tone={status.tone} className="!py-0 !text-[10px]">{status.label}</IosBadge>
-                            )}
-                            {priority.tone && (
-                                <IosBadge tone={priority.tone} className="!py-0 !text-[10px]">{priority.label}</IosBadge>
-                            )}
-                            {massOutage && (
-                                <IosBadge tone="red" className="!py-0 !text-[10px]">Массовый сбой</IosBadge>
+                        {/* Третья строка: номер и либо тематика, либо бейджи.
+                            Вместе они не влезают и переносят строку — а ряды
+                            разной высоты в ленте на сорок обращений читаются
+                            хуже, чем на одну подпись меньше. Тематика при этом
+                            почти всегда уже стоит в теме обращения. */}
+                        <span className="mt-1 flex items-center gap-1.5 overflow-hidden text-[11px] text-slate-400">
+                            <span className="shrink-0 tabular-nums">№{ticket.id}</span>
+                            <span className="shrink-0 text-slate-300">·</span>
+                            {badges.length ? badges.map((badge) => (
+                                <IosBadge key={badge.key} tone={badge.tone}
+                                          className="!py-0 shrink-0 !text-[10px]">
+                                    {badge.label}
+                                </IosBadge>
+                            )) : (
+                                <span className="truncate">{ticket.topic_title || ticket.queue_title}</span>
                             )}
                         </span>
                     </span>
@@ -356,17 +352,17 @@ const MessageBubble = ({
             {outgoing && onReply && (
                 <ReplyHandle onClick={() => onReply(message)} />
             )}
-            {badge && (grouped
-                /* У продолжения серии место под кружок остаётся пустым: без
-                   него пузыри уехали бы влево и серия развалилась бы на
-                   разные «колонки». */
-                ? <span className="h-7 w-7 shrink-0" />
-                : (
+            {/* Место слева держим у КАЖДОГО входящего, включая заметку: без
+                него продолжение серии и заметка уезжают влево, и вместо одной
+                колонки пузырей получается три. */}
+            {!outgoing && (badge && !grouped
+                ? (
                     <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold ${badge.bg}`}
                           title={message.author_name || ''}>
                         {badge.initials}
                     </span>
-                ))}
+                )
+                : <span className="h-7 w-7 shrink-0" />)}
             <div className={`max-w-[76%] px-3.5 py-2.5 text-[13px] leading-relaxed ${
                 note
                     ? 'rounded-2xl bg-amber-50 text-amber-900 ring-1 ring-amber-100'
@@ -835,29 +831,35 @@ const TicketCard = ({
                             <span className="text-[12px] font-semibold tabular-nums text-slate-400">
                                 №{ticket.id}
                             </span>
-                            <h3 className="text-[15px] font-semibold leading-tight text-slate-900">
+                            <h3 className="line-clamp-2 text-[15px] font-semibold leading-tight text-slate-900">
                                 {ticket.subject}
                             </h3>
                         </div>
+                        {/* На телефоне из меты остаётся только необходимое:
+                            группа, когда завели и до когда ждём ответ. Тематика
+                            и автор переносами съедали пол-экрана до первой
+                            реплики, а обе стоят в панели обращения рядом. */}
                         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-slate-500">
                             <span>{ticket.queue_title}</span>
                             {ticket.topic_title && (
-                                <>
+                                <span className="hidden items-center gap-2 sm:inline-flex">
                                     <span className="text-slate-300">·</span>
                                     <span>{ticket.topic_title}</span>
-                                </>
+                                </span>
                             )}
-                            <span className="text-slate-300">·</span>
-                            <span>{ticket.created_by_name}</span>
+                            <span className="hidden items-center gap-2 sm:inline-flex">
+                                <span className="text-slate-300">·</span>
+                                <span>{ticket.created_by_name}</span>
+                            </span>
                             <span className="text-slate-300">·</span>
                             <span className="tabular-nums">{fmtDateTime(ticket.created_at)}</span>
                             {ticket.due_at && (
-                                <>
+                                <span className="inline-flex items-center gap-2">
                                     <span className="text-slate-300">·</span>
                                     <span className={`tabular-nums ${overdue ? 'font-semibold text-amber-600' : ''}`}>
                                         ответ до {fmtDateTime(ticket.due_at)}
                                     </span>
-                                </>
+                                </span>
                             )}
                         </div>
                     </div>
@@ -906,8 +908,13 @@ const TicketCard = ({
                 экране она выезжает поверх именно этой области, а не всей
                 страницы. */}
             <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                {/* Обёртка нужна кнопке «вниз»: она стоит absolute, и без
+                    собственного контекста позиционирования её середина
+                    считалась бы от переписки ВМЕСТЕ с панелью — при открытой
+                    панели кнопка уезжала бы вправо. */}
+                <div className="relative flex min-h-0 min-w-0 flex-1">
                 <div ref={threadRef} onScroll={onThreadScroll}
-                     className="crm-thread min-h-0 min-w-0 flex-1 overflow-y-auto px-4 pb-4">
+                     className="crm-thread min-h-0 w-full overflow-y-auto px-4 pb-4">
                     {/* Текст обращения в начале переписки. Панель справа его не
                         отменяет: там он для слежения во время чата, здесь — как
                         начало разговора, с которого всё и пошло. */}
@@ -947,6 +954,7 @@ const TicketCard = ({
                         </div>
                     )}
 
+                </div>
                     {/* «Вниз» появляется только когда человек ушёл читать
                         историю: внизу она была бы кнопкой «остаться на месте». */}
                     {!atBottom && (
@@ -1541,8 +1549,16 @@ export default function CrmTicketsView({
             {tab === 'tickets' && (
                 <>
                     {/* Фильтры. Ничего не подсвечиваем «на всякий случай»: выбранное
-                        состояние видно по сегменту, остальное — нейтрально. */}
-                    <div className="mb-3 flex flex-wrap items-center gap-2 px-1">
+                        состояние видно по сегменту, остальное — нейтрально.
+
+                        На телефоне при открытом обращении их нет вовсе: там
+                        экран один, и человек в этот момент читает переписку, а
+                        не отбирает очередь. Три ряда фильтров съедали половину
+                        экрана, оставляя нити 200 px — это меньше трёх реплик.
+                        Назад к списку (и к фильтрам) ведёт стрелка в шапке. */}
+                    <div className={`mb-3 flex-wrap items-center gap-2 px-1 lg:flex ${
+                        selectedId ? 'hidden' : 'flex'
+                    }`}>
                         <div className="flex rounded-xl bg-slate-100 p-1">
                             {STATE_FILTERS.map((item) => (
                                 <button key={item.key} type="button"
@@ -1604,10 +1620,32 @@ export default function CrmTicketsView({
                         {/* Высота задана, а не только минимальная: без неё колонка
                             карточки росла под переписку, лента внутри никогда не
                             переполнялась и не скроллилась — вместо неё ехала вся
-                            страница. min-h остаётся полом для низких экранов. */}
-                        <div className="flex min-h-[560px] flex-col lg:h-[calc(100vh-300px)] lg:flex-row">
-                            {/* Лента */}
-                            <div className={`flex w-full shrink-0 flex-col border-slate-200/70 lg:w-[360px] lg:border-r ${
+                            страница. min-h остаётся полом для низких экранов.
+
+                            На телефоне высота тоже нужна, и по той же причине:
+                            там колонка одна, и без неё переписка растягивала
+                            карточку на несколько экранов, а поле ответа
+                            оказывалось где-то далеко внизу страницы — в
+                            мессенджере оно всегда под рукой.
+
+                            dvh, а не vh: на телефоне адресная строка браузера
+                            то есть, то нет, и на 100vh поле ответа уезжало бы
+                            под неё. Вычитаемое — шапка раздела с фильтрами
+                            (замерено: 310 px со фильтрами, 165 без них на
+                            ширине 390); min-h остаётся полом на низких
+                            экранах. */}
+                        <div className={`flex min-h-[420px] flex-col lg:h-[calc(100vh-300px)] lg:flex-row ${
+                            selectedId ? 'h-[calc(100dvh-175px)]' : 'h-[calc(100dvh-320px)]'
+                        }`}>
+                            {/* Лента.
+                                min-h-0 обязателен: у элемента flex по умолчанию
+                                min-height:auto, то есть он не умеет стать ниже
+                                своего содержимого. В колонку (телефон) это
+                                значит, что панель растягивает карточку под всю
+                                переписку, внутренняя прокрутка не включается
+                                никогда и едет вся страница — ровно то, от чего
+                                карточке и задана высота. */}
+                            <div className={`flex w-full min-h-0 shrink-0 flex-col border-slate-200/70 lg:w-[360px] lg:border-r ${
                                 selectedId ? 'hidden lg:flex' : 'flex'
                             }`}>
                                 <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1645,8 +1683,8 @@ export default function CrmTicketsView({
                                 )}
                             </div>
 
-                            {/* Карточка */}
-                            <div className={`min-w-0 flex-1 ${selectedId ? 'flex' : 'hidden lg:flex'}`}>
+                            {/* Карточка (про min-h-0 — см. выше) */}
+                            <div className={`min-h-0 min-w-0 flex-1 ${selectedId ? 'flex' : 'hidden lg:flex'}`}>
                                 {selectedId ? (
                                     <div className="h-full min-h-0 w-full">
                                         <TicketCard
