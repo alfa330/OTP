@@ -5784,10 +5784,16 @@ class Database:
 
         Реестр наш, а не CRM: CRM присылает только звонивших, и менеджер с
         нулём звонков — тот самый, кого отбивка обязана назвать. Уволенных
-        отсекаем: их ноль ничего не значит."""
+        отсекаем: их ноль ничего не значит.
+
+        Город берём из кадровой карточки (users.city) — CRM географию не
+        присылает вовсе, а поле заведено ровно под этот отдел: его офисы стоят
+        в разных городах. Дата приёма нужна знаменателю плана: у принятого
+        посреди периода нельзя требовать норму за дни до трудоустройства."""
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.email
+                SELECT u.id, u.name, u.email, NULLIF(btrim(COALESCE(u.city, '')), ''),
+                       u.hire_date
                 FROM users u
                 JOIN departments d ON d.id = u.department_id
                 WHERE d.code = %s
@@ -5795,7 +5801,8 @@ class Database:
                   AND LOWER(COALESCE(u.status, '')) <> 'fired'
                 ORDER BY u.name
             """, (FRONT_OFFICE_DEPARTMENT_CODE,))
-            return [{"id": r[0], "name": r[1], "email": r[2]}
+            return [{"id": r[0], "name": r[1], "email": r[2],
+                     "city": r[3], "hire_date": r[4]}
                     for r in cursor.fetchall()]
 
     def get_front_office_call_plan(self):

@@ -33940,16 +33940,89 @@ def _front_office_calls_broadcast_time():
 
 
 def _front_office_calls_report(date_from, date_to=None):
-    """Сводка по обзвону за период: реестр отдела + числа CRM + план.
+    """Сводка по обзвону за период: реестр отдела + числа CRM по дням + план.
+
+    Разбивки по датам CRM не отдаёт и параметром её не включить (проверено
+    живьём: group_by, by_day, detail, region_id и ещё полтора десятка ключей
+    она молча игнорирует, отвечая тем же телом), поэтому каждый день
+    спрашиваем отдельным запросом. Это дёшево: ~0,15 с на запрос, месяц из
+    31 дня — около пяти секунд, и суммы по дням в точности сходятся с
+    запросом за период.
+
+    День, который не ответил даже после повторов, не валит отчёт целиком —
+    он помечается «нет выгрузки»: иначе один сбой CRM оставляет главу отдела
+    вообще без таблицы.
 
     Блокирующая (HTTP + БД) — вызывать через executor_pool.
     """
+    date_to = date_to or date_from
     client = front_office_calls.RegionCallStatsClient.from_config()
-    managers = client.fetch_managers(date_from, date_to or date_from)
+
+    managers_by_day = {}
+    no_data_days = []
+    day = date_from
+    while day <= date_to:
+        try:
+            managers_by_day[day] = client.fetch_managers(day, day)
+        except Exception as exc:
+            logging.error("Обзвон фронт-офиса: CRM не отдала %s: %s", day, exc)
+            no_data_days.append(day)
+        day += timedelta(days=1)
+    if not managers_by_day:
+        raise RuntimeError("CRM не ответила ни за один день периода")
+
+    # Контрольный запрос за весь период. Смысл есть только когда все дни на
+    # месте: с дырой расхождение объясняется дырой и ничего не проверяет.
+    control_total = None
+    if date_to > date_from and not no_data_days:
+        try:
+            control_total = front_office_calls.total_calls(
+                client.fetch_managers(date_from, date_to))
+        except Exception as exc:
+            logging.warning("Обзвон фронт-офиса: контрольный запрос за период "
+                            "не удался: %s", exc)
+
     roster = db.get_front_office_call_roster()
     plan = db.get_front_office_call_plan()
-    return front_office_calls.build_report(
-        roster, managers, date_from, date_to or date_from, plan_per_day=plan)
+    return front_office_calls.build_daily_report(
+        roster, managers_by_day, plan_per_day=plan,
+        no_data_days=no_data_days, crm_period_total=control_total)
+
+
+def _front_office_calls_document(report):
+    """(байты, имя файла, короткая подпись) — таблица «город × сотрудник × дни».
+
+    Блокирующая по CPU (openpyxl) — вызывать через executor_pool.
+    """
+    return (
+        front_office_calls.build_workbook(
+            report, generated_at=datetime.now(FRONT_OFFICE_CALLS_TZ)),
+        front_office_calls.report_filename(report),
+        front_office_calls.document_caption(report),
+    )
+
+
+async def _front_office_calls_send(chat_id, text, document, reply_to=None):
+    """Отправить сводку вместе с таблицей.
+
+    Короткий текст уходит подписью к файлу — одно сообщение вместо двух.
+    Длинный (полный список за день) в подпись не влезает: у подписи лимит
+    1024 символа против 4096 у сообщения, поэтому текст идёт сообщением, а к
+    файлу остаётся короткая подпись. Если таблица не собралась, сводка всё
+    равно уходит текстом: отчёт важнее оформления.
+    """
+    file_bytes, filename, caption = document or (None, None, None)
+    if file_bytes and len(text) <= front_office_calls.CAPTION_LIMIT:
+        await bot.send_document(
+            chat_id, types.InputFile(BytesIO(file_bytes), filename=filename),
+            caption=text, parse_mode='HTML', reply_to_message_id=reply_to)
+        return
+    await bot.send_message(chat_id, text, parse_mode='HTML',
+                           reply_to_message_id=reply_to)
+    if file_bytes:
+        await bot.send_document(
+            chat_id, types.InputFile(BytesIO(file_bytes), filename=filename),
+            caption=caption, parse_mode='HTML')
 
 
 def _front_office_calls_access_allowed(user):
@@ -34018,10 +34091,19 @@ async def front_office_calls_broadcast_job():
         return
 
     text = front_office_calls.render_report(report, only_missing=True)
+    # Таблицу собираем ОДИН раз на всех подписчиков: данные те же, а openpyxl
+    # на каждый чат — пустая работа.
+    try:
+        document = await loop.run_in_executor(
+            executor_pool, functools.partial(_front_office_calls_document, report))
+    except Exception as exc:
+        logging.error("Обзвон фронт-офиса: таблица за %s не собралась: %s",
+                      day, exc, exc_info=True)
+        document = None
     for subscription in subscriptions:
         chat_id = subscription['chat_id']
         try:
-            await bot.send_message(chat_id, text, parse_mode='HTML')
+            await _front_office_calls_send(chat_id, text, document)
             await loop.run_in_executor(
                 executor_pool, db.mark_front_office_call_subscription_sent, chat_id)
         except Exception as exc:
@@ -40263,7 +40345,8 @@ async def front_office_calls_command(message: types.Message):
     """/obzvon [дата] [дата] — обзвон фронт-офиса за день или период.
 
     Без аргументов — вчера, то есть ровно то, о чём утренняя отбивка.
-    Показывает всех менеджеров отдела, включая тех, кто не звонил вовсе.
+    Показывает всех менеджеров отдела, включая тех, кто не звонил вовсе, и
+    сразу прикладывает таблицу «город × сотрудник × дни» файлом.
     Доступно администраторам, главе отдела «Фронт офисы» и его СВ."""
     loop = asyncio.get_event_loop()
     user = await loop.run_in_executor(
@@ -40302,7 +40385,15 @@ async def front_office_calls_command(message: types.Message):
     text = front_office_calls.render_report(report)
     if not report['plan_total']:
         text += "\n\n" + front_office_calls.render_no_plan_hint()
-    await message.reply(text, parse_mode='HTML')
+    try:
+        document = await loop.run_in_executor(
+            executor_pool, functools.partial(_front_office_calls_document, report))
+    except Exception as exc:
+        logging.error("Команда /obzvon: таблица не собралась: %s", exc, exc_info=True)
+        document = None
+        text += "\n\nТаблицу собрать не удалось — вот сводка текстом."
+    await _front_office_calls_send(message.chat.id, text, document,
+                                   reply_to=message.message_id)
 
 
 @dp.message_handler(commands=['obzvon_plan'])
