@@ -1,12 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, CheckCircle2, Download, FileSpreadsheet, Info, Loader2,
-    RefreshCw, ShieldCheck, ShieldAlert, UploadCloud,
+    AlertTriangle, CheckCircle2, ChevronDown, Download, FileSpreadsheet, Loader2,
+    RefreshCw, UploadCloud,
 } from 'lucide-react';
 import {
-    APPLE_FONT, iosCard, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, iosGroupLabel,
-    IosBadge, IosSection,
+    APPLE_FONT, iosCard, iosBtnPrimary, iosBtnGhost, iosGroupLabel, IosBadge,
 } from '../ui/ios';
 
 /* Раздел «Провайдер ЭДО» (задача #176).
@@ -14,14 +13,14 @@ import {
  * Человек загружает выгрузку из диспетчерской, робот проходит по списку в
  * кабинете Яндекс.Fleet и возвращает тот же список с колонкой «Провайдер ЭДО».
  *
- * Почему всё вокруг ожидания. Обход занимает минуты — пять на восьми тысячах
- * строк, — поэтому загрузка отвечает сразу, а карточка выгрузки живёт в базе и
- * опрашивается. Страницу при этом можно закрыть: работа идёт на сервере.
+ * Раскладка подчинена одному действию: сверху зона загрузки, под ней история
+ * выгрузок. Всё служебное — состояние связи с кабинетом — убрано вниз одной
+ * строкой и раскрывается по требованию: сотруднику, который пришёл за файлом,
+ * читать про сессии незачем, а когда связь оборвётся, строка сама станет
+ * заметной и скажет, что делать.
  *
- * Второй смысловой центр — состояние сессии кабинета. Fleet не выдаёт ключей,
- * раздел ходит туда под живым логином, и этот логин когда-нибудь протухнет.
- * Молчать об этом нельзя: человек должен видеть «сессия жива» ДО того, как
- * потратит десять минут на выгрузку, которая упадёт. */
+ * Обход занимает минуты, поэтому загрузка отвечает сразу, а карточка живёт в
+ * базе и опрашивается. Страницу можно закрыть: работа идёт на сервере. */
 
 const POLL_MS = 5000;
 
@@ -32,24 +31,25 @@ const STATUS_META = {
 };
 
 const ERROR_HINTS = {
-    session_expired: 'Сессия кабинета Fleet протухла — нужен новый вход, выгрузка не дошла до данных.',
-    bad_file: 'Файл не подошёл: нужна колонка с ID водителя.',
-    fleet_error: 'Кабинет Fleet не ответил как ожидалось.',
-    interrupted: 'Приложение перезапустилось во время выгрузки — запустите её заново.',
+    session_expired: 'Связь с диспетчерской прервалась — выгрузка не дошла до данных.',
+    bad_file: 'Файл не подошёл: нужен столбец с ID водителя.',
+    fleet_error: 'Диспетчерская ответила не так, как ожидалось.',
+    interrupted: 'Сервер перезапустился во время выгрузки — запустите её заново.',
 };
+
+const num = (value) => Number(value || 0).toLocaleString('ru-RU');
 
 const formatDateTime = (value) => {
     if (!value) return '—';
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return '—';
     return date.toLocaleString('ru-RU', {
-        day: '2-digit', month: '2-digit', year: '2-digit',
-        hour: '2-digit', minute: '2-digit',
+        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
     });
 };
 
 const formatDuration = (ms) => {
-    if (!ms) return '—';
+    if (!ms) return '';
     const total = Math.round(ms / 1000);
     if (total < 60) return `${total} с`;
     const minutes = Math.floor(total / 60);
@@ -58,17 +58,16 @@ const formatDuration = (ms) => {
 };
 
 const formatSize = (bytes) => {
-    if (!bytes) return '—';
+    if (!bytes) return '';
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} КБ`;
     return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
 };
 
-/* «Сколько ждать» — не гадание, а измеренный темп: около 140 запросов в минуту,
- * и цена определяется числом парков, а не числом строк. Пока парк не известен,
- * честнее говорить диапазоном, чем показывать точную неправду. */
+/* «Сколько ждать» — измеренный темп, а не обещание: около 140 запросов в минуту,
+ * и цена определяется числом диспетчерских, а не числом строк. */
 const etaHint = (rowsTotal) => {
     if (!rowsTotal) return '';
-    if (rowsTotal <= 500) return 'обычно меньше минуты, если водители из одного-двух парков';
+    if (rowsTotal <= 500) return 'обычно меньше минуты';
     if (rowsTotal <= 3000) return 'обычно 2–4 минуты';
     if (rowsTotal <= 15000) return 'обычно 5–8 минут';
     return 'на таком объёме — от четверти часа';
@@ -85,15 +84,19 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
     const [loadError, setLoadError] = useState(null);
     const [busy, setBusy] = useState('');
     const [dragging, setDragging] = useState(false);
-    const [checked, setChecked] = useState(null);
+    const [linkOpen, setLinkOpen] = useState(false);
 
     const fileInput = useRef(null);
     const poll = useRef(null);
 
     const jobs = overview?.jobs || [];
     const session = overview?.session || {};
+    const canManage = Boolean(overview?.can_manage_session);
     const running = useMemo(() => jobs.find((job) => job.status === 'running'), [jobs]);
-    const sessionReady = Boolean(session.configured) && !session.last_error;
+    // Идущая выгрузка живёт наверху отдельной карточкой, поэтому в истории её нет:
+    // один и тот же прогресс в двух местах на одном экране — это шум.
+    const history = useMemo(() => jobs.filter((job) => job.status !== 'running'), [jobs]);
+    const linked = Boolean(session.configured) && !session.last_error;
 
     const load = useCallback(() => {
         setLoadError(null);
@@ -106,8 +109,7 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
 
     useEffect(() => { load(); }, [load]);
 
-    // Пока выгрузка идёт — подтягиваем карточку. Как только все закончились,
-    // опрос прекращается сам: лишние запросы к списку никому не нужны.
+    // Пока выгрузка идёт — подтягиваем карточку; закончилась — опрос прекращается сам.
     useEffect(() => {
         clearInterval(poll.current);
         if (running) poll.current = setInterval(load, POLL_MS);
@@ -115,6 +117,12 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
     }, [running, load]);
 
     useEffect(() => () => clearInterval(poll.current), []);
+
+    // Связь оборвалась — разворачиваем подробности сами: это единственный случай,
+    // когда человеку действительно нужно про неё прочитать.
+    useEffect(() => {
+        if (overview && !linked) setLinkOpen(true);
+    }, [overview, linked]);
 
     const upload = async (file) => {
         if (!file) return;
@@ -126,8 +134,7 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
             showToast?.(`Файл принят, выгрузка №${response.data?.job_id} пошла`, 'success');
             await load();
         } catch (error) {
-            const payload = error?.response?.data || {};
-            showToast?.(payload.error || 'Не удалось запустить выгрузку', 'error');
+            showToast?.(error?.response?.data?.error || 'Не удалось запустить выгрузку', 'error');
         } finally {
             setBusy('');
             if (fileInput.current) fileInput.current.value = '';
@@ -155,163 +162,223 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
         }
     };
 
-    const checkSession = async () => {
-        setBusy('session');
+    const checkLink = async () => {
+        setBusy('link');
         try {
             const response = await axios.post(`${base}/session/check`, {}, { headers: headers() });
-            setChecked(response.data);
             showToast?.(
                 response.data?.alive
-                    ? `Сессия жива: ${response.data.account || 'аккаунт'}, ${response.data.parks_count} парков`
-                    : 'Сессия кабинета не отвечает — нужен новый вход',
+                    ? `Связь есть: ${response.data.parks_count} диспетчерских`
+                    : 'Связь с диспетчерской не отвечает',
                 response.data?.alive ? 'success' : 'error',
             );
             await load();
         } catch (error) {
-            showToast?.('Не удалось проверить сессию', 'error');
+            showToast?.('Не удалось проверить связь', 'error');
         } finally {
             setBusy('');
         }
     };
 
-    const onDrop = (event) => {
-        event.preventDefault();
-        setDragging(false);
-        upload(event.dataTransfer?.files?.[0]);
-    };
+    const dropzoneDisabled = busy === 'upload' || Boolean(running) || !linked;
 
     return (
-        <div className="p-4 sm:p-6 space-y-5" style={{ fontFamily: APPLE_FONT }}>
+        <div className="mx-auto max-w-[980px] p-4 sm:p-6 space-y-6" style={{ fontFamily: APPLE_FONT }}>
             <header className="space-y-1">
-                <h1 className="text-[22px] font-bold text-slate-900">Провайдер ЭДО</h1>
-                <p className="text-[13px] text-slate-500">
-                    Загрузите список водителей — вернём тот же список с колонкой «Провайдер ЭДО»
-                    из диспетчерских Яндекс.Fleet.
+                <h1 className="text-[26px] font-bold tracking-[-0.01em] text-slate-900">
+                    Провайдер ЭДО
+                </h1>
+                <p className="text-[13.5px] text-slate-500">
+                    Загрузите список водителей — вернём его же с колонкой «Провайдер ЭДО»
+                    из диспетчерских Яндекс.Такси.
                 </p>
             </header>
 
             {loadError && (
-                <div className="rounded-2xl bg-red-50 ring-1 ring-red-200 px-4 py-3 text-[13px] text-red-700">
+                <div className="rounded-2xl bg-rose-50 px-4 py-3 text-[13px] text-rose-700 ring-1 ring-rose-100">
                     {loadError}
                 </div>
             )}
 
-            {/* Состояние сессии — первым экраном: без неё выгрузка не поедет. */}
-            <IosSection
-                title="Кабинет Fleet"
-                right={(
-                    <button type="button" className={iosBtnGhost} onClick={checkSession}
-                            disabled={busy === 'session'}>
-                        {busy === 'session'
-                            ? <Loader2 size={14} className="animate-spin" />
-                            : <RefreshCw size={14} />}
-                        Проверить сессию
-                    </button>
-                )}
-            >
-                <div className="flex flex-wrap items-center gap-3">
-                    {sessionReady
-                        ? <ShieldCheck size={20} className="text-emerald-500" />
-                        : <ShieldAlert size={20} className="text-amber-500" />}
-                    <div className="flex-1 min-w-[220px]">
-                        <div className="text-[14px] font-semibold text-slate-900">
-                            {session.configured
-                                ? (session.account || 'Сессия настроена')
-                                : 'Сессия не настроена'}
+            {/* Верхний блок — ровно одно состояние из трёх. Пока выгрузка идёт, зона
+                загрузки не нужна вовсе: она бы занимала полэкрана, ничего не делая,
+                а прогресс показывался бы дважды. */}
+            {running ? (
+                <div className={`${iosCard} px-5 py-4 space-y-3`}>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <Loader2 size={18} className="shrink-0 animate-spin text-blue-500" />
+                        <div className="min-w-[200px] flex-1">
+                            <div className="truncate text-[14.5px] font-semibold text-slate-900">
+                                {running.source_name || `Выгрузка №${running.id}`}
+                            </div>
+                            <div className="text-[12.5px] text-slate-500 tabular-nums">
+                                {running.progress_note || 'Идёт обход диспетчерских'}
+                                {running.rows_total ? ` · ${etaHint(running.rows_total)}` : ''}
+                            </div>
                         </div>
-                        <div className="text-[12px] text-slate-500">
-                            {session.configured
-                                ? `Диспетчерских: ${session.parks_count ?? '—'} · обновлена ${formatDateTime(session.updated_at)}`
-                                : 'Раздел ходит в кабинет под живым логином — его нужно передать один раз.'}
+                        <div className="text-[15px] font-semibold text-slate-700 tabular-nums">
+                            {Math.max(0, Math.min(100, running.progress_percent || 0))}%
                         </div>
                     </div>
-                    {checked && (
-                        <IosBadge tone={checked.alive ? 'green' : 'red'}>
-                            {checked.alive ? 'Проверено: жива' : 'Проверено: не отвечает'}
-                        </IosBadge>
-                    )}
+                    <div className="h-1 w-full overflow-hidden rounded-full bg-slate-100">
+                        <div className="h-full rounded-full bg-blue-500 transition-all duration-700"
+                             style={{ width: `${Math.max(0, Math.min(100, running.progress_percent || 0))}%` }} />
+                    </div>
+                    <div className="text-[12px] text-slate-400">
+                        Страницу можно закрыть — выгрузка считается на сервере. Следующий файл
+                        загрузим, когда закончится этот.
+                    </div>
                 </div>
-                {session.last_error && (
-                    <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
-                        {session.last_error}
-                    </div>
-                )}
-                {overview?.can_manage_session && (
-                    <div className="rounded-xl bg-slate-50 px-3 py-2 text-[12px] text-slate-600 space-y-1">
-                        <div className="flex items-center gap-1.5 font-semibold text-slate-700">
-                            <Info size={13} /> Как обновить сессию
+            ) : !linked ? (
+                <div className={`${iosCard} flex items-start gap-3 px-5 py-4`}>
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0 text-amber-500" />
+                    <div className="space-y-0.5">
+                        <div className="text-[14.5px] font-semibold text-slate-900">
+                            Выгрузки временно недоступны
                         </div>
-                        <div>
-                            На машине, где есть браузер, выполните{' '}
-                            <code className="rounded bg-white px-1.5 py-0.5 ring-1 ring-slate-200">
-                                python scripts/fleet_edm_push_session.py
-                            </code>{' '}
-                            и войдите в кабинет в открывшемся окне. Скрипт сам передаст сессию сюда.
+                        <div className="text-[12.5px] leading-relaxed text-slate-500">
+                            Пропала связь с диспетчерской — подробности ниже.
+                            Как только её восстановят, загрузка файла снова появится здесь.
                         </div>
                     </div>
-                )}
-            </IosSection>
-
-            {/* Загрузка файла */}
-            <IosSection title="Новая выгрузка">
+                </div>
+            ) : (
                 <div
-                    onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+                    onDragOver={(event) => { event.preventDefault(); if (!dropzoneDisabled) setDragging(true); }}
                     onDragLeave={() => setDragging(false)}
-                    onDrop={onDrop}
-                    onClick={() => fileInput.current?.click()}
-                    className={`flex flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-4 py-8 text-center cursor-pointer transition ${
-                        dragging ? 'border-blue-400 bg-blue-50/60' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
-                    } ${(busy === 'upload' || running) ? 'pointer-events-none opacity-60' : ''}`}
+                    onDrop={(event) => {
+                        event.preventDefault();
+                        setDragging(false);
+                        if (!dropzoneDisabled) upload(event.dataTransfer?.files?.[0]);
+                    }}
+                    onClick={() => { if (!dropzoneDisabled) fileInput.current?.click(); }}
+                    className={`${iosCard} flex flex-col items-center justify-center gap-2 px-6 py-8 text-center transition-all ${
+                        dropzoneDisabled ? 'opacity-60' : 'cursor-pointer hover:ring-slate-300 active:scale-[0.995]'
+                    } ${dragging ? 'ring-2 ring-blue-500/70 bg-blue-50/40' : ''}`}
                 >
-                    {busy === 'upload'
-                        ? <Loader2 size={26} className="animate-spin text-blue-500" />
-                        : <UploadCloud size={26} className="text-slate-400" />}
-                    <div className="text-[14px] font-semibold text-slate-800">
-                        {running ? 'Идёт другая выгрузка' : 'Перетащите файл или нажмите, чтобы выбрать'}
+                    <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${
+                        dragging ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-400'
+                    }`}>
+                        {busy === 'upload'
+                            ? <Loader2 size={20} className="animate-spin text-blue-500" />
+                            : <UploadCloud size={20} />}
                     </div>
-                    <div className="text-[12px] text-slate-500 max-w-[520px]">
-                        Excel или CSV со столбцом «Contractor ID» (подойдёт «ID водителя»).
-                        Если в файле есть «ID парка» — выгрузка идёт в разы быстрее: без него
-                        каждого водителя приходится искать по всем диспетчерским.
+                    <div className="text-[15px] font-semibold text-slate-900">
+                        Перетащите файл или нажмите, чтобы выбрать
+                    </div>
+                    <div className="max-w-[540px] text-[12.5px] leading-relaxed text-slate-500">
+                        Excel или CSV со столбцом <b className="font-semibold text-slate-600">Contractor ID</b>.
+                        Если в файле есть и <b className="font-semibold text-slate-600">ID парка</b> — получится
+                        в разы быстрее.
                     </div>
                     <input
                         ref={fileInput} type="file" accept=".xlsx,.xlsm,.csv" className="hidden"
                         onChange={(event) => upload(event.target.files?.[0])}
                     />
                 </div>
-                {!sessionReady && (
-                    <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
-                        Пока сессия кабинета не в порядке, выгрузка не сможет получить данные.
-                    </div>
-                )}
-            </IosSection>
+            )}
 
-            {/* Список выгрузок */}
-            <section className="space-y-1.5">
+            {/* История */}
+            <section className="space-y-2">
                 <div className="flex items-end justify-between gap-2">
                     <div className={iosGroupLabel}>Выгрузки</div>
-                    <button type="button" className={iosBtnGhost} onClick={load}>
-                        <RefreshCw size={14} /> Обновить
-                    </button>
+                    {history.length > 0 && (
+                        <button type="button" className={iosBtnGhost} onClick={load}>
+                            <RefreshCw size={14} /> Обновить
+                        </button>
+                    )}
                 </div>
-                <div className={`${iosCard} divide-y divide-slate-100`}>
+                <div className={`${iosCard} overflow-hidden`}>
                     {!overview && !loadError && (
-                        <div className="flex items-center gap-2 px-4 py-6 text-[13px] text-slate-500">
+                        <div className="flex items-center gap-2 px-5 py-7 text-[13px] text-slate-500">
                             <Loader2 size={16} className="animate-spin" /> Загружаем…
                         </div>
                     )}
-                    {overview && jobs.length === 0 && (
-                        <div className="px-4 py-8 text-center text-[13px] text-slate-500">
+                    {overview && history.length === 0 && (
+                        <div className="px-5 py-10 text-center text-[13px] text-slate-400">
                             Выгрузок ещё не было
                         </div>
                     )}
-                    {jobs.map((job) => (
-                        <JobRow
-                            key={job.id} job={job}
-                            busy={busy === `file:${job.id}`}
-                            onDownload={() => download(job)}
-                        />
+                    {history.map((job, index) => (
+                        <div key={job.id} className={index ? 'border-t border-slate-100' : ''}>
+                            <JobRow
+                                job={job}
+                                busy={busy === `file:${job.id}`}
+                                onDownload={() => download(job)}
+                            />
+                        </div>
                     ))}
+                </div>
+            </section>
+
+            {/* Служебное: связь с кабинетом. В обычный день — одна строка. */}
+            <section className="space-y-2">
+                <div className={`${iosCard} overflow-hidden`}>
+                    <button
+                        type="button"
+                        onClick={() => setLinkOpen((open) => !open)}
+                        className="flex w-full items-center gap-3 px-5 py-3.5 text-left transition hover:bg-slate-50/70"
+                    >
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${
+                            linked ? 'bg-emerald-500' : 'bg-amber-500'
+                        }`} />
+                        <span className="flex-1 text-[13.5px] font-medium text-slate-700">
+                            Связь с диспетчерской
+                        </span>
+                        <span className={`text-[13px] ${linked ? 'text-slate-500' : 'text-amber-700'}`}>
+                            {linked ? 'активна' : 'нужно восстановить'}
+                        </span>
+                        <ChevronDown
+                            size={16}
+                            className={`text-slate-400 transition-transform ${linkOpen ? 'rotate-180' : ''}`}
+                        />
+                    </button>
+
+                    {linkOpen && (
+                        <div className="space-y-3 border-t border-slate-100 px-5 py-4">
+                            <p className="text-[12.5px] leading-relaxed text-slate-600">
+                                {linked
+                                    ? <>Раздел заходит в диспетчерскую от имени рабочей учётной записи —
+                                       сейчас это <span className="text-slate-800">{session.account || 'настроенный аккаунт'}</span>,
+                                       доступно {num(session.parks_count)} диспетчерских.
+                                       Обновлено {formatDateTime(session.updated_at)}.</>
+                                    : <>Вход в диспетчерскую перестал действовать, и выгрузки временно не работают.
+                                       Восстановление занимает пару минут.</>}
+                            </p>
+
+                            {/* Кто это делает — главный вопрос, поэтому он написан всем,
+                                а не спрятан под правами. */}
+                            <p className="text-[12.5px] leading-relaxed text-slate-500">
+                                Связь настраивает и восстанавливает разработчик со своего компьютера:
+                                сотрудникам раздела для этого ничего делать не нужно, вход в диспетчерскую
+                                у вас не спросят. Если написано «нужно восстановить» — сообщите
+                                разработчику, и выгрузки заработают снова.
+                            </p>
+
+                            {session.last_error && (
+                                <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+                                    {session.last_error}
+                                </div>
+                            )}
+
+                            {canManage && (
+                                <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                                    <button type="button" className={iosBtnGhost} onClick={checkLink}
+                                            disabled={busy === 'link'}>
+                                        {busy === 'link'
+                                            ? <Loader2 size={14} className="animate-spin" />
+                                            : <RefreshCw size={14} />}
+                                        Проверить связь
+                                    </button>
+                                    <span className="text-[11.5px] text-slate-400">
+                                        Для разработчика: восстановить — <code className="rounded bg-slate-100 px-1.5 py-0.5 text-slate-600">
+                                        python scripts/fleet_edm_push_session.py</code> из папки проекта,
+                                        затем вход в кабинет в открывшемся окне.
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             </section>
         </div>
@@ -322,70 +389,61 @@ function JobRow({ job, busy, onDownload }) {
     const meta = STATUS_META[job.status] || { label: job.status, tone: 'slate' };
     const stats = job.stats || {};
     const check = stats.check || {};
-    const percent = Math.max(0, Math.min(100, job.progress_percent || 0));
 
     return (
-        <div className="px-4 py-3 space-y-2">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <FileSpreadsheet size={16} className="text-slate-400 shrink-0" />
-                <div className="flex-1 min-w-[200px]">
-                    <div className="text-[14px] font-semibold text-slate-900 truncate">
+        <div className="px-5 py-4">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                    job.status === 'error' ? 'bg-rose-50 text-rose-500' : 'bg-slate-100 text-slate-400'
+                }`}>
+                    <FileSpreadsheet size={16} />
+                </div>
+                <div className="min-w-[180px] flex-1">
+                    <div className="truncate text-[14px] font-semibold text-slate-900">
                         {job.source_name || `Выгрузка №${job.id}`}
                     </div>
-                    <div className="text-[12px] text-slate-500">
+                    <div className="text-[12px] text-slate-500 tabular-nums">
                         {formatDateTime(job.created_at)}
                         {job.created_by_name ? ` · ${job.created_by_name}` : ''}
-                        {job.rows_total ? ` · ${job.rows_total.toLocaleString('ru-RU')} строк` : ''}
+                        {job.rows_total ? ` · ${num(job.rows_total)} строк` : ''}
                     </div>
                 </div>
-                <IosBadge tone={meta.tone}>{meta.label}</IosBadge>
-                {job.status === 'done' && job.has_file && (
+                {job.status === 'done' && job.has_file ? (
                     <button type="button" className={iosBtnPrimary} onClick={onDownload} disabled={busy}>
                         {busy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                         Скачать
                     </button>
+                ) : (
+                    <IosBadge tone={meta.tone}>{meta.label}</IosBadge>
                 )}
             </div>
 
-            {job.status === 'running' && (
-                <div className="space-y-1">
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                        <div className="h-full rounded-full bg-blue-500 transition-all duration-500"
-                             style={{ width: `${percent}%` }} />
-                    </div>
-                    <div className="text-[12px] text-slate-500">
-                        {job.progress_note || 'Идёт обход диспетчерских'}
-                        {job.rows_total ? ` · ${etaHint(job.rows_total)}` : ''}
-                    </div>
-                </div>
-            )}
-
             {job.status === 'error' && (
-                <div className="flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2 text-[12.5px] text-red-700">
+                <div className="mt-3 flex items-start gap-2 rounded-xl bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">
                     <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                    <div>
-                        <div>{ERROR_HINTS[job.error_code] || 'Выгрузка не удалась'}</div>
-                        {job.error && <div className="text-red-600/80 mt-0.5">{job.error}</div>}
-                    </div>
+                    <span>{ERROR_HINTS[job.error_code] || job.error || 'Выгрузка не удалась'}</span>
                 </div>
             )}
 
             {job.status === 'done' && (
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
-                    <span className="inline-flex items-center gap-1 text-emerald-600">
+                <div
+                    className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500 tabular-nums"
+                    title={`Запросов в диспетчерскую: ${num(job.requests_count)}`}
+                >
+                    <span className={`inline-flex items-center gap-1 ${
+                        job.rows_failed ? 'text-amber-700' : 'text-emerald-600'
+                    }`}>
                         <CheckCircle2 size={13} />
-                        Провайдер определён: {(job.rows_resolved || 0).toLocaleString('ru-RU')}
-                        {job.rows_total ? ` из ${job.rows_total.toLocaleString('ru-RU')}` : ''}
+                        Провайдер найден у {num(job.rows_resolved)} из {num(job.rows_total)}
                     </span>
                     {check.checked > 0 && (
-                        <span title="Случайные строки перепроверены по карточкам водителей — независимым путём">
-                            Сверка: {check.matched} из {check.checked} совпало
+                        <span title="Случайные строки перепроверены по карточкам водителей — независимым способом">
+                            выборочная проверка: {check.matched} из {check.checked}
                         </span>
                     )}
-                    {stats.from_card > 0 && <span>добрано карточками: {stats.from_card}</span>}
-                    <span>{formatDuration(job.duration_ms)}</span>
-                    <span>{(job.requests_count || 0).toLocaleString('ru-RU')} запросов</span>
-                    <span>{formatSize(job.file_size)}</span>
+                    {stats.from_card > 0 && <span>дособрано вручную: {num(stats.from_card)}</span>}
+                    {formatDuration(job.duration_ms) && <span>{formatDuration(job.duration_ms)}</span>}
+                    {formatSize(job.file_size) && <span>{formatSize(job.file_size)}</span>}
                 </div>
             )}
         </div>
