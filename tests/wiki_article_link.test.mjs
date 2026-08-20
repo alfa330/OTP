@@ -60,10 +60,34 @@ test('слаг проверяем: значение уходит в путь з�
   assert.equal(normalizeArticleSlug('klassifikator-avto'), 'klassifikator-avto');
   assert.equal(normalizeArticleSlug('  auto_list  '), 'auto_list');
   assert.equal(normalizeArticleSlug('../../api/admin/users'), '');
-  assert.equal(normalizeArticleSlug('тарифы'), '');
   assert.equal(normalizeArticleSlug('a'.repeat(201)), '');
   assert.equal(normalizeArticleSlug(''), '');
   assert.equal(normalizeArticleSlug(null), '');
+  // Служебные символы не пускаем ни в каком алфавите.
+  assert.equal(normalizeArticleSlug('забытые вещи'), '');
+  assert.equal(normalizeArticleSlug('забытые/вещи'), '');
+  assert.equal(normalizeArticleSlug('файл.doc'), '');
+  assert.equal(normalizeArticleSlug('%D1%81'), '');
+});
+
+/* 25 статей из 41 на проде пришли миграцией со СТАРЫМИ, кириллическими
+   слагами: проверка на латиницу оставила бы без ссылки почти всю вики. */
+test('кириллический слаг — тоже слаг: ссылка есть у статей из старой вики', () => {
+  assert.equal(normalizeArticleSlug('структура-отделов'), 'структура-отделов');
+  assert.equal(normalizeArticleSlug('справкизаморозки-по-счетам'), 'справкизаморозки-по-счетам');
+  // Казахские буквы — тот же случай.
+  assert.equal(normalizeArticleSlug('қала-ережелері'), 'қала-ережелері');
+});
+
+test('ссылка на статью с кириллическим слагом собирается и читается обратно', () => {
+  useLocation(PORTAL);
+  const link = buildArticleLink('структура-отделов');
+  assert.equal(
+    link,
+    'https://alfa330.github.io/OTP?view=wiki&article=%D1%81%D1%82%D1%80%D1%83%D0%BA%D1%82%D1%83%D1%80%D0%B0-%D0%BE%D1%82%D0%B4%D0%B5%D0%BB%D0%BE%D0%B2'
+  );
+  assert.equal(readArticleSlugFromHref(link), 'структура-отделов');
+  assert.equal(readArticleSlugFromSearch(new URL(link).search), 'структура-отделов');
 });
 
 test('битый слаг ссылки не даёт — вместо неё пустая строка', () => {
