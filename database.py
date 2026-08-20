@@ -3935,23 +3935,33 @@ class Database:
                     ALTER TABLE szov_wallboard_broadcast_chats
                     ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova';
                 """)
+                # Имя старого ключа НЕ зашиваем, а находим: Postgres назвал бы его
+                # szov_wallboard_broadcast_chats_pkey, но полагаться на это ради DROP
+                # CONSTRAINT незачем — ошибка в имени уронила бы миграцию на проде.
+                # Склейка через quote_ident, а не format('%I'): процент в SQL — это
+                # placeholder psycopg2, и один запрос с параметрами рядом сделал бы его
+                # ловушкой на пустом месте.
                 cursor.execute("""
                     DO $$
+                    DECLARE
+                        single_key_pk text;
                     BEGIN
-                        IF EXISTS (
-                            SELECT 1 FROM pg_index i
-                            JOIN pg_class c ON c.oid = i.indrelid
-                            WHERE c.relname = 'szov_wallboard_broadcast_chats'
-                              AND i.indisprimary AND i.indnatts = 1
-                        ) THEN
-                            ALTER TABLE szov_wallboard_broadcast_chats
-                                DROP CONSTRAINT szov_wallboard_broadcast_chats_pkey;
+                        SELECT con.conname INTO single_key_pk
+                        FROM pg_constraint con
+                        JOIN pg_index i ON i.indexrelid = con.conindid
+                        WHERE con.conrelid = 'szov_wallboard_broadcast_chats'::regclass
+                          AND con.contype = 'p'
+                          AND i.indnkeyatts = 1;
+                        IF single_key_pk IS NOT NULL THEN
+                            EXECUTE 'ALTER TABLE szov_wallboard_broadcast_chats DROP CONSTRAINT '
+                                || quote_ident(single_key_pk);
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD PRIMARY KEY (direction, chat_id);
                         END IF;
                         IF NOT EXISTS (
                             SELECT 1 FROM pg_constraint
-                            WHERE conname = 'szov_wallboard_broadcast_chats_direction'
+                            WHERE conrelid = 'szov_wallboard_broadcast_chats'::regclass
+                              AND conname = 'szov_wallboard_broadcast_chats_direction'
                         ) THEN
                             ALTER TABLE szov_wallboard_broadcast_chats
                                 ADD CONSTRAINT szov_wallboard_broadcast_chats_direction
@@ -3959,31 +3969,37 @@ class Database:
                         END IF;
                     END $$;
                 """)
+                # Переезд с одного чата на список — ровно один раз. Флаг нужен, чтобы
+                # удалённый получатель не воскресал на каждом рестарте; строку в config при
+                # этом НЕ трогаем, чтобы откат деплоя на прежний код продолжал слать в тот
+                # же чат.
+                # Стоит внутри того же SAVEPOINT, и это важно: INSERT ниже опирается и на
+                # колонку direction, и на составной ключ (ON CONFLICT). Не пройди смена
+                # ключа — он упал бы уже при планировании, даже когда переносить нечего, и
+                # уволок бы за собой инициализацию всей схемы.
+                cursor.execute("""
+                    ALTER TABLE szov_wallboard_broadcast_config
+                    ADD COLUMN IF NOT EXISTS chats_migrated BOOLEAN NOT NULL DEFAULT FALSE;
+                """)
+                cursor.execute("""
+                    INSERT INTO szov_wallboard_broadcast_chats
+                        (direction, chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
+                    SELECT 'osnova', chat_id, chat_title, 'always',
+                           is_enabled, updated_by, updated_at
+                    FROM szov_wallboard_broadcast_config
+                    WHERE id = 1 AND chat_id IS NOT NULL AND NOT chats_migrated
+                    ON CONFLICT (direction, chat_id) DO NOTHING;
+                """)
+                cursor.execute("""
+                    UPDATE szov_wallboard_broadcast_config
+                    SET chats_migrated = TRUE
+                    WHERE id = 1 AND NOT chats_migrated;
+                """)
                 cursor.execute("RELEASE SAVEPOINT sp_szov_broadcast_direction")
             except Exception as exc:
                 cursor.execute("ROLLBACK TO SAVEPOINT sp_szov_broadcast_direction")
                 logging.error("Отбивка табло: направление получателей не применилось: %s",
                               exc, exc_info=True)
-            # Переезд с одного чата на список — ровно один раз. Флаг нужен, чтобы удалённый
-            # получатель не воскресал на каждом рестарте; строку в config при этом НЕ трогаем,
-            # чтобы откат деплоя на прежний код продолжал слать в тот же чат.
-            cursor.execute("""
-                ALTER TABLE szov_wallboard_broadcast_config
-                ADD COLUMN IF NOT EXISTS chats_migrated BOOLEAN NOT NULL DEFAULT FALSE;
-            """)
-            cursor.execute("""
-                INSERT INTO szov_wallboard_broadcast_chats
-                    (direction, chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
-                SELECT 'osnova', chat_id, chat_title, 'always', is_enabled, updated_by, updated_at
-                FROM szov_wallboard_broadcast_config
-                WHERE id = 1 AND chat_id IS NOT NULL AND NOT chats_migrated
-                ON CONFLICT (direction, chat_id) DO NOTHING;
-            """)
-            cursor.execute("""
-                UPDATE szov_wallboard_broadcast_config
-                SET chats_migrated = TRUE
-                WHERE id = 1 AND NOT chats_migrated;
-            """)
             # Последний удачный снимок табло. Кэш живёт в памяти процесса, поэтому рестарт или
             # деплой раньше оставлял экран в операционном зале пустым до первого удачного ответа
             # Oktell — а прокси бывает недоступен минутами. Снимок один (singleton): это не
