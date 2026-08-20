@@ -1717,6 +1717,60 @@ def _sensitive_access_granted_for_user(user_id, cursor=None):
         user_id, _current_session_id_from_access_token(), cursor=cursor))
 
 
+def _sensitive_access_approval_error(*, approver_role, approver_id, approver_department_id,
+                                    approver_headed_department_ids, operator_department_id,
+                                    operator_supervisor_id):
+    """Вправе ли этот человек подтвердить QR оператора. None — вправе.
+
+    Правило (решение владельца 20.08.2026): подтверждает тот, кто отвечает за
+    человека на месте, — свой отдел целиком, а не только свои группы.
+
+        супер-админ                 любого оператора
+        админ без своего отдела     любого оператора (он вне отделов вовсе)
+        глава отдела                сотрудников СВОИХ отделов
+        супервайзер                 операторов СВОЕГО отдела
+        остальные                   никого
+
+    Две границы стоит отметить отдельно.
+
+    Супервайзер раньше мог подтвердить только тех, у кого он указан
+    руководителем. На практике это тупик: у оператора руководитель может быть в
+    отпуске или вообще не заполнен (у всех 22 сотрудников фронт-офиса он пуст),
+    и человек оставался без доступа при живом СВ рядом. Прежнее право «свой
+    оператор» при этом сохранено — оно нужно супервайзеру, у которого в профиле
+    не указан отдел.
+
+    Глава отдела ограничен своим отделом, даже если базовая роль у него admin:
+    назначение главой ЗАМЕНЯЕТ базовую роль — так считают задачи, «Бот
+    опозданий», ИИ-оценка, обращения и вики. До этого правила глава одного
+    отдела мог открыть доступ оператору любого другого.
+    """
+    role = _normalize_user_role(approver_role)
+    headed = {int(x) for x in (approver_headed_department_ids or []) if x is not None}
+
+    if role == 'super_admin':
+        return None
+    if role == 'admin' and not headed:
+        return None
+
+    if headed:
+        if operator_department_id is not None and int(operator_department_id) in headed:
+            return None
+        return ("Глава отдела подтверждает доступ только сотрудникам своего отдела", 403)
+
+    if role == 'sv':
+        if operator_supervisor_id is not None and int(operator_supervisor_id) == int(approver_id):
+            return None
+        if approver_department_id is None:
+            return ("В вашем профиле не указан отдел — доступ откроет администратор", 403)
+        if (operator_department_id is not None
+                and int(operator_department_id) == int(approver_department_id)):
+            return None
+        return ("Супервайзер подтверждает доступ только операторам своего отдела", 403)
+
+    return ("Подтвердить доступ может администратор, супервайзер или глава отдела", 403)
+
+
 def _sanitize_evaluations_for_access(evaluations, reveal_sensitive, hide_hidden_operator_comments=False):
     result = []
     for ev in (evaluations or []):
@@ -2884,7 +2938,7 @@ def _build_sensitive_access_approved_message_html(
     approver_device = _parse_user_agent_details(approval_context.get('request_user_agent'))
 
     lines = [
-        "<b>🔐 QR-доступ к данным оценок открыт</b>",
+        "<b>🔐 QR-доступ открыт: оценки, «Обращения», «Вики»</b>",
         "",
         f"<b>Время события:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
         f"<b>ID сессии:</b> <code>{_escape_telegram_html(session.get('session_id') or claims.get('session_id') or '—', 180)}</code>",
@@ -8948,8 +9002,14 @@ def approve_sensitive_access():
             return jsonify({"error": "Unauthorized"}), 401
 
         approver = db.get_user(id=approver_id)
-        if not approver or not _is_privileged_role(approver[3]):
-            return jsonify({"error": "Forbidden: only admin or supervisor can approve QR"}), 403
+        # Главу отдела пускаем сюда независимо от базовой роли: назначение главой
+        # заменяет её, и глава с ролью оператора отвечает за отдел так же.
+        approver_headed_ids = [d['id'] for d in
+                               (db.get_headed_departments_for_user(approver_id) or [])]
+        if not approver or not (_is_privileged_role(approver[3]) or approver_headed_ids):
+            return jsonify({
+                "error": "Подтвердить доступ может администратор, супервайзер или глава отдела"
+            }), 403
 
         data = request.get_json(silent=True) or {}
         raw_token = (data.get('token') or '').strip()
@@ -8978,8 +9038,19 @@ def approve_sensitive_access():
         if not session or session["revoked_at"] is not None:
             return jsonify({"error": "Operator session not found or revoked"}), 410
 
-        if approver[3] == 'sv' and operator[6] != approver_id:
-            return jsonify({"error": "Supervisor can approve only own operators"}), 403
+        # Периметр подтверждения — свой отдел. Считается одной функцией, чтобы
+        # правило жило в одном месте и проверялось тестом без Flask и базы.
+        perimeter_error = _sensitive_access_approval_error(
+            approver_role=approver[3],
+            approver_id=approver_id,
+            approver_department_id=db.get_user_department_id(approver_id),
+            approver_headed_department_ids=approver_headed_ids,
+            operator_department_id=db.get_user_department_id(operator_id),
+            operator_supervisor_id=operator[6] if len(operator) > 6 else None,
+        )
+        if perimeter_error:
+            message, status = perimeter_error
+            return jsonify({"error": message}), status
 
         updated = db.set_session_sensitive_access(
             session_id=claims["session_id"],

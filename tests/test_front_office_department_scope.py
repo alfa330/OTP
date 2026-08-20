@@ -45,23 +45,29 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         self.assertIn("head: FRONT_OFFICE_HEAD_VIEWS", entry)
         self.assertIn("sv: FRONT_OFFICE_MANAGER_VIEWS", entry)
 
-    def test_tasks_are_open_to_the_head_only(self):
+    def test_tasks_and_qr_access_are_open_to_the_head_only(self):
         # Пункт «Задачи» в ветке главы гейтится departmentAllowsView(user, 'tasks'),
         # поэтому раздел выдаётся не предикатом, а строкой в allowlist отдела.
+        # «QR доступ» приехал туда же 20.08.2026: сотрудники фронт-офиса
+        # открывают «Вики» только по подтверждению, а супервайзеров в отделе нет —
+        # подтверждает глава, и без строки в allowlist пункта меню у него не будет.
         source = _read(DEPARTMENT_VIEWS_PATH)
 
         self.assertIn(
-            "const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks'];", source
+            "const FRONT_OFFICE_HEAD_VIEWS = "
+            "[...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access'];", source
         )
-        # У СВ набор прежний: раздел не должен приехать вместе с главой.
+        # У СВ набор прежний: разделы главы не должны приехать вместе с ним.
         manager_line = next(
             line for line in source.splitlines()
             if line.startswith("const FRONT_OFFICE_MANAGER_VIEWS")
         )
         self.assertNotIn("'tasks'", manager_line)
+        self.assertNotIn("'qr_access'", manager_line)
 
         app = _read(APP_PATH)
         self.assertIn("{departmentAllowsView(user, 'tasks') && (", app)
+        self.assertIn("{departmentAllowsView(user, 'qr_access') && (", app)
 
     def test_colleague_schedule_hiding_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)

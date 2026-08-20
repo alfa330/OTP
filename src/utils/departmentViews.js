@@ -46,7 +46,11 @@ const FRONT_OFFICE_OPERATOR_VIEWS = ['profile', 'work_schedules'];
 const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedules'];
 // «Задачи» выданы только главе отдела: у СВ фронт-офисов набор разделов прежний
 // (в tez/op раздел есть у обеих ролей, здесь — по запросу владельца только глава).
-const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks'];
+// «QR доступ» — там же и по той же причине: сотрудники фронт-офиса открывают
+// «Вики» (офисы, парки) только по подтверждению, а супервайзеров в отделе нет
+// вовсе — подтверждает глава. Без строки в allowlist пункта меню у него не
+// появится, и подтвердить доступ станет физически некому.
+const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access'];
 
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',

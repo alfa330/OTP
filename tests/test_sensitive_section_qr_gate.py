@@ -17,7 +17,9 @@
     слотов пула на один запрос, а пул общий и небольшой.
 """
 
+import ast
 import sys
+import textwrap
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,6 +28,8 @@ from unittest.mock import MagicMock
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+BOT_PATH = ROOT / 'bot_schedule2.py'
 
 try:
     from flask import Flask
@@ -262,6 +266,94 @@ class GatePolicyTest(unittest.TestCase):
         """Фронт рисует замок по одному источнику правды, а не по роли."""
         self.assertTrue(crm_access.capabilities(crm_ctx())['requires_qr'])
         self.assertFalse(crm_access.capabilities(crm_ctx(role='sv'))['requires_qr'])
+
+
+def _approval_perimeter():
+    """Функция периметра из монолита. Импортировать bot_schedule2 нельзя — он на
+    старте поднимает пул к боевой базе, поэтому берём функции через ast."""
+    from tests import source_cache
+    source = BOT_PATH.read_text(encoding='utf-8-sig')
+    module = source_cache.parse(source)
+    namespace = {}
+    for name in ('_normalize_user_role', '_sensitive_access_approval_error'):
+        node = next(n for n in module.body
+                    if isinstance(n, ast.FunctionDef) and n.name == name)
+        exec(textwrap.dedent(ast.get_source_segment(source, node)), namespace)
+    return namespace['_sensitive_access_approval_error']
+
+
+SZOV, OP = 1, 367
+
+
+class ApprovalPerimeterTest(unittest.TestCase):
+    """Кто кому вправе подтвердить QR. Периметр — свой отдел."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.check = staticmethod(_approval_perimeter())
+
+    def verdict(self, *, role, approver_id=100, approver_dept=SZOV, headed=(),
+                operator_dept=SZOV, operator_supervisor=None):
+        return self.check(
+            approver_role=role,
+            approver_id=approver_id,
+            approver_department_id=approver_dept,
+            approver_headed_department_ids=list(headed),
+            operator_department_id=operator_dept,
+            operator_supervisor_id=operator_supervisor,
+        )
+
+    def test_super_admin_approves_anyone(self):
+        self.assertIsNone(self.verdict(role='super_admin', operator_dept=OP))
+
+    def test_global_admin_approves_anyone(self):
+        """Админ без своего отдела — вне отделов вовсе."""
+        self.assertIsNone(self.verdict(role='admin', operator_dept=OP))
+
+    def test_supervisor_approves_the_whole_department(self):
+        """Главное изменение: не «свои операторы», а весь свой отдел."""
+        self.assertIsNone(self.verdict(role='sv', operator_supervisor=999))
+
+    def test_supervisor_stops_at_the_department_border(self):
+        error = self.verdict(role='sv', operator_dept=OP)
+        self.assertIsNotNone(error)
+        self.assertEqual(error[1], 403)
+        self.assertIn('своего отдела', error[0])
+
+    def test_supervisor_without_department_keeps_own_operators(self):
+        """Прежнее право остаётся: иначе СВ без отдела в профиле потерял бы всех."""
+        self.assertIsNone(self.verdict(role='sv', approver_dept=None,
+                                       operator_supervisor=100))
+        error = self.verdict(role='sv', approver_dept=None, operator_supervisor=999)
+        self.assertIsNotNone(error)
+        self.assertIn('не указан отдел', error[0])
+
+    def test_supervisor_cannot_approve_operator_without_department(self):
+        error = self.verdict(role='sv', operator_dept=None)
+        self.assertIsNotNone(error)
+
+    def test_department_head_approves_own_department(self):
+        self.assertIsNone(self.verdict(role='admin', headed=[SZOV], operator_dept=SZOV))
+        # Глава с базовой ролью оператора — тоже глава.
+        self.assertIsNone(self.verdict(role='operator', headed=[SZOV], operator_dept=SZOV))
+
+    def test_department_head_stops_at_the_department_border(self):
+        """Назначение главой заменяет базовую роль: чужой отдел ему закрыт."""
+        error = self.verdict(role='admin', headed=[SZOV], operator_dept=OP)
+        self.assertIsNotNone(error)
+        self.assertEqual(error[1], 403)
+        self.assertIn('своего отдела', error[0])
+
+    def test_head_of_two_departments_covers_both(self):
+        self.assertIsNone(self.verdict(role='admin', headed=[SZOV, OP], operator_dept=OP))
+
+    def test_trainer_and_operator_approve_nobody(self):
+        for role in ('trainer', 'operator', 'trainee', ''):
+            with self.subTest(role=role):
+                error = self.verdict(role=role)
+                self.assertIsNotNone(error)
+                self.assertEqual(error[1], 403)
+                self.assertIn('администратор', error[0])
 
 
 if __name__ == '__main__':
