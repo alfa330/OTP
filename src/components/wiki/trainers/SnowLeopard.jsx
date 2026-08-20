@@ -62,9 +62,12 @@ const Mouth = ({ state }) => {
         // на 120 пикселях. Анимацию рта даёт CSS (wt-leo--speak).
         return (
             <g className="wt-leo__mouth">
-                <path d="M53 78c3 2.6 11 2.6 14 0" fill="none" stroke="#475569"
-                    strokeWidth="2.4" strokeLinecap="round" />
-                <ellipse cx="60" cy="82.5" rx="5.2" ry="4.4" fill="#f19b9b" />
+                {/* Открытый рот держится ВНУТРИ светлой маски морды (она
+                    заканчивается на y≈85): раньше он спускался до 87 и наезжал
+                    на шарф — на кадре это читалось как «рот съехал с морды». */}
+                <path d="M53.5 75.6c3 2.4 10 2.4 13 0" fill="none" stroke="#475569"
+                    strokeWidth="2.3" strokeLinecap="round" />
+                <ellipse cx="60" cy="79.2" rx="4.6" ry="3.6" fill="#f19b9b" />
             </g>
         );
     }

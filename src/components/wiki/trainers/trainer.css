@@ -21,7 +21,7 @@
     --wt-line: #e2e8f0;
     --wt-line-soft: #f1f5f9;
     --wt-surface: #ffffff;
-    --wt-canvas: #f4f6fa;
+    --wt-canvas: #eef1f6;
     --wt-accent: var(--wiki-accent, #4f46e5);
     --wt-accent-soft: #eef2ff;
 
@@ -32,227 +32,172 @@
     --wt-green: #16a34a;
     --wt-red: #e11d48;
 
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    min-height: 0;
+    /* Три колонки: помощник — телефон — прогресс. Телефон в середине шириной по
+       содержимому (auto), поэтому он не растягивается и не сжимается вслед за
+       текстом; боковые колонки делят остаток. Выравнивание по центру: колонки
+       заметно ниже телефона, и прижатые вверх они оставляли бы под собой пустое
+       поле в половину экрана. */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 0.9fr);
+    /* Строка ОГРАНИЧЕНА высотой окна (minmax(0, 1fr)), иначе она вырастает по
+       содержимому: телефон просит «100 % высоты», строка растёт под него, и
+       корпус уезжает за нижний край экрана. */
+    grid-template-rows: minmax(0, 1fr);
+    align-items: center;
+    gap: clamp(14px, 2.4vw, 36px);
+    width: 100%;
+    height: 100%;
+    padding: clamp(12px, 2vw, 26px);
+    overflow: auto;
     color: var(--wt-ink);
+    background: var(--wt-canvas);
     -webkit-font-smoothing: antialiased;
 }
 
-/* ── Оверлей на весь экран ───────────────────────────────────────────────
-   Тренажёр открывается поверх статьи: телефон и барс не должны зависеть от
-   ширины колонки текста. z-index 95 — выше модалок раздела (90) и ниже
-   уведомлений портала. */
+/* ── Тренажёр во весь экран ──────────────────────────────────────────────
+   Не модалка: ни затемнения, ни карточки. Внутри одновременно телефон,
+   помощник и прогресс — карточка внутри окна отнимала бы высоту дважды и
+   заставляла прокручивать то, что должно помещаться целиком.
+   z-index 95 — выше модалок раздела (90) и ниже уведомлений портала. */
 .wt-overlay {
     position: fixed;
     inset: 0;
     z-index: 95;
     display: flex;
-    align-items: stretch;
-    justify-content: center;
-}
-
-.wt-overlay__backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(15, 23, 42, 0.45);
-    backdrop-filter: blur(10px);
-}
-
-.wt-overlay__panel {
-    position: relative;
-    display: flex;
-    width: 100%;
-    max-width: 1180px;
-    margin: 0;
-    padding: 14px;
-    overflow: auto;
-}
-
-@media (min-width: 640px) {
-    .wt-overlay { padding: 20px; }
-    .wt-overlay__panel {
-        margin: auto;
-        padding: 0;
-    }
-}
-
-.wt-overlay__panel > .wt-root {
-    flex: 1 1 auto;
-    min-width: 0;
-    padding: 14px;
     background: var(--wt-canvas);
-    border-radius: 22px;
-    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.28);
 }
 
-/* ── Прогресс и шапка ───────────────────────────────────────────────────── */
-
-.wt-top {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px 16px;
-    padding: 12px 14px;
-    background: var(--wt-surface);
-    border: 1px solid var(--wt-line);
-    border-radius: 16px;
-}
-
-.wt-top__title {
-    display: flex;
-    min-width: 0;
-    flex: 1 1 200px;
-    flex-direction: column;
-}
-
-.wt-top__title span {
-    font-size: 11.5px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--wt-mute);
-}
-
-.wt-top__title strong {
-    font-size: 15px;
-    font-weight: 600;
-    line-height: 1.25;
-}
-
-.wt-top__progress {
-    display: flex;
-    flex: 1 1 220px;
-    align-items: center;
-    gap: 10px;
-}
-
-.wt-bar {
-    position: relative;
-    flex: 1 1 auto;
-    height: 6px;
-    overflow: hidden;
-    background: var(--wt-line-soft);
-    border-radius: 999px;
-}
-
-.wt-bar > i {
-    display: block;
-    height: 100%;
-    background: linear-gradient(90deg, var(--wt-accent), #7c86f5);
-    border-radius: 999px;
-    transition: width 0.32s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.wt-top__progress b {
-    flex: 0 0 auto;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--wt-ink-soft);
-    font-variant-numeric: tabular-nums;
-}
-
-.wt-top__actions {
-    display: flex;
-    gap: 6px;
-}
-
-.wt-top__btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 11px;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: var(--wt-ink-soft);
-    background: var(--wt-line-soft);
-    border: 0;
-    border-radius: 11px;
-    cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease;
-}
-
-.wt-top__btn:hover { background: #e6ebf3; color: var(--wt-ink); }
-.wt-top__btn--icon { padding: 7px; }
-
-/* ── Сцена: телефон и помощник рядом ────────────────────────────────────── */
-
+/* Сцена телефона — просто центровка: размеры задаёт сам корпус. */
 .wt-stage {
     display: flex;
-    flex-wrap: wrap;
-    /* Помощник по центру телефона, а не под его верхним краем: карточка барса
-       вдвое ниже телефона, и прижатая вверх она оставляла под собой пустое
-       поле высотой в треть экрана. */
     align-items: center;
     justify-content: center;
-    gap: 16px;
+    min-width: 0;
     min-height: 0;
+    height: 100%;
 }
 
-@media (min-width: 900px) {
-    .wt-stage {
-        flex-wrap: nowrap;
-        justify-content: center;
-    }
-}
+/* ── Учебный телефон ──────────────────────────────────────────────────────
+   Корпус нарисован по референсу владельца: тонкая рамка, вырез сверху,
+   боковые клавиши, крупный радиус. Это не украшательство — учебный экран
+   работает ровно тем, что человек узнаёт в нём своё устройство и переносит
+   действие на настоящее приложение.
 
-/* ── Учебный телефон ────────────────────────────────────────────────────── */
-
+   Размер задаётся ВЫСОТОЙ окна, а ширина следует из пропорций (aspect-ratio):
+   так телефон крупный на большом мониторе и целиком помещается на маленьком,
+   а внутренние экраны не приходится верстать под две разные ширины. */
 .wt-phone {
     position: relative;
     display: flex;
     flex: 0 0 auto;
     flex-direction: column;
-    width: 320px;
+    height: min(100%, 880px);
+    aspect-ratio: 390 / 844;
     max-width: 100%;
-    /* Высота ограничена окном, а не содержимым: экран приложения обязан
-       прокручиваться ВНУТРИ телефона, иначе рамка растягивается на две
-       страницы и перестаёт быть телефоном. */
-    height: min(620px, calc(100vh - 210px));
-    min-height: 460px;
-    padding: 9px;
-    background: #0b1220;
-    border-radius: 40px;
-    box-shadow: 0 18px 44px rgba(15, 23, 42, 0.26), inset 0 0 0 2px #1e293b;
+    padding: 11px;
+    background: linear-gradient(155deg, #3c5348 0%, #22322b 38%, #16211c 72%, #2b3d34 100%);
+    border-radius: 52px;
+    box-shadow:
+        0 22px 50px rgba(15, 23, 42, 0.30),
+        inset 0 0 0 2px rgba(255, 255, 255, 0.07);
 }
 
+/* Боковые клавиши: беззвучный режим и громкость слева, питание справа. */
+.wt-phone__side {
+    position: absolute;
+    width: 3px;
+    background: #35493f;
+}
+
+.wt-phone__side--mute {
+    left: -3px;
+    top: 13%;
+    height: 4%;
+    border-radius: 3px 0 0 3px;
+}
+
+.wt-phone__side--vol-up {
+    left: -3px;
+    top: 20%;
+    height: 7%;
+    border-radius: 3px 0 0 3px;
+}
+
+.wt-phone__side--vol-down {
+    left: -3px;
+    top: 29%;
+    height: 7%;
+    border-radius: 3px 0 0 3px;
+}
+
+.wt-phone__side--power {
+    right: -3px;
+    top: 24%;
+    height: 11%;
+    border-radius: 0 3px 3px 0;
+}
+
+.wt-phone__screen {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--wt-surface);
+    border-radius: 42px;
+}
+
+/* Вырез с динамиком и камерой. Лежит ПОВЕРХ экрана, как на устройстве, а
+   строка состояния обтекает его слева и справа. */
 .wt-phone__notch {
     position: absolute;
-    top: 14px;
+    top: 0;
     left: 50%;
-    width: 76px;
-    height: 5px;
-    background: #334155;
-    border-radius: 999px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 42%;
+    height: 27px;
+    background: #0b1210;
+    border-radius: 0 0 18px 18px;
     transform: translateX(-50%);
+}
+
+.wt-phone__speaker {
+    width: 34px;
+    height: 4px;
+    background: #26332e;
+    border-radius: 999px;
+}
+
+.wt-phone__cam {
+    width: 8px;
+    height: 8px;
+    background: #16283a;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1.5px #2f4d6b;
 }
 
 .wt-phone__status {
     display: flex;
+    flex: 0 0 auto;
+    align-items: center;
     justify-content: space-between;
-    padding: 6px 14px 4px;
-    font-size: 10.5px;
+    height: 30px;
+    padding: 0 20px;
+    font-size: 11.5px;
     font-weight: 600;
-    color: #cbd5e1;
+    color: var(--wt-ink);
     font-variant-numeric: tabular-nums;
 }
 
-.wt-phone__screen {
+.wt-phone__app {
     display: flex;
     flex: 1 1 auto;
     min-height: 0;
-    overflow: hidden;
-    background: var(--wt-surface);
-    border-radius: 30px;
-}
-
-.wt-phone__home {
-    width: 106px;
-    height: 4px;
-    margin: 7px auto 0;
-    background: #334155;
-    border-radius: 999px;
 }
 
 /* Любой экран приложения: прокрутка своя, отступы одни на все. */
@@ -1079,34 +1024,39 @@
 .wt-sp--site { padding: 0; background: var(--wt-canvas); }
 .wt-sp--site .wt-sp__nav { margin: auto 0 0; }
 
-/* ── Помощник: барс, реплика, цель ──────────────────────────────────────── */
+/* ── Слева: помощник ──────────────────────────────────────────────────────
+   Колонка целиком, а не подпись сбоку от телефона. Текст крупнее, чем в
+   остальном портале (15.5px против 13): реплика барса — то, ради чего экран
+   открыт, её читают с расстояния и до действия, а не после. */
 
 .wt-helper {
     display: flex;
-    flex: 1 1 300px;
     flex-direction: column;
-    gap: 10px;
-    max-width: 420px;
-    padding: 14px;
+    gap: 14px;
+    align-items: center;
+    justify-self: end;
+    width: 100%;
+    max-width: 460px;
+    min-width: 0;
+    padding: clamp(14px, 1.6vw, 22px);
     background: var(--wt-surface);
     border: 1px solid var(--wt-line);
-    border-radius: 18px;
+    border-radius: 22px;
 }
-
-.wt-helper__say { display: flex; flex-direction: column; gap: 10px; }
 
 .wt-helper__leo { display: flex; justify-content: center; }
 
-.wt-leo { width: 128px; height: auto; }
+.wt-leo { width: clamp(120px, 11vw, 176px); height: auto; }
 
 .wt-bubble {
     position: relative;
-    padding: 11px 13px;
-    font-size: 13px;
-    line-height: 1.5;
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 15.5px;
+    line-height: 1.55;
     color: var(--wt-ink);
     background: var(--wt-line-soft);
-    border-radius: 14px;
+    border-radius: 16px;
 }
 
 .wt-bubble::before {
@@ -1114,8 +1064,8 @@
     position: absolute;
     top: -6px;
     left: 50%;
-    width: 12px;
-    height: 12px;
+    width: 13px;
+    height: 13px;
     background: inherit;
     border-radius: 3px;
     transform: translateX(-50%) rotate(45deg);
@@ -1123,8 +1073,8 @@
 
 .wt-bubble__who {
     display: block;
-    margin-bottom: 3px;
-    font-size: 10.5px;
+    margin-bottom: 4px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -1139,83 +1089,180 @@
 .wt-goal {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 9px 11px;
+    gap: 3px;
+    width: 100%;
+    padding: 11px 14px;
     background: var(--wt-surface);
     border: 1px dashed var(--wt-line);
-    border-radius: 12px;
+    border-radius: 14px;
 }
 
 .wt-goal span {
-    font-size: 10px;
+    font-size: 10.5px;
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--wt-mute);
 }
 
-.wt-goal b { font-size: 13px; font-weight: 600; }
-
-.wt-helper__foot {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
+.wt-goal b { font-size: 14.5px; font-weight: 600; line-height: 1.4; }
 
 .wt-hint-btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
+    gap: 7px;
+    padding: 10px 16px;
     font: inherit;
-    font-size: 12.5px;
+    font-size: 13.5px;
     font-weight: 600;
     color: var(--wt-accent);
     background: var(--wt-accent-soft);
     border: 0;
-    border-radius: 11px;
+    border-radius: 13px;
     cursor: pointer;
 }
 
 .wt-hint-btn:disabled { color: var(--wt-mute); background: var(--wt-line-soft); cursor: default; }
 
-.wt-counters { font-size: 11.5px; color: var(--wt-mute); font-variant-numeric: tabular-nums; }
+/* ── Справа: прогресс ─────────────────────────────────────────────────────
+   Доля, полоса и список шагов инструкции вместе: полоса отвечает «сколько
+   осталось», список — «что именно осталось». В своей колонке список помещается
+   целиком, поэтому прятать его под кнопку больше не нужно. */
 
-.wt-steps__toggle {
-    padding: 0;
-    font: inherit;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--wt-accent);
-    text-align: left;
-    background: none;
-    border: 0;
-    cursor: pointer;
+.wt-side {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    justify-self: start;
+    width: 100%;
+    max-width: 380px;
+    min-width: 0;
+    padding: clamp(14px, 1.6vw, 22px);
+    background: var(--wt-surface);
+    border: 1px solid var(--wt-line);
+    border-radius: 22px;
 }
+
+.wt-side__head { display: flex; flex-direction: column; gap: 2px; }
+
+.wt-side__head span {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--wt-mute);
+}
+
+.wt-side__head strong { font-size: 16px; font-weight: 650; line-height: 1.25; }
+
+.wt-side__progress { display: flex; flex-direction: column; gap: 8px; }
+
+.wt-side__percent { display: flex; align-items: baseline; gap: 2px; }
+.wt-side__percent b { font-size: 34px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; }
+.wt-side__percent i { font-size: 16px; font-style: normal; font-weight: 600; color: var(--wt-mute); }
+
+.wt-bar {
+    position: relative;
+    height: 8px;
+    overflow: hidden;
+    background: var(--wt-line-soft);
+    border-radius: 999px;
+}
+
+.wt-bar > i {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, var(--wt-accent), #7c86f5);
+    border-radius: 999px;
+    transition: width 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.wt-side__progress > span { font-size: 13px; font-weight: 600; color: var(--wt-ink-soft); }
 
 .wt-steps {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 7px;
     margin: 0;
-    padding-left: 18px;
-    font-size: 12px;
+    padding: 0;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.35;
     color: var(--wt-mute);
-    list-style: decimal;
+    list-style: none;
+}
+
+.wt-steps li { display: flex; align-items: flex-start; gap: 9px; }
+
+.wt-steps li i {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
+    font-style: normal;
+    font-weight: 700;
+    color: var(--wt-mute);
+    background: var(--wt-line-soft);
+    border-radius: 999px;
 }
 
 .wt-steps li.is-current { color: var(--wt-ink); font-weight: 600; }
-.wt-steps li.is-done { color: var(--wt-green); }
+.wt-steps li.is-current i { color: #fff; background: var(--wt-accent); }
+.wt-steps li.is-done { color: var(--wt-ink-soft); }
+.wt-steps li.is-done i { color: #fff; background: var(--wt-green); }
+
+.wt-side__foot {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid var(--wt-line-soft);
+}
+
+.wt-counters { font-size: 12.5px; color: var(--wt-mute); font-variant-numeric: tabular-nums; }
+
+.wt-side__buttons { display: flex; gap: 8px; }
+
+.wt-side__btn {
+    display: inline-flex;
+    flex: 1 1 auto;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--wt-ink-soft);
+    background: var(--wt-line-soft);
+    border: 0;
+    border-radius: 13px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.wt-side__btn:hover { background: #e5eaf2; color: var(--wt-ink); }
+.wt-side__btn--close { color: #fff; background: var(--wt-ink); }
+.wt-side__btn--close:hover { background: #1e293b; color: #fff; }
 
 /* ── Анимации барса ─────────────────────────────────────────────────────── */
 
 .wt-leo__tail { transform-origin: 86px 112px; animation: wt-tail 3.4s ease-in-out infinite; }
 .wt-leo__head { transform-origin: 60px 84px; }
-.wt-leo__mouth { transform-box: fill-box; }
+/* Рот открывается ОТ ЛИНИИ ГУБ вниз, поэтому origin — верх собственного бокса.
+   Раньше здесь стояло `transform-origin: 60px 80px` вместе с transform-box:
+   fill-box, а это две несовместимые системы координат: с fill-box отсчёт идёт
+   от угла бокса самого рта (он размером ~14×10), и точка 60;80 оказывалась
+   далеко за его пределами — рот на каждой анимации уезжал с морды. */
+.wt-leo__mouth {
+    transform-box: fill-box;
+    transform-origin: center top;
+}
+
 .wt-leo--speak .wt-leo__head { animation: wt-nod 2.4s ease-in-out infinite; }
-.wt-leo--speak .wt-leo__mouth { animation: wt-talk 0.62s ease-in-out infinite; transform-origin: 60px 80px; }
+.wt-leo--speak .wt-leo__mouth { animation: wt-talk 0.62s ease-in-out infinite; }
 .wt-leo--hint .wt-leo__paw { transform-origin: 92px 100px; animation: wt-wave 1.1s ease-in-out infinite; }
 .wt-leo--error .wt-leo__head { animation: wt-shake 0.42s ease-in-out 1; }
 .wt-leo--success .wt-leo__body { transform-origin: 60px 116px; animation: wt-hop 1.1s ease-in-out infinite; }
@@ -1279,55 +1326,114 @@
     }
 }
 
-/* ── Компактный режим: тренажёр внутри страницы, а не поверх неё ─────────── */
-
-.wt-root--compact .wt-phone { height: min(560px, calc(100vh - 260px)); }
-
 /* ── Узкий экран ──────────────────────────────────────────────────────────
-   На телефоне тренажёр перестраивается, а не сжимается:
+   Три колонки складываются в одну, и порядок меняется: сверху прогресс (он
+   короткий и отвечает «где я»), затем помощник, и только потом телефон. Так
+   первым экраном человек читает, что нужно сделать, а не разглядывает телефон,
+   под которым где-то внизу спрятано объяснение.
 
-   ПОМОЩНИК ВЫШЕ ТЕЛЕФОНА (order: -1). Учебный экран высокий, и помощник под
-   ним оказывался за пределами видимого: человек видел телефон, не видел
-   реплики и не понимал, что от него хотят.
-
-   БАРС РЯДОМ С РЕПЛИКОЙ, А НЕ НАД НЕЙ. Портрет в 128 пикселей над текстом
-   съедал треть первого экрана; в строке он занимает 76 и остаётся узнаваемым.
-
-   ТЕЛЕФОН НИЖЕ. Высота считается от окна за вычетом шапки и помощника —
-   иначе рамка не помещается целиком ни на одном экране. */
-@media (max-width: 899px) {
-    .wt-helper {
-        order: -1;
-        max-width: none;
+   Барс на узком экране встаёт РЯДОМ с репликой: портрет в 128 пикселей над
+   текстом съедал треть первого экрана. */
+@media (max-width: 1023px) {
+    .wt-root {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
         padding: 12px;
     }
 
-    .wt-helper__say {
-        flex-direction: row;
-        align-items: flex-start;
-        gap: 10px;
+    /* Ни один блок не сжимается: во flex-колонке с ограниченной высотой карточки
+       ужимались ниже своего содержимого, и телефон наезжал на реплику барса.
+       Высоту здесь диктует содержимое, а лишнее забирает прокрутка колонки. */
+    .wt-root > * { flex: 0 0 auto; }
+
+    /* В колонке карточки тянутся на всю ширину: justify-self — свойство сетки,
+       во flex-колонке оно не работает, и карточки схлопывались по содержимому. */
+    .wt-helper,
+    .wt-side {
+        align-self: stretch;
+        width: 100%;
+        max-width: 560px;
+        margin: 0 auto;
+        padding: 12px;
     }
 
-    .wt-helper__leo { flex: 0 0 auto; }
-    .wt-leo { width: 76px; }
+    /* Сцена по содержимому: с height 100% она забирала весь экран и центрировала
+       телефон внутри себя — между помощником и телефоном зияла пустота в пол-окна. */
+    .wt-stage { height: auto; }
 
-    .wt-bubble { flex: 1 1 auto; min-width: 0; }
+    .wt-side { order: -2; gap: 10px; }
+    .wt-helper { order: -1; }
 
-    /* Хвостик пузыря переезжает влево — он показывает на барса, а барс теперь
-       сбоку, а не сверху. */
+    /* Прогресс сжимается в строку: доля и полоса рядом, список шагов скрыт —
+       на телефоне это восемь строк, которые отодвигают всё остальное. */
+    .wt-side__progress {
+        flex-direction: row;
+        align-items: center;
+        gap: 12px;
+    }
+
+    .wt-side__percent b { font-size: 24px; }
+    .wt-side__progress .wt-bar { flex: 1 1 auto; }
+    .wt-side__progress > span { flex: 0 0 auto; font-size: 12.5px; }
+    .wt-steps { display: none; }
+    .wt-side__head strong { font-size: 14.5px; }
+    .wt-side__foot { flex-direction: row; align-items: center; justify-content: space-between; }
+
+    .wt-helper {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-areas:
+            'leo bubble'
+            'goal goal'
+            'hint hint';
+        gap: 10px;
+        align-items: start;
+    }
+
+    .wt-helper__leo { grid-area: leo; }
+    .wt-leo { width: 84px; }
+    .wt-bubble { grid-area: bubble; font-size: 14px; }
+    .wt-goal { grid-area: goal; }
+    .wt-hint-btn { grid-area: hint; justify-content: center; }
+
+    /* Хвостик пузыря показывает на барса, а он теперь сбоку. */
     .wt-bubble::before {
-        top: 14px;
+        top: 16px;
         left: -5px;
         transform: rotate(45deg);
     }
 
+    /* Телефон во всю доступную ширину, а не «сколько осталось по высоте».
+       Пробовал вписать всё в один экран — не сходится: помощник и прогресс на
+       390 пикселях занимают около 350, и корпусу остаётся высота, при которой
+       ширина экрана падает до ~200. Внутренние экраны от этого не масштабируются
+       (это настоящая вёрстка, а не картинка) и становятся нечитаемыми. Поэтому
+       страница честно прокручивается: сверху — что делать, ниже — где делать. */
     .wt-phone {
-        width: 100%;
-        max-width: 340px;
-        height: min(560px, calc(100vh - 300px));
-        min-height: 400px;
+        width: min(100%, 360px);
+        height: auto;
+        min-height: 380px;
     }
 
-    .wt-top { padding: 10px 12px; }
-    .wt-top__title strong { font-size: 14px; }
+    /* Помощник на узком экране компактнее: он объясняет шаг, а не занимает
+       собой первый экран. Длинная реплика (самая длинная — вступление) не
+       растягивает карточку, а прокручивается внутри пузыря. */
+    .wt-helper { gap: 8px; }
+    .wt-leo { width: 72px; }
+
+    .wt-bubble {
+        max-height: 8.4em;
+        padding: 11px 13px;
+        overflow-y: auto;
+        font-size: 13.5px;
+        line-height: 1.45;
+    }
+
+    .wt-goal { padding: 8px 11px; }
+    .wt-goal b { font-size: 13.5px; }
+    .wt-hint-btn { padding: 8px 12px; font-size: 12.5px; }
+    /* Подзаголовок в шапке прогресса — то же, что и название, только длиннее. */
+    .wt-side__head span { display: none; }
 }

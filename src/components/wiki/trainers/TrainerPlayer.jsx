@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { motion, useReducedMotion } from 'framer-motion';
 import { HelpCircle, RotateCcw, X } from 'lucide-react';
 
-import { APPLE_FONT, IOS_MODAL_MOTION, IOS_MODAL_MOTION_REDUCED } from '../../ui/ios';
+import { APPLE_FONT } from '../../ui/ios';
 import SnowLeopard from './SnowLeopard';
 import {
     currentStep, expectedTap, isFinished, progressPercent, restart, speech, stageCount,
@@ -74,14 +74,13 @@ const HOURS = () => {
     return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 };
 
-export function TrainerPlayer({ scenario, onClose = null, compact = false }) {
+export function TrainerPlayer({ scenario, onClose = null }) {
     const [run, setRun] = useState(() => startRun(scenario));
-    const [showSteps, setShowSteps] = useState(false);
     const phoneRef = useRef(null);
     const stages = useMemo(() => stageCount(scenario), [scenario]);
 
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
-    useEffect(() => { setRun(startRun(scenario)); setShowSteps(false); }, [scenario]);
+    useEffect(() => { setRun(startRun(scenario)); }, [scenario]);
 
     const step = currentStep(run);
     const target = expectedTap(run);
@@ -116,138 +115,154 @@ export function TrainerPlayer({ scenario, onClose = null, compact = false }) {
     const purpose = scenario.egovPurpose ? scenario.egovPurpose(step.key) : 'docs';
 
     return (
-        <div className={`wt-root${compact ? ' wt-root--compact' : ''}`} style={{ fontFamily: APPLE_FONT }}>
-            {/* ── Прогресс сверху ────────────────────────────────────────────
-                Полоса и «шаг N из M» вместе: полоса отвечает «сколько осталось»,
-                число — «где я по инструкции». Одного из двух не хватает: полоса
-                без числа не соотносится с текстом статьи, число без полосы не
-                показывает, что до конца недалеко. */}
-            <header className="wt-top">
-                <div className="wt-top__title">
+        <div className="wt-root" style={{ fontFamily: APPLE_FONT }}>
+            {/* ── СЛЕВА: помощник ────────────────────────────────────────────
+                Барс и его реплика занимают целую колонку, и текст здесь крупнее,
+                чем в остальном портале: это не подпись к картинке, а то, ради
+                чего экран открыт, — человек читает объяснение и идёт делать. */}
+            <aside className="wt-helper">
+                <div className="wt-helper__leo">
+                    <SnowLeopard state={finished ? 'success' : (MOOD[said.tone] || 'speak')} />
+                </div>
+                <div className={`wt-bubble wt-bubble--${said.tone}`}>
+                    <span className="wt-bubble__who">Барс</span>
+                    {/* aria-live: реплика меняется без перехода фокуса, и без
+                        объявления человек со скринридером не узнаёт, что нажал
+                        не туда. */}
+                    <p aria-live="polite">{said.text}</p>
+                </div>
+
+                {!finished && (
+                    <div className="wt-goal">
+                        <span>Сейчас</span>
+                        <b>{stepGoal(run)}</b>
+                    </div>
+                )}
+
+                <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
+                    <HelpCircle size={15} /> Подсказка
+                </button>
+            </aside>
+
+            {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
+                Высота считается от окна, ширина — от пропорций корпуса, поэтому
+                на большом экране телефон крупный, а на маленьком не вылезает. */}
+            <div className="wt-stage">
+                <div className="wt-phone" ref={phoneRef} data-screen={step.screen}>
+                    {/* Боковые клавиши и вырез — корпус должен читаться телефоном,
+                        а не прямоугольником: учебный экран тем и работает, что
+                        человек узнаёт в нём своё устройство. */}
+                    <span className="wt-phone__side wt-phone__side--mute" aria-hidden="true" />
+                    <span className="wt-phone__side wt-phone__side--vol-up" aria-hidden="true" />
+                    <span className="wt-phone__side wt-phone__side--vol-down" aria-hidden="true" />
+                    <span className="wt-phone__side wt-phone__side--power" aria-hidden="true" />
+
+                    <div className="wt-phone__screen">
+                        <div className="wt-phone__notch" aria-hidden="true">
+                            <i className="wt-phone__speaker" />
+                            <i className="wt-phone__cam" />
+                        </div>
+                        <div className="wt-phone__status" aria-hidden="true">
+                            <span>{HOURS()}</span>
+                            <span>LTE ▮</span>
+                        </div>
+                        <div className="wt-phone__app">
+                            {Screen ? (
+                                <Screen
+                                    /* key по шагу: экран кода встречается дважды, и без
+                                       пересоздания во второй сессии остались бы цифры,
+                                       набранные в первой. */
+                                    key={step.key}
+                                    scenario={scenario}
+                                    world={run.world}
+                                    tap={doTap}
+                                    toggle={doToggle}
+                                    target={target}
+                                    purpose={purpose}
+                                    period={run.world.period?.label}
+                                    onRestart={doRestart}
+                                />
+                            ) : (
+                                <div className="wt-screen"><p>Экран «{step.screen}» не найден.</p></div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* ── СПРАВА: прогресс ─────────────────────────────────────────
+                Полоса, доля и список шагов инструкции вместе: полоса отвечает
+                «сколько осталось», список — «что именно осталось». В отдельной
+                колонке список помещается целиком, поэтому прятать его больше
+                не нужно. */}
+            <aside className="wt-side">
+                <header className="wt-side__head">
                     <span>{scenario.subtitle}</span>
                     <strong>{scenario.title}</strong>
-                </div>
-                <div className="wt-top__progress">
+                </header>
+
+                <div className="wt-side__progress">
+                    <div className="wt-side__percent">
+                        <b>{percent}</b><i>%</i>
+                    </div>
                     <div className="wt-bar" role="progressbar" aria-valuenow={percent}
                         aria-valuemin={0} aria-valuemax={100}
                         aria-label={`Прогресс тренажёра: ${percent}%`}>
                         <i style={{ width: `${percent}%` }} />
                     </div>
-                    <b>{finished ? 'Готово' : `Шаг ${Math.max(1, step.stage)} из ${stages}`}</b>
+                    <span>{finished ? 'Урок пройден' : `Шаг ${Math.max(1, step.stage)} из ${stages}`}</span>
                 </div>
-                <div className="wt-top__actions">
-                    <button type="button" className="wt-top__btn" onClick={doRestart}>
-                        <RotateCcw size={14} /> Заново
-                    </button>
-                    {onClose && (
-                        <button type="button" className="wt-top__btn wt-top__btn--icon"
-                            onClick={onClose} aria-label="Закрыть тренажёр">
-                            <X size={16} />
-                        </button>
-                    )}
-                </div>
-            </header>
 
-            <div className="wt-stage">
-                {/* ── Телефон ─────────────────────────────────────────────── */}
-                <div className="wt-phone" ref={phoneRef} data-screen={step.screen}>
-                    <div className="wt-phone__notch" aria-hidden="true" />
-                    <div className="wt-phone__status" aria-hidden="true">
-                        <span>{HOURS()}</span>
-                        <span>LTE ▮</span>
-                    </div>
-                    <div className="wt-phone__screen">
-                        {Screen ? (
-                            <Screen
-                                /* key по шагу: экран кода встречается дважды, и без
-                                   пересоздания во второй сессии остались бы цифры,
-                                   набранные в первой. */
-                                key={step.key}
-                                scenario={scenario}
-                                world={run.world}
-                                tap={doTap}
-                                toggle={doToggle}
-                                target={target}
-                                purpose={purpose}
-                                period={run.world.period?.label}
-                                onRestart={doRestart}
-                            />
-                        ) : (
-                            <div className="wt-screen"><p>Экран «{step.screen}» не найден.</p></div>
+                <ol className="wt-steps">
+                    {(scenario.checklist || []).map((item, index) => {
+                        const number = index + 1;
+                        const state = finished || step.stage > number ? 'is-done'
+                            : (step.stage === number ? 'is-current' : '');
+                        return (
+                            <li key={`${index}-${item}`} className={state}>
+                                <i aria-hidden="true">{finished || step.stage > number ? '✓' : number}</i>
+                                {item}
+                            </li>
+                        );
+                    })}
+                </ol>
+
+                <div className="wt-side__foot">
+                    <span className="wt-counters">
+                        Промахов: {run.errors} · подсказок: {run.hints}
+                    </span>
+                    <div className="wt-side__buttons">
+                        <button type="button" className="wt-side__btn" onClick={doRestart}>
+                            <RotateCcw size={14} /> Заново
+                        </button>
+                        {onClose && (
+                            <button type="button" className="wt-side__btn wt-side__btn--close"
+                                onClick={onClose}>
+                                <X size={15} /> Закрыть
+                            </button>
                         )}
                     </div>
-                    <div className="wt-phone__home" aria-hidden="true" />
                 </div>
-
-                {/* ── Помощник ────────────────────────────────────────────── */}
-                <aside className="wt-helper">
-                    {/* Барс и его реплика — одна группа: на узком экране они
-                        встают в строку (барс слева, реплика справа), и это не
-                        косметика. На телефоне помощник обязан быть ВЫШЕ учебного
-                        экрана: инструкцию читают до действия, а не после того,
-                        как пролистали телефон до конца. */}
-                    <div className="wt-helper__say">
-                        <div className="wt-helper__leo">
-                            <SnowLeopard state={finished ? 'success' : (MOOD[said.tone] || 'speak')} />
-                        </div>
-                        <div className={`wt-bubble wt-bubble--${said.tone}`}>
-                            <span className="wt-bubble__who">Барс</span>
-                            {/* aria-live: реплика меняется без перехода фокуса, и без
-                                объявления человек со скринридером не узнаёт, что
-                                нажал не туда. */}
-                            <p aria-live="polite">{said.text}</p>
-                        </div>
-                    </div>
-
-                    {!finished && (
-                        <div className="wt-goal">
-                            <span>Сейчас</span>
-                            <b>{stepGoal(run)}</b>
-                        </div>
-                    )}
-
-                    <div className="wt-helper__foot">
-                        <button type="button" className="wt-hint-btn" onClick={doHint}
-                            disabled={finished}>
-                            <HelpCircle size={14} /> Подсказка
-                        </button>
-                        <span className="wt-counters">
-                            Промахов: {run.errors} · подсказок: {run.hints}
-                        </span>
-                    </div>
-
-                    {/* Полный список шагов спрятан: развёрнутым он превращается в
-                        вечную колонку текста рядом с экраном, а нужен один раз —
-                        когда хочется понять, сколько ещё впереди. */}
-                    <button type="button" className="wt-steps__toggle"
-                        onClick={() => setShowSteps((v) => !v)} aria-expanded={showSteps}>
-                        {showSteps ? 'Скрыть шаги инструкции' : `Все шаги инструкции (${stages})`}
-                    </button>
-                    {showSteps && (
-                        <ol className="wt-steps">
-                            {(scenario.checklist || []).map((item, index) => {
-                                const number = index + 1;
-                                const state = finished || step.stage > number ? 'is-done'
-                                    : (step.stage === number ? 'is-current' : '');
-                                return <li key={`${index}-${item}`} className={state}>{item}</li>;
-                            })}
-                        </ol>
-                    )}
-                </aside>
-            </div>
+            </aside>
         </div>
     );
 }
 
 /* Тренажёр во весь экран.
  *
- * Портал в document.body, а не div рядом со статьёй: телефон и барс не должны
- * зависеть от ширины колонки статьи, а внутри .wiki-prose у текста свои отступы
- * и типографика, которые тут же начали бы красить учебные экраны.
+ * Не модалка. Модальное окно с затемнением и карточкой годится для формы на
+ * полтора поля, а здесь на экране одновременно живут телефон, помощник и
+ * прогресс — карточка внутри окна отнимала бы у них высоту дважды (её поля
+ * плюс поля страницы) и заставляла бы прокручивать то, что должно помещаться
+ * целиком. Поэтому тренажёр занимает окно полностью и ведёт себя как отдельный
+ * экран портала, а не как всплывающее окно поверх статьи.
+ *
+ * Портал в document.body остаётся: телефон не должен зависеть от ширины колонки
+ * статьи, а внутри .wiki-prose у текста своя типографика, которая тут же начала
+ * бы красить учебные экраны.
  */
 export default function TrainerModal({ scenario, onClose }) {
     const reduceMotion = useReducedMotion();
-    const motions = reduceMotion ? IOS_MODAL_MOTION_REDUCED : IOS_MODAL_MOTION;
 
     // Esc закрывает. Слушатель на документе, потому что фокус в момент нажатия
     // стоит на кнопке внутри учебного телефона.
@@ -257,16 +272,29 @@ export default function TrainerModal({ scenario, onClose }) {
         return () => document.removeEventListener('keydown', onKey);
     }, [onClose]);
 
+    /* Страница под тренажёром не прокручивается: экран занят целиком, и вторая
+       полоса прокрутки за ним — это прокрутка «не того», как в режиме чтения во
+       весь экран у статьи. */
+    useEffect(() => {
+        const previous = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => { document.body.style.overflow = previous; };
+    }, []);
+
     if (!scenario) return null;
 
     return createPortal(
-        <div className="wt-overlay" role="dialog" aria-modal="true" aria-label={scenario.title}>
-            <motion.div className="wt-overlay__backdrop" {...motions.backdrop}
-                onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }} />
-            <motion.div className="wt-overlay__panel" {...motions.panel}>
-                <TrainerPlayer scenario={scenario} onClose={onClose} />
-            </motion.div>
-        </div>,
+        <motion.div
+            className="wt-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-label={scenario.title}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }}
+        >
+            <TrainerPlayer scenario={scenario} onClose={onClose} />
+        </motion.div>,
         document.body,
     );
 }
