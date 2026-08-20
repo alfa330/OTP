@@ -14,10 +14,13 @@ import {
     formatClock,
     formatDuration,
     formatInt,
+    formatMinutes,
     readWallboardMetric,
     useSzovChatWallboardSnapshot,
     useSzovWallboardSnapshot,
+    wallboardDirection,
     wallboardStaleNotice,
+    WALLBOARD_DIRECTION_LIST,
 } from './szovWallboardShared';
 import SzovChatWallboardBody from './SzovChatWallboard';
 import { IosDateRangeCalendar, isoDate, rangeLabel } from '../ui/DateRangePicker';
@@ -26,7 +29,7 @@ import { Grid, KeyTile, Section, SegmentedSwitch, StatTile } from './SzovWallboa
 /*
  * «Табло СЗоВ» — онлайн-мониторинг входящей линии (задача #108) и чатов.
  *
- * Направлений два, переключатель в шапке: «Основа» (входящая линия Oktell, весь код этого
+ * Направлений два, переключатель в шапке: «Линия» (входящая линия Oktell, весь код этого
  * файла) и «Чат» (Chat2Desk, SzovChatWallboard.jsx). Общие у них шапка, полноэкранный режим
  * и механика опроса; всё остальное у каждого своё, потому что и источники разные.
  *
@@ -132,6 +135,29 @@ const BROADCAST_MODES = [
 
 const modeLabel = (key) => (BROADCAST_MODES.find((mode) => mode.key === key) || BROADCAST_MODES[0]).label;
 
+/*
+ * Что считается отклонением — своё у каждого направления, и это ровно то, что подсвечено на
+ * табло. Текст обязателен: режим «только при отклонениях» без него — обещание без содержания,
+ * и человек не знает, чего ждать от тишины.
+ */
+const BROADCAST_DEVIATION_HINT = {
+    osnova: () => (
+        <>
+            Отклонением считаем то же, что подсвечено на табло: AR вне коридора{' '}
+            {AR_MIN_PERCENT}–{AR_MAX_PERCENT}%, SL ниже {Math.round(SL_GOOD_RATIO * 100)}%
+            {' '}или Oktell не отвечает и цифры на табло замерли.
+        </>
+    ),
+    chat: (targetSeconds) => (
+        <>
+            Отклонением считаем то же, что подсвечено на табло: ответ внутри чата дольше цели
+            {' '}{formatMinutes(targetSeconds || 120)} или Chat2Desk не отвечает и цифры на
+            табло замерли. Ночные часы с единичными обращениями в тревогу не идут: среднее
+            по паре чатов — это случай, а не показатель.
+        </>
+    ),
+};
+
 const ModeSwitch = (props) => <SegmentedSwitch options={BROADCAST_MODES} {...props} />;
 
 /** Строка истории «кто менял» человеческим языком. */
@@ -151,7 +177,8 @@ const historyLine = (settings) => {
  * Настройка отбивки показателей в Telegram. Живёт в модалке, а не на самом табло:
  * табло смотрят, а не настраивают, и форма поверх экрана, который висит на стене, — лишний шум.
  */
-const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const BroadcastModal = ({ open, onClose, direction, directionLabel, deviationHint,
+                         apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [state, setState] = useState(null);
     const [busy, setBusy] = useState(false);
     const [draftChat, setDraftChat] = useState('');
@@ -169,16 +196,19 @@ const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, show
         const build = headersRef.current;
         const headers = build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' };
         if (body) headers['Content-Type'] = 'application/json';
-        const response = await fetch(`${apiBaseUrl}/api/szov_wallboard/broadcast`, {
-            method,
-            headers,
-            credentials: 'include',
-            body: body ? JSON.stringify(body) : undefined,
-        });
+        // Направление — в адресе: список получателей, расписание и история у «Линии» и
+        // «Чата» свои, а эндпоинт один.
+        const response = await fetch(
+            `${apiBaseUrl}/api/szov_wallboard/broadcast?direction=${encodeURIComponent(direction)}`, {
+                method,
+                headers,
+                credentials: 'include',
+                body: body ? JSON.stringify(body) : undefined,
+            });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
         return data;
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, direction]);
 
     // Список тянем при каждом открытии: бота могли добавить в новую группу, пока модалка закрыта.
     useEffect(() => {
@@ -214,7 +244,7 @@ const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, show
                 method: 'POST',
                 headers,
                 credentials: 'include',
-                body: JSON.stringify({ chat_id: chatId }),
+                body: JSON.stringify({ chat_id: chatId, direction }),
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(data?.error || `Сервер ответил ${response.status}`);
@@ -254,7 +284,7 @@ const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, show
             open={open}
             onClose={onClose}
             title="Отбивка показателей"
-            subtitle={`Расписание ${sendTimes.join(', ') || '—'} · Алматы`}
+            subtitle={`${directionLabel} · расписание ${sendTimes.join(', ') || '—'} · Алматы`}
             maxWidth="max-w-3xl"
             footer={<button type="button" className={iosBtnSecondary} onClick={onClose}>Готово</button>}
         >
@@ -357,9 +387,7 @@ const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, show
                     </div>
 
                     <div className="px-1 text-[12.5px] leading-relaxed text-slate-500">
-                        Отклонением считаем то же, что подсвечено на табло: AR вне коридора{' '}
-                        {AR_MIN_PERCENT}–{AR_MAX_PERCENT}%, SL ниже {Math.round(SL_GOOD_RATIO * 100)}%
-                        {' '}или Oktell не отвечает и цифры на табло замерли.
+                        {deviationHint}
                     </div>
 
                     <div>
@@ -390,6 +418,43 @@ const BroadcastModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, show
                 </div>
             )}
         </IosModal>
+    );
+};
+
+/*
+ * Кнопка «Отбивка» вместе со своей модалкой — одна на оба направления. Различается только
+ * `direction`, который уезжает в запросы: получатели, расписание и история у направлений
+ * свои, а форма, права и поведение общие. Копировать эти двадцать строк во второе
+ * направление нельзя — разойдутся ровно там, где однажды починили одно.
+ *
+ * Модалка идёт через портал, как и полноэкранный режим: она не должна зависеть от
+ * вертикальных отступов шапки, а шапка рисуется во всех состояниях экрана.
+ */
+const BroadcastControls = ({ direction, targetSeconds, apiBaseUrl, withAccessTokenHeader,
+                            showToast }) => {
+    const [broadcastOpen, setBroadcastOpen] = useState(false);
+    const label = wallboardDirection(direction).label;
+    const hint = BROADCAST_DEVIATION_HINT[direction] || BROADCAST_DEVIATION_HINT.osnova;
+    return (
+        <>
+            <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
+                <FaIcon className="fas fa-paper-plane"></FaIcon>
+                Отбивка
+            </button>
+            {createPortal(
+                <BroadcastModal
+                    open={broadcastOpen}
+                    onClose={() => setBroadcastOpen(false)}
+                    direction={direction}
+                    directionLabel={label}
+                    deviationHint={hint(targetSeconds)}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />,
+                document.body,
+            )}
+        </>
     );
 };
 
@@ -452,15 +517,15 @@ const WallboardBody = ({ snapshot, scale }) => {
 };
 
 /*
- * Направления табло. «Основа» — входящая линия Oktell, «Чат» — Chat2Desk: разные источники,
+ * Направления табло. «Линия» — входящая линия Oktell, «Чат» — Chat2Desk: разные источники,
  * разный темп опроса и разный набор показателей, поэтому каждое направление живёт своим
  * компонентом со своим снимком. Рисуется всегда только выбранное — иначе закрытое направление
  * продолжало бы опрашивать свой источник впустую (а квота Chat2Desk общая на компанию).
+ *
+ * Подписи и подсказки берём из общего каталога, а не описываем здесь второй раз: тот же
+ * каталог питает виджет, и разъехавшиеся названия одного направления — готовая путаница.
  */
-const DIRECTIONS = [
-    { key: 'osnova', label: 'Основа', hint: 'Входящая линия: Oktell' },
-    { key: 'chat', label: 'Чат', hint: 'Чаты: Chat2Desk' },
-];
+const DIRECTIONS = WALLBOARD_DIRECTION_LIST;
 
 const directionStorageKey = (userId) => `otp:szov-wallboard-direction${userId ? `:${userId}` : ''}`;
 
@@ -479,14 +544,14 @@ const writeStoredDirection = (userId, direction) => {
     try {
         window.localStorage.setItem(directionStorageKey(userId), direction);
     } catch (error) {
-        // Выбор направления — предпочтение браузера: не сохранилось, откроется «Основа».
+        // Выбор направления — предпочтение браузера: не сохранилось, откроется «Линия».
     }
 };
 
 /*
  * Шапка у обоих направлений одна: заголовок, переключатель, пометка о замерших данных, кнопки.
- * Различаются только подпись под заголовком и кнопки, которые есть лишь у «Основы» (отбивка и
- * виджет собраны по показателям линии).
+ * Различаются только подпись под заголовком и набор кнопок в `children`: у «Линии» это
+ * отбивка, у «Чата» — отбивка и выгрузка в Excel.
  */
 const WallboardHeader = ({
     subtitle, direction, onDirectionChange, staleNotice, loading, onRefresh, onFullscreen,
@@ -556,7 +621,7 @@ const WallboardPlaceholder = ({ header, message, tone = 'muted' }) => (
     </div>
 );
 
-/** Направление «Основа»: входящая линия Oktell. */
+/** Направление «Линия»: входящая линия Oktell. */
 const LineWallboard = ({
     apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast, widgetOpen, onToggleWidget,
     direction, onDirectionChange,
@@ -564,7 +629,6 @@ const LineWallboard = ({
     // Снимок и опрос общие с виджетом: один запрос к Oktell на оба экрана, одни цифры в обоих.
     const { snapshot, error, loading, refresh } = useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
-    const [broadcastOpen, setBroadcastOpen] = useState(false);
 
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error), [error, snapshot]);
 
@@ -582,44 +646,29 @@ const LineWallboard = ({
             onToggleWidget={onToggleWidget}
         >
             {canManageBroadcast ? (
-                <button type="button" className={iosBtnGhost} onClick={() => setBroadcastOpen(true)}>
-                    <FaIcon className="fas fa-paper-plane"></FaIcon>
-                    Отбивка
-                </button>
+                <BroadcastControls
+                    direction={direction}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />
             ) : null}
         </WallboardHeader>
     );
 
-    /* Через портал, как и полноэкранный режим: модалка не должна зависеть от вертикальных
-       отступов шапки, а шапка рисуется во всех трёх состояниях экрана. */
-    const broadcastModal = canManageBroadcast ? createPortal(
-        <BroadcastModal
-            open={broadcastOpen}
-            onClose={() => setBroadcastOpen(false)}
-            apiBaseUrl={apiBaseUrl}
-            withAccessTokenHeader={withAccessTokenHeader}
-            showToast={showToast}
-        />,
-        document.body,
-    ) : null;
-
     if (!snapshot) {
         return (
-            <>
-                <WallboardPlaceholder
-                    header={header}
-                    message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
-                    tone={loading ? 'muted' : 'error'}
-                />
-                {broadcastModal}
-            </>
+            <WallboardPlaceholder
+                header={header}
+                message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
+                tone={loading ? 'muted' : 'error'}
+            />
         );
     }
 
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
-            {broadcastModal}
             <WallboardBody snapshot={snapshot} scale={1} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
@@ -794,8 +843,8 @@ const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToast, snap
 };
 
 /** Направление «Чат»: Chat2Desk. */
-const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction, onDirectionChange,
-                        widgetOpen, onToggleWidget }) => {
+const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast,
+                        direction, onDirectionChange, widgetOpen, onToggleWidget }) => {
     const { snapshot, error, loading, refresh } = useSzovChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
 
@@ -814,6 +863,18 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, direction
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
         >
+            {/* Отбивка настраивается и без снимка: получатели и расписание живут на сервере,
+                а цифры для сообщения он берёт сам. Цель времени ответа передаём из снимка,
+                когда он есть, — иначе подсказка о норме назвала бы значение по умолчанию. */}
+            {canManageBroadcast ? (
+                <BroadcastControls
+                    direction={direction}
+                    targetSeconds={snapshot?.target_seconds}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />
+            ) : null}
             {/* Пока снимка нет, выгружать нечего: пикер и кнопка появляются вместе с цифрами. */}
             {snapshot ? (
                 <ChatExportControls
@@ -875,6 +936,7 @@ export default function SzovWallboardView(props) {
                 apiBaseUrl={apiBaseUrl}
                 withAccessTokenHeader={withAccessTokenHeader}
                 showToast={showToast}
+                canManageBroadcast={canManageBroadcast}
                 direction={direction}
                 onDirectionChange={changeDirection}
                 widgetOpen={widgetOpen}

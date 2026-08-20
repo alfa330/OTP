@@ -1228,7 +1228,7 @@ class SzovBroadcastTests(unittest.TestCase):
             '_szov_format_age_ru',
             '_szov_broadcast_stale_note', '_szov_broadcast_deviations',
             '_szov_broadcast_notes', '_szov_broadcast_text',
-            '_szov_broadcast_send_times',
+            '_szov_broadcast_parse_times', '_szov_broadcast_send_times',
         }, ns)
         return ns
 
@@ -1474,9 +1474,25 @@ class SzovBroadcastWiringTests(unittest.TestCase):
             self.assertIn(method, self.db, method)
 
     def test_one_chat_is_one_row(self):
-        """Дубль получателя = две отбивки в один чат."""
-        self.assertIn("chat_id BIGINT PRIMARY KEY", self.db)
-        self.assertIn("ON CONFLICT (chat_id) DO UPDATE SET", self.db)
+        """Дубль получателя = две отбивки в один чат.
+
+        Ключ составной: направлений два, и одна группа вправе получать обе отбивки — но
+        каждую по одному разу."""
+        self.assertIn("PRIMARY KEY (direction, chat_id)", self.db)
+        self.assertIn("ON CONFLICT (direction, chat_id) DO UPDATE SET", self.db)
+
+    def test_direction_is_a_second_key_and_migrates_the_live_table(self):
+        """Боевая таблица заводилась с ключом из одного chat_id — перевод обязан быть в схеме,
+        иначе ON CONFLICT (direction, chat_id) упадёт на первом сохранении."""
+        self.assertIn("ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova'",
+                      self.db)
+        self.assertIn("ADD PRIMARY KEY (direction, chat_id)", self.db)
+        self.assertIn("CHECK (direction IN ('osnova', 'chat'))", self.db)
+        # Под SAVEPOINT: весь _init_db — одна транзакция, и упавшая смена ключа откатила бы
+        # инициализацию всей схемы, то есть уронила бы приложение ради одной таблицы.
+        self.assertIn('cursor.execute("SAVEPOINT sp_szov_broadcast_direction")', self.db)
+        self.assertIn('cursor.execute("ROLLBACK TO SAVEPOINT sp_szov_broadcast_direction")',
+                      self.db)
 
     def test_single_chat_setting_is_migrated_exactly_once(self):
         """Переезд с singleton на список: удалённый получатель не должен воскресать
@@ -1502,7 +1518,7 @@ class SzovBroadcastWiringTests(unittest.TestCase):
 
     def test_preview_never_sends_anything(self):
         """Предпросмотр нужен, чтобы проверить шрифт и вид, не тревожа рабочий чат."""
-        pattern = "def api_szov_wallboard_broadcast_preview.*?(?=@app\.route)"
+        pattern = r"def api_szov_wallboard_broadcast_preview.*?(?=@app\.route)"
         block = re.search(pattern, self.api, flags=re.DOTALL).group(0)
         self.assertNotIn("send_media_group", block)
         self.assertNotIn("send_message", block)
@@ -1514,13 +1530,26 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("id=f'szov_wallboard_broadcast_{_hour:02d}{_minute:02d}'", self.api)
         self.assertIn("timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)", self.api)
 
+    RUN_JOB_RE = r"async def _szov_broadcast_run_job\(.*?(?=\nasync def szov_broadcast_job)"
+
     def test_scheduled_send_collects_once_for_all_recipients(self):
-        """Прокси Oktell низкоконкурентный: сбор данных один на всех, отправка — по чатам."""
-        block = re.search(r"async def szov_broadcast_job\(\).*?(?=\n# ===)", self.api,
-                          flags=re.DOTALL).group(0)
-        self.assertEqual(block.count("_szov_broadcast_prepare("), 1)
+        """Сбор данных один на всех, отправка — по чатам: прокси Oktell низкоконкурентный, а
+        квота Chat2Desk общая на компанию. Обход у направлений ОДИН — копии быть не должно."""
+        block = re.search(self.RUN_JOB_RE, self.api, flags=re.DOTALL).group(0)
+        self.assertEqual(block.count("await prepare()"), 1)
         self.assertIn("for chat in targets:", block)
         self.assertIn("await _szov_broadcast_deliver(int(chat['chat_id']), text, media)", block)
+        self.assertEqual(self.api.count("for chat in targets:"), 1)
+
+    def test_both_directions_are_scheduled_from_their_own_times(self):
+        """У чатов своя джоба и своё расписание: источник другой, а получателей может не быть
+        вовсе — тогда джоба выходит сразу и Chat2Desk не дёргает."""
+        for job in ("async def szov_broadcast_job():", "async def szov_chat_broadcast_job():"):
+            self.assertIn(job, self.api, job)
+        self.assertIn("prepare=_szov_broadcast_prepare", self.api)
+        self.assertIn("prepare=_szov_chat_broadcast_prepare", self.api)
+        self.assertIn("for _hour, _minute in _szov_chat_broadcast_send_times():", self.api)
+        self.assertIn("id=f'szov_chat_wallboard_broadcast_{_hour:02d}{_minute:02d}'", self.api)
 
     def test_one_dead_chat_does_not_stop_the_rest(self):
         block = re.search(r"for chat in targets:.*?(?=\n    except Exception)", self.api,
@@ -1528,18 +1557,22 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("не получил сообщение", block)
 
     def test_deviation_mode_is_silent_while_everything_is_within_norm(self):
-        block = re.search(r"async def szov_broadcast_job\(\).*?(?=\n# ===)", self.api,
-                          flags=re.DOTALL).group(0)
-        self.assertIn("deviations = _szov_broadcast_deviations(data)", block)
-        self.assertIn("if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or deviations", block)
+        block = re.search(self.RUN_JOB_RE, self.api, flags=re.DOTALL).group(0)
+        self.assertIn("notes = deviations(data)", block)
+        self.assertIn("if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or notes", block)
+        # Правило нормы у направлений своё, а гейт «писать или молчать» — один.
+        self.assertIn("deviations=_szov_broadcast_deviations", self.api)
+        self.assertIn("deviations=_szov_chat_broadcast_deviations", self.api)
 
     def test_manual_send_only_targets_a_configured_recipient(self):
         """Кнопка проверяет настроенную рассылку, а не пишет в произвольную группу."""
         block = re.search(r"def api_szov_wallboard_broadcast_test.*?(?=\n# ===)", self.api,
                           flags=re.DOTALL).group(0)
-        self.assertIn("recipients = {str(chat['chat_id']): chat for chat in db.get_szov_broadcast_chats()}",
-                      block)
+        self.assertIn("for chat in db.get_szov_broadcast_chats(direction)}", block)
         self.assertIn('return jsonify({"error": "Сначала выберите чат"}), 400', block)
+        # Кнопка шлёт отбивку ТОГО направления, из которого её нажали.
+        self.assertIn("send = (_szov_chat_broadcast_send if direction == SZOV_BROADCAST_DIRECTION_CHAT",
+                      block)
 
     def test_bot_loop_is_captured_for_flask_triggered_sends(self):
         """Из потока Flask нельзя слать через чужой цикл — ссылку берём на старте бота."""
@@ -1547,7 +1580,7 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("executor.start_polling(dp, skip_updates=True, on_startup=_on_bot_startup)", self.api)
         self.assertIn("await _capture_bot_loop(_dispatcher)", self.api)
         self.assertIn("async def _capture_bot_loop", self.api)
-        self.assertIn("asyncio.run_coroutine_threadsafe(_szov_broadcast_send(int(chat_id)), loop)", self.api)
+        self.assertIn("asyncio.run_coroutine_threadsafe(send(int(chat_id)), loop)", self.api)
 
     def test_command_for_arbitrary_time_exists(self):
         self.assertIn("@dp.message_handler(commands=['tablo'])", self.api)
@@ -1580,12 +1613,18 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertIn("const [broadcastOpen, setBroadcastOpen] = useState(false);", self.view)
 
     def test_broadcast_button_follows_the_refresh_button(self):
-        """Кнопки направления «Основа» вставляются в общую шапку между «Обновить» и «На весь экран»."""
+        """Кнопка отбивки вставляется в общую шапку между «Обновить» и «На весь экран» — и
+        теперь у ОБОИХ направлений: форма одна, различается только `direction`."""
         header = self.view[self.view.index("Обновить\n"):self.view.index("На весь экран")]
         self.assertIn("{children}", header)
-        line_board = self.view[self.view.index("const LineWallboard ="):self.view.index("const ChatWallboard =")]
-        self.assertIn("setBroadcastOpen(true)", line_board)
-        self.assertIn("Отбивка", line_board)
+        # Кнопка вместе с модалкой живут одним компонентом: второй копии в файле нет.
+        self.assertEqual(self.view.count("const BroadcastControls = "), 1)
+        self.assertEqual(self.view.count("setBroadcastOpen(true)"), 1)
+        for section, following in (("const LineWallboard =", "const ChatWallboard ="),
+                                   ("const ChatWallboard =",
+                                    "export default function SzovWallboardView")):
+            block = self.view[self.view.index(section):self.view.index(following)]
+            self.assertIn("<BroadcastControls", block, section)
 
     def test_recipient_row_offers_both_modes_and_removal(self):
         self.assertIn("{ key: 'always'", self.view)
@@ -1602,8 +1641,11 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         manage = app[app.index("const canManageSzovBroadcastForUser = "):]
         manage = manage[:manage.index("};")]
         self.assertNotIn("isSupervisorRole", manage)
-        self.assertIn("{canManageBroadcast ? (", self.view)
-        self.assertIn("canManageBroadcast ? createPortal(", self.view)
+        # Оба направления закрыты одним и тем же пропом, а модалка идёт через портал.
+        self.assertEqual(self.view.count("{canManageBroadcast ? ("), 2)
+        controls = self.view[self.view.index("const BroadcastControls = "):
+                             self.view.index("/** Само табло.")]
+        self.assertIn("createPortal(", controls)
 
     def test_a_chat_cannot_be_added_twice(self):
         """Дубль в списке — две одинаковые отбивки в одну группу."""
@@ -1625,7 +1667,7 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
         db_class = next(node for node in tree.body
                         if isinstance(node, ast.ClassDef) and node.name == "Database")
         wanted = {'save_szov_broadcast_chat', 'delete_szov_broadcast_chat',
-                  '_log_szov_broadcast_change'}
+                  '_log_szov_broadcast_change', '_szov_broadcast_direction'}
         nodes = [ast.FunctionDef(name=item.name, args=item.args, body=item.body,
                                  decorator_list=[], returns=None, type_comment=None,
                                  type_params=[])
@@ -1651,12 +1693,14 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
 
         class FakeDb:
             SZOV_BROADCAST_MODES = ('always', 'deviations')
+            SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')
+            SZOV_BROADCAST_DIRECTION_DEFAULT = 'osnova'
 
             @contextlib.contextmanager
             def _get_cursor(self):
                 yield FakeCursor()
 
-            def get_szov_broadcast_chats(self):
+            def get_szov_broadcast_chats(self, direction=None):
                 return [dict(row) for row in rows]
 
         for name, fn in methods.items():
@@ -1680,20 +1724,52 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
         db, recorded = self._fake_db()
         db.save_szov_broadcast_chat({'chat_id': '-100123', 'chat_title': 'Руководство',
                                      'mode': 'deviations'}, user_id=7)
-        self.assertEqual(self._insert(recorded), (-100123, 'Руководство', 'deviations', True, 7))
+        self.assertEqual(self._insert(recorded),
+                         ('osnova', -100123, 'Руководство', 'deviations', True, 7))
         self.assertIn('"action": "added"', self._audit(recorded)[1])
 
     def test_mode_switch_keeps_title_and_toggle(self):
         """Форма шлёт точечные патчи: пришёл только режим — остальное трогать нельзя."""
         db, recorded = self._fake_db(rows=[self.EXISTING])
         db.save_szov_broadcast_chat({'chat_id': -100123, 'mode': 'always'}, user_id=9)
-        self.assertEqual(self._insert(recorded), (-100123, 'Руководство', 'always', True, 9))
+        self.assertEqual(self._insert(recorded),
+                         ('osnova', -100123, 'Руководство', 'always', True, 9))
         self.assertIn('"action": "changed"', self._audit(recorded)[1])
 
     def test_toggle_keeps_the_mode(self):
         db, recorded = self._fake_db(rows=[self.EXISTING])
         db.save_szov_broadcast_chat({'chat_id': -100123, 'is_enabled': False}, user_id=9)
-        self.assertEqual(self._insert(recorded), (-100123, 'Руководство', 'deviations', False, 9))
+        self.assertEqual(self._insert(recorded),
+                         ('osnova', -100123, 'Руководство', 'deviations', False, 9))
+
+    # --- направления ---
+
+    def test_direction_defaults_to_the_line(self):
+        """Старый бандл фронта о направлениях не знает: без параметра настраивается «Линия»."""
+        db, recorded = self._fake_db()
+        db.save_szov_broadcast_chat({'chat_id': -1, 'chat_title': 'Ч'}, user_id=1)
+        self.assertEqual(self._insert(recorded)[0], 'osnova')
+
+    def test_chat_direction_is_written_as_its_own_row(self):
+        """Одна группа вправе получать обе отбивки: ключ составной, строки независимы."""
+        db, recorded = self._fake_db()
+        db.save_szov_broadcast_chat({'chat_id': -100123, 'chat_title': 'Руководство'},
+                                    user_id=7, direction='chat')
+        self.assertEqual(self._insert(recorded)[:2], ('chat', -100123))
+        self.assertEqual(self._audit(recorded)[2], 'chat')
+
+    def test_direction_travels_with_the_removal_and_its_audit(self):
+        db, recorded = self._fake_db(deleted_row=('Руководство', 'always'))
+        db.delete_szov_broadcast_chat(-100123, user_id=9, direction='chat')
+        delete = next(params for sql, params in recorded if sql.startswith('DELETE'))
+        self.assertEqual(delete, ('chat', -100123))
+        self.assertEqual(self._audit(recorded)[2], 'chat')
+
+    def test_unknown_direction_is_rejected(self):
+        """Иначе строка не прошла бы CHECK и запрос упал бы уже в БД."""
+        db, _ = self._fake_db()
+        with self.assertRaises(ValueError):
+            db.save_szov_broadcast_chat({'chat_id': -1}, direction='видео')
 
     def test_missing_chat_is_rejected(self):
         db, _ = self._fake_db()

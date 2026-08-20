@@ -1,10 +1,12 @@
 """Табло СЗоВ, направление «Чат»: статусы чатников, почасовой срез и кэш снимка.
 
-Функции бэкенда вытаскиваем из bot_schedule2.py тем же загрузчиком, что и тесты «Основы»
+Функции бэкенда вытаскиваем из bot_schedule2.py тем же загрузчиком, что и тесты «Линии»
 (`_load_names`): проверяется настоящая логика, а не строковое совпадение.
 """
 import logging
 import math
+import os
+import re
 import threading
 import time
 import unittest
@@ -589,9 +591,19 @@ class ChatWallboardWiringTests(unittest.TestCase):
         cls.shared = (ROOT / "src" / "components" / "monitoring" / "szovWallboardShared.js").read_text(encoding="utf-8-sig")
 
     def test_header_offers_both_directions(self):
-        self.assertIn("{ key: 'osnova', label: 'Основа'", self.view)
-        self.assertIn("{ key: 'chat', label: 'Чат'", self.view)
+        """Подписи направлений живут в общем каталоге: раздел и виджет читают одно описание,
+        и разъехаться названия одного направления не могут."""
+        self.assertIn("const DIRECTIONS = WALLBOARD_DIRECTION_LIST;", self.view)
         self.assertIn("<SegmentedSwitch value={direction} options={DIRECTIONS}", self.view)
+        self.assertIn("label: 'Линия'", self.shared)
+        self.assertIn("label: 'Чат'", self.shared)
+
+    def test_line_direction_keeps_its_historic_key(self):
+        """Подпись сменили на «Линию», а ключ 'osnova' трогать нельзя: по нему лежат выбор
+        направления и набор показателей виджета в localStorage, строки получателей отбивки в
+        БД и параметр `direction` в запросах."""
+        self.assertIn("key: 'osnova'", self.shared)
+        self.assertNotIn("Основа", self.view)
 
     def test_only_the_open_direction_is_polled(self):
         """Закрытое направление не должно тратить квоту Chat2Desk: хук живёт в своём компоненте."""
@@ -607,11 +619,18 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("path: '/api/szov_wallboard/chat_snapshot'", self.shared)
         self.assertIn("pollIntervalMs: CHAT_POLL_INTERVAL_MS", self.shared)
 
-    def test_broadcast_stays_on_the_line_direction(self):
-        """Отбивка собрана по показателям линии — на экране чатов ей делать нечего."""
+    def test_broadcast_is_offered_on_both_directions(self):
+        """Владелец попросил у чатов такую же настройку отбивки, как у линии (20.08.2026).
+
+        Кнопка, форма и права — общие; различается направление, которое уезжает параметром."""
         chat_board = self.view[self.view.index("const ChatWallboard ="):
                                self.view.index("export default function SzovWallboardView")]
-        self.assertNotIn("Отбивка", chat_board)
+        self.assertIn("<BroadcastControls", chat_board)
+        self.assertIn("canManageBroadcast", chat_board)
+        # Цель времени ответа берём из снимка: иначе подсказка о норме назвала бы значение
+        # по умолчанию вместо настоящего.
+        self.assertIn("targetSeconds={snapshot?.target_seconds}", chat_board)
+        self.assertIn("direction=${encodeURIComponent(direction)}", self.view)
 
     def test_chat_direction_offers_the_widget_too(self):
         """Виджет «поверх окон» есть у обоих направлений, у каждого со своим набором."""
@@ -1147,6 +1166,226 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertIsNone(self._find_row(wb['Показатели'], 'Ответ внутри чата, мин')[1])
         self.assertEqual(wb['Люди на линии'].cell(row=2, column=1).value,
                          'Никто не выходил на линию')
+
+
+class ChatBroadcastTests(unittest.TestCase):
+    """Отбивка направления «Чат»: что считаем отклонением, что пишем в сообщении.
+
+    Снимок подсовываем готовым — сбор данных проверен тестами самого табло, а здесь важно
+    ровно то, что видит получатель в Telegram."""
+
+    SNAPSHOT = {
+        'day': '2026-08-20',
+        'chat2desk_now': '2026-08-20 14:05:00',
+        'target_seconds': 120,
+        'now': {'operators_online': 6, 'operators_busy': 2, 'operators_on_training': 1,
+                'operators_on_break': 3, 'operators_offline': 8, 'open_chats': 41,
+                'operators': []},
+        'today': {'chats': 512, 'chats_open': 41,
+                  'first_reply_seconds': 74.2, 'inner_reply_seconds': 187.5},
+        'stale': False,
+        'age_seconds': 30,
+    }
+
+    def _namespace(self, snapshot=None):
+        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        ns = {
+            'os': os, 're': re, 'logging': logging,
+            'datetime': datetime, 'ZoneInfo': ZoneInfo,
+            'CHAT_HOURLY_TIMEZONE': 'Asia/Almaty',
+            'SZOV_CHAT_WALLBOARD_TARGET_SECONDS': 120,
+            '_env_int': lambda name, default, minimum=None, maximum=None: default,
+            '_szov_chat_wallboard_snapshot': lambda: (self.SNAPSHOT if snapshot is None
+                                                      else snapshot),
+        }
+        _load_names(source, {
+            'SZOV_BROADCAST_SEND_TIMES', '_SZOV_BROADCAST_HOURLY',
+            'SZOV_CHAT_BROADCAST_SEND_TIMES', 'SZOV_CHAT_BROADCAST_MIN_CHATS',
+            '_szov_wallboard_int', '_szov_plural', '_szov_format_seconds_mmss',
+            '_szov_format_age_ru', '_szov_broadcast_parse_times', '_szov_broadcast_stale_note',
+            '_szov_chat_broadcast_send_times', '_szov_chat_broadcast_duration',
+            '_szov_chat_broadcast_collect', '_szov_chat_broadcast_deviations',
+            '_szov_chat_broadcast_notes', '_szov_chat_broadcast_text',
+        }, ns)
+        return ns
+
+    def _data(self, snapshot=None):
+        ns = self._namespace(snapshot)
+        return ns, ns['_szov_chat_broadcast_collect']()
+
+    @staticmethod
+    def _with(**today):
+        snapshot = dict(ChatBroadcastTests.SNAPSHOT)
+        snapshot['today'] = dict(snapshot['today'], **today)
+        return snapshot
+
+    # --- отклонения ---
+
+    def test_slow_inner_reply_is_a_deviation(self):
+        """Единственный оценочный показатель направления — тот же, что красит плитку."""
+        ns, data = self._data()
+        notes = ns['_szov_chat_broadcast_deviations'](data)
+        self.assertEqual(len(notes), 1)
+        self.assertIn('3:07', notes[0])
+        self.assertIn('2:00', notes[0])
+
+    def test_reply_within_the_goal_is_not_a_deviation(self):
+        ns, data = self._data(self._with(inner_reply_seconds=90.0))
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+
+    def test_exactly_on_the_goal_is_still_within_norm(self):
+        """Граница включительная — как chatReplyTone на фронте (value <= target)."""
+        ns, data = self._data(self._with(inner_reply_seconds=120))
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+
+    def test_a_handful_of_night_chats_does_not_raise_an_alarm(self):
+        """«Ответ внутри чата» — среднее по суткам: в 00:30 оно стоит на паре обращений, и
+        один медленный ответ поднял бы тревогу там, где нет ни очереди, ни проблемы."""
+        ns, data = self._data(self._with(chats=2, inner_reply_seconds=600.0))
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+
+    def test_the_same_delay_on_a_full_day_does_raise_it(self):
+        """Порог выборки не должен глушить настоящую проблему."""
+        ns, data = self._data(self._with(chats=200, inner_reply_seconds=600.0))
+        self.assertEqual(len(ns['_szov_chat_broadcast_deviations'](data)), 1)
+
+    def test_missing_reply_time_is_not_a_deviation(self):
+        """Обращений не было — сравнивать нечего; ноль здесь означал бы «отвечаем мгновенно»."""
+        ns, data = self._data(self._with(chats=0, first_reply_seconds=None,
+                                         inner_reply_seconds=None))
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+
+    def test_frozen_snapshot_names_chat2desk_not_oktell(self):
+        """Получателю важно, КТО молчит: от этого зависит, к кому идти."""
+        stale = dict(self.SNAPSHOT, stale=True, age_seconds=2400)
+        ns, data = self._data(stale)
+        notes = ns['_szov_chat_broadcast_deviations'](data)
+        self.assertTrue(any('Chat2Desk' in note for note in notes), notes)
+        self.assertFalse(any('Oktell' in note for note in notes), notes)
+        self.assertTrue(any('40 минут' in note for note in notes), notes)
+
+    # --- примечания и текст ---
+
+    def test_duty_lines_are_not_deviations(self):
+        """Иначе чат в режиме «только при отклонениях» получал бы сообщение каждый раз."""
+        ns, data = self._data(self._with(inner_reply_seconds=90.0))
+        notes = ns['_szov_chat_broadcast_notes'](data)
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+        self.assertTrue(notes)
+        self.assertIn('6 чатников на линии', notes[0])
+        self.assertIn('3 на перерыве', notes[0])
+
+    def test_empty_statuses_are_left_out_of_the_line(self):
+        """Ноль в строке — шум: перечисляем только то, что есть."""
+        snapshot = dict(self.SNAPSHOT)
+        snapshot['now'] = dict(snapshot['now'], operators_busy=0, operators_on_training=0)
+        ns, data = self._data(snapshot)
+        line = ns['_szov_chat_broadcast_notes'](data)[1]
+        self.assertIn('на перерыве', line)
+        self.assertNotIn('заняты', line)
+        self.assertNotIn('на тренинге', line)
+
+    def test_an_empty_day_says_so_in_words(self):
+        """«Первый ответ — —, внутри чата —» читается как сбой, хотя пустая ночь — норма."""
+        ns, data = self._data(self._with(chats=0, first_reply_seconds=None,
+                                         inner_reply_seconds=None))
+        notes = ns['_szov_chat_broadcast_notes'](data)
+        self.assertIn('Обращений за сутки пока не было.', notes)
+        self.assertFalse(any('Первый ответ' in note for note in notes), notes)
+
+    def test_text_leads_with_the_deviation(self):
+        ns, data = self._data()
+        text = ns['_szov_chat_broadcast_text'](data)
+        self.assertTrue(text.startswith('<b>Чаты сейчас</b>'))
+        self.assertIn('ответ внутри чата дольше цели', text)
+        self.assertIn('Первый ответ — 1:14', text)
+
+    def test_frozen_note_goes_last(self):
+        """Замершие данные упоминаем после дежурных строк, а не вместо них."""
+        stale = dict(self.SNAPSHOT, stale=True, age_seconds=600)
+        ns, data = self._data(stale)
+        notes = ns['_szov_chat_broadcast_notes'](data)
+        self.assertIn('Chat2Desk', notes[-1])
+        self.assertEqual([note for note in notes if 'Chat2Desk' in note], [notes[-1]])
+
+    # --- расписание ---
+
+    def test_chat_schedule_follows_the_line_unless_set_apart(self):
+        """Владелец просил «такую же»: по умолчанию расписание совпадает с «Линией»."""
+        ns = self._namespace()
+        self.assertEqual(ns['_szov_chat_broadcast_send_times'](),
+                         [(hour, 0) for hour in range(24)])
+
+    def test_broken_chat_send_time_is_skipped_not_fatal(self):
+        ns = self._namespace()
+        ns['SZOV_CHAT_BROADCAST_SEND_TIMES'] = '09:00, ерунда, 24:00, 21:30'
+        self.assertEqual(ns['_szov_chat_broadcast_send_times'](), [(9, 0), (21, 30)])
+
+
+class ChatBroadcastWiringTests(unittest.TestCase):
+    """Отбивка чатов подключена: снимок из кэша, картинка общим рисовальщиком, отправка."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+
+    def _section(self, start, end):
+        return self.api[self.api.index(start):self.api.index(end)]
+
+    def test_broadcast_never_spends_chat2desk_quota_of_its_own(self):
+        """Снимок направления уже собран для экрана: второй сбор жёг бы квоту компании и
+        разводил цифры в Telegram с цифрами на стене."""
+        block = self._section("def _szov_chat_broadcast_collect(",
+                              "def _szov_chat_broadcast_deviations(")
+        self.assertIn("_szov_chat_wallboard_snapshot()", block)
+        self.assertNotIn("_chat2desk_", block)
+        self.assertNotIn("requests.", block)
+
+    def test_one_picture_goes_as_a_photo_not_an_album(self):
+        """sendMediaGroup у Telegram принимает от ДВУХ вложений и на одном честно падает."""
+        block = self._section("async def _szov_broadcast_deliver(",
+                              "async def _szov_broadcast_send(")
+        self.assertIn("if len(media) == 1:", block)
+        self.assertIn("await bot.send_photo(", block)
+        self.assertIn("group = types.MediaGroup()", block)
+
+    def test_tiles_are_drawn_by_one_shared_renderer(self):
+        """Картинки «Линии» и «Чата» лежат в одном чате рядом — оформление разъезжаться не должно."""
+        self.assertEqual(self.api.count("def _szov_render_tiles_png("), 1)
+        for renderer in ("def _szov_render_wallboard_png(", "def _szov_render_chat_wallboard_png("):
+            block = self.api[self.api.index(renderer):]
+            self.assertIn("_szov_render_tiles_png(", block[:2500], renderer)
+        # Второй копии раскладки плиток в файле нет.
+        self.assertEqual(self.api.count("draw.rounded_rectangle([x, y, x + w, y + tile_h]"), 1)
+
+    def test_picture_failure_never_swallows_the_numbers(self):
+        block = self._section("async def _szov_chat_broadcast_prepare(",
+                              "async def _szov_chat_broadcast_send(")
+        self.assertIn("media = []", block)
+        self.assertIn("не удалось собрать картинку", block)
+
+    def test_snapshot_is_collected_off_the_bot_loop(self):
+        """Chat2Desk — синхронный requests: держать на нём event loop бота недопустимо."""
+        block = self._section("async def _szov_chat_broadcast_prepare(",
+                              "async def _szov_chat_broadcast_send(")
+        self.assertIn("run_in_executor(executor_pool, _szov_chat_broadcast_collect)", block)
+
+    def test_preview_shows_the_chat_direction_without_sending(self):
+        block = self._section("def _szov_chat_broadcast_preview(",
+                              "@app.route('/api/szov_wallboard/broadcast_test'")
+        self.assertIn("font_path", block)
+        self.assertNotIn("send_media_group", block)
+        self.assertNotIn("send_photo", block)
+        self.assertNotIn("send_message", block)
+
+    def test_endpoints_default_to_the_line_for_an_older_bundle(self):
+        """Фронт едет отдельным деплоем (GitHub Pages против Render): бандл, не знающий о
+        втором направлении, обязан продолжать настраивать «Линию», а не получать 400."""
+        block = self._section("def _szov_broadcast_direction_arg(",
+                              "def _szov_broadcast_direction_times(")
+        self.assertIn("or SZOV_BROADCAST_DIRECTION_LINE", block)
+        self.assertIn("raise ValueError", block)
+
 
 if __name__ == '__main__':
     unittest.main()

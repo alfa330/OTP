@@ -3889,23 +3889,81 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_szov_wallboard_broadcast_history_changed_at
                 ON szov_wallboard_broadcast_history(changed_at DESC);
             """)
+            # Аудит тоже разводим по направлениям: в модалке «Чата» незачем видеть правки
+            # получателей «Линии» — это разные списки и разные люди их ведут.
+            cursor.execute("""
+                ALTER TABLE szov_wallboard_broadcast_history
+                ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova';
+            """)
             # Получатели отбивки. Раньше чат был один (singleton выше), но одному отделу
             # нужна каждая отбивка, а руководству — только когда показатели вышли из нормы,
             # поэтому получателей стало несколько и у каждого свой режим:
             #   always     — каждая плановая отбивка;
             #   deviations — то же расписание, но письмо уходит, только если есть отклонения.
+            # Направление — второй ключ: направлений у табло два («Линия» и «Чат»),
+            # показатели и расписание у них свои, и один чат вправе получать обе отбивки
+            # или только одну. Ключ 'osnova' — историческое имя «Линии»: подпись на экране
+            # сменили, а ключ трогать нельзя — по нему уже лежат строки на проде.
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS szov_wallboard_broadcast_chats (
-                    chat_id BIGINT PRIMARY KEY,
+                    direction VARCHAR(16) NOT NULL DEFAULT 'osnova',
+                    chat_id BIGINT NOT NULL,
                     chat_title VARCHAR(255) NOT NULL DEFAULT '',
                     mode VARCHAR(16) NOT NULL DEFAULT 'always',
                     is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                     updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (direction, chat_id),
                     CONSTRAINT szov_wallboard_broadcast_chats_mode
-                        CHECK (mode IN ('always', 'deviations'))
+                        CHECK (mode IN ('always', 'deviations')),
+                    CONSTRAINT szov_wallboard_broadcast_chats_direction
+                        CHECK (direction IN ('osnova', 'chat'))
                 );
             """)
+            # Таблица старше направлений: там ключом был один chat_id. Досыпаем колонку и
+            # переводим ключ на составной — иначе второе направление не смогло бы писать в
+            # тот же чат, что и первое (ON CONFLICT (chat_id) молча затирал бы соседа).
+            # Порядок важен: перевод ключа обязан пройти ДО одноразового переезда из
+            # singleton-config ниже — тот уже пишет с ON CONFLICT (direction, chat_id).
+            # Под SAVEPOINT: весь _init_db идёт ОДНОЙ транзакцией, и упавшая смена ключа
+            # откатила бы инициализацию всей схемы — то есть уронила бы приложение целиком
+            # ради одной таблицы отбивки. Здесь цена отказа честнее: получатели читаются,
+            # а сохранение вернёт 500 с этой ошибкой в логе.
+            try:
+                cursor.execute("SAVEPOINT sp_szov_broadcast_direction")
+                cursor.execute("""
+                    ALTER TABLE szov_wallboard_broadcast_chats
+                    ADD COLUMN IF NOT EXISTS direction VARCHAR(16) NOT NULL DEFAULT 'osnova';
+                """)
+                cursor.execute("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM pg_index i
+                            JOIN pg_class c ON c.oid = i.indrelid
+                            WHERE c.relname = 'szov_wallboard_broadcast_chats'
+                              AND i.indisprimary AND i.indnatts = 1
+                        ) THEN
+                            ALTER TABLE szov_wallboard_broadcast_chats
+                                DROP CONSTRAINT szov_wallboard_broadcast_chats_pkey;
+                            ALTER TABLE szov_wallboard_broadcast_chats
+                                ADD PRIMARY KEY (direction, chat_id);
+                        END IF;
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_constraint
+                            WHERE conname = 'szov_wallboard_broadcast_chats_direction'
+                        ) THEN
+                            ALTER TABLE szov_wallboard_broadcast_chats
+                                ADD CONSTRAINT szov_wallboard_broadcast_chats_direction
+                                CHECK (direction IN ('osnova', 'chat'));
+                        END IF;
+                    END $$;
+                """)
+                cursor.execute("RELEASE SAVEPOINT sp_szov_broadcast_direction")
+            except Exception as exc:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_szov_broadcast_direction")
+                logging.error("Отбивка табло: направление получателей не применилось: %s",
+                              exc, exc_info=True)
             # Переезд с одного чата на список — ровно один раз. Флаг нужен, чтобы удалённый
             # получатель не воскресал на каждом рестарте; строку в config при этом НЕ трогаем,
             # чтобы откат деплоя на прежний код продолжал слать в тот же чат.
@@ -3915,11 +3973,11 @@ class Database:
             """)
             cursor.execute("""
                 INSERT INTO szov_wallboard_broadcast_chats
-                    (chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
-                SELECT chat_id, chat_title, 'always', is_enabled, updated_by, updated_at
+                    (direction, chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
+                SELECT 'osnova', chat_id, chat_title, 'always', is_enabled, updated_by, updated_at
                 FROM szov_wallboard_broadcast_config
                 WHERE id = 1 AND chat_id IS NOT NULL AND NOT chats_migrated
-                ON CONFLICT (chat_id) DO NOTHING;
+                ON CONFLICT (direction, chat_id) DO NOTHING;
             """)
             cursor.execute("""
                 UPDATE szov_wallboard_broadcast_config
@@ -23424,17 +23482,35 @@ class Database:
 
     # Режимы получателя: каждая отбивка или только та, где есть отклонения от нормы.
     SZOV_BROADCAST_MODES = ('always', 'deviations')
+    # Направления табло: у каждого свой список получателей, свои показатели и своё
+    # расписание. 'osnova' — историческое имя направления «Линия» (на экране подпись
+    # сменили, ключ остался: по нему лежат строки на проде).
+    SZOV_BROADCAST_DIRECTIONS = ('osnova', 'chat')
+    SZOV_BROADCAST_DIRECTION_DEFAULT = 'osnova'
 
-    def get_szov_broadcast_chats(self) -> list:
+    def _szov_broadcast_direction(self, value) -> str:
+        """Направление отбивки. Пусто = «Линия».
+
+        Пустое значение допускаем намеренно: фронт деплоится отдельно от бэкенда
+        (GitHub Pages против Render), и старый бандл, ничего не знающий о втором
+        направлении, обязан продолжать настраивать «Линию», а не падать."""
+        direction = str(value or self.SZOV_BROADCAST_DIRECTION_DEFAULT).strip()
+        if direction not in self.SZOV_BROADCAST_DIRECTIONS:
+            raise ValueError("Неизвестное направление табло")
+        return direction
+
+    def get_szov_broadcast_chats(self, direction=None) -> list:
         """Получатели отбивки табло: куда, в каком режиме и включён ли чат."""
+        direction = self._szov_broadcast_direction(direction)
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT c.chat_id, c.chat_title, c.mode, c.is_enabled,
                        c.updated_by, c.updated_at, u.name
                 FROM szov_wallboard_broadcast_chats c
                 LEFT JOIN users u ON u.id = c.updated_by
+                WHERE c.direction = %s
                 ORDER BY COALESCE(NULLIF(c.chat_title, ''), c.chat_id::text)
-            """)
+            """, (direction,))
             rows = cur.fetchall()
         return [{
             "chat_id": r[0],
@@ -23446,12 +23522,14 @@ class Database:
             "updated_at": r[5].isoformat() if r[5] else None,
         } for r in rows]
 
-    def save_szov_broadcast_chat(self, payload: dict, user_id=None) -> list:
+    def save_szov_broadcast_chat(self, payload: dict, user_id=None, direction=None) -> list:
         """Добавить получателя или изменить его режим / включённость.
 
-        Один чат — одна строка: повторное добавление того же чата не плодит дубли,
-        иначе отбивка приходила бы в него дважды."""
+        Один чат — одна строка НА НАПРАВЛЕНИЕ: повторное добавление того же чата не
+        плодит дубли, иначе отбивка приходила бы в него дважды. А вот один и тот же чат
+        в «Линии» и в «Чате» — это две разные строки: отбивки разные."""
         payload = payload or {}
+        direction = self._szov_broadcast_direction(direction or payload.get('direction'))
         raw = payload.get('chat_id')
         if raw in (None, '', 'null'):
             raise ValueError("Не выбран чат для отбивки")
@@ -23460,7 +23538,8 @@ class Database:
         except (TypeError, ValueError):
             raise ValueError("Не выбран чат для отбивки")
 
-        existing = {row['chat_id']: row for row in self.get_szov_broadcast_chats()}.get(chat_id)
+        existing = {row['chat_id']: row
+                    for row in self.get_szov_broadcast_chats(direction)}.get(chat_id)
         # Не переданное поле означает «оставить как было»: форма шлёт точечные патчи
         # (переключили режим / щёлкнули тумблером), а не всю карточку получателя.
         mode = payload.get('mode')
@@ -23477,47 +23556,52 @@ class Database:
         with self._get_cursor() as cur:
             cur.execute("""
                 INSERT INTO szov_wallboard_broadcast_chats
-                    (chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
-                VALUES (%s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
-                ON CONFLICT (chat_id) DO UPDATE SET
+                    (direction, chat_id, chat_title, mode, is_enabled, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                ON CONFLICT (direction, chat_id) DO UPDATE SET
                     chat_title = EXCLUDED.chat_title,
                     mode = EXCLUDED.mode,
                     is_enabled = EXCLUDED.is_enabled,
                     updated_by = EXCLUDED.updated_by,
                     updated_at = EXCLUDED.updated_at
-            """, (chat_id, chat_title, mode, is_enabled, user_id))
-        chats = self.get_szov_broadcast_chats()
+            """, (direction, chat_id, chat_title, mode, is_enabled, user_id))
+        chats = self.get_szov_broadcast_chats(direction)
         self._log_szov_broadcast_change(
             user_id,
             'added' if existing is None else 'changed',
             {"chat_id": chat_id, "chat_title": chat_title, "mode": mode, "is_enabled": is_enabled},
             chats,
+            direction,
         )
         return chats
 
-    def delete_szov_broadcast_chat(self, chat_id, user_id=None) -> list:
-        """Убрать чат из получателей."""
+    def delete_szov_broadcast_chat(self, chat_id, user_id=None, direction=None) -> list:
+        """Убрать чат из получателей одного направления."""
+        direction = self._szov_broadcast_direction(direction)
         try:
             chat_id = int(chat_id)
         except (TypeError, ValueError):
             raise ValueError("Не выбран чат для отбивки")
         with self._get_cursor() as cur:
             cur.execute("""
-                DELETE FROM szov_wallboard_broadcast_chats WHERE chat_id = %s
+                DELETE FROM szov_wallboard_broadcast_chats
+                WHERE direction = %s AND chat_id = %s
                 RETURNING chat_title, mode
-            """, (chat_id,))
+            """, (direction, chat_id))
             removed = cur.fetchone()
-        chats = self.get_szov_broadcast_chats()
+        chats = self.get_szov_broadcast_chats(direction)
         if removed:
             self._log_szov_broadcast_change(
                 user_id, 'removed',
                 {"chat_id": chat_id, "chat_title": removed[0] or "", "mode": removed[1] or "always",
                  "is_enabled": False},
                 chats,
+                direction,
             )
         return chats
 
-    def _log_szov_broadcast_change(self, user_id, action: str, target: dict, chats: list) -> None:
+    def _log_szov_broadcast_change(self, user_id, action: str, target: dict, chats: list,
+                                   direction=None) -> None:
         """Аудит: что именно сделали и каким после этого стал весь список получателей.
 
         Снимок целиком, а не diff: строк мало, зато видно, кому уходила отбивка на
@@ -23530,21 +23614,23 @@ class Database:
         })
         with self._get_cursor() as cur:
             cur.execute("""
-                INSERT INTO szov_wallboard_broadcast_history (changed_by, settings)
-                VALUES (%s, %s::jsonb)
-            """, (user_id, snapshot))
+                INSERT INTO szov_wallboard_broadcast_history (changed_by, settings, direction)
+                VALUES (%s, %s::jsonb, %s)
+            """, (user_id, snapshot, self._szov_broadcast_direction(direction)))
 
-    def get_szov_broadcast_history(self, limit: int = 50) -> list:
-        """Кто и когда менял чат отбивки."""
+    def get_szov_broadcast_history(self, limit: int = 50, direction=None) -> list:
+        """Кто и когда менял получателей отбивки этого направления."""
         limit = max(1, min(int(limit or 50), 200))
+        direction = self._szov_broadcast_direction(direction)
         with self._get_cursor() as cur:
             cur.execute("""
                 SELECT h.changed_at, h.changed_by, u.name, h.settings
                 FROM szov_wallboard_broadcast_history h
                 LEFT JOIN users u ON u.id = h.changed_by
+                WHERE h.direction = %s
                 ORDER BY h.changed_at DESC, h.id DESC
                 LIMIT %s
-            """, (limit,))
+            """, (direction, limit))
             rows = cur.fetchall()
         return [{
             "changed_at": r[0].isoformat() if r[0] else None,

@@ -31346,10 +31346,10 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
     отдаём последний удачный снимок с stale=True: экран на стене гаснуть не должен, а поток
     waitress не должен стоять в ожидании медленного прокси.
 
-    Направления два («Основа» по Oktell и «Чат» по Chat2Desk), у каждого свои константы и свой
+    Направления два («Линия» по Oktell и «Чат» по Chat2Desk), у каждого свои константы и свой
     кэш, но правила устаревания у них обязаны быть одни: разъедутся — и одно табло будет
     показывать замёрзшие данные как свежие. Поэтому копии этой функции быть не должно.
-    before/after — то, чем направления отличаются: «Основа» поднимает кэш из БД на старте и
+    before/after — то, чем направления отличаются: «Линия» поднимает кэш из БД на старте и
     дублирует туда удачные снимки."""
 
     def _fresh(payload, at):
@@ -31403,7 +31403,7 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
 
 
 def _szov_wallboard_snapshot():
-    """Снимок направления «Основа»: входящая линия Oktell."""
+    """Снимок направления «Линия»: входящая линия Oktell."""
     return _wallboard_snapshot_with_cache(
         cache=_szov_wallboard_cache,
         lock=_szov_wallboard_lock,
@@ -31452,6 +31452,13 @@ SZOV_SL_MIN_PERCENT = float(os.getenv('SZOV_SL_MIN_PERCENT') or 80)
 # Режимы получателя отбивки: каждая отбивка или только та, где есть отклонения от нормы.
 SZOV_BROADCAST_MODE_ALWAYS = 'always'
 SZOV_BROADCAST_MODE_DEVIATIONS = 'deviations'
+# Направления табло: у каждого свой список получателей, свои показатели и своё расписание.
+# 'osnova' — историческое имя направления «Линия». Подпись на экране сменили, а ключ трогать
+# нельзя: по нему лежат и строки получателей в БД, и выбор направления с набором показателей
+# виджета в localStorage у каждого пользователя.
+SZOV_BROADCAST_DIRECTION_LINE = 'osnova'
+SZOV_BROADCAST_DIRECTION_CHAT = 'chat'
+SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT)
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None):
@@ -31631,13 +31638,16 @@ def _szov_format_percent(ratio, digits=1):
     return f"{ratio * 100:.{digits}f}".replace('.', ',') + '%'
 
 
-def _szov_broadcast_stale_note(data):
-    """Примечание о замерших данных. None — снимок свежий."""
+def _szov_broadcast_stale_note(data, source='Oktell'):
+    """Примечание о замерших данных. None — снимок свежий.
+
+    Источник называем явно: у направлений он разный (Oktell против Chat2Desk), а получателю
+    важно, КТО молчит — от этого зависит, к кому идти."""
     if not data.get('snapshot_stale'):
         return None
     age = _szov_format_age_ru(data.get('snapshot_age_seconds'))
     return (f"Также данные на дашборде не обновляются уже {age} "
-            f"из-за отсутствия ответа от Oktell.")
+            f"из-за отсутствия ответа от {source}.")
 
 
 def _szov_broadcast_deviations(data):
@@ -31871,10 +31881,55 @@ def _szov_render_hourly_table_png(rows):
     return buffer.getvalue()
 
 
-def _szov_render_wallboard_png(data):
-    """PNG самого табло: те же плитки, что на экране, нарисованные Pillow."""
+def _szov_render_tiles_png(title, subtitle, key_tiles, stat_tiles):
+    """PNG плиток табло: четыре крупные сверху, мелкие в ряд под ними.
+
+    Общий на оба направления: картинки «Линии» и «Чата» лежат в одном чате рядом, и
+    разъехавшееся оформление там сразу видно. key_tiles — (подпись, значение, фон, цвет
+    текста), stat_tiles — (подпись, значение); мелкие плитки делят ширину по числу."""
     from PIL import Image, ImageDraw
 
+    tile_w, tile_h, gap, margin = 250, 130, 16, 24
+    width = margin * 2 + tile_w * 4 + gap * 3
+    height = margin * 2 + 56 + tile_h * 2 + gap * 2 + 40
+    image = Image.new('RGB', (width, height), '#f8fafc')
+    draw = ImageDraw.Draw(image)
+
+    draw.text((margin, margin), title, font=_szov_font(30, bold=True), fill='#0f172a')
+    draw.text((margin, margin + 34), subtitle, font=_szov_font(17), fill='#64748b')
+
+    def tile(x, y, label, value, bg, fg, w=tile_w):
+        draw.rounded_rectangle([x, y, x + w, y + tile_h], radius=16, fill=bg, outline='#e2e8f0')
+        label_font = _szov_font(17, bold=True)
+        lw = draw.textlength(label, font=label_font)
+        draw.text((x + (w - lw) / 2, y + 18), label, font=label_font, fill=fg)
+        # Подгоняем кегль под ширину плитки: «970/1091» длиннее, чем «0», и иначе вылезает за край.
+        value_font, vw = None, 0
+        for size in (46, 40, 34, 30, 26, 22):
+            value_font = _szov_font(size, bold=True)
+            vw = draw.textlength(value, font=value_font)
+            if vw <= w - 20:
+                break
+        draw.text((x + (w - vw) / 2, y + 52), value, font=value_font, fill=fg)
+
+    top = margin + 72
+    for index, (label, value, bg, fg) in enumerate(key_tiles):
+        tile(margin + index * (tile_w + gap), top, label, value, bg, fg)
+
+    second = top + tile_h + gap
+    count = max(1, len(stat_tiles))
+    small_w = (tile_w * 4 + gap * 3 - gap * (count - 1)) // count
+    for index, (label, value) in enumerate(stat_tiles):
+        tile(margin + index * (small_w + gap), second, label, value, '#ffffff', '#0f172a', w=small_w)
+
+    buffer = BytesIO()
+    image.save(buffer, format='PNG')
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _szov_render_wallboard_png(data):
+    """PNG направления «Линия»: те же плитки, что на экране."""
     totals, ops = data['totals'], data['operators']
     ar = totals['ar_ratio']
     ar_percent = None if ar is None else ar * 100
@@ -31903,43 +31958,8 @@ def _szov_render_wallboard_png(data):
         ('Перезвон', str(_szov_wallboard_int(ops.get('on_recall')))),
     ]
 
-    tile_w, tile_h, gap, margin = 250, 130, 16, 24
-    width = margin * 2 + tile_w * 4 + gap * 3
-    height = margin * 2 + 56 + tile_h * 2 + gap * 2 + 40
-    image = Image.new('RGB', (width, height), '#f8fafc')
-    draw = ImageDraw.Draw(image)
-
-    draw.text((margin, margin), 'Табло СЗоВ', font=_szov_font(30, bold=True), fill='#0f172a')
-    draw.text((margin, margin + 34), f"Входящая линия · {data['generated_at']}",
-              font=_szov_font(17), fill='#64748b')
-
-    def tile(x, y, label, value, bg, fg, w=tile_w):
-        draw.rounded_rectangle([x, y, x + w, y + tile_h], radius=16, fill=bg, outline='#e2e8f0')
-        label_font = _szov_font(17, bold=True)
-        lw = draw.textlength(label, font=label_font)
-        draw.text((x + (w - lw) / 2, y + 18), label, font=label_font, fill=fg)
-        # Подгоняем кегль под ширину плитки: «970/1091» длиннее, чем «0», и иначе вылезает за край.
-        value_font, vw = None, 0
-        for size in (46, 40, 34, 30, 26, 22):
-            value_font = _szov_font(size, bold=True)
-            vw = draw.textlength(value, font=value_font)
-            if vw <= w - 20:
-                break
-        draw.text((x + (w - vw) / 2, y + 52), value, font=value_font, fill=fg)
-
-    top = margin + 72
-    for index, (label, value, bg, fg) in enumerate(key_tiles):
-        tile(margin + index * (tile_w + gap), top, label, value, bg, fg)
-
-    second = top + tile_h + gap
-    small_w = (tile_w * 4 + gap * 3 - gap * 5) // 6
-    for index, (label, value) in enumerate(stat_tiles):
-        tile(margin + index * (small_w + gap), second, label, value, '#ffffff', '#0f172a', w=small_w)
-
-    buffer = BytesIO()
-    image.save(buffer, format='PNG')
-    buffer.seek(0)
-    return buffer.getvalue()
+    return _szov_render_tiles_png(
+        'Табло СЗоВ', f"Входящая линия · {data['generated_at']}", key_tiles, stat_tiles)
 
 
 # --- Отправка отбивки -------------------------------------------------------------------------
@@ -31986,9 +32006,18 @@ async def _szov_broadcast_prepare(hour_to=None):
 
 
 async def _szov_broadcast_deliver(chat_id, text, media):
-    """Отправить уже собранную отбивку в один чат: две картинки альбомом + текст."""
+    """Отправить уже собранную отбивку в один чат: картинки с подписью, иначе текстом.
+
+    Одна картинка уходит send_photo, две и больше — альбомом: sendMediaGroup у Telegram
+    принимает от ДВУХ вложений и на одном честно падает. Направление «Чат» присылает одну
+    картинку, «Линия» — две, поэтому развилка здесь, а не у каждого вызывающего."""
     if media:
         try:
+            if len(media) == 1:
+                name, blob = media[0]
+                await bot.send_photo(chat_id, types.InputFile(BytesIO(blob), filename=name),
+                                     caption=text, parse_mode='HTML')
+                return
             group = types.MediaGroup()
             for index, (name, blob) in enumerate(media):
                 group.attach_photo(types.InputFile(BytesIO(blob), filename=name),
@@ -32008,52 +32037,72 @@ async def _szov_broadcast_send(chat_id, hour_to=None):
     return data
 
 
-def _szov_broadcast_send_times():
-    """[(час, минута), ...] из SZOV_BROADCAST_SEND_TIMES."""
+def _szov_broadcast_parse_times(raw, label):
+    """[(час, минута), ...] из строки «10:00,14:00». Один разбор на оба направления.
+
+    Непонятное время пропускаем с записью в лог, а не роняем запуск: из-за опечатки в env
+    приложение не должно остаться без планировщика."""
     times = []
-    for chunk in (SZOV_BROADCAST_SEND_TIMES or '').split(','):
+    for chunk in (raw or '').split(','):
         chunk = chunk.strip()
         if not chunk:
             continue
         match = re.fullmatch(r'([01]?\d|2[0-3]):([0-5]\d)', chunk)
         if not match:
-            logging.warning("Отбивка табло: не понял время отправки %r", chunk)
+            logging.warning("%s: не понял время отправки %r", label, chunk)
             continue
         times.append((int(match.group(1)), int(match.group(2))))
     return times
 
 
-async def szov_broadcast_job():
-    """Плановая отбивка всем получателям. Молчит, если получателей нет.
+def _szov_broadcast_send_times():
+    """[(час, минута), ...] из SZOV_BROADCAST_SEND_TIMES — направление «Линия»."""
+    return _szov_broadcast_parse_times(SZOV_BROADCAST_SEND_TIMES, "Отбивка табло")
 
-    Данные собираем ОДИН раз на всех: прокси Oktell низкоконкурентный, и повторять
-    сбор на каждый чат нельзя. Чат в режиме «только при отклонениях» стоит в том же
+
+async def _szov_broadcast_run_job(*, direction, label, prepare, deviations):
+    """Плановая отбивка одного направления. Молчит, если получателей нет.
+
+    Общая на «Линию» и «Чат»: различаются только сбор данных и правило отклонений, а
+    обход получателей одинаков и разъехаться не должен. Данные собираем ОДИН раз на всех —
+    прокси Oktell низкоконкурентный, а квота Chat2Desk общая на компанию, и повторять сбор
+    на каждый чат нельзя. Получатель в режиме «только при отклонениях» стоит в том же
     расписании, но сообщение получает, лишь когда показатели вышли из нормы."""
     try:
         loop = asyncio.get_event_loop()
-        chats = await loop.run_in_executor(executor_pool, db.get_szov_broadcast_chats)
+        chats = await loop.run_in_executor(
+            executor_pool, functools.partial(db.get_szov_broadcast_chats, direction))
         recipients = [chat for chat in chats if chat.get('is_enabled') and chat.get('chat_id')]
         if not recipients:
             return
-        data, text, media = await _szov_broadcast_prepare()
-        deviations = _szov_broadcast_deviations(data)
+        data, text, media = await prepare()
+        notes = deviations(data)
         targets = [chat for chat in recipients
-                   if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or deviations]
+                   if chat.get('mode') != SZOV_BROADCAST_MODE_DEVIATIONS or notes]
         if not targets:
-            logging.info("Отбивка табло: отклонений нет, %d чатам с режимом «только при "
-                         "отклонениях» не пишем", len(recipients))
+            logging.info("%s: отклонений нет, %d чатам с режимом «только при "
+                         "отклонениях» не пишем", label, len(recipients))
             return
         for chat in targets:
             # Один недоступный чат (бота выгнали из группы) не должен лишать отбивки остальных.
             try:
                 await _szov_broadcast_deliver(int(chat['chat_id']), text, media)
-                logging.info("Отбивка табло отправлена в чат %s (%s)",
+                logging.info("%s отправлена в чат %s (%s)", label,
                              chat['chat_id'], chat.get('mode'))
             except Exception as exc:
-                logging.error("Отбивка табло: чат %s не получил сообщение: %s",
+                logging.error("%s: чат %s не получил сообщение: %s", label,
                               chat['chat_id'], exc)
     except Exception as exc:
-        logging.error("Отбивка табло: плановая отправка не удалась: %s", exc, exc_info=True)
+        logging.error("%s: плановая отправка не удалась: %s", label, exc, exc_info=True)
+
+
+async def szov_broadcast_job():
+    """Плановая отбивка направления «Линия»."""
+    await _szov_broadcast_run_job(
+        direction=SZOV_BROADCAST_DIRECTION_LINE,
+        label="Отбивка табло",
+        prepare=_szov_broadcast_prepare,
+        deviations=_szov_broadcast_deviations)
 
 
 # === Почасовой отчёт по чатам ===================================================================
@@ -32722,7 +32771,7 @@ async def chat_hourly_broadcast_job():
 
 # === Табло СЗоВ · направление «Чат» =============================================================
 #
-# Второе направление того же табло: в шапке раздела переключатель «Основа / Чат». «Основа» —
+# Второе направление того же табло: в шапке раздела переключатель «Линия / Чат». «Линия» —
 # входящая линия Oktell (весь код выше), «Чат» — Chat2Desk.
 #
 # Источники ровно те же, что у почасового отчёта по чатам (`_chat_hourly_*`), и это намеренно:
@@ -32961,7 +33010,7 @@ def _szov_chat_wallboard_timelines(events, lookup, *, truncated=None):
     """Ленты статусов по чат-менеджерам СЗоВ: {имя: [(секунда дня, ключ, подпись, время)]}.
 
     Имена, которые не сопоставились с чат-менеджером СЗоВ, возвращаем отдельно — по ним потом
-    видно, что кто-то переименовался и выпал из счётчиков (та же диагностика, что у «Основы»).
+    видно, что кто-то переименовался и выпал из счётчиков (та же диагностика, что у «Линии»).
     `truncated` — обрезалась ли выгрузка событий; по умолчанию берём у кэша табло, но выгрузка
     за период качает события в свой кэш и передаёт признак явно."""
     timelines = {}
@@ -33008,7 +33057,7 @@ def _szov_chat_wallboard_online_seconds(timelines, now_seconds):
     смены на линии. Одной суммой обошлась бы только FTE-доля, а её владелец отменил
     19.08.2026 — на стене нужны люди.
     Считаем только статус «онлайн»: занят, тренинг, перерыв и отпуск линию не держат — их
-    минуты в сумму не идут вовсе, ровно та же граница, что у «Основы», где онлайн это свободен
+    минуты в сумму не идут вовсе, ровно та же граница, что у «Линии», где онлайн это свободен
     или в разговоре."""
     per_hour = {}
     for name, entries in timelines.items():
@@ -33248,7 +33297,7 @@ def _szov_chat_wallboard_fetch_snapshot():
 def _szov_chat_wallboard_snapshot():
     """Снимок направления «Чат»: Chat2Desk.
 
-    Кэш тут длиннее, чем у «Основы»: квота Chat2Desk общая на компанию, а не наш собственный
+    Кэш тут длиннее, чем у «Линии»: квота Chat2Desk общая на компанию, а не наш собственный
     прокси. Правила устаревания — общие с «Основой», см. _wallboard_snapshot_with_cache."""
     return _wallboard_snapshot_with_cache(
         cache=_szov_chat_wallboard_cache,
@@ -33912,6 +33961,214 @@ def api_szov_wallboard_chat_export():
         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
+# === Отбивка показателей табло, направление «Чат» ==============================================
+# То же, что отбивка «Линии» (см. «Отбивка показателей «Табло СЗоВ» в Telegram»), но своими
+# показателями. Получатели, режимы, аудит, кнопка «Отправить сейчас», обход чатов и правило
+# «только при отклонениях» — общий механизм: направление лежит колонкой `direction` у
+# получателя, а рассылку ведёт один `_szov_broadcast_run_job`.
+#
+# Данные берём ИЗ КЭША ТАБЛО и только оттуда: квота Chat2Desk общая на компанию, а снимок
+# направления уже собран для экрана. Отсюда главное свойство — цифры в Telegram и цифры на
+# стене совпадают по построению, а отбивка не стоит компании ни одного лишнего запроса.
+#
+# Почасовой таблицы здесь НЕТ, и это решение, а не упущение: разбор по часам и по каждому
+# чатнику уже уходит почасовым отчётом (`_chat_hourly_*`), который подписывается командой в
+# самом чате. Отбивка — это сводка со стены и отклонения от нормы; вторая копия тех же
+# чисел в том же чате была бы шумом. Один чат вправе быть подписан на оба — это выбор
+# получателя, а не дубль.
+SZOV_CHAT_BROADCAST_SEND_TIMES = (
+    os.getenv('SZOV_CHAT_BROADCAST_SEND_TIMES') or SZOV_BROADCAST_SEND_TIMES).strip()
+# Сколько обращений должно быть за сутки, чтобы средним временем ответа можно было будить
+# людей. «Ответ внутри чата» — среднее ПО СУТКАМ, и в 00:30 оно стоит на двух-трёх чатах:
+# один медленный ответ поднял бы тревогу там, где нет ни очереди, ни проблемы. На саму
+# норму это не влияет — на табло плитка покраснеет как обычно; ниже порога мы просто не
+# считаем эту цифру поводом написать в чат.
+SZOV_CHAT_BROADCAST_MIN_CHATS = _env_int('SZOV_CHAT_BROADCAST_MIN_CHATS', 5,
+                                         minimum=1, maximum=1000)
+
+
+def _szov_chat_broadcast_send_times():
+    """[(час, минута), ...] из SZOV_CHAT_BROADCAST_SEND_TIMES — направление «Чат».
+
+    По умолчанию совпадает с расписанием «Линии»: владелец просил «такую же отбивку», а
+    разойтись расписаниям даём отдельной переменной, если понадобится."""
+    return _szov_broadcast_parse_times(SZOV_CHAT_BROADCAST_SEND_TIMES, "Отбивка табло (чат)")
+
+
+def _szov_chat_broadcast_duration(seconds):
+    """Время ответа для сообщения. Прочерк, а не ноль, когда обращений не было.
+
+    Ноль здесь врал бы про «отвечаем мгновенно» — на ночном часу без чатов это как раз и
+    случилось бы."""
+    return '—' if seconds is None else _szov_format_seconds_mmss(seconds)
+
+
+def _szov_chat_broadcast_collect():
+    """Показатели отбивки чатов — снимок табло, тот же, что на стене.
+
+    Своих запросов к Chat2Desk не делаем: снимок направления уже лежит в кэше табло. Если
+    Chat2Desk молчит дольше окна устаревания, снимок не отдастся вовсе и отбивка не уйдёт —
+    это лучше письма из одних прочерков."""
+    snapshot = _szov_chat_wallboard_snapshot()
+    return {
+        'generated_at': datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).strftime('%d.%m.%Y %H:%M'),
+        'target_seconds': (_szov_wallboard_int((snapshot or {}).get('target_seconds'))
+                           or SZOV_CHAT_WALLBOARD_TARGET_SECONDS),
+        'now': (snapshot or {}).get('now') or {},
+        'today': (snapshot or {}).get('today') or {},
+        'snapshot_stale': bool((snapshot or {}).get('stale')),
+        'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
+    }
+
+
+def _szov_chat_broadcast_deviations(data):
+    """Отклонения от нормы направления «Чат». Пустой список — всё в норме.
+
+    По нему решается, получит ли сообщение чат в режиме «только при отклонениях». Норма
+    здесь ровно та, что красит плитки на табло: у направления один оценочный показатель —
+    «ответ внутри чата» против цели (SZOV_CHAT_WALLBOARD_TARGET_SECONDS). Придумывать
+    второй порог нельзя: одна и та же цифра стала бы отклонением в Telegram и нормой на
+    экране.
+
+    Единственная поправка — размер выборки (SZOV_CHAT_BROADCAST_MIN_CHATS): среднее по
+    двум ночным обращениям это не показатель, а случай, и будить им людей нельзя. Норму
+    это не меняет — плитка на табло краснеет как обычно, мы лишь не пишем об этом в чат.
+
+    Молчание Chat2Desk — тоже отклонение: цифры на стене замерли, и знать об этом надо."""
+    notes = []
+    today = data.get('today') or {}
+    target = _szov_wallboard_int(data.get('target_seconds'))
+    inner = today.get('inner_reply_seconds')
+    chats = _szov_wallboard_int(today.get('chats'))
+    if (target and inner is not None and inner > target
+            and chats >= SZOV_CHAT_BROADCAST_MIN_CHATS):
+        notes.append(
+            f"Обратите внимание: ответ внутри чата дольше цели "
+            f"({_szov_format_seconds_mmss(target)}) — {_szov_format_seconds_mmss(inner)} "
+            f"на {chats} {_szov_plural(chats, 'обращении', 'обращениях', 'обращениях')} за сутки."
+        )
+    stale = _szov_broadcast_stale_note(data, 'Chat2Desk')
+    if stale:
+        notes.append(stale)
+    return notes
+
+
+def _szov_chat_broadcast_notes(data):
+    """Примечания отбивки чатов: отклонения плюс дежурные строки.
+
+    Дежурные строки (кто на линии, время ответа) отклонениями НЕ считаются — иначе чат в
+    режиме «только при отклонениях» получал бы сообщение каждый раз."""
+    stale = _szov_broadcast_stale_note(data, 'Chat2Desk')
+    # Замершие данные упоминаем последними, после дежурных строк.
+    notes = [note for note in _szov_chat_broadcast_deviations(data) if note != stale]
+    now = data.get('now') or {}
+    today = data.get('today') or {}
+
+    online = _szov_wallboard_int(now.get('operators_online'))
+    parts = [f"{online} {_szov_plural(online, 'чатник', 'чатника', 'чатников')} на линии"]
+    for count, label in ((_szov_wallboard_int(now.get('operators_busy')), 'заняты'),
+                         (_szov_wallboard_int(now.get('operators_on_break')), 'на перерыве'),
+                         (_szov_wallboard_int(now.get('operators_on_training')), 'на тренинге')):
+        if count:
+            parts.append(f"{count} {label}")
+    notes.append(', '.join(parts) + '.')
+
+    # Без обращений говорим это словами: строка «Первый ответ — —, внутри чата —» читается
+    # как сбой, хотя ночью пустые сутки — норма.
+    if _szov_wallboard_int(today.get('chats')):
+        notes.append(
+            f"Первый ответ — {_szov_chat_broadcast_duration(today.get('first_reply_seconds'))}, "
+            f"внутри чата {_szov_chat_broadcast_duration(today.get('inner_reply_seconds'))}")
+    else:
+        notes.append("Обращений за сутки пока не было.")
+
+    if stale:
+        notes.append(stale)
+    return notes
+
+
+def _szov_chat_broadcast_text(data):
+    """Текст отбивки чатов. HTML parse_mode: заголовок жирный.
+
+    Сами цифры построчно НЕ перечисляем — они уже на картинке, которая уходит этим же
+    сообщением; в тексте остаются отклонения и дежурные строки."""
+    lines = [f"<b>Чаты сейчас</b> ({data['generated_at']}):"]
+    notes = _szov_chat_broadcast_notes(data)
+    if notes:
+        lines.append("")
+        lines.extend(notes)
+    return "\n".join(lines)
+
+
+def _szov_render_chat_wallboard_png(data):
+    """PNG направления «Чат»: те же плитки, что на стене, тем же рисовальщиком, что «Линия»."""
+    now = data.get('now') or {}
+    today = data.get('today') or {}
+    target = _szov_wallboard_int(data.get('target_seconds'))
+    inner = today.get('inner_reply_seconds')
+    # Цвет единственного оценочного показателя направления — как на табло: уложились или нет.
+    if inner is None:
+        inner_colors = ('#f1f5f9', '#334155')
+    elif target and inner > target:
+        inner_colors = ('#ffe4e6', '#be123c')
+    else:
+        inner_colors = ('#d1fae5', '#047857')
+
+    key_tiles = [
+        ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
+        ('Ответ внутри чата', _szov_chat_broadcast_duration(inner),
+         inner_colors[0], inner_colors[1]),
+        ('Открыто чатов', str(_szov_wallboard_int(now.get('open_chats'))), '#f1f5f9', '#334155'),
+        ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break'))), '#fef3c7', '#b45309'),
+    ]
+    stat_tiles = [
+        ('Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
+        ('Первый ответ', _szov_chat_broadcast_duration(today.get('first_reply_seconds'))),
+        ('Занят', str(_szov_wallboard_int(now.get('operators_busy')))),
+        ('Тренинг', str(_szov_wallboard_int(now.get('operators_on_training')))),
+        ('Не в системе', str(_szov_wallboard_int(now.get('operators_offline')))),
+    ]
+    return _szov_render_tiles_png(
+        'Табло СЗоВ · чаты', f"Чаты · {data['generated_at']}", key_tiles, stat_tiles)
+
+
+async def _szov_chat_broadcast_prepare():
+    """Собрать отбивку чатов целиком: данные, текст и картинку.
+
+    Отдельно от отправки, потому что получателей несколько: собирать один и тот же снимок
+    по разу на каждый чат нельзя. Снимок тянем в пуле потоков — Chat2Desk это синхронный
+    requests, и держать на нём event loop бота недопустимо."""
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(executor_pool, _szov_chat_broadcast_collect)
+    text = _szov_chat_broadcast_text(data)
+
+    media = []
+    try:
+        board_png = await loop.run_in_executor(
+            executor_pool, _szov_render_chat_wallboard_png, data)
+        media = [('chat_board.png', board_png)]
+    except Exception as exc:
+        # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинки.
+        logging.error("Отбивка табло (чат): не удалось собрать картинку: %s", exc)
+    return data, text, media
+
+
+async def _szov_chat_broadcast_send(chat_id):
+    """Собрать и отправить отбивку чатов в один чат — кнопка «Отправить сейчас»."""
+    data, text, media = await _szov_chat_broadcast_prepare()
+    await _szov_broadcast_deliver(chat_id, text, media)
+    return data
+
+
+async def szov_chat_broadcast_job():
+    """Плановая отбивка направления «Чат»."""
+    await _szov_broadcast_run_job(
+        direction=SZOV_BROADCAST_DIRECTION_CHAT,
+        label="Отбивка табло (чат)",
+        prepare=_szov_chat_broadcast_prepare,
+        deviations=_szov_chat_broadcast_deviations)
+
+
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------
 
 def amo_leads_sync(days=None):
@@ -34332,6 +34589,31 @@ async def front_office_calls_broadcast_job():
 
 
 # --- Настройка отбивки: эндпоинты --------------------------------------------------------------
+#
+# Эндпоинты одни на оба направления: различаются только список получателей, расписание и
+# сборщик сообщения, а форма настройки, права и аудит у них общие. Направление приходит
+# параметром `direction`.
+
+
+def _szov_broadcast_direction_arg(payload=None):
+    """Направление отбивки из запроса. Пусто = «Линия».
+
+    Пустое значение допускаем намеренно: фронт едет отдельным деплоем (GitHub Pages против
+    Render), и бандл, ничего не знающий о втором направлении, обязан продолжать настраивать
+    «Линию», а не получать 400."""
+    raw = str(request.args.get('direction') or (payload or {}).get('direction') or '').strip()
+    direction = raw or SZOV_BROADCAST_DIRECTION_LINE
+    if direction not in SZOV_BROADCAST_DIRECTIONS:
+        raise ValueError("Неизвестное направление табло")
+    return direction
+
+
+def _szov_broadcast_direction_times(direction):
+    """Расписание направления — то, что форма показывает подписью под заголовком."""
+    times = (_szov_chat_broadcast_send_times() if direction == SZOV_BROADCAST_DIRECTION_CHAT
+             else _szov_broadcast_send_times())
+    return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
+
 
 @app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
 @require_api_key
@@ -34339,30 +34621,37 @@ def api_szov_wallboard_broadcast():
     """Получатели отбивки: кому слать, в каком режиме, история изменений и чаты бота.
 
     POST добавляет получателя или меняет его режим / включённость (чат — ключ, дублей не
-    заводим), DELETE убирает из списка."""
+    заводим), DELETE убирает из списка. Всё — в пределах одного направления: тот же чат в
+    «Линии» и в «Чате» это две независимые строки."""
     if request.method == 'OPTIONS':
         return _build_cors_preflight_response()
     requester_id, err = _szov_broadcast_guard()
     if err:
         return err
+    payload = request.get_json(silent=True) or {} if request.method in ('POST', 'DELETE') else {}
+    try:
+        direction = _szov_broadcast_direction_arg(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     if request.method in ('POST', 'DELETE'):
-        payload = request.get_json(silent=True) or {}
         try:
             if request.method == 'DELETE':
                 db.delete_szov_broadcast_chat(
-                    payload.get('chat_id') or request.args.get('chat_id'), user_id=requester_id)
+                    payload.get('chat_id') or request.args.get('chat_id'),
+                    user_id=requester_id, direction=direction)
             else:
-                db.save_szov_broadcast_chat(payload, user_id=requester_id)
+                db.save_szov_broadcast_chat(payload, user_id=requester_id, direction=direction)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except Exception as exc:
             logging.error("Отбивка табло: не удалось сохранить настройку: %s", exc)
             return jsonify({"error": "Не удалось сохранить настройку"}), 500
     return jsonify({
-        "recipients": db.get_szov_broadcast_chats(),
-        "history": db.get_szov_broadcast_history(),
+        "direction": direction,
+        "recipients": db.get_szov_broadcast_chats(direction),
+        "history": db.get_szov_broadcast_history(direction=direction),
         "chats": db.list_bot_group_chats(),
-        "send_times": [f"{h:02d}:{m:02d}" for h, m in _szov_broadcast_send_times()],
+        "send_times": _szov_broadcast_direction_times(direction),
     })
 
 
@@ -34379,6 +34668,12 @@ def api_szov_wallboard_broadcast_preview():
     requester_id, err = _szov_broadcast_guard()
     if err:
         return err
+    try:
+        direction = _szov_broadcast_direction_arg()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if direction == SZOV_BROADCAST_DIRECTION_CHAT:
+        return _szov_chat_broadcast_preview()
     hour_raw = (request.args.get('hour') or '').strip()
     hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
 
@@ -34421,6 +34716,35 @@ def api_szov_wallboard_broadcast_preview():
     })
 
 
+def _szov_chat_broadcast_preview():
+    """Предпросмотр отбивки чатов: текст и картинка, ничего не отправляя.
+
+    Нужен там же, где предпросмотр «Линии»: посмотреть вид перед включением и убедиться,
+    что на сервере нашёлся шрифт с кириллицей. Снимок берётся из кэша табло, поэтому
+    предпросмотр не тратит квоту Chat2Desk."""
+    try:
+        data = _szov_chat_broadcast_collect()
+    except Exception as exc:
+        logging.error("Предпросмотр отбивки (чат): данные не собрались: %s", exc)
+        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
+
+    if (request.args.get('image') or '').strip() == 'board':
+        try:
+            blob = _szov_render_chat_wallboard_png(data)
+        except Exception as exc:
+            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
+        response = Response(blob, mimetype='image/png')
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    regular, _bold = _szov_font_paths()
+    return jsonify({
+        "text": _szov_chat_broadcast_text(data),
+        "font_path": regular,
+        "images_available": bool(regular),
+    })
+
+
 @app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])
 @require_api_key
 def api_szov_wallboard_broadcast_test():
@@ -34435,20 +34759,27 @@ def api_szov_wallboard_broadcast_test():
     if err:
         return err
     payload = request.get_json(silent=True) or {}
+    try:
+        direction = _szov_broadcast_direction_arg(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     raw = payload.get('chat_id')
-    recipients = {str(chat['chat_id']): chat for chat in db.get_szov_broadcast_chats()}
+    recipients = {str(chat['chat_id']): chat
+                  for chat in db.get_szov_broadcast_chats(direction)}
     if raw in (None, '') and len(recipients) == 1:
         raw = next(iter(recipients))
     if str(raw) not in recipients:
         return jsonify({"error": "Сначала выберите чат"}), 400
     chat_id = recipients[str(raw)]['chat_id']
+    send = (_szov_chat_broadcast_send if direction == SZOV_BROADCAST_DIRECTION_CHAT
+            else _szov_broadcast_send)
     try:
         loop = _bot_event_loop()
         if loop is None:
             return jsonify({"error": "Бот не запущен"}), 503
-        future = asyncio.run_coroutine_threadsafe(_szov_broadcast_send(int(chat_id)), loop)
+        future = asyncio.run_coroutine_threadsafe(send(int(chat_id)), loop)
         future.result(timeout=180)
-        return jsonify({"status": "success", "chat_id": chat_id})
+        return jsonify({"status": "success", "chat_id": chat_id, "direction": direction})
     except Exception as exc:
         logging.error("Отбивка табло: тестовая отправка не удалась: %s", exc, exc_info=True)
         return jsonify({"error": "Не удалось отправить", "detail": str(exc)[:300]}), 502
@@ -52385,6 +52716,19 @@ if __name__ == '__main__':
             szov_broadcast_job,
             CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
             id=f'szov_wallboard_broadcast_{_hour:02d}{_minute:02d}',
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+
+    # То же для направления «Чат». Своё расписание и своя джоба: у чатов другой источник
+    # (Chat2Desk) и другие показатели, а получателей у направления может не быть вовсе —
+    # тогда джоба выходит сразу и ничего не дёргает.
+    for _hour, _minute in _szov_chat_broadcast_send_times():
+        scheduler.add_job(
+            szov_chat_broadcast_job,
+            CronTrigger(hour=_hour, minute=_minute, timezone=ZoneInfo(SZOV_BROADCAST_TIMEZONE)),
+            id=f'szov_chat_wallboard_broadcast_{_hour:02d}{_minute:02d}',
             misfire_grace_time=600,
             max_instances=1,
             coalesce=True
