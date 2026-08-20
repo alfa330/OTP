@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { typeBadge } from './articleTypes';
+import { findTrainer } from './trainers/registry';
 import { scrollToElement } from './scrollContainer';
 import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
@@ -23,6 +24,11 @@ import WikiAckPanel from './WikiAckPanel';
    ровно как раньше, когда он был отдельным разделом. */
 export const CLASSIFIER_SLUG = 'klassifikator-avto';
 const ClassifierView = lazy(() => import('../classifier/ClassifierView'));
+
+/* Тренажёр — отдельный чанк: экраны двух приложений, барс и своя таблица стилей
+   весят прилично, а открывают их только в статьях-тренажёрах. Грузим по нажатию
+   на кнопку в тексте, а не при открытии статьи. */
+const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
 
 /* Страница статьи.
  *
@@ -72,6 +78,11 @@ const SANITIZE_OPTIONS = {
         'data-color', 'data-title', 'data-default-open', 'data-allow-multiple',
         'data-required-for-ack', 'data-wiki-collapsible', 'data-wiki-collapsible-group',
         'data-id', 'data-icon', 'data-size', 'data-layout', 'open', 'colspan', 'rowspan',
+        /* Кнопка тренажёра. Тот же список, что в серверном санитайзере
+           (wiki/sanitize.py): разойдись они — статья сохранилась бы с кнопкой,
+           а при чтении та превратилась бы в безымянный div, и тренажёр просто
+           не открывался бы. */
+        'data-wiki-trainer', 'data-label', 'data-width', 'data-align',
     ],
 };
 
@@ -152,7 +163,28 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     const [toc, setToc] = useState([]);
     const [activeId, setActiveId] = useState('');
     const bodyRef = useRef(null);
+    /* «Тело статьи уже в DOM» — ОТДЕЛЬНОЕ состояние, а не производное от
+       содержимого.
+       Так пришлось сделать из-за порядка обновлений: setArticle зовётся в .then,
+       а setLoading(false) — в .finally, и это два разных рендера. В первом из
+       них содержимое уже посчитано, но компонент ещё возвращает «Открываем
+       статью…», то есть див тела не смонтирован и bodyRef пуст. Эффекты,
+       завязанные только на содержимое, срабатывали именно в этот момент и
+       больше не повторялись: заголовки не получали id (оглавление статьи
+       оставалось пустым), подсветка найденного слова не появлялась, а кнопка
+       тренажёра не получала роль и попадание в Tab.
+       Колбэк-ref будит эффекты тогда, когда узел реально появился, — независимо
+       от того, какой именно ранний возврат задержал отрисовку. */
+    const [bodyReady, setBodyReady] = useState(false);
+    const attachBody = useCallback((node) => {
+        bodyRef.current = node;
+        setBodyReady(!!node);
+    }, []);
     const [archiving, setArchiving] = useState(false);
+    /* Открытый тренажёр — сценарий, а не флаг: в одной статье кнопок может быть
+       несколько (например, «через приложение» и «через сайт»), и открыться
+       обязан именно тот, по которому нажали. */
+    const [trainer, setTrainer] = useState(null);
     /* Чтение во весь экран. Нужно для широких статей: у «Все акции» одиннадцать
        колонок, и таблице требуется около 2500px — в колонку раздела она не
        влезает ни при какой вёрстке, поэтому единственный честный ответ это
@@ -206,9 +238,26 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
        авторизация. Внешние ссылки и клики с модификатором (открыть в новой
        вкладке) отдаём браузеру нетронутыми. */
     const onBodyClick = (event) => {
-        if (!onOpenArticle) return;
         if (event.defaultPrevented || event.button !== 0) return;
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
+        /* Кнопка тренажёра. Обработчик делегированный, потому что тело статьи
+           вставляется через dangerouslySetInnerHTML — навесить onClick в
+           разметке негде, а склеивать HTML со строкой обработчика нельзя: это
+           ровно та дыра, от которой стоит санитайзер. */
+        const button = event.target?.closest?.('[data-wiki-trainer]');
+        if (button) {
+            event.preventDefault();
+            const key = button.getAttribute('data-wiki-trainer');
+            const scenario = findTrainer(key);
+            if (scenario) setTrainer(scenario);
+            // Тренажёр мог уехать из кода, а кнопка в статье остаться. Молчать
+            // нельзя: для читателя это «нажал — ничего не произошло».
+            else showToast?.('Этот тренажёр больше не доступен', 'error');
+            return;
+        }
+
+        if (!onOpenArticle) return;
         const anchor = event.target?.closest?.('a[href]');
         if (!anchor || anchor.target === '_blank') return;
         const target = readArticleSlugFromHref(anchor.getAttribute('href'));
@@ -258,6 +307,35 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         [article?.content, base],
     );
 
+    /* Кнопка тренажёра приходит из базы обычным div'ом: тега button там быть не
+       может — санитайзер его не пропускает (и правильно: в тексте статьи кнопке
+       с обработчиком не место). Значит, нажимаемой с клавиатуры её надо сделать
+       здесь, после вставки контента: роль, попадание в Tab и подпись для
+       скринридера. Правка идёт по готовому DOM, то есть ПОСЛЕ санитайзера, и
+       ничего мимо него не проносит. */
+    useEffect(() => {
+        if (!safeHtml || !bodyRef.current) return;
+        bodyRef.current.querySelectorAll('[data-wiki-trainer]').forEach((node) => {
+            node.setAttribute('role', 'button');
+            node.setAttribute('tabindex', '0');
+            const label = node.getAttribute('data-label') || node.textContent?.trim();
+            if (label) node.setAttribute('aria-label', `${label}. Откроется тренажёр`);
+        });
+    }, [safeHtml, bodyReady]);
+
+    /* Пробел и Enter на кнопке тренажёра. У настоящей button это работает само,
+       у div с role=button — нет, и без этого кнопка остаётся недоступной тем,
+       кто не пользуется мышью. */
+    const onBodyKeyDown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const button = event.target?.closest?.('[data-wiki-trainer]');
+        if (!button) return;
+        event.preventDefault();
+        const scenario = findTrainer(button.getAttribute('data-wiki-trainer'));
+        if (scenario) setTrainer(scenario);
+        else showToast?.('Этот тренажёр больше не доступен', 'error');
+    };
+
     // Оглавление собираем после того, как контент оказался в DOM.
     useEffect(() => {
         if (!safeHtml || !bodyRef.current) { setToc([]); return; }
@@ -271,7 +349,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         });
         setToc(entries);
         setActiveId(entries[0]?.id || '');
-    }, [safeHtml]);
+    }, [safeHtml, bodyReady]);
 
     // Подсветка активного пункта оглавления. IntersectionObserver вместо
     // обработчика прокрутки: он не будит React на каждый кадр.
@@ -361,7 +439,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             };
         }
         return undefined;
-    }, [safeHtml, highlightTerm]);
+    }, [safeHtml, highlightTerm, bodyReady]);
 
     /* Звезда работает в обе стороны.
      *
@@ -608,7 +686,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     )}
 
                     {isClassifier ? (
-                        <div ref={bodyRef} className="min-w-0 flex-1">
+                        <div ref={attachBody} className="min-w-0 flex-1">
                             <Suspense fallback={(
                                 <div className="flex items-center justify-center gap-2 py-14 text-slate-400">
                                     <Loader2 size={18} className="animate-spin" />
@@ -620,9 +698,10 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         </div>
                     ) : (
                         <div
-                            ref={bodyRef}
+                            ref={attachBody}
                             className="wiki-prose min-w-0 flex-1"
                             onClick={onBodyClick}
+                            onKeyDown={onBodyKeyDown}
                             dangerouslySetInnerHTML={{ __html: safeHtml }}
                         />
                     )}
@@ -646,6 +725,23 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                 <p className="px-1 text-[11.5px] text-slate-400">
                     Доступ: {article.why}
                 </p>
+            )}
+
+            {/* Тренажёр открывается ПОВЕРХ статьи и на весь экран: учебный
+                телефон с барсом рядом в колонку текста не влезает, а сжимать его
+                до ширины абзаца — значит сделать экраны нечитаемыми.
+                Ленивый чанк ждать не заставляет: пока грузится, показываем
+                строку вместо пустого экрана. */}
+            {trainer && (
+                <Suspense fallback={(
+                    <div className="fixed inset-0 z-[95] flex items-center justify-center gap-2
+                                    bg-slate-900/40 text-white backdrop-blur-md">
+                        <Loader2 size={18} className="animate-spin" />
+                        <span className="text-[13px]">Готовим тренажёр…</span>
+                    </div>
+                )}>
+                    <TrainerModal scenario={trainer} onClose={() => setTrainer(null)} />
+                </Suspense>
             )}
         </div>
     );

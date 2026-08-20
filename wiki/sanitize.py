@@ -51,6 +51,12 @@ _WIKI_DATA_ATTRS = {
     'data-title', 'data-default-open', 'data-allow-multiple',
     'data-required-for-ack', 'data-id', 'data-icon', 'data-size',
     'data-layout', 'data-color',
+    # Кнопка тренажёра внутри текста статьи. Узел ПУСТОЙ по смыслу: вся
+    # интерактивность навешивается при чтении (WikiArticle), а в базе остаётся
+    # только «какой сценарий, какой подписью, какой ширины и по какому краю».
+    # Без этих атрибутов кнопка сохранилась бы как безымянный div — статья
+    # открывалась бы без тренажёра, и молча.
+    'data-wiki-trainer', 'data-label', 'data-width', 'data-align',
 }
 
 ALLOWED_ATTRIBUTES = {tag: set(_COMMON_ATTRS) for tag in ALLOWED_TAGS}

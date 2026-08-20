@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
-    AlertCircle, BookOpen, FileText, FolderTree, Home, KeyRound, Layers, MapPin,
+    AlertCircle, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound, Layers, MapPin,
     Network,
     Building2, Loader2, Plus, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
@@ -14,6 +14,7 @@ import WikiCatalog, { BucketSwitch } from './WikiCatalog';
 import WikiParks from './WikiParks';
 import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
+import WikiTrainers from './WikiTrainers';
 import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
@@ -72,7 +73,14 @@ const StatTile = ({ icon: Icon, value, label }) => (
 const MODES = [
     { key: 'catalog', label: 'Статьи', icon: BookOpen },
     { key: 'structure', label: 'Структура', icon: Network },
+    /* Тренажёры — третья половина той же работы: «что лежит», «как разложено»
+       и «чем это отрабатывают». Отдельным пунктом меню они стали бы четвёртой
+       вкладкой с двумя карточками внутри. */
+    { key: 'trainers', label: 'Тренажёры', icon: Gamepad2 },
 ];
+
+/* Порядок половин — он же направление, с которого приезжает содержимое. */
+const MODE_ORDER = MODES.map((mode) => mode.key);
 
 const ModeSwitch = ({ value, onChange, allowed }) => (
     <div className="inline-flex max-w-full gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
@@ -125,10 +133,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        работы («что лежит» и «как разложено») собраны под одним пунктом меню и
        переключаются здесь. */
     const [catalogMode, setCatalogMode] = useState('catalog');
-    /* Счётчик нажатий «Новая статья»: кнопка живёт в шапке раздела, редактор —
-       во вкладке со статьями. Счётчик, а не флаг: после закрытия редактора его
-       не нужно гасить, чтобы кнопка сработала во второй раз. */
-    const [createTick, setCreateTick] = useState(0);
+    /* Просьба открыть редактор новой статьи. Кнопка живёт в шапке раздела и
+       работает с ДВУХ вкладок — с главной и из каталога, — а сам редактор
+       принадлежит витрине статей.
+       Просьба одноразовая, как initialSlug, а не счётчик нажатий: при переходе
+       из каталога витрина монтируется заново и уже с новым значением счётчика,
+       то есть сравнивать его было бы не с чем — кнопка молча не срабатывала бы.
+       Гасит просьбу тот, кто её выполнил. */
+    const [createRequest, setCreateRequest] = useState(null);
+    /* Правка статьи из каталога. Редактор там не живёт (в каталоге нет ни
+       читалки, ни оглавления), поэтому просьба уезжает на витрину — тем же
+       путём, каким из каталога открывается сама статья. */
+    const [editTarget, setEditTarget] = useState(null);   // {slug}
     // Тем же способом заголовок раздела возвращает витрину на главную.
     const [homeTick, setHomeTick] = useState(0);
     const rootRef = useRef(null);
@@ -219,7 +235,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const catalogModes = useMemo(() => [
         ...(isEditor ? ['catalog'] : []),
         ...(canManageStructure || canGrantAccess ? ['structure'] : []),
+        // Тренажёры — редактору: это инструмент того, кто СТАВИТ тренажёр в
+        // статью. Читателю он не нужен, тренажёр к нему приходит кнопкой в тексте.
+        ...(isEditor ? ['trainers'] : []),
     ], [isEditor, canManageStructure, canGrantAccess]);
+
+    /* Сторона, с которой въезжает выбранная половина. Предыдущую держим в ref,
+       а не в состоянии: она нужна только для стартового смещения анимации, и
+       лишний рендер на её запись был бы чистой платой ни за что. */
+    const previousMode = useRef(catalogMode);
+    const modeSlide = MODE_ORDER.indexOf(catalogMode) >= MODE_ORDER.indexOf(previousMode.current)
+        ? 16 : -16;
+    useEffect(() => { previousMode.current = catalogMode; }, [catalogMode]);
 
     // Доступная человеку половина может не совпасть с выбранной — например,
     // права сузились между заходами.
@@ -318,12 +345,20 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         </button>
 
                         {/* Действие вкладки со статьями — в шапке рядом с «Обновить»,
-                            как в макете. На других вкладках его быть не должно:
-                            редактор принадлежит витрине статей. */}
-                        {tab === 'library' && capabilities.can_create && (
+                            как в макете.
+                            Показываем на ДВУХ вкладках: на главной и в каталоге.
+                            Каталог — рабочее место того, кто ведёт базу знаний:
+                            он разбирает там разделы и черновики, и «создать
+                            статью» ему нужно ровно оттуда, а не после
+                            возвращения на главную. Место у кнопки при этом одно
+                            и то же — на другие вкладки она не выходит, потому
+                            что редактор принадлежит витрине статей. */}
+                        {capabilities.can_create
+                            && (tab === 'library'
+                                || (tab === 'catalog' && catalogMode === 'catalog')) && (
                             <button
                                 type="button"
-                                onClick={() => setCreateTick((n) => n + 1)}
+                                onClick={() => { setTab('library'); setCreateRequest({}); }}
                                 className={iosBtnPrimary}
                             >
                                 <Plus size={15} /> Новая статья
@@ -491,7 +526,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         catalog={catalog}
                         canCreate={!!capabilities.can_create}
                         canEdit={canEdit}
-                        createTick={createTick}
+                        createRequest={createRequest}
+                        onCreateConsumed={() => setCreateRequest(null)}
+                        editTarget={editTarget}
+                        onEditTargetConsumed={() => setEditTarget(null)}
                         homeTick={homeTick}
                         onOpenParks={() => setTab('parks')}
                         /* Счётчики на главной — не подписи, а кнопки: число
@@ -562,22 +600,36 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         )}
 
                         {/* Половина появляется со сдвигом в ту сторону, откуда
-                            пришла: «Структура» правее «Статей», значит и въезжает
-                            справа. Без направления переход читается как перерисовка,
-                            а не как переход. Анимируем ТОЛЬКО въезд: выезд старой
-                            половины схлопывал бы высоту и дёргал прокрутку —
-                            структура много выше каталога. */}
+                            пришла: правее в переключателе — значит въезжает
+                            справа. Без направления переход читается как
+                            перерисовка, а не как переход. Анимируем ТОЛЬКО въезд:
+                            выезд старой половины схлопывал бы высоту и дёргал
+                            прокрутку — структура много выше каталога.
+                            Сторону считаем по порядку половин, а не по имени
+                            одной из них: с появлением третьей («Тренажёры»)
+                            проверка на 'structure' начала бы врать. */}
                         <motion.div
                             key={catalogMode}
                             initial={reduceMotion
                                 ? { opacity: 0 }
-                                : { opacity: 0, x: catalogMode === 'structure' ? 16 : -16 }}
+                                : { opacity: 0, x: modeSlide }}
                             animate={{ opacity: 1, x: 0 }}
                             transition={reduceMotion
                                 ? { duration: 0 }
                                 : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
                         >
-                            {catalogMode === 'catalog' ? (
+                            {catalogMode === 'trainers' ? (
+                                <WikiTrainers
+                                    base={base}
+                                    headers={headers}
+                                    /* Статью со вставленным тренажёром открываем
+                                       там же, где все статьи, — на главной. */
+                                    onOpenArticle={(slug) => {
+                                        setTab('library');
+                                        setSearchTarget({ slug });
+                                    }}
+                                />
+                            ) : catalogMode === 'catalog' ? (
                                 <WikiCatalog
                                     base={base}
                                     headers={headers}
@@ -593,6 +645,17 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                         setTab('library');
                                         setSearchTarget({ slug });
                                     }}
+                                    /* Правка — туда же, где редактор: на
+                                       витрину. Второго редактора в каталоге
+                                       быть не должно ровно по той же причине,
+                                       что и второго экрана статьи. */
+                                    onEditArticle={(article) => {
+                                        setTab('library');
+                                        setEditTarget({ slug: article.slug });
+                                    }}
+                                    /* Смена статуса из списка меняет числа на
+                                       переключателе корзин — они живут здесь. */
+                                    reloadCatalog={loadCatalog}
                                 />
                             ) : (
                                 <WikiStructure

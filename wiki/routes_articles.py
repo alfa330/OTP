@@ -82,7 +82,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
     # ── Список ───────────────────────────────────────────────────────────
     @wiki_route('/articles')
     def wiki_articles_list(cursor, ctx):
-        _subjects, _sections, visible = _browse(cursor, ctx)
+        subjects, sections, visible = _browse(cursor, ctx)
         limit = min(max(_int_or_none(request.args.get('limit')) or 50, 1), 200)
         offset = max(_int_or_none(request.args.get('offset')) or 0, 0)
         section_id, orphans_only = _section_filter()
@@ -96,6 +96,16 @@ def register(bp, wiki_route, db, log_ip, gcs):
             query=(request.args.get('q') or None),
             limit=limit, offset=offset,
         )
+        # Что человек вправе СДЕЛАТЬ с каждой статьёй — в самой выдаче: меню
+        # действий в каталоге иначе предлагало бы «Редактировать» на статье,
+        # которую сервер тут же откажется править. Роль такого ответа не даёт —
+        # у статьи есть свои правила доступа, и знать про них может только тот,
+        # кто их считает. Расчёт стоит два запроса на весь список, независимо от
+        # его длины (permissions_for_articles).
+        rights = wiki_articles.permissions_for_articles(
+            cursor, ctx, items, subjects, sections, queries.section_rules_for_user)
+        for item in items:
+            item['permissions'] = wiki_access.permissions_only(rights[item['id']])
         return jsonify({"items": items, "total_visible": len(visible)})
 
     # ── Каталог по разделам ──────────────────────────────────────────────
@@ -161,6 +171,29 @@ def register(bp, wiki_route, db, log_ip, gcs):
             "totals": counts['totals'],
             "sections_total": len(sections),
         })
+
+    # ── Тренажёры ────────────────────────────────────────────────────────
+    @wiki_route('/trainers')
+    def wiki_trainers(cursor, ctx):
+        """Где какой тренажёр вставлен — для вкладки «Тренажёры».
+
+        Сами сценарии сервер не знает и знать не должен: они собраны во фронте
+        (src/components/wiki/trainers), потому что тренажёр — это экраны и
+        реплики помощника, а не данные. Сервер отвечает на единственный вопрос,
+        который во фронте не выяснить: в каких статьях кнопка уже стоит.
+
+        Гейт тот же, что у каталога, и по той же причине: вкладка принадлежит
+        тому, кто ведёт базу знаний, а гард во фронте не защищает прямой запрос.
+        """
+        caps = ctx['capabilities']
+        if not (caps.get('can_create') or caps.get('can_edit') or caps.get('can_publish')):
+            return jsonify({
+                "error": "Тренажёры доступны редакторам вики",
+                "code": "WIKI_EDITOR_ONLY",
+            }), 403
+
+        _subjects, _allowed, visible = _browse(cursor, ctx)
+        return jsonify({"usages": wiki_articles.trainer_usages(cursor, visible)})
 
     # ── Поиск ────────────────────────────────────────────────────────────
     @wiki_route('/search')

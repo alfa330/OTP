@@ -49,6 +49,12 @@ SECTION_KINDS = ('common', 'department')
 # нельзя отфильтровать.
 ARTICLE_TYPES = (
     'general', 'job_description', 'regulation', 'instruction', 'tool_description',
+    # 'trainer' — статья-тренажёр: в её тексте стоит кнопка запуска учебного
+    # сценария (телефон + помощник), а сам сценарий живёт во фронте
+    # (src/components/wiki/trainers). Тип нужен серверу не для отрисовки, а
+    # чтобы редактор знал, когда показывать выбор тренажёра, а витрина умела
+    # собрать такие статьи в одну подборку.
+    'trainer',
 )
 
 # Статусы статьи, сгруппированные в три корзины витрины: «Статьи», «Черновики»,
@@ -194,6 +200,10 @@ _STATEMENTS = [
         content           TEXT NOT NULL DEFAULT '',
         content_plain     TEXT NOT NULL DEFAULT '',
         search_aliases    TEXT NOT NULL DEFAULT '',
+        -- Список значений живёт в ARTICLE_TYPES; здесь он ИСТОРИЧЕСКИЙ и
+        -- нарочно не дописывается: ограничение всё равно пересобирается ниже
+        -- (_article_type_check_statement) — и на пустой базе, и на проде, где
+        -- оно уже создано со старым набором.
         article_type      VARCHAR(32) NOT NULL DEFAULT 'general'
                           CHECK (article_type IN ('general', 'job_description', 'regulation',
                                                   'instruction', 'tool_description')),
@@ -1228,6 +1238,51 @@ _ORG_STATEMENTS = [
 ]
 
 
+def _article_type_check_statement():
+    """Пересобирает CHECK на article_type под текущий ARTICLE_TYPES.
+
+    Ограничение объявлено ВНУТРИ CREATE TABLE, то есть на проде лежит с
+    автоматическим именем и со старым списком значений. Добавить тип одним
+    правкой кортежа поэтому нельзя: сохранение статьи с новым типом падало бы
+    на ограничении 500-й ошибкой, причём молча для того, кто выбрал тип.
+
+    Проверка «нужно ли пересобирать» идёт по ТЕКСТУ определения: именованное
+    ограничение обязано упоминать каждое значение из ARTICLE_TYPES. Условие
+    «существует ограничение с таким именем» здесь не годится — оно один раз
+    создало бы ограничение и навсегда заморозило список: следующий добавленный
+    тип не прошёл бы, а причину пришлось бы искать в базе, а не в коде.
+    """
+    values = ", ".join("'%s'" % name for name in ARTICLE_TYPES)
+    fresh = " AND ".join(
+        "pg_get_constraintdef(oid) LIKE '%%''%s''%%'" % name for name in ARTICLE_TYPES
+    ).replace('%%', '%')
+    return """
+    DO $$
+    DECLARE stale text;
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+             WHERE conrelid = 'wiki_articles'::regclass
+               AND contype = 'c'
+               AND conname = 'wiki_articles_type_chk'
+               AND {fresh}
+        ) THEN
+            FOR stale IN
+                SELECT conname FROM pg_constraint
+                 WHERE conrelid = 'wiki_articles'::regclass
+                   AND contype = 'c'
+                   AND pg_get_constraintdef(oid) LIKE '%article_type%'
+            LOOP
+                EXECUTE format('ALTER TABLE wiki_articles DROP CONSTRAINT %I', stale);
+            END LOOP;
+
+            ALTER TABLE wiki_articles ADD CONSTRAINT wiki_articles_type_chk
+                CHECK (article_type IN ({values}));
+        END IF;
+    END $$;
+    """.format(fresh=fresh, values=values)
+
+
 def _subject_type_check_statement(table):
     """Пересобирает CHECK на subject_type, добавляя новые типы субъектов.
 
@@ -1292,6 +1347,10 @@ def init_wiki_schema(cursor):
         cursor.execute(statement)
     for table in ('wiki_section_access_rules', 'wiki_article_access_rules'):
         cursor.execute(_subject_type_check_statement(table))
+
+    # Тип статьи: список в ARTICLE_TYPES растёт (последним пришёл 'trainer'), а
+    # ограничение в базе создано вместе с таблицей и о новых значениях не знает.
+    cursor.execute(_article_type_check_statement())
 
     for row in _SEED_ROLES:
         cursor.execute(

@@ -13,7 +13,7 @@ import { Color, TextStyle } from '@tiptap/extension-text-style';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
 import {
     AlignCenter, AlignLeft, AlignRight, Bold, Code, Heading1, Heading2, Heading3,
-    Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
+    Gamepad2, Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
     Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
     Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
@@ -22,7 +22,9 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
-import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE } from './articleTypes';
+import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE, TRAINER_TYPE } from './articleTypes';
+import WikiTrainerNode from './trainers/TrainerNode';
+import { TRAINER_CARDS, defaultButtonLabel, findTrainer } from './trainers/registry';
 import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
@@ -81,6 +83,11 @@ export default function WikiEditor({
     const [saving, setSaving] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [importing, setImporting] = useState(false);
+    /* Выбор в селекторе тренажёров держим пустым: селектор здесь — не поле со
+       значением, а команда «вставить». Останься в нём выбранный тренажёр, второе
+       нажатие по тому же пункту не считалось бы изменением, и вставить одну и ту
+       же кнопку дважды стало бы нельзя. */
+    const [trainerPick, setTrainerPick] = useState('');
     // Поддержка ИИ по умолчанию ВКЛЮЧЕНА: в базе рубильник называется ai_opt_out
     // и по умолчанию false, то есть новая статья и так участвует в ответах
     // помощника. Показать её выключенной значило бы соврать про текущее
@@ -111,6 +118,11 @@ export default function WikiEditor({
             TableRow,
             TableHeader,
             TableCell,
+            /* Кнопка тренажёра. Расширение подключено ВСЕГДА, а не только у
+               статей-тренажёров: тип статьи можно сменить обратно, и без узла в
+               схеме уже вставленная кнопка при открытии редактора превратилась
+               бы в пустой абзац — то есть молча пропала бы из текста. */
+            WikiTrainerNode,
         ],
         // Тот же разворот адресов, что и при чтении: иначе в редакторе картинки
         // уже загруженной статьи стоят битыми (см. fileUrls.js). Обратно они
@@ -262,6 +274,22 @@ export default function WikiEditor({
             return;
         }
         editor.chain().focus().extendMarkRange('link').setLink({ href: url.trim() }).run();
+    };
+
+    /* Вставка кнопки тренажёра. Подпись по умолчанию содержит название
+       тренажёра: кнопка «Открыть тренажёр» без уточнения в статье с двумя
+       разными тренажёрами не отвечает на вопрос, какой из них откроется. */
+    const insertTrainer = (key) => {
+        const scenario = findTrainer(key);
+        if (!scenario || !editor) return;
+        editor.commands.insertWikiTrainer({
+            trainer: scenario.key,
+            label: defaultButtonLabel(scenario),
+            width: 60,
+            align: 'left',
+        });
+        setDirty(true);
+        setTrainerPick('');
     };
 
     if (!editor) {
@@ -542,6 +570,33 @@ export default function WikiEditor({
                                 />
                             ))}
                         </span>
+
+                        {/* Выбор тренажёра — в конце того же ряда, где жирный и
+                            курсив: вставка кнопки для автора статьи-тренажёра
+                            такое же обычное действие, как вставка картинки.
+                            Появляется ТОЛЬКО у типа «Тренажёр»: у остальных
+                            статей это лишний элемент, который приходится читать
+                            и понимать, зачем он тут. */}
+                        {articleType === TRAINER_TYPE && (
+                            <>
+                                <Divider />
+                                <span className="flex items-center gap-1.5 px-1">
+                                    <Gamepad2 size={14} className="text-slate-400" />
+                                    <CustomSelect
+                                        variant="ios"
+                                        className="w-[210px]"
+                                        value={trainerPick}
+                                        onChange={insertTrainer}
+                                        options={TRAINER_CARDS.map((card) => ({
+                                            value: card.key,
+                                            label: `${card.title} · ${card.stages} шагов`,
+                                        }))}
+                                        placeholder="Вставить тренажёр…"
+                                        ariaLabel="Вставить кнопку тренажёра"
+                                    />
+                                </span>
+                            </>
+                        )}
                     </div>
 
                     <div className="px-4 py-4 sm:px-6">

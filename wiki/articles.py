@@ -156,14 +156,17 @@ def article_rules_for_user(cursor, article_ids, subjects, user_id):
 
 # Тело статьи в списке НЕ выбираем: в проде вики три статьи весят по 200-900 КБ
 # из-за картинок в base64, и одна выдача списка тянула бы мегабайты.
+# owner_user_id выбирается ради ПРАВ: автор и назначенный владелец правят
+# статью всегда (resolve_article_permissions), и без этого поля меню действий в
+# каталоге скрывало бы «Редактировать» у владельца его же статьи.
 _LIST_KEYS = ('id', 'slug', 'title', 'summary', 'article_type', 'status',
               'visibility_mode', 'strict_mode', 'views', 'author_id', 'author_name',
-              'updated_at', 'published_at', 'section_ids', 'tags')
+              'owner_user_id', 'updated_at', 'published_at', 'section_ids', 'tags')
 
 _LIST_SQL = """
 SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
        a.visibility_mode, a.strict_mode, a.views, a.author_id, u.name,
-       a.updated_at, a.published_at,
+       a.owner_user_id, a.updated_at, a.published_at,
        COALESCE((SELECT array_agg(s.section_id) FROM wiki_article_sections s
                   WHERE s.article_id = a.id), '{}') AS section_ids,
        COALESCE((SELECT array_agg(t.tag_name) FROM wiki_article_tags t
@@ -405,6 +408,48 @@ def recent_and_popular(cursor, visible_ids, user_id, limit=6):
     return {'recent': recent, 'popular': popular, 'favorites': favorites}
 
 
+# ── Где стоят тренажёры ──────────────────────────────────────────────────────
+#
+# Кнопка тренажёра живёт ВНУТРИ тела статьи (data-wiki-trainer="<ключ>"), своей
+# таблицы у неё нет — и правильно, что нет: связь «статья ↔ тренажёр» ровно
+# такая же, как «статья ↔ картинка», её источник правды один, и это текст.
+#
+# Ключи вынимаем регуляркой в САМОМ ПОСТГРЕСЕ, а не тянем тела статей в питон:
+# в проде вики 81 % объёма контента — base64-картинки, и вкладка «Тренажёры»
+# качала бы мегабайты, чтобы посчитать десяток кнопок.
+_TRAINER_USAGE_SQL = """
+SELECT a.id, a.slug, a.title, a.status, m.groups[1] AS trainer_key
+  FROM wiki_articles a
+  CROSS JOIN LATERAL regexp_matches(a.content,
+                                    'data-wiki-trainer="([A-Za-z0-9_-]{1,64})"',
+                                    'g') AS m(groups)
+ WHERE a.id = ANY(%(ids)s)
+   AND a.content LIKE '%%data-wiki-trainer=%%'
+ ORDER BY a.title
+"""
+
+
+def trainer_usages(cursor, visible_ids):
+    """{ключ тренажёра: [статьи, где он вставлен]} в границах периметра.
+
+    Одна статья может вставить один тренажёр дважды (например, в начале и в
+    конце длинной инструкции) — в списке она обязана остаться ОДНОЙ строкой,
+    иначе «используется в 2 статьях» врёт при одной. Поэтому дедупликация по
+    (ключ, id), а не DISTINCT в SQL: distinct по всей строке от повтора внутри
+    одной статьи не спасает — regexp_matches отдаёт по строке на вхождение.
+    """
+    if not visible_ids:
+        return {}
+    cursor.execute(_TRAINER_USAGE_SQL, {'ids': list(visible_ids)})
+    usages = {}
+    for article_id, slug, title, status, key in cursor.fetchall():
+        bucket = usages.setdefault(key, {})
+        bucket.setdefault(article_id, {
+            'id': article_id, 'slug': slug, 'title': title, 'status': status,
+        })
+    return {key: list(items.values()) for key, items in usages.items()}
+
+
 def backlinks(cursor, article_id, visible_ids):
     """Кто ссылается на статью — только среди доступных пользователю.
 
@@ -501,33 +546,60 @@ def register_file(cursor, *, article_id, bucket, blob_path, original_name,
     return cursor.fetchone()[0]
 
 
-def effective_permissions(cursor, ctx, article, subjects, allowed_sections,
-                          section_rules_fn):
-    """Эффективные права на статью — единая точка для чтения и для правки.
+def permissions_for_articles(cursor, ctx, articles, subjects, allowed_sections,
+                             section_rules_fn):
+    """Эффективные права на КАЖДУЮ статью списка: {id статьи: права}.
 
-    Вынесено сюда, чтобы эндпоинт просмотра и эндпоинт сохранения считали права
-    ОДНИМ способом. В оригинале удаление статьи гейтилось только ролью, причём
-    «редактором» там считались восемь ролей — то есть любой супервайзер мог
-    снести любую статью.
+    Двумя запросами на весь список, а не по статье: правила разделов и правила
+    статей и так спрашиваются по массиву идентификаторов, а расчёт поверх них
+    (resolve_article_permissions) базы не касается вовсе. Считать построчно
+    значило бы пару запросов на каждую строку выдачи — тот же N+1, от которого
+    в каталоге отдельно ушли счётчики (catalog_counts).
+
+    Пустой список базу не трогает: выдача бывает пустой на каждом втором
+    фильтре, и два запроса «ни о чём» здесь ни к чему.
 
     section_rules_fn — queries.section_rules_for_user; передаётся аргументом,
     чтобы этот модуль не импортировал queries (там свои SQL периметра).
     """
     from . import access as wiki_access
 
-    relevant = [s for s in (article.get('section_ids') or []) if s in allowed_sections]
-    section_rules = section_rules_fn(cursor, relevant, subjects, ctx['user_id'])
-    flat = [rule for rules in section_rules.values() for rule in rules]
-    article_rules = article_rules_for_user(
-        cursor, [article['id']], subjects, ctx['user_id']).get(article['id'], [])
+    rows = [a for a in (articles or ()) if a and a.get('id')]
+    if not rows:
+        return {}
 
-    return wiki_access.resolve_article_permissions(
-        capabilities=ctx['capabilities'],
-        visibility_mode=article.get('visibility_mode', 'inherit'),
-        strict_mode=article.get('strict_mode', False),
-        section_rules=flat,
-        article_rules=article_rules,
-        otp_role=ctx['otp_role'],
-        is_article_owner=(article.get('author_id') == ctx['user_id']
-                          or article.get('owner_user_id') == ctx['user_id']),
-    )
+    # Разделы спрашиваем ОДНИМ множеством по всей выдаче: статьи лежат в общих
+    # ветках, и по строкам это были бы одни и те же правила, запрошенные заново.
+    wanted = sorted({s for a in rows for s in (a.get('section_ids') or [])
+                     if s in allowed_sections})
+    section_rules = section_rules_fn(cursor, wanted, subjects, ctx['user_id'])
+    article_rules = article_rules_for_user(
+        cursor, [a['id'] for a in rows], subjects, ctx['user_id'])
+
+    result = {}
+    for article in rows:
+        relevant = [s for s in (article.get('section_ids') or []) if s in allowed_sections]
+        result[article['id']] = wiki_access.resolve_article_permissions(
+            capabilities=ctx['capabilities'],
+            visibility_mode=article.get('visibility_mode', 'inherit'),
+            strict_mode=article.get('strict_mode', False),
+            section_rules=[rule for s in relevant for rule in section_rules.get(s, ())],
+            article_rules=article_rules.get(article['id'], []),
+            otp_role=ctx['otp_role'],
+            is_article_owner=(article.get('author_id') == ctx['user_id']
+                              or article.get('owner_user_id') == ctx['user_id']),
+        )
+    return result
+
+
+def effective_permissions(cursor, ctx, article, subjects, allowed_sections,
+                          section_rules_fn):
+    """Эффективные права на ОДНУ статью — тот же расчёт, что у списка.
+
+    Вынесено сюда, чтобы эндпоинт просмотра и эндпоинт сохранения считали права
+    ОДНИМ способом. В оригинале удаление статьи гейтилось только ролью, причём
+    «редактором» там считались восемь ролей — то есть любой супервайзер мог
+    снести любую статью.
+    """
+    return permissions_for_articles(cursor, ctx, [article], subjects,
+                                    allowed_sections, section_rules_fn)[article['id']]
