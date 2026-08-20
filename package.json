@@ -14,6 +14,7 @@
     "test:url-hygiene": "node --test tests/url_hygiene.test.mjs",
     "test:board-grouping": "node --test tests/board_grouping.test.mjs",
     "test:wiki-search": "node --test tests/wiki_search_text.test.mjs",
+    "test:wiki-article-link": "node --test tests/wiki_article_link.test.mjs",
     "test:wiki-quote": "node --test tests/wiki_quote_anchor.test.mjs",
     "test:wiki-car": "node --test tests/wiki_car_match.test.mjs",
     "test:wiki-section-picker": "node --test tests/wiki_section_picker.test.mjs",

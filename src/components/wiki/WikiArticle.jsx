@@ -8,6 +8,7 @@ import {
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { scrollToElement } from './scrollContainer';
 import { absolutizeFileUrls } from './fileUrls';
+import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
 
@@ -141,7 +142,8 @@ const markNeedles = (nodes, rawNeedles, limit = 60) => {
 
 export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                       highlightTerm = null, classifierPrefill = null,
-                                      onEdit = null, onArchived = null }) {
+                                      onEdit = null, onArchived = null,
+                                      onOpenArticle = null }) {
     const isClassifier = slug === CLASSIFIER_SLUG;
     const [article, setArticle] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -170,6 +172,49 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             window.removeEventListener('keydown', onKey);
         };
     }, [immersive]);
+
+    /* Ссылка на статью. Кладём в буфер: адресную строку человек не открывает,
+       а ссылку надо отправить в переписке. Запасной путь через execCommand
+       нужен не для красоты — clipboard.writeText есть только в защищённом
+       контексте, и в старом вебвью кнопка иначе молча ничего не делала бы. */
+    const copyLink = () => {
+        const link = buildArticleLink(article?.slug || slug);
+        if (!link) { showToast?.('Не удалось собрать ссылку на статью', 'error'); return; }
+        const ok = () => showToast?.('Ссылка на статью скопирована', 'success');
+        const fallback = () => {
+            const field = document.createElement('textarea');
+            field.value = link;
+            field.setAttribute('readonly', '');
+            field.style.position = 'fixed';
+            field.style.opacity = '0';
+            document.body.appendChild(field);
+            field.select();
+            let copied = false;
+            try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+            document.body.removeChild(field);
+            if (copied) ok();
+            else showToast?.('Не удалось скопировать — адрес статьи есть в адресной строке', 'error');
+        };
+        if (!navigator.clipboard?.writeText) { fallback(); return; }
+        navigator.clipboard.writeText(link).then(ok).catch(fallback);
+    };
+
+    /* Ссылка на другую статью внутри текста ведёт на тот же портал
+       (?view=wiki&article=<slug>). Открываем её здесь же: полная перезагрузка
+       приложения ради соседней статьи — это секунды ожидания и повторная
+       авторизация. Внешние ссылки и клики с модификатором (открыть в новой
+       вкладке) отдаём браузеру нетронутыми. */
+    const onBodyClick = (event) => {
+        if (!onOpenArticle) return;
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const anchor = event.target?.closest?.('a[href]');
+        if (!anchor || anchor.target === '_blank') return;
+        const target = readArticleSlugFromHref(anchor.getAttribute('href'));
+        if (!target || target === slug) return;
+        event.preventDefault();
+        onOpenArticle(target);
+    };
 
     const archive = () => {
         // Подтверждение обязательно: кнопка стоит рядом с «Править», а промах по
@@ -400,7 +445,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     вообще, даже администратору. Право берём из ответа сервера
                     (permissions.can_edit), а не из роли: у статьи есть свои
                     правила доступа, и роль их не описывает. */}
-                <div className="flex items-center gap-2">
+                {/* Перенос обязателен: кнопок в строке четыре, и на телефоне они
+                    иначе уезжают за правый край экрана — «Править» не достать. */}
+                <div className="flex flex-wrap items-center justify-end gap-2">
                     {/* Удаление МЯГКОЕ: статья уходит в архив, потому что жёсткое
                         снесло бы каскадом версии, просмотры, назначения на
                         ознакомление и избранное. Кнопка так и называется — «В
@@ -418,6 +465,14 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             В архив
                         </button>
                     )}
+                    <button
+                        type="button"
+                        className={iosBtnSecondary}
+                        title="Скопировать ссылку на статью"
+                        onClick={copyLink}
+                    >
+                        <Link2 size={14} /> Ссылка
+                    </button>
                     <button
                         type="button"
                         className={iosBtnSecondary}
@@ -557,6 +612,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         <div
                             ref={bodyRef}
                             className="wiki-prose min-w-0 flex-1"
+                            onClick={onBodyClick}
                             dangerouslySetInnerHTML={{ __html: safeHtml }}
                         />
                     )}

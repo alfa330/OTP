@@ -9,6 +9,7 @@ import WikiParkRail from './WikiParkRail';
 import WikiPark from './WikiPark';
 import { markedWord } from './WikiSearch';
 import useStableCallback from './useStableCallback';
+import { syncArticleDeepLink } from './articleLink';
 import { selectableSections } from './sectionPicker';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
@@ -144,6 +145,16 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
         setOpenSlug(searchTarget.slug);
         consumeSearchTarget();
     }, [searchTarget, consumeSearchTarget]);
+
+    /* Открытая статья живёт в адресной строке: ?view=wiki&article=<slug>. Это и
+       есть «ссылка на статью» — её копирует кнопка «Ссылка» на самой статье, и
+       по ней же перезагрузка страницы возвращает человека в статью, а не в
+       список. Метку снимаем при закрытии статьи и при уходе с вкладки: иначе
+       она осталась бы в адресе показывать то, чего на экране нет. */
+    useEffect(() => {
+        syncArticleDeepLink(openSlug);
+        return () => syncArticleDeepLink(null);
+    }, [openSlug]);
 
     /* «Новая статья» и заголовок раздела живут в шапке, а состояние, которым они
        управляют, — здесь. Нажатие приходит счётчиком: он меняется на каждое
@@ -368,6 +379,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                 classifierPrefill={openPrefill}
                 showToast={showToast}
                 onBack={() => { setOpenSlug(null); setOpenHighlight(null); setOpenPrefill(null); }}
+                /* Ссылка на другую статью внутри текста открывает её здесь же
+                   (см. articleLink.js), без перезагрузки портала. */
+                onOpenArticle={openArticle}
                 /* Статья приходит с сервера целиком (content, разделы, флаги),
                    поэтому редактору не нужен второй запрос — открываем прямо
                    на том объекте, который человек сейчас читает. */

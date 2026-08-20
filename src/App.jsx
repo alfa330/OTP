@@ -41,6 +41,7 @@ import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHide
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
+import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -1632,6 +1633,15 @@ const readTicketIdFromUrl = (locationLike = null) => {
     }
 };
 
+/* Статья вики, открытая прямой ссылкой: её копируют кнопкой «Ссылка» на самой
+   статье и вставляют в переписку. Разбор слага живёт в
+   components/wiki/articleLink.js — там же его собирают. */
+const readWikiArticleSlugFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return '';
+    const search = locationLike?.search ?? window.location.search;
+    return readArticleSlugFromSearch(search);
+};
+
 const buildAppViewUrl = (nextView) => {
     if (typeof window === 'undefined') return APP_BASE_URL;
     try {
@@ -1651,6 +1661,9 @@ const buildAppViewUrl = (nextView) => {
         }
         if (nextView !== 'tasks') {
             url.searchParams.delete(TASK_ID_QUERY_PARAM);
+        }
+        if (nextView !== 'wiki') {
+            url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
         }
         return url.toString();
     } catch (error) {
@@ -1681,6 +1694,12 @@ const syncAppViewWithUrl = (nextView) => {
         }
         if (nextView !== 'tasks') {
             url.searchParams.delete(TASK_ID_QUERY_PARAM);
+        }
+        /* Метку статьи ставит и снимает сама витрина вики (articleLink.js), но
+           уход в другой раздел она уже не видит — снимаем здесь, иначе адрес
+           «задач» унёс бы с собой чужой слаг. */
+        if (nextView !== 'wiki') {
+            url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
         }
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
@@ -35280,6 +35299,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 () => readTicketIdFromUrl(location),
                 [location.search]
             );
+            const requestedWikiSlugFromLocation = useMemo(
+                () => readWikiArticleSlugFromUrl(location),
+                [location.search]
+            );
             const currentMonth = new Date().toISOString().slice(0, 7);
             const getStoredValue = (key, fallback) => {
                 try {
@@ -38885,6 +38908,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     requestId: Number(prev?.requestId || 0) + 1,
                 }));
             }, [user?.id, requestedViewFromLocation, requestedTicketIdFromLocation]);
+
+            /* И тем же механизмом — статья вики: ссылку копируют из статьи и
+               присылают в переписке, поэтому раздел обязан открыть её сразу
+               после входа, а не показать список. */
+            useEffect(() => {
+                if (!user?.id || requestedViewFromLocation !== 'wiki'
+                    || !requestedWikiSlugFromLocation) return;
+                setWikiInitialSlug(requestedWikiSlugFromLocation);
+            }, [user?.id, requestedViewFromLocation, requestedWikiSlugFromLocation]);
 
             useEffect(() => {
                 // Do not touch view while authentication is still initializing
