@@ -47257,6 +47257,7 @@ class Database:
                     requested_by_name = %s,
                     reminder_minutes_before = %s,
                     {reset_reminder_sql}
+                    {reset_info_request_sql}
                     updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 WHERE id = %s
                 RETURNING updated_at
@@ -47264,6 +47265,15 @@ class Database:
                 reset_reminder_sql=(
                     'reminder_sent_at = NULL,'
                     if ('deadline' in changed_fields or 'reminder' in changed_fields) else ''
+                ),
+                # Задачу передали другому — открытый запрос информации снимаем:
+                # иначе постановщика вечно дёргает вопрос от человека, которого
+                # на задаче уже нет, а закрыть его некому (ответить не на что).
+                reset_info_request_sql=(
+                    'info_request_id = NULL, info_request_at = NULL,'
+                    if (assigned_to_new is not None
+                        and current_assigned_to is not None
+                        and int(assigned_to_new) != int(current_assigned_to)) else ''
                 )
             ), (
                 subject_new,
@@ -47676,8 +47686,11 @@ class Database:
             if kind_norm == 'request':
                 if requester_id != assigned_to:
                     raise PermissionError("ONLY_ASSIGNEE_ASKS")
-                if str(task_row.get('status') or '') == 'accepted':
-                    raise ValueError("TASK_ALREADY_ACCEPTED")
+                # Ровно те же статусы, по которым причина «просят информацию»
+                # попадает в бейдж и колокол. Иначе на сданной задаче ушло бы
+                # Telegram-уведомление, а бейдж молчал — уведомление-призрак.
+                if str(task_row.get('status') or '') not in ('assigned', 'in_progress', 'returned'):
+                    raise ValueError("TASK_CLOSED_FOR_REQUEST")
                 # Спросить некого: постановка целиком своя (задача себе без поручителя).
                 if not answer_authority or answer_authority == requester_id:
                     raise ValueError("NO_ONE_TO_ASK")
@@ -47731,18 +47744,31 @@ class Database:
 
             # Метка задачи и её updated_at: по ним считаются бейдж «ждут вас» и
             # колокол, а UPDATE задачи заодно будит триггер мгновенных уведомлений.
-            cursor.execute("""
-                UPDATE tasks
-                SET info_request_id = %s,
-                    info_request_at = %s,
-                    updated_at = %s
-                WHERE id = %s
-            """, (
-                message_id if kind_norm == 'request' else None,
-                now if kind_norm == 'request' else None,
-                now,
-                task_id
-            ))
+            # Открытый запрос трогают только запрос и ответ: дополнение к
+            # постановке НЕ закрывает чужой вопрос — постановщик мог дописать
+            # совсем не про то, о чём спрашивали.
+            if kind_norm == 'request':
+                cursor.execute("""
+                    UPDATE tasks
+                    SET info_request_id = %s,
+                        info_request_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                """, (message_id, now, now, task_id))
+            elif kind_norm == 'answer':
+                cursor.execute("""
+                    UPDATE tasks
+                    SET info_request_id = NULL,
+                        info_request_at = NULL,
+                        updated_at = %s
+                    WHERE id = %s
+                """, (now, task_id))
+            else:
+                cursor.execute("""
+                    UPDATE tasks
+                    SET updated_at = %s
+                    WHERE id = %s
+                """, (now, task_id))
 
             cursor.execute(self._TASK_MESSAGE_SELECT + " WHERE m.id = %s", (message_id,))
             message = self._serialize_task_message(cursor.fetchone())

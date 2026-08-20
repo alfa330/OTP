@@ -1121,10 +1121,12 @@ const BoardCard = ({
             Возврат
           </span>
         )}
-        {/* По задаче задали вопрос и ждут ответа — до него работа не двигается. */}
+        {/* По задаче задали вопрос и ждут ответа — до него работа не двигается.
+            Фиолетовый — цвет причины «Просят информацию» в «Ждут вас», а не ещё
+            один статус: амбер уже занят колонкой «В работе» и срочностью. */}
         {task?.info_request && (
           <span
-            className="rounded-md bg-amber-50 px-1.5 py-[2px] text-[10.5px] font-semibold text-amber-700"
+            className="rounded-md bg-violet-50 px-1.5 py-[2px] text-[10.5px] font-semibold text-violet-700"
             title={`Исполнителю не хватает информации${task.info_request.author_name ? ` · спросил ${task.info_request.author_name}` : ''}`}
           >
             Ждёт ответа

@@ -1802,15 +1802,25 @@ class TaskClarificationDbTests(unittest.TestCase):
         self.assertIn('raise ValueError("NO_OPEN_REQUEST")', self.block)
         # Задача целиком своя — спрашивать не у кого, иначе запрос повис бы навсегда.
         self.assertIn('raise ValueError("NO_ONE_TO_ASK")', self.block)
-        self.assertIn('raise ValueError("TASK_ALREADY_ACCEPTED")', self.block)
+        # Статусы запроса совпадают со статусами причины «ждут вас»: иначе на
+        # сданной задаче Telegram уходит, а бейдж молчит.
+        self.assertIn('raise ValueError("TASK_CLOSED_FOR_REQUEST")', self.block)
+        self.assertIn("not in ('assigned', 'in_progress', 'returned')", self.block)
 
     def test_answer_closes_the_request_and_clears_the_marker(self):
         self.assertIn("SET resolved_at = %s, resolved_by = %s", self.block)
-        self.assertIn("SET info_request_id = %s,", self.block)
-        self.assertIn("message_id if kind_norm == 'request' else None,", self.block)
+        self.assertIn("if kind_norm == 'request':", self.block)
+        self.assertIn("elif kind_norm == 'answer':", self.block)
         # updated_at двигаем намеренно: на нём держатся отметки «просмотрено»
         # и триггер мгновенных уведомлений.
-        self.assertIn("updated_at = %s", self.block)
+        self.assertIn("SET updated_at = %s", self.block)
+
+    def test_reassigning_the_task_drops_the_open_request(self):
+        # Вопрос от человека, которого на задаче уже нет, закрыть некому.
+        start = self.src.index("    def edit_task(")
+        block = self.src[start:self.src.index("    def _normalize_task_report_kind(", start)]
+        self.assertIn("reset_info_request_sql", block)
+        self.assertIn("int(assigned_to_new) != int(current_assigned_to)", block)
 
     def test_asker_can_withdraw_only_his_own_request(self):
         start = self.src.index("    def withdraw_task_info_request(")
@@ -1914,9 +1924,10 @@ class TaskClarificationFrontendTests(unittest.TestCase):
                          else self.src.index("const TaskDrawer = React.memo((", start)]
         # У дополнения нет условия по статусу — «всегда» из требования владельца.
         self.assertIn("const canAddNote = typeof onSubmitMessage === 'function' && isOwnerSide;", block)
-        # Запрос — только исполнителю и пока задачу не приняли.
+        # Запрос — только исполнителю и только по живым статусам: границы те же,
+        # что у причины «ждут вас», иначе кнопка обещает то, чего не будет.
         self.assertIn("&& isAssignee", block)
-        self.assertIn("&& task?.status !== 'accepted'", block)
+        self.assertIn("&& ['assigned', 'in_progress', 'returned'].includes(String(task?.status || ''))", block)
         self.assertIn("&& answerAuthorityId !== currentUserId", block)
 
     def test_files_ride_a_form_and_never_json(self):
@@ -1933,9 +1944,14 @@ class TaskClarificationFrontendTests(unittest.TestCase):
         self.assertEqual(self.src.count(".filter((att) => !att?.message_id);"), 2)
 
     def test_blocked_task_is_visible_in_lists_and_on_the_board(self):
-        self.assertIn('{task?.info_request && <span className="tv-badge tv-badge-amber">Ждёт ответа</span>}', self.src)
+        # Не badge и не амбер: рядом стоят бейджи статуса и срочности, а амбер у
+        # них уже занят. Цвет — тот же, что у причины «Просят информацию».
+        self.assertEqual(
+            self.src.count('{task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}'), 2
+        )
+        self.assertNotIn('tv-badge-amber">Ждёт ответа', self.src)
         self.assertIn("{task?.info_request && (", self.workspace)
-        self.assertIn("Ждёт ответа", self.workspace)
+        self.assertIn("text-violet-700", self.workspace)
 
     def test_upload_limits_are_refused_in_russian_before_the_round_trip(self):
         # Пределы сервера те же (10 файлов / 10 МБ), но его отказ приходит

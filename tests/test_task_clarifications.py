@@ -212,10 +212,14 @@ class AskForInformationTests(unittest.TestCase):
             self._ask(_task_row(info_request_id=555))
         self.assertEqual(str(ctx.exception), "REQUEST_ALREADY_OPEN")
 
-    def test_accepted_task_is_too_late_to_ask(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._ask(_task_row(status="accepted"))
-        self.assertEqual(str(ctx.exception), "TASK_ALREADY_ACCEPTED")
+    def test_handed_over_task_is_too_late_to_ask(self):
+        # Границы те же, что у причины «ждут вас»: сданная и принятая задачи
+        # запрос не принимают, иначе уведомление ушло бы, а бейдж молчал.
+        for status in ("completed", "accepted"):
+            with self.subTest(status=status):
+                with self.assertRaises(ValueError) as ctx:
+                    self._ask(_task_row(status=status))
+                self.assertEqual(str(ctx.exception), "TASK_CLOSED_FOR_REQUEST")
 
     def test_own_initiative_has_no_one_to_ask(self):
         # Задача себе без поручителя: спрашивать не у кого, иначе запрос повис бы.
@@ -280,12 +284,18 @@ class SupplementAndAnswerTests(unittest.TestCase):
             self._write(_task_row(), "note", ASSIGNEE)
         self.assertEqual(str(ctx.exception), "ONLY_TASK_OWNER_ADDS")
 
-    def test_supplement_does_not_open_a_request(self):
+    def test_supplement_neither_opens_nor_closes_a_request(self):
         cursor = self._write(_task_row(), "note", OWNER)
-        marked = cursor.ran("SET info_request_id = %s")
-        self.assertEqual(len(marked), 1)
-        self.assertIsNone(marked[0][1][0])
-        self.assertIsNone(marked[0][1][1])
+        self.assertEqual(len(cursor.ran("SET info_request_id")), 0)
+        # Только updated_at: он гасит отметки «просмотрено» и будит колокол.
+        self.assertEqual(len(cursor.ran("SET updated_at = %s")), 1)
+
+    def test_supplement_does_not_swallow_an_open_question(self):
+        # Постановщик дописал не про то, о чём спрашивали, — вопрос обязан
+        # остаться открытым, иначе он молча исчезает из «ждут вас».
+        cursor = self._write(_task_row(info_request_id=555), "note", OWNER)
+        self.assertEqual(len(cursor.ran("SET info_request_id")), 0)
+        self.assertEqual(len(cursor.ran("SET resolved_at")), 0)
 
     def test_answer_closes_the_open_request(self):
         cursor = self._write(_task_row(info_request_id=555), "answer", OWNER)
@@ -295,7 +305,7 @@ class SupplementAndAnswerTests(unittest.TestCase):
         # Ответ помнит, на что отвечал.
         self.assertEqual(cursor.ran("INSERT INTO task_messages")[0][1][4], 555)
         # И метка снимается — постановщика перестаёт дёргать бейдж.
-        self.assertIsNone(cursor.ran("SET info_request_id = %s")[0][1][0])
+        self.assertEqual(len(cursor.ran("SET info_request_id = NULL")), 1)
 
     def test_answer_without_a_request_is_refused(self):
         with self.assertRaises(ValueError) as ctx:

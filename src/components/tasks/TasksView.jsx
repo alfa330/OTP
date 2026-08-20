@@ -331,10 +331,24 @@ styleTag.textContent = `
     display: flex; align-items: baseline; justify-content: space-between;
     gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
   }
+  /* Метка «работа стоит из-за вопроса». Не badge: рядом уже стоят бейджи
+     статуса и срочности, и четвёртая такая же пилюля читалась бы как ещё один
+     статус. Точка + подпись в цвете самой причины (#7c3aed — тот же, что у
+     «Просят информацию» в панели «Ждут вас»), поэтому в списке, на доске и в
+     колоколе это узнаётся как одно и то же состояние. */
+  .tv-clar-waiting {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; color: #6d28d9;
+    white-space: nowrap;
+  }
+  .tv-clar-waiting::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: #7c3aed; flex: none;
+  }
   .tv-clar-pending {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 2px 8px; border-radius: 99px;
-    background: #fef3c7; color: #92400e;
+    background: #f5f3ff; color: #6d28d9; border: 1px solid #ddd6fe;
     font-size: 11px; font-weight: 600;
   }
   .tv-clar-empty { font-size: 12.5px; color: var(--ink-3); line-height: 1.5; margin: 0; }
@@ -354,13 +368,13 @@ styleTag.textContent = `
     border-radius: 12px 4px 12px 12px;
   }
   /* Открытый запрос — единственное цветное состояние: пока не ответят, работа стоит. */
-  .tv-clar-item .tv-clar-bubble.is-open { background: #fffbeb; border-color: #fde68a; }
+  .tv-clar-item .tv-clar-bubble.is-open { background: #f5f3ff; border-color: #ddd6fe; }
   .tv-clar-top {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     font-size: 11px; color: var(--ink-3);
   }
   .tv-clar-kind { font-weight: 600; color: var(--ink-2); }
-  .tv-clar-bubble.is-open .tv-clar-kind { color: #92400e; }
+  .tv-clar-bubble.is-open .tv-clar-kind { color: #6d28d9; }
   .tv-clar-body {
     margin: 0; font-size: 13px; line-height: 1.55;
     color: var(--ink); white-space: pre-wrap; word-break: break-word;
@@ -4621,7 +4635,7 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
         {deadlineLabel && <span className={`tv-deadline-chip ${isTaskOverdue(task) ? 'is-overdue' : ''}`}>{deadlineLabel}</span>}
         {/* Единственное «лишнее» состояние, которое стоит показать всем: по задаче
             задали вопрос, и до ответа она не двигается. */}
-        {task?.info_request && <span className="tv-badge tv-badge-amber">Ждёт ответа</span>}
+        {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
         <span className="tv-task-row-assignee-chip">
           <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={task?.assignee?.avatar_url || ''} />
           <span className="tv-task-row-assignee-name">{assigneeName}</span>
@@ -4847,9 +4861,11 @@ const TaskClarificationsBlock = ({
   const openRequest = task?.info_request || null;
   const canAddNote = typeof onSubmitMessage === 'function' && isOwnerSide;
   const canAnswer = canAddNote && !!openRequest;
+  // Статусы те же, по которым запрос попадает в «ждут вас»: на сданной задаче
+  // уведомление ушло бы, а бейдж молчал.
   const canAsk = typeof onSubmitMessage === 'function'
     && isAssignee
-    && task?.status !== 'accepted'
+    && ['assigned', 'in_progress', 'returned'].includes(String(task?.status || ''))
     && answerAuthorityId > 0
     && answerAuthorityId !== currentUserId;
   const isMyRequest = !!openRequest && Number(openRequest.author_id || 0) === currentUserId;
@@ -6080,7 +6096,7 @@ export const PinnedTaskWidget = React.memo(({
               {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
               {/* Закреплённая задача — та, над которой работают: если работа
                   стоит из-за незакрытого вопроса, это надо видеть сразу. */}
-              {task?.info_request && <span className="tv-badge tv-badge-amber">Ждёт ответа</span>}
+              {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
             </div>
           )}
         </div>
