@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  attachmentKind, attachmentMeta, fileExtension, formatBytes,
+  attachmentKind, attachmentMeta, fileExtension, fileLinkHtml, formatBytes,
 } from '../src/components/wiki/attachments.js';
 import { absoluteFileUrl } from '../src/components/wiki/fileUrls.js';
 
@@ -48,4 +48,32 @@ test('размер читается по-русски и не показывае
 test('подпись строки не оставляет точку-сироту у файла без размера', () => {
   assert.equal(attachmentMeta({ name: 'бланк.pdf', size: 0 }), 'PDF');
   assert.equal(attachmentMeta({ name: 'бланк.pdf', size: 2048 }), 'PDF · 2 КБ');
+});
+
+/* Карточка файла внутри текста статьи. Она живёт как обычная ссылка с классом:
+   у <a> серверный санитайзер разрешает только href, target и class, поэтому
+   всё, что несёт смысл, обязано лежать в них и в самом тексте ссылки. */
+
+test('карточка файла собирается ссылкой с классом типа', () => {
+  const html = fileLinkHtml({
+    name: 'Заявление на отпуск.docx',
+    size: 238 * 1024,
+    url: '/api/wiki/file/abc',
+    download_url: '/api/wiki/file/abc?download=1',
+  });
+  assert.match(html, /class="wiki-file wiki-file--doc"/);
+  assert.match(html, /href="\/api\/wiki\/file\/abc\?download=1"/);
+  assert.match(html, /Заявление на отпуск\.docx · 238 КБ/);
+});
+
+test('имя файла не может внести разметку в статью', () => {
+  const html = fileLinkHtml({ name: '"><img src=x onerror=alert(1)>.pdf', size: 10 });
+  assert.ok(!html.includes('<img'), html);
+  assert.match(html, /&quot;&gt;&lt;img/);
+});
+
+test('без размера подпись остаётся именем файла', () => {
+  const html = fileLinkHtml({ name: 'бланк.xlsx', size: 0, url: '/api/wiki/file/x' });
+  assert.match(html, /wiki-file--sheet/);
+  assert.match(html, />бланк\.xlsx</);
 });

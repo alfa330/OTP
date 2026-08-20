@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import axios from 'axios';
 import {
-    ChevronDown, ChevronUp, Download, Loader2, Paperclip, Trash2,
+    ChevronDown, ChevronUp, Download, Loader2, Paperclip, TextCursorInput, Trash2,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel } from '../ui/ios';
 import { absoluteFileUrl } from './fileUrls';
@@ -46,7 +46,7 @@ const RowButton = ({ title, onClick, disabled, danger, children }) => (
 );
 
 export default function WikiAttachments({
-    base, headers, showToast, items = [], onChange,
+    base, headers, showToast, items = [], onChange, onInsert = null,
 }) {
     // Имена файлов, которые сейчас едут в хранилище. Именно имена, а не
     // счётчик: когда прикладывают пять файлов разом, человек должен видеть,
@@ -173,6 +173,18 @@ export default function WikiAttachments({
                                             </RowButton>
                                         </>
                                     )}
+                                    {/* Тот же файл можно назвать и в тексте —
+                                        на том шаге инструкции, где он нужен.
+                                        Кнопка есть только когда есть куда
+                                        вставлять: панель переиспользуема. */}
+                                    {onInsert && (
+                                        <RowButton
+                                            title="Вставить ссылку в текст статьи"
+                                            onClick={() => onInsert(attachment)}
+                                        >
+                                            <TextCursorInput size={15} />
+                                        </RowButton>
+                                    )}
                                     <a
                                         href={absoluteFileUrl(attachment.download_url
                                             || `${attachment.url}?download=1`, base)}
@@ -214,6 +226,9 @@ export default function WikiAttachments({
                     Файлы встанут под текстом статьи — читатель откроет или скачает их
                     оттуда. У читателей они появятся после сохранения статьи, а «Убрать»
                     отвяжет файл тем же сохранением.
+                    {onInsert && ' Кнопкой «Вставить ссылку в текст» тот же файл можно'
+                        + ' назвать в нужном месте статьи, а скрепка в панели редактора'
+                        + ' кладёт в текст новый файл.'}
                 </p>
             </div>
         </section>

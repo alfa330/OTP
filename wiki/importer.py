@@ -40,6 +40,7 @@ SUPPORTED = {
     '.pdf': 'PDF',
     '.xlsx': 'Excel', '.xlsm': 'Excel', '.csv': 'CSV',
     '.txt': 'Текст', '.md': 'Markdown',
+    '.html': 'HTML', '.htm': 'HTML',
 }
 
 # Заголовки Word -> наши. Список повторяет оригинал: без него Word-документ
@@ -297,6 +298,96 @@ def _convert_csv(data):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _decode_html(data):
+    """Байты HTML -> текст. Кодировка берётся из самого файла, а не угадывается.
+
+    Выгрузки из Word и старых порталов до сих пор приходят в windows-1251, и
+    декодирование их как utf-8 даёт не ошибку, а страницу из «Ð¿Ñ€Ð¸Ð²ÐµÑ‚»:
+    статья импортируется «успешно» и оказывается нечитаемой.
+    """
+    if data[:3] == b'\xef\xbb\xbf':
+        return data.decode('utf-8-sig', errors='replace')
+
+    candidates = []
+    declared = re.search(rb'charset=["\']?\s*([A-Za-z0-9_\-]+)', data[:4096], re.I)
+    if declared:
+        candidates.append(declared.group(1).decode('ascii', 'ignore'))
+    candidates += ['utf-8', 'cp1251']
+    for encoding in candidates:
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError, ValueError):
+            continue
+    return data.decode('utf-8', errors='replace')
+
+
+def _convert_html(data):
+    """HTML-файл -> тело статьи. Возвращает (html, plain, images, warnings, title).
+
+    Разметку НЕ пересобираем: в HTML уже есть заголовки, списки и таблицы —
+    ровно то, ради чего импорт и затевается. Работа здесь в том, чтобы убрать
+    всё, что к содержанию не относится, и честно предупредить про картинки.
+
+    Картинки — единственное, что импорт HTML принести не может. Файл ссылается
+    на них снаружи: либо адресом чужого сайта (он однажды перестанет
+    открываться), либо относительным путём к папке рядом с файлом (её нам никто
+    не передавал). Скачивать их отсюда нельзя — это сетевые запросы из
+    обработчика, который всё это время держит соединение из общего пула на 40.
+    Поэтому не молчим, а пишем в замечания: человек увидит их сразу после
+    разбора и решит сам.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(_decode_html(data), 'html.parser')
+
+    title = ''
+    if soup.title:
+        title = soup.title.get_text(strip=True)
+
+    # head целиком: без этого <title> и содержимое <style> попадают в текст
+    # статьи простым текстом — теги санитайзер снимет, а буквы оставит.
+    for tag in soup(['script', 'style', 'noscript', 'iframe', 'head', 'meta', 'link']):
+        tag.decompose()
+
+    body = soup.body or soup
+
+    # Заголовок документа предпочитаем <h1>: в выгрузках Word <title> сплошь
+    # «Microsoft Word - договор_2026.doc», а h1 — то, как документ называется
+    # для человека.
+    heading = body.find(['h1', 'h2'])
+    if heading:
+        heading_text = heading.get_text(strip=True)
+        if heading_text:
+            title = heading_text
+
+    external, relative = 0, 0
+    for img in body.find_all('img'):
+        src = str(img.get('src') or '').strip()
+        if src.startswith('data:'):
+            continue                      # картинка лежит в самом файле — дойдёт
+        if src.startswith(('http://', 'https://', '//')):
+            external += 1
+        elif src:
+            relative += 1
+            # Битому адресу в статье не место: он оставит рамку с крестиком.
+            img.decompose()
+
+    warnings = []
+    if external:
+        warnings.append('Картинок осталось ссылками на внешний сайт: %d. Если сайт '
+                        'закроется, они пропадут — перезалейте их в статью.' % external)
+    if relative:
+        warnings.append('Картинок не перенеслось: %d. В файле они лежат отдельными '
+                        'файлами рядом, добавьте их в статью вручную.' % relative)
+
+    html = body.decode_contents() if hasattr(body, 'decode_contents') else str(body)
+    return html, body.get_text('\n', strip=True), [], warnings, (title or '')[:255]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Точка входа
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -317,6 +408,10 @@ def convert(filename, data, *, store_image=None):
             'Формат не поддерживается. Можно: %s' % ', '.join(sorted(set(SUPPORTED.values())))
         )
 
+    # Заголовок из САМОГО документа: его знает только HTML (у остальных форматов
+    # его взять неоткуда, там остаётся имя файла).
+    doc_title = None
+
     if ext in ('.docx', '.doc'):
         if store_image is None:
             raise ImportError_('Нет хранилища для картинок документа')
@@ -327,6 +422,8 @@ def convert(filename, data, *, store_image=None):
         html, plain, images, warnings = _convert_xlsx(data)
     elif ext == '.csv':
         html, plain, images, warnings = _convert_csv(data)
+    elif ext in ('.html', '.htm'):
+        html, plain, images, warnings, doc_title = _convert_html(data)
     else:
         text = data.decode('utf-8', errors='replace')
         html, plain, images, warnings = _paragraphs_to_html(text), text, [], []
@@ -337,7 +434,7 @@ def convert(filename, data, *, store_image=None):
     summary = to_plain_text(clean, limit=280)
 
     return {
-        'title': title_from_filename(filename),
+        'title': doc_title or title_from_filename(filename),
         'content': clean,
         'summary': summary,
         'images': images,

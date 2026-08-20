@@ -401,6 +401,82 @@
     }
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Файл, вставленный В ТЕКСТ статьи.
+
+   Разметка — обычная ссылка с классом (см. attachments.js: fileLinkHtml), а
+   весь вид держится здесь. Так сделано потому, что тело статьи проходит через
+   белый список серверного санитайзера: у <a> разрешены href, target и class,
+   и ничего больше. Карточка, собранная на вложенных <span> или data-*,
+   потеряла бы вид при первом же сохранении.
+
+   Правила висят на .wiki-prose, а этот класс стоит и на теле готовой статьи,
+   и на области ввода редактора — карточка выглядит одинаково там и там, и
+   человек видит при написании ровно то, что увидит читатель.
+
+   Значок — маска, а не фоновая картинка: цвет тогда задаётся обычным CSS и
+   меняется по типу файла одной строкой, без отдельной копии картинки на
+   каждый цвет.
+   ───────────────────────────────────────────────────────────────────────── */
+
+.wiki-prose a.wiki-file {
+    --wiki-file-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='black'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M15%202H6a2%202%200%200%200-2%202v16a2%202%200%200%200%202%202h12a2%202%200%200%200%202-2V7Z'/%3E%3Cpath%20d='M14%202v5h6'/%3E%3Cpath%20d='M16%2013H8'/%3E%3Cpath%20d='M16%2017H8'/%3E%3Cpath%20d='M10%209H8'/%3E%3C/svg%3E");
+    --wiki-file-color: #2563eb;
+
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    max-width: 100%;
+    margin: 0.375rem 0.375rem 0.375rem 0;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--wiki-line);
+    border-radius: 0.75rem;
+    background: #f8fafc;
+    color: var(--wiki-ink);
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.35;
+    text-decoration: none;
+    vertical-align: middle;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.wiki-prose a.wiki-file:hover {
+    background: #fff;
+    border-color: var(--wiki-accent-line);
+    text-decoration: none;
+}
+
+/* Значок типа файла слева. */
+.wiki-prose a.wiki-file::before {
+    content: '';
+    flex: none;
+    width: 1.125rem;
+    height: 1.125rem;
+    background-color: var(--wiki-file-color);
+    -webkit-mask: var(--wiki-file-icon) center / contain no-repeat;
+    mask: var(--wiki-file-icon) center / contain no-repeat;
+}
+
+/* Стрелка справа: карточка обещает скачивание, и обещание должно быть видно
+   до нажатия, а не только в подсказке браузера. */
+.wiki-prose a.wiki-file::after {
+    content: '';
+    flex: none;
+    width: 0.875rem;
+    height: 0.875rem;
+    background-color: var(--wiki-ink-mute);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='black'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M21%2015v4a2%202%200%200%201-2%202H5a2%202%200%200%201-2-2v-4'/%3E%3Cpath%20d='m7%2010%205%205%205-5'/%3E%3Cpath%20d='M12%2015V3'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='black'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M21%2015v4a2%202%200%200%201-2%202H5a2%202%200%200%201-2-2v-4'/%3E%3Cpath%20d='m7%2010%205%205%205-5'/%3E%3Cpath%20d='M12%2015V3'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.wiki-prose a.wiki-file--pdf    { --wiki-file-color: #dc2626; }
+.wiki-prose a.wiki-file--sheet  { --wiki-file-color: #059669; --wiki-file-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='black'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Crect%20x='3'%20y='3'%20width='18'%20height='18'%20rx='2'/%3E%3Cpath%20d='M3%209h18'/%3E%3Cpath%20d='M3%2015h18'/%3E%3Cpath%20d='M9%203v18'/%3E%3Cpath%20d='M15%203v18'/%3E%3C/svg%3E"); }
+.wiki-prose a.wiki-file--slides { --wiki-file-color: #d97706; }
+.wiki-prose a.wiki-file--image  { --wiki-file-color: #7c3aed; --wiki-file-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='black'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Crect%20x='3'%20y='3'%20width='18'%20height='18'%20rx='2'/%3E%3Ccircle%20cx='9'%20cy='9'%20r='2'/%3E%3Cpath%20d='m21%2015-4.5-4.5L7%2021'/%3E%3C/svg%3E"); }
+.wiki-prose a.wiki-file--archive,
+.wiki-prose a.wiki-file--file   { --wiki-file-color: #475569; }
+
 @media (prefers-reduced-motion: reduce) {
     .wiki-heading-pulse {
         animation: none;

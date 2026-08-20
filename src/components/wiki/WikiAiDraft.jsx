@@ -32,7 +32,7 @@ import {
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
-const ACCEPT_WITH_AI = '.docx,.doc,.pdf,.xlsx,.xlsm,.csv,.txt,.md,.png,.jpg,.jpeg,.webp';
+const ACCEPT_WITH_AI = '.docx,.doc,.pdf,.xlsx,.xlsm,.csv,.txt,.md,.html,.htm,.png,.jpg,.jpeg,.webp';
 
 const VERDICT_TONE = { дубль: 'red', похоже: 'amber', рядом: 'slate' };
 

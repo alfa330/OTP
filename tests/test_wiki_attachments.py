@@ -189,6 +189,41 @@ class AttachmentRouteTest(unittest.TestCase):
         self.assertNotIn('wiki/files', disposition)
 
 
+class FileInTextTest(unittest.TestCase):
+    """Файл, вставленный В ТЕКСТ статьи (карточка-ссылка из редактора).
+
+    Держится он на одном классе у <a>, поэтому проверяем ровно то, что может
+    его отнять: серверную чистку и привязку файла к статье.
+    """
+
+    CARD = ('<p>Заполните <a class="wiki-file wiki-file--doc" '
+            'href="/api/wiki/file/%s?download=1" target="_blank" '
+            'rel="noreferrer">Заявление.docx · 238 КБ</a> и отдайте СВ.</p>' % FILE_ID)
+
+    def test_class_survives_sanitizer(self):
+        """Без класса карточка станет синей строчкой с адресом — и молча."""
+        from wiki.sanitize import sanitize_html
+        clean = sanitize_html(self.CARD)
+        self.assertIn('class="wiki-file wiki-file--doc"', clean)
+        self.assertIn('href="/api/wiki/file/%s?download=1"' % FILE_ID, clean)
+        self.assertIn('target="_blank"', clean)
+
+    def test_file_in_text_gets_linked_to_the_article(self):
+        """Иначе файл виден одному автору: непривязанный доступен только ему."""
+        cursor = FakeCursor()
+        linked = wiki_edit.link_content_files(cursor, 7, self.CARD)
+        self.assertEqual(linked, 1)
+        sql, params = cursor.calls[0]
+        self.assertIn('UPDATE wiki_files SET article_id', sql)
+        self.assertEqual(params[1], [FILE_ID])
+
+    def test_inline_file_is_not_an_attachment(self):
+        """Файл из текста не должен дублироваться в списке под статьёй."""
+        cursor = FakeCursor()
+        wiki_edit.link_content_files(cursor, 7, self.CARD)
+        self.assertNotIn('is_attachment', cursor.calls[0][0])
+
+
 class SetAttachmentsTest(unittest.TestCase):
     """Привязка списка — единственное место, где решается «чей это файл»."""
 

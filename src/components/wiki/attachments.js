@@ -25,22 +25,22 @@ export const fileExtension = (name) => {
 /* Группы намеренно широкие: читателю важно «таблица / текст / картинка», а не
    то, чем именно её открыть. Пять групп и «прочее» покрывают весь корпус. */
 const KINDS = [
-    { label: 'Документ', icon: FileText, tone: 'text-blue-600 bg-blue-50',
+    { slug: 'doc', label: 'Документ', icon: FileText, tone: 'text-blue-600 bg-blue-50',
       exts: ['doc', 'docx', 'rtf', 'odt', 'txt', 'md'] },
     // PDF отдельной группой, хотя значок тот же: красный за ним закрепился
     // настолько, что в списке из пяти файлов его находят по цвету, не читая.
-    { label: 'PDF', icon: FileText, tone: 'text-red-600 bg-red-50', exts: ['pdf'] },
-    { label: 'Таблица', icon: FileSpreadsheet, tone: 'text-emerald-600 bg-emerald-50',
+    { slug: 'pdf', label: 'PDF', icon: FileText, tone: 'text-red-600 bg-red-50', exts: ['pdf'] },
+    { slug: 'sheet', label: 'Таблица', icon: FileSpreadsheet, tone: 'text-emerald-600 bg-emerald-50',
       exts: ['xls', 'xlsx', 'xlsm', 'csv', 'ods'] },
-    { label: 'Презентация', icon: Presentation, tone: 'text-amber-600 bg-amber-50',
+    { slug: 'slides', label: 'Презентация', icon: Presentation, tone: 'text-amber-600 bg-amber-50',
       exts: ['ppt', 'pptx', 'odp', 'key'] },
-    { label: 'Картинка', icon: FileImage, tone: 'text-violet-600 bg-violet-50',
+    { slug: 'image', label: 'Картинка', icon: FileImage, tone: 'text-violet-600 bg-violet-50',
       exts: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic'] },
-    { label: 'Архив', icon: FileArchive, tone: 'text-slate-600 bg-slate-100',
+    { slug: 'archive', label: 'Архив', icon: FileArchive, tone: 'text-slate-600 bg-slate-100',
       exts: ['zip', 'rar', '7z', 'tar', 'gz'] },
 ];
 
-const OTHER = { label: 'Файл', icon: File, tone: 'text-slate-600 bg-slate-100' };
+const OTHER = { slug: 'file', label: 'Файл', icon: File, tone: 'text-slate-600 bg-slate-100' };
 
 export const attachmentKind = (name) => {
     const ext = fileExtension(name);
@@ -67,3 +67,49 @@ export const attachmentMeta = (attachment) => [
     attachmentKind(attachment?.name).label,
     formatBytes(attachment?.size),
 ].filter(Boolean).join(' · ');
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Файл ВНУТРИ текста статьи.
+
+   Второй способ приложить документ, и он не заменяет список под статьёй, а
+   отвечает на другой вопрос. Список — «что приложено к статье вообще»;
+   ссылка в тексте — «скачайте бланк ИМЕННО ЗДЕСЬ, на этом шаге инструкции».
+   Человеку, который читает пункт «заполните заявление», незачем искать файл
+   в конце документа.
+
+   Это обычная ссылка <a class="wiki-file …">, а не собственный узел редактора,
+   и так сделано намеренно:
+
+     * тело статьи санитизируется на сервере белым списком (wiki/sanitize.py),
+       где у <a> разрешены href, target и class — и НЕ разрешены data-*.
+       Карточка на data-атрибутах молча теряла бы вид после первого сохранения;
+     * ссылка переживает любой перенос текста — копирование в другую статью,
+       импорт, правку через ИИ. Кастомный узел пришлось бы учить каждому из
+       этих путей;
+     * привязка файла к статье уже умеет находить такие ссылки: она ищет
+       /api/wiki/file/<uuid> в тексте (wiki/edit.py: _FILE_REF), и адрес с
+       ?download=1 попадает под неё без изменений.
+
+   Всё оформление — на CSS по классу (wiki-theme.css), поэтому в редакторе и
+   в готовой статье карточка выглядит одинаково: класс .wiki-prose стоит на
+   обоих контейнерах.
+   ───────────────────────────────────────────────────────────────────────── */
+
+const escapeHtml = (value) => String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+export const fileLinkHtml = (attachment) => {
+    const name = String(attachment?.name || 'Файл');
+    const kind = attachmentKind(name);
+    const size = formatBytes(attachment?.size);
+    // Размер — частью ТЕКСТА ссылки, а не отдельным элементом: вложенный <span>
+    // внутри ссылки редактор при разборе схлопнул бы в простой текст, а
+    // псевдоэлемент CSS не переживает копирование статьи в письмо или чат.
+    const label = size ? `${name} · ${size}` : name;
+    // Адрес всегда «скачать»: файл в тексте прикладывают, чтобы его забрали.
+    // Открыть его читатель всё равно сможет — браузер сам покажет то, что умеет.
+    const href = attachment?.download_url || `${attachment?.url || ''}?download=1`;
+    return `<a class="wiki-file wiki-file--${kind.slug}" href="${escapeHtml(href)}"`
+        + ` target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+};

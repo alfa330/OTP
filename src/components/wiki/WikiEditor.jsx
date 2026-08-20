@@ -14,7 +14,7 @@ import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table
 import {
     AlignCenter, AlignLeft, AlignRight, Bold, Code, Heading1, Heading2, Heading3,
     Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
-    Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
+    Image as ImageIcon, Paperclip, Save, Strikethrough, Table as TableIcon,
     Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
 import {
@@ -23,6 +23,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
 import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE } from './articleTypes';
+import { fileLinkHtml } from './attachments';
 import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
 import WikiAttachments from './WikiAttachments';
@@ -102,6 +103,8 @@ export default function WikiEditor({
        правкой запятой в тексте, — худший из возможных исходов. */
     const knowsAttachments = isNew || Array.isArray(article?.attachments);
     const [attachmentsTouched, setAttachmentsTouched] = useState(false);
+    // Файл, который прямо сейчас едет в текст статьи (кнопка со скрепкой).
+    const [inserting, setInserting] = useState(false);
 
     /* Панель отдаёт обновление функцией (файлы грузятся параллельно), поэтому
        прокидываем setState как есть и лишь помечаем правку несохранённой. */
@@ -125,7 +128,18 @@ export default function WikiEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
             Underline,
-            Link.configure({ openOnClick: false, autolink: true }),
+            /* Ссылке разрешён класс: на нём держится вид карточки файла
+               внутри текста (wiki-theme.css). Штатный Link класс не хранит —
+               при первом же сохранении карточка превратилась бы в синюю
+               строчку с адресом, и понять, почему, было бы неоткуда. */
+            Link.extend({
+                addAttributes() {
+                    return {
+                        ...this.parent?.(),
+                        class: { default: null },
+                    };
+                },
+            }).configure({ openOnClick: false, autolink: true }),
             Image.configure({ inline: false, allowBase64: true }),
             TextAlign.configure({ types: ['heading', 'paragraph'] }),
             TextStyle,
@@ -270,6 +284,34 @@ export default function WikiEditor({
             .finally(() => setImporting(false));
     };
 
+    /* Файл В МЕСТО КУРСОРА.
+     *
+     * Отличается от панели «Файлы к статье» не техникой, а смыслом: там список
+     * всего, что приложено к статье, здесь — «бланк нужен ИМЕННО на этом шаге».
+     * Читателю инструкции не приходится искать файл в конце документа.
+     *
+     * Вставляется ссылка с классом, а не собственный узел редактора: тело
+     * статьи чистится белым списком на сервере, и всё, кроме href/target/class
+     * у <a>, оттуда вырезается (wiki/sanitize.py). Оформление — на CSS.
+     *
+     * Привязку к статье делать не нужно: сохранение само находит в тексте
+     * адреса /api/wiki/file/<uuid> и закрепляет их (wiki/edit.py).
+     */
+    const insertFileIntoText = (file) => {
+        if (!file || !editor) return;
+        const form = new FormData();
+        form.append('file', file);
+        setInserting(true);
+        axios.post(`${base}/attachments`, form, { headers })
+            .then((r) => {
+                editor.chain().focus().insertContent(fileLinkHtml(r.data)).run();
+                setDirty(true);
+                showToast?.(`Файл «${r.data?.name}» вставлен в текст`, 'success');
+            })
+            .catch((e) => showToast?.(errText(e, 'Не удалось вставить файл'), 'error'))
+            .finally(() => setInserting(false));
+    };
+
     const uploadImage = (file) => {
         if (!file) return;
         const form = new FormData();
@@ -325,7 +367,7 @@ export default function WikiEditor({
                         <input
                             type="file"
                             className="hidden"
-                            accept=".docx,.doc,.pdf,.xlsx,.xlsm,.csv,.txt,.md"
+                            accept=".docx,.doc,.pdf,.xlsx,.xlsm,.csv,.txt,.md,.html,.htm"
                             onChange={(e) => { importDocument(e.target.files?.[0]); e.target.value = ''; }}
                         />
                     </label>
@@ -426,6 +468,15 @@ export default function WikiEditor({
                 showToast={showToast}
                 items={attachments}
                 onChange={changeAttachments}
+                /* Тот же файл можно упомянуть и в тексте — например, назвать
+                   бланк на том шаге инструкции, где его заполняют. Второй
+                   загрузки для этого не нужно: ссылка ведёт на уже лежащий
+                   в хранилище файл. */
+                onInsert={(attachment) => {
+                    editor?.chain().focus().insertContent(fileLinkHtml(attachment)).run();
+                    setDirty(true);
+                    showToast?.('Ссылка на файл вставлена в текст', 'success');
+                }}
             />
 
             <WikiAiDraft
@@ -562,6 +613,24 @@ export default function WikiEditor({
                                 className="hidden"
                                 accept="image/*"
                                 onChange={(e) => { uploadImage(e.target.files?.[0]); e.target.value = ''; }}
+                            />
+                        </label>
+                        {/* Файл в место курсора. Стоит рядом с картинкой
+                            намеренно: обе кнопки кладут файл В ТЕКСТ, а список
+                            «Файлы к статье» наверху отвечает за другое — за то,
+                            что приложено к статье целиком. */}
+                        <label
+                            title="Файл в это место текста: читатель скачает его прямо отсюда"
+                            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100"
+                        >
+                            {inserting
+                                ? <Loader2 size={15} className="animate-spin" />
+                                : <Paperclip size={15} />}
+                            <input
+                                type="file"
+                                className="hidden"
+                                disabled={inserting}
+                                onChange={(e) => { insertFileIntoText(e.target.files?.[0]); e.target.value = ''; }}
                             />
                         </label>
                         <Divider />

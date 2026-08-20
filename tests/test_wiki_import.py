@@ -231,6 +231,60 @@ class PdfTest(unittest.TestCase):
         self.assertIn('скан', str(ctx.exception).lower())
 
 
+class HtmlTest(unittest.TestCase):
+    """HTML-файл: выгрузки с порталов и «Сохранить как HTML» из Word."""
+
+    PAGE = (
+        '<!doctype html><html><head><title>Microsoft Word - reglament.doc</title>'
+        '<style>.x{color:red}</style><script>alert(1)</script></head>'
+        '<body><h1>Регламент оформления заявки</h1>'
+        '<p>Заявка оформляется <b>в тот же день</b>.</p>'
+        '<ul><li>Проверить телефон</li></ul>'
+        '<table><tr><th>Шаг</th></tr><tr><td>Проверка</td></tr></table>'
+        '</body></html>'
+    )
+
+    def test_structure_survives(self):
+        """Ради этого импорт HTML и нужен: заголовки, списки и таблицы уже есть."""
+        result = convert('reglament.html', self.PAGE.encode('utf-8'))
+        self.assertEqual(result['kind'], 'HTML')
+        for fragment in ('<h1>', '<ul>', '<li>', '<table>', '<b>'):
+            self.assertIn(fragment, result['content'], fragment)
+
+    def test_head_and_scripts_do_not_reach_the_article(self):
+        """Теги санитайзер снимет сам, а вот ТЕКСТ из head остался бы в статье."""
+        result = convert('reglament.html', self.PAGE.encode('utf-8'))
+        self.assertNotIn('alert(1)', result['content'])
+        self.assertNotIn('color:red', result['content'])
+        self.assertNotIn('Microsoft Word', result['content'])
+
+    def test_title_comes_from_h1_not_from_title_tag(self):
+        """В выгрузках Word <title> — это «Microsoft Word - файл.doc»."""
+        result = convert('reglament.html', self.PAGE.encode('utf-8'))
+        self.assertEqual(result['title'], 'Регламент оформления заявки')
+
+    def test_windows_1251_is_read_by_its_own_declaration(self):
+        """Иначе импорт «удаётся», а статья состоит из «Ð¿Ñ€Ð¸Ð²ÐµÑ‚»."""
+        page = ('<html><head><meta http-equiv="Content-Type" '
+                'content="text/html; charset=windows-1251"><title>x</title></head>'
+                '<body><h2>Привет из 1251</h2><p>Текст</p></body></html>')
+        result = convert('старый.htm', page.encode('cp1251'))
+        self.assertEqual(result['title'], 'Привет из 1251')
+        self.assertIn('Текст', result['content'])
+
+    def test_pictures_are_reported_not_hidden(self):
+        """Картинки HTML принести не может — человек обязан узнать об этом сразу."""
+        page = ('<html><body><p>Текст</p>'
+                '<img src="https://example.com/a.png">'
+                '<img src="images/local.png"></body></html>')
+        result = convert('page.html', page.encode('utf-8'))
+        self.assertEqual(len(result['warnings']), 2, result['warnings'])
+        # Внешняя остаётся (она хотя бы открывается), относительная убирается:
+        # битый адрес в статье — это рамка с крестиком.
+        self.assertIn('https://example.com/a.png', result['content'])
+        self.assertNotIn('images/local.png', result['content'])
+
+
 class GuardTest(unittest.TestCase):
     def test_unsupported_extension(self):
         with self.assertRaises(ImportError_) as ctx:
