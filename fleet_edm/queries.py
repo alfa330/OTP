@@ -82,8 +82,9 @@ def update_progress(cursor, job_id, *, percent=None, note=None, rows_total=None,
     if requests_count is not None:
         sets.append('requests_count = %s')
         params.append(int(requests_count))
-    if not sets:
-        return
+    # Отметку времени ставим всегда, даже если менять больше нечего: по ней
+    # видно, что выгрузка жива, — см. fail_stale_jobs.
+    sets.append('progress_at = NOW()')
     params.append(int(job_id))
     cursor.execute(
         "UPDATE fleet_edm_jobs SET {} WHERE id = %s".format(', '.join(sets)),
@@ -200,25 +201,31 @@ def has_running_job(cursor):
     return int(row[0]) if row else None
 
 
-def fail_stale_jobs(cursor, minutes=180):
+def fail_stale_jobs(cursor, silence_minutes=10):
     """Задания, пережившие рестарт процесса, закрываем ошибкой.
 
-    Поток выгрузки живёт в памяти инстанса: деплой или падение оставляют карточку
-    вечно «формируется», и раздел до конца времён показывает прогресс, за которым
-    никого нет. Вызывается при входе в раздел — там же, где читается список.
+    Поток выгрузки живёт в памяти инстанса: деплой или падение убивают его молча,
+    и карточка остаётся «формируется» навсегда — раздел показывает застывший
+    прогресс, за которым никого нет, и вдобавок не даёт запустить новую выгрузку.
+    Так и случилось 20.08.2026: деплой посреди прогона заморозил карточку на 54%.
+
+    Отличаем по МОЛЧАНИЮ, а не по времени старта: живая выгрузка отмечается в
+    базе каждые пару секунд, поэтому десять минут тишины — это точно смерть, а
+    вот «идёт полчаса» для большого файла совершенно нормально.
     """
     cursor.execute(
         """
         UPDATE fleet_edm_jobs
            SET status = 'error',
-               error = 'Выгрузка прервана: приложение перезапустилось',
+               error = 'Выгрузка прервана: приложение перезапустилось. Запустите заново.',
                error_code = 'interrupted',
                finished_at = NOW()
          WHERE status = 'running'
-           AND started_at < NOW() - make_interval(mins => %s)
+           AND COALESCE(progress_at, started_at, created_at)
+               < NOW() - make_interval(mins => %s)
         RETURNING id
         """,
-        (int(minutes),),
+        (int(silence_minutes),),
     )
     return [int(row[0]) for row in cursor.fetchall()]
 

@@ -230,6 +230,9 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 MAX_UPLOAD_BYTES // (1024 * 1024))}), 413
 
         with db._get_cursor() as cursor:
+            # Сначала хороним замолчавшие карточки: иначе выгрузка, убитая
+            # деплоем, до конца дня не давала бы запустить новую.
+            queries.fail_stale_jobs(cursor)
             session = queries.session_status(cursor)
             if not session.get('configured'):
                 return jsonify({

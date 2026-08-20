@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS fleet_edm_jobs (
 CREATE INDEX IF NOT EXISTS idx_fleet_edm_jobs_created ON fleet_edm_jobs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fleet_edm_jobs_status ON fleet_edm_jobs(status);
 
+-- Когда карточка последний раз подавала признаки жизни. Не то же самое, что
+-- started_at: выгрузка живёт в памяти инстанса, и деплой посреди работы убивает
+-- поток молча. По времени старта такую карточку не отличить от честно идущей
+-- долгой выгрузки, а по «давно ничего не писала» — отличить сразу.
+ALTER TABLE fleet_edm_jobs ADD COLUMN IF NOT EXISTS progress_at TIMESTAMPTZ;
+
 -- kind: 'source' — то, что загрузил человек, 'result' — то, что собрал робот.
 -- Исходник храним, чтобы выгрузку можно было повторить, не прося файл заново.
 CREATE TABLE IF NOT EXISTS fleet_edm_job_files (
