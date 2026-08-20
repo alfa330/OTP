@@ -131,6 +131,7 @@ hit AS (
        AND (%(section)s::int IS NULL
             OR EXISTS (SELECT 1 FROM wiki_article_sections s
                         WHERE s.article_id = a.id AND s.section_id = %(section)s::int))
+       AND (%(article_type)s::text IS NULL OR a.article_type = %(article_type)s::text)
        AND (
             a.search_vector @@ q.tsq
             OR (q.tsq_prefix IS NOT NULL AND a.search_vector @@ q.tsq_prefix)
@@ -165,7 +166,8 @@ SELECT top.id, top.slug, top.title, top.summary, top.status, top.views,
                       for m.pos - GREATEST(m.pos - 70, 1))
             || '<mark>' || substring(a2.content_plain from m.pos for m.len) || '</mark>'
             || substring(a2.content_plain from m.pos + m.len for 110)
-       END AS snippet_folded
+       END AS snippet_folded,
+       a2.article_type
   FROM top
   JOIN wiki_articles a2 ON a2.id = top.id
   LEFT JOIN LATERAL (
@@ -207,7 +209,7 @@ _TIER_TRIGRAM = [
 _TIER_FALLBACK = 8
 
 _KEYS = ('id', 'slug', 'title', 'summary', 'status', 'views', 'updated_at',
-         'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded')
+         'rank_fts', 'rank_trgm', 'snippet', 'snippet_folded', 'article_type')
 
 # Буквы и цифры, из которых собирается префиксный tsquery. Всё прочее
 # (операторы tsquery, кавычки, дефисы) отбрасывается — слово из букв и цифр
@@ -333,19 +335,21 @@ def _rows_to_items(cursor):
     return items
 
 
-def _run(cursor, sql, ids, variants, section_id, limit):
+def _run(cursor, sql, ids, variants, section_id, limit, article_type=None):
     cursor.execute(sql, {
         'ids': ids,
         'variants': variants,
         'prefixes': [prefix_tsquery(v) for v in variants],
         'looses': [prefix_tsquery(v, ' | ') for v in variants],
         'section': section_id,
+        'article_type': article_type or None,
         'limit': limit,
     })
     return _rows_to_items(cursor)
 
 
-def search(cursor, visible_ids, query, *, section_id=None, limit=20, with_trigram=True):
+def search(cursor, visible_ids, query, *, section_id=None, article_type=None,
+           limit=20, with_trigram=True):
     """Поиск в границах периметра пользователя.
 
     Запрос прогоняется по всем вариантам написания сразу: исходный,
@@ -369,7 +373,8 @@ def search(cursor, visible_ids, query, *, section_id=None, limit=20, with_trigra
         return []
 
     ids = list(visible_ids)
-    return _run(cursor, build_sql(with_trigram), ids, variants, section_id, limit)
+    return _run(cursor, build_sql(with_trigram), ids, variants, section_id, limit,
+                article_type=article_type)
 
 
 def suggest(cursor, visible_ids, query, *, limit=5, with_trigram=True):

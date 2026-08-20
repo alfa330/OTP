@@ -243,6 +243,10 @@ WITH wiki_articles AS (
     SELECT id::int, slug::text, title::text, summary::text, status::text,
            views::int, NULL::timestamp AS updated_at,
            content_plain::text, search_aliases::text,
+           -- Тип статьи задаётся не в VALUES, а выражением по id: колонка
+           -- нужна одному тесту из тридцати, и тащить её во все строки-
+           -- заготовки значило бы править их все ради значения 'general'.
+           {types} AS article_type,
            setweight(to_tsvector('russian', translate(coalesce(title, ''), 'ёЁ', 'еЕ')),          'A') ||
            setweight(to_tsvector('russian', translate(coalesce(search_aliases, ''), 'ёЁ', 'еЕ')), 'B') ||
            setweight(to_tsvector('russian', translate(coalesce(summary, ''), 'ёЁ', 'еЕ')),        'C') ||
@@ -271,7 +275,8 @@ wiki_article_sections AS (
         prod_db.rollback()
 
     def run_search(self, rows, query, *, sections=None, with_trigram=False,
-                   section_id=None, ids=(1, 2, 3, 4, 5)):
+                   section_id=None, article_type=None, types=None,
+                   ids=(1, 2, 3, 4, 5)):
         """Боевой SQL целиком, только wiki_articles подменена синтетикой.
 
         Параметры собираются ровно как в wiki_search._run, включая слияние всех
@@ -282,6 +287,9 @@ wiki_article_sections AS (
             rows=', '.join(rows),
             sections=', '.join(sections) if sections
             else '(NULL::int, NULL::int)',
+            types=("(CASE id %s ELSE 'general' END)::text" % ' '.join(
+                f"WHEN {aid} THEN '{name}'" for aid, name in types.items())
+                if types else "'general'::text"),
         )
         sql = (wiki_search.build_sql(with_trigram)
                .replace('WITH q AS (', stub + 'q AS (', 1))
@@ -294,6 +302,7 @@ wiki_article_sections AS (
                 'prefixes': [wiki_search.prefix_tsquery(v) for v in variants],
                 'looses': [wiki_search.prefix_tsquery(v, ' | ') for v in variants],
                 'section': section_id,
+                'article_type': article_type,
                 'limit': 10,
             })
             return wiki_search._rows_to_items(cur)
@@ -422,6 +431,24 @@ class SearchMergeTest(SearchSqlTest):
 
     def ids(self, found):
         return [item['id'] for item in found]
+
+    def test_article_type_filter(self):
+        """Фильтр по типу сужает выдачу и не трогает её, когда не задан.
+
+        Проверяется на ОДНОМ и том же запросе: иначе тест доказывал бы лишь,
+        что разные слова находят разное, а не что фильтр работает.
+        """
+        found = self.run_search(self.ROWS, 'регламент')
+        self.assertIn(6, self.ids(found))
+
+        # Статья 6 — обычная, среди должностных инструкций её быть не должно.
+        self.assertEqual(self.run_search(self.ROWS, 'регламент',
+                                         article_type='job_description'), [])
+
+        # Та же статья, объявленная должностной инструкцией, — находится.
+        self.assertEqual(self.ids(self.run_search(
+            self.ROWS, 'регламент', article_type='job_description',
+            types={6: 'job_description'})), [6])
 
     def test_variants_are_merged_not_short_circuited(self):
         """«hyundai solaris» обязан отдать ОБЕ статьи.

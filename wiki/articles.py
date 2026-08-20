@@ -174,6 +174,7 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
         OR EXISTS (SELECT 1 FROM wiki_article_sections s
                     WHERE s.article_id = a.id AND s.section_id = %(section)s::int))
    AND (%(status)s::text IS NULL OR a.status = %(status)s::text)
+   AND (%(article_type)s::text IS NULL OR a.article_type = %(article_type)s::text)
    AND (%(query)s::text IS NULL
         OR a.title ILIKE '%%' || %(query)s::text || '%%'
         OR a.summary ILIKE '%%' || %(query)s::text || '%%')
@@ -183,11 +184,12 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
 
 
 def list_articles(cursor, visible_ids, *, section_id=None, status=None,
-                  query=None, limit=50, offset=0):
+                  article_type=None, query=None, limit=50, offset=0):
     if not visible_ids:
         return []
     cursor.execute(_LIST_SQL, {
         'ids': list(visible_ids), 'section': section_id, 'status': status,
+        'article_type': article_type or None,
         'query': query or None, 'limit': limit, 'offset': offset,
     })
     rows = []

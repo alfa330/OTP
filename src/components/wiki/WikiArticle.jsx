@@ -6,6 +6,7 @@ import {
     Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { typeBadge } from './articleTypes';
 import { scrollToElement } from './scrollContainer';
 import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
@@ -423,6 +424,9 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         );
     }
 
+    // Подпись типа документа: null у обычной статьи — бейджа тогда нет вовсе.
+    const typeMeta = typeBadge(article?.article_type);
+
     return (
         <div
             className={immersive
@@ -512,6 +516,12 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
                             {STATUS_LABELS[article.status] || article.status}
                         </IosBadge>
+                        {/* Тип документа — сразу за статусом: у должностной
+                            инструкции и регламента другой вес, чем у заметки,
+                            и знать об этом надо до чтения, а не после. */}
+                        {typeMeta && (
+                            <IosBadge tone={typeMeta.tone}>{typeMeta.label}</IosBadge>
+                        )}
                         {/* У классификатора visibility_mode='restricted' по
                             устройству — у него собственный периметр, но правило
                             в нём одно: читать могут все роли. Бейдж «только по

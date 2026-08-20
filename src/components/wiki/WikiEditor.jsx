@@ -22,6 +22,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
+import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE } from './articleTypes';
 import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
@@ -43,14 +44,6 @@ import WikiTableMenu from './WikiTableMenu';
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
-
-const ARTICLE_TYPES = [
-    { value: 'general', label: 'Обычная статья' },
-    { value: 'regulation', label: 'Регламент' },
-    { value: 'instruction', label: 'Инструкция' },
-    { value: 'job_description', label: 'Должностная инструкция' },
-    { value: 'tool_description', label: 'Описание инструмента' },
-];
 
 const HIGHLIGHT_COLORS = ['#fef3c7', '#dcfce7', '#dbeafe', '#fce7f3', '#e0e7ff'];
 
@@ -157,6 +150,19 @@ export default function WikiEditor({
             link: ed.isActive('link'),
         } : null),
     });
+
+    /* Смена типа на «Должностная инструкция» раскладывает скелет документа.
+     *
+     * Только в ПУСТУЮ статью: перебор типов на уже написанном тексте не должен
+     * его затирать, а подтверждения здесь ставить не за что — человек выбирал
+     * тип, а не соглашался потерять написанное. Пустоту спрашиваем у самого
+     * редактора (editor.isEmpty), а не у длины HTML: пустой документ TipTap —
+     * это '<p></p>', и проверка на непустую строку считала бы его текстом.
+     */
+    const applyTypeTemplate = useCallback((value) => {
+        if (value !== 'job_description' || !editor?.isEmpty) return;
+        editor.commands.setContent(JOB_DESCRIPTION_TEMPLATE);
+    }, [editor]);
 
     // Предупреждаем о несохранённом при уходе со страницы. Внутри портала
     // навигация без перезагрузки, поэтому это только про закрытие вкладки.
@@ -345,7 +351,11 @@ export default function WikiEditor({
                             <CustomSelect
                                 variant="ios"
                                 value={articleType}
-                                onChange={(v) => { setArticleType(v); setDirty(true); }}
+                                onChange={(v) => {
+                                    setArticleType(v);
+                                    setDirty(true);
+                                    applyTypeTemplate(v);
+                                }}
                                 options={ARTICLE_TYPES}
                                 ariaLabel="Тип статьи"
                             />

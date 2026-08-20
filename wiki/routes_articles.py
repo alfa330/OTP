@@ -23,6 +23,16 @@ def _int_or_none(value):
         return None
 
 
+def _article_type():
+    """Тип статьи из запроса — только из белого списка.
+
+    Неизвестное значение гасим в None, а не в 400: фильтр витрины — украшение
+    выдачи, и опечатка в адресе не повод отказать человеку в списке статей.
+    """
+    value = (request.args.get('article_type') or '').strip()
+    return value if value in wiki_schema.ARTICLE_TYPES else None
+
+
 def register(bp, wiki_route, db, log_ip, gcs):
     """gcs — словарь с ключами signed_url и bucket_name (внедряются из bot_schedule2)."""
 
@@ -54,6 +64,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
             cursor, visible,
             section_id=_int_or_none(request.args.get('section_id')),
             status=(request.args.get('status') or None),
+            article_type=_article_type(),
             query=(request.args.get('q') or None),
             limit=limit, offset=offset,
         )
@@ -77,6 +88,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
         items = wiki_search.search(
             cursor, visible, query,
             section_id=_int_or_none(request.args.get('section_id')),
+            article_type=_article_type(),
             limit=limit,
             with_trigram=wiki_schema.trigram_available(cursor),
         )

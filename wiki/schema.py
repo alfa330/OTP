@@ -43,6 +43,14 @@ SUBJECT_TYPES = (
 # пространства (ОП / ОТП у «Коммерческого отдела»); 'common' — всё остальное.
 SECTION_KINDS = ('common', 'department')
 
+# Тип статьи. Один источник правды на весь пакет: CHECK в wiki_articles,
+# белый список правки (routes_edit) и фильтр витрины (routes_articles) обязаны
+# брать значения отсюда — разойдись они, тип, который можно сохранить, стало бы
+# нельзя отфильтровать.
+ARTICLE_TYPES = (
+    'general', 'job_description', 'regulation', 'instruction', 'tool_description',
+)
+
 # Шесть прав. В оригинальной вики их пять — can_delete добавлено нами.
 PERMISSION_COLUMNS = (
     'can_read', 'can_create', 'can_edit', 'can_delete', 'can_publish', 'can_approve',
