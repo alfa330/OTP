@@ -11,7 +11,7 @@ import { markedWord } from './WikiSearch';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
 import { selectableSections } from './sectionPicker';
-import { FILTERABLE_TYPES, typeBadge, typePlural } from './articleTypes';
+import { typeBadge } from './articleTypes';
 
 // TipTap с ProseMirror весит ~128 КБ gzip — грузим только при открытии
 // редактора, а не при входе в раздел.
@@ -57,11 +57,10 @@ const Snippet = ({ html }) => {
     );
 };
 
-/* Карточка статьи в центре витрины — и в выдаче поиска, и в подборке по типу.
-   Разница между ними только в подписи под заголовком: у поиска это отрывок с
-   найденным словом, у подборки — описание статьи. */
-const ArticleCard = ({ article, onOpen, showType = true }) => {
-    const meta = showType ? typeBadge(article.article_type) : null;
+/* Карточка статьи в выдаче поиска: заголовок, подпись типа и отрывок с
+   найденным словом. */
+const ArticleCard = ({ article, onOpen }) => {
+    const meta = typeBadge(article.article_type);
     return (
         <button
             type="button"
@@ -91,22 +90,6 @@ const ArticleCard = ({ article, onOpen, showType = true }) => {
         </button>
     );
 };
-
-/* Фильтр витрины по типу документа. Рисуется только для типов, которые в
-   периметре человека ЕСТЬ (см. availableTypes): кнопка, открывающая пустой
-   список, здесь ничем не лучше отсутствующей. */
-const TypeChip = ({ active, onClick, children }) => (
-    <button
-        type="button"
-        aria-pressed={active}
-        onClick={onClick}
-        className={`rounded-full px-3 py-1 text-[11.5px] font-medium transition ${active
-            ? 'bg-slate-900 text-white'
-            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-    >
-        {children}
-    </button>
-);
 
 export default function WikiLibrary({ base, headers, showToast, structure, catalog,
                                       canCreate, canEdit = false,
@@ -142,12 +125,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const [parksCanManage, setParksCanManage] = useState(false);
     const [found, setFound] = useState(null);   // null = поиска не было
     const [loading, setLoading] = useState(false);
-    /* Тип документа, по которому сужена витрина: null = не сужена. Действует и
-       на выдачу поиска, и на центр без поиска — иначе выбранный тип означал бы
-       разное в зависимости от того, введено ли слово в поле. */
-    const [typeFilter, setTypeFilter] = useState(null);
-    const [typed, setTyped] = useState([]);
-    const [typedLoading, setTypedLoading] = useState(false);
     /* Периметр витрины — ВСЕГДА личный: человек видит то, к чему имеет
      * отношение. Переключателя «Моё / Всё содержимое» здесь больше нет.
      *
@@ -226,7 +203,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         setEditing(null);
         setQuery('');
         setFound(null);
-        setTypeFilter(null);
     }, [homeTick]);
 
     /* Обычное открытие из списка — без подсветки: она осмысленна только когда
@@ -259,15 +235,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         if (term.length < 2) { setFound(null); return; }
 
         setLoading(true);
-        axios.get(`${base}/search`, { headers,
-                                      params: { q: term, article_type: typeFilter || undefined } })
+        axios.get(`${base}/search`, { headers, params: { q: term } })
             .then((r) => setFound(r.data?.items || []))
             .catch((e) => {
                 setFound([]);
                 toast(errText(e, 'Поиск не сработал'), 'error');
             })
             .finally(() => setLoading(false));
-    }, [base, headers, query, typeFilter, toast]);
+    }, [base, headers, query, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -284,21 +259,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
             .catch(() => setIndex([]))
             .finally(() => setIndexLoading(false));
     }, [base, headers]);
-
-    /* Подборка по типу тянется с сервера, а не режется из оглавления: оглавление
-       ограничено потолком в 200 статей, и на большем содержимом подборка молча
-       не досчиталась бы документов, которые в разделе есть. */
-    useEffect(() => {
-        if (!typeFilter) { setTyped([]); return undefined; }
-        let cancelled = false;
-        setTypedLoading(true);
-        axios.get(`${base}/articles`, { headers,
-                                        params: { article_type: typeFilter, limit: 200 } })
-            .then((r) => { if (!cancelled) setTyped(r.data?.items || []); })
-            .catch(() => { if (!cancelled) setTyped([]); })
-            .finally(() => { if (!cancelled) setTypedLoading(false); });
-        return () => { cancelled = true; };
-    }, [base, headers, typeFilter]);
 
     const loadHome = useCallback(() => {
         setHomeLoading(true);
@@ -327,13 +287,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        архивные — здесь, на витрине чтения, первые были бы ветками, которые
        открываются пустыми, а вторые — вторым экземпляром раздела рядом с живым
        двойником: архивируют обычно дубль с тем же именем. */
-    /* Кнопки фильтра — только под типы, которые в периметре человека есть.
-       Источник тот же, что у оглавления: если типа нет в дереве, нет и кнопки. */
-    const availableTypes = useMemo(() => {
-        const present = new Set((index || []).map((a) => a.article_type));
-        return FILTERABLE_TYPES.filter((type) => present.has(type.value));
-    }, [index]);
-
     const treeSections = useMemo(
         () => selectableSections(sections).filter((s) => s.accessible !== false),
         [sections],
@@ -514,26 +467,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                         )}
                     </div>
 
-                    {/* Быстрый вход в нормативные документы: должностные
-                        инструкции и регламенты ищут по названию типа, а не по
-                        словам внутри текста. */}
-                    {availableTypes.length > 0 && (
-                        <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5">
-                            <TypeChip active={!typeFilter} onClick={() => setTypeFilter(null)}>
-                                Все статьи
-                            </TypeChip>
-                            {availableTypes.map((type) => (
-                                <TypeChip
-                                    key={type.value}
-                                    active={typeFilter === type.value}
-                                    onClick={() => setTypeFilter(
-                                        typeFilter === type.value ? null : type.value)}
-                                >
-                                    {type.label}
-                                </TypeChip>
-                            ))}
-                        </div>
-                    )}
                 </section>
 
 
@@ -567,44 +500,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                     )
                 )}
 
-                {/* Сужение по типу заменяет витрину «про меня»: человек попросил
-                    показать документы одного вида, и полки «недавнее» и
-                    «популярное» под ними отвечали бы не на его вопрос. */}
-                {!busy && !searching && typeFilter && (
-                    typedLoading ? (
-                        <div className={`${iosCard} h-[220px] overflow-hidden`}>
-                            <div className="sk-shimmer h-full w-full" />
-                        </div>
-                    ) : typed.length > 0 ? (
-                        <div className="space-y-2.5">
-                            <div className={iosGroupLabel}>
-                                {typePlural(typeFilter)} · {typed.length}
-                            </div>
-                            {/* Тип у карточек не показываем: он уже стоит в
-                                заголовке подборки, и на каждой строке был бы
-                                той же подписью в третий раз. */}
-                            {typed.map((article) => (
-                                <ArticleCard key={article.id} article={article}
-                                             showType={false}
-                                             onOpen={() => openArticle(article.slug)} />
-                            ))}
-                        </div>
-                    ) : (
-                        <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
-                            <div className="text-[15px] font-semibold text-slate-900">
-                                Таких документов пока нет
-                            </div>
-                            <p className="max-w-sm text-[13px] leading-relaxed text-slate-500">
-                                В доступных вам разделах нет ни одной статьи этого типа.
-                            </p>
-                        </div>
-                    )
-                )}
-
                 {/* Пока /home не ответил, витрину «про меня» не рисуем пустыми
                     полками: «Пусто» и «Пока ничего не читали» — это утверждения,
                     и до ответа сервера они неправда. */}
-                {!busy && !searching && !typeFilter && (
+                {!busy && !searching && (
                     homeLoading ? (
                         <div className={`${iosCard} h-[220px] overflow-hidden`}>
                             <div className="sk-shimmer h-full w-full" />
