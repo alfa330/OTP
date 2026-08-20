@@ -41632,6 +41632,133 @@ async def cancel_handler(message: types.Message, state: FSMContext):
     await message.delete()
 
 # === Команды ====================================================================================================
+def _szov_wallboard_access_allowed(user):
+    """Табло СЗоВ — глобальным админам, главе и СВ отдела СЗоВ.
+
+    Доступ тот же, что у раздела. Вынесен из обработчика, потому что спрашивают
+    двое: сама /tablo и /help, который решает, показывать её человеку или нет."""
+    if not user:
+        return False
+    role = _normalize_user_role(user[3])
+    if _is_admin_role(role):
+        return True
+    department_id = _szov_wallboard_department_id()
+    if department_id is None:
+        return False
+    if db.headed_department_id_for_user(user[0]) == department_id:
+        return True
+    return _is_supervisor_role(role) and db.get_user_department_id(user[0]) == department_id
+
+
+# Что показывает /help. Ключ первым элементом сверяется с флагами из
+# _bot_help_flags: человек видит только те команды, которые у него сработают
+# в ЭТОМ чате. Порядок разделов — порядок в ответе.
+# Синего меню со всеми командами у бота нет намеренно (см. «Меню команд» в конце
+# файла), поэтому этот список — единственное место, где команды описаны для
+# сотрудника: добавил команду — добавь строку сюда.
+BOT_HELP_SECTIONS = (
+    ('basics', 'Общее', (
+        ('/start', 'главное меню и кнопки под полем ввода'),
+        ('/help', 'этот список'),
+    )),
+    ('tablo', 'Табло СЗоВ', (
+        ('/tablo', 'показатели на сейчас'),
+        ('/tablo 14:00', 'показатели на указанный час'),
+    )),
+    ('leads', 'Лиды amoCRM', (
+        ('/leads', 'лиды по источникам за текущий период'),
+        ('/leads 05.08.2026', 'за указанные сутки'),
+        ('/leads_subscribe', 'присылать отбивку по лидам в этот чат'),
+        ('/leads_unsubscribe', 'перестать присылать'),
+    )),
+    ('obzvon', 'Обзвон фронт-офиса', (
+        ('/obzvon', 'за вчера, как в утренней отбивке'),
+        ('/obzvon 16.08.2026', 'за день; /obzvon 10.08 12.08 — за период'),
+        ('/obzvon_plan', 'какая сейчас дневная норма звонков'),
+    )),
+    ('obzvon_manage', 'Обзвон: настройка', (
+        ('/obzvon_plan 10', 'задать норму; /obzvon_plan 0 — снять'),
+        ('/obzvon_subscribe', 'присылать утреннюю отбивку в этот чат'),
+        ('/obzvon_unsubscribe', 'перестать присылать'),
+    )),
+    ('chats', 'Чаты', (
+        ('/chats', 'почасовой отчёт прямо сейчас'),
+        ('/chats_subscribe', 'присылать отчёт в этот чат каждый час'),
+        ('/chats_unsubscribe', 'перестать присылать'),
+    )),
+    ('report', 'Опоздания', (
+        ('/report', 'Excel по опозданиям за сегодня'),
+        ('/report 2026-08-01 2026-08-20', 'за период'),
+        ('/report СЗоВ', 'только по отделу'),
+    )),
+)
+
+
+def _bot_help_flags(user, is_private, group_late_chat):
+    """Какие разделы /help показать этому человеку в этом чате.
+
+    Синхронная: ходит в базу теми же проверками, что и сами команды — иначе
+    список разойдётся с тем, что реально сработает."""
+    flags = {
+        # /start уводит человека в личку (удаляет сообщение и пишет ему одному),
+        # в группе показывать его нечестно.
+        'basics': bool(is_private),
+        # /report отвечает только в чатах контроля опозданий — гейт тот же.
+        'report': bool(group_late_chat),
+    }
+    if user:
+        flags['tablo'] = _szov_wallboard_access_allowed(user)
+        flags['leads'] = _amo_leads_access_allowed(user)
+        flags['obzvon'] = _front_office_calls_access_allowed(user)
+        flags['obzvon_manage'] = _front_office_calls_manage_allowed(user)
+        flags['chats'] = _chat_hourly_access_allowed(user)
+    return flags
+
+
+def _bot_help_text(flags, has_user=True):
+    """Текст ответа /help по флагам доступа. Без базы и сети — это и проверяют тесты."""
+    blocks = []
+    for key, title, rows in BOT_HELP_SECTIONS:
+        if not flags.get(key):
+            continue
+        blocks.append('\n'.join(['<b>%s</b>' % title]
+                                + ['%s — %s' % row for row in rows]))
+    if not blocks:
+        # Бывает только в группе: в личке всегда есть хотя бы /start.
+        return 'Здесь я команд не выполняю. Напишите мне в личку — там /start.'
+    footer = ('Показаны только доступные вам команды: у коллег список другой.'
+              if has_user else
+              'Вы ещё не вошли: нажмите /start и «Вход👤» — команд станет больше.')
+    return ('🧭 <b>Команды бота</b>\n\n' + '\n\n'.join(blocks)
+            + '\n\n<i>%s</i>' % footer)
+
+
+@dp.message_handler(commands=['help'], state='*')
+async def bot_help_command(message: types.Message):
+    """/help — перечень команд, доступных именно этому человеку в этом чате.
+
+    state='*' намеренно: без него «/help», набранный посреди диалога (например
+    на шаге ввода пароля), достался бы обработчику состояния и был бы принят за
+    пароль. Состояние команда не сбрасывает — человек продолжает с того же места."""
+    loop = asyncio.get_event_loop()
+    is_private = message.chat.type == 'private'
+
+    group_late_chat = None
+    if not is_private:
+        # Чат контроля опозданий читаем его же пулом, как это делает /report.
+        group_late_chat = await loop.run_in_executor(
+            group_late_pool, db.glb_get_chat, str(message.chat.id))
+
+    def _collect():
+        # Один заход в пул на всё: get_user и проверки прав ходят в одну базу,
+        # а места в общем пуле дороги — его делят все обработчики бота.
+        found = db.get_user(telegram_id=message.from_user.id)
+        return found, _bot_help_flags(found, is_private, group_late_chat)
+
+    user, flags = await loop.run_in_executor(executor_pool, _collect)
+    await message.reply(_bot_help_text(flags, has_user=bool(user)), parse_mode='HTML')
+
+
 @dp.message_handler(commands=['tablo'])
 async def szov_wallboard_command(message: types.Message):
     """/tablo [ЧЧ:ММ] — показатели табло на указанный час (по умолчанию — на сейчас).
@@ -41643,18 +41770,7 @@ async def szov_wallboard_command(message: types.Message):
         await message.reply("Не нашёл вас в системе. Войдите в бота через «Вход».")
         return
 
-    def _allowed():
-        role = _normalize_user_role(user[3])
-        if _is_admin_role(role):
-            return True
-        department_id = _szov_wallboard_department_id()
-        if department_id is None:
-            return False
-        if db.headed_department_id_for_user(user[0]) == department_id:
-            return True
-        return _is_supervisor_role(role) and db.get_user_department_id(user[0]) == department_id
-
-    if not await loop.run_in_executor(executor_pool, _allowed):
+    if not await loop.run_in_executor(executor_pool, _szov_wallboard_access_allowed, user):
         await message.reply("Табло СЗоВ доступно администраторам, главе и СВ отдела СЗоВ.")
         return
 
@@ -53101,39 +53217,39 @@ _register_bot_chat_discovery()
 
 
 # === Меню команд ================================================================================
-# Синего меню у бота нет намеренно. Telegram показывает список команд всем, кто
-# видит бота, скрыть пункт по роли нельзя — а /tablo, /leads и /report доступны
-# только части сотрудников, рекламировать их всем подряд незачем. Сами команды
-# работают, если набрать их руками: права по-прежнему проверяют обработчики.
-# Живой список: /start, /tablo, /leads, /leads_subscribe, /leads_unsubscribe,
-# /chats, /chats_subscribe, /chats_unsubscribe, /report (в чатах контроля опозданий).
+# В синем меню стоит ровно одна команда — /help. Остальные там не показываем
+# намеренно: меню одно на всех, кто видит бота, скрыть пункт по роли нельзя, а
+# /tablo, /leads, /obzvon, /chats и /report доступны только части сотрудников.
+# /help же безобиден для всех и сам разбирается, кому что показать
+# (BOT_HELP_SECTIONS выше) — так команды находятся, но не рекламируются.
 
 
-async def _clear_bot_commands():
-    """Гасим меню команд в Telegram при старте.
+async def _sync_bot_commands():
+    """Ставим меню из одной команды /help при старте.
 
-    Меню живёт на стороне Telegram: убрать код со списком мало, нужно явно
-    очистить каждый scope, куда мы когда-то заливали команды. Ошибку глотаем —
+    Меню живёт на стороне Telegram: пока не отправишь список в КАЖДЫЙ scope,
+    куда мы когда-то заливали команды, там останется прежний. Ошибку глотаем —
     недоступный на старте Telegram не должен мешать боту подняться, меню
-    погаснет при следующем перезапуске.
+    обновится при следующем перезапуске.
     """
     try:
+        commands = [types.BotCommand(command='help', description='Список доступных команд')]
         scopes = [
             None,  # default — чаты, не попавшие ни в один scope ниже
             types.BotCommandScopeAllPrivateChats(),
             types.BotCommandScopeAllGroupChats(),
         ]
         for scope in scopes:
-            await bot.delete_my_commands(scope=scope)
-        logging.info("🧾 Меню команд бота убрано")
+            await bot.set_my_commands(commands, scope=scope)
+        logging.info("🧾 Меню команд бота: /help")
     except Exception as error:
-        logging.warning("Не удалось убрать меню команд бота: %s", error)
+        logging.warning("Не удалось обновить меню команд бота: %s", error)
 
 
 async def _on_bot_startup(_dispatcher=None):
-    """on_startup: запомнить цикл бота и погасить меню команд."""
+    """on_startup: запомнить цикл бота и обновить меню команд."""
     await _capture_bot_loop(_dispatcher)
-    await _clear_bot_commands()
+    await _sync_bot_commands()
 
 
 if __name__ == '__main__':
