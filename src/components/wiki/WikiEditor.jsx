@@ -25,6 +25,7 @@ import { absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
 import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE } from './articleTypes';
 import SectionTreeSelect from './SectionTreeSelect';
 import WikiAiDraft from './WikiAiDraft';
+import WikiAttachments from './WikiAttachments';
 import WikiTableMenu from './WikiTableMenu';
 
 /* Редактор статьи на TipTap.
@@ -86,6 +87,29 @@ export default function WikiEditor({
     // помощника. Показать её выключенной значило бы соврать про текущее
     // состояние, а сохранить в этом виде — молча выключить то, что включено.
     const [aiSupport, setAiSupport] = useState(!article?.ai_opt_out);
+
+    /* Приложения к статье. Приходят готовым списком в самой статье
+       (wiki/routes_articles.py), потому что редактор открывается ровно тем
+       ответом сервера, которым статья читается, — отдельный запрос за файлами
+       был бы вторым источником правды о том же. */
+    const [attachments, setAttachments] = useState(article?.attachments || []);
+
+    /* Трогали ли список приложений в этот заход. Нужен ради того, чтобы
+       сохранение НЕ отправляло пустой список туда, где редактор приложений
+       просто не видел: статья могла приехать из ответа без поля attachments
+       (например, из кэша страницы, собранной до этой правки), и тогда «пусто»
+       означало бы «не знаю», а не «убрать все». Открепить приложения молча,
+       правкой запятой в тексте, — худший из возможных исходов. */
+    const knowsAttachments = isNew || Array.isArray(article?.attachments);
+    const [attachmentsTouched, setAttachmentsTouched] = useState(false);
+
+    /* Панель отдаёт обновление функцией (файлы грузятся параллельно), поэтому
+       прокидываем setState как есть и лишь помечаем правку несохранённой. */
+    const changeAttachments = useCallback((updater) => {
+        setAttachments(updater);
+        setAttachmentsTouched(true);
+        setDirty(true);
+    }, []);
 
     /* Название общего раздела — для подсказки под выбором раздела. Слаг тот же,
        что знает сервер (wiki/edit.py: _FALLBACK_SECTION_SLUG); совпадение
@@ -189,6 +213,12 @@ export default function WikiEditor({
             section_ids: sectionIds.map(Number).filter(Boolean),
             ai_support: aiSupport,
         };
+        // Полный список, а не «что добавили»: сервер приводит приложения статьи
+        // ровно к нему, и пропавшее здесь там открепляется. Поэтому и ключ
+        // ставится только когда список действительно известен.
+        if (knowsAttachments || attachmentsTouched) {
+            payload.attachment_ids = attachments.map((a) => a.id);
+        }
         if (status) payload.status = status;
 
         setSaving(true);
@@ -213,8 +243,9 @@ export default function WikiEditor({
             })
             .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
             .finally(() => setSaving(false));
-    }, [editor, title, summary, articleType, sectionIds, aiSupport, isNew, base,
-        headers, article, showToast, onSaved]);
+    }, [editor, title, summary, articleType, sectionIds, aiSupport, attachments,
+        knowsAttachments, attachmentsTouched, isNew, base, headers, article,
+        showToast, onSaved]);
 
     const importDocument = (file) => {
         if (!file) return;
@@ -388,6 +419,14 @@ export default function WikiEditor({
                     </div>
                 </div>
             </section>
+
+            <WikiAttachments
+                base={base}
+                headers={headers}
+                showToast={showToast}
+                items={attachments}
+                onChange={changeAttachments}
+            />
 
             <WikiAiDraft
                 base={base}

@@ -49,3 +49,16 @@ export const relativizeFileUrls = (html) => {
         new RegExp('(src|href)="https?://[^"]*?' + FILE_PREFIX, 'g'),
         '$1="' + FILE_PREFIX);
 };
+
+/* Один адрес файла (не тело статьи) → абсолютный.
+ *
+ * Нужен приложениям: их ссылки приходят от сервера отдельными полями
+ * (`url`, `download_url`), а не внутри HTML, но живут по тому же правилу —
+ * в базе относительные, на экране абсолютные. Уже абсолютный адрес возвращаем
+ * как есть: иначе получился бы `https://hosthttps://host`.
+ */
+export const absoluteFileUrl = (url, base) => {
+    const value = String(url || '');
+    if (!value.startsWith(FILE_PREFIX)) return value;
+    return originOf(base) + value;
+};

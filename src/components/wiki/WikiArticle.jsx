@@ -2,13 +2,14 @@ import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'rea
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    Archive, ArrowLeft, Clock, Eye, Link2, List, Loader2, Maximize2, Minimize2,
-    Pencil, Star, User,
+    Archive, ArrowLeft, Clock, Download, Eye, Link2, List, Loader2, Maximize2,
+    Minimize2, Paperclip, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { typeBadge } from './articleTypes';
 import { scrollToElement } from './scrollContainer';
-import { absolutizeFileUrls } from './fileUrls';
+import { absoluteFileUrl, absolutizeFileUrls } from './fileUrls';
+import { attachmentKind, attachmentMeta } from './attachments';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
@@ -627,6 +628,64 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         />
                     )}
                 </div>
+
+                {/* Приложения — ПОД текстом и в самой карточке статьи, а не
+                    отдельным блоком рядом: файл здесь продолжение документа
+                    («бланк заявления к регламенту»), и уехав в сторону, он
+                    читался бы как что-то необязательное. Имя открывает файл,
+                    кнопка скачивает — разными путями, потому что pdf с
+                    инструкцией обычно смотрят, а бланк заполняют у себя. */}
+                {article.attachments?.length > 0 && (
+                    <footer className="border-t border-slate-100 px-5 py-4 sm:px-7">
+                        <div className={`${iosGroupLabel} mb-2 flex items-center gap-1.5`}>
+                            <Paperclip size={12} /> Файлы к статье
+                        </div>
+                        <ul className="grid gap-1.5 sm:grid-cols-2">
+                            {article.attachments.map((attachment) => {
+                                const kind = attachmentKind(attachment.name);
+                                const Icon = kind.icon;
+                                return (
+                                    <li
+                                        key={attachment.id}
+                                        className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 transition hover:bg-slate-100"
+                                    >
+                                        <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${kind.tone}`}>
+                                            <Icon size={16} />
+                                        </span>
+                                        <a
+                                            href={absoluteFileUrl(attachment.url, base)}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            title="Открыть файл в новой вкладке"
+                                            className="min-w-0 flex-1"
+                                        >
+                                            <span className="block truncate text-[13.5px] font-medium text-slate-800">
+                                                {attachment.name}
+                                            </span>
+                                            <span className="block text-[11.5px] text-slate-400">
+                                                {attachmentMeta(attachment)}
+                                            </span>
+                                        </a>
+                                        <a
+                                            href={absoluteFileUrl(attachment.download_url
+                                                || `${attachment.url}?download=1`, base)}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            title={`Скачать «${attachment.name}»`}
+                                            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] font-medium text-slate-500 transition hover:bg-white hover:text-blue-600"
+                                        >
+                                            <Download size={15} />
+                                            {/* Подпись прячется только на совсем
+                                                узком экране: на телефоне строка
+                                                и так занята именем файла. */}
+                                            <span className="hidden sm:inline">Скачать</span>
+                                        </a>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    </footer>
+                )}
 
                 {article.backlinks?.length > 0 && (
                     <footer className="border-t border-slate-100 px-5 py-4 sm:px-7">
