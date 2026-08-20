@@ -31901,7 +31901,21 @@ def _szov_break_planned_for_day(planned_breaks, operator_id, day):
     return plan
 
 
-def _szov_break_classify(episodes, planned_breaks, shift_days, now,
+def _szov_break_on_shift(shifts, operator_id, day, start_minutes):
+    """Накрыт ли момент выхода на перерыв сменой из графика.
+
+    Считать по календарной дате нельзя: ночная смена лежит на своей дате и уходит за полночь,
+    поэтому её хвост и обычный дневной перерыв следующего дня попадают в один и тот же день.
+    Замер на боевых данных: смена 17.08 15:00–02:00 делала «сменным» перерыв 18.08 в 13:36."""
+    today = (shifts or {}).get((operator_id, day.strftime('%Y-%m-%d'))) or []
+    if any(start <= start_minutes < end for start, end in today):
+        return True
+    previous_key = (operator_id, (day - timedelta(days=1)).strftime('%Y-%m-%d'))
+    previous = (shifts or {}).get(previous_key) or []
+    return any(start <= start_minutes + 1440 < end for start, end in previous)
+
+
+def _szov_break_classify(episodes, planned_breaks, shifts, now,
                          direction=SZOV_BREAK_DIRECTION_LINE):
     """Эпизоды перерывов -> строки нарушений. Совпавшие с графиком не возвращаются вовсе.
 
@@ -31936,13 +31950,20 @@ def _szov_break_classify(episodes, planned_breaks, shift_days, now,
             'planned_end_minutes': None,
             'deviation_minutes': None,
         }
-        if not plan:
-            has_shift = (episode['operator_id'], day.strftime('%Y-%m-%d')) in (shift_days or set())
-            row['kind'] = SZOV_BREAK_KIND_NOT_PLANNED if has_shift else SZOV_BREAK_KIND_NO_SHIFT
+        tolerance = SZOV_BREAK_TOLERANCE_MINUTES
+        if plan and any(start - tolerance <= start_minutes < end + tolerance
+                        for start, end in plan):
+            continue
+        on_shift = _szov_break_on_shift(shifts, episode['operator_id'], day, start_minutes)
+        if not on_shift:
+            # Смена графиком не покрыта — сверять не с чем, даже если на эту дату заехал
+            # ночной хвост вчерашней смены: он относится к другим часам.
+            row['kind'] = SZOV_BREAK_KIND_NO_SHIFT
             violations.append(row)
             continue
-        tolerance = SZOV_BREAK_TOLERANCE_MINUTES
-        if any(start - tolerance <= start_minutes < end + tolerance for start, end in plan):
+        if not plan:
+            row['kind'] = SZOV_BREAK_KIND_NOT_PLANNED
+            violations.append(row)
             continue
         nearest = min(plan, key=lambda item: abs(item[0] - start_minutes))
         row['kind'] = SZOV_BREAK_KIND_OFF_SCHEDULE
@@ -32003,8 +32024,8 @@ def _szov_break_violations_scan(now=None):
         day = episode['started_at'].date()
         days.add(day)
         days.add(day - timedelta(days=1))   # ночной хвост вчерашней смены
-    planned_breaks, shift_days = db.get_planned_breaks_for_days(operator_ids, days)
-    violations = _szov_break_classify(merged, planned_breaks, shift_days, now)
+    planned_breaks, shifts = db.get_planned_breaks_for_days(operator_ids, days)
+    violations = _szov_break_classify(merged, planned_breaks, shifts, now)
     if not violations:
         return 0
     inserted = db.save_szov_break_violations(violations)
@@ -33986,8 +34007,8 @@ def _szov_chat_break_scan_day(day_str, lookup, now, *, own_cache=False):
         day = episode['started_at'].date()
         days.add(day)
         days.add(day - timedelta(days=1))   # ночной хвост вчерашней смены
-    planned_breaks, shift_days = db.get_planned_breaks_for_days(operator_ids, days)
-    found = _szov_break_classify(merged, planned_breaks, shift_days, now,
+    planned_breaks, shifts = db.get_planned_breaks_for_days(operator_ids, days)
+    found = _szov_break_classify(merged, planned_breaks, shifts, now,
                                  direction=SZOV_BREAK_DIRECTION_CHAT)
     # «Смены в графике нет» по чату — не нарушение, а отсутствие данных: график чат-менеджерам
     # почти не заполняют (замер 18–20.08: работали 11–14 человек в день, смена была у 0–1).

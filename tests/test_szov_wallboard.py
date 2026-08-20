@@ -1612,16 +1612,20 @@ class SzovBroadcastWiringTests(unittest.TestCase):
         self.assertLess(block.index("_szov_break_violations_scan"),
                         block.index("_szov_broadcast_run_job"))
 
-    def test_break_scan_belongs_to_the_line_only(self):
-        """Перерывы по графику есть только у линии. В общем раннере разбор запускался бы
-        дважды — второй раз за счёт направления «Чат»."""
+    def test_each_direction_scans_its_own_source(self):
+        """В общем раннере разбор запускался бы дважды, поэтому он у каждого направления свой:
+        факт линии приезжает из Oktell, факт чата — из Chat2Desk, и путать их нельзя."""
         runner = re.search(r"async def _szov_broadcast_run_job\(.*?(?=\nasync def )", self.api,
                            flags=re.DOTALL).group(0)
-        self.assertNotIn("_szov_break_violations_scan", runner)
+        self.assertNotIn("break_violations_scan", runner)
+        line_job = re.search(r"async def szov_broadcast_job\(\).*?(?=\n# ===)", self.api,
+                             flags=re.DOTALL).group(0)
+        self.assertIn("executor_pool, _szov_break_violations_scan", line_job)
+        self.assertNotIn("_szov_chat_break_violations_scan", line_job)
         chat_job = re.search(r"async def szov_chat_broadcast_job\(\).*?(?=\n\n\n)", self.api,
                              flags=re.DOTALL).group(0)
-        self.assertNotIn("_szov_break_violations_scan", chat_job)
-        self.assertNotIn("break_violations", chat_job)
+        self.assertIn("executor_pool, _szov_chat_break_violations_scan", chat_job)
+        self.assertNotIn("executor_pool, _szov_break_violations_scan", chat_job)
 
     def test_violations_are_marked_reported_only_after_a_successful_send(self):
         """Упавшая отправка не должна проглотить предупреждения молча."""

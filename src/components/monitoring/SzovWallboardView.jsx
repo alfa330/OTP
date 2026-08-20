@@ -210,7 +210,8 @@ const breakViolationDetail = (item) => {
     return planned ? `по графику в ${planned}` : 'в графике на это время перерыва нет';
 };
 
-const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader, showToast }) => {
+const BreakViolationsModal = ({ open, onClose, direction, directionLabel,
+                               apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const [period, setPeriod] = useState('today');
     const [state, setState] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -230,7 +231,8 @@ const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader
         setLoading(true);
         const build = headersRef.current;
         const headers = build ? build({ Accept: 'application/json' }) : { Accept: 'application/json' };
-        fetch(`${apiBaseUrl}/api/szov_wallboard/break_violations?date_from=${from}&date_to=${to}`, {
+        fetch(`${apiBaseUrl}/api/szov_wallboard/break_violations`
+            + `?date_from=${from}&date_to=${to}&direction=${direction}`, {
             headers, credentials: 'include',
         })
             .then(async (response) => {
@@ -244,7 +246,7 @@ const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader
             })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, [open, period, apiBaseUrl]);
+    }, [open, period, direction, apiBaseUrl]);
 
     const violations = state?.violations || [];
 
@@ -266,14 +268,18 @@ const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader
     );
 
     const rules = state?.rules;
+    /* Сколько человек за период работали без смены в графике. Их перерывы сверять не с чем,
+       и в списке их нет — но и молчать нельзя: пустой журнал читался бы как «все по графику»,
+       хотя проверка по ним просто не работала. */
+    const unscheduled = state?.unscheduled;
     return (
         <IosModal
             open={open}
             onClose={onClose}
-            title="Перерывы не по графику"
+            title={`Перерывы не по графику · ${directionLabel}`}
             subtitle={rules
                 ? `Перерыв короче ${rules.min_minutes} мин не считаем, допуск к плановому времени ±${rules.tolerance_minutes} мин`
-                : 'Сверка фактических перерывов Oktell с «Графиками работы»'}
+                : 'Сверка фактических перерывов с «Графиками работы»'}
             maxWidth="max-w-3xl"
             footer={<button type="button" className={iosBtnSecondary} onClick={onClose}>Готово</button>}
         >
@@ -294,6 +300,16 @@ const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader
                         </div>
                     ) : null}
                 </div>
+
+                {unscheduled?.days ? (
+                    <div className="rounded-2xl bg-slate-100/70 px-4 py-3 text-[13px] text-slate-500">
+                        {`У части сотрудников смен в графике за период нет — их перерывы не сверялись `}
+                        {`(дней с такими: ${formatInt(unscheduled.days)}, `}
+                        {`до ${formatInt(unscheduled.operators_max)} `}
+                        {plural(unscheduled.operators_max, 'человека', 'человек', 'человек')}
+                        {' в день). Как только график заполнят, они попадут в проверку сами.'}
+                    </div>
+                ) : null}
 
                 {loading && !state ? (
                     <div className="py-6 text-center text-[13px] text-slate-500">Загружаем журнал…</div>
@@ -328,6 +344,34 @@ const BreakViolationsModal = ({ open, onClose, apiBaseUrl, withAccessTokenHeader
                 ))}
             </div>
         </IosModal>
+    );
+};
+
+/*
+ * Кнопка «Перерывы» вместе со своей модалкой — по образцу «Отбивки»: направление получает
+ * готовый узел и не держит у себя ни состояния, ни портала.
+ */
+const BreakViolationsControls = ({ direction, apiBaseUrl, withAccessTokenHeader, showToast }) => {
+    const [open, setOpen] = useState(false);
+    return (
+        <>
+            <button type="button" className={iosBtnGhost} onClick={() => setOpen(true)}>
+                <FaIcon className="fas fa-user-clock"></FaIcon>
+                Перерывы
+            </button>
+            {createPortal(
+                <BreakViolationsModal
+                    open={open}
+                    onClose={() => setOpen(false)}
+                    direction={direction}
+                    directionLabel={wallboardDirection(direction === 'chat' ? 'chat' : 'osnova').label}
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />,
+                document.body,
+            )}
+        </>
     );
 };
 
@@ -787,7 +831,6 @@ const LineWallboard = ({
     // Снимок и опрос общие с виджетом: один запрос к Oktell на оба экрана, одни цифры в обоих.
     const { snapshot, error, loading, refresh } = useSzovWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
-    const [violationsOpen, setViolationsOpen] = useState(false);
 
     const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error), [error, snapshot]);
 
@@ -804,10 +847,12 @@ const LineWallboard = ({
             widgetOpen={widgetOpen}
             onToggleWidget={onToggleWidget}
         >
-            <button type="button" className={iosBtnGhost} onClick={() => setViolationsOpen(true)}>
-                <FaIcon className="fas fa-user-clock"></FaIcon>
-                Перерывы
-            </button>
+            <BreakViolationsControls
+                direction="line"
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                showToast={showToast}
+            />
             {canManageBroadcast ? (
                 <BroadcastControls
                     direction={direction}
@@ -819,37 +864,19 @@ const LineWallboard = ({
         </WallboardHeader>
     );
 
-    /* Через портал, как и полноэкранный режим: модалка не должна зависеть от вертикальных
-       отступов шапки, а шапка рисуется во всех трёх состояниях экрана. Модалка отбивки
-       живёт внутри BroadcastControls, поэтому здесь остаётся только журнал перерывов. */
-    const violationsModal = createPortal(
-        <BreakViolationsModal
-            open={violationsOpen}
-            onClose={() => setViolationsOpen(false)}
-            apiBaseUrl={apiBaseUrl}
-            withAccessTokenHeader={withAccessTokenHeader}
-            showToast={showToast}
-        />,
-        document.body,
-    );
-
     if (!snapshot) {
         return (
-            <>
-                <WallboardPlaceholder
-                    header={header}
-                    message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
-                    tone={loading ? 'muted' : 'error'}
-                />
-                {violationsModal}
-            </>
+            <WallboardPlaceholder
+                header={header}
+                message={loading ? 'Загружаем данные Oktell…' : (error || 'Данные недоступны')}
+                tone={loading ? 'muted' : 'error'}
+            />
         );
     }
 
     return (
         <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
             {header}
-            {violationsModal}
             <WallboardBody snapshot={snapshot} scale={1} />
             {fullscreen ? createPortal(
                 <FullscreenSheet
@@ -1047,6 +1074,12 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
             {/* Отбивка настраивается и без снимка: получатели и расписание живут на сервере,
                 а цифры для сообщения он берёт сам. Цель времени ответа передаём из снимка,
                 когда он есть, — иначе подсказка о норме назвала бы значение по умолчанию. */}
+            <BreakViolationsControls
+                direction="chat"
+                apiBaseUrl={apiBaseUrl}
+                withAccessTokenHeader={withAccessTokenHeader}
+                showToast={showToast}
+            />
             {canManageBroadcast ? (
                 <BroadcastControls
                     direction={direction}

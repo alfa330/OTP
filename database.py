@@ -23786,31 +23786,42 @@ class Database:
     # --- Выходы на перерыв мимо графика (задача #114) ---------------------------------------
 
     def get_planned_breaks_for_days(self, operator_ids, days):
-        """Плановые перерывы и наличие смены по (оператор, дата).
+        """Плановые перерывы и интервалы смен по (оператор, дата).
 
-        Возвращает (breaks, shift_days):
-          breaks     — {(operator_id, 'YYYY-MM-DD'): [(start_minutes, end_minutes), ...]}
-          shift_days — {(operator_id, 'YYYY-MM-DD'), ...} — где смена в графике вообще есть.
+        Возвращает (breaks, shifts), у обоих ключ — (operator_id, 'YYYY-MM-DD'):
+          breaks — [(start_minutes, end_minutes), ...] плановых перерывов;
+          shifts — [(start_minutes, end_minutes), ...] самих смен.
 
         Минуты считаются от полуночи ДАТЫ СМЕНЫ и у ночной смены уходят за 1440 — так их
         хранит shift_breaks, и так же их разворачивает сверка (ночной хвост вчерашней смены
-        приезжает вместе с датой минус сутки)."""
+        приезжает вместе с датой минус сутки). Поэтому и смена возвращается интервалом, а не
+        просто датой: «человек на смене» у ночной смены нельзя выяснить по календарному дню —
+        перерыв в 13:36 и хвост смены, кончившейся в 02:00, приходятся на одну и ту же дату."""
         op_ids = sorted({int(v) for v in (operator_ids or []) if v is not None})
         day_objs = sorted({self._normalize_schedule_date(day) for day in (days or [])})
         if not op_ids or not day_objs:
-            return {}, set()
+            return {}, {}
         breaks = {}
-        shift_days = set()
+        shifts = {}
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT ws.operator_id, ws.shift_date, sb.start_minutes, sb.end_minutes
+                SELECT ws.operator_id, ws.shift_date, ws.start_time, ws.end_time,
+                       sb.start_minutes, sb.end_minutes
                 FROM work_shifts ws
                 LEFT JOIN shift_breaks sb ON sb.shift_id = ws.id
                 WHERE ws.operator_id = ANY(%s) AND ws.shift_date = ANY(%s)
             """, (op_ids, day_objs))
-            for operator_id, shift_date, start_minutes, end_minutes in (cursor.fetchall() or []):
+            for row in (cursor.fetchall() or []):
+                operator_id, shift_date, start_time, end_time, start_minutes, end_minutes = row
                 key = (int(operator_id), shift_date.strftime('%Y-%m-%d'))
-                shift_days.add(key)
+                if start_time is not None and end_time is not None:
+                    shift_start = start_time.hour * 60 + start_time.minute
+                    shift_end = end_time.hour * 60 + end_time.minute
+                    if shift_end <= shift_start:
+                        shift_end += 1440   # смена через полночь
+                    interval = (shift_start, shift_end)
+                    if interval not in shifts.setdefault(key, []):
+                        shifts[key].append(interval)
                 if start_minutes is None or end_minutes is None:
                     continue
                 start_value, end_value = int(start_minutes), int(end_minutes)
@@ -23818,7 +23829,9 @@ class Database:
                     breaks.setdefault(key, []).append((start_value, end_value))
         for value in breaks.values():
             value.sort()
-        return breaks, shift_days
+        for value in shifts.values():
+            value.sort()
+        return breaks, shifts
 
     def save_szov_break_violations(self, rows) -> int:
         """Записать найденные нарушения. Возвращает число НОВЫХ строк.

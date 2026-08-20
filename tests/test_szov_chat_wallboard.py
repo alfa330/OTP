@@ -1437,7 +1437,7 @@ class ChatBroadcastTests(unittest.TestCase):
         'age_seconds': 30,
     }
 
-    def _namespace(self, snapshot=None):
+    def _namespace(self, snapshot=None, break_violations=None):
         source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
         ns = {
             'os': os, 're': re, 'logging': logging,
@@ -1447,6 +1447,11 @@ class ChatBroadcastTests(unittest.TestCase):
             '_env_int': lambda name, default, minimum=None, maximum=None: default,
             '_szov_chat_wallboard_snapshot': lambda: (self.SNAPSHOT if snapshot is None
                                                       else snapshot),
+            # Журнал перерывов лежит в БД, его наполняет отдельный разбор (задача #114):
+            # здесь подставляем готовые строки, а сборку текста проверяем настоящую.
+            '_szov_chat_broadcast_break_violations': (
+                lambda scheduled=False, now=None: list(break_violations or [])
+            ),
         }
         _load_names(source, {
             'SZOV_BROADCAST_SEND_TIMES', '_SZOV_BROADCAST_HOURLY',
@@ -1456,12 +1461,41 @@ class ChatBroadcastTests(unittest.TestCase):
             '_szov_chat_broadcast_send_times', '_szov_chat_broadcast_duration',
             '_szov_chat_broadcast_collect', '_szov_chat_broadcast_deviations',
             '_szov_chat_broadcast_notes', '_szov_chat_broadcast_text',
+            'SZOV_BREAK_NOTE_LIMIT', 'SZOV_BREAK_KIND_OFF_SCHEDULE',
+            'SZOV_BREAK_KIND_NOT_PLANNED', 'SZOV_BREAK_KIND_NO_SHIFT',
+            '_szov_break_violation_detail', '_szov_break_violation_notes',
         }, ns)
         return ns
 
-    def _data(self, snapshot=None):
-        ns = self._namespace(snapshot)
+    def _data(self, snapshot=None, break_violations=None):
+        ns = self._namespace(snapshot, break_violations)
         return ns, ns['_szov_chat_broadcast_collect']()
+
+    def test_break_violations_reach_the_chat_broadcast(self):
+        """Тот же контроль, что у «Линии»: строка приходит почасовым отчётом чатов."""
+        ns, data = self._data(break_violations=[{
+            'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
+            'kind': 'off_schedule', 'planned_start_minutes': 14 * 60,
+        }])
+        text = ns['_szov_chat_broadcast_text'](data)
+        self.assertIn('Обратите внимание: Иванов Иван вышел(а) на перерыв не по графику', text)
+        self.assertIn('по графику в 14:00', text)
+
+    def test_break_violation_is_a_routine_line_for_chat_too(self):
+        """Решение владельца: такой строкой чат «только при отклонениях» не будим."""
+        # Снимок берём заведомо спокойный: иначе отклонением стал бы медленный ответ,
+        # и тест перестал бы проверять то, ради чего написан.
+        ns, data = self._data(snapshot=self._with(inner_reply_seconds=60.0), break_violations=[{
+            'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
+            'kind': 'not_planned', 'planned_start_minutes': None,
+        }])
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+        self.assertIn('перерывов в графике на этот день нет',
+                      ' '.join(ns['_szov_chat_broadcast_notes'](data)))
+
+    def test_quiet_hour_adds_no_break_line(self):
+        ns, data = self._data(break_violations=[])
+        self.assertNotIn('не по графику', ns['_szov_chat_broadcast_text'](data))
 
     @staticmethod
     def _with(**today):
@@ -1618,7 +1652,7 @@ class ChatBroadcastWiringTests(unittest.TestCase):
         """Chat2Desk — синхронный requests: держать на нём event loop бота недопустимо."""
         block = self._section("async def _szov_chat_broadcast_prepare(",
                               "async def _szov_chat_broadcast_send(")
-        self.assertIn("run_in_executor(executor_pool, _szov_chat_broadcast_collect)", block)
+        self.assertIn("run_in_executor(executor_pool, _szov_chat_broadcast_collect", block)
 
     def test_preview_shows_the_chat_direction_without_sending(self):
         block = self._section("def _szov_chat_broadcast_preview(",
