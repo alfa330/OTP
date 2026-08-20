@@ -1,16 +1,18 @@
 /*
  * «Задача ждёт меня» — единые правила для уведомлений раздела и бейджа сайдбара.
  *
- * Те же четыре правила продублированы в SQL дважды:
+ * Те же правила продублированы в SQL дважды:
  * database.py → Database.get_task_action_needs_summary (бейдж считается на сервере,
  * когда раздел не открыт) и notifications/sources.py → tasks (колокол уведомлений
- * отдаёт не только число, но и сами задачи). Меняете правило — меняйте во всех трёх.
+ * отдаёт не только число, но и сами задачи), плюс в CLI —
+ * scripts/task_board.py → task_action_need. Меняете правило — меняйте во всех четырёх.
  *
  * Категории взаимоисключающие: у задачи ровно одна причина, самая срочная.
- * Бэклог не трогаем — это очередь планирования, работы там ещё нет.
+ * Бэклог не трогаем — это очередь планирования, работы там ещё нет. Единственное
+ * исключение — `info`: вопрос задал живой человек, и очередь ответа не отменяет.
  */
 
-export const ACTION_NEED_KINDS = ['overdue', 'returned', 'review', 'fresh', 'accepted'];
+export const ACTION_NEED_KINDS = ['overdue', 'returned', 'info', 'review', 'fresh', 'accepted'];
 
 export const ACTION_NEED_META = {
   overdue: {
@@ -27,15 +29,25 @@ export const ACTION_NEED_META = {
     hint: 'Итог не приняли',
     dot: '#f59e0b',
   },
-  review: {
+  /* Единственная причина, которую поднимает не статус задачи, а живой
+     вопрос человека: исполнитель нажал «Не хватает информации». Выше приёмки —
+     пока не ответишь, работа стоит. */
+  info: {
     order: 2,
+    title: 'Просят информацию',
+    label: 'Просят информацию',
+    hint: 'Исполнителю не хватает данных',
+    dot: '#7c3aed',
+  },
+  review: {
+    order: 3,
     title: 'Ждут вашей приёмки',
     label: 'Ждёт приёмки',
     hint: 'Исполнитель сдал работу',
     dot: '#2563eb',
   },
   fresh: {
-    order: 3,
+    order: 4,
     title: 'Новые для вас',
     label: 'Не начата',
     hint: 'Поручена, работа не начата',
@@ -50,7 +62,7 @@ export const ACTION_NEED_META = {
      collectTaskActionNeeds), иначе панель раздела за пару месяцев
      превращается в кладбище закрытых задач. */
   accepted: {
-    order: 4,
+    order: 5,
     title: 'Работу приняли',
     label: 'Принята',
     hint: 'Поручитель принял работу',
@@ -83,6 +95,18 @@ export const taskActionNeed = (task, userId, now = Date.now()) => {
 
   if (status === 'completed' && reviewAuthorityId(task) === personId) {
     return { kind: 'review', dueAt };
+  }
+
+  /* Исполнителю не хватает информации, и ответ за мной. Раньше проверок
+     исполнителя: спрашивающий и отвечающий — разные люди, поэтому причина
+     живёт вне ветки «я исполнитель», и бэклог её не отменяет. */
+  if (
+    task?.info_request
+    && ['assigned', 'in_progress', 'returned'].includes(status)
+    && reviewAuthorityId(task) === personId
+    && !isAssignee
+  ) {
+    return { kind: 'info', dueAt };
   }
 
   /* Раньше проверки бэклога и живых статусов: принятая задача из работы вышла,

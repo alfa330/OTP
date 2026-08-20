@@ -156,3 +156,76 @@ test('локальная отметка гасит счётчик до отве�
   const edited = { ...pending, updated_at: '2026-07-31T11:30:00' };
   assert.equal(countUnseenActionNeeds(collectTaskActionNeeds([edited], ME, NOW, localSeen)), 1);
 });
+
+/* ─── Просят информацию: причина стороны постановки ─── */
+
+const BOSS = 42;
+const WORKER = 55;
+
+/* Здесь «я» — постановщик, а исполнитель другой человек: запрос информации
+   адресован именно мне. */
+const ownedTask = (fields) => ({
+  id: 90,
+  status: 'in_progress',
+  is_backlog: false,
+  updated_at: '2026-07-31T09:00:00',
+  assignee: { id: WORKER, name: 'Исполнитель' },
+  creator: { id: ME, name: 'Я' },
+  info_request: { id: 501, author_id: WORKER, author_name: 'Исполнитель', body: 'нет доступа' },
+  ...fields,
+});
+
+test('открытый запрос ждёт того, кто отвечает за постановку', () => {
+  assert.equal(taskActionNeed(ownedTask({}), ME, NOW)?.kind, 'info');
+  // Без запроса причины нет: живая задача чужими руками меня не касается.
+  assert.equal(taskActionNeed(ownedTask({ info_request: null }), ME, NOW), null);
+});
+
+test('отвечает поручитель, а не тот, кто завёл карточку', () => {
+  const delegated = ownedTask({
+    creator: { id: BOSS, name: 'Секретарь' },
+    requested_by: { id: ME, name: 'Я' },
+  });
+  assert.equal(taskActionNeed(delegated, ME, NOW)?.kind, 'info');
+  assert.equal(taskActionNeed(delegated, BOSS, NOW), null);
+});
+
+test('спрашивавшему его же вопрос не показывают', () => {
+  const selfTask = ownedTask({ assignee: { id: ME, name: 'Я' } });
+  // Я и постановщик, и исполнитель — причина «просят информацию» была бы про меня же.
+  assert.notEqual(taskActionNeed(selfTask, ME, NOW)?.kind, 'info');
+});
+
+test('бэклог запрос не отменяет, а сдача задачи — отменяет', () => {
+  // Вопрос задал живой человек: то, что задача ещё в очереди, ответа не отменяет.
+  assert.equal(taskActionNeed(ownedTask({ is_backlog: true }), ME, NOW)?.kind, 'info');
+  // А сданная задача ждёт приёмки — это и есть следующий шаг постановщика.
+  assert.equal(taskActionNeed(ownedTask({ status: 'completed' }), ME, NOW)?.kind, 'review');
+  assert.equal(taskActionNeed(ownedTask({ status: 'accepted' }), ME, NOW), null);
+});
+
+test('просроченность исполнителя не подменяет вопрос ко мне', () => {
+  // Дедлайн прошёл, но я не исполнитель: «просрочена» — не моя причина.
+  assert.equal(taskActionNeed(ownedTask({ due_at: PAST }), ME, NOW)?.kind, 'info');
+  assert.equal(taskActionNeed(ownedTask({ due_at: PAST }), WORKER, NOW)?.kind, 'overdue');
+});
+
+test('запрос стоит выше приёмки в списке «ждут вас»', () => {
+  const asking = ownedTask({ id: 91 });
+  const waitingReview = ownedTask({ id: 92, status: 'completed', info_request: null });
+  const needs = collectTaskActionNeeds([waitingReview, asking], ME, NOW);
+  assert.deepEqual(needs.map((need) => need.kind), ['info', 'review']);
+});
+
+test('просмотренный запрос уходит из счётчика, но остаётся в списке', () => {
+  const seen = ownedTask({
+    id: 93,
+    action_seen: { kind: 'info', seen_at: '2026-07-31T10:00:00' },
+  });
+  const needs = collectTaskActionNeeds([seen], ME, NOW);
+  assert.equal(needs.length, 1);
+  assert.equal(countUnseenActionNeeds(needs), 0);
+  // Новое уточнение двигает updated_at — отметка сгорает, счётчик звонит снова.
+  const touched = { ...seen, updated_at: '2026-07-31T11:00:00' };
+  assert.equal(countUnseenActionNeeds(collectTaskActionNeeds([touched], ME, NOW)), 1);
+});

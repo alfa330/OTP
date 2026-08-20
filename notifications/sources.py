@@ -272,6 +272,7 @@ def four_you(cursor, viewer, limit):
 _TASK_KIND_BODY = {
     'overdue': 'Просрочена',
     'returned': 'Вернули на доработку',
+    'info': 'Исполнителю не хватает информации',
     'review': 'Ждёт вашей приёмки',
     'fresh': 'Поручена, работа не начата',
     'accepted': 'Работу приняли',
@@ -283,6 +284,7 @@ def tasks(cursor, viewer, limit):
 
     Категории взаимоисключающие, у задачи ровно одна причина, самая срочная:
       review   — я поручитель, исполнитель сдал работу и ждёт приёмки;
+      info     — я отвечаю за постановку, исполнителю не хватает информации;
       overdue  — я исполнитель, дедлайн прошёл, задача не закрыта;
       returned — мне вернули на доработку;
       fresh    — мне поручили, к работе ещё не приступил.
@@ -303,6 +305,13 @@ def tasks(cursor, viewer, limit):
                        -- Строго раньше проверки дедлайна: у принятой задачи он
                        -- давно позади, и она попала бы в «просрочена».
                        WHEN t.status = 'accepted' THEN 'accepted'
+                       -- Раньше дедлайна и статусов: строку привёл сюда открытый
+                       -- запрос информации, а не работа зрителя — он тут не
+                       -- исполнитель, и «просрочена»/«не начата» про него ложь.
+                       WHEN t.info_request_id IS NOT NULL
+                            AND t.assigned_to IS DISTINCT FROM %(user_id)s
+                            AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
+                            THEN 'info'
                        WHEN t.due_at IS NOT NULL AND t.due_at < %(now)s THEN 'overdue'
                        WHEN t.status = 'returned' THEN 'returned'
                        ELSE 'fresh'
@@ -324,6 +333,14 @@ def tasks(cursor, viewer, limit):
                     AND t.assigned_to = %(user_id)s
                     AND COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %(user_id)s
                     AND (r.task_id IS NULL OR r.kind <> 'accepted'))
+                -- Исполнителю не хватает информации. Бэклог считается, в
+                -- отличие от остальных причин: вопрос задали живому человеку, и
+                -- «задача ещё в очереди» ответа не отменяет.
+                OR (t.info_request_id IS NOT NULL
+                    AND t.status IN ('assigned', 'in_progress', 'returned')
+                    AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
+                    AND t.assigned_to IS DISTINCT FROM %(user_id)s
+                    AND (r.task_id IS NULL OR r.kind <> 'info' OR r.seen_at < t.updated_at))
                 OR (t.assigned_to = %(user_id)s
                     AND t.is_backlog = FALSE
                     AND t.status IN ('assigned', 'in_progress', 'returned')
@@ -335,7 +352,7 @@ def tasks(cursor, viewer, limit):
                              AND (r.task_id IS NULL OR r.kind <> 'fresh' OR r.seen_at < t.updated_at))))
           ) needs
          ORDER BY array_position(
-                      ARRAY['overdue', 'returned', 'review', 'fresh', 'accepted']::text[], kind),
+                      ARRAY['overdue', 'returned', 'info', 'review', 'fresh', 'accepted']::text[], kind),
                   due_at NULLS LAST, id DESC
          LIMIT %(limit)s
         """,

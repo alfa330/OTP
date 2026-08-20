@@ -3676,6 +3676,59 @@ class Database:
                   );
             """)
 
+            # Уточнения по задаче: постановщик дополняет постановку, исполнитель
+            # просит то, чего не хватает. Отдельная лента, а не task_reports:
+            # отчёт — это «что я сделал» с трудозатратами, уточнение — переписка
+            # по самой постановке, и мешать их в одном журнале значит смешать
+            # факт работы с обсуждением задания.
+            #   note     — постановщик дополнил задачу (можно в любом статусе);
+            #   request  — исполнителю не хватает информации;
+            #   answer   — ответ на запрос, он же его закрывает.
+            # Лента только пополняется: править и удалять чужие (и свои) слова
+            # по постановке нельзя — на них ссылаются и по ним работают.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_messages (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    kind VARCHAR(16) NOT NULL DEFAULT 'note'
+                        CHECK (kind IN ('note', 'request', 'answer')),
+                    body TEXT NOT NULL,
+                    -- Запрос информации живёт «открытым», пока на него не ответили
+                    -- или пока автор его не отозвал; reply_to_id связывает ответ
+                    -- с запросом, чтобы в ленте было видно, на что отвечали.
+                    reply_to_id INTEGER REFERENCES task_messages(id) ON DELETE SET NULL,
+                    resolved_at TIMESTAMP,
+                    resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at ASC, id ASC);")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_messages_open_request
+                ON task_messages(task_id)
+                WHERE kind = 'request' AND resolved_at IS NULL;
+            """)
+
+            # Открытый запрос информации денормализован в саму задачу: по нему
+            # считаются бейдж «ждут вас», колокол и чип на карточке, а все три
+            # смотрят только в tasks. Плюс UPDATE задачи сам будит триггер
+            # колокола (trg_bell_tasks) — отдельный триггер на ленту не нужен.
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS info_request_id INTEGER REFERENCES task_messages(id) ON DELETE SET NULL;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS info_request_at TIMESTAMP;")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tasks_info_request
+                ON tasks(info_request_at)
+                WHERE info_request_id IS NOT NULL;
+            """)
+
+            # Файл уточнения лежит там же, где файлы постановки (attachment_kind
+            # остаётся 'initial'): так его видят и выгрузка, и CLI, и блок
+            # «Файлы задачи». message_id говорит, что файл приехал с уточнением,
+            # — карточка показывает его в самом уточнении и не дублирует выше.
+            cursor.execute("ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS message_id INTEGER REFERENCES task_messages(id) ON DELETE SET NULL;")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_attachments_message ON task_attachments(message_id) WHERE message_id IS NOT NULL;")
+
             # Отметка «уведомление просмотрено»: гасит счётчик «ждут вас», но не задачу.
             # Ключ — пользователь+задача; kind и seen_at нужны, чтобы отметка сгорала,
             # когда причина сменилась (не начата → просрочена) или задачу тронули снова.
@@ -47469,6 +47522,272 @@ class Database:
 
         return {"report_id": report_id, "task_id": task_id, "deleted": True}
 
+    # ─── Уточнения по задаче ───
+    #
+    # Постановщик дополняет постановку в любой момент, исполнитель просит то,
+    # чего не хватает. Лента только пополняется: слова по постановке — это то,
+    # на что человек уже сослался в работе, переписывать их нельзя.
+
+    TASK_MESSAGE_KINDS = ('note', 'request', 'answer')
+
+    def _normalize_task_message_kind(self, kind):
+        kind_norm = (kind or 'note').strip().lower() or 'note'
+        if kind_norm not in self.TASK_MESSAGE_KINDS:
+            raise ValueError("INVALID_MESSAGE_KIND")
+        return kind_norm
+
+    def _serialize_task_message(self, row):
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "task_id": row[1],
+            "author_id": row[2],
+            "author_name": row[3],
+            "kind": row[4],
+            "body": row[5],
+            "reply_to_id": row[6],
+            "resolved_at": self._task_dt_to_iso(row[7]),
+            "resolved_by": row[8],
+            "resolved_by_name": row[9],
+            "created_at": self._task_dt_to_iso(row[10]),
+            "attachments": []
+        }
+
+    _TASK_MESSAGE_SELECT = """
+        SELECT
+            m.id, m.task_id, m.author_id, author.name, m.kind, m.body,
+            m.reply_to_id, m.resolved_at, m.resolved_by, resolver.name, m.created_at
+        FROM task_messages m
+        LEFT JOIN users author ON author.id = m.author_id
+        LEFT JOIN users resolver ON resolver.id = m.resolved_by
+    """
+
+    def _task_message_attachments_tx(self, cursor, message_ids):
+        """Файлы, приехавшие с уточнениями, — теми же полями, что и файлы задачи."""
+        ids = [int(item) for item in (message_ids or []) if item]
+        if not ids:
+            return {}
+        cursor.execute("""
+            SELECT
+                a.id, a.message_id, a.file_name, a.content_type, a.file_size, a.created_at,
+                COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
+                COALESCE(a.attachment_kind, 'initial')
+            FROM task_attachments a
+            WHERE a.message_id = ANY(%s)
+            ORDER BY a.id ASC
+        """, (ids,))
+        grouped = defaultdict(list)
+        for row in cursor.fetchall():
+            grouped[row[1]].append({
+                "id": row[0],
+                "message_id": row[1],
+                "file_name": row[2],
+                "content_type": row[3],
+                "file_size": row[4],
+                "created_at": self._task_dt_to_iso(row[5]),
+                "storage_type": row[6],
+                "gcs_bucket": row[7],
+                "gcs_blob_path": row[8],
+                "attachment_kind": row[9]
+            })
+        return grouped
+
+    def _task_message_access_tx(self, cursor, task_id, requester_id, role, lock=False):
+        """Задача глазами ленты уточнений: кто есть кто и есть ли открытый запрос.
+
+        lock — блокировка строки задачи на время записи: правило «открытый запрос
+        один» иначе проходит дважды, если исполнитель дважды щёлкнул кнопку.
+        """
+        cursor.execute("""
+            SELECT t.id, t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id,
+                   t.requested_by_id, t.status, t.info_request_id
+            FROM tasks t
+            LEFT JOIN users assignee ON assignee.id = t.assigned_to
+            WHERE t.id = %s
+        """ + (" FOR UPDATE OF t" if lock else ""), (int(task_id),))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("TASK_NOT_FOUND")
+        if not self._task_visible_for_requester(role, requester_id, row[1], row[2], row[3], row[4], row[5]):
+            raise PermissionError("TASK_FORBIDDEN")
+        return {
+            "id": row[0],
+            "created_by": row[1],
+            "assigned_to": row[2],
+            "requested_by_id": row[5],
+            "status": row[6],
+            "info_request_id": row[7]
+        }
+
+    @staticmethod
+    def _task_answer_authority(task_row):
+        """Кто отвечает за постановку: поручитель, а если его нет — постановщик.
+
+        Тот же порядок, что у приёмки итога (get_task_action_needs_summary,
+        taskActionNeeds.js::reviewAuthorityId): у задачи один ответственный за
+        «что нужно сделать», и это он же закрывает запрос информации.
+        """
+        return int(task_row.get('requested_by_id') or 0) or int(task_row.get('created_by') or 0)
+
+    def get_task_messages(self, task_id, requester_id, requester_role):
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        with self._get_cursor() as cursor:
+            self._task_message_access_tx(cursor, task_id, requester_id, role)
+            cursor.execute(
+                self._TASK_MESSAGE_SELECT + " WHERE m.task_id = %s ORDER BY m.created_at ASC, m.id ASC",
+                (int(task_id),)
+            )
+            messages = [self._serialize_task_message(row) for row in cursor.fetchall()]
+            files = self._task_message_attachments_tx(cursor, [item['id'] for item in messages])
+        for message in messages:
+            message['attachments'] = files.get(message['id'], [])
+        return messages
+
+    def create_task_message(self, task_id, requester_id, requester_role, kind, body, attachments=None):
+        """Уточнение по задаче: дополнение, запрос информации либо ответ на него.
+
+        Права: дополнять и отвечать — постановщик, поручитель или админ;
+        просить информацию — только исполнитель. Открытый запрос у задачи один:
+        пока на него не ответили и его не отозвали, второй не создать, иначе
+        постановщика засыпало бы одинаковыми напоминаниями.
+        """
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        kind_norm = self._normalize_task_message_kind(kind)
+        body_norm = str(body or '').strip()
+        file_items = [item for item in (attachments or []) if item]
+        if not body_norm and not file_items:
+            raise ValueError("MESSAGE_BODY_REQUIRED")
+
+        with self._get_cursor() as cursor:
+            task_row = self._task_message_access_tx(cursor, task_id, requester_id, role, lock=True)
+            created_by = int(task_row.get('created_by') or 0)
+            assigned_to = int(task_row.get('assigned_to') or 0)
+            answer_authority = self._task_answer_authority(task_row)
+            is_owner_side = (
+                requester_id in (created_by, int(task_row.get('requested_by_id') or 0))
+                or role_has_min(role, 'admin')
+            )
+            open_request_id = task_row.get('info_request_id')
+
+            if kind_norm == 'request':
+                if requester_id != assigned_to:
+                    raise PermissionError("ONLY_ASSIGNEE_ASKS")
+                if str(task_row.get('status') or '') == 'accepted':
+                    raise ValueError("TASK_ALREADY_ACCEPTED")
+                # Спросить некого: постановка целиком своя (задача себе без поручителя).
+                if not answer_authority or answer_authority == requester_id:
+                    raise ValueError("NO_ONE_TO_ASK")
+                if open_request_id:
+                    raise ValueError("REQUEST_ALREADY_OPEN")
+            elif kind_norm == 'answer':
+                if not is_owner_side:
+                    raise PermissionError("ONLY_TASK_OWNER_ANSWERS")
+                if not open_request_id:
+                    raise ValueError("NO_OPEN_REQUEST")
+            else:
+                if not is_owner_side:
+                    raise PermissionError("ONLY_TASK_OWNER_ADDS")
+
+            reply_to_id = open_request_id if kind_norm == 'answer' else None
+            now = self._task_now()
+            cursor.execute("""
+                INSERT INTO task_messages (task_id, author_id, kind, body, reply_to_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (task_id, requester_id, kind_norm, body_norm, reply_to_id, now))
+            message_id = cursor.fetchone()[0]
+
+            for attachment in file_items:
+                file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
+                content_type = (attachment.get('content_type') or '').strip() or None
+                storage_type = (attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
+                if storage_type != 'gcs':
+                    continue
+                gcs_bucket = (attachment.get('gcs_bucket') or '').strip() or None
+                gcs_blob_path = (attachment.get('gcs_blob_path') or '').strip() or None
+                if not gcs_bucket or not gcs_blob_path:
+                    continue
+                cursor.execute("""
+                    INSERT INTO task_attachments (
+                        task_id, file_name, content_type, file_size, file_data,
+                        storage_type, gcs_bucket, gcs_blob_path, attachment_kind, uploaded_by, message_id
+                    )
+                    VALUES (%s, %s, %s, %s, NULL, 'gcs', %s, %s, 'initial', %s, %s)
+                """, (
+                    task_id, file_name, content_type, int(attachment.get('file_size') or 0),
+                    gcs_bucket, gcs_blob_path, requester_id, message_id
+                ))
+
+            if kind_norm == 'answer':
+                cursor.execute("""
+                    UPDATE task_messages
+                    SET resolved_at = %s, resolved_by = %s
+                    WHERE id = %s AND resolved_at IS NULL
+                """, (now, requester_id, int(open_request_id)))
+
+            # Метка задачи и её updated_at: по ним считаются бейдж «ждут вас» и
+            # колокол, а UPDATE задачи заодно будит триггер мгновенных уведомлений.
+            cursor.execute("""
+                UPDATE tasks
+                SET info_request_id = %s,
+                    info_request_at = %s,
+                    updated_at = %s
+                WHERE id = %s
+            """, (
+                message_id if kind_norm == 'request' else None,
+                now if kind_norm == 'request' else None,
+                now,
+                task_id
+            ))
+
+            cursor.execute(self._TASK_MESSAGE_SELECT + " WHERE m.id = %s", (message_id,))
+            message = self._serialize_task_message(cursor.fetchone())
+            message['attachments'] = self._task_message_attachments_tx(cursor, [message_id]).get(message_id, [])
+        return message
+
+    def withdraw_task_info_request(self, message_id, requester_id, requester_role):
+        """Снять свой запрос информации: спрашивавший разобрался сам.
+
+        Иначе ошибочный клик навсегда оставил бы постановщику напоминание,
+        закрыть которое он не может — ответить-то не на что.
+        """
+        message_id = int(message_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, task_id, author_id, kind, resolved_at
+                FROM task_messages WHERE id = %s
+            """, (message_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("MESSAGE_NOT_FOUND")
+            task_id, author_id, kind, resolved_at = row[1], row[2], row[3], row[4]
+            self._task_message_access_tx(cursor, task_id, requester_id, role, lock=True)
+            if kind != 'request':
+                raise ValueError("NOT_A_REQUEST")
+            if author_id is None or int(author_id) != requester_id:
+                raise PermissionError("ONLY_REQUEST_AUTHOR")
+            now = self._task_now()
+            if resolved_at is None:
+                cursor.execute("""
+                    UPDATE task_messages
+                    SET resolved_at = %s, resolved_by = %s
+                    WHERE id = %s
+                """, (now, requester_id, message_id))
+            cursor.execute("""
+                UPDATE tasks
+                SET info_request_id = NULL,
+                    info_request_at = NULL,
+                    updated_at = %s
+                WHERE id = %s AND info_request_id = %s
+            """, (now, task_id, message_id))
+        return {"message_id": message_id, "task_id": task_id, "withdrawn": True}
+
     def update_task_board_state(
             self,
             task_id,
@@ -48066,6 +48385,7 @@ class Database:
         (notifications/sources.py::tasks) — если меняете здесь, меняйте и там:
           overdue  — я исполнитель, дедлайн прошёл, задача не закрыта;
           returned — мне вернули на доработку;
+          info     — я отвечаю за постановку, исполнителю не хватает информации;
           review   — я поручитель, исполнитель сдал работу и ждёт приёмки;
           fresh    — мне поручили, к работе ещё не приступил;
           accepted — мою работу приняли (единственное «к сведению», а не «сделай»).
@@ -48095,6 +48415,17 @@ class Database:
                           AND (r.task_id IS NULL OR r.kind <> 'returned' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
+                        -- Спрашивает исполнитель, отвечает тот же человек, что
+                        -- принимает итог. Бэклог здесь считается, в отличие от
+                        -- остальных причин: вопрос задали живому человеку, и
+                        -- «задача ещё в очереди» ответа не отменяет.
+                        WHERE t.info_request_id IS NOT NULL
+                          AND t.status IN ('assigned', 'in_progress', 'returned')
+                          AND COALESCE(t.requested_by_id, t.created_by) = %s
+                          AND t.assigned_to IS DISTINCT FROM %s
+                          AND (r.task_id IS NULL OR r.kind <> 'info' OR r.seen_at < t.updated_at)
+                    )::INT,
+                    COUNT(*) FILTER (
                         WHERE t.status = 'completed'
                           AND COALESCE(t.requested_by_id, t.created_by) = %s
                           AND (r.task_id IS NULL OR r.kind <> 'review' OR r.seen_at < t.updated_at)
@@ -48120,23 +48451,25 @@ class Database:
             """, (
                 requester_id, now,
                 requester_id, now,
+                requester_id, requester_id,
                 requester_id,
                 requester_id, now,
                 requester_id, requester_id,
                 requester_id
             ))
-            row = cursor.fetchone() or (0, 0, 0, 0, 0)
+            row = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
 
         breakdown = {
             "overdue": int(row[0] or 0),
             "returned": int(row[1] or 0),
-            "review": int(row[2] or 0),
-            "fresh": int(row[3] or 0),
-            "accepted": int(row[4] or 0)
+            "info": int(row[2] or 0),
+            "review": int(row[3] or 0),
+            "fresh": int(row[4] or 0),
+            "accepted": int(row[5] or 0)
         }
         return {"count": sum(breakdown.values()), "breakdown": breakdown}
 
-    TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'review', 'fresh', 'accepted')
+    TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'info', 'review', 'fresh', 'accepted')
 
     def mark_task_action_seen(self, requester_id, task_id, kind):
         """
@@ -48520,7 +48853,8 @@ class Database:
                     t.planned_start_at, t.started_at,
                     t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name),
                     t.reminder_minutes_before, t.reminder_sent_at,
-                    action_read.kind, action_read.seen_at
+                    action_read.kind, action_read.seen_at,
+                    t.info_request_id
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
@@ -48547,6 +48881,7 @@ class Database:
             attachment_rows = []
             checklist_rows = []
             report_rows = []
+            message_rows = []
             if task_rows:
                 task_ids = [row[0] for row in task_rows]
 
@@ -48565,7 +48900,7 @@ class Database:
                     SELECT
                         a.id, a.task_id, a.file_name, a.content_type, a.file_size, a.created_at,
                         COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
-                        COALESCE(a.attachment_kind, 'initial')
+                        COALESCE(a.attachment_kind, 'initial'), a.message_id
                     FROM task_attachments a
                     WHERE a.task_id = ANY(%s)
                     ORDER BY a.id ASC
@@ -48590,6 +48925,12 @@ class Database:
                 )
                 report_rows = cursor.fetchall()
 
+                cursor.execute(
+                    self._TASK_MESSAGE_SELECT + " WHERE m.task_id = ANY(%s) ORDER BY m.created_at ASC, m.id ASC",
+                    (task_ids,)
+                )
+                message_rows = cursor.fetchall()
+
         history_map = defaultdict(list)
         for row in history_rows:
             history_map[row[1]].append({
@@ -48612,7 +48953,10 @@ class Database:
                 "storage_type": row[6],
                 "gcs_bucket": row[7],
                 "gcs_blob_path": row[8],
-                "attachment_kind": row[9]
+                "attachment_kind": row[9],
+                # Не NULL — файл приехал с уточнением: карточка покажет его
+                # внутри уточнения и не станет дублировать в «Файлах задачи».
+                "message_id": row[10]
             })
 
         checklist_map = defaultdict(list)
@@ -48634,6 +48978,20 @@ class Database:
         report_map = defaultdict(list)
         for row in report_rows:
             report_map[row[1]].append(self._serialize_task_report(row))
+
+        # Уточнения: файлы к ним раскладываются из уже выбранных вложений задачи,
+        # пятый запрос ради того же самого был бы лишним.
+        message_map = defaultdict(list)
+        message_by_id = {}
+        for row in message_rows:
+            message = self._serialize_task_message(row)
+            message_map[row[1]].append(message)
+            message_by_id[message['id']] = message
+        for attachments in attachment_map.values():
+            for attachment in attachments:
+                owner = message_by_id.get(attachment.get('message_id'))
+                if owner is not None:
+                    owner['attachments'].append(attachment)
 
         result = []
         for row in task_rows:
@@ -48703,7 +49061,11 @@ class Database:
                 "completion_attachments": result_attachments,
                 "checklist": checklist_map.get(task_id, []),
                 "reports": task_reports,
-                "spent_minutes": spent_total or None
+                "spent_minutes": spent_total or None,
+                # Уточнения по постановке + открытый запрос информации отдельно:
+                # по нему рисуется чип на карточке и считается «ждут вас».
+                "messages": message_map.get(task_id, []),
+                "info_request": message_by_id.get(row[42]) if row[42] else None
             })
 
         return {

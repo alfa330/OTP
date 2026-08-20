@@ -1121,6 +1121,15 @@ const BoardCard = ({
             Возврат
           </span>
         )}
+        {/* По задаче задали вопрос и ждут ответа — до него работа не двигается. */}
+        {task?.info_request && (
+          <span
+            className="rounded-md bg-amber-50 px-1.5 py-[2px] text-[10.5px] font-semibold text-amber-700"
+            title={`Исполнителю не хватает информации${task.info_request.author_name ? ` · спросил ${task.info_request.author_name}` : ''}`}
+          >
+            Ждёт ответа
+          </span>
+        )}
         {actionNeed && !actionNeed.seen && <ActionAtMarker kind={actionNeed.kind} />}
       </div>
 

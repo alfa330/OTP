@@ -325,6 +325,50 @@ styleTag.textContent = `
   .tv-report-form-row .tv-input { flex: 1; }
   .tv-report-composer { margin-top: 10px; }
   .tv-reports-add { margin-top: 10px; }
+
+  /* ── Уточнения по задаче ── */
+  .tv-clar-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .tv-clar-pending {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 99px;
+    background: #fef3c7; color: #92400e;
+    font-size: 11px; font-weight: 600;
+  }
+  .tv-clar-empty { font-size: 12.5px; color: var(--ink-3); line-height: 1.5; margin: 0; }
+  .tv-clar-list { display: flex; flex-direction: column; gap: 8px; }
+  .tv-clar-item { display: flex; width: 100%; }
+  .tv-clar-item.is-owner { justify-content: flex-start; }
+  .tv-clar-item.is-assignee { justify-content: flex-end; }
+  .tv-clar-bubble {
+    display: flex; flex-direction: column; gap: 4px;
+    max-width: 85%; padding: 8px 12px;
+    font-size: 12.5px; word-break: break-word;
+    background: #eef2ff; border: 1px solid #c7d2fe;
+    border-radius: 4px 12px 12px 12px;
+  }
+  .tv-clar-item.is-assignee .tv-clar-bubble {
+    background: var(--surface-2); border-color: var(--border);
+    border-radius: 12px 4px 12px 12px;
+  }
+  /* Открытый запрос — единственное цветное состояние: пока не ответят, работа стоит. */
+  .tv-clar-item .tv-clar-bubble.is-open { background: #fffbeb; border-color: #fde68a; }
+  .tv-clar-top {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 11px; color: var(--ink-3);
+  }
+  .tv-clar-kind { font-weight: 600; color: var(--ink-2); }
+  .tv-clar-bubble.is-open .tv-clar-kind { color: #92400e; }
+  .tv-clar-body {
+    margin: 0; font-size: 13px; line-height: 1.55;
+    color: var(--ink); white-space: pre-wrap; word-break: break-word;
+  }
+  .tv-clar-resolved { font-size: 11px; color: var(--emerald); }
+  .tv-clar-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .tv-clar-form { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  .tv-clar-form-row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
   .tv-field-hint { margin: 5px 0 0; font-size: 11.5px; color: var(--ink-3); }
 
   /* ── Форма задачи с постепенным раскрытием ── */
@@ -3219,6 +3263,19 @@ const appendTaskFormData = (body, values) => {
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
 
+/* Пределы сервера (TASK_MAX_FILES / TASK_MAX_FILE_SIZE_BYTES). Проверяем заранее:
+   иначе человек ждёт загрузку, чтобы получить отказ, да ещё и по-английски. */
+const TASK_UPLOAD_MAX_FILES = 10;
+const TASK_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+const taskUploadRefusal = (files) => {
+  if (files.length > TASK_UPLOAD_MAX_FILES) {
+    return `За раз можно приложить не больше ${TASK_UPLOAD_MAX_FILES} файлов`;
+  }
+  const tooBig = files.find((file) => Number(file?.size || 0) > TASK_UPLOAD_MAX_BYTES);
+  return tooBig ? `Файл «${tooBig.name}» больше 10 МБ` : '';
+};
+
 const fileIdentity = (file) => [
   file?.name || '',
   file?.size || 0,
@@ -4517,6 +4574,26 @@ const TaskComposerForm = ({
   );
 };
 
+/* Уточнения по задаче: дополнение постановки, запрос информации и ответ на него.
+   Отдельно от отчётов о работе — это переписка по заданию, а не факт работы. */
+const TASK_MESSAGE_KIND_LABEL = {
+  note: 'Дополнение',
+  request: 'Не хватает информации',
+  answer: 'Ответ на запрос',
+};
+
+const TASK_MESSAGE_PLACEHOLDER = {
+  note: 'Что добавить к задаче',
+  request: 'Чего не хватает, чтобы продолжить',
+  answer: 'Ответ исполнителю',
+};
+
+const TASK_MESSAGE_SUBMIT_LABEL = {
+  note: 'Отправить дополнение',
+  request: 'Отправить запрос',
+  answer: 'Отправить ответ',
+};
+
 const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray', dot: '#ccc' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -4542,6 +4619,9 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
         {task?.priority && task.priority !== 'normal' && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
         {deadlineLabel && <span className={`tv-deadline-chip ${isTaskOverdue(task) ? 'is-overdue' : ''}`}>{deadlineLabel}</span>}
+        {/* Единственное «лишнее» состояние, которое стоит показать всем: по задаче
+            задали вопрос, и до ответа она не двигается. */}
+        {task?.info_request && <span className="tv-badge tv-badge-amber">Ждёт ответа</span>}
         <span className="tv-task-row-assignee-chip">
           <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={task?.assignee?.avatar_url || ''} />
           <span className="tv-task-row-assignee-name">{assigneeName}</span>
@@ -4738,17 +4818,211 @@ const TaskReportsBlock = ({
   );
 };
 
+/* Лента уточнений: постановщик дополняет постановку в любой момент, исполнитель
+   просит то, чего не хватает. Заголовок и разделитель рисует сам блок — когда
+   писать нечего и лента пуста, раздела в карточке нет вовсе. */
+const TaskClarificationsBlock = ({
+  task,
+  messages,
+  currentUserId,
+  currentUserRole,
+  actionLoadingKey,
+  onSubmitMessage,
+  onWithdrawRequest,
+  downloadAttachment,
+}) => {
+  const [composerKind, setComposerKind] = useState('');
+  const [draftBody, setDraftBody] = useState('');
+  const [draftFiles, setDraftFiles] = useState([]);
+
+  const assigneeId = Number(task?.assignee?.id || 0);
+  const creatorId = Number(task?.creator?.id || 0);
+  const requestedById = Number(task?.requested_by?.id || 0);
+  const isAssignee = assigneeId === currentUserId;
+  // Те же права, что проверяет API: дополняет и отвечает сторона постановки.
+  const isOwnerSide = currentUserId === creatorId
+    || (requestedById > 0 && currentUserId === requestedById)
+    || isAdminLikeRole(currentUserRole);
+  const answerAuthorityId = requestedById || creatorId;
+  const openRequest = task?.info_request || null;
+  const canAddNote = typeof onSubmitMessage === 'function' && isOwnerSide;
+  const canAnswer = canAddNote && !!openRequest;
+  const canAsk = typeof onSubmitMessage === 'function'
+    && isAssignee
+    && task?.status !== 'accepted'
+    && answerAuthorityId > 0
+    && answerAuthorityId !== currentUserId;
+  const isMyRequest = !!openRequest && Number(openRequest.author_id || 0) === currentUserId;
+  const isBusy = !!actionLoadingKey;
+
+  if (!messages.length && !canAddNote && !canAsk) return null;
+
+  const closeComposer = () => {
+    setComposerKind('');
+    setDraftBody('');
+    setDraftFiles([]);
+  };
+
+  const openComposer = (kind) => {
+    setComposerKind(kind);
+    setDraftBody('');
+    setDraftFiles([]);
+  };
+
+  const submitDraft = async () => {
+    const ok = await onSubmitMessage(task, {
+      kind: composerKind,
+      body: draftBody,
+      files: draftFiles,
+    });
+    if (ok) closeComposer();
+  };
+
+  return (
+    <>
+      <hr className="tv-divider" />
+      <div>
+        <div className="tv-clar-head">
+          <p className="tv-block-label" style={{ marginBottom: 0 }}>Уточнения</p>
+          {openRequest && (
+            <span className="tv-clar-pending">
+              {isOwnerSide && !isAssignee ? 'Ждут вашего ответа' : 'Ждём ответа постановщика'}
+            </span>
+          )}
+        </div>
+
+        {messages.length === 0 && (
+          <p className="tv-clar-empty">
+            {canAsk
+              ? 'Не хватает данных для работы — попросите их здесь, постановщик получит уведомление.'
+              : 'Здесь можно дополнить постановку текстом или файлом в любой момент.'}
+          </p>
+        )}
+
+        {messages.length > 0 && (
+          <div className="tv-clar-list">
+            {messages.map((message) => {
+              const authorId = Number(message?.author_id || 0);
+              const side = authorId && authorId === assigneeId ? 'is-assignee' : 'is-owner';
+              const isOpenRequest = message.kind === 'request' && !message.resolved_at;
+              return (
+                <div key={message.id} className={`tv-clar-item ${side}`}>
+                  <div className={`tv-clar-bubble ${isOpenRequest ? 'is-open' : ''}`}>
+                    <span className="tv-clar-top">
+                      <span className="tv-clar-kind">
+                        {TASK_MESSAGE_KIND_LABEL[message.kind] || 'Уточнение'}
+                      </span>
+                      <span>{message.author_name || '—'}</span>
+                      <span>{fmt(message.created_at)}</span>
+                    </span>
+                    {message.body && <p className="tv-clar-body">{message.body}</p>}
+                    {Array.isArray(message.attachments) && message.attachments.length > 0 && (
+                      <div className="tv-file-list">
+                        {message.attachments.map((att) => (
+                          <button
+                            key={att.id}
+                            type="button"
+                            className="tv-file-btn"
+                            onClick={() => downloadAttachment?.(att)}
+                          >
+                            <FileIcon />{att.file_name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {message.kind === 'request' && message.resolved_at && (
+                      <span className="tv-clar-resolved">
+                        Закрыт · {fmtShortDateTime(message.resolved_at)}
+                        {message.resolved_by_name ? ` · ${message.resolved_by_name}` : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {!composerKind && (
+          <div className="tv-clar-actions">
+            {canAnswer && (
+              <button type="button" className="tv-btn tv-btn-primary" disabled={isBusy}
+                onClick={() => openComposer('answer')}>
+                Ответить на запрос
+              </button>
+            )}
+            {canAddNote && (
+              <button type="button" className="tv-btn tv-btn-ghost" disabled={isBusy}
+                onClick={() => openComposer('note')}>
+                + Дополнить задачу
+              </button>
+            )}
+            {canAsk && !openRequest && (
+              <button type="button" className="tv-btn tv-btn-ghost" disabled={isBusy}
+                onClick={() => openComposer('request')}>
+                Не хватает информации
+              </button>
+            )}
+            {isMyRequest && typeof onWithdrawRequest === 'function' && (
+              <button type="button" className="tv-btn tv-btn-ghost" disabled={isBusy}
+                onClick={() => onWithdrawRequest(task, openRequest)}>
+                Снять запрос
+              </button>
+            )}
+          </div>
+        )}
+
+        {composerKind && (
+          <div className="tv-clar-form">
+            <textarea
+              className="tv-textarea"
+              placeholder={TASK_MESSAGE_PLACEHOLDER[composerKind] || 'Текст уточнения'}
+              autoFocus
+              value={draftBody}
+              disabled={isBusy}
+              onChange={(event) => setDraftBody(event.target.value)}
+            />
+            <TaskFileDropzone
+              files={draftFiles}
+              disabled={isBusy}
+              onChange={setDraftFiles}
+              title="Файлы уточнения"
+              prompt="Перетащите файл сюда"
+              hint="или нажмите, чтобы выбрать"
+            />
+            <div className="tv-clar-form-row">
+              <button type="button" className="tv-btn tv-btn-ghost" disabled={isBusy} onClick={closeComposer}>
+                Отмена
+              </button>
+              <button type="button" className="tv-btn tv-btn-primary" disabled={isBusy} onClick={submitDraft}>
+                {actionLoadingKey === `${task.id}:message`
+                  ? 'Отправляю...'
+                  : (TASK_MESSAGE_SUBMIT_LABEL[composerKind] || 'Отправить')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+};
+
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
+  onSubmitTaskMessage, onWithdrawInfoRequest,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
   const pm = PRIORITY_META[task.priority] || PRIORITY_META.normal;
-  const attachments     = Array.isArray(task.attachments)            ? task.attachments            : [];
+  // Файлы, приехавшие с уточнением, показывает само уточнение — в «Файлах
+  // задачи» они были бы вторым экземпляром того же файла.
+  const attachments     = (Array.isArray(task.attachments) ? task.attachments : [])
+    .filter((att) => !att?.message_id);
   const compAttachments = Array.isArray(task.completion_attachments) ? task.completion_attachments : [];
+  const messages        = Array.isArray(task.messages)               ? task.messages               : [];
   const history         = Array.isArray(task.history)                ? task.history                : [];
   const checklist       = Array.isArray(task.checklist)              ? task.checklist              : [];
   const progress        = checklistProgress(checklist);
@@ -4925,6 +5199,17 @@ const TaskDrawer = React.memo(({
               </div>
             </>
           )}
+
+          <TaskClarificationsBlock
+            task={task}
+            messages={messages}
+            currentUserId={currentUserId}
+            currentUserRole={currentUserRole}
+            actionLoadingKey={actionLoadingKey}
+            onSubmitMessage={onSubmitTaskMessage}
+            onWithdrawRequest={onWithdrawInfoRequest}
+            downloadAttachment={downloadAttachment}
+          />
 
           {checklist.length > 0 && (
             <>
@@ -5130,7 +5415,9 @@ export const PinnedTaskWidget = React.memo(({
   const sm = STATUS_META[task?.status] || { label: task?.status || '—', badge: 'tv-badge-gray' };
   const tm = TAG_META[task?.tag] || { label: task?.tag || '—', badge: 'tv-badge-gray' };
   const pm = PRIORITY_META[task?.priority] || PRIORITY_META.normal;
-  const attachments = Array.isArray(task?.attachments) ? task.attachments : [];
+  // Как и в карточке: файл уточнения живёт в уточнении, а не в «Файлах задачи».
+  const attachments = (Array.isArray(task?.attachments) ? task.attachments : [])
+    .filter((att) => !att?.message_id);
   const compAttachments = Array.isArray(task?.completion_attachments) ? task.completion_attachments : [];
   const checklist = Array.isArray(task?.checklist) ? task.checklist : [];
   const progress = checklistProgress(checklist);
@@ -5791,6 +6078,9 @@ export const PinnedTaskWidget = React.memo(({
               <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
               {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
               {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
+              {/* Закреплённая задача — та, над которой работают: если работа
+                  стоит из-за незакрытого вопроса, это надо видеть сразу. */}
+              {task?.info_request && <span className="tv-badge tv-badge-amber">Ждёт ответа</span>}
             </div>
           )}
         </div>
@@ -6112,6 +6402,10 @@ const inboxCounterpartLabel = (need) => {
   if (need?.kind === 'review') {
     const name = need?.task?.assignee?.name;
     return name ? `Сдал: ${name}` : 'Ждёт приёмки';
+  }
+  if (need?.kind === 'info') {
+    const name = need?.task?.info_request?.author_name || need?.task?.assignee?.name;
+    return name ? `Спросил: ${name}` : 'Просят информацию';
   }
   const name = need?.task?.creator?.name;
   return name ? `Поручил: ${name}` : '';
@@ -7158,6 +7452,68 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
 
+  /* Уточнение по задаче: дополнение постановки, запрос информации либо ответ.
+     Файлы едут только формой — иначе сервер получит JSON без вложений. */
+  const submitTaskMessage = useCallback(async (task, { kind = 'note', body, files = [] } = {}) => {
+    const taskId = Number(task?.id || 0);
+    if (!taskId) return false;
+    const text = String(body || '').trim();
+    const fileList = filesFromList(files);
+    if (!text && !fileList.length) {
+      notify('Напишите текст или приложите файл', 'error');
+      return false;
+    }
+    const refusal = taskUploadRefusal(fileList);
+    if (refusal) { notify(refusal, 'error'); return false; }
+    setActionLoadingKey(`${taskId}:message`);
+    try {
+      let res;
+      if (fileList.length) {
+        const form = new FormData();
+        form.append('kind', kind);
+        form.append('body', text);
+        fileList.forEach((file) => form.append('files', file));
+        res = await axios.post(`${apiBaseUrl}/api/tasks/${taskId}/messages`, form, { headers: buildHeaders() });
+      } else {
+        res = await axios.post(
+          `${apiBaseUrl}/api/tasks/${taskId}/messages`,
+          { kind, body: text },
+          { headers: buildHeaders() }
+        );
+      }
+      notify(res?.data?.message || 'Уточнение добавлено');
+      if (res?.data?.warning) notify(res.data.warning, 'error');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось отправить уточнение', 'error');
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
+  const withdrawTaskInfoRequest = useCallback(async (task, message) => {
+    const messageId = Number(message?.id || 0);
+    if (!messageId) return false;
+    setActionLoadingKey(`${Number(task?.id || 0)}:message`);
+    try {
+      const res = await axios.post(
+        `${apiBaseUrl}/api/tasks/messages/${messageId}/withdraw`,
+        {},
+        { headers: buildHeaders() }
+      );
+      notify(res?.data?.message || 'Запрос снят');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось снять запрос', 'error');
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
   /* ── Complete modal ── */
   const openCompleteModal = useCallback((task) => {
     if (!task?.id) return;
@@ -7747,6 +8103,8 @@ const TasksView = ({
           currentUserId={currentUserId}
           currentUserRole={currentUserRole}
           onSubmitReport={submitTaskReport}
+          onSubmitTaskMessage={submitTaskMessage}
+          onWithdrawInfoRequest={withdrawTaskInfoRequest}
           onPatchReport={patchTaskReport}
           onRemoveReport={removeTaskReport}
           onTogglePinTask={(task) => {

@@ -3291,6 +3291,45 @@ def _build_task_report_notification_html(task_ctx, actor_name, report, task_link
     return message
 
 
+TASK_MESSAGE_SAVED_LABELS = {
+    'note': 'Задача дополнена',
+    'request': 'Запрос отправлен постановщику',
+    'answer': 'Ответ отправлен исполнителю',
+}
+
+TASK_MESSAGE_NOTIFICATION_HEADERS = {
+    'note': '📌 Постановщик дополнил задачу',
+    'request': '❓ Исполнителю не хватает информации',
+    'answer': '💬 Ответ на запрос информации',
+}
+
+
+def _build_task_message_notification_html(task_ctx, actor_name, message, task_link=None):
+    """Уточнение по задаче: дополнение постановки, запрос информации либо ответ."""
+    kind = str((message or {}).get('kind') or 'note').strip().lower()
+    header = TASK_MESSAGE_NOTIFICATION_HEADERS.get(kind, '📌 Уточнение по задаче')
+    lines = [
+        f"<b>{header}</b>",
+        "",
+        f"<b>Тема:</b> {_build_task_subject_notification_html(task_ctx, task_link)}",
+        f"<b>Автор:</b> {_escape_telegram_html(actor_name or 'Сотрудник', 80)}"
+    ]
+    attachments = (message or {}).get('attachments') or []
+    if attachments:
+        lines.append(f"<b>Файлов:</b> {len(attachments)}")
+    body = str((message or {}).get('body') or '').strip()
+    if body:
+        lines.append("")
+        lines.append(_escape_telegram_html(body, 1500))
+    if kind == 'request':
+        lines.append("")
+        lines.append("Ответьте в карточке задачи — до ответа работа стоит.")
+    message_html = "\n".join(lines)
+    if len(message_html) > TELEGRAM_MAX_MESSAGE_CHARS:
+        message_html = message_html[:TELEGRAM_MAX_MESSAGE_CHARS]
+    return message_html
+
+
 def _build_task_checklist_notification_html(task_ctx, checklist_item, actor_name, is_done, task_link=None):
     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
     priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
@@ -19462,6 +19501,19 @@ TASK_REPORT_ERRORS = {
     'TASK_FORBIDDEN': ("You do not have access to this task", 403),
     'ONLY_TASK_PARTICIPANT': ("Отчёт пишут исполнитель, постановщик или админ", 403),
     'ONLY_REPORT_AUTHOR': ("Редактировать отчёт может только его автор", 403),
+    # Лента уточнений по задаче
+    'MESSAGE_NOT_FOUND': ("Уточнение не найдено", 404),
+    'MESSAGE_BODY_REQUIRED': ("Напишите текст или приложите файл", 400),
+    'INVALID_MESSAGE_KIND': ("Неизвестный вид уточнения", 400),
+    'ONLY_TASK_OWNER_ADDS': ("Дополнить задачу может постановщик, поручитель или админ", 403),
+    'ONLY_TASK_OWNER_ANSWERS': ("Ответить может постановщик, поручитель или админ", 403),
+    'ONLY_ASSIGNEE_ASKS': ("Запросить информацию может только исполнитель", 403),
+    'ONLY_REQUEST_AUTHOR': ("Снять запрос может только тот, кто его отправил", 403),
+    'REQUEST_ALREADY_OPEN': ("Запрос уже отправлен — дождитесь ответа", 409),
+    'NO_OPEN_REQUEST': ("По задаче нет открытого запроса информации", 409),
+    'NOT_A_REQUEST': ("Это не запрос информации", 400),
+    'NO_ONE_TO_ASK': ("Задача целиком ваша — спросить не у кого", 400),
+    'TASK_ALREADY_ACCEPTED': ("Задача уже принята — запрашивать информацию поздно", 409),
 }
 
 
@@ -19584,6 +19636,139 @@ def handle_task_report_item(report_id):
 
     except Exception as e:
         logging.error(f"Error in handle_task_report_item: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _notify_task_message(task_id, requester, requester_id, message):
+    """Уточнение уходит всем участникам задачи, кроме автора."""
+    warnings = []
+    try:
+        task_ctx = _fetch_task_notification_context(task_id)
+        if not task_ctx:
+            return warnings
+        actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
+        task_link = _build_current_task_deep_link(task_ctx.get('id'))
+        message_html = _build_task_message_notification_html(
+            task_ctx=task_ctx,
+            actor_name=actor_name,
+            message=message,
+            task_link=task_link
+        )
+        for recipient in _collect_task_notification_recipients(task_ctx, requester_id):
+            response = _send_telegram_text_message(
+                recipient.get('chat_id'),
+                message_html,
+                parse_mode='HTML',
+                reply_markup=_build_task_notification_reply_markup(task_link)
+            )
+            if response.status_code != 200:
+                warnings.append(
+                    f"Не удалось отправить уведомление ({recipient.get('name') or 'получатель'}): "
+                    f"{_get_telegram_error_text(response)}"
+                )
+    except Exception as notify_error:
+        warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+    return warnings
+
+
+@app.route('/api/tasks/<int:task_id>/messages', methods=['GET', 'POST', 'OPTIONS'])
+@require_api_key
+def handle_task_messages(task_id):
+    """Лента уточнений по задаче: дополнения постановки и запросы информации."""
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        requester_role = getattr(g, 'effective_task_role', requester[3])
+
+        if request.method == 'GET':
+            try:
+                messages = db.get_task_messages(task_id, requester_id, requester_role)
+            except (ValueError, PermissionError) as error:
+                return _task_report_error_response(error)
+            return jsonify({"status": "success", "messages": messages}), 200
+
+        content_type = (request.content_type or '').lower()
+        if 'multipart/form-data' in content_type:
+            source = request.form
+            uploaded_files = request.files.getlist('files')
+        else:
+            source = request.get_json(silent=True) or {}
+            uploaded_files = []
+
+        kind = str(source.get('kind') or 'note').strip().lower()
+        body = str(source.get('body') or '').strip()
+
+        attachments = []
+        uploaded_blob_paths = []
+        gcs_bucket = None
+        if uploaded_files:
+            try:
+                attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(
+                    uploaded_files, stage='clarification'
+                )
+            except ValueError as upload_error:
+                return jsonify({"error": str(upload_error)}), 400
+            except RuntimeError as upload_error:
+                return jsonify({"error": str(upload_error)}), 500
+            except Exception as upload_error:
+                logging.error(f"Task clarification upload failed: {upload_error}")
+                return jsonify({"error": "Failed to upload attachments"}), 500
+
+        try:
+            message = db.create_task_message(
+                task_id=task_id,
+                requester_id=requester_id,
+                requester_role=requester_role,
+                kind=kind,
+                body=body,
+                attachments=attachments
+            )
+        except (ValueError, PermissionError) as error:
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
+            return _task_report_error_response(error)
+        except Exception:
+            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
+            raise
+
+        warnings = _notify_task_message(task_id, requester, requester_id, message)
+        payload = {
+            "status": "success",
+            "message": TASK_MESSAGE_SAVED_LABELS.get(message.get('kind'), 'Уточнение добавлено'),
+            "task_message": message
+        }
+        if warnings:
+            payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
+        return jsonify(payload), 201
+
+    except Exception as e:
+        logging.error(f"Error in handle_task_messages: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/tasks/messages/<int:message_id>/withdraw', methods=['POST', 'OPTIONS'])
+@require_api_key
+def withdraw_task_info_request(message_id):
+    """Снять свой запрос информации — разобрался сам, постановщика не держим."""
+    try:
+        requester_id, requester, guard_response, guard_status = _task_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        try:
+            result = db.withdraw_task_info_request(
+                message_id,
+                requester_id,
+                getattr(g, 'effective_task_role', requester[3])
+            )
+        except (ValueError, PermissionError) as error:
+            return _task_report_error_response(error)
+
+        return jsonify({"status": "success", "message": "Запрос снят", **result}), 200
+
+    except Exception as e:
+        logging.error(f"Error in withdraw_task_info_request: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

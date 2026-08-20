@@ -82,6 +82,7 @@ PRIORITY_LABELS = {'normal': 'обычная', 'urgent': 'срочная', 'crit
 ACTION_KIND_LABELS = {
     'overdue': 'просрочено (я исполнитель)',
     'returned': 'вернули на доработку',
+    'info': 'у меня просят информацию',
     'review': 'ждёт моей приёмки',
     'fresh': 'поручили, ещё не начал',
     'accepted': 'мою работу приняли (к сведению)',
@@ -261,6 +262,20 @@ class TaskBoardClient:
     def delete_report(self, report_id):
         return self._request('DELETE', f'/api/tasks/reports/{int(report_id)}')
 
+    def list_messages(self, task_id):
+        return self._request('GET', f'/api/tasks/{int(task_id)}/messages')
+
+    def add_message(self, task_id, kind, body, files=None):
+        path = f'/api/tasks/{int(task_id)}/messages'
+        payload = {'kind': kind, 'body': body}
+        if files:
+            # Тот же контракт, что у создания задачи: есть файлы — вся форма multipart.
+            return self._request('POST', path, data=payload, files=files)
+        return self._request('POST', path, json=payload)
+
+    def withdraw_info_request(self, message_id):
+        return self._request('POST', f'/api/tasks/messages/{int(message_id)}/withdraw')
+
 
 # ─────────────── Вычисления над задачами ───────────────
 
@@ -322,6 +337,14 @@ def task_action_need(task, user_id, now=None):
 
     if status == 'completed' and review_authority_id(task) == person_id:
         return 'review'
+    # Исполнителю не хватает информации, отвечать мне. Раньше ветки «я
+    # исполнитель»: спрашивающий и отвечающий — разные люди, и бэклог тут
+    # причину не отменяет.
+    if (task.get('info_request')
+            and status in ('assigned', 'in_progress', 'returned')
+            and review_authority_id(task) == person_id
+            and not is_assignee):
+        return 'info'
     # Раньше проверок бэклога и живых статусов: принятая задача из работы вышла,
     # но исполнителю о приёмке сказать надо. Кроме случая, когда принимал он сам.
     if status == 'accepted' and is_assignee and review_authority_id(task) != person_id:
@@ -844,6 +867,32 @@ def _print_reports(task, indent='  '):
             print(f'{indent}         {line}')
 
 
+MESSAGE_KIND_LABELS = {
+    'note': 'дополнение',
+    'request': 'НЕ ХВАТАЕТ ИНФОРМАЦИИ',
+    'answer': 'ответ',
+}
+
+
+def _print_messages(task, indent='  '):
+    """Уточнения по постановке. Дополнение ТЗ приходит именно сюда, не в описание."""
+    messages = task.get('messages') or []
+    if not messages:
+        return
+    print(f'{indent}уточнения ({len(messages)}):')
+    for message in messages:
+        kind = message.get('kind') or 'note'
+        label = MESSAGE_KIND_LABELS.get(kind, kind)
+        created = str(message.get('created_at') or '')[:16].replace('T', ' ')
+        open_mark = ' ← ЖДЁТ ОТВЕТА' if kind == 'request' and not message.get('resolved_at') else ''
+        print(f'{indent}  #{message.get("id")} {created}  {message.get("author_name") or "—"}  '
+              f'[{label}]{open_mark}')
+        for line in str(message.get('body') or '').splitlines():
+            print(f'{indent}       {line}')
+        for attachment in (message.get('attachments') or []):
+            print(f'{indent}       файл: {attachment_line(attachment)}')
+
+
 def _print_history(task, indent='  '):
     history = task.get('history') or []
     if not history:
@@ -933,6 +982,7 @@ def cmd_show(client, args):
         print('  описание      —')
 
     _print_attachments(task)
+    _print_messages(task)
     _print_checklist(task)
     _print_reports(task)
     if task.get('completion_summary'):
@@ -1488,6 +1538,38 @@ def cmd_report(client, args):
         print(f'warning: {result["warning"]}')
 
 
+def cmd_clarify(client, args):
+    """Уточнение по задаче: дополнение, запрос информации или ответ на запрос."""
+    kind = 'request' if args.ask else ('answer' if args.answer else 'note')
+    result = client.add_message(args.task_id, kind, args.body, files=upload_payload(args.attach))
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    message = result.get('task_message') or {}
+    print(f'#{args.task_id}: {result.get("message") or "уточнение добавлено"} '
+          f'(#{message.get("id")}, {MESSAGE_KIND_LABELS.get(message.get("kind"), message.get("kind"))})')
+    if result.get('warning'):
+        print(f'warning: {result["warning"]}')
+
+
+def cmd_clarifications(client, args):
+    payload = client.list_messages(args.task_id)
+    messages = payload.get('messages') or []
+    if args.json:
+        print(json.dumps(messages, ensure_ascii=False, indent=2))
+        return
+    print(f'Уточнения по #{args.task_id}: {len(messages)}')
+    _print_messages({'messages': messages}, indent='')
+
+
+def cmd_unask(client, args):
+    result = client.withdraw_info_request(args.message_id)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(f'Запрос #{args.message_id} снят (задача #{result.get("task_id")})')
+
+
 def cmd_reports(client, args):
     payload = client.list_reports(args.task_id)
     reports = payload.get('reports') or []
@@ -1615,6 +1697,24 @@ def build_parser():
     report.add_argument('--spent', help='затрачено времени: 3h, 90m, 1d2h')
     report.add_argument('--final', action='store_true', help='итоговый отчёт (иначе промежуточный)')
     report.set_defaults(func=cmd_report)
+
+    clarify = sub.add_parser('clarify', help='дополнить постановку, запросить информацию или ответить')
+    clarify.add_argument('task_id', type=int)
+    clarify.add_argument('body', help='текст уточнения')
+    clarify.add_argument('--ask', action='store_true',
+                         help='запрос информации (может только исполнитель задачи)')
+    clarify.add_argument('--answer', action='store_true',
+                         help='ответ на открытый запрос — он же его закрывает')
+    clarify.add_argument('--attach', nargs='*', metavar='FILE', help='приложить файлы к уточнению')
+    clarify.set_defaults(func=cmd_clarify)
+
+    clarifications = sub.add_parser('clarifications', help='лента уточнений по задаче')
+    clarifications.add_argument('task_id', type=int)
+    clarifications.set_defaults(func=cmd_clarifications)
+
+    unask = sub.add_parser('unask', help='снять свой запрос информации')
+    unask.add_argument('message_id', type=int, help='id уточнения-запроса')
+    unask.set_defaults(func=cmd_unask)
 
     reports = sub.add_parser('reports', help='журнал отчётов по задаче')
     reports.add_argument('task_id', type=int)

@@ -23,6 +23,7 @@ python -X utf8 scripts/task_board.py show 412         # карточка цел�
 python -X utf8 scripts/task_board.py inbox            # что ждёт лично меня
 python -X utf8 scripts/task_board.py files 412 --text # ВЛОЖЕНИЯ: скачать и прочитать
 python -X utf8 scripts/task_board.py history 412      # история с комментариями переходов
+python -X utf8 scripts/task_board.py clarifications 412  # УТОЧНЕНИЯ: дополнения ТЗ и запросы
 python -X utf8 scripts/task_board.py recipients       # id исполнителей
 ```
 
@@ -53,6 +54,10 @@ python -X utf8 scripts/task_board.py files 412 --dir C:/tmp/тз  # своя п�
 `attachments`), `result` — приложил исполнитель при сдаче (`completion_attachments`).
 Файлы, приложенные к возврату на доработку, лежат как `initial`: `attachment_kind`
 знает только два значения, а `result` ставится только у `completed`.
+
+Файлы **уточнений** тоже `initial`, но с непустым `message_id` — это и есть
+«постановщик дослал ТЗ по ходу работы». В `files 412` они видны наравне с
+остальными; в карточке их показывает само уточнение.
 
 ### Что читается, а что нет
 
@@ -185,6 +190,54 @@ python -X utf8 scripts/task_board.py deadline 92 --remind off
 только автор** (админ может удалить чужой, но не переписать). Отчёт при сдаче
 обязателен: `status <id> completed` без `--report` CLI отклонит.
 
+## Уточнения: дополнить постановку и запросить информацию
+
+Таблица `task_messages` — переписка **по самой постановке**, отдельно от отчётов о
+работе. Три вида (`kind`):
+
+| kind | Кто пишет | Смысл |
+|---|---|---|
+| `note` | постановщик, поручитель, админ | дополнил задачу — **в любом статусе**, текстом и/или файлом |
+| `request` | **только исполнитель** | «не хватает информации», кнопка в карточке |
+| `answer` | постановщик, поручитель, админ | ответ на запрос; он же **закрывает** запрос |
+
+```bash
+python -X utf8 scripts/task_board.py clarifications 412              # лента
+python -X utf8 scripts/task_board.py clarify 412 "вот ещё вводные" --attach доп.docx
+python -X utf8 scripts/task_board.py clarify 412 "нет доступа к базе" --ask
+python -X utf8 scripts/task_board.py clarify 412 "доступ выдал" --answer --attach логин.txt
+python -X utf8 scripts/task_board.py unask 77                         # снять СВОЙ запрос
+```
+
+Правила, которые сервер держит сам:
+
+- **Открытый запрос у задачи один.** Пока не ответили и не отозвали, второй не
+  создать (`REQUEST_ALREADY_OPEN`) — иначе постановщика заваливало бы копиями.
+- Запрос нельзя завести на принятой задаче и на задаче, где спрашивать не у кого
+  (своя инициатива: `created_by == assigned_to` и поручителя нет).
+- Отвечает тот же человек, что принимает итог: `requested_by_id`, иначе `created_by`.
+- Снять запрос может **только его автор** — постановщик закрывает его ответом.
+- Лента **только пополняется**: править и удалять уточнения нельзя. На эти слова
+  уже сослались в работе, поэтому переписывать их задним числом запрещено.
+
+**Файлы уточнений — обычные вложения задачи** (`attachment_kind='initial'`), просто
+с непустым `task_attachments.message_id`. Значит `files 412` их видит и читает, а
+карточка показывает их внутри уточнения и не дублирует в «Файлах задачи».
+Пределы те же: 10 файлов, 10 МБ.
+
+**Пятая причина «ждут вас» — `info`.** Открытый запрос показывается тому, кто
+отвечает за постановку: бейдж сайдбара, колокол, панель «Ждут вас», `inbox`, чип
+«Ждёт ответа» на карточке и в списке. Бэклог здесь **считается**, в отличие от
+остальных причин: вопрос задали живому человеку, и «задача ещё в очереди» ответа
+не отменяет. Метка открытого запроса лежит прямо в задаче
+(`tasks.info_request_id` / `info_request_at`) — поэтому её видят все четыре копии
+правил и триггер колокола `trg_bell_tasks` срабатывает сам.
+
+Про исполнителя: о дополнении и об ответе ему приходит **Telegram**, и он видит
+ленту в карточке; отдельной причины «ждут вас» у него нет — у `task_action_reads`
+одна строка на пару пользователь+задача, и вторая причина на стороне исполнителя
+конкурировала бы с «просрочено»/«вернули»/«не начата».
+
 ## Команды изменения
 
 ```bash
@@ -281,6 +334,9 @@ python -X utf8 scripts/task_board.py report 412 "Готово, вот итог" 
   для `completed` — `{"action":"completed","report":"...","spent_minutes":210}`
 - `GET|POST /api/tasks/<id>/reports` — журнал отчётов; POST `{"body":"...","spent_minutes":120,"kind":"progress"}`
 - `PATCH|DELETE /api/tasks/reports/<report_id>` — правка/удаление своего отчёта
+- `GET|POST /api/tasks/<id>/messages` — лента уточнений; POST `{"kind":"note|request|answer","body":"..."}`,
+  с файлами — той же multipart-формой полем `files`
+- `POST /api/tasks/messages/<message_id>/withdraw` — снять свой запрос информации
 - `GET /api/tasks/export?mine=&person_id=&person_scope=&department_id=` — xlsx, лист на колонку
   доски. Параметры охвата те же, что у списка, и других нет: колонки в файле
   все сразу. Пустой лист и пустая во всех строках колонка не выводятся.
@@ -303,10 +359,12 @@ python -X utf8 scripts/task_board.py report 412 "Готово, вот итог" 
 
 Реализация: роуты в `bot_schedule2.py` (`handle_tasks`, `handle_single_task`,
 `handle_tasks_board`, `handle_task_reports`, `handle_task_report_item`,
+`handle_task_messages`, `withdraw_task_info_request`,
 `update_task_status`, `download_task_attachment`, `update_task_checklist_item`,
 `handle_task_notes`, `mark_task_action_seen`), логика — `database.py` (`create_task`,
 `edit_task`, `update_task_board_state`, `update_task_status`, `create_task_report`,
-`update_task_report`, `delete_task_report`, `get_tasks_for_requester`,
+`update_task_report`, `delete_task_report`, `create_task_message`,
+`get_task_messages`, `withdraw_task_info_request`, `get_tasks_for_requester`,
 `get_task_attachment_for_requester`, `get_task_action_needs_summary`).
 
 ## Остальное вокруг задачи
@@ -335,25 +393,30 @@ python -X utf8 scripts/task_board.py note-del 19
 `check` рассылает уведомление в Telegram всем участникам задачи (кроме тебя).
 Отмечать пункты «за компанию» нельзя — это увидят люди.
 
-`inbox` показывает пять причин, они взаимоисключающие и у задачи ровно одна,
+`inbox` показывает шесть причин, они взаимоисключающие и у задачи ровно одна,
 самая срочная:
 
 | Причина | Когда |
 |---|---|
 | `overdue` | я исполнитель, дедлайн прошёл, задача не закрыта |
 | `returned` | мне вернули на доработку |
+| `info` | я отвечаю за постановку, исполнитель просит информацию |
 | `review` | я поручитель, исполнитель сдал и ждёт приёмки |
 | `fresh` | мне поручили, к работе ещё не приступил |
 | `accepted` | мою работу приняли — единственное «к сведению», а не «сделай» |
 
-Бэклог в счёт не идёт: это очередь планирования, работы там ещё нет.
+Бэклог в счёт не идёт: это очередь планирования, работы там ещё нет. Исключение —
+`info`: вопрос задал живой человек, и очередь планирования ответа не отменяет.
 Просмотренные уведомления помечаются `(просмотрено)`, но из списка не исчезают —
 кроме `accepted`, у которой отметка вечная и просмотренная уходит совсем.
 
 Правила эти лежат в **четырёх** местах: `database.py::get_task_action_needs_summary`,
 `src/components/tasks/taskActionNeeds.js`, `notifications/sources.py::tasks` и
 `scripts/task_board.py::task_action_need`. Меняешь правило — меняй во всех четырёх;
-`tests/test_task_board_cli.py` сторожит, чтобы они не разъехались.
+`tests/test_task_board_cli.py` сторожит, чтобы они не разъехались (порядок причин
+в `ACTION_NEED_KINDS` и в `ACTION_KIND_LABELS` сверяется буквально), а
+`tests/test_task_backlog_board.py::TaskClarificationNeedTests` — чтобы новую
+причину не забыли ни в одной копии.
 
 **Заметки личные.** `task_notes.owner_id` — сервер отдаёт только свои, чужие не
 видны никому, включая админа. Напоминание — тот же предел суток, что у задач.

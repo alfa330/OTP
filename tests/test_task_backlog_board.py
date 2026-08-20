@@ -999,9 +999,9 @@ class ActionNeedsBadgeTests(unittest.TestCase):
         start = db_src.index("    def get_task_action_needs_summary(self, requester_id):")
         block = db_src[start:db_src.index("    TASK_ACTION_NEED_KINDS", start)]
         self.assertIn("t.status = 'accepted'", block)
-        self.assertIn('"accepted": int(row[4] or 0)', block)
+        self.assertIn('"accepted": int(row[5] or 0)', block)
         self.assertIn(
-            "TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'review', 'fresh', 'accepted')",
+            "TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'info', 'review', 'fresh', 'accepted')",
             db_src,
         )
 
@@ -1734,6 +1734,238 @@ class DepartmentSwitcherTests(unittest.TestCase):
         self.assertIn("return available.has(fallback) ? fallback : TASK_DEPARTMENT_ALL;", block)
         # «Все отделы» — это отсутствие параметра, а не значение для сервера.
         self.assertIn("return value === TASK_DEPARTMENT_ALL ? {} : { department_id: value };", self.filter_src)
+
+
+class TaskClarificationSchemaTests(unittest.TestCase):
+    """Лента уточнений: постановщик дополняет постановку, исполнитель просит данные."""
+
+    def setUp(self):
+        self.src = _read(DATABASE_PATH)
+
+    def test_messages_table(self):
+        start = self.src.index("CREATE TABLE IF NOT EXISTS task_messages (")
+        block = self.src[start:self.src.index('"""', start)]
+        self.assertIn("task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE", block)
+        self.assertIn("CHECK (kind IN ('note', 'request', 'answer'))", block)
+        self.assertIn("body TEXT NOT NULL", block)
+        # Ответ помнит, на что отвечал, а закрытие запроса — кто и когда его снял.
+        self.assertIn("reply_to_id INTEGER REFERENCES task_messages(id) ON DELETE SET NULL", block)
+        self.assertIn("resolved_at TIMESTAMP", block)
+        self.assertIn("idx_task_messages_open_request", self.src)
+
+    def test_open_request_is_denormalised_into_the_task(self):
+        # По метке в tasks считаются бейдж, колокол и чип карточки; UPDATE задачи
+        # заодно будит существующий триггер колокола, отдельный не нужен.
+        self.assertIn(
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS info_request_id INTEGER "
+            "REFERENCES task_messages(id) ON DELETE SET NULL;",
+            self.src,
+        )
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS info_request_at TIMESTAMP;", self.src)
+        # Ссылка на task_messages требует, чтобы таблица была создана раньше ALTER'а.
+        self.assertLess(
+            self.src.index("CREATE TABLE IF NOT EXISTS task_messages ("),
+            self.src.index("ADD COLUMN IF NOT EXISTS info_request_id"),
+        )
+
+    def test_clarification_files_stay_ordinary_task_attachments(self):
+        # attachment_kind не расширяли: выгрузка, CLI и «Файлы задачи» продолжают
+        # видеть файл, а message_id говорит, что он приехал с уточнением.
+        self.assertIn(
+            "ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS message_id INTEGER "
+            "REFERENCES task_messages(id) ON DELETE SET NULL;",
+            self.src,
+        )
+        start = self.src.index("CREATE TABLE IF NOT EXISTS task_attachments (")
+        block = self.src[start:self.src.index(");", start)]
+        self.assertIn("CHECK (attachment_kind IN ('initial', 'result'))", block)
+
+
+class TaskClarificationDbTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(DATABASE_PATH)
+        start = self.src.index("    def create_task_message(")
+        self.block = self.src[start:self.src.index("    def withdraw_task_info_request(", start)]
+
+    def test_only_assignee_asks_and_only_owner_side_answers(self):
+        self.assertIn('raise PermissionError("ONLY_ASSIGNEE_ASKS")', self.block)
+        self.assertIn('raise PermissionError("ONLY_TASK_OWNER_ANSWERS")', self.block)
+        self.assertIn('raise PermissionError("ONLY_TASK_OWNER_ADDS")', self.block)
+
+    def test_text_or_file_is_enough(self):
+        # Файл без слов — законное дополнение постановки (обычно так и присылают ТЗ).
+        self.assertIn("if not body_norm and not file_items:", self.block)
+        self.assertIn('raise ValueError("MESSAGE_BODY_REQUIRED")', self.block)
+
+    def test_one_open_request_at_a_time(self):
+        self.assertIn('raise ValueError("REQUEST_ALREADY_OPEN")', self.block)
+        self.assertIn('raise ValueError("NO_OPEN_REQUEST")', self.block)
+        # Задача целиком своя — спрашивать не у кого, иначе запрос повис бы навсегда.
+        self.assertIn('raise ValueError("NO_ONE_TO_ASK")', self.block)
+        self.assertIn('raise ValueError("TASK_ALREADY_ACCEPTED")', self.block)
+
+    def test_answer_closes_the_request_and_clears_the_marker(self):
+        self.assertIn("SET resolved_at = %s, resolved_by = %s", self.block)
+        self.assertIn("SET info_request_id = %s,", self.block)
+        self.assertIn("message_id if kind_norm == 'request' else None,", self.block)
+        # updated_at двигаем намеренно: на нём держатся отметки «просмотрено»
+        # и триггер мгновенных уведомлений.
+        self.assertIn("updated_at = %s", self.block)
+
+    def test_asker_can_withdraw_only_his_own_request(self):
+        start = self.src.index("    def withdraw_task_info_request(")
+        block = self.src[start:self.src.index("    def update_task_board_state(", start)]
+        self.assertIn('raise PermissionError("ONLY_REQUEST_AUTHOR")', block)
+        self.assertIn('raise ValueError("NOT_A_REQUEST")', block)
+        self.assertIn("SET info_request_id = NULL,", block)
+
+    def test_tasks_payload_carries_the_thread_and_the_open_request(self):
+        self.assertIn('"messages": message_map.get(task_id, []),', self.src)
+        self.assertIn('"info_request": message_by_id.get(row[42]) if row[42] else None', self.src)
+        # Файлы уточнений раскладываются из уже выбранных вложений — без пятого запроса.
+        self.assertIn("owner = message_by_id.get(attachment.get('message_id'))", self.src)
+
+
+class TaskClarificationApiTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(APP_PATH)
+
+    def test_routes_registered(self):
+        self.assertIn(
+            "@app.route('/api/tasks/<int:task_id>/messages', methods=['GET', 'POST', 'OPTIONS'])",
+            self.src,
+        )
+        self.assertIn(
+            "@app.route('/api/tasks/messages/<int:message_id>/withdraw', methods=['POST', 'OPTIONS'])",
+            self.src,
+        )
+
+    def test_errors_mapped(self):
+        start = self.src.index("TASK_REPORT_ERRORS = {")
+        block = self.src[start:self.src.index("}", start)]
+        for code in ("'ONLY_ASSIGNEE_ASKS'", "'ONLY_TASK_OWNER_ADDS'", "'REQUEST_ALREADY_OPEN'",
+                     "'NO_ONE_TO_ASK'", "'MESSAGE_BODY_REQUIRED'"):
+            self.assertIn(code, block)
+
+    def test_files_ride_the_same_field_and_are_cleaned_up_on_failure(self):
+        start = self.src.index("def handle_task_messages(task_id):")
+        block = self.src[start:self.src.index("def withdraw_task_info_request(", start)]
+        self.assertIn("request.files.getlist('files')", block)
+        self.assertIn("_upload_task_attachments_to_gcs(", block)
+        # Отказ БД не должен оставлять сирот в бакете.
+        self.assertIn("_cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)", block)
+
+    def test_participants_are_notified(self):
+        self.assertIn("def _build_task_message_notification_html(", self.src)
+        self.assertIn("'request': '❓ Исполнителю не хватает информации'", self.src)
+        start = self.src.index("def _notify_task_message(")
+        block = self.src[start:self.src.index("@app.route('/api/tasks/<int:task_id>/messages'", start)]
+        self.assertIn("_collect_task_notification_recipients(task_ctx, requester_id)", block)
+
+
+class TaskClarificationNeedTests(unittest.TestCase):
+    """Причина «просят информацию» обязана совпасть во всех четырёх реализациях."""
+
+    def test_all_four_copies_know_the_kind(self):
+        db_src = _read(DATABASE_PATH)
+        start = db_src.index("    def get_task_action_needs_summary(self, requester_id):")
+        block = db_src[start:db_src.index("    TASK_ACTION_NEED_KINDS", start)]
+        self.assertIn("t.info_request_id IS NOT NULL", block)
+        # Спрашивает исполнитель — значит ему самому причина не показывается.
+        self.assertIn("t.assigned_to IS DISTINCT FROM %s", block)
+        self.assertIn('"info": int(row[2] or 0)', block)
+
+        client = _read(ROOT / "src" / "components" / "tasks" / "taskActionNeeds.js")
+        self.assertIn("'info'", client)
+        self.assertIn("return { kind: 'info', dueAt };", client)
+
+        bell = _read(ROOT / "notifications" / "sources.py")
+        self.assertIn("'info': 'Исполнителю не хватает информации'", bell)
+        self.assertIn("ARRAY['overdue', 'returned', 'info', 'review', 'fresh', 'accepted']", bell)
+
+        cli = _read(CLI_PATH)
+        self.assertIn("'info': 'у меня просят информацию'", cli)
+        self.assertIn("return 'info'", cli)
+
+    def test_marker_kind_is_accepted_by_the_seen_endpoint(self):
+        db_src = _read(DATABASE_PATH)
+        self.assertIn(
+            "TASK_ACTION_NEED_KINDS = ('overdue', 'returned', 'info', 'review', 'fresh', 'accepted')",
+            db_src,
+        )
+
+
+class TaskClarificationFrontendTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(TASKS_VIEW_PATH)
+        self.workspace = _read(WORKSPACE_PATH)
+
+    def test_block_and_buttons_exist(self):
+        self.assertIn("const TaskClarificationsBlock = ({", self.src)
+        self.assertIn("Не хватает информации", self.src)
+        self.assertIn("+ Дополнить задачу", self.src)
+        self.assertIn("Ответить на запрос", self.src)
+        self.assertIn("Снять запрос", self.src)
+
+    def test_owner_can_add_at_any_status(self):
+        start = self.src.index("const TaskClarificationsBlock = ({")
+        block = self.src[start:self.src.index("const TaskDrawer = React.memo({", start)
+                         if "const TaskDrawer = React.memo({" in self.src
+                         else self.src.index("const TaskDrawer = React.memo((", start)]
+        # У дополнения нет условия по статусу — «всегда» из требования владельца.
+        self.assertIn("const canAddNote = typeof onSubmitMessage === 'function' && isOwnerSide;", block)
+        # Запрос — только исполнителю и пока задачу не приняли.
+        self.assertIn("&& isAssignee", block)
+        self.assertIn("&& task?.status !== 'accepted'", block)
+        self.assertIn("&& answerAuthorityId !== currentUserId", block)
+
+    def test_files_ride_a_form_and_never_json(self):
+        start = self.src.index("const submitTaskMessage = useCallback(")
+        block = self.src[start:self.src.index("const withdrawTaskInfoRequest = useCallback(", start)]
+        self.assertIn("new FormData()", block)
+        self.assertIn("form.append('files', file)", block)
+        self.assertIn("api/tasks/${taskId}/messages", block)
+
+    def test_clarification_files_are_not_duplicated_above(self):
+        # Файл уточнения показывает само уточнение; в «Файлах задачи» он был бы
+        # вторым экземпляром того же файла (визуальный шум).
+        self.assertIn(".filter((att) => !att?.message_id);", self.src)
+        self.assertEqual(self.src.count(".filter((att) => !att?.message_id);"), 2)
+
+    def test_blocked_task_is_visible_in_lists_and_on_the_board(self):
+        self.assertIn('{task?.info_request && <span className="tv-badge tv-badge-amber">Ждёт ответа</span>}', self.src)
+        self.assertIn("{task?.info_request && (", self.workspace)
+        self.assertIn("Ждёт ответа", self.workspace)
+
+    def test_upload_limits_are_refused_in_russian_before_the_round_trip(self):
+        # Пределы сервера те же (10 файлов / 10 МБ), но его отказ приходит
+        # по-английски и уже после ожидания загрузки.
+        self.assertIn("const TASK_UPLOAD_MAX_FILES = 10;", self.src)
+        self.assertIn("const TASK_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;", self.src)
+        self.assertIn("больше 10 МБ", self.src)
+        self.assertIn("const refusal = taskUploadRefusal(fileList);", self.src)
+
+    def test_inbox_row_names_who_asked(self):
+        self.assertIn("if (need?.kind === 'info') {", self.src)
+        self.assertIn("Спросил:", self.src)
+
+
+class TaskClarificationCliTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _read(CLI_PATH)
+
+    def test_commands_exist(self):
+        self.assertIn("sub.add_parser('clarify'", self.src)
+        self.assertIn("sub.add_parser('clarifications'", self.src)
+        self.assertIn("sub.add_parser('unask'", self.src)
+        self.assertIn("def add_message(self, task_id, kind, body, files=None):", self.src)
+
+    def test_show_prints_the_thread(self):
+        # Дополнение ТЗ приходит уточнением, а не в описание: не увидеть его нельзя.
+        start = self.src.index("def cmd_show(client, args):")
+        block = self.src[start:self.src.index("def cmd_history(", start)]
+        self.assertIn("_print_messages(task)", block)
+        self.assertIn("← ЖДЁТ ОТВЕТА", self.src)
 
 
 if __name__ == "__main__":
