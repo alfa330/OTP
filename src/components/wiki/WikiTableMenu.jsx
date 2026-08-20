@@ -61,7 +61,19 @@ export default function WikiTableMenu({ editor }) {
        и «разбить» не оживали бы никогда. */
     const state = useEditorState({
         editor,
-        selector: ({ editor: ed }) => (ed ? {
+        /* Проверки НЕ ХВАТАЛО на `ed`: подписка успевает дёрнуть селектор на
+           редакторе, у которого ещё нет view (или уже нет — destroy() обнуляет
+           commandManager), и `ed.can()` падает внутри TipTap с «Cannot read
+           properties of null (reading 'can')». Падение в селекторе роняет весь
+           редактор: React разбирает поддерево, и человек видит вместо статьи
+           витрину — то есть кнопка «Редактировать» как будто ничего не делает.
+           Поймано на открытии редактора из каталога, где статья приезжает
+           отдельным запросом: там редактор монтируется под остальной загрузкой
+           витрины и промах по этому окну случался в половине заходов.
+           isDestroyed у TipTap — это `editorView?.isDestroyed ?? true`, то есть
+           одна проверка закрывает оба случая: «ещё не готов» и «уже разобран».
+           Тем же условием защищается сам TipTap перед обращением к view. */
+        selector: ({ editor: ed }) => (ed && !ed.isDestroyed ? {
             canMerge: ed.can().mergeCells(),
             canSplit: ed.can().splitCell(),
         } : { canMerge: false, canSplit: false }),

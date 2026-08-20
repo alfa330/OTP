@@ -417,5 +417,132 @@ class CatalogRouteTest(unittest.TestCase):
         self.assertEqual(self.perimeter_calls[-1], self.perimeter_calls[-2])
 
 
+class RulesCursor:
+    """Курсор для правил статей: одна заготовленная выборка и счётчик запросов."""
+
+    def __init__(self, article_rules=()):
+        self.article_rules = list(article_rules)   # [(article_id, mode, r, c, e, d, p, a)]
+        self.queries = []
+
+    def execute(self, sql, params=None):
+        self.queries.append(' '.join(sql.split()))
+
+    def fetchall(self):
+        return self.article_rules
+
+
+class ListPermissionsTest(unittest.TestCase):
+    """Права на каждую статью выдачи — для меню действий в каталоге.
+
+    Меню «три точки» у строки статьи не имеет права предлагать действие, на
+    которое сервер ответит 403: роль этого не знает — у статьи есть свои
+    правила доступа. Поэтому права считаются на сервере и приезжают в списке.
+    Ценой этого не должен становиться N+1: выдача бывает в 200 строк.
+    """
+
+    def setUp(self):
+        self.subjects = collect_subjects(user_id=42, otp_role='sv')
+        self.section_calls = []
+
+    def ctx(self, **caps):
+        base = {'can_read': True, 'can_create': True, 'can_edit': True,
+                'can_delete': True, 'can_publish': True, 'can_approve': False,
+                'can_manage_users': False, 'can_manage_structure': False,
+                'can_manage_access': False}
+        base.update(caps)
+        return {'user_id': 42, 'otp_role': 'sv', 'capabilities': base}
+
+    def section_rules(self, granted=('can_read', 'can_edit', 'can_delete')):
+        rule = {name: name in granted for name in
+                ('can_read', 'can_create', 'can_edit', 'can_delete',
+                 'can_publish', 'can_approve')}
+
+        def fn(_cursor, section_ids, _subjects, _user_id):
+            self.section_calls.append(list(section_ids))
+            return {section_id: [dict(rule)] for section_id in section_ids}
+
+        return fn
+
+    def article(self, article_id, **extra):
+        row = {'id': article_id, 'section_ids': [3], 'visibility_mode': 'inherit',
+               'strict_mode': False, 'author_id': 7, 'owner_user_id': None}
+        row.update(extra)
+        return row
+
+    def test_two_queries_for_a_whole_page_of_articles(self):
+        """Двести статей — те же два запроса, что и одна."""
+        cursor = RulesCursor()
+        rows = [self.article(i) for i in range(1, 201)]
+        rights = wiki_articles.permissions_for_articles(
+            cursor, self.ctx(), rows, self.subjects, {3}, self.section_rules())
+        self.assertEqual(len(rights), 200)
+        self.assertEqual(len(self.section_calls), 1, 'правила разделов спросили построчно')
+        self.assertEqual(len(cursor.queries), 1, 'правила статей спросили построчно')
+
+    def test_sections_are_asked_once_as_a_set(self):
+        """Общая ветка не спрашивается заново на каждую статью из неё."""
+        cursor = RulesCursor()
+        rows = [self.article(1, section_ids=[3, 4]), self.article(2, section_ids=[4]),
+                self.article(3, section_ids=[5])]
+        wiki_articles.permissions_for_articles(
+            cursor, self.ctx(), rows, self.subjects, {3, 4}, self.section_rules())
+        # 5 в периметр не входит — за его правилами не идём вовсе.
+        self.assertEqual(self.section_calls, [[3, 4]])
+
+    def test_empty_list_asks_the_database_nothing(self):
+        cursor = RulesCursor()
+        self.assertEqual(
+            wiki_articles.permissions_for_articles(
+                cursor, self.ctx(), [], self.subjects, {3}, self.section_rules()),
+            {})
+        self.assertEqual(cursor.queries, [])
+        self.assertEqual(self.section_calls, [])
+
+    def test_rights_are_per_article_not_shared(self):
+        """Запрет на ОДНОЙ статье не должен гасить кнопки у соседних строк."""
+        cursor = RulesCursor(article_rules=[
+            (2, 'deny', False, False, True, True, False, False),
+        ])
+        rows = [self.article(1), self.article(2), self.article(3)]
+        rights = wiki_articles.permissions_for_articles(
+            cursor, self.ctx(), rows, self.subjects, {3}, self.section_rules())
+        self.assertTrue(rights[1]['can_edit'])
+        self.assertFalse(rights[2]['can_edit'], 'запрет правилом статьи не сработал')
+        self.assertFalse(rights[2]['can_delete'])
+        self.assertTrue(rights[3]['can_edit'])
+
+    def test_designated_owner_keeps_edit_without_any_rule(self):
+        """Ради этого owner_user_id и выбирается списком (_LIST_KEYS).
+
+        Владелец статьи правит её всегда. Без поля в выдаче меню скрывало бы
+        «Редактировать» у владельца его же статьи — и человек решил бы, что
+        доступ отобрали.
+        """
+        cursor = RulesCursor()
+        rows = [self.article(1, owner_user_id=42)]
+        rights = wiki_articles.permissions_for_articles(
+            cursor, self.ctx(), rows, self.subjects, set(), self.section_rules(granted=()))
+        self.assertTrue(rights[1]['can_edit'])
+
+    def test_capability_still_gates_the_object_right(self):
+        """Правило раздела даёт удаление, а способности нет — значит нельзя."""
+        cursor = RulesCursor()
+        rights = wiki_articles.permissions_for_articles(
+            cursor, self.ctx(can_delete=False), [self.article(1)],
+            self.subjects, {3}, self.section_rules())
+        self.assertTrue(rights[1]['can_edit'])
+        self.assertFalse(rights[1]['can_delete'])
+
+    def test_one_article_goes_through_the_same_calculation(self):
+        """effective_permissions — тот же расчёт, а не второй его экземпляр."""
+        cursor = RulesCursor()
+        article = self.article(1)
+        one = wiki_articles.effective_permissions(
+            cursor, self.ctx(), article, self.subjects, {3}, self.section_rules())
+        many = wiki_articles.permissions_for_articles(
+            cursor, self.ctx(), [article], self.subjects, {3}, self.section_rules())
+        self.assertEqual(dict(one), dict(many[1]))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import {
     Archive, ChevronRight, Eye, FileText, Folder, FolderOpen, Layers, Loader2,
-    MousePointerClick, PenLine, Search, User, X,
+    MousePointerClick, PenLine, Pencil, Search, User, X,
 } from 'lucide-react';
-import { iosCard, IosBadge } from '../ui/ios';
+import { iosCard, IosBadge, IosMenu } from '../ui/ios';
 import { typeBadge } from './articleTypes';
 
 /* Вкладка «Статьи» — каталог: дерево разделов слева, статьи выбранного справа.
@@ -216,53 +216,81 @@ const SectionRow = ({ section, depth, count, selected, open, hasChildren, onSele
 );
 
 /* ── Строка статьи в правой колонке ────────────────────────────────────────
-   Автор и свежесть здесь не украшение: по ним понимают, можно ли документу
-   верить, — а это первый вопрос при виде незнакомой статьи. */
-const ArticleRow = ({ article, showStatus, onOpen }) => {
+ * Автор и свежесть здесь не украшение: по ним понимают, можно ли документу
+ * верить, — а это первый вопрос при виде незнакомой статьи.
+ *
+ * Две мишени в одной строке, как у строки раздела слева: нажатие на название
+ * открывает статью, «три точки» — распоряжаются ею. Раньше мишень была одна, и
+ * каталог умел ровно одно действие: уйти в статью. Вложенные <button>
+ * невалидны, поэтому строка — <div> с кнопкой и меню внутри, а не кнопка
+ * с кнопкой.
+ */
+const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked }) => {
     const type = typeBadge(article.article_type);
     const ago = fmtAgo(article.updated_at);
     return (
-        <button
-            type="button"
-            onClick={onOpen}
-            className="flex w-full items-start gap-3 px-3 py-3 text-left transition hover:bg-slate-50"
-        >
-            <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-500">
-                <FileText size={14} />
-            </span>
-            <span className="min-w-0 flex-1">
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span className="text-[13.5px] font-semibold leading-snug text-slate-900">
-                        {article.title}
-                    </span>
-                    {type && <IosBadge tone={type.tone}>{type.label}</IosBadge>}
-                    {showStatus && article.status && (
-                        <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
-                            {STATUS_LABELS[article.status] || article.status}
-                        </IosBadge>
-                    )}
+        <div className="flex items-start transition hover:bg-slate-50">
+            <button
+                type="button"
+                onClick={onOpen}
+                className="flex min-w-0 flex-1 items-start gap-3 px-3 py-3 text-left"
+            >
+                <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-500">
+                    <FileText size={14} />
                 </span>
-                {article.summary && (
-                    <span className="mt-0.5 block line-clamp-2 text-[12px] leading-relaxed text-slate-500">
-                        {article.summary}
+                <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-[13.5px] font-semibold leading-snug text-slate-900">
+                            {article.title}
+                        </span>
+                        {type && <IosBadge tone={type.tone}>{type.label}</IosBadge>}
+                        {showStatus && article.status && (
+                            <IosBadge tone={STATUS_TONES[article.status] || 'slate'}>
+                                {STATUS_LABELS[article.status] || article.status}
+                            </IosBadge>
+                        )}
                     </span>
-                )}
-                <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-slate-400">
-                    {article.author_name && (
-                        <span className="inline-flex items-center gap-1">
-                            <User size={10} /> {article.author_name}
+                    {article.summary && (
+                        <span className="mt-0.5 block line-clamp-2 text-[12px] leading-relaxed text-slate-500">
+                            {article.summary}
                         </span>
                     )}
-                    {ago && <span>{ago}</span>}
-                    {article.views > 0 && (
-                        <span className="inline-flex items-center gap-1 tabular-nums">
-                            <Eye size={10} /> {article.views}
-                        </span>
-                    )}
+                    <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-slate-400">
+                        {article.author_name && (
+                            <span className="inline-flex items-center gap-1">
+                                <User size={10} /> {article.author_name}
+                            </span>
+                        )}
+                        {ago && <span>{ago}</span>}
+                        {article.views > 0 && (
+                            <span className="inline-flex items-center gap-1 tabular-nums">
+                                <Eye size={10} /> {article.views}
+                            </span>
+                        )}
+                    </span>
                 </span>
+                <ChevronRight size={14} className="mt-2 shrink-0 text-slate-300" />
+            </button>
+            {/* Меню держим на строке заголовка — на одной линии со стрелкой
+                «открыть»: по центру высокой строки оно вставало ниже стрелки, и
+                два действия на правом краю читались как разнобой.
+                Пока идёт запрос — на месте меню спиннер: строка меняется здесь
+                же, и общего индикатора у списка нет (перезапрос идёт тихо). */}
+            <span className="mt-2.5 mr-1 grid h-8 w-8 shrink-0 place-items-center">
+                {busy
+                    ? <Loader2 size={14} className="animate-spin text-slate-400" />
+                    : <IosMenu
+                        items={menu}
+                        /* Пока идёт действие над ДРУГОЙ строкой, меню погашено:
+                           одновременно мы обрабатываем одно, и пункт, который
+                           молча ничего не делает, — тот же отказ, только
+                           неотличимый от поломки. Так же гасится меню разделов
+                           на «Структуре». */
+                        disabled={locked}
+                        label={`Действия со статьёй «${article.title}»`}
+                      />}
             </span>
-            <ChevronRight size={14} className="mt-2 shrink-0 text-slate-300" />
-        </button>
+        </div>
     );
 };
 
@@ -279,15 +307,21 @@ const Blank = ({ icon: Icon, title, text, children }) => (
 );
 
 export default function WikiCatalog({ base, headers, showToast, catalog, loading,
-                                      bucket, onBucketChange, onOpenArticle }) {
+                                      bucket, onBucketChange, onOpenArticle,
+                                      onEditArticle, reloadCatalog }) {
     const [selected, setSelected] = useState(null);   // {id, name, path} либо null
     const [items, setItems] = useState(null);         // null = ещё не ответили
     const [busy, setBusy] = useState(false);
+    const [acting, setActing] = useState(null);       // id статьи, над которой работаем
     const [filter, setFilter] = useState('');         // поиск внутри выбранного раздела
     const [query, setQuery] = useState('');           // поиск по дереву
     const [openSections, setOpenSections] = useState(() => new Set());
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
     const resultRef = useRef(null);
+    /* Раздел, ответ по которому ещё ждём. Ответов теперь бывает два в полёте —
+       выбор раздела и тихое обновление после действия над строкой, — и без этой
+       отметки поздний ответ по ПРЕЖНЕМУ разделу лёг бы под шапку нового. */
+    const wantedRef = useRef(null);
 
     const spaces = catalog?.spaces || [];
     const sections = catalog?.sections || [];
@@ -372,17 +406,94 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     // дереве бессмысленно.
     const isOpen = (id) => (needle ? visibleSections.has(id) : openSections.has(id));
 
-    const loadArticles = useCallback((id) => {
-        setBusy(true);
-        setItems(null);
+    /* quiet — обновление списка ПОСЛЕ действия над строкой: список остаётся на
+       экране, пока сервер не ответит. Гасить всю правую колонку спиннером ради
+       смены статуса одной строки значило бы мигать экраном на ровном месте. */
+    const loadArticles = useCallback((id, { quiet = false } = {}) => {
+        wantedRef.current = id;
+        if (!quiet) { setBusy(true); setItems(null); }
         axios.get(`${base}/articles`, { headers, params: { section_id: id, bucket, limit: 200 } })
-            .then((r) => setItems(r.data?.items || []))
+            .then((r) => { if (wantedRef.current === id) setItems(r.data?.items || []); })
             .catch((e) => {
-                setItems([]);
+                if (!quiet && wantedRef.current === id) setItems([]);
                 showToast?.(errText(e, 'Не удалось загрузить статьи раздела'), 'error');
             })
-            .finally(() => setBusy(false));
+            .finally(() => { if (!quiet) setBusy(false); });
     }, [base, headers, bucket, showToast]);
+
+    /* ── Действия над статьёй прямо из списка ──────────────────────────────
+     * Раньше каталог умел одно: уйти в статью. Чтобы снять статью с публикации
+     * или убрать в архив, приходилось открыть её, найти кнопку в шапке и
+     * вернуться назад — при разборе раздела на десяток статей это десяток
+     * кругов.
+     *
+     * Статус после действия НЕ подставляем на клиенте: корзину статьи считает
+     * сервер (ARTICLE_BUCKETS), и вторая копия этих правил здесь разошлась бы с
+     * первой. Вместо этого тихо перезапрашиваем список и счётчики корзин —
+     * статья, ушедшая из открытой корзины, исчезает из него сама.
+     */
+    const act = (article, send, done, fail) => {
+        if (acting) return;
+        setActing(article.id);
+        send()
+            .then(() => {
+                showToast?.(done, 'success');
+                if (selected) loadArticles(selected.id, { quiet: true });
+                // Числа на переключателе корзин меняются тем же действием:
+                // сняли статью с публикации — «Черновиков» обязано стать
+                // больше сразу, а не при следующем заходе в раздел.
+                reloadCatalog?.();
+            })
+            .catch((e) => showToast?.(errText(e, fail), 'error'))
+            .finally(() => setActing(null));
+    };
+
+    const toDraft = (article) => act(
+        article,
+        () => axios.patch(`${base}/articles/${article.id}`,
+                          // Комментарий уезжает в историю версий: снятие с
+                          // публикации — то самое событие, о котором потом
+                          // спрашивают «кто и зачем».
+                          { status: 'draft', comment: 'Возврат в черновики из каталога' },
+                          { headers }),
+        'Статья вернулась в черновики', 'Не удалось отправить в черновик');
+
+    const archive = (article) => {
+        /* Подтверждение обязательно, и тот же вопрос задаёт кнопка «В архив» на
+           самой статье (WikiArticle): одно действие — один разговор с
+           человеком. */
+        if (!window.confirm(`Убрать статью «${article.title}» в архив?
+
+`
+            + 'Она пропадёт из списков и из ответов помощника. '
+            + 'Восстановить сможет администратор.')) return;
+        act(article, () => axios.delete(`${base}/articles/${article.id}`, { headers }),
+            'Статья убрана в архив', 'Не удалось убрать в архив');
+    };
+
+    /* Пункты меню строки. Право берём из ответа сервера (permissions), а не из
+       роли: у статьи есть свои правила доступа, и роль их не описывает —
+       предложить «Редактировать» на статье, которую сервер откажется править,
+       значит соврать. Не пришли права вовсе (старый бандл против нового
+       сервера) — меню просто нет: IosMenu без пунктов не рисует и кнопку. */
+    const menuFor = (article) => {
+        const rights = article.permissions || {};
+        const canDraft = !!rights.can_edit && article.status !== 'draft';
+        return [
+            onEditArticle && rights.can_edit && {
+                key: 'edit', label: 'Редактировать', icon: Pencil,
+                onSelect: () => onEditArticle(article) },
+            /* Черновику этот пункт не нужен — он уже черновик. Зато нужен
+               АРХИВНОЙ статье: из архива иначе нет пути назад. */
+            canDraft && {
+                key: 'draft', label: 'Отправить в черновик', icon: PenLine,
+                separatorBefore: true, onSelect: () => toDraft(article) },
+            rights.can_delete && article.status !== 'archived' && {
+                key: 'archive', label: 'Убрать в архив', icon: Archive,
+                danger: true, separatorBefore: !canDraft,
+                onSelect: () => archive(article) },
+        ];
+    };
 
     const selectSection = (section, path) => {
         setFilter('');
@@ -636,6 +747,9 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                             article={article}
                                             showStatus={bucket !== 'published'}
                                             onOpen={() => onOpenArticle(article.slug)}
+                                            menu={menuFor(article)}
+                                            busy={acting === article.id}
+                                            locked={acting !== null && acting !== article.id}
                                         />
                                     ))}
                                 </div>

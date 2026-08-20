@@ -93,7 +93,9 @@ const ArticleCard = ({ article, onOpen }) => {
 
 export default function WikiLibrary({ base, headers, showToast, structure, catalog,
                                       canCreate, canEdit = false,
-                                      createTick = 0, homeTick = 0,
+                                      createRequest = null, onCreateConsumed,
+                                      editTarget = null, onEditTargetConsumed,
+                                      homeTick = 0,
                                       onOpenParks, onOpenCatalog, reloadCatalog,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
@@ -103,6 +105,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const toast = useStableCallback(showToast);
     const consumeInitialSlug = useStableCallback(onInitialSlugConsumed);
     const consumeSearchTarget = useStableCallback(onSearchTargetConsumed);
+    const consumeCreate = useStableCallback(onCreateConsumed);
+    const consumeEditTarget = useStableCallback(onEditTargetConsumed);
     const refreshCatalog = useStableCallback(reloadCatalog);
 
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
@@ -172,18 +176,35 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     }, [openSlug]);
 
     /* «Новая статья» и заголовок раздела живут в шапке, а состояние, которым они
-       управляют, — здесь. Нажатие приходит счётчиком: он меняется на каждое
-       нажатие, и повторно сработать можно без гашения флага в родителе.
-       Сравниваем со ЗНАЧЕНИЕМ НА МОМЕНТ МОНТИРОВАНИЯ, а не с нулём: вкладка
-       размонтируется при уходе на «Парки», и по возвращении ненулевой счётчик
-       иначе открыл бы редактор сам собой. */
-    const seenTicks = useRef({ create: createTick, home: homeTick });
+       управляют, — здесь.
+       Заголовок приходит счётчиком нажатий: он меняется на каждое нажатие, и
+       повторно сработать можно без гашения флага в родителе. Сравниваем со
+       ЗНАЧЕНИЕМ НА МОМЕНТ МОНТИРОВАНИЯ, а не с нулём: вкладка размонтируется
+       при уходе на «Парки», и по возвращении ненулевой счётчик иначе сбросил бы
+       витрину сам собой. */
+    const seenTicks = useRef({ home: homeTick });
 
+    /* «Новая статья» — не счётчик, а одноразовая просьба: кнопка работает и из
+       каталога, откуда витрина монтируется ЗАНОВО, уже с новым значением. Гасим
+       её сразу, как выполнили, — иначе следующий заход в раздел открывал бы
+       редактор сам собой. */
     useEffect(() => {
-        if (createTick === seenTicks.current.create) return;
-        seenTicks.current.create = createTick;
+        if (!createRequest) return;
+        consumeCreate();
         setEditing({});
-    }, [createTick]);
+    }, [createRequest, consumeCreate]);
+
+    /* Правка статьи из каталога. Статью тянем целиком: редактору нужен её
+       текст, а список отдаёт только карточку. Тот же путь, что у
+       onUpdateExisting ниже. */
+    useEffect(() => {
+        const slug = editTarget?.slug;
+        if (!slug) return;
+        consumeEditTarget();
+        axios.get(`${base}/articles/${encodeURIComponent(slug)}`, { headers })
+            .then((r) => setEditing(r.data))
+            .catch((e) => toast(errText(e, 'Не удалось открыть статью на правку'), 'error'));
+    }, [editTarget, consumeEditTarget, base, headers, toast]);
 
     /* Возврат на главную витрины: закрываем статью и сбрасываем поиск. editing намеренно не в зависимостях — он читается тем значением,
        какое было в момент нажатия, а в deps заставил бы эффект сбрасывать
