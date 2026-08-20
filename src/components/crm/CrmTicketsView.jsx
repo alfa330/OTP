@@ -364,7 +364,7 @@ const MessageBubble = ({
                     </span>
                 )
                 : <span className="h-7 w-7 shrink-0" />)}
-            <div className={`max-w-[76%] px-3.5 py-2 text-[13px] leading-snug ${
+            <div className={`max-w-[76%] px-3 py-2 text-[13.5px] leading-snug ${
                 note
                     ? 'rounded-2xl bg-amber-50 text-amber-900 ring-1 ring-amber-100'
                     : outgoing
@@ -405,45 +405,24 @@ const MessageBubble = ({
                     </button>
                 )}
                 {!outgoing && message.author_name && !grouped && (
-                    <div className={`text-[11.5px] font-semibold ${
+                    <div className={`mb-0.5 text-[11.5px] font-semibold ${
                         note ? 'text-amber-700' : badge ? badge.tone : 'text-slate-600'
                     }`}>
                         {message.author_name}
                     </div>
                 )}
-                {/* Время стоит В СТРОКЕ с текстом, а не отдельной строкой под
-                    ним. Отдельной оно занимало свою высоту плюс отступ — около
-                    двадцати пикселей, и пузырь с одним словом «Ок» получался
-                    вдвое выше самого слова. В мессенджерах время дописывается к
-                    последней строке и переносится только если не влезло; тут
-                    ровно это и происходит — inline-block уходит на новую строку
-                    сам, когда места нет.
-
-                    У сообщения с вложением время всё-таки отдельной строкой:
-                    приписать его к тексту НАД картинкой значило бы поставить
-                    подпись не туда. */}
                 {message.body
-                    ? (
-                        <div className="whitespace-pre-wrap break-words">
-                            {message.body}
-                            {!message.attachment && <BubbleTime message={message} outgoing={outgoing} inline />}
-                        </div>
-                    )
+                    ? <div className="whitespace-pre-wrap break-words">{message.body}</div>
                     : (!message.attachment && (
                         // Вложение уходит отдельным сообщением с пустым телом —
                         // без этого в переписке висел бы пустой пузырь.
-                        <div className="text-[12px] italic opacity-70">
-                            без текста
-                            <BubbleTime message={message} outgoing={outgoing} inline />
-                        </div>
+                        <div className="text-[12px] italic opacity-70">без текста</div>
                     ))}
                 {message.attachment && (
-                    <>
-                        <MessageMedia message={message} apiBaseUrl={apiBaseUrl} ticketId={ticketId}
-                                      headers={headers} showToast={showToast} light={outgoing} />
-                        <BubbleTime message={message} outgoing={outgoing} />
-                    </>
+                    <MessageMedia message={message} apiBaseUrl={apiBaseUrl} ticketId={ticketId}
+                                  headers={headers} showToast={showToast} light={outgoing} />
                 )}
+                <BubbleTime message={message} outgoing={outgoing} />
             </div>
             {!outgoing && onReply && (
                 <ReplyHandle onClick={() => onReply(message)} />
@@ -452,16 +431,19 @@ const MessageBubble = ({
     );
 };
 
-/* Время отправки. inline — дописывается к последней строке текста; без inline
- * стоит своей строкой (сообщение с вложением). */
-const BubbleTime = ({ message, outgoing, inline = false }) => (
-    <span className={`text-[10.5px] tabular-nums ${
-        outgoing ? 'text-white/70' : 'text-slate-400'
-    } ${inline
-        ? 'ml-1.5 inline-block translate-y-[1px] align-baseline'
-        : 'mt-0.5 block text-right'}`}>
+/* Время отправки — в правом нижнем углу пузыря, ровно как в «Чатах
+ * Верификаторов» (WazzupChatsView.MessageBubble): `mt-0.5`, 10 px, к правому
+ * краю. Раздел не должен иметь своей версии одного и того же пузыря.
+ *
+ * Пробовали дописывать время в строку с текстом — так делает Telegram, и пузырь
+ * короткой реплики выходит ниже. Но у нас уже есть эталон в соседнем разделе, и
+ * два разных чата в одном портале хуже, чем несколько лишних пикселей. */
+const BubbleTime = ({ message, outgoing }) => (
+    <div className={`mt-0.5 flex items-center justify-end text-[10px] tabular-nums ${
+        outgoing ? 'text-blue-100/90' : 'text-slate-400'
+    }`}>
         {fmtTime(message.created_at)}
-    </span>
+    </div>
 );
 
 /* Ответить на это сообщение. Появляется только по наведению: постоянная кнопка
@@ -944,7 +926,7 @@ const TicketCard = ({
                     панели кнопка уезжала бы вправо. */}
                 <div className="relative flex min-h-0 min-w-0 flex-1">
                 <div ref={threadRef} onScroll={onThreadScroll}
-                     className="crm-thread min-h-0 w-full overflow-y-auto px-4 pb-4">
+                     className="crm-thread crm-scroll min-h-0 w-full overflow-y-auto px-4 pb-4">
                     {/* Текст обращения в начале переписки — то, с чего разговор
                         начался.
 
@@ -1044,7 +1026,7 @@ const TicketCard = ({
                                 <X size={13} />
                             </button>
                         </div>
-                        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-3">
+                        <div className="crm-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-3">
                             <div className="mb-2.5 text-[13px] font-semibold leading-snug text-slate-900">
                                 {ticket.subject}
                             </div>
@@ -1736,7 +1718,7 @@ export default function CrmTicketsView({
                             <div className={`flex w-full min-h-0 shrink-0 flex-col border-slate-200/70 lg:w-[360px] lg:border-r ${
                                 selectedId ? 'hidden lg:flex' : 'flex'
                             }`}>
-                                <div className="min-h-0 flex-1 overflow-y-auto">
+                                <div className="crm-scroll min-h-0 flex-1 overflow-y-auto">
                                     {loading && !tickets.length && <LoadingBlock />}
                                     {!loading && error && (
                                         <div className="flex items-center justify-center gap-2 py-16 text-center text-[13px] text-rose-500">
