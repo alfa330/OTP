@@ -847,3 +847,98 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
     :root { --chat-dock-w: 100vw; }
     body.chat-dock-open { padding-right: 0; }
 }
+
+
+/* ── Раздел «Обращения»: полотно переписки и панель обращения ──
+   Живёт в CSS, а не классами в разметке, по двум причинам: узор — это
+   многослойный background, который в утилитах Tailwind выглядел бы строкой на
+   полэкрана, а панель меняет саму механику (наплыв справа на узком экране,
+   поджатие переписки на широком) — то есть медиазапрос, а не набор классов. */
+
+/* Полотно переписки.
+
+   Раньше фон был bg-slate-50/60, а входящий пузырь — bg-slate-100: разница
+   между ними меньше, чем шум монитора, и переписка выглядела текстом без
+   пузырей вовсе. Теперь как в мессенджерах: полотно ощутимо темнее и с узором,
+   а пузыри БЕЛЫЕ с тонким кантом — контраст даёт не затемнение фона, а разница
+   «плотное полотно ↔ белый лист».
+
+   Узор — точечная сетка 22px плюс мягкое голубое свечение сверху, оба
+   собственным слоем. Он намеренно не прокручивается вместе с сообщениями:
+   так он читается как обои чата, а не как часть содержимого. */
+.crm-thread {
+    background-color: #e8ecf3;
+    background-image:
+        radial-gradient(circle at 1px 1px, rgba(15, 23, 42, 0.075) 1px, transparent 0),
+        radial-gradient(900px 320px at 50% 0%, rgba(59, 130, 246, 0.10), transparent 72%);
+    background-size: 22px 22px, 100% 100%;
+}
+
+/* Плашка дня. Липкая, поэтому полупрозрачная с размытием: под ней проезжают
+   сообщения, и плотный фон закрывал бы их целиком. */
+.crm-day-chip {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
+/* ── Панель обращения справа ──
+   На широком экране она ПОДЖИМАЕТ переписку (анимируется ширина): смысл панели
+   в том, чтобы следить за обращением, не теряя из вида чат, — а наплыв поверх
+   как раз чат и закрыл бы.
+
+   На узком экране поджимать нечего, и панель выезжает поверх переписки
+   (анимируется сдвиг — он дешевле для браузера, чем ширина).
+
+   visibility в списке переходов не для красоты: у закрытой панели ширина 0 и
+   содержимое обрезано, но без visibility оно осталось бы в порядке обхода
+   табом. Переход возвращает видимость сразу при открытии и снимает её в конце
+   закрытия — ровно то поведение, которое нужно. */
+.crm-aside {
+    position: absolute;
+    inset-block: 0;
+    right: 0;
+    z-index: 20;
+    width: min(340px, 88%);
+    overflow: hidden;
+    visibility: hidden;
+    transform: translateX(100%);
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.28s;
+    background: #ffffff;
+    border-left: 1px solid rgb(226 232 240 / 0.7);
+    box-shadow: -12px 0 32px -16px rgba(15, 23, 42, 0.28);
+}
+.crm-aside.is-open {
+    visibility: visible;
+    transform: translateX(0);
+}
+/* Содержимое фиксированной ширины: пока панель раскрывается, текст внутри не
+   должен переливаться по строкам заново — это выглядит как рябь. */
+.crm-aside-body {
+    width: min(340px, 88vw);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+@media (min-width: 1024px) {
+    .crm-aside {
+        position: relative;
+        width: 0;
+        transform: none;
+        box-shadow: none;
+        transition: width 0.28s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.28s;
+    }
+    .crm-aside.is-open {
+        width: 340px;
+    }
+    .crm-aside-body {
+        width: 340px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .crm-aside {
+        transition: none;
+    }
+}

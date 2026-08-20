@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, ArrowLeft, CheckCircle2, ChevronRight, CornerUpLeft, Inbox, Loader2,
+    AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, CheckCircle2, ChevronRight,
+    CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
 } from 'lucide-react';
 import {
@@ -10,8 +11,16 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import TicketWizard from './TicketWizard';
-import { formatTicketBody } from './ticketBody';
-import { attachmentKind, authorTone, indexByTgId, messageSnippet, quoteOf } from './threadView';
+import {
+    BLOCK_CHECKS, BLOCK_CONTEXT, BLOCK_WARNING, describeBody,
+} from './ticketBody';
+import {
+    attachmentKind, authorBadge, continuesRun, groupByDay, indexByTgId, messageSnippet, quoteOf,
+} from './threadView';
+import {
+    isOverdue, markTicketSeen, mergeTicketsById, previewAuthor, previewText,
+    queueMonogram, queueTile, rowAlert, unreadLabel,
+} from './ticketList';
 
 /* Раздел «Обращения» — тикеты в рабочие Telegram-группы.
  *
@@ -67,14 +76,6 @@ const EVENT_LABELS = {
 };
 
 const statusMeta = (code) => STATUS_META[code] || { label: code || '—', tone: null };
-
-// Просрочен ли срок ответа. Только для незакрытых: у решённого обращения срок
-// уже ничего не значит, и красить его — врать про состояние дел.
-const isOverdue = (ticket) => Boolean(
-    ticket.due_at
-    && ['open', 'in_progress', 'answered'].includes(ticket.status)
-    && new Date(ticket.due_at).getTime() < Date.now(),
-);
 const priorityMeta = (code) => PRIORITY_META[code] || { label: code || '—', tone: null };
 
 const fmtDateTime = (iso) => (iso
@@ -126,58 +127,110 @@ const LoadingBlock = () => (
 
 /* ─── Лента обращений ─────────────────────────────────────────────────────── */
 
+/* Строка ленты. Раньше это были две строки текста подряд, и сорок таких строк
+ * читались как один абзац: глазу не за что зацепиться, а взгляд обязан за один
+ * проход находить «где моё и что там нового».
+ *
+ * Теперь раскладка мессенджера: плитка очереди слева даёт ритм и цвет, тема —
+ * первая строка, превью последней реплики — вторая, справа время и пузырёк
+ * непрочитанного. Разбор того, ЧТО именно писать в каждом месте, лежит в
+ * ticketList.js и проверен тестами.
+ *
+ * Бейджи остались, но только исключениями: «не доставлено», «просрочено»,
+ * массовый сбой и высокий приоритет. Штатное «Отправлено» бейджем не рисуется —
+ * иначе сорок строк снова превращаются в светофор.
+ */
 const TicketRow = memo(function TicketRow({ ticket, active, onSelect }) {
     const status = statusMeta(ticket.status);
     const priority = priorityMeta(ticket.priority);
-    const failed = ticket.delivery_status === 'failed';
-    const overdue = isOverdue(ticket);
+    const alert = rowAlert(ticket);
+    const unread = ticket.unread;
+    const count = unreadLabel(ticket.unread_count);
+    const last = ticket.last_message;
+    const author = previewAuthor(last);
+    const preview = previewText(last);
+    const massOutage = (ticket.flags || []).includes('mass_outage');
+
     return (
         <button
             type="button"
             onClick={() => onSelect(ticket.id)}
-            className={`w-full border-b border-slate-100 px-3.5 py-3 text-left transition-colors ${
-                active ? 'bg-blue-50/70' : 'hover:bg-slate-50'
+            className={`relative flex w-full gap-3 px-3 py-2.5 text-left transition-colors ${
+                active
+                    ? 'bg-blue-50'
+                    : unread ? 'bg-blue-50/40 hover:bg-blue-50/70' : 'hover:bg-slate-50'
             }`}
         >
-            <div className="flex items-start gap-2.5">
-                {/* Точка непрочитанного — единственный «сигнал» в строке.
-                    Место под неё держим всегда, иначе текст прыгает. */}
-                <span className={`mt-[6px] h-[7px] w-[7px] shrink-0 rounded-full ${
-                    ticket.unread ? 'bg-blue-500' : 'bg-transparent'
-                }`} />
-                <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                        <span className="shrink-0 text-[11.5px] font-semibold tabular-nums text-slate-400">
-                            №{ticket.id}
-                        </span>
-                        <span className={`truncate text-[13.5px] leading-snug ${
-                            ticket.unread ? 'font-semibold text-slate-900' : 'font-medium text-slate-800'
+            {/* Выделение выбранного — полоской у края, как в списках macOS.
+                Фоном одним его мало: у непрочитанной строки фон тоже голубоват. */}
+            <span className={`absolute inset-y-1 left-0 w-[3px] rounded-r-full transition-colors ${
+                active ? 'bg-blue-500' : 'bg-transparent'
+            }`} />
+
+            {/* Плитка очереди: куда ушло обращение. Цвет по id очереди —
+                постоянный, поэтому «Посылки» узнаются до чтения подписи. */}
+            <span className={`mt-0.5 grid h-[38px] w-[38px] shrink-0 place-items-center rounded-[12px] text-[13px] font-semibold ring-1 ${
+                queueTile(ticket.queue_id)
+            }`}>
+                {queueMonogram(ticket.queue_title)}
+            </span>
+
+            <span className="min-w-0 flex-1">
+                <span className="flex items-baseline gap-2">
+                    <span className={`min-w-0 flex-1 truncate text-[13.5px] leading-snug ${
+                        unread ? 'font-semibold text-slate-900' : 'font-medium text-slate-800'
+                    }`}>
+                        {ticket.subject}
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-slate-400"
+                          title={fmtDateTime(ticket.last_message_at || ticket.created_at)}>
+                        {fmtAgo(ticket.last_message_at || ticket.created_at)}
+                    </span>
+                </span>
+
+                <span className="mt-0.5 flex items-end gap-2">
+                    <span className="min-w-0 flex-1">
+                        {/* Превью последней реплики — то, ради чего строку и
+                            читают: по нему видно, ответили ли по делу, не
+                            открывая обращение. */}
+                        <span className={`block truncate text-[12px] leading-snug ${
+                            unread ? 'text-slate-600' : 'text-slate-500'
                         }`}>
-                            {ticket.subject}
+                            {preview
+                                ? <>{author && <span className="font-medium text-slate-500">{author}: </span>}{preview}</>
+                                : <span className="text-slate-400">{ticket.queue_title}</span>}
                         </span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-slate-500">
-                        <span className="truncate">{ticket.queue_title}</span>
-                        <span className="text-slate-300">·</span>
-                        <span className="tabular-nums">{fmtAgo(ticket.last_message_at || ticket.created_at)}</span>
-                        {failed && (
-                            <IosBadge tone="red" className="!py-0.5 !text-[10.5px]">Не доставлено</IosBadge>
-                        )}
-                        {!failed && overdue && (
-                            <IosBadge tone="amber" className="!py-0.5 !text-[10.5px]">Просрочено</IosBadge>
-                        )}
-                        {!failed && !overdue && status.tone && (
-                            <IosBadge tone={status.tone} className="!py-0.5 !text-[10.5px]">{status.label}</IosBadge>
-                        )}
-                        {priority.tone && (
-                            <IosBadge tone={priority.tone} className="!py-0.5 !text-[10.5px]">{priority.label}</IosBadge>
-                        )}
-                        {(ticket.flags || []).includes('mass_outage') && (
-                            <IosBadge tone="red" className="!py-0.5 !text-[10.5px]">Массовый сбой</IosBadge>
-                        )}
-                    </div>
-                </div>
-            </div>
+                        <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-slate-400">
+                            <span className="tabular-nums">№{ticket.id}</span>
+                            <span className="text-slate-300">·</span>
+                            <span className="truncate">{ticket.topic_title || ticket.queue_title}</span>
+                            {alert === 'failed' && (
+                                <IosBadge tone="red" className="!py-0 !text-[10px]">Не доставлено</IosBadge>
+                            )}
+                            {alert === 'overdue' && (
+                                <IosBadge tone="amber" className="!py-0 !text-[10px]">Просрочено</IosBadge>
+                            )}
+                            {!alert && status.tone && (
+                                <IosBadge tone={status.tone} className="!py-0 !text-[10px]">{status.label}</IosBadge>
+                            )}
+                            {priority.tone && (
+                                <IosBadge tone={priority.tone} className="!py-0 !text-[10px]">{priority.label}</IosBadge>
+                            )}
+                            {massOutage && (
+                                <IosBadge tone="red" className="!py-0 !text-[10px]">Массовый сбой</IosBadge>
+                            )}
+                        </span>
+                    </span>
+                    {/* Пузырёк непрочитанного. Место под него не держим: у
+                        прочитанных обращений его нет, и пустой круг был бы
+                        сорок раз повторённым «ничего». */}
+                    {!!count && (
+                        <span className="mb-0.5 grid h-[19px] min-w-[19px] shrink-0 place-items-center rounded-full bg-blue-500 px-1.5 text-[11px] font-semibold tabular-nums leading-none text-white shadow-sm">
+                            {count}
+                        </span>
+                    )}
+                </span>
+            </span>
         </button>
     );
 });
@@ -243,7 +296,7 @@ const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light
         if (!url) {
             return (
                 <div className={`mt-1.5 grid h-28 w-40 place-items-center rounded-xl ${
-                    light ? 'bg-white/15' : 'bg-white'
+                    light ? 'bg-white/15' : 'bg-slate-100'
                 }`}>
                     <Loader2 size={16} className="animate-spin opacity-60" />
                 </div>
@@ -275,7 +328,7 @@ const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light
     return (
         <button type="button" onClick={openFile} disabled={downloading}
                 className={`mt-1.5 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium transition ${
-                    light ? 'bg-white/15 hover:bg-white/25' : 'bg-white hover:bg-slate-50'
+                    light ? 'bg-white/15 hover:bg-white/25' : 'bg-slate-100 hover:bg-slate-200'
                 }`}>
             {downloading ? <Loader2 size={12} className="animate-spin" /> : <Paperclip size={12} />}
             {message.attachment.name || 'Вложение'}
@@ -284,14 +337,17 @@ const MessageMedia = ({ message, apiBaseUrl, ticketId, headers, showToast, light
 };
 
 const MessageBubble = ({
-    message, quote, apiBaseUrl, ticketId, headers, showToast, onReply, onJumpTo,
+    message, quote, grouped, apiBaseUrl, ticketId, headers, showToast, onReply, onJumpTo,
 }) => {
     const outgoing = message.direction === 'out';
     const note = message.direction === 'note';
+    // Кружок с инициалами — только у входящих: у своих реплик и так понятно,
+    // кто написал, а у заметки автора нет вовсе.
+    const badge = !outgoing && !note ? authorBadge(message) : null;
 
     return (
         <div id={`crm-msg-${message.id}`}
-             className={`group flex items-center gap-1.5 ${
+             className={`group flex items-end gap-1.5 ${grouped ? 'mt-0.5' : 'mt-2.5'} ${
                  outgoing ? 'justify-end' : 'justify-start'
              }`}>
             {/* Кнопка ответа показывается по наведению и стоит со стороны поля
@@ -300,12 +356,31 @@ const MessageBubble = ({
             {outgoing && onReply && (
                 <ReplyHandle onClick={() => onReply(message)} />
             )}
-            <div className={`max-w-[76%] rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed ${
+            {badge && (grouped
+                /* У продолжения серии место под кружок остаётся пустым: без
+                   него пузыри уехали бы влево и серия развалилась бы на
+                   разные «колонки». */
+                ? <span className="h-7 w-7 shrink-0" />
+                : (
+                    <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold ${badge.bg}`}
+                          title={message.author_name || ''}>
+                        {badge.initials}
+                    </span>
+                ))}
+            <div className={`max-w-[76%] px-3.5 py-2.5 text-[13px] leading-relaxed ${
                 note
-                    ? 'bg-amber-50 text-amber-900 ring-1 ring-amber-100'
+                    ? 'rounded-2xl bg-amber-50 text-amber-900 ring-1 ring-amber-100'
                     : outgoing
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 text-slate-800'
+                        /* Свои — синие, и «хвост» у нижнего правого угла срезан:
+                           так пузырь принадлежит своей стороне, а не висит
+                           посередине. Тень мягкая — на плотном полотне без неё
+                           пузырь выглядит наклейкой. */
+                        ? 'rounded-2xl rounded-br-md bg-blue-600 text-white shadow-[0_1px_3px_rgba(37,99,235,0.35)]'
+                        /* Чужие — БЕЛЫЕ с тонким кантом. Раньше здесь был
+                           bg-slate-100 на фоне bg-slate-50/60: пузырь и полотно
+                           почти не отличались, и переписка читалась как текст
+                           без пузырей вовсе. */
+                        : 'rounded-2xl rounded-bl-md bg-white text-slate-800 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.06)]'
             }`}>
                 {quote && (
                     <button type="button"
@@ -314,7 +389,7 @@ const MessageBubble = ({
                             className={`mb-1.5 flex w-full gap-2 rounded-lg border-l-[3px] px-2 py-1 text-left transition ${
                                 outgoing
                                     ? 'border-white/60 bg-white/10 hover:bg-white/20'
-                                    : 'border-blue-400 bg-white/70 hover:bg-white'
+                                    : 'border-blue-400 bg-slate-50 hover:bg-slate-100'
                             } ${quote.id ? 'cursor-pointer' : 'cursor-default'}`}>
                         <span className="min-w-0">
                             {quote.author && (
@@ -332,9 +407,9 @@ const MessageBubble = ({
                         </span>
                     </button>
                 )}
-                {!outgoing && message.author_name && (
+                {!outgoing && message.author_name && !grouped && (
                     <div className={`mb-0.5 text-[11.5px] font-semibold ${
-                        note ? 'text-amber-700' : authorTone(message)
+                        note ? 'text-amber-700' : badge ? badge.tone : 'text-slate-600'
                     }`}>
                         {message.author_name}
                     </div>
@@ -367,15 +442,160 @@ const MessageBubble = ({
  * у каждой реплики — это шум на каждой строке переписки. */
 const ReplyHandle = ({ onClick }) => (
     <button type="button" onClick={onClick} title="Ответить"
-            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 opacity-0 transition hover:bg-slate-100 hover:text-slate-600 focus:opacity-100 group-hover:opacity-100">
+            className="mb-1 grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 opacity-0 transition hover:bg-white hover:text-slate-600 focus:opacity-100 group-hover:opacity-100">
         <CornerUpLeft size={14} />
     </button>
 );
 
+/* Плашка дня между сообщениями. Липкая: пролистывая длинную переписку, всегда
+ * видно, какой день читаешь. */
+const DayChip = ({ children }) => (
+    <div className="sticky top-0 z-10 flex justify-center py-1">
+        <span className="crm-day-chip rounded-full px-2.5 py-1 text-[11px] font-semibold text-slate-500 ring-1 ring-slate-200/70">
+            {children}
+        </span>
+    </div>
+);
+
+/* ─── Текст обращения ─────────────────────────────────────────────────────── */
+
+const CHECK_TONE = {
+    green: 'text-emerald-500',
+    red: 'text-rose-500',
+    blue: 'text-blue-500',
+    amber: 'text-amber-500',
+};
+
+/* Само обращение: тот текст, что ушёл в группу. Раньше он выводился одним
+ * серым полотном — «просто большой блок текста», как и было сказано.
+ *
+ * Теперь блоки рисуются по смыслу (разбор — describeBody в ticketBody.js):
+ * метка сбоя полосой, «где и когда» — метками, суть — перечнем «подпись/ответ»,
+ * хвост — строками с галочкой.
+ *
+ * Один компонент на два места: этот же блок стоит и в начале переписки, и в
+ * панели справа. Двумя копиями разметки они разъехались бы на второй правке.
+ */
+const TicketBody = ({ body }) => {
+    const blocks = describeBody(body);
+    if (!blocks.length) {
+        return <div className="text-[12.5px] italic text-slate-400">Текст обращения пуст</div>;
+    }
+    return (
+        <div className="space-y-3">
+            {blocks.map((block, index) => {
+                if (block.kind === BLOCK_WARNING) {
+                    return (
+                        <div key={index} className="space-y-1">
+                            {block.rows.map((row, rowIndex) => (
+                                <div key={rowIndex}
+                                     className="flex items-center gap-2 rounded-xl bg-amber-50 px-2.5 py-1.5 text-[12.5px] font-semibold text-amber-800 ring-1 ring-amber-100">
+                                    <AlertTriangle size={13} className="shrink-0 text-amber-500" />
+                                    <span className="min-w-0 break-words">{row.value}</span>
+                                </div>
+                            ))}
+                        </div>
+                    );
+                }
+                if (block.kind === BLOCK_CONTEXT) {
+                    return (
+                        <div key={index} className="flex flex-wrap gap-1.5">
+                            {block.chips.map((chip, chipIndex) => (
+                                <span key={chipIndex}
+                                      className="rounded-lg bg-slate-100 px-2 py-0.5 text-[11.5px] font-medium text-slate-600">
+                                    {chip}
+                                </span>
+                            ))}
+                        </div>
+                    );
+                }
+                if (block.kind === BLOCK_CHECKS) {
+                    return (
+                        <div key={index} className="space-y-1.5 border-t border-slate-100 pt-2.5">
+                            {block.rows.map((row, rowIndex) => (
+                                <div key={rowIndex} className="flex items-start gap-2 text-[12.5px]">
+                                    <span className={`mt-[3px] shrink-0 ${CHECK_TONE[row.tone] || 'text-slate-400'}`}>
+                                        {row.tone === 'green' ? <CheckCircle2 size={13} />
+                                            : row.tone === 'red' ? <AlertCircle size={13} />
+                                                : <ListChecks size={13} />}
+                                    </span>
+                                    <span className="min-w-0">
+                                        {row.label && (
+                                            <span className="text-slate-500">{row.label}: </span>
+                                        )}
+                                        {row.items
+                                            ? (
+                                                <span className="inline-flex flex-wrap gap-1 align-middle">
+                                                    {row.items.map((item, itemIndex) => (
+                                                        <span key={itemIndex}
+                                                              className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[11.5px] text-slate-700">
+                                                            {item}
+                                                        </span>
+                                                    ))}
+                                                </span>
+                                            )
+                                            : <span className="break-words font-medium text-slate-800">{row.value}</span>}
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    );
+                }
+                return (
+                    <div key={index} className="space-y-1">
+                        {block.rows.map((row, rowIndex) => (row.label ? (
+                            /* Подпись бледная, ответ тёмный — так перечень
+                               «вопрос: ответ» читается по столбцу ответов, а не
+                               построчно целиком. */
+                            <div key={rowIndex}
+                                 className="flex flex-wrap items-baseline gap-x-1.5 text-[12.5px] leading-relaxed">
+                                <span className="text-slate-500">{row.label}</span>
+                                <span className="min-w-0 break-words font-medium text-slate-800">
+                                    {row.value}
+                                </span>
+                            </div>
+                        ) : (
+                            <div key={rowIndex}
+                                 className="break-words text-[12.5px] font-medium leading-relaxed text-slate-800">
+                                {row.text}
+                            </div>
+                        )))}
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
 /* ─── Карточка обращения ──────────────────────────────────────────────────── */
 
+/* Показывать ли панель обращения справа — выбор человека, а не раздела, и он
+ * переживает переход к другому обращению и перезагрузку страницы. Держать её
+ * закрытой по умолчанию правильно (обычно нужен чат), но тому, кто работает с
+ * панелью, переоткрывать её сорок раз в день — издевательство. */
+const ASIDE_KEY = 'crm.ticket.aside';
+
+const readAsidePreference = () => {
+    try {
+        return window.localStorage.getItem(ASIDE_KEY) === '1';
+    } catch (error) {
+        // Приватный режим и «запретить сайту данные» — не повод падать.
+        return false;
+    }
+};
+
+const writeAsidePreference = (value) => {
+    try {
+        window.localStorage.setItem(ASIDE_KEY, value ? '1' : '0');
+    } catch (error) { /* см. выше */ }
+};
+
+// Насколько близко к низу считается «человек смотрит свежее». 120px — примерно
+// один пузырь: если внизу видно последнее сообщение, лента доедет сама.
+const NEAR_BOTTOM = 120;
+
 const TicketCard = ({
-    ticketId, apiBaseUrl, headers, showToast, onChanged, onBack, pulse,
+    ticketId, apiBaseUrl, headers, showToast, onChanged, onSeen, onBack, pulse,
 }) => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -390,6 +610,10 @@ const TicketCard = ({
     // вместо лишнего запроса на каждое открытие обращения.
     const [events, setEvents] = useState(null);
     const [eventsLoading, setEventsLoading] = useState(false);
+    // Панель с текстом обращения справа.
+    const [asideOpen, setAsideOpen] = useState(readAsidePreference);
+    // Человек ушёл читать историю переписки вверх — вниз его не тащим.
+    const [atBottom, setAtBottom] = useState(true);
     const fileRef = useRef(null);
     const threadRef = useRef(null);
 
@@ -400,12 +624,17 @@ const TicketCard = ({
                 { headers: headers() });
             setData(response.data);
             setError(null);
+            /* Открытие карточки ГАСИТ «непрочитано» на сервере — значит, и в
+               ленте оно должно погаснуть. Лента при этом НЕ перезапрашивается
+               намеренно: список отсортирован «непрочитанное сверху», и
+               перезапрос увёз бы читаемое обращение из-под курсора вниз. */
+            if (response.data?.item && !response.data.item.unread) onSeen?.(Number(ticketId));
         } catch (err) {
             setError(errorText(err, 'Не удалось открыть обращение'));
         } finally {
             setLoading(false);
         }
-    }, [apiBaseUrl, headers, ticketId]);
+    }, [apiBaseUrl, headers, ticketId, onSeen]);
 
     useEffect(() => { load(); }, [load]);
 
@@ -417,18 +646,82 @@ const TicketCard = ({
         load(true);
     }, [pulse]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Лента всегда прокручена к свежему сообщению — как в любом мессенджере.
+    const messages = data?.messages;
+
+    /* Лента доезжает к свежему сообщению — но только если человек и так стоял
+       внизу. Раньше она прокручивалась всегда: стоило уйти читать переписку
+       вверх, как пришедший ответ утаскивал экран в конец. Теперь вместо рывка
+       появляется кнопка «вниз». */
     useEffect(() => {
         const node = threadRef.current;
-        if (node) node.scrollTop = node.scrollHeight;
-    }, [data?.messages?.length]);
+        if (!node) return;
+        if (atBottom) node.scrollTop = node.scrollHeight;
+    }, [messages?.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // При переходе к другому обращению лента всегда начинается снизу.
+    useEffect(() => { setAtBottom(true); }, [ticketId]);
+
+    const onThreadScroll = useCallback((event) => {
+        const node = event.currentTarget;
+        const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+        setAtBottom(gap < NEAR_BOTTOM);
+    }, []);
+
+    const scrollToBottom = useCallback(() => {
+        const node = threadRef.current;
+        if (!node) return;
+        node.scrollTo({ top: node.scrollHeight, behavior: 'smooth' });
+    }, []);
+
+    const toggleAside = useCallback(() => {
+        setAsideOpen((open) => {
+            writeAsidePreference(!open);
+            return !open;
+        });
+    }, []);
+
+    /* Раскрытие панели поджимает переписку, пузыри переверстываются, и лента,
+       стоявшая внизу, оказывается «почти внизу». Догоняем — но только если она
+       и была внизу: иначе панель утаскивала бы читателя истории в конец.
+       Задержка равна длительности перехода в styles.css: пока панель едет,
+       высота содержимого ещё меняется. */
+    useEffect(() => {
+        if (!atBottom) return undefined;
+        const timer = setTimeout(() => {
+            const node = threadRef.current;
+            if (node) node.scrollTop = node.scrollHeight;
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [asideOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Escape закрывает панель — привычка из любого оверлея; на узком экране
+    // панель лежит поверх переписки, и это единственный быстрый выход.
+    useEffect(() => {
+        if (!asideOpen) return undefined;
+        const onKey = (event) => {
+            if (event.key !== 'Escape') return;
+            setAsideOpen(false);
+            writeAsidePreference(false);
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [asideOpen]);
 
     const ticket = data?.item;
     const permissions = data?.permissions || {};
 
     /* Указатель «на что отвечали» строится один раз на всю нить: у каждого
        сообщения искать цель перебором значило бы квадрат на длинной переписке. */
-    const quoteIndex = useMemo(() => indexByTgId(data?.messages), [data?.messages]);
+    const quoteIndex = useMemo(() => indexByTgId(messages), [messages]);
+
+    /* Корневое сообщение уже показано блоком «Обращение» — второй раз тем же
+       текстом это дубль, а не переписка. Дни считаются после отсева: иначе
+       день, в котором осталось одно отсеянное сообщение, дал бы пустую плашку. */
+    const days = useMemo(() => groupByDay(
+        (messages || []).filter((m, index) => !(
+            index === 0 && m.direction === 'out' && m.body === ticket?.body
+        )),
+    ), [messages, ticket?.body]);
 
     /* Переход к оригиналу по клику на цитату — как в Telegram. Подсветку снимаем
        сами: без неё сообщение осталось бы выделенным навсегда. */
@@ -458,6 +751,9 @@ const TicketCard = ({
             setReplyTo(null);
             setAttachment(null);
             if (fileRef.current) fileRef.current.value = '';
+            // Своё сообщение всегда доезжает до экрана: человек только что его
+            // отправил и обязан увидеть, что оно ушло.
+            setAtBottom(true);
             onChanged?.();
         } catch (err) {
             showToast?.(errorText(err, 'Сообщение не ушло'), 'error');
@@ -516,11 +812,12 @@ const TicketCard = ({
     const status = statusMeta(ticket.status);
     const priority = priorityMeta(ticket.priority);
     const closed = ticket.status === 'resolved' || ticket.status === 'cancelled';
+    const overdue = isOverdue(ticket);
 
     return (
         <div className="flex h-full min-h-0 flex-col">
             {/* Шапка карточки */}
-            <div className="shrink-0 border-b border-slate-200/70 px-4 py-3">
+            <div className="shrink-0 border-b border-slate-200/70 bg-white/80 px-4 py-3 backdrop-blur-xl">
                 <div className="flex items-start gap-2">
                     {onBack && (
                         <button type="button" onClick={onBack}
@@ -528,6 +825,11 @@ const TicketCard = ({
                             <ArrowLeft size={16} />
                         </button>
                     )}
+                    <span className={`mt-0.5 hidden shrink-0 place-items-center rounded-[11px] text-[12px] font-semibold ring-1 sm:grid sm:h-[34px] sm:w-[34px] ${
+                        queueTile(ticket.queue_id)
+                    }`}>
+                        {queueMonogram(ticket.queue_title)}
+                    </span>
                     <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                             <span className="text-[12px] font-semibold tabular-nums text-slate-400">
@@ -552,7 +854,7 @@ const TicketCard = ({
                             {ticket.due_at && (
                                 <>
                                     <span className="text-slate-300">·</span>
-                                    <span className={`tabular-nums ${isOverdue(ticket) ? 'font-semibold text-amber-600' : ''}`}>
+                                    <span className={`tabular-nums ${overdue ? 'font-semibold text-amber-600' : ''}`}>
                                         ответ до {fmtDateTime(ticket.due_at)}
                                     </span>
                                 </>
@@ -564,6 +866,21 @@ const TicketCard = ({
                             ? <IosBadge tone={status.tone}>{status.label}</IosBadge>
                             : <span className="text-[11.5px] text-slate-400">{status.label}</span>}
                         {priority.tone && <IosBadge tone={priority.tone}>{priority.label}</IosBadge>}
+                        {/* Само обращение — на расстоянии одного нажатия из
+                            любого места переписки. Кнопка нажатая читается как
+                            нажатая: панель может стоять открытой полдня, и
+                            «откуда она взялась» не должно быть вопросом. */}
+                        <button type="button" onClick={toggleAside}
+                                aria-pressed={asideOpen}
+                                title={asideOpen ? 'Скрыть текст обращения' : 'Показать текст обращения'}
+                                className={`inline-flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[12.5px] font-semibold transition-all active:scale-[0.98] ${
+                                    asideOpen
+                                        ? 'bg-blue-600 text-white shadow-sm hover:bg-blue-700'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                }`}>
+                            <FileText size={14} />
+                            <span className="hidden sm:inline">Обращение</span>
+                        </button>
                     </div>
                 </div>
 
@@ -585,54 +902,104 @@ const TicketCard = ({
                 )}
             </div>
 
-            {/* Переписка */}
-            <div ref={threadRef} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto bg-slate-50/60 px-4 py-4">
-                {/* Текст обращения — тот самый, что ушёл в группу, но разложенный
-                    по блокам и строкам: подпись бледная, ответ тёмный. Одним серым
-                    полотном перечень «вопрос: ответ» не читается вовсе. */}
-                <div className="rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70">
-                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                        Обращение
+            {/* Переписка и панель обращения. relative — под панель: на узком
+                экране она выезжает поверх именно этой области, а не всей
+                страницы. */}
+            <div className="relative flex min-h-0 flex-1 overflow-hidden">
+                <div ref={threadRef} onScroll={onThreadScroll}
+                     className="crm-thread min-h-0 min-w-0 flex-1 overflow-y-auto px-4 pb-4">
+                    {/* Текст обращения в начале переписки. Панель справа его не
+                        отменяет: там он для слежения во время чата, здесь — как
+                        начало разговора, с которого всё и пошло. */}
+                    <div className="mt-3 rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.06)]">
+                        <div className="mb-2 flex items-center gap-1.5">
+                            <FileText size={12} className="text-slate-400" />
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                Обращение
+                            </span>
+                            <span className="ml-auto text-[11px] tabular-nums text-slate-400">
+                                {fmtDateTime(ticket.created_at)}
+                            </span>
+                        </div>
+                        <TicketBody body={ticket.body} />
                     </div>
-                    <div className="space-y-2.5">
-                        {formatTicketBody(ticket.body).map((block, blockIndex) => (
-                            <div key={blockIndex} className="space-y-1">
-                                {block.map((row, rowIndex) => (row.label ? (
-                                    <div key={rowIndex}
-                                         className="flex flex-wrap items-baseline gap-x-1.5 text-[13px] leading-relaxed">
-                                        <span className="text-slate-500">{row.label}</span>
-                                        <span className="min-w-0 break-words font-medium text-slate-800">
-                                            {row.value}
-                                        </span>
-                                    </div>
-                                ) : (
-                                    <div key={rowIndex}
-                                         className="break-words text-[13px] font-medium leading-relaxed text-slate-800">
-                                        {row.text}
-                                    </div>
-                                )))}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-                {(data.messages || [])
-                    /* Корневое сообщение уже показано блоком «Обращение» выше —
-                       второй раз тем же текстом это дубль, а не переписка. */
-                    .filter((m, index) => !(index === 0 && m.direction === 'out' && m.body === ticket.body))
-                    .map((message) => (
-                        <MessageBubble key={message.id} message={message} ticketId={ticket.id}
-                                       quote={quoteOf(message, quoteIndex)}
-                                       apiBaseUrl={apiBaseUrl} headers={headers}
-                                       showToast={showToast}
-                                       onReply={permissions.can_reply ? setReplyTo : null}
-                                       onJumpTo={jumpToMessage} />
+
+                    {days.map((day) => (
+                        <div key={day.key}>
+                            <DayChip>{day.label}</DayChip>
+                            {day.items.map((message, index) => (
+                                <MessageBubble key={message.id} message={message} ticketId={ticket.id}
+                                               quote={quoteOf(message, quoteIndex)}
+                                               grouped={continuesRun(day.items[index - 1], message)}
+                                               apiBaseUrl={apiBaseUrl} headers={headers}
+                                               showToast={showToast}
+                                               onReply={permissions.can_reply ? setReplyTo : null}
+                                               onJumpTo={jumpToMessage} />
+                            ))}
+                        </div>
                     ))}
-                {ticket.resolved_at && (
-                    <div className="flex items-center justify-center gap-1.5 py-1 text-[11.5px] text-emerald-600">
-                        <CheckCircle2 size={13} />
-                        Решено{ticket.resolved_by_name ? ` · ${ticket.resolved_by_name}` : ''} · {fmtDateTime(ticket.resolved_at)}
-                    </div>
+                    {ticket.resolved_at && (
+                        <div className="mt-3 flex items-center justify-center gap-1.5 text-[11.5px] font-medium text-emerald-700">
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 ring-1 ring-emerald-100">
+                                <CheckCircle2 size={13} />
+                                Решено{ticket.resolved_by_name ? ` · ${ticket.resolved_by_name}` : ''} · {fmtDateTime(ticket.resolved_at)}
+                            </span>
+                        </div>
+                    )}
+
+                    {/* «Вниз» появляется только когда человек ушёл читать
+                        историю: внизу она была бы кнопкой «остаться на месте». */}
+                    {!atBottom && (
+                        <button type="button" onClick={scrollToBottom}
+                                title="К свежим сообщениям"
+                                className="absolute bottom-4 left-1/2 z-10 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full bg-white text-slate-500 shadow-[0_4px_14px_rgba(15,23,42,0.18)] ring-1 ring-slate-200/70 transition hover:text-slate-800 active:scale-95">
+                            <ArrowDown size={16} />
+                        </button>
+                    )}
+                </div>
+
+                {/* Затемнение — только там, где панель лежит ПОВЕРХ переписки.
+                    На широком экране она переписку поджимает, и затемнять
+                    нечего: смысл панели как раз в том, чтобы чат остался
+                    рабочим. */}
+                {asideOpen && (
+                    <button type="button" aria-label="Скрыть обращение" onClick={toggleAside}
+                            className="absolute inset-0 z-10 bg-slate-900/25 lg:hidden" />
                 )}
+
+                {/* Панель обращения. Всегда в разметке, а не по условию: иначе у
+                    неё не было бы анимации закрытия — нечему уезжать. Механика
+                    (поджать переписку на широком, наплыть на узком) в
+                    src/styles.css: это медиазапрос, а не набор классов. */}
+                <aside className={`crm-aside ${asideOpen ? 'is-open' : ''}`}
+                       aria-hidden={!asideOpen} aria-label="Текст обращения">
+                    <div className="crm-aside-body">
+                        <div className="flex shrink-0 items-center gap-2 border-b border-slate-200/70 px-3.5 py-2.5">
+                            <FileText size={13} className="text-slate-400" />
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                Обращение №{ticket.id}
+                            </span>
+                            <button type="button" onClick={toggleAside} aria-label="Скрыть обращение"
+                                    className="ml-auto grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-600">
+                                <X size={13} />
+                            </button>
+                        </div>
+                        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-3">
+                            <div className="mb-2.5 text-[13px] font-semibold leading-snug text-slate-900">
+                                {ticket.subject}
+                            </div>
+                            <TicketBody body={ticket.body} />
+                            {(ticket.client_name || ticket.client_phone) && (
+                                <div className="mt-3 border-t border-slate-100 pt-2.5">
+                                    <div className={iosGroupLabel}>Клиент</div>
+                                    <div className="mt-1 text-[12.5px] text-slate-700">
+                                        {[ticket.client_name, ticket.client_phone].filter(Boolean).join(' · ')}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </aside>
             </div>
 
             {/* Ответ и действия */}
@@ -1043,7 +1410,10 @@ export default function CrmTicketsView({
             const response = await axios.get(`${apiBaseUrl}/api/crm/tickets?${params}`,
                 { headers: headers() });
             const items = response.data.items || [];
-            setTickets((prev) => (nextOffset ? [...prev, ...items] : items));
+            // Склейка по id, а не конкатенация: порядок «непрочитанное сверху»
+            // сдвигается от прочтения, и OFFSET на догрузке иначе то пропускает
+            // строку, то приносит дубль (см. mergeTicketsById).
+            setTickets((prev) => (nextOffset ? mergeTicketsById(prev, items) : items));
             setHasMore(Boolean(response.data.has_more));
             // Права приезжают вместе со списком — они уже посчитаны на сервере
             // для этого запроса, и отдельный поход за ними разделу не нужен.
@@ -1113,6 +1483,16 @@ export default function CrmTicketsView({
     const refreshAfterChange = useCallback(() => {
         loadTickets(0, true);
     }, [loadTickets]);
+
+    /* Карточка сообщает, что сервер погасил «непрочитано», — и лента гасит
+       пузырёк у этой строки, не перезапрашиваясь.
+       Функция ОБЯЗАНА быть стабильной: она уходит в зависимости load() внутри
+       карточки, и новая ссылка на каждый рендер раздела означала бы
+       перезагрузку карточки от любого чиха выше (в проекте это уже случалось
+       с showToast). Поэтому setState функцией и пустые зависимости. */
+    const handleSeen = useCallback((ticketId) => {
+        setTickets((prev) => markTicketSeen(prev, ticketId));
+    }, []);
 
     return (
         <div className="w-full" style={{ fontFamily: APPLE_FONT }}>
@@ -1276,6 +1656,7 @@ export default function CrmTicketsView({
                                             headers={headers}
                                             showToast={showToast}
                                             onChanged={refreshAfterChange}
+                                            onSeen={handleSeen}
                                             onBack={() => setSelectedId(null)}
                                             pulse={realtimePulse}
                                         />

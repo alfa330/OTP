@@ -10,6 +10,7 @@ queries.visibility_sql фильтрует список в базе. Фильтр
 """
 
 import re
+import io
 import unittest
 from pathlib import Path
 
@@ -323,9 +324,37 @@ class SchemaContractTest(unittest.TestCase):
         """Индекс без столбца сортировки отдаёт строки, но база их всё равно сортирует."""
         ddl = ' '.join(schema._STATEMENTS)
         for index in ('idx_crm_tickets_author_recent', 'idx_crm_tickets_recent',
-                      'idx_crm_tickets_queue_recent', 'idx_crm_tickets_department_recent'):
+                      'idx_crm_tickets_queue_recent', 'idx_crm_tickets_department_recent',
+                      'idx_crm_tickets_author_attention'):
             self.assertIn(index, ddl, index)
-        self.assertEqual(ddl.count('last_message_at DESC, id DESC'), 4)
+        # Пять индексов и ровно пять хвостов сортировки: каждый список
+        # раздела читается по индексу, а не сортируется базой.
+        self.assertEqual(ddl.count('last_message_at DESC, id DESC'), 5)
+
+    def test_unread_first_order_matches_its_index_word_for_word(self):
+        """Порядок с ВЫРАЖЕНИЕМ берёт индекс только при дословном совпадении.
+
+        Стоит написать в ORDER BY `author_unread_at IS NOT NULL DESC`, а в индексе
+        оставить `IS NULL` — и вместо чтения первых сорока строк база отсортирует
+        весь периметр. Ошибки не будет вовсе — только тишина и медленный список.
+        """
+        ddl = ' '.join(' '.join(schema._STATEMENTS).split())
+        self.assertIn('ON crm_tickets(created_by, (author_unread_at IS NULL), '
+                      'last_message_at DESC, id DESC)', ddl)
+        source = io.open(queries.__file__, encoding='utf-8').read()
+        self.assertIn("'(t.author_unread_at IS NULL), t.last_message_at DESC, t.id DESC'", source)
+
+    def test_unread_counter_is_a_column_not_a_subquery(self):
+        """Счётчик непрочитанного — столбец, и он обязан приехать МИГРАЦИЕЙ.
+
+        В CREATE TABLE ему нельзя: на развёрнутой базе CREATE TABLE IF NOT EXISTS
+        ничего не добавляет, и столбец так и не появится.
+        """
+        migrations = ' '.join(schema._MIGRATIONS)
+        self.assertIn('crm_tickets ADD COLUMN IF NOT EXISTS author_unread_count', migrations)
+        # Индекса по нему нет и не надо: столбец только читается вместе со
+        # строкой, ни один запрос по нему не фильтрует и не сортирует.
+        self.assertNotIn('author_unread_count', ' '.join(schema._STATEMENTS))
 
     def test_search_index_covers_the_columns_the_query_names(self):
         """Индекс по ВЫРАЖЕНИЮ (COALESCE) не подходит запросу по столбцу: замер

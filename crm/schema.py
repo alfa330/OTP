@@ -228,6 +228,21 @@ _STATEMENTS = [
         ON crm_tickets(created_by, author_unread_at DESC)
         WHERE author_unread_at IS NOT NULL
     """,
+    # «Непрочитанное — наверху» в списке СВОИХ обращений (просьба владельца
+    # 20.08.2026). Выражение в ORDER BY по умолчанию отменяет чтение по индексу
+    # и заставляет базу отсортировать весь отобранный набор — поэтому индекс
+    # повторяет порядок сортировки ДОСЛОВНО, вместе с самим выражением. Тогда
+    # база читает первые сорок строк и останавливается.
+    #
+    # Ведущий created_by не для периметра, а потому что «непрочитано» —
+    # свойство автора (см. queries._ticket_row): порядок с этим выражением
+    # запрашивается только там, где выборка сужена до одного автора.
+    """
+    CREATE INDEX IF NOT EXISTS idx_crm_tickets_author_attention
+        ON crm_tickets(created_by, (author_unread_at IS NULL),
+                       last_message_at DESC, id DESC)
+    """,
+
     # Поиск по тексту (ТЗ #29: «поиск по тексту»). ILIKE '%%слово%%' обычным
     # индексом не ускоряется вообще — нужен триграммный GIN. В боевой базе
     # расширение pg_trgm уже стоит (его использует вики), поэтому индекс
@@ -342,6 +357,16 @@ _MIGRATIONS = [
     "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '{}'::jsonb",
     "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS flags JSONB NOT NULL DEFAULT '[]'::jsonb",
     "ALTER TABLE crm_ticket_messages ADD COLUMN IF NOT EXISTS reply_to_tg_message_id BIGINT",
+    # Сколько непрочитанного накопилось у автора. СЧЁТЧИК, а не подсчёт по
+    # переписке: список обращений — самый частый запрос раздела, и подзапрос
+    # COUNT(*) по crm_ticket_messages на КАЖДУЮ строку списка означал бы проход
+    # по нити на каждую строку. Инкремент при входящем и обнуление при открытии
+    # карточки укладываются в те UPDATE, которые и так уже делаются.
+    #
+    # Считаем именно уведомления автору, а не входящие сообщения: «группа
+    # закрыла обращение» — тоже непрочитанное событие, хотя сообщения в нити
+    # за ним нет.
+    "ALTER TABLE crm_tickets ADD COLUMN IF NOT EXISTS author_unread_count INTEGER NOT NULL DEFAULT 0",
 ]
 
 # Очереди, которые нужны сценариям. Заводятся сами и БЕЗ Telegram-группы:

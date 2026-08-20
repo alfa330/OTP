@@ -480,6 +480,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             if queries.mark_seen_by_author(cursor, ticket_id, ctx['user_id']):
                 ticket['unread'] = False
                 ticket['unread_kind'] = None
+                ticket['unread_count'] = 0
         # Историю действий карточка не тянет: она нужна изредка и почти вся
         # повторяет то, что и так видно в переписке. Открывается отдельно
         # (GET /tickets/<id>/events) — один запрос по кнопке вместо лишнего

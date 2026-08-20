@@ -275,7 +275,7 @@ _TICKET_COLUMNS = """
     t.author_unread_at, t.author_unread_kind,
     t.resolved_at, t.resolved_by_name,
     t.created_at, t.updated_at, q.department_id,
-    t.scenario_key, t.answers, t.flags
+    t.scenario_key, t.answers, t.flags, t.author_unread_count
 """
 
 
@@ -314,6 +314,10 @@ def _ticket_row(row, viewer_id=None):
         # чужое обращение, не должен видеть чужую «точку» и тем более гасить её.
         'unread': bool(row[23]) and is_author,
         'unread_kind': row[24] if (row[23] and is_author) else None,
+        # Сколько уведомлений накопилось. Минимум единица, пока признак горит:
+        # у обращений, заведённых до появления счётчика, он остался нулём, и
+        # «непрочитано, но ноль штук» было бы неправдой в обе стороны.
+        'unread_count': (int(row[33] or 0) or 1) if (row[23] and is_author) else 0,
         'resolved_at': _iso(row[25]),
         'resolved_by_name': row[26],
         'created_at': _iso(row[27]),
@@ -337,10 +341,25 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
     колонка «Готово» на доске задач.
 
     Порядок — last_message_at DESC, id DESC, ровно под индексом: без COALESCE и
-    без выражений. «Непрочитанное наверху» отдельным условием в ORDER BY не нужно:
-    входящий ответ двигает last_message_at на «сейчас», и обращение с новым
-    ответом всплывает само. Выражение же в сортировке заставило бы базу
-    отсортировать весь отфильтрованный набор вместо чтения по индексу.
+    без выражений.
+
+    Непрочитанное поднимается наверх (просьба владельца 20.08.2026), но ТОЛЬКО
+    в выборке своих обращений, и на это две причины.
+
+    Первая — смысл. «Непрочитано» есть у автора и ни у кого больше (см.
+    _ticket_row), так что в списке «Все» поднимать нечего: признак там пуст у
+    всех строк, и выражение в сортировке было бы платой за ничего.
+
+    Вторая — план. Изначально «наверх» здесь не делали как раз потому, что
+    выражение в ORDER BY отменяет чтение по индексу. Теперь под этот порядок
+    есть свой индекс (idx_crm_tickets_author_attention), повторяющий его
+    дословно вместе с выражением, — и база снова читает первые сорок строк и
+    останавливается. Ведущий столбец индекса — created_by, поэтому порядок
+    запрашивается только когда выборка сужена до одного автора.
+
+    Довод «входящий ответ и так двигает last_message_at» на деле не работал:
+    ответ двухдневной давности, который человек ещё не открыл, уезжал вниз под
+    всё, что он завёл после.
     """
     where, params = visibility_sql(ctx)
     clauses = [where]
@@ -407,6 +426,13 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
                 OR t.body ILIKE %(search)s
             )""")
 
+    # Выборка сужена до одного автора? Тогда «непрочитанное наверху» и имеет
+    # смысл, и укладывается в индекс. mine без поиска — сегмент «Мои»; SCOPE_OWN —
+    # оператор, который своё и видит.
+    own_only = bool(mine and not search) or access.visibility_scope(ctx) == access.SCOPE_OWN
+    order = ('(t.author_unread_at IS NULL), t.last_message_at DESC, t.id DESC'
+             if own_only else 't.last_message_at DESC, t.id DESC')
+
     page = max(1, min(int(limit), 200))
     # Просим на одну строку больше, чем покажем: она и есть ответ на вопрос
     # «есть ли ещё», и стоит чтения одной строки, а не подсчёта всех.
@@ -420,14 +446,57 @@ def list_tickets(cursor, ctx, *, status=None, queue_id=None, mine=False, unread_
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
          WHERE %s
-         ORDER BY t.last_message_at DESC, t.id DESC
+         ORDER BY %s
          LIMIT %%(limit)s OFFSET %%(offset)s
-        """ % (_TICKET_COLUMNS, ' AND '.join(clauses)),
+        """ % (_TICKET_COLUMNS, ' AND '.join(clauses), order),
         params,
     )
     rows = cursor.fetchall()
     has_more = len(rows) > page
-    return [_ticket_row(row, ctx['user_id']) for row in rows[:page]], has_more
+    items = [_ticket_row(row, ctx['user_id']) for row in rows[:page]]
+    attach_previews(cursor, items)
+    return items, has_more
+
+
+def attach_previews(cursor, items):
+    """Дописывает в строки списка последнюю реплику нити — как в мессенджере.
+
+    Отдельным запросом, а не LATERAL внутри списка, намеренно. LATERAL пришлось
+    бы считать до сортировки: порядок «непрочитанное наверху» — выражение, и
+    планировщик волен собрать соединение раньше, чем отсечёт лишние строки.
+    Здесь же вопрос задаётся ровно про те сорок id, которые действительно
+    поедут на экран, и отвечает на него DISTINCT ON по тому же индексу
+    (ticket_id, created_at, id), которым читается сама переписка.
+
+    Пустая нить бывает: обращение, которое ещё не ушло в Telegram. Такой строке
+    превью просто не достанется, и лента покажет тему — без заглушек.
+    """
+    ids = [int(item['id']) for item in items]
+    if not ids:
+        return items
+    cursor.execute(
+        """
+        SELECT DISTINCT ON (m.ticket_id)
+               m.ticket_id, m.direction, m.author_name, m.tg_from_name,
+               m.body, m.attachment_kind, m.attachment_name, m.created_at
+          FROM crm_ticket_messages m
+         WHERE m.ticket_id = ANY(%s)
+         ORDER BY m.ticket_id, m.created_at DESC, m.id DESC
+        """,
+        (ids,),
+    )
+    preview = {}
+    for row in cursor.fetchall():
+        preview[row[0]] = {
+            'direction': row[1],
+            'author_name': row[2] or row[3],
+            'body': row[4],
+            'attachment': ({'kind': row[5], 'name': row[6]} if row[5] else None),
+            'created_at': _iso(row[7]),
+        }
+    for item in items:
+        item['last_message'] = preview.get(int(item['id']))
+    return items
 
 
 def get_ticket(cursor, ticket_id, viewer_id=None):
@@ -674,6 +743,10 @@ def touch_inbound(cursor, ticket_id, *, unread_kind=UNREAD_REPLY, mark_answered=
 
     Статус переводим в 'answered' только из рабочих: у решённого обращения
     дописка в чате не должна воскрешать его в списке «ждут ответа».
+
+    Счётчик непрочитанного увеличивается на каждое входящее — он и есть то
+    число, которое лента показывает пузырьком у обращения. Обнуляется не по
+    таймеру и не колоколом, а открытием карточки (mark_seen_by_author).
     """
     cursor.execute(
         """
@@ -686,6 +759,7 @@ def touch_inbound(cursor, ticket_id, *, unread_kind=UNREAD_REPLY, mark_answered=
                    ELSE status END,
                author_unread_at = {now},
                author_unread_kind = %(kind)s,
+               author_unread_count = author_unread_count + 1,
                updated_at = {now}
          WHERE id = %(id)s
         """.format(now=_NOW),
@@ -727,6 +801,7 @@ def set_status(cursor, ticket_id, status, *, actor_user_id=None, actor_name=None
                resolved_by_name = CASE WHEN %(resolved)s THEN %(actor_name)s ELSE NULL END,
                author_unread_at = CASE WHEN %(notify)s THEN {now} ELSE author_unread_at END,
                author_unread_kind = CASE WHEN %(notify)s THEN %(kind)s ELSE author_unread_kind END,
+               author_unread_count = author_unread_count + CASE WHEN %(notify)s THEN 1 ELSE 0 END,
                updated_at = {now}
          WHERE id = %(id)s
         """.format(now=_NOW),
@@ -747,8 +822,10 @@ def mark_seen_by_author(cursor, ticket_id, user_id):
     cursor.execute(
         """
         UPDATE crm_tickets
-           SET author_unread_at = NULL, author_unread_kind = NULL
-         WHERE id = %s AND created_by = %s AND author_unread_at IS NOT NULL
+           SET author_unread_at = NULL, author_unread_kind = NULL,
+               author_unread_count = 0
+         WHERE id = %s AND created_by = %s
+           AND (author_unread_at IS NOT NULL OR author_unread_count > 0)
         """,
         (int(ticket_id), int(user_id)),
     )
