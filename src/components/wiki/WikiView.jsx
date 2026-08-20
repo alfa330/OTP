@@ -1,13 +1,14 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, BookOpen, FileText, FolderTree, KeyRound, Layers, MapPin,
+    AlertCircle, BookOpen, FileText, FolderTree, Home, KeyRound, Layers, MapPin,
     Building2, Loader2, Plus, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import WikiLibrary from './WikiLibrary';
+import WikiCatalog from './WikiCatalog';
 import WikiParks from './WikiParks';
 import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
@@ -77,6 +78,16 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [structureLoading, setStructureLoading] = useState(true);
     const [tab, setTab] = useState('library');
     const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight}
+    /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
+       двум причинам: счётчики на главной берут из них свои числа (иначе «29
+       статей» и список за плиткой считались бы разными запросами и разошлись),
+       и «Обновить» в шапке обязана обновлять и их тоже. */
+    const [catalog, setCatalog] = useState(null);
+    const [catalogLoading, setCatalogLoading] = useState(true);
+    /* Корзина каталога тоже здесь: на неё нажимают со СЧЁТЧИКОВ главной
+       («9 черновиков» открывает каталог сразу в черновиках), а вкладка при
+       уходе размонтируется и локальное состояние потеряла бы. */
+    const [catalogBucket, setCatalogBucket] = useState('published');
     /* Счётчик нажатий «Новая статья»: кнопка живёт в шапке раздела, редактор —
        во вкладке со статьями. Счётчик, а не флаг: после закрытия редактора его
        не нужно гасить, чтобы кнопка сработала во второй раз. */
@@ -101,7 +112,16 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             .finally(() => setStructureLoading(false));
     }, [base, headers]);
 
-    useEffect(() => { loadPing(); loadStructure(); }, [loadPing, loadStructure]);
+    const loadCatalog = useCallback(() => {
+        setCatalogLoading(true);
+        return axios.get(`${base}/catalog`, { headers })
+            .then((r) => setCatalog(r.data))
+            .catch(() => setCatalog(null))
+            .finally(() => setCatalogLoading(false));
+    }, [base, headers]);
+
+    useEffect(() => { loadPing(); loadStructure(); loadCatalog(); },
+             [loadPing, loadStructure, loadCatalog]);
 
     const capabilities = state?.capabilities || {};
     const granted = Object.keys(CAPABILITY_LABELS).filter((key) => capabilities[key]);
@@ -116,11 +136,15 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const canEdit = !!(capabilities.can_edit || capabilities.can_publish);
 
     const tabs = useMemo(() => ([
-        { key: 'library', label: 'Статьи', icon: BookOpen, show: true },
+        { key: 'library', label: 'Главная', icon: Home, show: true },
         // Показан всем: периметр считает сервер, и гейт по способности здесь
         // был бы вреден — он мигал бы false во время загрузки ping, а эффект
         // ниже выкидывал бы человека из открытого чата.
         { key: 'assistant', label: 'Помощник', icon: Sparkles, show: true },
+        // Каталог по разделам. Стоит после помощника по просьбе владельца;
+        // гейта нет — сервер отдаёт только разделы периметра, и у человека без
+        // доступа вкладка честно говорит, что разделов ему не открыто.
+        { key: 'catalog', label: 'Статьи', icon: BookOpen, show: true },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'parks', label: 'Парки', icon: Building2, show: true },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: true },
@@ -144,7 +168,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     }, [initialArticleSlug]);
 
     const refresh = () => {
-        Promise.all([loadPing(), loadStructure()])
+        Promise.all([loadPing(), loadStructure(), loadCatalog()])
             .then(() => showToast?.('Обновлено', 'success'));
     };
 
@@ -391,12 +415,22 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         headers={headers}
                         showToast={showToast}
                         structure={structure}
-                        counters={counters}
+                        catalog={catalog}
                         canCreate={!!capabilities.can_create}
                         canEdit={canEdit}
                         createTick={createTick}
                         homeTick={homeTick}
                         onOpenParks={() => setTab('parks')}
+                        /* Счётчики на главной — не подписи, а кнопки: число
+                           ведёт туда, где лежит то, что оно посчитало. */
+                        onOpenCatalog={(bucket) => {
+                            setCatalogBucket(bucket);
+                            setTab('catalog');
+                        }}
+                        /* Правка статьи меняет числа каталога: опубликовали
+                           черновик — «Черновиков» обязано уменьшиться сразу, а
+                           не при следующем заходе в раздел. */
+                        reloadCatalog={loadCatalog}
                         initialSlug={initialArticleSlug}
                         onInitialSlugConsumed={onInitialArticleConsumed}
                         searchTarget={searchTarget}
@@ -424,6 +458,25 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             }}
                         />
                     </Suspense>
+                )}
+
+                {tab === 'catalog' && (
+                    <WikiCatalog
+                        base={base}
+                        headers={headers}
+                        showToast={showToast}
+                        catalog={catalog}
+                        loading={catalogLoading}
+                        bucket={catalogBucket}
+                        onBucketChange={setCatalogBucket}
+                        /* Статья открывается на главной — там живут читалка,
+                           редактор и оглавление. Второго экрана статьи в
+                           каталоге быть не должно. */
+                        onOpenArticle={(slug) => {
+                            setTab('library');
+                            setSearchTarget({ slug });
+                        }}
+                    />
                 )}
 
                 {tab === 'parks' && (

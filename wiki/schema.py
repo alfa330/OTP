@@ -51,6 +51,28 @@ ARTICLE_TYPES = (
     'general', 'job_description', 'regulation', 'instruction', 'tool_description',
 )
 
+# Статусы статьи, сгруппированные в три корзины витрины: «Статьи», «Черновики»,
+# «Архив». Переключатель на вкладке «Статьи» и счётчики на главной обязаны
+# считать ОДИНАКОВО — иначе плитка «9 черновиков» открывает список из семи.
+#
+# Корзины покрывают ВСЕ шесть статусов CHECK'а wiki_articles намеренно: статус,
+# не попавший ни в одну, исчез бы из раздела молча. Поэтому 'on_approval' и
+# 'requires_verification' лежат в черновиках (текст ещё не выпущен), а
+# 'expired' — в архиве (выпущен и отозван временем).
+ARTICLE_BUCKETS = {
+    'published': ('published',),
+    'draft': ('draft', 'on_approval', 'requires_verification'),
+    'archived': ('archived', 'expired'),
+}
+
+# Обратное отображение: статус → корзина. Строится из ARTICLE_BUCKETS, чтобы
+# второго списка, который можно забыть обновить, не появилось.
+BUCKET_OF_STATUS = {
+    status: bucket
+    for bucket, statuses in ARTICLE_BUCKETS.items()
+    for status in statuses
+}
+
 # Шесть прав. В оригинальной вики их пять — can_delete добавлено нами.
 PERMISSION_COLUMNS = (
     'can_read', 'can_create', 'can_edit', 'can_delete', 'can_publish', 'can_approve',

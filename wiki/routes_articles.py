@@ -14,6 +14,7 @@ from . import perimeter as wiki_perimeter
 from . import queries
 from . import schema as wiki_schema
 from . import search as wiki_search
+from . import structure
 
 
 def _int_or_none(value):
@@ -21,6 +22,30 @@ def _int_or_none(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bucket():
+    """Корзина витрины из запроса: «Статьи», «Черновики» или «Архив».
+
+    Неизвестное значение — как отсутствующее: витрина отдаёт всё, что видно.
+    Молчаливый отказ на опечатку в адресе здесь хуже широкой выдачи — периметр
+    всё равно считается отдельно и ничего лишнего не пропустит.
+    """
+    value = (request.args.get('bucket') or '').strip()
+    return wiki_schema.ARTICLE_BUCKETS.get(value)
+
+
+def _section_filter():
+    """Раздел из запроса: (section_id, только_без_раздела).
+
+    ?section_id=none — статьи, не привязанные ни к одному разделу. Отдельное
+    слово, а не 0 и не пустая строка: 0 неотличим от «не передали», а плитка
+    «Без раздела» в каталоге обязана открываться.
+    """
+    raw = (request.args.get('section_id') or '').strip().lower()
+    if raw == 'none':
+        return None, True
+    return _int_or_none(raw), False
 
 
 def _article_type():
@@ -60,15 +85,71 @@ def register(bp, wiki_route, db, log_ip, gcs):
         _subjects, _sections, visible = _browse(cursor, ctx)
         limit = min(max(_int_or_none(request.args.get('limit')) or 50, 1), 200)
         offset = max(_int_or_none(request.args.get('offset')) or 0, 0)
+        section_id, orphans_only = _section_filter()
         items = wiki_articles.list_articles(
             cursor, visible,
-            section_id=_int_or_none(request.args.get('section_id')),
+            section_id=section_id,
+            orphans_only=orphans_only,
             status=(request.args.get('status') or None),
+            statuses=_bucket(),
             article_type=_article_type(),
             query=(request.args.get('q') or None),
             limit=limit, offset=offset,
         )
         return jsonify({"items": items, "total_visible": len(visible)})
+
+    # ── Каталог по разделам ──────────────────────────────────────────────
+    @wiki_route('/catalog')
+    def wiki_catalog(cursor, ctx):
+        """Плитки вкладки «Статьи»: разделы периметра и число статей в каждом.
+
+        Периметр тот же ЛИЧНЫЙ, что у списка и поиска (_browse): плитка обязана
+        открываться тем же содержимым, которое отдаст /articles по этому разделу.
+        Считай их разные периметры — и раздел показывал бы «12 статей», а внутри
+        лежало три.
+
+        Архивные разделы и пространства отсеяны: архивируют обычно дубль с тем
+        же именем, и в сетке плиток он неотличим от живого (см. sectionPicker.js
+        во фронте — там та же причина).
+
+        totals отдаём отдельно от суммы по разделам: статья лежит сразу в
+        нескольких разделах, и сумма плиток её посчитала бы дважды. Именно
+        totals стоит на счётчиках главной, поэтому «29 статей» и список за
+        плиткой берутся из одного числа.
+        """
+        _subjects, allowed, visible = _browse(cursor, ctx)
+        counts = wiki_articles.catalog_counts(cursor, visible)
+
+        sections = [
+            {
+                'id': section['id'],
+                'space_id': section['space_id'],
+                'parent_section_id': section['parent_section_id'],
+                'name': section['name'],
+                'icon': section['icon'],
+                'department_name': section['department_name'],
+                'counts': counts['sections'].get(section['id'],
+                                                 {k: 0 for k in wiki_schema.ARTICLE_BUCKETS}),
+            }
+            for section in structure.list_sections(cursor, include_archived=False)
+            if section['id'] in allowed
+        ]
+        used_spaces = {s['space_id'] for s in sections}
+        spaces = [
+            {'id': sp['id'], 'name': sp['name'], 'icon': sp['icon']}
+            for sp in structure.list_spaces(cursor, include_archived=False)
+            if sp['id'] in used_spaces
+        ]
+        return jsonify({
+            "spaces": spaces,
+            "sections": sections,
+            # Наследие импорта: статья без единого раздела. Плитку рисуем только
+            # когда такие статьи есть — пустая строка «Без раздела» в каталоге
+            # была бы вопросом без ответа.
+            "orphans": counts['orphans'],
+            "totals": counts['totals'],
+            "sections_total": len(sections),
+        })
 
     # ── Поиск ────────────────────────────────────────────────────────────
     @wiki_route('/search')

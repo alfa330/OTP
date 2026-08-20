@@ -108,10 +108,10 @@ const TypeChip = ({ active, onClick, children }) => (
     </button>
 );
 
-export default function WikiLibrary({ base, headers, showToast, structure, counters,
+export default function WikiLibrary({ base, headers, showToast, structure, catalog,
                                       canCreate, canEdit = false,
                                       createTick = 0, homeTick = 0,
-                                      onOpenParks,
+                                      onOpenParks, onOpenCatalog, reloadCatalog,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
@@ -120,6 +120,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const toast = useStableCallback(showToast);
     const consumeInitialSlug = useStableCallback(onInitialSlugConsumed);
     const consumeSearchTarget = useStableCallback(onSearchTargetConsumed);
+    const refreshCatalog = useStableCallback(reloadCatalog);
 
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
     // Открытый парк — такая же страница витрины, как статья (см. WikiPark).
@@ -137,7 +138,6 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
     const [indexLoading, setIndexLoading] = useState(true);
     const [home, setHome] = useState(null);
     const [homeLoading, setHomeLoading] = useState(true);
-    const [drafts, setDrafts] = useState([]);
     const [parks, setParks] = useState([]);
     const [parksCanManage, setParksCanManage] = useState(false);
     const [found, setFound] = useState(null);   // null = поиска не было
@@ -308,17 +308,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
             .finally(() => setHomeLoading(false));
     }, [base, headers]);
 
-    const loadDrafts = useCallback(() => {
-        if (!isEditor) { setDrafts([]); return Promise.resolve(); }
-        return axios.get(`${base}/articles`, { headers,
-                                              params: { status: 'draft', limit: 8 } })
-            .then((r) => setDrafts(r.data?.items || []))
-            .catch(() => setDrafts([]));
-    }, [base, headers, isEditor]);
-
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
-    useEffect(() => { loadDrafts(); }, [loadDrafts]);
 
     useEffect(() => {
         axios.get(`${base}/parks`, { headers })
@@ -405,8 +396,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                         setEditing(null);
                         load();
                         loadIndex();
-                        loadDrafts();
                         loadHome();
+                        // Числа каталога меняются той же правкой: опубликовали
+                        // черновик — «Черновиков» обязано уменьшиться сразу.
+                        refreshCatalog();
                         if (slug) setOpenSlug(slug);
                     }}
                 />
@@ -454,7 +447,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                     // в витрине уже нет.
                     setOpenSlug(null);
                     load();
+                    loadIndex();
                     loadHome();
+                    refreshCatalog();
                 }}
             />
         );
@@ -617,11 +612,13 @@ export default function WikiLibrary({ base, headers, showToast, structure, count
                     ) : (
                         <WikiHome
                             isEditor={isEditor}
-                            counters={counters}
+                            totals={catalog?.totals}
+                            sectionsTotal={catalog?.sections_total}
                             parksCount={parks.length}
-                            drafts={drafts}
                             home={home}
                             onOpen={openArticle}
+                            onOpenCatalog={onOpenCatalog}
+                            onOpenParks={onOpenParks}
                         />
                     )
                 )}

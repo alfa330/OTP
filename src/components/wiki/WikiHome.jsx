@@ -1,5 +1,5 @@
 import React from 'react';
-import { Clock, Eye, FileText, PenLine, Star } from 'lucide-react';
+import { Building2, Clock, Eye, FileText, FolderTree, PenLine, Star } from 'lucide-react';
 import { iosCard } from '../ui/ios';
 
 /* Центральная колонка витрины, когда человек ничего не ищет: счётчики, два
@@ -26,13 +26,30 @@ const fmtAgo = (iso) => {
     return then.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' });
 };
 
-const StatTile = ({ value, label }) => (
-    <div className="rounded-xl px-3 py-2.5 ring-1 ring-slate-200/70">
-        <div className="text-[19px] font-bold leading-none tracking-[-0.02em] text-slate-900 tabular-nums">
-            {value}
+/* Счётчик — кнопка, а не подпись.
+ *
+ * Раньше это были четыре мёртвых числа: человек читал «9 черновиков» и шёл
+ * искать их руками. Теперь число ведёт ровно туда, где лежит то, что оно
+ * посчитало, — в каталог с нужной корзиной или в справочник парков.
+ *
+ * Иконка нужна как раз потому, что плитка стала кнопкой: без неё четыре
+ * одинаковых прямоугольника с цифрами не читаются как действие.
+ */
+const StatTile = ({ icon: Icon, value, label, hint, onClick }) => (
+    <button
+        type="button"
+        onClick={onClick}
+        title={hint}
+        className="group rounded-xl px-3 py-2.5 text-left ring-1 ring-slate-200/70 transition hover:bg-slate-50 hover:ring-slate-300 active:scale-[0.98]"
+    >
+        <div className="flex items-center gap-1.5">
+            <Icon size={11} className="shrink-0 text-slate-400 transition group-hover:text-indigo-500" />
+            <div className="text-[19px] font-bold leading-none tracking-[-0.02em] text-slate-900 tabular-nums">
+                {value}
+            </div>
         </div>
         <div className="mt-1 text-[10.5px] text-slate-500">{label}</div>
-    </div>
+    </button>
 );
 
 const MiniCard = ({ title, subtitle, meta, onClick }) => (
@@ -65,20 +82,47 @@ const POP_TONES = [
     'bg-pink-50 text-pink-600',
 ];
 
-export default function WikiHome({ isEditor, counters, parksCount, drafts, home, onOpen }) {
+export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
+                                   home, onOpen, onOpenCatalog, onOpenParks }) {
     const favorites = (home?.favorites || []).slice(0, 4);
     const recent = (home?.recent || []).slice(0, 4);
     const popular = (home?.popular || []).slice(0, 4);
-    const shownDrafts = (drafts || []).slice(0, 4);
 
     return (
         <>
-            {isEditor && counters && (
+            {/* Числа — из каталога, то есть из ПЕРИМЕТРА человека, а не из всей
+                базы. Иначе счётчик обещал бы 29 статей, а список за ним отдавал
+                двенадцать — те, к которым у человека есть доступ. */}
+            {isEditor && totals && (
                 <div className={`${iosCard} grid grid-cols-2 gap-2 p-2.5 sm:grid-cols-4`}>
-                    <StatTile value={counters.articles_published} label="Статей" />
-                    <StatTile value={counters.articles_draft ?? 0} label="Черновиков" />
-                    <StatTile value={parksCount} label="Парков" />
-                    <StatTile value={counters.sections} label="Разделов" />
+                    <StatTile
+                        icon={FileText}
+                        value={totals.published ?? 0}
+                        label="Статей"
+                        hint="Открыть каталог: опубликованные статьи"
+                        onClick={() => onOpenCatalog?.('published')}
+                    />
+                    <StatTile
+                        icon={PenLine}
+                        value={totals.draft ?? 0}
+                        label="Черновиков"
+                        hint="Открыть каталог: черновики и статьи на согласовании"
+                        onClick={() => onOpenCatalog?.('draft')}
+                    />
+                    <StatTile
+                        icon={Building2}
+                        value={parksCount}
+                        label="Парков"
+                        hint="Открыть справочник таксопарков"
+                        onClick={() => onOpenParks?.()}
+                    />
+                    <StatTile
+                        icon={FolderTree}
+                        value={sectionsTotal ?? 0}
+                        label="Разделов"
+                        hint="Открыть каталог разделов"
+                        onClick={() => onOpenCatalog?.('published')}
+                    />
                 </div>
             )}
 
@@ -86,33 +130,12 @@ export default function WikiHome({ isEditor, counters, parksCount, drafts, home,
                 отдаёт полке 309 px, и в двух колонках карточек от заголовка
                 оставалось «Как заправить…». Ширина колонки здесь важнее того,
                 что блок займёт две строки. */}
+            {/* Полки «Черновики и модерация» здесь больше нет: черновики живут
+                на вкладке «Статьи», и счётчик «Черновиков» выше открывает их
+                там же — целиком и по разделам, а не первыми четырьмя. Держать
+                на главной вторую, урезанную копию того же списка значило бы
+                показывать одно и то же в двух местах и по-разному. */}
             <div className="grid grid-cols-1 gap-3 2xl:grid-cols-2">
-                {isEditor && (
-                    <Panel
-                        icon={PenLine}
-                        title="Черновики и модерация"
-                        items={shownDrafts}
-                        empty="Неопубликованных статей нет."
-                    >
-                        {shownDrafts.map((article) => (
-                            <MiniCard
-                                key={article.id}
-                                title={article.title}
-                                subtitle={article.summary || 'Без описания'}
-                                meta={(
-                                    <>
-                                        <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-700">
-                                            Черновик
-                                        </span>
-                                        <span className="truncate">{article.author_name || '—'}</span>
-                                    </>
-                                )}
-                                onClick={() => onOpen(article.slug)}
-                            />
-                        ))}
-                    </Panel>
-                )}
-
                 {/* Избранное показываем ВСЕГДА, а не «когда нет черновиков».
                     Раньше эти две полки делили одно место, и у редактора с
                     единственным черновиком избранное пропадало с экрана целиком

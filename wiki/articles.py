@@ -30,6 +30,7 @@
 # с разделами, из wiki/queries.py. Двух определений быть не должно:
 # в оригинальной вике они разошлись, и список статей с деревом разделов
 # показывали разное.
+from . import schema as wiki_schema
 from .queries import SUBJECT_MATCH as _SUBJECT_MATCH, subject_params
 
 _VISIBLE_ARTICLES_SQL = """
@@ -173,7 +174,12 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
    AND (%(section)s::int IS NULL
         OR EXISTS (SELECT 1 FROM wiki_article_sections s
                     WHERE s.article_id = a.id AND s.section_id = %(section)s::int))
-   AND (%(status)s::text IS NULL OR a.status = %(status)s::text)
+   -- Статья без единого раздела: отдельный запрос витрины, а не «section IS NULL».
+   -- Такие статьи есть только в наследии импорта (сервер давно кладёт новую в
+   -- отдел автора), и без этого условия они не открываются ни с одной плитки.
+   AND (NOT %(orphans)s
+        OR NOT EXISTS (SELECT 1 FROM wiki_article_sections s WHERE s.article_id = a.id))
+   AND (%(statuses)s::text[] IS NULL OR a.status = ANY(%(statuses)s::text[]))
    AND (%(article_type)s::text IS NULL OR a.article_type = %(article_type)s::text)
    AND (%(query)s::text IS NULL
         OR a.title ILIKE '%%' || %(query)s::text || '%%'
@@ -184,11 +190,20 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
 
 
 def list_articles(cursor, visible_ids, *, section_id=None, status=None,
+                  statuses=None, orphans_only=False,
                   article_type=None, query=None, limit=50, offset=0):
+    """Список статей в границах уже посчитанного периметра.
+
+    status и statuses — один и тот же фильтр с разной шириной: первый берёт один
+    статус (так спрашивает ?status= в адресе), второй — корзину витрины целиком
+    (ARTICLE_BUCKETS). Заданы оба — побеждает statuses.
+    """
     if not visible_ids:
         return []
+    wanted = list(statuses) if statuses else ([status] if status else None)
     cursor.execute(_LIST_SQL, {
-        'ids': list(visible_ids), 'section': section_id, 'status': status,
+        'ids': list(visible_ids), 'section': section_id, 'statuses': wanted,
+        'orphans': bool(orphans_only),
         'article_type': article_type or None,
         'query': query or None, 'limit': limit, 'offset': offset,
     })
@@ -199,6 +214,80 @@ def list_articles(cursor, visible_ids, *, section_id=None, status=None,
         item['tags'] = list(item['tags'] or [])
         rows.append(item)
     return rows
+
+
+# ── Каталог: сколько статей в каждом разделе, по корзинам ────────────────────
+
+_CATALOG_SECTION_SQL = """
+SELECT s.section_id, a.status, count(*)
+  FROM wiki_article_sections s
+  JOIN wiki_articles a ON a.id = s.article_id
+ WHERE s.article_id = ANY(%(ids)s)
+ GROUP BY s.section_id, a.status
+"""
+
+# Статьи, не привязанные ни к одному разделу. Считаются ОТДЕЛЬНЫМ запросом, а не
+# вычитанием из суммы по разделам: статья может лежать сразу в нескольких
+# разделах, и в такой разности она вычлась бы дважды.
+_CATALOG_ORPHAN_SQL = """
+SELECT a.status, count(*)
+  FROM wiki_articles a
+ WHERE a.id = ANY(%(ids)s)
+   AND NOT EXISTS (SELECT 1 FROM wiki_article_sections s WHERE s.article_id = a.id)
+ GROUP BY a.status
+"""
+
+_CATALOG_TOTAL_SQL = """
+SELECT a.status, count(*)
+  FROM wiki_articles a
+ WHERE a.id = ANY(%(ids)s)
+ GROUP BY a.status
+"""
+
+
+def _empty_buckets():
+    return {bucket: 0 for bucket in wiki_schema.ARTICLE_BUCKETS}
+
+
+def _add_status(target, status, count):
+    """Разложить статус по корзинам витрины. Неизвестный статус не теряем.
+
+    В базе стоит CHECK, но корзины — код рядом, а не тот же CHECK: появись
+    седьмой статус в схеме без правки ARTICLE_BUCKETS, статьи исчезли бы из
+    раздела молча. Пусть лучше упадут в черновики и попадутся на глаза.
+    """
+    bucket = wiki_schema.BUCKET_OF_STATUS.get(status, 'draft')
+    target[bucket] = target.get(bucket, 0) + count
+
+
+def catalog_counts(cursor, visible_ids):
+    """Счётчики каталога в границах периметра: по разделам, без раздела и всего.
+
+    Возвращает {'sections': {id: {bucket: n}}, 'orphans': {bucket: n},
+    'totals': {bucket: n}}. Три запроса на весь каталог, а не по разделу:
+    N+1 здесь означал бы запрос на каждую плитку.
+    """
+    ids = list(visible_ids or ())
+    empty = {'sections': {}, 'orphans': _empty_buckets(), 'totals': _empty_buckets()}
+    if not ids:
+        return empty
+
+    by_section = {}
+    cursor.execute(_CATALOG_SECTION_SQL, {'ids': ids})
+    for section_id, status, count in cursor.fetchall():
+        _add_status(by_section.setdefault(section_id, _empty_buckets()), status, count)
+
+    orphans = _empty_buckets()
+    cursor.execute(_CATALOG_ORPHAN_SQL, {'ids': ids})
+    for status, count in cursor.fetchall():
+        _add_status(orphans, status, count)
+
+    totals = _empty_buckets()
+    cursor.execute(_CATALOG_TOTAL_SQL, {'ids': ids})
+    for status, count in cursor.fetchall():
+        _add_status(totals, status, count)
+
+    return {'sections': by_section, 'orphans': orphans, 'totals': totals}
 
 
 _ARTICLE_KEYS = ('id', 'slug', 'title', 'summary', 'content', 'article_type', 'status',
