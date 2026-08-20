@@ -1,22 +1,30 @@
 """Обход кабинета: из списка ID — таблица с провайдером ЭДО.
 
-Порядок работы и почему он такой:
+Экономика обхода держится на одном измерении (20.08.2026): **фильтр принимает
+минимум 10 000 идентификаторов за раз**, а сотня — это ограничение размера
+СТРАНИЦЫ ответа, не запроса. Значит цена запроса зависит от числа НАЙДЕННЫХ, а не
+спрошенных: диспетчерская, где из списка нет никого, отвечает одним запросом, будь
+в файле десять строк или десять тысяч. Второе измерение: шесть параллельных
+запросов кабинет держит без роста времени ответа (590/мин против 170 в один поток),
+а 429 не приходил ни разу.
 
-1. **Разбор файла.** Ищем колонку с ID водителя и, если она есть, колонку с ID
-   парка. Парк — не прихоть: список контрагентов парко-зависим, те же ID с чужим
-   `x-park-id` дают 200 и пустоту (проверено 20.08.2026). Обычная выгрузка из
-   кабинета колонку «ID парка» содержит, поэтому в типичном случае шага 2 нет.
+Порядок работы:
 
-2. **Определение парка** для строк, где его не дали: перебор парков пачками по
-   100 ID, с ранним выходом — как только все определились, перебор кончается.
-   Дорого: цена растёт числом парков, а не числом строк. В отчёт пишем, сколько
-   это стоило, чтобы «файл без парка» не выглядел бесплатным.
+1. **Разбор файла.** Ищем колонку с ID водителя и, если есть, колонку с ID парка.
+   Парк — не прихоть: список парко-зависим, те же ID с чужим `x-park-id` дают 200
+   и пустоту. Обычная выгрузка из кабинета колонку «ID парка» содержит.
 
-3. **Провайдер пачками.** На каждый парк: «кто из этой сотни у провайдера X».
-   Семь провайдеров = максимум семь проходов по остатку, потом такой же проход по
-   архиву. Провайдеры на каждом следующем парке переставляются по частоте уже
-   найденного: три четверти водителей на «Бумажном документообороте», и если
-   спросить про него первым, остальные проходы идут по короткому остатку.
+2. **Определение парка** для строк без него: каждой диспетчерской отдаём ВЕСЬ
+   остаток списка разом, диспетчерские опрашиваем параллельно. Раньше это стоило
+   86 × (строк/100) запросов и было самым дорогим местом раздела; теперь — 86
+   запросов плюс страница на сотню найденных.
+
+3. **Провайдер раундами.** Раунд на провайдера, внутри раунда парки идут
+   параллельно; найденные уходят из очереди, следующий раунд спрашивает про
+   остаток. «Бумажный документооборот» первым — на нём три четверти водителей.
+   Потом такие же раунды по архиву: это отдельный сегмент, по умолчанию список
+   его не отдаёт вовсе. Парки, где остались один-два водителя, дешевле спросить
+   карточками — они уходят туда сразу.
 
 4. **Добор карточками.** Фильтр списка молча не возвращает часть действующих
    профилей — 286 строк из 147 238 в августе и 4 из 8 800 в повторном прогоне.
@@ -32,9 +40,19 @@
 import logging
 import random
 import re
+import threading
 from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
-from .client import MAX_BATCH, FleetClient, FleetError, FleetSessionExpired
+from .client import MAX_FILTER_IDS, FleetClient, FleetError, FleetSessionExpired
+
+# Ниже этого числа водителей в парке дешевле спросить карточки, чем ждать раундов
+# по провайдерам. Арифметика: карточка — ровно один запрос на человека, а парк,
+# висящий в очереди, стоит по запросу на каждый раунд, пока не дойдёт очередь до
+# ЕГО провайдера (в среднем около двух, «бумажный» идёт первым). На одном-двух
+# водителях карточки выигрывают и вдобавок дают ответ из первоисточника; с трёх
+# выигрывает список. Порог намеренно осторожный — не «оптимизация ради цифры».
+CARDS_CHEAPER_BELOW = 3
 
 # Поля, которые просим у списка. Провайдера среди них нет и быть не может — он
 # приходит тем, ПО КАКОМУ фильтру строка нашлась.
@@ -51,6 +69,10 @@ CONTROL_SAMPLE = 25
 # паркам. Каждая такая строка стоит до 86 запросов — в августе 8 недоступных
 # профилей съели столько же времени, сколько весь основной сбор.
 MAX_ORPHAN_CARD_LOOKUPS = 40
+
+# До скольких строк в доборе разрешаем перебор диспетчерских. Больше — значит
+# добирать нужно многих, и перебор из полезного превращается в час ожидания.
+MAX_CARD_SCANS = 50
 
 WORK_STATUS_LABELS = {
     'working': 'Работает',
@@ -87,11 +109,6 @@ class InputError(ValueError):
 
 def _normalize_header(value):
     return re.sub(r'\s+', ' ', str(value or '').strip().lower()).strip(' :')
-
-
-def _chunks(items, size=MAX_BATCH):
-    for start in range(0, len(items), size):
-        yield items[start:start + size]
 
 
 # ── разбор входного файла ────────────────────────────────────────────────────
@@ -280,32 +297,28 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
             unique[cid] = park_id
         stats['parks_probed'] = len(found_parks)
 
-    # ── шаг 2: провайдер пачками, парк за парком ─────────────────────────────
+    # ── шаг 2: провайдер — раундами по провайдерам, парки параллельно ────────
     by_park = OrderedDict()
     for cid, park_id in unique.items():
         if park_id:
             by_park.setdefault(park_id, []).append(cid)
-    # Крупные парки первыми: на них раньше набирается статистика частот
-    # провайдеров, и остальные парки идут уже с хорошим порядком проходов.
-    ordered_parks = sorted(by_park.items(), key=lambda item: -len(item[1]))
+
+    # Совсем мелкие парки дешевле спросить карточками: проход по провайдерам
+    # стоит до семи запросов даже там, где в парке один человек.
+    tiny = {park: ids for park, ids in by_park.items() if len(ids) < CARDS_CHEAPER_BELOW}
+    big = {park: ids for park, ids in by_park.items() if len(ids) >= CARDS_CHEAPER_BELOW}
 
     seen_providers = Counter()
     leftovers = []
-    done_rows = len(results)
-    for index, (park_id, ids) in enumerate(ordered_parks, start=1):
-        found, pending = _resolve_park(client, park_id, ids, providers, seen_providers)
-        for cid, entry in found.items():
-            entry['park_id'] = park_id
-            results[cid] = entry
-        leftovers.extend((park_id, cid) for cid in pending)
-        done_rows = len(results)
-        progress(
-            percent=_percent(done_rows, len(unique), low=12, high=88),
-            note='Парк {} из {}: определено {} из {}'.format(
-                index, len(ordered_parks), done_rows, len(unique)),
-            rows_resolved=done_rows,
-            requests=client.requests_count,
+    if big:
+        found, pending = _resolve_by_providers(
+            client, big, providers, seen_providers, progress,
+            total=len(unique), done_before=len(results),
         )
+        results.update(found)
+        leftovers.extend(pending)
+    for park_id, ids in tiny.items():
+        leftovers.extend((park_id, cid) for cid in ids)
 
     # ── шаг 3: добор карточками ──────────────────────────────────────────────
     orphan_left = [cid for cid, park_id in unique.items()
@@ -320,10 +333,16 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     if to_card:
         progress(percent=90, note='Добираем из карточек: {} строк'.format(len(to_card)),
                  requests=client.requests_count)
-        for park_id, cid in to_card:
-            entry = _card_lookup(client, cid, park_id, parks)
+        # Карточки не зависят друг от друга — значит идут в те же потоки.
+        # Перебор диспетчерских включаем, только когда добирать нужно немногих:
+        # один такой водитель стоит до 86 запросов.
+        allow_scan = len(to_card) <= MAX_CARD_SCANS
+        for entry in _run_parallel(
+                client, to_card,
+                lambda task: _card_lookup(client, task[1], task[0], parks,
+                                          allow_scan=allow_scan)):
             if entry:
-                results[cid] = entry
+                results[entry['contractor_id']] = entry
                 stats['from_card'] += 1
             else:
                 stats['not_found'] += 1
@@ -335,20 +354,30 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         sample = rng.sample(from_list, min(control_sample, len(from_list)))
         progress(percent=95, note='Контрольная сверка {} строк по карточкам'.format(len(sample)),
                  requests=client.requests_count)
-        for cid in sample:
+        def verify(cid):
             entry = results[cid]
-            profile = client.driver_card(entry.get('park_id'), cid)
+            try:
+                profile = client.driver_card(entry.get('park_id'), cid)
+            except FleetSessionExpired:
+                raise
+            except FleetError:
+                return None
             if profile is None:
+                return None
+            return cid, entry.get('provider_name'), FleetClient.card_provider(profile)
+
+        for outcome in _run_parallel(client, sample, verify):
+            if not outcome:
                 continue
-            card_value = FleetClient.card_provider(profile)
+            cid, listed, card_value = outcome
+            if not card_value:
+                continue
             check['checked'] += 1
-            if card_value and card_value == entry.get('provider_name'):
+            if card_value == listed:
                 check['matched'] += 1
-            elif card_value:
+            else:
                 check['mismatched'].append({
-                    'contractor_id': cid,
-                    'list': entry.get('provider_name'),
-                    'card': card_value,
+                    'contractor_id': cid, 'list': listed, 'card': card_value,
                 })
 
     return {
@@ -377,43 +406,100 @@ def _percent(done, total, low=10, high=90):
     return int(low + (high - low) * min(1.0, done / float(total)))
 
 
-def _resolve_park(client, park_id, ids, providers, seen_providers):
-    """Провайдеры для водителей ОДНОГО парка. Возвращает (найденные, остаток)."""
-    found, pending = {}, list(ids)
-    # Порядок проходов — по уже увиденной частоте: самый популярный провайдер
-    # первым закрывает большую часть списка, и следующие проходы идут по остатку.
-    ordered = sorted(providers, key=lambda p: -seen_providers.get(p['id'], 0))
-    for archive in (False, True):
-        if not pending:
+def _run_parallel(client, tasks, worker):
+    """Раскладывает задачи по потокам. Параллельность — не украшение: замерено
+    20.08.2026, шесть потоков дают 590 запросов/мин против 170 в один, и медиана
+    ответа при этом не растёт. Упавшая задача не роняет остальные — её строки
+    просто уйдут в добор карточками."""
+    if not tasks:
+        return []
+    workers = max(1, min(client.concurrency, len(tasks)))
+    if workers == 1:
+        return [worker(tasks[0])]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='fleet-edm-io') as pool:
+        return list(pool.map(worker, tasks))
+
+
+def _split_tasks(pending, concurrency, slice_min=1000):
+    """(парк, срез ID) для одного раунда.
+
+    Обычно на поток приходится свой парк. Но когда парков меньше, чем потоков —
+    а это ровно случай «весь файл из одной диспетчерской», — режем список одного
+    парка на срезы, иначе шесть потоков простаивали бы за одним.
+    """
+    parks = [(park, ids) for park, ids in pending.items() if ids]
+    if len(parks) >= concurrency:
+        return [(park, ids) for park, ids in parks]
+    tasks = []
+    for park, ids in parks:
+        slices = max(1, min(concurrency, (len(ids) + slice_min - 1) // slice_min))
+        step = (len(ids) + slices - 1) // slices
+        for start in range(0, len(ids), step):
+            tasks.append((park, ids[start:start + step]))
+    return tasks
+
+
+def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
+                          total, done_before=0):
+    """Провайдер для всех сразу: раунд на провайдера, парки внутри раунда параллельно.
+
+    Почему именно так. Спросить можно про десять тысяч ID за раз, и пустой ответ
+    стоит один запрос. Значит цена раунда — это число НАЙДЕННЫХ, а не спрошенных:
+    один запрос на парк плюс страница на каждую сотню совпадений. После раунда
+    найденные уходят из очереди, и следующий провайдер спрашивается уже про
+    остаток. «Бумажный документооборот» идёт первым не случайно — на нём три
+    четверти водителей, и один раунд снимает большую часть работы.
+    """
+    pending = {park: list(ids) for park, ids in by_park.items()}
+    found = {}
+    lock = threading.Lock()
+
+    def ask(task, provider, archive):
+        park_id, ids = task
+        try:
+            items = client.contractors_all(
+                park_id, contractor_ids=ids, edm_provider=provider['id'],
+                archive=archive, projection=LIST_PROJECTION,
+            )
+        except FleetSessionExpired:
+            raise
+        except FleetError:
+            logging.exception('Провайдер ЭДО: запрос по парку %s не удался', park_id)
+            return park_id, {}
+        entries = {}
+        for item in items:
+            cid = str(item.get('id') or '')
+            if cid:
+                entry = _entry_from_list(item, provider, archive)
+                entry['park_id'] = park_id
+                entries[cid] = entry
+        return park_id, entries
+
+    rounds = [(archive, provider) for archive in (False, True) for provider in providers]
+    for archive, provider in rounds:
+        tasks = _split_tasks(pending, client.concurrency)
+        if not tasks:
             break
-        for provider in ordered:
-            if not pending:
-                break
-            rest = []
-            for chunk in _chunks(pending):
-                try:
-                    contractors = client.contractors(
-                        park_id, contractor_ids=chunk, edm_provider=provider['id'],
-                        archive=archive, projection=LIST_PROJECTION,
-                    )
-                except FleetSessionExpired:
-                    raise
-                except FleetError:
-                    # Один сорвавшийся запрос — не повод терять весь парк: эти ID
-                    # уйдут в остаток и доберутся карточкой.
-                    logging.exception('Провайдер ЭДО: запрос по парку %s не удался', park_id)
-                    rest.extend(chunk)
+        results = _run_parallel(client, tasks, lambda task: ask(task, provider, archive))
+        with lock:
+            for park_id, entries in results:
+                if not entries:
                     continue
-                hit = {str(item.get('id')): item for item in contractors}
-                for cid in chunk:
-                    item = hit.get(cid)
-                    if item is None:
-                        rest.append(cid)
-                        continue
-                    found[cid] = _entry_from_list(item, provider, archive)
-                    seen_providers[provider['id']] += 1
-            pending = rest
-    return found, pending
+                found.update(entries)
+                seen_providers[provider['id']] += len(entries)
+                pending[park_id] = [cid for cid in pending.get(park_id, [])
+                                    if cid not in entries]
+        done = done_before + len(found)
+        progress(
+            percent=_percent(done, total, low=12, high=88),
+            note='{}{}: определено {} из {}'.format(
+                provider['name'], ' (архив)' if archive else '', done, total),
+            rows_resolved=done,
+            requests=client.requests_count,
+        )
+
+    leftovers = [(park_id, cid) for park_id, ids in pending.items() for cid in ids]
+    return found, leftovers
 
 
 def _entry_from_list(item, provider, archive):
@@ -430,51 +516,71 @@ def _entry_from_list(item, provider, archive):
 
 
 def _probe_parks(client, ids, parks, progress):
-    """Перебор парков для строк без парка. Два круга: обычные сегменты, затем
-    архив — архивного водителя список по умолчанию не отдаёт вовсе.
+    """Перебор диспетчерских для строк без парка — параллельно и одним списком.
 
-    Спрашиваем только id: на этом шаге нужен ответ «твой ли это парк», а ФИО и
-    телефон всё равно приедут следующим шагом, вместе с провайдером.
+    Здесь выигрыш от больших пачек самый большой. Раньше каждый парк спрашивали
+    сотнями: восемь тысяч «ничьих» строк — это 88 запросов НА КАЖДЫЙ из 86 парков.
+    Теперь парку отдают весь список сразу, и парк, где никого нет, отвечает одним
+    запросом. Цена перебора перестала зависеть от длины файла.
+
+    Два круга: обычные сегменты, затем архив — архивного водителя список по
+    умолчанию не отдаёт вовсе.
     """
+    pending = set(ids)
     found = {}
-    pending = list(ids)
+    lock = threading.Lock()
+
+    def probe(park, archive):
+        park_id = str(park.get('id'))
+        with lock:
+            snapshot = list(pending)
+        if not snapshot:
+            return 0
+        try:
+            items = client.contractors_all(
+                park_id, contractor_ids=snapshot, archive=archive, projection=['id'],
+            )
+        except FleetSessionExpired:
+            raise
+        except FleetError:
+            logging.exception('Провайдер ЭДО: перебор парка %s не удался', park_id)
+            return 0
+        with lock:
+            for item in items:
+                cid = str(item.get('id') or '')
+                if cid in pending:
+                    pending.discard(cid)
+                    found[cid] = park_id
+        return len(items)
+
     for archive in (False, True):
         if not pending:
             break
-        for index, park in enumerate(parks, start=1):
-            if not pending:
-                break
-            park_id = str(park.get('id'))
-            rest = []
-            for chunk in _chunks(pending):
-                try:
-                    contractors = client.contractors(
-                        park_id, contractor_ids=chunk, archive=archive,
-                        projection=['id'],
-                    )
-                except FleetSessionExpired:
-                    raise
-                except FleetError:
-                    logging.exception('Провайдер ЭДО: перебор парка %s не удался', park_id)
-                    rest.extend(chunk)
-                    continue
-                hit = {str(item.get('id')) for item in contractors}
-                for cid in chunk:
-                    if cid in hit:
-                        found[cid] = park_id
-                    else:
-                        rest.append(cid)
-            pending = rest
-            if index % 10 == 0:
-                progress(note='Ищем парки: осталось найти {} из {}'.format(
-                    len(pending), len(ids)), requests=client.requests_count)
+        _run_parallel(client, list(parks), lambda park: probe(park, archive))
+        progress(
+            note='Ищем диспетчерские: осталось найти {} из {}'.format(len(pending), len(ids)),
+            requests=client.requests_count,
+        )
     return found
 
 
-def _card_lookup(client, contractor_id, park_id, parks):
-    """Карточка водителя. Если парк неизвестен — перебираем все, но это дорого:
-    один такой водитель стоит до 86 запросов."""
-    candidates = [park_id] if park_id else [str(park.get('id')) for park in parks]
+def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
+    """Карточка водителя.
+
+    Парк из файла проверяем первым, но если карточки там нет — идём по остальным
+    диспетчерским. Это не перестраховка: в файле заказчика парк у части строк
+    указан неверно (в августовской выгрузке для этого была отдельная колонка
+    «Парк совпал»), и без перебора такие строки возвращались бы пустыми.
+
+    Перебор дорогой — до 86 запросов на одного человека, — поэтому вызывающий
+    выключает его, когда добирать нужно многих.
+    """
+    candidates = []
+    if park_id:
+        candidates.append(park_id)
+    if allow_scan or not park_id:
+        candidates.extend(str(park.get('id')) for park in parks
+                          if str(park.get('id')) != park_id)
     for candidate in candidates:
         if not candidate:
             continue
@@ -490,8 +596,7 @@ def _card_lookup(client, contractor_id, park_id, parks):
             'contractor_id': contractor_id,
             'provider_id': '',
             'provider_name': FleetClient.card_provider(profile),
-            'full_name': str(profile.get('full_name') or '').strip()
-                         or _card_name(profile),
+            'full_name': str(profile.get('full_name') or '').strip() or _card_name(profile),
             'phone': _card_phone(profile),
             'work_status': str(profile.get('work_status') or '').strip(),
             'employment_type': str(profile.get('employment_type') or '').strip(),

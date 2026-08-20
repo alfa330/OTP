@@ -32,6 +32,7 @@
 
 import json
 import logging
+import threading
 import time
 
 import requests
@@ -45,8 +46,24 @@ PATH_PROVIDERS = '/api/fleet/contractor-profiles-manager/v1/edm-providers'
 PATH_LIST = '/api/fleet/contractor-profiles-manager/v2/contractors/list'
 PATH_CARD = '/api/fleet/router/v1/cards/driver/details'
 
-# Больше сотни сервер не отдаёт: 300 и 1000 возвращают ошибку вместо списка.
+# Больше сотни в ОТВЕТЕ сервер не отдаёт: limit 300 и 1000 возвращают ошибку.
+# Это ограничение страницы, а не запроса — см. MAX_FILTER_IDS.
 MAX_BATCH = 100
+
+# А вот СПРОСИТЬ можно про сколько угодно: замерено 20.08.2026 — фильтр принял
+# 10 000 идентификаторов за раз и отдал первую сотню совпавших с курсором на
+# остальные. Это меняет всю экономику обхода: цена запроса теперь зависит от
+# числа НАЙДЕННЫХ, а не от числа спрошенных. Раньше «сотня водителей = запрос»,
+# теперь «сотня совпадений = запрос», а пустой парк стоит один запрос независимо
+# от размера списка. Держим 10 000 как проверенный потолок: тело запроса при этом
+# около 340 КБ, дальше не измеряли и наугад не лезем.
+MAX_FILTER_IDS = 10000
+
+# Столько одновременных запросов кабинет держит без деградации: на шести потоках
+# 590 запросов/мин при той же медиане ответа 0,35 с, на десяти — 663/мин, но
+# медиана уже 0,93 с (сервер начинает копить очередь). 429 не пришёл ни разу ни
+# на одной ступени. Берём шесть: почти весь выигрыш и никакого давления.
+DEFAULT_CONCURRENCY = 6
 
 DEFAULT_USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -74,18 +91,25 @@ class FleetClient:
     хочется меньше всего.
     """
 
-    def __init__(self, cookies, user_agent=None, *, delay=0.3, min_delay=0.12,
-                 max_delay=20.0, success_streak=25, timeout=60, session=None):
-        self._session = session or requests.Session()
-        self._session.cookies.update(self._normalize_cookies(cookies))
+    def __init__(self, cookies, user_agent=None, *, concurrency=DEFAULT_CONCURRENCY,
+                 max_delay=20.0, timeout=60, session=None):
+        self._cookies = self._normalize_cookies(cookies)
         self._user_agent = (user_agent or '').strip() or DEFAULT_USER_AGENT
-        self._delay = float(delay)
-        self._min_delay = float(min_delay)
         self._max_delay = float(max_delay)
-        self._success_streak_target = int(success_streak)
-        self._streak = 0
         self._timeout = timeout
+        self.concurrency = max(1, int(concurrency))
         self.requests_count = 0
+
+        # Соединения по одному на поток: requests.Session не рассчитан на
+        # одновременное использование из нескольких потоков, а держать общий
+        # мьютекс вокруг сетевого вызова означало бы отменить параллельность.
+        self._local = threading.local()
+        self._shared_session = session          # для тестов: подменённый транспорт
+        self._lock = threading.Lock()
+        # Общий на всех тормоз: 429 приходит не отдельному потоку, а нам целиком,
+        # поэтому и притормаживают все разом.
+        self._pause_until = 0.0
+        self._backoff = 0.0
 
     # ── низкий уровень ───────────────────────────────────────────────────────
 
@@ -119,10 +143,50 @@ class FleetClient:
             headers['content-type'] = 'application/json'
         return headers
 
+    @property
+    def _session(self):
+        if self._shared_session is not None:
+            return self._shared_session
+        session = getattr(self._local, 'session', None)
+        if session is None:
+            session = requests.Session()
+            session.cookies.update(self._cookies)
+            self._local.session = session
+        return session
+
+    def _wait_if_paused(self):
+        while True:
+            with self._lock:
+                pause = self._pause_until - time.time()
+            if pause <= 0:
+                return
+            time.sleep(min(pause, 1.0))
+
+    def _note_throttled(self):
+        """429 — притормаживают все потоки сразу, а не только пострадавший.
+
+        И это не всё: раз кабинет попросил помедленнее, мы ещё и убираем один
+        поток до конца прогона. Пауза лечит текущую минуту, но если не снизить
+        темп, следующий 429 придёт через минуту снова — а это чужая система, и
+        долбиться в её потолок ради нескольких секунд неприлично.
+        """
+        with self._lock:
+            self._backoff = min(self._max_delay, max(1.0, self._backoff * 1.5))
+            self._pause_until = max(self._pause_until, time.time() + self._backoff)
+            self.concurrency = max(2, self.concurrency - 1)
+            return self._backoff
+
+    def _note_success(self):
+        with self._lock:
+            if self._backoff:
+                self._backoff = max(0.0, self._backoff * 0.7)
+            self.requests_count += 1
+
     def _request(self, method, path, *, park_id, body=None, attempts=7):
         url = BASE + path
         last_error = None
         for attempt in range(1, attempts + 1):
+            self._wait_if_paused()
             try:
                 response = self._session.request(
                     method, url,
@@ -139,12 +203,9 @@ class FleetClient:
                 time.sleep(min(self._max_delay, 3.0 * attempt))
                 continue
 
-            self.requests_count += 1
-
             if response.status_code == 429:
-                self._streak = 0
-                self._delay = min(self._max_delay, self._delay * 1.4)
-                time.sleep(self._delay * attempt)
+                backoff = self._note_throttled()
+                logging.warning('Провайдер ЭДО: кабинет просит помедленнее, пауза %.1f с', backoff)
                 last_error = FleetError('429 Too Many Requests')
                 continue
 
@@ -153,7 +214,7 @@ class FleetClient:
                     'Кабинет Fleet не принял сессию (401). Нужен новый вход.'
                 )
 
-            self._pace()
+            self._note_success()
 
             if response.status_code >= 500:
                 last_error = FleetError('HTTP {}'.format(response.status_code))
@@ -187,15 +248,6 @@ class FleetClient:
 
         raise FleetError('Fleet не ответил после {} попыток: {}'.format(attempts, last_error))
 
-    def _pace(self):
-        """Пауза между запросами. После серии удачных ответов потихоньку
-        ускоряемся — иначе на больших файлах теряются минуты на ровном месте."""
-        self._streak += 1
-        if self._streak >= self._success_streak_target and self._delay > self._min_delay:
-            self._delay = max(self._min_delay, self._delay * 0.9)
-            self._streak = 0
-        time.sleep(self._delay)
-
     # ── методы кабинета ──────────────────────────────────────────────────────
 
     def parks(self, park_id=None):
@@ -222,18 +274,20 @@ class FleetClient:
         return providers
 
     def contractors(self, park_id, *, contractor_ids=None, edm_provider=None,
-                    archive=False, projection=None, limit=MAX_BATCH):
-        """Список контрагентов парка под фильтр.
+                    archive=False, projection=None, limit=MAX_BATCH, cursor=None):
+        """Одна страница списка контрагентов парка под фильтр.
 
         Фильтр собирается здесь целиком: неизвестный ключ сервер молча
         проглатывает и отдаёт первую страницу, поэтому «прокинуть произвольный
         фильтр снаружи» — верный способ получить правдоподобный мусор.
+
+        Возвращает (записи, курсор_следующей_страницы).
         """
         filter_ = {}
         if contractor_ids:
             ids = list(contractor_ids)
-            if len(ids) > MAX_BATCH:
-                raise ValueError('За раз можно спросить не больше {} ID'.format(MAX_BATCH))
+            if len(ids) > MAX_FILTER_IDS:
+                raise ValueError('За раз можно спросить не больше {} ID'.format(MAX_FILTER_IDS))
             filter_['contractor_ids'] = ids
         if edm_provider:
             filter_['edm_providers'] = [edm_provider]
@@ -244,8 +298,41 @@ class FleetClient:
             'projection': list(projection or ['id']),
             'limit': min(int(limit or MAX_BATCH), MAX_BATCH),
         }
+        if cursor:
+            body['cursor'] = cursor
         payload = self._request('POST', PATH_LIST, park_id=park_id, body=body)
-        return list(payload.get('contractors') or [])
+        return list(payload.get('contractors') or []), payload.get('cursor')
+
+    def contractors_all(self, park_id, *, contractor_ids=None, edm_provider=None,
+                        archive=False, projection=None, max_pages=400):
+        """Все совпадения по фильтру, сколько бы страниц ни потребовалось.
+
+        Спрашиваем сразу обо всех, кто ещё не определился — хоть о десяти тысячах.
+        Пустой ответ стоит ОДИН запрос независимо от длины списка, а дальше цена
+        растёт только числом найденных. Именно на этом держится вся скорость
+        раздела: раньше сотня водителей = запрос, теперь сотня совпадений = запрос.
+        """
+        ids = list(contractor_ids or [])
+        found, cursor, pages = [], None, 0
+        while True:
+            chunk = ids[:MAX_FILTER_IDS] if ids else None
+            batch, cursor = self.contractors(
+                park_id, contractor_ids=chunk, edm_provider=edm_provider,
+                archive=archive, projection=projection, cursor=cursor,
+            )
+            found.extend(batch)
+            pages += 1
+            # Пустая страница и отсутствие курсора одинаково означают «всё».
+            if not batch or not cursor or pages >= max_pages:
+                break
+        if len(ids) > MAX_FILTER_IDS:
+            # Список длиннее проверенного потолка — добираем остаток отдельно,
+            # рекурсией по хвосту, а не молча теряем его.
+            found.extend(self.contractors_all(
+                park_id, contractor_ids=ids[MAX_FILTER_IDS:], edm_provider=edm_provider,
+                archive=archive, projection=projection, max_pages=max_pages,
+            ))
+        return found
 
     def driver_card(self, park_id, driver_id):
         """Карточка водителя — единственное место, где провайдер лежит значением.

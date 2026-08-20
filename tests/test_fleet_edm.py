@@ -9,10 +9,12 @@ Fleet подставляется FakeClient, который ведёт себя 
 * список контрагентов ПАРКО-ЗАВИСИМ — чужой парк отдаёт пустоту, а не ошибку;
 * провайдера в полях списка нет, он выводится из того, ПО КАКОМУ фильтру строка
   нашлась;
+* спросить можно про тысячи ID за раз, отдаются только совпавшие;
 * архив — отдельный сегмент, по умолчанию список его не отдаёт;
 * часть действующих профилей список молча не возвращает — их добирают карточкой.
 """
 import sys
+import threading
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -22,7 +24,7 @@ from openpyxl import Workbook, load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fleet_edm import access, engine, report  # noqa: E402
-from fleet_edm.client import FleetClient  # noqa: E402
+from fleet_edm.client import MAX_BATCH, FleetClient, FleetError, FleetSessionExpired  # noqa: E402
 from fleet_edm.routes import _safe_name  # noqa: E402
 
 PARK_A = 'a' * 32
@@ -44,32 +46,38 @@ class FakeClient:
     кто лежит в архиве. Считает запросы — на них опираются проверки экономии."""
 
     def __init__(self, drivers, parks=(PARK_A, PARK_B), hidden_from_list=(),
-                 missing_everywhere=()):
+                 missing_everywhere=(), concurrency=4):
         # drivers: {id: {'park': ..., 'provider': 'paperdo', 'archive': bool, ...}}
         self.drivers = drivers
         self._parks = list(parks)
         self.hidden_from_list = set(hidden_from_list)
         self.missing_everywhere = set(missing_everywhere)
+        self.concurrency = concurrency
         self.requests_count = 0
         self.list_calls = []
         self.card_calls = []
+        self._lock = threading.Lock()
 
     def parks(self, park_id=None):
-        self.requests_count += 1
+        with self._lock:
+            self.requests_count += 1
         return [{'id': park, 'name': 'Парк ' + park[:2], 'city': 'Алматы'}
                 for park in self._parks]
 
     def edm_providers(self, park_id):
-        self.requests_count += 1
+        with self._lock:
+            self.requests_count += 1
         return list(PROVIDERS)
 
-    def contractors(self, park_id, *, contractor_ids=None, edm_provider=None,
-                    archive=False, projection=None, limit=100):
-        self.requests_count += 1
-        self.list_calls.append({'park': park_id, 'provider': edm_provider,
-                                'archive': archive, 'ids': list(contractor_ids or [])})
+    def contractors_all(self, park_id, *, contractor_ids=None, edm_provider=None,
+                        archive=False, projection=None, max_pages=400):
+        ids = list(contractor_ids or [])
+        with self._lock:
+            self.requests_count += 1
+            self.list_calls.append({'park': park_id, 'provider': edm_provider,
+                                    'archive': archive, 'ids': ids})
         out = []
-        for cid in (contractor_ids or []):
+        for cid in ids:
             driver = self.drivers.get(cid)
             if not driver or cid in self.hidden_from_list:
                 continue
@@ -89,8 +97,9 @@ class FakeClient:
         return out
 
     def driver_card(self, park_id, driver_id):
-        self.requests_count += 1
-        self.card_calls.append((park_id, driver_id))
+        with self._lock:
+            self.requests_count += 1
+            self.card_calls.append((park_id, driver_id))
         driver = self.drivers.get(driver_id)
         if not driver or driver_id in self.missing_everywhere:
             return None
@@ -203,14 +212,17 @@ class ParseInputTest(unittest.TestCase):
 
 # ── обход ────────────────────────────────────────────────────────────────────
 
+def _park_rows(drivers):
+    return [{'contractor_id': cid, 'park_id': info['park']} for cid, info in drivers.items()]
+
+
 class ResolveTest(unittest.TestCase):
     def test_provider_comes_from_filter_intersection(self):
         drivers = {
             _driver_id(1): {'park': PARK_A, 'provider': 'paperdo'},
             _driver_id(2): {'park': PARK_A, 'provider': '2KZSP'},
         }
-        rows = [{'contractor_id': cid, 'park_id': PARK_A} for cid in drivers]
-        result = engine.resolve(rows, FakeClient(drivers), control_sample=0)
+        result = engine.resolve(_park_rows(drivers), FakeClient(drivers), control_sample=0)
         self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
                          'Бумажный документооборот')
         self.assertEqual(result['results'][_driver_id(2)]['provider_name'], 'Sapar')
@@ -223,9 +235,9 @@ class ResolveTest(unittest.TestCase):
         drivers = {
             _driver_id(1): {'park': PARK_A, 'provider': 'paperdo'},
             _driver_id(2): {'park': PARK_A, 'provider': '2KZSP', 'archive': True},
+            _driver_id(3): {'park': PARK_A, 'provider': 'paperdo'},
         }
-        rows = [{'contractor_id': cid, 'park_id': PARK_A} for cid in drivers]
-        result = engine.resolve(rows, FakeClient(drivers), control_sample=0)
+        result = engine.resolve(_park_rows(drivers), FakeClient(drivers), control_sample=0)
         self.assertEqual(result['results'][_driver_id(2)]['provider_name'], 'Sapar')
         self.assertEqual(result['results'][_driver_id(2)]['source'], 'архив')
 
@@ -236,9 +248,11 @@ class ResolveTest(unittest.TestCase):
             _driver_id(1): {'park': PARK_A, 'provider': 'paperdo'},
             hidden: {'park': PARK_A, 'provider': '2KZVZ'},
         }
-        rows = [{'contractor_id': cid, 'park_id': PARK_A} for cid in drivers]
+        # Четыре водителя, чтобы парк не ушёл в «мелкие» и провайдер спрашивался списком.
+        drivers[_driver_id(3)] = {'park': PARK_A, 'provider': 'paperdo'}
+        drivers[_driver_id(4)] = {'park': PARK_A, 'provider': 'paperdo'}
         client = FakeClient(drivers, hidden_from_list=[hidden])
-        result = engine.resolve(rows, client, control_sample=0)
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
         entry = result['results'][hidden]
         self.assertEqual(entry['provider_name'], 'Vezunchik.Pro')
         self.assertEqual(entry['source'], 'карточка')
@@ -253,35 +267,58 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(result['results'][_driver_id(7)]['provider_name'], 'Sapar')
         self.assertGreater(result['park_probe_requests'], 0)
 
+    def test_park_probe_asks_whole_list_at_once(self):
+        """Главная экономия: диспетчерской отдают ВЕСЬ список сразу, а не сотнями.
+
+        Пустой парк стоит один запрос независимо от того, 10 в файле строк или
+        10 000 — иначе перебор 86 диспетчерских упирался бы в тысячи запросов.
+        """
+        drivers = {_driver_id(i): {'park': PARK_B, 'provider': 'paperdo'}
+                   for i in range(1, 251)}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = FakeClient(drivers)
+        engine.resolve(rows, client, control_sample=0)
+        probe_calls = [call for call in client.list_calls if call['provider'] is None]
+        self.assertTrue(probe_calls)
+        self.assertEqual(max(len(call['ids']) for call in probe_calls), 250)
+        # Два круга (обычный + архив) на два парка — а не 250/100 запросов на каждый.
+        self.assertLessEqual(len(probe_calls), 4)
+
+    def test_next_provider_round_asks_only_the_remainder(self):
+        """После раунда найденные уходят из очереди — следующий провайдер
+        спрашивается уже про остаток, иначе раунды стоили бы одинаково."""
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'} for i in range(1, 9)}
+        drivers[_driver_id(9)] = {'park': PARK_A, 'provider': '2KZSP'}
+        client = FakeClient(drivers)
+        engine.resolve(_park_rows(drivers), client, control_sample=0)
+        by_provider = {}
+        for call in client.list_calls:
+            if call['provider'] and not call['archive']:
+                by_provider.setdefault(call['provider'], len(call['ids']))
+        self.assertEqual(by_provider['paperdo'], 9)
+        self.assertEqual(by_provider['2KZSP'], 1)
+
+    def test_tiny_park_is_resolved_by_cards(self):
+        """В парке один-два водителя — карточка дешевле семи проходов по провайдерам."""
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'}}
+        client = FakeClient(drivers)
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+        self.assertEqual(result['results'][_driver_id(1)]['source'], 'карточка')
+        self.assertFalse([call for call in client.list_calls if call['provider']])
+
     def test_missing_driver_is_reported_not_invented(self):
-        drivers = {_driver_id(8): {'park': PARK_A, 'provider': 'paperdo'}}
         ghost = _driver_id(9)
+        drivers = {ghost: {'park': PARK_A, 'provider': 'paperdo'}}
+        for index in range(10, 14):
+            drivers[_driver_id(index)] = {'park': PARK_A, 'provider': 'paperdo'}
         rows = [{'contractor_id': ghost, 'park_id': PARK_A}]
-        client = FakeClient(dict(drivers, **{ghost: {'park': PARK_A, 'provider': 'paperdo'}}),
-                            hidden_from_list=[ghost], missing_everywhere=[ghost])
+        client = FakeClient(drivers, hidden_from_list=[ghost], missing_everywhere=[ghost])
         result = engine.resolve(rows, client, control_sample=0)
         self.assertNotIn(ghost, result['results'])
         self.assertEqual(result['stats']['not_found'], 1)
 
-    def test_frequent_provider_is_asked_first(self):
-        """Порядок проходов — по уже увиденной частоте: на реальных данных три
-        четверти водителей «бумажные», и это экономит проходы по остатку."""
-        drivers = {}
-        for index in range(1, 21):
-            drivers[_driver_id(index)] = {'park': PARK_A, 'provider': '2KZVZ'}
-        drivers[_driver_id(50)] = {'park': PARK_B, 'provider': '2KZVZ'}
-        rows = [{'contractor_id': cid, 'park_id': info['park']}
-                for cid, info in drivers.items()]
-        client = FakeClient(drivers)
-        engine.resolve(rows, client, control_sample=0)
-        # Крупный парк идёт первым, на нём набирается статистика; ко второму парку
-        # самый частый провайдер уже спрашивается первым запросом.
-        second_park_calls = [call for call in client.list_calls if call['park'] == PARK_B]
-        self.assertEqual(second_park_calls[0]['provider'], '2KZVZ')
-
     def test_control_sample_catches_mismatch(self):
-        drivers = {_driver_id(11): {'park': PARK_A, 'provider': 'paperdo'}}
-        rows = [{'contractor_id': _driver_id(11), 'park_id': PARK_A}]
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'} for i in range(1, 6)}
 
         class LyingClient(FakeClient):
             def driver_card(self, park_id, driver_id):
@@ -290,19 +327,70 @@ class ResolveTest(unittest.TestCase):
                     card['edm_provider'] = 'Sapar'      # карточка говорит другое
                 return card
 
-        result = engine.resolve(rows, LyingClient(drivers), control_sample=5)
-        self.assertEqual(result['check']['checked'], 1)
+        result = engine.resolve(_park_rows(drivers), LyingClient(drivers), control_sample=5)
+        self.assertEqual(result['check']['checked'], 5)
         self.assertEqual(result['check']['matched'], 0)
-        self.assertEqual(len(result['check']['mismatched']), 1)
+        self.assertEqual(len(result['check']['mismatched']), 5)
 
-    def test_batches_are_capped_at_hundred(self):
-        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
-                   for i in range(1, 151)}
-        rows = [{'contractor_id': cid, 'park_id': PARK_A} for cid in drivers]
-        client = FakeClient(drivers)
-        engine.resolve(rows, client, control_sample=0)
-        self.assertTrue(client.list_calls)
-        self.assertTrue(all(len(call['ids']) <= 100 for call in client.list_calls))
+
+class ParallelismTest(unittest.TestCase):
+    def test_one_park_is_sliced_so_threads_are_not_idle(self):
+        """Файл из одной диспетчерской: без нарезки шесть потоков ждали бы один."""
+        tasks = engine._split_tasks({PARK_A: [_driver_id(i) for i in range(4000)]},
+                                    concurrency=6)
+        self.assertGreater(len(tasks), 1)
+        self.assertEqual(sum(len(ids) for _park, ids in tasks), 4000)
+
+    def test_many_parks_are_not_sliced(self):
+        pending = {'{:032x}'.format(index): [_driver_id(index)] for index in range(10)}
+        tasks = engine._split_tasks(pending, concurrency=6)
+        self.assertEqual(len(tasks), 10)
+
+    def test_empty_parks_produce_no_tasks(self):
+        self.assertEqual(engine._split_tasks({PARK_A: []}, concurrency=6), [])
+
+
+class ClientPagingTest(unittest.TestCase):
+    """Курсорная постраничность — на подменённом транспорте, без сети."""
+
+    class _Response:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _Session:
+        def __init__(self, pages):
+            self.pages = list(pages)
+            self.bodies = []
+            self.cookies = type('J', (), {'update': lambda self, value: None})()
+
+        def request(self, method, url, headers=None, data=None, timeout=None):
+            self.bodies.append(data)
+            return ClientPagingTest._Response(self.pages.pop(0))
+
+    def test_pages_until_cursor_runs_out(self):
+        pages = [
+            {'contractors': [{'id': _driver_id(i)} for i in range(100)], 'cursor': 'c1'},
+            {'contractors': [{'id': _driver_id(i)} for i in range(100, 130)], 'cursor': None},
+        ]
+        session = self._Session(pages)
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        found = client.contractors_all(PARK_A, contractor_ids=[_driver_id(i) for i in range(500)])
+        self.assertEqual(len(found), 130)
+        self.assertEqual(len(session.bodies), 2)
+        self.assertIn('c1', session.bodies[1])
+        # Размер страницы остаётся сотней — это ограничение ответа, не запроса.
+        self.assertIn('"limit": {}'.format(MAX_BATCH), session.bodies[0])
+
+    def test_whole_list_goes_in_one_request(self):
+        session = self._Session([{'contractors': [], 'cursor': None}])
+        client = FleetClient({'Session_id': 'x'}, 'UA', session=session)
+        client.contractors_all(PARK_A, contractor_ids=[_driver_id(i) for i in range(5000)])
+        self.assertEqual(len(session.bodies), 1)
+        self.assertIn(_driver_id(4999), session.bodies[0])
 
 
 # ── сборка файла ─────────────────────────────────────────────────────────────
@@ -312,6 +400,8 @@ class ReportTest(unittest.TestCase):
         drivers = {
             _driver_id(1): {'park': PARK_A, 'provider': 'paperdo', 'phone': '77010000001'},
             _driver_id(2): {'park': PARK_A, 'provider': '2KZSP', 'phone': '77010000002'},
+            _driver_id(3): {'park': PARK_A, 'provider': 'paperdo', 'phone': '77010000003'},
+            _driver_id(4): {'park': PARK_A, 'provider': 'paperdo', 'phone': '77010000004'},
         }
         rows = [{'contractor_id': cid, 'park_id': PARK_A,
                  'source_park_name': 'Парк А', 'row_number': index}
