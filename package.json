@@ -35,7 +35,6 @@
     "test:salary-potok": "node --test tests/salary_potok.test.mjs"
   },
   "dependencies": {
-    "@tiptap/core": "^3.29.2",
     "@tiptap/extension-highlight": "^3.29.2",
     "@tiptap/extension-image": "^3.29.2",
     "@tiptap/extension-link": "^3.29.2",

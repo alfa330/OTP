@@ -1,6 +1,9 @@
 import React, { useCallback, useRef } from 'react';
-import { Node, mergeAttributes } from '@tiptap/core';
-import { NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
+/* Node и mergeAttributes берём из @tiptap/react, а не из @tiptap/core напрямую:
+   пакет их реэкспортирует, а в package.json он уже объявлен. Прямая зависимость
+   на @tiptap/core потребовала бы правки package-lock.json, иначе сборка на
+   Pages падает — там стоит `npm ci`, который сверяет манифест с локом. */
+import { Node, NodeViewWrapper, ReactNodeViewRenderer, mergeAttributes } from '@tiptap/react';
 import {
     AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, GripVertical, Minus, Pencil,
     Play, Plus, Trash2,
