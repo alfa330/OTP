@@ -33927,6 +33927,15 @@ FRONT_OFFICE_CALLS_BROADCAST_TIME = (
 # бессмыслен, а сообщение всё равно упрётся в лимит Telegram.
 FRONT_OFFICE_CALLS_MAX_DAYS = 31
 
+# Сколько всего секунд отпущено на поденный сбор. Пул потоков один на весь бот
+# (4 места), поэтому отчёт не имеет права занимать место дольше: остаток дней
+# честно уезжает в «нет выгрузки». В норме месяц собирается за 4–5 секунд.
+FRONT_OFFICE_CALLS_COLLECT_BUDGET = 90
+
+# Чаты, для которых обзвон считается прямо сейчас. Без этого пользователь,
+# не увидев ответа, повторяет команду — и четыре повтора занимают весь пул.
+_front_office_calls_running = set()
+
 
 def _front_office_calls_broadcast_time():
     """(час, минута) из FRONT_OFFICE_CALLS_BROADCAST_TIME."""
@@ -33956,14 +33965,30 @@ def _front_office_calls_report(date_from, date_to=None):
     Блокирующая (HTTP + БД) — вызывать через executor_pool.
     """
     date_to = date_to or date_from
-    client = front_office_calls.RegionCallStatsClient.from_config()
+    # Поденный клиент терпит недолго и не повторяет: см. DAY_HTTP_TIMEOUT.
+    day_client = front_office_calls.RegionCallStatsClient.from_config(
+        timeout=front_office_calls.DAY_HTTP_TIMEOUT,
+        retries=front_office_calls.DAY_MAX_RETRIES)
 
     managers_by_day = {}
     no_data_days = []
+    deadline = time.monotonic() + FRONT_OFFICE_CALLS_COLLECT_BUDGET
     day = date_from
     while day <= date_to:
+        if time.monotonic() > deadline:
+            # Бюджет вышел — остаток дней помечаем «нет выгрузки» и отдаём
+            # поток. Неполная таблица лучше, чем бот, который никому не отвечает.
+            remaining = []
+            while day <= date_to:
+                remaining.append(day)
+                day += timedelta(days=1)
+            no_data_days.extend(remaining)
+            logging.error("Обзвон фронт-офиса: бюджет %s с исчерпан, %d дней "
+                          "остались без выгрузки",
+                          FRONT_OFFICE_CALLS_COLLECT_BUDGET, len(remaining))
+            break
         try:
-            managers_by_day[day] = client.fetch_managers(day, day)
+            managers_by_day[day] = day_client.fetch_managers(day, day)
         except Exception as exc:
             logging.error("Обзвон фронт-офиса: CRM не отдала %s: %s", day, exc)
             no_data_days.append(day)
@@ -33976,8 +34001,10 @@ def _front_office_calls_report(date_from, date_to=None):
     control_total = None
     if date_to > date_from and not no_data_days:
         try:
+            # Он один, за него можно и подождать — берём обычное терпение.
             control_total = front_office_calls.total_calls(
-                client.fetch_managers(date_from, date_to))
+                front_office_calls.RegionCallStatsClient.from_config()
+                .fetch_managers(date_from, date_to))
         except Exception as exc:
             logging.warning("Обзвон фронт-офиса: контрольный запрос за период "
                             "не удался: %s", exc)
@@ -34008,21 +34035,43 @@ async def _front_office_calls_send(chat_id, text, document, reply_to=None):
     Короткий текст уходит подписью к файлу — одно сообщение вместо двух.
     Длинный (полный список за день) в подпись не влезает: у подписи лимит
     1024 символа против 4096 у сообщения, поэтому текст идёт сообщением, а к
-    файлу остаётся короткая подпись. Если таблица не собралась, сводка всё
-    равно уходит текстом: отчёт важнее оформления.
+    файлу остаётся короткая подпись.
+
+    Отчёт важнее оформления, поэтому отказ файла НЕ отменяет сводку: если
+    sendDocument не прошёл (в группе боту запрещены медиа, флуд-лимит, обрыв
+    на закачке), текст всё равно уходит сообщением. И reply ставим с
+    allow_sending_without_reply — сбор за месяц идёт секунды, за это время
+    команду в группе могли удалить, а реплай на удалённое сообщение отменяет
+    всю отправку целиком (та же ловушка, что в crm/transport.py).
     """
     file_bytes, filename, caption = document or (None, None, None)
-    if file_bytes and len(text) <= front_office_calls.CAPTION_LIMIT:
-        await bot.send_document(
-            chat_id, types.InputFile(BytesIO(file_bytes), filename=filename),
-            caption=text, parse_mode='HTML', reply_to_message_id=reply_to)
-        return
+
+    def _document():
+        return types.InputFile(BytesIO(file_bytes), filename=filename)
+
+    if file_bytes and len(text) <= TELEGRAM_MAX_CAPTION_CHARS:
+        try:
+            await bot.send_document(
+                chat_id, _document(), caption=text, parse_mode='HTML',
+                reply_to_message_id=reply_to, allow_sending_without_reply=True)
+            return
+        except Exception as exc:
+            logging.warning("Обзвон фронт-офиса: чат %s не принял файл (%s) — "
+                            "отправляю сводку текстом", chat_id, exc)
+            await bot.send_message(chat_id, text, parse_mode='HTML',
+                                   allow_sending_without_reply=True)
+            return
+
     await bot.send_message(chat_id, text, parse_mode='HTML',
-                           reply_to_message_id=reply_to)
+                           reply_to_message_id=reply_to,
+                           allow_sending_without_reply=True)
     if file_bytes:
-        await bot.send_document(
-            chat_id, types.InputFile(BytesIO(file_bytes), filename=filename),
-            caption=caption, parse_mode='HTML')
+        try:
+            await bot.send_document(chat_id, _document(), caption=caption,
+                                    parse_mode='HTML')
+        except Exception as exc:
+            logging.warning("Обзвон фронт-офиса: чат %s не принял файл: %s",
+                            chat_id, exc)
 
 
 def _front_office_calls_access_allowed(user):
@@ -40371,29 +40420,40 @@ async def front_office_calls_command(message: types.Message):
         await message.reply("Период слишком длинный: не больше %d дней."
                             % FRONT_OFFICE_CALLS_MAX_DAYS)
         return
-
-    await message.reply("Считаю обзвон…")
-    try:
-        report = await loop.run_in_executor(
-            executor_pool,
-            functools.partial(_front_office_calls_report, date_from, date_to))
-    except Exception as exc:
-        logging.error("Команда /obzvon: не удалось собрать сводку: %s", exc, exc_info=True)
-        await message.reply("Не удалось собрать обзвон — CRM не ответила.")
+    if message.chat.id in _front_office_calls_running:
+        await message.reply("Обзвон по этому чату уже считается — подождите, "
+                            "отчёт придёт сюда же.")
         return
 
-    text = front_office_calls.render_report(report)
-    if not report['plan_total']:
-        text += "\n\n" + front_office_calls.render_no_plan_hint()
+    await message.reply("Считаю обзвон…")
+    _front_office_calls_running.add(message.chat.id)
     try:
-        document = await loop.run_in_executor(
-            executor_pool, functools.partial(_front_office_calls_document, report))
-    except Exception as exc:
-        logging.error("Команда /obzvon: таблица не собралась: %s", exc, exc_info=True)
-        document = None
-        text += "\n\nТаблицу собрать не удалось — вот сводка текстом."
-    await _front_office_calls_send(message.chat.id, text, document,
-                                   reply_to=message.message_id)
+        try:
+            report = await loop.run_in_executor(
+                executor_pool,
+                functools.partial(_front_office_calls_report, date_from, date_to))
+        except Exception as exc:
+            logging.error("Команда /obzvon: не удалось собрать сводку: %s",
+                          exc, exc_info=True)
+            await message.reply("Не удалось собрать обзвон — CRM не ответила.")
+            return
+
+        text = front_office_calls.render_report(report)
+        if not report['plan_total']:
+            text += "\n\n" + front_office_calls.render_no_plan_hint()
+        try:
+            document = await loop.run_in_executor(
+                executor_pool,
+                functools.partial(_front_office_calls_document, report))
+        except Exception as exc:
+            logging.error("Команда /obzvon: таблица не собралась: %s",
+                          exc, exc_info=True)
+            document = None
+            text += "\n\nТаблицу собрать не удалось — вот сводка текстом."
+        await _front_office_calls_send(message.chat.id, text, document,
+                                       reply_to=message.message_id)
+    finally:
+        _front_office_calls_running.discard(message.chat.id)
 
 
 @dp.message_handler(commands=['obzvon_plan'])

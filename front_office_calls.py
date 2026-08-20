@@ -61,6 +61,15 @@ HTTP_TIMEOUT = 60
 MAX_RETRIES = 3
 RETRY_PAUSE = 2.0
 
+# Поденные запросы ходят с коротким терпением и без повторов. Причина
+# арифметическая: три попытки по минуте с паузами — это до 186 секунд на ОДИН
+# день, то есть до полутора часов на месяц, и всё это время занят поток общего
+# пула бота (в нём 4 места на весь бот, включая db.get_user в начале каждого
+# хендлера). День, который не ответил, штатно деградирует в «нет выгрузки»,
+# так что бороться за него ценой доступности бота нельзя.
+DAY_HTTP_TIMEOUT = 15
+DAY_MAX_RETRIES = 1
+
 # Сколько менеджеров показываем в полной сводке. Отдел — 22 человека, запас
 # на вырост; список длиннее просто не читается в Telegram.
 MAX_ROWS = 60
@@ -87,18 +96,20 @@ def is_configured(config=None):
 class RegionCallStatsClient:
     """Минимальный клиент POST {CRM_REGION_CALL_STATS_URL}."""
 
-    def __init__(self, url, token, timeout=HTTP_TIMEOUT):
+    def __init__(self, url, token, timeout=HTTP_TIMEOUT, retries=MAX_RETRIES):
         if not url or not token:
             raise ValueError("CRM_REGION_CALL_STATS_URL / токен CRM не заданы")
         self.url = url
         self.token = token
         self.timeout = timeout
+        self.retries = max(int(retries or 1), 1)
         self.session = requests.Session()
 
     @classmethod
-    def from_config(cls, config=None):
+    def from_config(cls, config=None, timeout=HTTP_TIMEOUT, retries=MAX_RETRIES):
         cfg = config or get_config()
-        return cls(cfg.get("url"), cfg.get("token"))
+        return cls(cfg.get("url"), cfg.get("token"), timeout=timeout,
+                   retries=retries)
 
     def _post(self, payload):
         headers = {
@@ -106,7 +117,7 @@ class RegionCallStatsClient:
             "Content-Type": "application/json",
         }
         last_error = None
-        for attempt in range(1, MAX_RETRIES + 1):
+        for attempt in range(1, self.retries + 1):
             try:
                 resp = self.session.post(self.url, json=payload,
                                          headers=headers, timeout=self.timeout)
@@ -121,10 +132,11 @@ class RegionCallStatsClient:
             except (requests.RequestException, ValueError) as exc:
                 last_error = exc
                 log.warning("front_office_calls: попытка %s/%s не удалась: %s",
-                            attempt, MAX_RETRIES, exc)
-                if attempt < MAX_RETRIES:
+                            attempt, self.retries, exc)
+                if attempt < self.retries:
                     time.sleep(RETRY_PAUSE * attempt)
-        raise RuntimeError(f"CRM недоступна после {MAX_RETRIES} попыток: {last_error}")
+        raise RuntimeError(
+            f"CRM недоступна после {self.retries} попыток: {last_error}")
 
     def fetch_managers(self, date_from, date_to):
         """Звонки менеджеров за период [date_from, date_to] включительно.
@@ -208,42 +220,73 @@ def _directory(roster):
             for u in (roster or [])]
 
 
-def _staff_days(hire_date, date_from, date_to, no_data_days=()):
-    """Дни периода, за которые с человека вообще можно требовать норму.
+def _staff_from(hire_date, date_from, first_call_day=None):
+    """С какого дня периода с человека можно требовать норму.
 
-    Два вычета, и оба обязательные: дни до приёма на работу (у принятого 3-го
-    августа нет плана на 1–2 августа) и дни, за которые CRM не ответила — там
-    ноль означает дыру в выгрузке, а не молчащий телефон.
+    Обычно это дата приёма: у принятого 3-го августа нет плана на 1–2 августа.
+    Но если человек ЗВОНИЛ раньше своей даты приёма, верить надо звонкам, а не
+    карточке. Иначе окно плана оказывается уже, чем набор дней, за которые мы
+    показываем числа, и получается сразу три вранья: клетки со звонками
+    прячутся под «вне штата», процент нормы считается от меньшего знаменателя
+    (легко выходит 400%), а недобравший норму уезжает из списка «не выполнили».
+    Дата приёма может быть неверной обыденно, без опечатки: повторный приём
+    перезаписывает её на новую, а логин CRM могли передать другому человеку.
     """
-    start = max(date_from, hire_date) if hire_date else date_from
-    if start > date_to:
+    start = date_from
+    if hire_date and hire_date > date_from:
+        start = hire_date
+        if first_call_day is not None and first_call_day < start:
+            start = max(first_call_day, date_from)
+    return start
+
+
+def _staff_days(staff_from, date_to, no_data_days=()):
+    """Сколько дней окна реально идёт в знаменатель плана.
+
+    Дни, за которые CRM не ответила, вычитаем: там ноль означает дыру в
+    выгрузке, а не молчащий телефон.
+    """
+    if staff_from > date_to:
         return 0
-    blind = sum(1 for day in no_data_days if start <= day <= date_to)
-    return max((date_to - start).days + 1 - blind, 0)
+    blind = sum(1 for day in no_data_days if staff_from <= day <= date_to)
+    return max((date_to - staff_from).days + 1 - blind, 0)
+
+
+# Надёжность методов матчинга: почта точнее ФИО, точное ФИО точнее префикса.
+_MATCH_RANK = {"email": 0, "name": 1, "name_prefix": 2}
 
 
 def _match_calls(directory, crm_managers):
     """Разложить звонки CRM на реестр.
 
-    Возвращает ({user_id: звонки}, [строки вне реестра], {метод матчинга: людей}).
+    Возвращает ({user_id: звонки}, [строки вне реестра], {user_id: метод}).
     Один человек может иметь в CRM несколько учёток (у отдела уже есть пары id
     из разных наборов), поэтому звонки по сопоставленному пользователю
-    складываем, а не берём первую строку.
+    складываем, а не берём первую строку. Метод при этом запоминаем ОДИН на
+    человека, самый надёжный из сработавших: иначе две учётки дают два плюса
+    в разные счётчики и «Сопоставлено 23 из 22».
     """
     calls_by_user = {}
     unmatched = {}
     methods = {}
-    for row in crm_managers or []:
+    for index, row in enumerate(crm_managers or []):
         calls = _int_or_zero(row.get("total_calls"))
         user, method = reg_contest.match_operator(
             row.get("manager_login"), row.get("manager_name"), directory)
         if user:
             calls_by_user[user["id"]] = calls_by_user.get(user["id"], 0) + calls
-            methods.setdefault(method, set()).add(user["id"])
+            previous = methods.get(user["id"])
+            if previous is None or _MATCH_RANK.get(method, 9) < _MATCH_RANK.get(previous, 9):
+                methods[user["id"]] = method
         elif calls:
             # Нулевые чужие строки прятать можно — они ничего не меняют,
             # а вот звонки мимо реестра обязаны быть видны.
+            # У строки без manager_id ключа не существует: сливать такие в одну
+            # «учётку None» нельзя — звонки нескольких разных подписались бы
+            # именем первой, а счётчик учёток занизился бы.
             key = row.get("manager_id")
+            if key is None:
+                key = ("crm-row", index)
             entry = unmatched.setdefault(key, {
                 "crm_manager_id": key,
                 "name": row.get("manager_name"),
@@ -252,12 +295,11 @@ def _match_calls(directory, crm_managers):
                 "days": 0,
             })
             entry["calls"] += calls
-    return (calls_by_user, list(unmatched.values()),
-            {name: len(ids) for name, ids in methods.items()})
+    return calls_by_user, list(unmatched.values()), methods
 
 
 def build_report(roster, crm_managers, date_from, date_to=None, plan_per_day=None,
-                 no_data_days=()):
+                 no_data_days=(), first_call_days=None):
     """Свести реестр менеджеров iCORE с числами CRM.
 
     roster — список {id, name, email, city, hire_date} из отдела «Фронт офисы»;
@@ -268,8 +310,15 @@ def build_report(roster, crm_managers, date_from, date_to=None, plan_per_day=Non
     покажет «все молодцы» ровно в тот день, когда никто не работал.
 
     План у каждого свой: общая норма умножается не на длину периода, а на его
-    личные дни в штате (см. _staff_days). За один день это то же самое число,
+    личные дни в штате (см. _staff_from). За один день это то же самое число,
     а на месяце — разница между «новичок провалил план» и «новичка ещё не было».
+
+    first_call_days — {user_id: первый день со звонками}. Нужен, чтобы окно
+    плана не оказалось уже набора дней, за которые мы показываем числа; его
+    передаёт build_daily_report, у которого разбивка по дням на руках. Без
+    него (одним куском за период) день звонка неизвестен, и тогда любые
+    звонки раздвигают окно на весь период — то есть считаем как раньше, но
+    ничего не прячем.
     """
     date_to = date_to or date_from
     days = (date_to - date_from).days + 1
@@ -282,15 +331,22 @@ def build_report(roster, crm_managers, date_from, date_to=None, plan_per_day=Non
 
     rows = []
     for user in roster or []:
-        calls = calls_by_user.get(user.get("id"), 0)
-        staff_days = _staff_days(_hire_date_of(user), date_from, date_to,
-                                 no_data_days)
+        user_id = user.get("id")
+        calls = calls_by_user.get(user_id, 0)
+        hire_date = _hire_date_of(user)
+        if first_call_days is not None:
+            first_call_day = first_call_days.get(user_id)
+        else:
+            first_call_day = date_from if calls else None
+        staff_from = _staff_from(hire_date, date_from, first_call_day)
+        staff_days = _staff_days(staff_from, date_to, no_data_days)
         own_plan = plan_per_day * staff_days if plan_per_day else None
         rows.append({
-            "user_id": user.get("id"),
+            "user_id": user_id,
             "name": user.get("name"),
             "city": _city_of(user),
-            "hire_date": _hire_date_of(user),
+            "hire_date": hire_date,
+            "staff_from": staff_from,
             "calls": calls,
             "staff_days": staff_days,
             "plan_total": own_plan,
@@ -298,7 +354,6 @@ def build_report(roster, crm_managers, date_from, date_to=None, plan_per_day=Non
             # не попадает ни в «выполнил», ни в «не выполнил».
             "met": (calls >= own_plan) if own_plan else None,
             "per_day": {},
-            "days_met": 0,
         })
     # Больше звонков — выше; при равенстве по алфавиту, чтобы список не
     # перетасовывался между днями на одинаковых числах.
@@ -323,9 +378,19 @@ def build_report(roster, crm_managers, date_from, date_to=None, plan_per_day=Non
         "total_calls": sum(r["calls"] for r in rows),
         "unmatched": unmatched,
         "unmatched_calls": sum(r["calls"] for r in unmatched),
-        "matched_by": matched_by,
+        # Людей по методу, а не строк CRM: у одного человека может быть две
+        # учётки, и складывать их в разные счётчики нельзя.
+        "matched_by": _count_methods(matched_by),
+        "matched_total": len(matched_by),
         "crm_period_total": None,
     })
+
+
+def _count_methods(methods_by_user):
+    counts = {}
+    for method in methods_by_user.values():
+        counts[method] = counts.get(method, 0) + 1
+    return counts
 
 
 def _summarize(report):
@@ -413,22 +478,34 @@ def build_daily_report(roster, managers_by_day, plan_per_day=None,
     if not day_list:
         raise ValueError("Нужен хотя бы один день")
 
-    all_rows = [row for day in sorted(answered) for row in (answered[day] or [])]
-    report = build_report(roster, all_rows, day_list[0], day_list[-1],
-                          plan_per_day=plan_per_day, no_data_days=no_data_days)
-
+    # Дни разбираем ПЕРВЫМИ: из них известно, с какого дня человек реально
+    # звонил, а без этого окно плана можно посчитать уже, чем набор показанных
+    # клеток (см. _staff_from).
     directory = _directory(roster)
-    rows_by_id = {row["user_id"]: row for row in report["rows"]}
+    calls_by_day = {}
+    first_call_days = {}
     unmatched_days = {}
     for day in sorted(answered):
         calls_by_user, unmatched, _methods = _match_calls(directory, answered[day])
+        calls_by_day[day] = calls_by_user
+        for user_id, calls in calls_by_user.items():
+            if calls and day < first_call_days.get(user_id, day + timedelta(days=1)):
+                first_call_days[user_id] = day
+        for entry in unmatched:
+            key = entry["crm_manager_id"]
+            unmatched_days[key] = unmatched_days.get(key, 0) + 1
+
+    all_rows = [row for day in sorted(answered) for row in (answered[day] or [])]
+    report = build_report(roster, all_rows, day_list[0], day_list[-1],
+                          plan_per_day=plan_per_day, no_data_days=no_data_days,
+                          first_call_days=first_call_days)
+
+    rows_by_id = {row["user_id"]: row for row in report["rows"]}
+    for day, calls_by_user in calls_by_day.items():
         for user_id, calls in calls_by_user.items():
             row = rows_by_id.get(user_id)
             if row is not None:
                 row["per_day"][day] = calls
-        for entry in unmatched:
-            key = entry["crm_manager_id"]
-            unmatched_days[key] = unmatched_days.get(key, 0) + 1
     for entry in report["unmatched"]:
         entry["days"] = unmatched_days.get(entry["crm_manager_id"], 0)
 
@@ -442,12 +519,16 @@ def day_cell(report, row, day):
     """Что стоит в клетке «сотрудник × день»: ('data'|'no_data'|'off_staff', n).
 
     Три состояния вместо одного нуля. Ноль на дне без выгрузки — вранье, а ноль
-    до даты приёма — обвинение человека в том, что его ещё не наняли.
+    до приёма на работу — обвинение человека в том, что его ещё не наняли.
+
+    Границу берём из окна плана (staff_from), а не прямо из даты приёма:
+    только так набор скрытых клеток совпадает с тем, что вычтено из
+    знаменателя, и сумма видимых клеток строки равна её «Факту».
     """
     if day in report["no_data_days"]:
         return "no_data", None
-    hire_date = row.get("hire_date")
-    if hire_date and day < hire_date:
+    staff_from = row.get("staff_from")
+    if staff_from and day < staff_from:
         return "off_staff", None
     return "data", row["per_day"].get(day, 0)
 
@@ -503,6 +584,24 @@ def _plan_line(report):
     return "План: %d в день, за %d %s — %d." % (
         report["plan_per_day"], report["days"],
         _plural(report["days"], "день", "дня", "дней"), report["plan_total"])
+
+
+def _and_more(shown):
+    """Хвост «…и ещё N» для списков, которые упёрлись в MAX_ROWS."""
+    if len(shown) <= MAX_ROWS:
+        return []
+    return ["…и ещё %d." % (len(shown) - MAX_ROWS)]
+
+
+def weakest(report, limit=3):
+    """Кто ниже всех — по СРЕДНЕМУ за день, а не по факту.
+
+    У новичка факт мал законно, поэтому «последние по факту» назвали бы не тех.
+    Людей без дней в штате не берём вовсе: их не с чем сравнивать.
+    """
+    return sorted((row for row in report["rows"] if row["staff_days"]),
+                  key=lambda row: (row["avg_per_day"],
+                                   reg_contest.fold_name(row["name"])))[:limit]
 
 
 def _city_table(report):
@@ -568,6 +667,7 @@ def render_report(report, only_missing=False):
         for row in shown[:MAX_ROWS]:
             lines.append("%s — %d из %d" % (
                 html.escape(row["name"] or "—"), row["calls"], row["plan_total"]))
+        lines.extend(_and_more(shown))
     elif report["days"] == 1:
         shown = report["rows"]
         previous_met = None
@@ -580,22 +680,18 @@ def render_report(report, only_missing=False):
                 lines.append("— ниже плана —")
             previous_met = row["met"]
             lines.append("%s — %d" % (html.escape(row["name"] or "—"), row["calls"]))
+        lines.extend(_and_more(shown))
     else:
-        shown = []
+        # За период людей по именам не перечисляем вовсе — только города и
+        # худших, так что и обрезать нечего.
         lines.extend(_city_table(report))
-        # Кого называть по имени за период — не «последних по факту» (у
-        # новичка факт мал законно), а последних по среднему за день.
-        worst = sorted((row for row in report["rows"] if row["staff_days"]),
-                       key=lambda row: (row["avg_per_day"],
-                                        reg_contest.fold_name(row["name"])))[:3]
+        worst = weakest(report)
         if worst:
             lines.append("")
             lines.append("Ниже всех: %s." % ", ".join(
                 "%s (%s в день)" % (html.escape(row["name"] or "—"),
                                     _num(row["avg_per_day"]))
                 for row in worst))
-    if len(shown) > MAX_ROWS:
-        lines.append("…и ещё %d." % (len(shown) - MAX_ROWS))
 
     if report["unmatched_calls"]:
         lines.append("")
@@ -675,10 +771,11 @@ def parse_period(argument, today):
 # Таблица (xlsx)
 # ---------------------------------------------------------------------------
 
-# Палитра и приёмы — как в остальных отчётах проекта (отчёт по аукциону смен),
-# чтобы файл не выглядел чужим: тёмный титул, голубой подзаголовок, синяя
-# шапка, зелёная заливка «норма взята», серая «вне штата», жёлтая «нет
-# выгрузки», зебра между городами.
+# Палитра — из отчёта по аукциону смен, чтобы файл не выглядел чужим: тёмный
+# титул, голубой подзаголовок, синяя шапка, зелёная заливка «норма взята».
+# Два цвета пришлось взять темнее, чем там: зебра F8FAFC на экране неразличима
+# вовсе, а «вне штата» F1F5F9 не отличался от зебры (проверено картинкой).
+# Плюс свой жёлтый для дня, за который CRM не ответила.
 _TITLE_FILL = "0F172A"
 _SUBTITLE_FILL = "E0F2FE"
 _HEADER_FILL = "1E3A8A"
@@ -698,11 +795,6 @@ _DAY_WIDTH = 6.6
 
 _THIN = Side(style="thin", color="CBD5E1")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-
-# Подпись к документу в Telegram — 1024 символа; полный список туда не влезает,
-# поэтому длинный текст уходит отдельным сообщением, а к файлу идёт короткая
-# подпись. Порог с запасом на служебную разметку.
-CAPTION_LIMIT = 1000
 
 SHEET_NAMES = ("Сводка", "Обзвон", "Города", "Как читать")
 
@@ -751,17 +843,32 @@ def _subtitle(report, generated_at=None):
 
 
 def _title_block(ws, report, width, subtitle):
+    """Титул и подзаголовок. Вызывать ПОСЛЕ _widths: ширины нужны, чтобы понять,
+    влезает ли подзаголовок — в объединённой клетке текст не переливается в
+    соседние, а обрезается по границе."""
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=width)
     cell = ws.cell(row=1, column=1,
                    value="Обзвон фронт-офиса · %s" % _period_label(report))
     cell.fill = _fill(_TITLE_FILL)
     cell.font = Font(bold=True, color="FFFFFF", size=14)
     cell.alignment = Alignment(horizontal="left", vertical="center")
+
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=width)
     cell = ws.cell(row=2, column=1, value=subtitle)
     cell.fill = _fill(_SUBTITLE_FILL)
     cell.font = Font(color=_TITLE_FILL, size=10)
-    cell.alignment = Alignment(horizontal="left", vertical="center")
+    available = sum(
+        (ws.column_dimensions[get_column_letter(column)].width or 8.43)
+        for column in range(1, width + 1))
+    if len(subtitle) > available:
+        # Узкий лист (например, отчёт за один день — там всего пять колонок):
+        # переносим текст и отдаём строке столько высоты, сколько нужно.
+        cell.alignment = Alignment(horizontal="left", vertical="center",
+                                   wrap_text=True)
+        ws.row_dimensions[2].height = 14 * max(
+            2, -(-len(subtitle) // max(int(available), 1)))
+    else:
+        cell.alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[3].height = 6
 
 
@@ -815,7 +922,7 @@ def _matrix_columns(report):
             # которого в этот день ещё не наняли, нормы не существует.
             columns.append(("Норма", 8, lambda row: row["plan_total"] or None,
                             "0", "center"))
-            columns.append(("Отклонение", 11,
+            columns.append(("Отклонение", 13,
                             lambda row: (row["calls"] - row["plan_total"]
                                          if row["plan_total"] else None),
                             "0", "center"))
@@ -853,8 +960,8 @@ def _sheet_matrix(ws, report, generated_at=None):
     columns = _matrix_columns(report)
     day_list = report["day_list"] if report["days"] > 1 else []
     width = len(columns) + len(day_list)
-    _title_block(ws, report, width, _subtitle(report, generated_at))
     _widths(ws, [column[1] for column in columns] + [_DAY_WIDTH] * len(day_list))
+    _title_block(ws, report, width, _subtitle(report, generated_at))
     _header_row(ws, 4, [column[0] for column in columns] + list(day_list),
                 no_data_days=set(report["no_data_days"]))
 
@@ -874,6 +981,10 @@ def _sheet_matrix(ws, report, generated_at=None):
         # его пустые числа иначе читаются как провал.
         base_fill = (_OFF_STAFF_FILL if not row["staff_days"]
                      else (_ZEBRA_FILL if zebra else None))
+        if not day_list and row["met"]:
+            # За один день дневных клеток нет, а красить «норма взята» надо:
+            # это и есть ежедневный отчёт, который читают чаще остальных.
+            base_fill = _MET_FILL
         for column, (_title, _width, getter, number_format, align) in enumerate(
                 columns, start=1):
             _put(ws, index, column, getter(row), number_format=number_format,
@@ -891,6 +1002,12 @@ def _sheet_matrix(ws, report, generated_at=None):
                      fill=_OFF_STAFF_FILL if state == "off_staff" else _NO_DATA_FILL)
         index += 1
 
+    # Пустая строка перед итогом — не для красоты. Excel считает таблицей все
+    # смежные строки и расширяет автофильтр на ИТОГО: тогда фильтр по городу
+    # скрывает итоги, «ИТОГО» появляется в списке значений колонки «Город», а
+    # сортировка по шапке утаскивает строку итога внутрь данных. Разрыв
+    # схлопывает диапазон обратно (проверено живым Excel).
+    index += 1
     totals = _matrix_totals(report)
     _put(ws, index, 1, "ИТОГО", bold=True, align="left")
     _put(ws, index, 2, "%d %s" % (report["roster_size"],
@@ -905,42 +1022,55 @@ def _sheet_matrix(ws, report, generated_at=None):
         _put(ws, index, len(columns) + 1 + offset,
              report["per_day_totals"].get(day), number_format="0", bold=True)
 
-    # Итог стоит НИЖЕ области фильтра: иначе фильтр уносит его вместе с данными.
-    ws.auto_filter.ref = "A4:%s%d" % (get_column_letter(width), index - 1)
+    ws.auto_filter.ref = "A4:%s%d" % (get_column_letter(width), index - 2)
     ws.freeze_panes = "C5"
     _print_wide(ws)
+
+
+def _cities_columns(report):
+    """Колонки листа «Города»: (заголовок, ширина, из города, итог, формат).
+
+    Одна спецификация на шапку, строки и ИТОГО — иначе итоги пишутся по
+    номерам колонок и разъезжаются, стоит добавить или убрать колонку.
+    Ширины с запасом под кнопку автофильтра: иначе заголовки читаются как
+    «Менеджер ов» и «% норм».
+    """
+    columns = [
+        ("Город", 20, lambda city: city["city"], "ИТОГО", None),
+        ("Менеджеров", 13, lambda city: city["roster_size"],
+         report["roster_size"], "0"),
+        ("Звонков", 11, lambda city: city["calls"], report["total_calls"], "0"),
+        ("Ср/день на человека", 14, lambda city: city["avg_per_day"],
+         report["avg_per_manager_day"], "0.0"),
+    ]
+    if report["plan_per_day"]:
+        columns.append(("% нормы", 10, lambda city: city["plan_pct"],
+                        report["plan_pct"], "0%"))
+        columns.append(("Не выполнили", 14, lambda city: city["missing_count"],
+                        len(report["missing"]), "0"))
+    return columns
 
 
 def _sheet_cities(ws, report, generated_at=None):
     """Тот же разрез, свёрнутый до города: 16 строк, по ним и принимают решение."""
     day_list = report["day_list"] if report["days"] > 1 else []
     plan = report["plan_per_day"]
-    header = ["Город", "Менеджеров", "Звонков", "Ср/день на человека"]
-    # Ширины с запасом под кнопку автофильтра: иначе заголовки читаются как
-    # «Менеджер ов» и «% норм».
-    widths = [20, 13, 11, 14]
-    if plan:
-        header += ["% нормы", "Не выполнили"]
-        widths += [10, 14]
+    columns = _cities_columns(report)
+    header = [column[0] for column in columns]
+    widths = [column[1] for column in columns]
     width = len(header) + len(day_list)
-    _title_block(ws, report, width, _subtitle(report, generated_at))
     _widths(ws, widths + [_DAY_WIDTH] * len(day_list))
+    _title_block(ws, report, width, _subtitle(report, generated_at))
     _header_row(ws, 4, header + list(day_list),
                 no_data_days=set(report["no_data_days"]))
 
     index = 5
     for city in report["cities"]:
-        values = [(city["city"], None, "left"),
-                  (city["roster_size"], "0", "center"),
-                  (city["calls"], "0", "center"),
-                  (city["avg_per_day"], "0.0", "center")]
-        if plan:
-            values.append((city["plan_pct"], "0%", "center"))
-            values.append((city["missing_count"], "0", "center"))
         met_fill = (_MET_FILL if plan and (city["plan_pct"] or 0) >= 1 else None)
-        for column, (value, number_format, align) in enumerate(values, start=1):
-            _put(ws, index, column, value, number_format=number_format,
-                 fill=met_fill, align=align)
+        for column, (_title, _width, getter, _total, number_format) in enumerate(
+                columns, start=1):
+            _put(ws, index, column, getter(city), number_format=number_format,
+                 fill=met_fill, align="left" if column == 1 else "center")
         for offset, day in enumerate(day_list):
             column = len(header) + 1 + offset
             if day in report["no_data_days"]:
@@ -952,33 +1082,30 @@ def _sheet_cities(ws, report, generated_at=None):
                 cell.font = Font(color=_MUTED_COLOR)
         index += 1
 
-    _put(ws, index, 1, "ИТОГО", bold=True, align="left")
-    _put(ws, index, 2, report["roster_size"], number_format="0", bold=True)
-    _put(ws, index, 3, report["total_calls"], number_format="0", bold=True)
-    _put(ws, index, 4, report["avg_per_manager_day"], number_format="0.0", bold=True)
-    if plan:
-        _put(ws, index, 5, report["plan_pct"], number_format="0%", bold=True)
-        _put(ws, index, 6, len(report["missing"]), number_format="0", bold=True)
+    # Разрыв перед итогом — по той же причине, что на листе «Обзвон».
+    index += 1
+    for column, (_title, _width, _getter, total, number_format) in enumerate(
+            columns, start=1):
+        _put(ws, index, column, total, number_format=number_format, bold=True,
+             align="left" if column == 1 else "center")
     for offset, day in enumerate(day_list):
         _put(ws, index, len(header) + 1 + offset,
              report["per_day_totals"].get(day), number_format="0", bold=True)
 
-    ws.auto_filter.ref = "A4:%s%d" % (get_column_letter(width), index - 1)
+    ws.auto_filter.ref = "A4:%s%d" % (get_column_letter(width), index - 2)
     ws.freeze_panes = "B5"
     _print_wide(ws, title_cols="A:A")
 
 
 def _sheet_summary(ws, report, generated_at=None):
     """Первый лист: цифры периода, кому подтянуться, звонки вне реестра, качество данных."""
-    _title_block(ws, report, 5, _subtitle(report, generated_at))
     _widths(ws, [38, 28, 12, 12, 16])
+    _title_block(ws, report, 5, _subtitle(report, generated_at))
     row = _section(ws, 4, "ИТОГО")
     row = _pairs(ws, row, _summary_totals(report))
 
     row = _section(ws, row, "КОМУ ПОДТЯНУТЬСЯ")
-    worst = sorted((item for item in report["rows"] if item["staff_days"]),
-                   key=lambda item: (item["avg_per_day"],
-                                     reg_contest.fold_name(item["name"])))[:5]
+    worst = weakest(report, limit=5)
     _header_row(ws, row, ["Город", "Сотрудник", "Звонков", "Ср/день", "% нормы"])
     row += 1
     for item in worst:
@@ -1047,11 +1174,12 @@ def _summary_quality(report):
     matched = report["matched_by"]
     by_email = matched.get("email", 0)
     by_name = matched.get("name", 0) + matched.get("name_prefix", 0)
+    matched_total = report.get("matched_total", by_email + by_name)
     control = report.get("crm_period_total")
     total_crm = report["total_calls"] + report["unmatched_calls"]
     pairs = [
         ("Сопоставлено с реестром", "%d из %d (по почте %d, по ФИО %d)" % (
-            by_email + by_name, report["roster_size"], by_email, by_name), None),
+            matched_total, report["roster_size"], by_email, by_name), None),
         ("Учёток CRM без сопоставления", len(report["unmatched"]), "0"),
         ("Без города в карточке", report["no_city_count"], "0"),
         ("Дней без выгрузки CRM", "%d из %d" % (len(report["no_data_days"]),
@@ -1116,8 +1244,8 @@ _NOTES = [
 
 
 def _sheet_notes(ws, report):
-    _title_block(ws, report, 2, "Как читать эту таблицу")
     _widths(ws, [6, 110])
+    _title_block(ws, report, 2, "Как читать эту таблицу")
     row = 4
     for number, text in enumerate(_NOTES, start=1):
         cell = ws.cell(row=row, column=1, value=number)

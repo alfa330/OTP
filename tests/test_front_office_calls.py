@@ -298,8 +298,6 @@ class ParsePeriodTests(unittest.TestCase):
             self.assertIsNone(foc.parse_period(text, self.TODAY), text)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ---------------------------------------------------------------------------
@@ -591,14 +589,26 @@ class WorkbookTests(unittest.TestCase):
 
     def test_rows_grouped_by_city_with_unknown_last(self):
         ws = self._book(self._report())["Обзвон"]
+        # Данные кончаются за две строки до ИТОГО: между ними намеренный разрыв.
         cities = [ws.cell(row=row, column=1).value
-                  for row in range(5, ws.max_row)]
+                  for row in range(5, ws.max_row - 1)]
         self.assertEqual(cities, ["Алматы", "Астана", foc.CITY_UNKNOWN])
 
     def test_totals_row_is_outside_the_filter(self):
+        """Смежную строку Excel втягивает в таблицу сам, поэтому нужен разрыв.
+
+        Без пустой строки фильтр по городу скрывал ИТОГО, «ИТОГО» попадало в
+        список значений колонки «Город», а сортировка по шапке уносила итог
+        внутрь данных (проверено живым Excel)."""
         ws = self._book(self._report())["Обзвон"]
         self.assertEqual(ws.cell(row=ws.max_row, column=1).value, "ИТОГО")
-        self.assertTrue(ws.auto_filter.ref.endswith(str(ws.max_row - 1)))
+        gap = ws.max_row - 1
+        self.assertTrue(all(ws.cell(row=gap, column=column).value is None
+                            for column in range(1, ws.max_column + 1)),
+                        "строка между данными и ИТОГО должна быть пустой")
+        self.assertTrue(ws.auto_filter.ref.endswith(str(ws.max_row - 2)),
+                        "фильтр обязан кончаться до разрыва: %s"
+                        % ws.auto_filter.ref)
         self.assertEqual(ws.freeze_panes, "C5")
 
     def test_zero_day_cell_is_a_number_shown_as_dash(self):
@@ -636,13 +646,20 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(cell.value, 11)
         self.assertEqual(cell.fill.fgColor.rgb[-6:], foc._MET_FILL)
 
-    def test_cities_sheet_lists_every_city_with_totals(self):
-        ws = self._book(self._report())["Города"]
+    def test_cities_sheet_lists_cities_worst_first(self):
+        """sorted() тут был бы бессмыслен: порядок и есть сообщение листа."""
+        report = self._report()
+        ws = self._book(report)["Города"]
         cities = [ws.cell(row=row, column=1).value
-                  for row in range(5, ws.max_row)]
-        self.assertEqual(sorted(cities),
-                         sorted(["Алматы", "Астана", foc.CITY_UNKNOWN]))
+                  for row in range(5, ws.max_row - 1)]
+        self.assertEqual(cities, [city["city"] for city in report["cities"]])
+        # «Бекова Бота» звонков не делала, значит её город худший и стоит первым,
+        # а город без названия — всегда последним.
+        self.assertEqual(cities[0], "Астана")
+        self.assertEqual(cities[-1], foc.CITY_UNKNOWN)
         self.assertEqual(ws.cell(row=ws.max_row, column=1).value, "ИТОГО")
+        self.assertEqual(ws.cell(row=ws.max_row, column=3).value,
+                         report["total_calls"])
 
     def test_notes_sheet_warns_about_missing_shifts(self):
         ws = self._book(self._report())["Как читать"]
@@ -731,3 +748,214 @@ class BotWiringTests(unittest.TestCase):
         calls = self._calls("_front_office_calls_send")
         self.assertIn("send_document", calls)
         self.assertIn("send_message", calls)
+
+    def test_failed_document_still_lets_the_text_through(self):
+        """Отказ файла не имеет права отменить сводку.
+
+        В группе, где боту запрещены медиа, sendDocument падает — а до правки
+        короткий текст уходил ТОЛЬКО подписью к файлу, и чат в этот день не
+        получал ничего."""
+        node = self.source_cache.function_node(str(self.bot_path),
+                                               "_front_office_calls_send")
+        handlers = [inner for inner in ast.walk(node)
+                    if isinstance(inner, ast.Try)]
+        self.assertTrue(handlers, "отправка файла должна быть в try/except")
+        rescued = [handler for handler in handlers
+                   if "send_document" in self._names(ast.Module(body=handler.body,
+                                                                type_ignores=[]))
+                   and any("send_message" in self._names(clause)
+                           for clause in handler.handlers)]
+        self.assertTrue(rescued,
+                        "в except после send_document должен быть send_message")
+
+    def test_reply_never_cancels_the_whole_send(self):
+        node = self.source_cache.function_node(str(self.bot_path),
+                                               "_front_office_calls_send")
+        replies = [keyword.arg for inner in ast.walk(node)
+                   if isinstance(inner, ast.Call)
+                   for keyword in inner.keywords]
+        self.assertEqual(replies.count("reply_to_message_id"),
+                         replies.count("allow_sending_without_reply") - 1,
+                         "у каждого reply_to_message_id должен быть "
+                         "allow_sending_without_reply")
+
+    def test_day_requests_are_impatient(self):
+        """31 день × 3 попытки × 60 с занял бы поток общего пула на 1,5 часа."""
+        node = self.source_cache.function_node(str(self.bot_path),
+                                               "_front_office_calls_report")
+        names = self._names(node)
+        self.assertIn("DAY_HTTP_TIMEOUT", names)
+        self.assertIn("DAY_MAX_RETRIES", names)
+        self.assertIn("FRONT_OFFICE_CALLS_COLLECT_BUDGET", names)
+        self.assertIn("monotonic", names)
+
+    def test_command_refuses_a_second_parallel_run(self):
+        names = self._names(self.source_cache.function_node(
+            str(self.bot_path), "front_office_calls_command"))
+        self.assertIn("_front_office_calls_running", names)
+
+
+class ClientPatienceTests(unittest.TestCase):
+    """Терпение клиента настраивается: поденные запросы не ждут по минуте."""
+
+    def test_retries_are_configurable(self):
+        client = foc.RegionCallStatsClient("http://crm.test", "token",
+                                           timeout=5, retries=1)
+        self.assertEqual(client.timeout, 5)
+        self.assertEqual(client.retries, 1)
+
+    def test_single_attempt_does_not_retry(self):
+        client = foc.RegionCallStatsClient("http://crm.test", "token", retries=1)
+        attempts = []
+
+        def _boom(*_args, **_kwargs):
+            attempts.append(1)
+            raise foc.requests.RequestException("нет сети")
+
+        client.session.post = _boom
+        with self.assertRaises(RuntimeError):
+            client.fetch_managers(DAY, DAY)
+        self.assertEqual(len(attempts), 1)
+
+    def test_default_still_retries_three_times(self):
+        client = foc.RegionCallStatsClient("http://crm.test", "token")
+        self.assertEqual(client.retries, foc.MAX_RETRIES)
+
+    def test_day_settings_are_cheaper_than_default(self):
+        self.assertLess(foc.DAY_HTTP_TIMEOUT, foc.HTTP_TIMEOUT)
+        self.assertLess(foc.DAY_MAX_RETRIES, foc.MAX_RETRIES)
+
+
+class StaffWindowTests(unittest.TestCase):
+    """Окно плана не может быть уже набора дней, за которые показаны звонки.
+
+    Иначе получалось сразу три вранья: клетка со звонками прятались под «вне
+    штата», процент нормы считался от меньшего знаменателя (доходило до 400%),
+    а недобравший норму молча уезжал из списка «не выполнили».
+    """
+
+    DAY_ONE = date(2026, 8, 1)
+    DAY_TWO = date(2026, 8, 2)
+
+    def _report(self, hire_date, calls_per_day=20, plan_per_day=10):
+        roster = [_fo(1, "Тестов Тест", "t@x.kz", city="Алматы",
+                      hire_date=hire_date)]
+        by_day = {day: [_crm(1, "Тестов Тест", "t@x.kz", calls_per_day)]
+                  for day in (self.DAY_ONE, self.DAY_TWO)}
+        return foc.build_daily_report(roster, by_day, plan_per_day=plan_per_day)
+
+    def test_calls_before_hire_widen_the_window(self):
+        report = self._report(self.DAY_TWO)
+        row = report["rows"][0]
+        self.assertEqual(row["staff_from"], self.DAY_ONE)
+        self.assertEqual(row["staff_days"], 2)
+        self.assertEqual(row["plan_total"], 20)
+
+    def test_visible_cells_sum_to_the_fact(self):
+        report = self._report(self.DAY_TWO)
+        row = report["rows"][0]
+        visible = [value for day in report["day_list"]
+                   for state, value in [foc.day_cell(report, row, day)]
+                   if state == "data"]
+        self.assertEqual(sum(visible), row["calls"])
+        self.assertEqual(len(visible), len(report["day_list"]))
+
+    def test_days_met_never_exceeds_staff_days(self):
+        report = self._report(self.DAY_TWO)
+        row = report["rows"][0]
+        self.assertLessEqual(row["days_met"], row["staff_days"])
+
+    def test_column_total_equals_sum_of_visible_cells(self):
+        report = self._report(self.DAY_TWO)
+        for day in report["day_list"]:
+            visible = sum(value for row in report["rows"]
+                          for state, value in [foc.day_cell(report, row, day)]
+                          if state == "data")
+            self.assertEqual(report["per_day_totals"][day], visible)
+
+    def test_hire_inside_period_without_early_calls_still_shrinks(self):
+        # Обычный новичок: звонков до приёма нет — окно по-прежнему режется.
+        roster = [_fo(1, "Тестов Тест", "t@x.kz", city="Алматы",
+                      hire_date=self.DAY_TWO)]
+        by_day = {self.DAY_ONE: [],
+                  self.DAY_TWO: [_crm(1, "Тестов Тест", "t@x.kz", 5)]}
+        report = foc.build_daily_report(roster, by_day, plan_per_day=10)
+        row = report["rows"][0]
+        self.assertEqual(row["staff_days"], 1)
+        self.assertEqual(row["plan_total"], 10)
+        self.assertEqual(foc.day_cell(report, row, self.DAY_ONE),
+                         ("off_staff", None))
+
+    def test_future_hire_date_with_calls_does_not_hide_them(self):
+        report = self._report(date(2026, 12, 31))
+        row = report["rows"][0]
+        self.assertEqual(row["staff_days"], 2)
+        self.assertEqual(foc.day_cell(report, row, self.DAY_ONE),
+                         ("data", 20))
+
+    def test_single_shot_report_never_hides_calls_either(self):
+        # Без разбивки по дням день звонка неизвестен, поэтому любые звонки
+        # раздвигают окно на весь период — лучше мягкий план, чем скрытые числа.
+        roster = [_fo(1, "Тестов Тест", "t@x.kz", hire_date=self.DAY_TWO)]
+        report = foc.build_report(roster, [_crm(1, "Тестов Тест", "t@x.kz", 40)],
+                                  self.DAY_ONE, self.DAY_TWO, plan_per_day=10)
+        self.assertEqual(report["rows"][0]["staff_days"], 2)
+
+
+class MatchAccountingTests(unittest.TestCase):
+    """Сопоставление считается по людям, а не по строкам CRM."""
+
+    def test_two_crm_accounts_of_one_person_count_once(self):
+        roster = [_fo(1, "Асанов Асан", "a@x.kz", city="Алматы")]
+        rows = [_crm(10, "Асанов Асан", "a@x.kz", 3),
+                _crm(11, "Асанов Асан", None, 4)]
+        report = foc.build_report(roster, rows, DAY)
+        self.assertEqual(report["rows"][0]["calls"], 7)
+        self.assertEqual(report["matched_total"], 1)
+        self.assertEqual(sum(report["matched_by"].values()), 1)
+
+    def test_best_method_wins_for_a_person(self):
+        roster = [_fo(1, "Асанов Асан", "a@x.kz", city="Алматы")]
+        rows = [_crm(10, "Асанов Асан", None, 1),
+                _crm(11, "Асанов Асан", "a@x.kz", 1)]
+        report = foc.build_report(roster, rows, DAY)
+        self.assertEqual(report["matched_by"], {"email": 1})
+
+    def test_rows_without_id_are_not_merged(self):
+        roster = [_fo(1, "Асанов Асан", "a@x.kz", city="Алматы")]
+        rows = [_crm(None, None, None, 5), _crm(None, None, None, 7)]
+        report = foc.build_report(roster, rows, DAY)
+        self.assertEqual(len(report["unmatched"]), 2)
+        self.assertEqual(report["unmatched_calls"], 12)
+
+
+class SummarySheetTests(unittest.TestCase):
+    """Строка сверки на «Сводке» — та самая, ради которой нужен контрольный запрос."""
+
+    def _summary_text(self, report):
+        book = load_workbook(BytesIO(foc.build_workbook(report)))
+        return " | ".join(str(cell.value)
+                          for row in book["Сводка"].iter_rows()
+                          for cell in row if cell.value is not None)
+
+    def _report(self, control):
+        roster = [_fo(1, "Асанов Асан", "a@x.kz", city="Алматы")]
+        by_day = {day: [_crm(1, "Асанов Асан", "a@x.kz", 2)]
+                  for day in _days(date(2026, 8, 1), date(2026, 8, 3))}
+        return foc.build_daily_report(roster, by_day, plan_per_day=10,
+                                      crm_period_total=control)
+
+    def test_matching_control_total_says_so(self):
+        self.assertIn("сходится", self._summary_text(self._report(6)))
+
+    def test_mismatching_control_total_is_shouted(self):
+        text = self._summary_text(self._report(99))
+        self.assertIn("РАСХОЖДЕНИЕ", text)
+
+    def test_without_control_total_there_is_no_line(self):
+        text = self._summary_text(self._report(None))
+        self.assertNotIn("Контрольный запрос", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
