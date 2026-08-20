@@ -81,13 +81,21 @@
     -webkit-backdrop-filter: blur(16px) saturate(120%);
 }
 
-/* Колонки и сцена — над вуалью. */
+/* Слои: вуаль → карточки → бегущий барс → телефон. Барс обязан пробежать НАД
+   карточкой (иначе он ныряет под неё за миг до финиша) и ПОД телефоном (иначе
+   выглядывает поверх корпуса, а не из-за него). */
 .wt-helper,
-.wt-side,
-.wt-stage {
+.wt-side {
     position: relative;
     z-index: 1;
 }
+
+.wt-stage {
+    position: relative;
+    z-index: 3;
+}
+
+.wt-runner { z-index: 2; }
 
 /* Сцена телефона — просто центровка: размеры задаёт сам корпус. */
 .wt-stage {
@@ -111,16 +119,43 @@
     justify-content: center;
 }
 
+/* Окно, в которое видно ГОЛОВУ выглядывающего барса. Обрезка по рамке окна, а
+   не «сдвинуть зверя левее»: сдвигом наружу вылезает вертикальная полоса всего
+   силуэта — ухо, плечо, лапа, — и получается не «выглядывает», а «стоит рядом».
+   Высота окна выбрана по голове, положение — по высоте места барса в карточке. */
 .wt-peek {
     position: absolute;
-    bottom: 6%;
-    left: -76px;
+    top: 30%;
+    left: -48px;
     z-index: 0;
-    width: 156px;
+    width: 48px;
+    /* Высота ровно по подбородку: ниже начинается шарф, и горизонтальный срез
+       по нему читается как обрезанная картинка, а не как «выглянул из-за угла». */
+    height: 98px;
+    overflow: hidden;
     pointer-events: none;
 }
 
-.wt-peek .wt-leo { width: 100%; }
+.wt-peek .wt-leo {
+    position: absolute;
+    top: -22px;
+    left: -36px;
+    width: 168px;
+}
+
+/* Бегун — тот же барс целиком, в той же точке, что и голова в окне: сумма
+   смещений окна и картинки внутри него (-48 и -36 по горизонтали, -22 по
+   вертикали). Совпадение позиций и делает подмену незаметной. */
+.wt-runner {
+    position: absolute;
+    top: calc(30% - 22px);
+    left: -84px;
+    z-index: 0;
+    width: 168px;
+    pointer-events: none;
+}
+
+.wt-runner .wt-leo { width: 100%; }
 
 /* ── Учебный телефон ──────────────────────────────────────────────────────
    Корпус нарисован по референсу владельца: тонкая рамка, вырез сверху,
@@ -327,16 +362,30 @@
 /* Подсвеченная цель — единственная «нереалистичная» деталь экрана, и она
    намеренна: без неё тренажёр превращается в поиск кнопки методом перебора.
    Обводка снаружи (outline), чтобы не сдвигать раскладку. */
+/* Подсветка цели — КРАСНАЯ и толстая.
+   Индиго в два пикселя терялся на мелких целях: крестик рекламного окна, иконка
+   в нижней панели, строка подсказки браузера. Человек не находил, куда нажать, и
+   тыкал наугад — то есть подсветка, ради которой всё и затевалось, не работала.
+   Красный здесь не «ошибка», а «сюда»: другого красного на учебных экранах нет. */
 .wt-phone .is-target {
-    outline: 2px solid var(--wt-accent);
+    outline: 3px solid var(--wt-red);
     outline-offset: 2px;
     border-radius: 13px;
-    animation: wt-target 1.9s ease-in-out infinite;
+    animation: wt-target 1.6s ease-in-out infinite;
 }
 
 @keyframes wt-target {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.34); }
-    55% { box-shadow: 0 0 0 7px rgba(79, 70, 229, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(225, 29, 72, 0.45); }
+    60% { box-shadow: 0 0 0 9px rgba(225, 29, 72, 0); }
+}
+
+/* Учебный код в реплике барса. */
+.wt-code {
+    font-weight: 800;
+    font-size: 1.12em;
+    letter-spacing: 0.04em;
+    color: var(--wt-red);
+    white-space: nowrap;
 }
 
 .wt-pulse { animation: wt-pulse 1.6s ease-in-out infinite; }
@@ -887,15 +936,23 @@
 
 .wt-eg__dots { display: flex; justify-content: center; gap: 12px; padding: 6px 0; }
 
+/* Точки набранного кода. Крупнее и с кольцом: бледные кружки в 13 пикселей на
+   белом фоне не показывали, сколько цифр уже набрано, и человек вводил код
+   заново поверх набранного. */
 .wt-eg__dots i {
-    width: 13px;
-    height: 13px;
-    background: var(--wt-line);
+    width: 16px;
+    height: 16px;
+    background: transparent;
+    border: 2px solid var(--wt-line);
     border-radius: 999px;
-    transition: background 0.15s ease, transform 0.15s ease;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
 }
 
-.wt-eg__dots i.is-filled { background: var(--wt-violet); transform: scale(1.08); }
+.wt-eg__dots i.is-filled {
+    background: var(--wt-violet);
+    border-color: var(--wt-violet);
+    transform: scale(1.12);
+}
 
 .wt-eg__pad {
     display: grid;
@@ -1304,6 +1361,36 @@
 .wt-side__btn--close:hover { background: #1e293b; color: #fff; }
 
 /* ── Анимации барса ─────────────────────────────────────────────────────── */
+
+/* Бег на четырёх лапах: пары чередуются, корпус подпрыгивает, хвост вытянут
+   назад. Кадров как таковых нет — движение целиком на трансформациях, поэтому
+   бег остаётся плавным на любой скорости перемещения. */
+.wt-leo--run .wt-leo__legs-a,
+.wt-leo--run .wt-leo__legs-b {
+    transform-box: fill-box;
+    transform-origin: center top;
+}
+
+.wt-leo--run .wt-leo__legs-a { animation: wt-step 0.26s ease-in-out infinite; }
+.wt-leo--run .wt-leo__legs-b { animation: wt-step 0.26s ease-in-out infinite reverse; }
+.wt-leo--run .wt-leo__body { transform-origin: 60px 116px; animation: wt-runbob 0.26s ease-in-out infinite; }
+.wt-leo--run .wt-leo__head { transform-origin: 60px 84px; animation: wt-runbob 0.26s ease-in-out infinite; }
+.wt-leo--run .wt-leo__tail { animation: wt-runtail 0.26s ease-in-out infinite; }
+
+@keyframes wt-step {
+    0%, 100% { transform: translateY(0) rotate(-13deg); }
+    50% { transform: translateY(-3px) rotate(13deg); }
+}
+
+@keyframes wt-runbob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3.5px); }
+}
+
+@keyframes wt-runtail {
+    0%, 100% { transform: rotate(-14deg); }
+    50% { transform: rotate(-2deg); }
+}
 
 .wt-leo__tail { transform-origin: 86px 112px; animation: wt-tail 3.4s ease-in-out infinite; }
 .wt-leo__head { transform-origin: 60px 84px; }

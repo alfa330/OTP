@@ -15,7 +15,7 @@ import React from 'react';
  * внимание — учебный экран главный, помощник комментирует.
  */
 
-const STATES = new Set(['idle', 'speak', 'hint', 'error', 'success']);
+const STATES = new Set(['idle', 'speak', 'hint', 'error', 'success', 'run']);
 
 /* Глаза — единственное, что по-настоящему меняет выражение. Остальное
    (наклон головы, хвост) делает CSS: анимация не должна множить разметку. */
@@ -77,6 +77,26 @@ const Mouth = ({ state }) => {
     );
 };
 
+/* Четыре лапы — только для бега.
+ *
+ * В остальных состояниях барс сидит, и лап под ним не видно (они спрятаны за
+ * корпусом, как у сидящей кошки). Рисовать их постоянно нельзя: сидящий зверь с
+ * четырьмя торчащими лапами выглядит сломанным. Пары чередуются анимацией:
+ * передняя левая с задней правой и наоборот — так бегают на самом деле.
+ */
+const Legs = () => (
+    <g className="wt-leo__legs">
+        <g className="wt-leo__legs-a">
+            <rect x="40" y="112" width="9" height="18" rx="4.5" fill="#e6ecf3" />
+            <rect x="71" y="112" width="9" height="18" rx="4.5" fill="#dfe6ee" />
+        </g>
+        <g className="wt-leo__legs-b">
+            <rect x="53" y="112" width="9" height="18" rx="4.5" fill="#f2f6fa" />
+            <rect x="58" y="112" width="9" height="18" rx="4.5" fill="#e6ecf3" />
+        </g>
+    </g>
+);
+
 export default function SnowLeopard({ state = 'idle', className = '' }) {
     const mood = STATES.has(state) ? state : 'idle';
     return (
@@ -98,6 +118,8 @@ export default function SnowLeopard({ state = 'idle', className = '' }) {
                 d="M86 112c14 2 22-8 20-18-2-9-11-11-15-5"
                 fill="none" stroke="#cbd5e1" strokeWidth="11" strokeLinecap="round"
                 strokeDasharray="3 13" />
+
+            {mood === 'run' && <Legs />}
 
             <g className="wt-leo__body">
                 <path d="M60 84c16 0 26 12 26 26 0 8-11 12-26 12s-26-4-26-12c0-14 10-26 26-26Z"

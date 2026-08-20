@@ -70,20 +70,39 @@ const SCREENS = {
    иначе неверное нажатие проходит незамеченным: текст сменился, а картинка нет. */
 const MOOD = { idle: 'speak', error: 'error', hint: 'hint' };
 
+/* Учебный код в реплике барса — красным и жирным.
+ *
+ * Его переписывают на клавиатуру телефона, и в сплошном тексте четыре цифры
+ * теряются: человек читает реплику, не находит, что вводить, и жмёт наугад.
+ * Подсвечиваем ТОЛЬКО настоящие коды текущей попытки, а не любое число: иначе
+ * красным станет и «за Июль 2026». */
+const withCodes = (text, codes) => {
+    const values = Object.values(codes || {}).filter((v) => /^\d{4}$/.test(String(v)));
+    if (!values.length) return text;
+    const parts = String(text).split(new RegExp(`(${values.join('|')})`, 'g'));
+    return parts.map((part, index) => (values.includes(part)
+        ? <b key={`c${index}`} className="wt-code">{part}</b>
+        : <React.Fragment key={`t${index}`}>{part}</React.Fragment>));
+};
+
 const HOURS = () => {
     const now = new Date();
     return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 };
 
-/* Появление тренажёра разложено на три такта, и порядок здесь смысловой:
+/* Появление тренажёра разложено на такты, и порядок здесь смысловой:
  *
  *   'rise'  — телефон выезжает снизу поверх статьи. Фон ещё чистый: читатель
  *             видит, ОТКУДА взялся экран, и не теряет место в тексте.
- *   'peek'  — телефон доехал. Только теперь появляется полупрозрачная подложка
- *             (статья остаётся видна, но уходит на второй план), а из-за
- *             телефона слева выглядывает барс.
- *   'done'  — из-за телефона выезжают карточки помощника и прогресса, барс
- *             занимает своё место в карточке.
+ *   'peek'  — телефон доехал. Появляется полупрозрачная подложка, а из-за
+ *             корпуса выглядывает ГОЛОВА барса — на той же высоте, где он потом
+ *             будет сидеть в карточке. Пауза около секунды: на выглядывание надо
+ *             успеть посмотреть, иначе оно не считывается вовсе.
+ *   'cards' — из-за телефона выезжают карточки помощника и прогресса.
+ *   'run'   — барс выходит из-за телефона и на четырёх лапах бежит к своему
+ *             месту в карточке. Место не задано числом: оно измеряется по факту,
+ *             поэтому бег заканчивается ровно там, где барс потом сидит.
+ *   'done'  — всё на местах.
  *
  * Такты, а не один общий переход: когда всё выезжает разом, глазу не за чем
  * следить и появление читается как мигание. */
@@ -94,6 +113,13 @@ export function TrainerPlayer({
     const phoneRef = useRef(null);
     const stages = useMemo(() => stageCount(scenario), [scenario]);
     const reduceMotion = useReducedMotion();
+    /* На узком экране барс не выглядывает и не бежит: телефон занимает почти всю
+       ширину, места для зверя слева просто нет — он вылезал бы за край окна.
+       Там остаётся то, что работает: телефон выезжает, появляется подложка,
+       следом карточки. Замеряем один раз при открытии — поворот устройства
+       посреди анимации не тот случай, ради которого стоит усложнять. */
+    const [narrow] = useState(() => (typeof window !== 'undefined'
+        && window.matchMedia('(max-width: 1023px)').matches));
     const [phase, setPhase] = useState(
         animateEntrance && !reduceMotion ? 'rise' : 'done');
 
@@ -101,7 +127,38 @@ export function TrainerPlayer({
     useEffect(() => { if (reduceMotion) setPhase('done'); }, [reduceMotion]);
 
     const shown = phase !== 'rise';
+    const cardsOut = phase === 'cards' || phase === 'run' || phase === 'done';
+    const running = phase === 'run';
     const settled = phase === 'done';
+
+    /* Барс выглядывает и ждёт: без паузы голова мелькает за долю секунды, и
+       вместо «подглядывает» получается «что-то дёрнулось». */
+    useEffect(() => {
+        if (phase !== 'peek') return undefined;
+        const timer = setTimeout(() => setPhase('cards'), narrow ? 120 : 1000);
+        return () => clearTimeout(timer);
+    }, [phase, narrow]);
+
+    /* Маршрут пробежки считается по факту: откуда барс выглядывает и где стоит
+       его место в карточке. Числами это не задать — карточка и телефон меняют
+       размеры вместе с окном. */
+    const runnerRef = useRef(null);
+    const slotRef = useRef(null);
+    const phoneWrapRef = useRef(null);
+    const [runPath, setRunPath] = useState(null);
+    useEffect(() => {
+        if (phase !== 'run') return;
+        const from = runnerRef.current?.getBoundingClientRect();
+        const to = slotRef.current?.getBoundingClientRect();
+        // Не смогли измерить — не задерживаем человека: барс просто окажется на
+        // месте, а тренажёр останется рабочим.
+        if (!from || !to || !to.width) { setPhase('done'); return; }
+        setRunPath({
+            x: to.left + (to.width - from.width) / 2 - from.left,
+            y: to.top + (to.height - from.height) / 2 - from.top,
+            scale: Math.min(1.15, Math.max(0.6, to.width / from.width)),
+        });
+    }, [phase]);
 
     /* Плавность одна на все такты: та же кривая, что у модалок портала
        (ui/ios.jsx) — быстрый старт, мягкое приземление. */
@@ -169,10 +226,16 @@ export function TrainerPlayer({
                     ? { opacity: 0, x: 120, scale: 0.94 } : false}
                 animate={leaving
                     ? { opacity: 0, x: 120, scale: 0.94 }
-                    : (settled ? { opacity: 1, x: 0, scale: 1 } : {})}
+                    : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
                 transition={{ duration: leaving ? 0.26 : 0.46, ease: EASE }}
+                onAnimationComplete={() => {
+                    if (!leaving) setPhase((p) => (p === 'cards' ? (narrow ? 'done' : 'run') : p));
+                }}
             >
-                <div className="wt-helper__leo">
+                {/* Место барса в карточке. Пока он бежит, слот пуст — иначе
+                    зверь окажется в двух местах сразу. */}
+                <div className="wt-helper__leo" ref={slotRef}
+                    style={{ opacity: settled || leaving ? 1 : 0 }}>
                     <SnowLeopard state={finished ? 'success' : (MOOD[said.tone] || 'speak')} />
                 </div>
                 <div className={`wt-bubble wt-bubble--${said.tone}`}>
@@ -180,7 +243,7 @@ export function TrainerPlayer({
                     {/* aria-live: реплика меняется без перехода фокуса, и без
                         объявления человек со скринридером не узнаёт, что нажал
                         не туда. */}
-                    <p aria-live="polite">{said.text}</p>
+                    <p aria-live="polite">{withCodes(said.text, run.world.codes)}</p>
                 </div>
 
                 {!finished && (
@@ -199,21 +262,51 @@ export function TrainerPlayer({
                 Высота считается от окна, ширина — от пропорций корпуса, поэтому
                 на большом экране телефон крупный, а на маленьком не вылезает. */}
             <div className="wt-stage">
-                <div className="wt-phone-wrap">
-                    {/* Барс подглядывает ИЗ-ЗА телефона: он лежит ниже корпуса по
-                        слою и наполовину им закрыт. Это тот же приём, что у
-                        карточек, — движение начинается из одной точки, поэтому
-                        экран собирается на глазах, а не появляется собранным. */}
-                    {!settled && (
+                <div className="wt-phone-wrap" ref={phoneWrapRef}>
+                    {/* ГОЛОВА барса из-за корпуса. Окно с обрезкой, а не весь
+                        зверь целиком: выглядывать половиной туловища — это не
+                        «подглядывает», это «стоит рядом». Высота окна выбрана
+                        так, чтобы голова оказалась там же, где барс потом сидит
+                        в карточке, — тогда пробежка читается как продолжение
+                        одного движения, а не как телепорт. */}
+                    {!narrow && (phase === 'peek' || phase === 'cards') && (
                         <motion.div
                             className="wt-peek"
                             aria-hidden="true"
-                            initial={{ x: 70, opacity: 0 }}
-                            animate={shown ? { x: 0, opacity: 1 } : {}}
-                            transition={{ duration: 0.44, ease: [0.34, 1.4, 0.64, 1] }}
-                            onAnimationComplete={() => { if (shown) setPhase('done'); }}
+                            initial={{ x: 46, opacity: 0 }}
+                            animate={{ x: 0, opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: 0.42, ease: [0.34, 1.4, 0.64, 1] }}
                         >
                             <SnowLeopard state="idle" />
+                        </motion.div>
+                    )}
+
+                    {/* Тот же барс, но целиком: появляется ровно там, где была
+                        голова, и убегает на своё место в карточке. */}
+                    {running && (
+                        <motion.div
+                            className="wt-runner"
+                            aria-hidden="true"
+                            ref={runnerRef}
+                            initial={{ opacity: 0, x: 0, y: 0, scale: 1 }}
+                            animate={runPath
+                                ? { opacity: 1, x: runPath.x, y: runPath.y, scale: runPath.scale }
+                                : { opacity: 1 }}
+                            transition={{
+                                opacity: { duration: 0.16 },
+                                default: { duration: 0.78, ease: [0.4, 0, 0.2, 1] },
+                            }}
+                            /* Проверяем, ЧТО именно доиграло: барс появляется в
+                               два приёма — сначала проявляется на месте головы,
+                               потом бежит. Без этой проверки «готово» срабатывало
+                               на проявлении, и пробежка обрывалась через четверть
+                               секунды в двадцати пикселях от старта. */
+                            onAnimationComplete={(definition) => {
+                                if (definition && definition.x !== undefined) setPhase('done');
+                            }}
+                        >
+                            <SnowLeopard state="run" />
                         </motion.div>
                     )}
 
@@ -282,7 +375,7 @@ export function TrainerPlayer({
                     ? { opacity: 0, x: -120, scale: 0.94 } : false}
                 animate={leaving
                     ? { opacity: 0, x: -120, scale: 0.94 }
-                    : (settled ? { opacity: 1, x: 0, scale: 1 } : {})}
+                    : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
                 transition={{ duration: leaving ? 0.26 : 0.46, ease: EASE }}
             >
                 <header className="wt-side__head">
