@@ -276,7 +276,13 @@ OKTELL_API_TIMEOUT_SECONDS = _env_int('OKTELL_API_TIMEOUT_SECONDS', 60, minimum=
 # 0,1-0,3 с; когда он захлёбывается, хендшейк не завершается вовсе, и ждать его столько же,
 # сколько ответ, бессмысленно — быстрее сдаться и показать предыдущий снимок.
 OKTELL_API_CONNECT_TIMEOUT_SECONDS = _env_int('OKTELL_API_CONNECT_TIMEOUT_SECONDS', 5, minimum=1, maximum=60)
-OKTELL_AUDIO_FETCH_WORKERS = _env_int('OKTELL_AUDIO_FETCH_WORKERS', 4, minimum=1, maximum=16)
+# Прокси Oktell низкоконкурентный: на КАЖДОЕ TCP-соединение он поднимает своё ODBC-подключение
+# к SQL Server. Поэтому качаем малым числом потоков и с паузой между запросами, а не залпом.
+OKTELL_AUDIO_FETCH_WORKERS = _env_int('OKTELL_AUDIO_FETCH_WORKERS', 2, minimum=1, maximum=16)
+# Минимальный интервал между ЛЮБЫМИ запросами файлов записей (общий на процесс, не на поток).
+OKTELL_RECORD_MIN_INTERVAL_MS = _env_int('OKTELL_RECORD_MIN_INTERVAL_MS', 150, minimum=0, maximum=5000)
+# Сколько коммутаций спрашиваем одним SELECT-ом при вычислении путей к записям (cap прокси — 1000 строк).
+OKTELL_RECORD_PATH_BATCH = _env_int('OKTELL_RECORD_PATH_BATCH', 200, minimum=1, maximum=500)
 OKTELL_API_PAGE_SIZE = _env_int('OKTELL_API_PAGE_SIZE', 1000, minimum=1, maximum=1000)
 OKTELL_API_MAX_PAGES = _env_int('OKTELL_API_MAX_PAGES', 500, minimum=1, maximum=5000)
 OKTELL_SYNC_MAX_RANGE_DAYS = _env_int('OKTELL_SYNC_MAX_RANGE_DAYS', 3, minimum=1, maximum=31)
@@ -21127,55 +21133,207 @@ def _oktell_record_url(conn_id):
     ).geturl()
 
 
-def _oktell_download_record(conn_id):
-    """Download one MP3 from the Oktell proxy, or return None for a missing file."""
+def _oktell_record_path_url(rel_path):
+    """Собрать /record?path=<относительный путь> рядом с настроенным /query."""
+    parsed = urlparse(OKTELL_API_URL)
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError("OKTELL_IP is not a valid absolute URL")
+    base_path = parsed.path.rstrip('/')
+    if base_path.endswith('/query'):
+        base_path = base_path[:-len('/query')]
+    clean = str(rel_path or '').replace('\\', '/').lstrip('/')
+    return parsed._replace(
+        path=f"{base_path}/record",
+        params='',
+        query=f"path={quote(clean, safe='/')}",
+        fragment='',
+    ).geturl()
+
+
+def _oktell_record_relative_paths(line_a, line_b, time_start):
+    """Кандидаты относительных путей к записи одной коммутации: сначала .mp3, потом .wav.
+
+    Имя файла в БД Oktell НЕ хранится, оно вычисляется (вики «Получить путь к записи разговора
+    по завершению коммутации»): <YYYYMMDD>/<HHMM>/mix_<aln>_<bln>__<YYYY_MM_DD__HH_MM_SS_mmm>.
+    Линии сортируются СТРОКОВО, а не по стороне A/B: у исходящих ALineNum — динамическая
+    веб-линия вида 17eNNN, и она больше, чем 13NNN. Именно на этом ошибается ручка
+    /record/{conn_id} и отдаёт 404 на всех исходящих.
+    .wav в кандидатах — на случай смены кодека микшера или включения стерео-режима."""
+    aln = str(line_a or '').strip()
+    bln = str(line_b or '').strip()
+    stamp_source = str(time_start or '').strip()
+    if not aln or not bln or len(stamp_source) < 19:
+        return []
+    low, high = sorted((aln, bln))
+    day = stamp_source[:10].replace('-', '')
+    millis = (stamp_source[20:23] if len(stamp_source) >= 21 else '').ljust(3, '0')
+    stamp = (
+        f"{stamp_source[:10].replace('-', '_')}__"
+        f"{stamp_source[11:19].replace(':', '_')}_{millis}"
+    )
+    folder = f"{day}/{stamp_source[11:13]}{stamp_source[14:16]}"
+    name = f"mix_{low}_{high}__{stamp}"
+    return [f"{folder}/{name}.mp3", f"{folder}/{name}.wav"]
+
+
+def _oktell_record_paths_by_conn(conn_ids):
+    """Одним SELECT-ом на пачку достаёт координаты записей: {conn_id: [путь.mp3, путь.wav]}.
+
+    Зачем не полагаться на /record/{conn_id}: она делает свой SQL-запрос на КАЖДЫЙ файл (а прокси
+    на каждое соединение поднимает своё ODBC-подключение), и вычисляет путь с ошибкой сортировки
+    линий — исходящие всегда 404. Один запрос на пачку + скачивание по прямому пути снимает и
+    лишние подключения, и потерю исходящих. Ошибку SQL глотаем: без путей просто останется
+    фолбэк на /record/{conn_id}, как было раньше."""
+    unique_ids = []
+    seen = set()
+    for conn_id in (conn_ids or ()):
+        try:
+            normalized = _oktell_normalize_conn_id(conn_id)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_ids.append(normalized)
+
+    paths = {}
+    for start in range(0, len(unique_ids), OKTELL_RECORD_PATH_BATCH):
+        chunk = unique_ids[start:start + OKTELL_RECORD_PATH_BATCH]
+        id_list = ", ".join(f"'{value}'" for value in chunk)
+        sql = (
+            "SELECT CONVERT(varchar(36), Id) AS conn_id, ALineNum, BLineNum, "
+            "CONVERT(varchar(23), TimeStart, 121) AS ts "
+            "FROM oktell.dbo.A_Stat_Connections_1x1 "
+            f"WHERE Id IN ({id_list})"
+        )
+        try:
+            rows = _oktell_query(sql)
+        except Exception as exc:
+            logging.warning("Oktell: пути к записям пачкой не вычислились (%s), идём фолбэком", exc)
+            return paths
+        for row in (rows or ()):
+            candidates = _oktell_record_relative_paths(
+                row.get('ALineNum'), row.get('BLineNum'), row.get('ts'))
+            if candidates:
+                paths[str(row.get('conn_id') or '').strip().lower()] = candidates
+    return paths
+
+
+_oktell_record_pace_lock = threading.Lock()
+_oktell_record_pace_last = [0.0]
+
+
+def _oktell_record_pace():
+    """Выдерживает минимальный интервал между запросами файлов ко всему прокси.
+
+    Пауза общая на процесс, а не на поток: иначе N воркеров превращают пачку в залп, а прокси
+    от залпов уже переставал отвечать."""
+    interval = OKTELL_RECORD_MIN_INTERVAL_MS / 1000.0
+    if interval <= 0:
+        return
+    while True:
+        with _oktell_record_pace_lock:
+            now = time.monotonic()
+            wait = _oktell_record_pace_last[0] + interval - now
+            if wait <= 0:
+                _oktell_record_pace_last[0] = now
+                return
+        time.sleep(wait)
+
+
+def _oktell_record_get(url):
+    """GET файла записи через ОБЩУЮ keep-alive сессию, с паузой и одним ретраем.
+
+    Раньше здесь был голый requests.get: новое TCP-соединение (и новое ODBC-подключение на
+    стороне прокси) на каждый файл, без паузы и без обработки протухшего keep-alive."""
+    timeouts = (OKTELL_API_CONNECT_TIMEOUT_SECONDS, OKTELL_API_TIMEOUT_SECONDS)
+    headers = {"X-API-Key": OKTELL_API_TOKEN}
+    _oktell_record_pace()
+    try:
+        return _oktell_session.get(url, headers=headers, timeout=timeouts)
+    except requests.exceptions.RequestException as exc:
+        if not _oktell_dropped_keepalive(exc):
+            raise
+        logging.info("Oktell: прокси закрыл keep-alive, повторяем скачивание записи")
+        _oktell_record_pace()
+        return _oktell_session.get(url, headers=headers, timeout=timeouts)
+
+
+def _oktell_detect_audio_format(audio_bytes):
+    """'mp3' | 'wav' | None по магии файла.
+
+    WAV обязателен: при включении стерео-режима записи или кодека G.711 микшер начнёт отдавать
+    wav, и прежняя жёсткая проверка «только MP3» роняла бы весь ночной прогон."""
+    if not audio_bytes:
+        return None
+    if audio_bytes.startswith(b'ID3'):
+        return 'mp3'
+    if len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0:
+        return 'mp3'
+    if audio_bytes[:4] == b'RIFF' and audio_bytes[8:12] == b'WAVE':
+        return 'wav'
+    return None
+
+
+def _oktell_download_record(conn_id, rel_paths=None):
+    """Скачать запись одной коммутации. None — файла нет (это норма, ~0,4% записей).
+
+    Порядок попыток важен для НАГРУЗКИ на их сервер: сначала прямой путь (?path=) — это чистое
+    чтение файла, без SQL на стороне прокси и без штатных ручек Oktell, которые при отложенной
+    упаковке принудительно будят однопоточный микшер. /record/{conn_id} остаётся фолбэком."""
     if not _oktell_api_ready():
         raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
     normalized_id = _oktell_normalize_conn_id(conn_id)
-    response = requests.get(
-        _oktell_record_url(normalized_id),
-        headers={"X-API-Key": OKTELL_API_TOKEN},
-        timeout=OKTELL_API_TIMEOUT_SECONDS,
-    )
-    if response.status_code == 404:
-        return None
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Oktell record proxy HTTP {response.status_code}: {response.text[:300]}"
-        )
+    urls = [_oktell_record_path_url(rel_path) for rel_path in (rel_paths or ())]
+    urls.append(_oktell_record_url(normalized_id))
 
-    audio_bytes = response.content
-    content_type = str(response.headers.get('Content-Type') or '').split(';', 1)[0].strip().lower()
-    if not audio_bytes:
-        return None
-    if not content_type.startswith('audio/'):
-        raise RuntimeError(f"Oktell record proxy returned {content_type or 'unknown content type'}")
-    looks_like_mp3 = (
-        audio_bytes.startswith(b'ID3')
-        or (len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0)
-    )
-    if not looks_like_mp3:
-        raise RuntimeError("Oktell record proxy returned invalid MP3 data")
-    return audio_bytes, content_type
+    last_error = None
+    for url in urls:
+        response = _oktell_record_get(url)
+        if response.status_code == 404:
+            continue
+        if response.status_code != 200:
+            last_error = (
+                f"Oktell record proxy HTTP {response.status_code}: {response.text[:300]}"
+            )
+            continue
+        audio_bytes = response.content
+        if not audio_bytes:
+            continue
+        content_type = str(
+            response.headers.get('Content-Type') or ''
+        ).split(';', 1)[0].strip().lower()
+        if not content_type.startswith('audio/'):
+            raise RuntimeError(
+                f"Oktell record proxy returned {content_type or 'unknown content type'}")
+        if not _oktell_detect_audio_format(audio_bytes):
+            raise RuntimeError("Oktell record proxy returned neither MP3 nor WAV data")
+        return audio_bytes, content_type
+
+    if last_error:
+        raise RuntimeError(last_error)
+    return None
 
 
-def _oktell_fetch_record_to_gcs(conn_id):
-    """Fetch an Oktell MP3 and return its stable GCS bucket/blob path."""
+def _oktell_fetch_record_to_gcs(conn_id, rel_paths=None):
+    """Fetch an Oktell recording and return its stable GCS bucket/blob path."""
     normalized_id = _oktell_normalize_conn_id(conn_id)
-    downloaded = _oktell_download_record(normalized_id)
+    downloaded = _oktell_download_record(normalized_id, rel_paths)
     if not downloaded:
         return None
     audio_bytes, content_type = downloaded
+    extension = _oktell_detect_audio_format(audio_bytes) or 'mp3'
     return _upload_external_record_to_gcs(
         audio_bytes,
-        f"oktell-{normalized_id}.mp3",
+        f"oktell-{normalized_id}.{extension}",
         content_type,
     )
 
 
 def _oktell_store_record(imported_id, conn_id):
     """Fetch an Oktell recording and attach its GCS path to imported_calls."""
-    audio_path = _oktell_fetch_record_to_gcs(conn_id)
+    rel_paths = _oktell_record_paths_by_conn([conn_id]).get(
+        _oktell_normalize_conn_id(conn_id))
+    audio_path = _oktell_fetch_record_to_gcs(conn_id, rel_paths)
     if not audio_path:
         return None
     db.set_imported_call_audio_path(imported_id, audio_path)
@@ -21213,12 +21371,16 @@ def _oktell_prepare_distribution_audio(payload):
     repeated_error_stop = threading.Event()
     error_lock = threading.Lock()
     error_count = {'value': 0}
+    # Один SELECT на всю пачку вместо скрытого SQL-запроса внутри /record/{conn_id} на каждый
+    # файл. Заодно лечит потерю исходящих: их путь та ручка считает неверно и всегда даёт 404.
+    record_paths = _oktell_record_paths_by_conn(ordered_ids)
 
     def _fetch_one(conn_id):
         if repeated_error_stop.is_set():
             return conn_id, None, "Batch stopped after repeated Oktell audio errors"
         try:
-            return conn_id, _oktell_fetch_record_to_gcs(conn_id), None
+            return conn_id, _oktell_fetch_record_to_gcs(
+                conn_id, record_paths.get(conn_id)), None
         except Exception as exc:
             with error_lock:
                 error_count['value'] += 1
@@ -21270,6 +21432,15 @@ def _oktell_prepare_distribution_audio(payload):
         prepared_operator_row = dict(operator_row)
         prepared_operator_row['calls'] = prepared_calls
         prepared_distribution.append(prepared_operator_row)
+
+    if missing:
+        # Норма, а не сбой: ~0,4% записей физически отсутствуют на диске Oktell. Раньше это
+        # тонуло молча, и молча же терялись все исходящие из-за 404 у /record/{conn_id}.
+        logging.info(
+            "Oktell distribution audio: %s из %s без файла (записи нет на диске)",
+            missing,
+            len(ordered_ids),
+        )
 
     errors = [
         {"external_id": conn_id, "error": error}

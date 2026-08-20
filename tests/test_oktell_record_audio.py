@@ -42,10 +42,32 @@ class FakeDb:
         self.updated.append((imported_id, audio_path))
 
 
-def _oktell_audio_namespace(response=None):
+class SequencedRequests:
+    """Отдаёт заранее заданный ответ на каждый URL и помнит порядок вызовов."""
+
+    def __init__(self, by_suffix, default=None):
+        self.by_suffix = by_suffix
+        self.default = default or FakeResponse(status_code=404)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        for suffix, response in self.by_suffix.items():
+            if suffix in url:
+                return response
+        return self.default
+
+
+def _oktell_audio_namespace(response=None, session=None):
     wanted = {
         "_oktell_normalize_conn_id",
         "_oktell_record_url",
+        "_oktell_record_path_url",
+        "_oktell_record_relative_paths",
+        "_oktell_record_paths_by_conn",
+        "_oktell_record_pace",
+        "_oktell_record_get",
+        "_oktell_detect_audio_format",
         "_oktell_download_record",
         "_oktell_fetch_record_to_gcs",
         "_oktell_store_record",
@@ -57,6 +79,7 @@ def _oktell_audio_namespace(response=None):
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
     fake_requests = FakeRequests(response or FakeResponse())
+    fake_session = session if session is not None else fake_requests
     fake_db = FakeDb()
     ns = {
         "uuid": uuid,
@@ -71,12 +94,21 @@ def _oktell_audio_namespace(response=None):
         "OKTELL_API_URL": "http://oktell-proxy.test:8085/query",
         "OKTELL_API_TOKEN": "secret-token",
         "OKTELL_API_TIMEOUT_SECONDS": 60,
+        "OKTELL_API_CONNECT_TIMEOUT_SECONDS": 5,
         "OKTELL_AUDIO_FETCH_WORKERS": 4,
+        "OKTELL_RECORD_MIN_INTERVAL_MS": 0,
+        "OKTELL_RECORD_PATH_BATCH": 200,
+        "_oktell_session": fake_session,
+        "_oktell_record_pace_lock": threading.Lock(),
+        "_oktell_record_pace_last": [0.0],
+        "_oktell_dropped_keepalive": lambda _exc: False,
+        "_oktell_query": lambda _sql: [],
         "_oktell_api_ready": lambda: True,
         "_upload_external_record_to_gcs": lambda *_args, **_kwargs: "bucket/Uploads/test.mp3",
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOT_PATH), "exec"), ns)
     ns["_fake_requests"] = fake_requests
+    ns["_fake_session"] = fake_session
     ns["_fake_db"] = fake_db
     return ns
 
@@ -97,7 +129,7 @@ class OktellRecordAudioTests(unittest.TestCase):
         url, kwargs = ns["_fake_requests"].calls[0]
         self.assertEqual(url, f"http://oktell-proxy.test:8085/record/{CONN_ID}")
         self.assertEqual(kwargs["headers"], {"X-API-Key": "secret-token"})
-        self.assertEqual(kwargs["timeout"], 60)
+        self.assertEqual(kwargs["timeout"], (5, 60))
 
     def test_download_returns_none_for_missing_record(self):
         ns = _oktell_audio_namespace(FakeResponse(status_code=404))
@@ -112,7 +144,7 @@ class OktellRecordAudioTests(unittest.TestCase):
     def test_fetch_uses_stable_gcs_filename_and_store_updates_row(self):
         ns = _oktell_audio_namespace()
         captured = {}
-        ns["_oktell_download_record"] = lambda _conn_id: (b"\xff\xe3\x00", "audio/mpeg")
+        ns["_oktell_download_record"] = lambda _conn_id, _rel_paths=None: (b"\xff\xe3\x00", "audio/mpeg")
 
         def upload(audio_bytes, filename, content_type):
             captured.update(
@@ -180,7 +212,7 @@ class OktellRecordAudioTests(unittest.TestCase):
         missing_id = "5026d1f7-e9b9-41bd-87df-aa3f83b360d5"
         failed_id = "b1e5a329-f84c-4ad8-bee4-ccfdd9a0afcc"
 
-        def fetch(conn_id):
+        def fetch(conn_id, _rel_paths=None):
             if conn_id == ready_id:
                 return f"bucket/Uploads/oktell-{conn_id}.mp3"
             if conn_id == failed_id:
@@ -220,7 +252,7 @@ class OktellRecordAudioTests(unittest.TestCase):
         lock = threading.Lock()
         active = {"value": 0, "peak": 0}
 
-        def fetch(conn_id):
+        def fetch(conn_id, _rel_paths=None):
             with lock:
                 active["value"] += 1
                 active["peak"] = max(active["peak"], active["value"])
@@ -270,6 +302,141 @@ class OktellRecordAudioTests(unittest.TestCase):
         sync_worker = source[sync_start:sync_end]
         self.assertIn("_oktell_prepare_distribution_audio({", sync_worker)
         self.assertIn("'audio_ready': grand_audio_ready", sync_worker)
+
+
+
+class OktellRecordLowLoadTests(unittest.TestCase):
+    """Правки, снимающие нагрузку с сервера Oktell (20.08.2026)."""
+
+    TS = "2026-08-20 14:39:11.130"
+    MP3 = bytes([0xFF, 0xE3]) + bytes(32)
+    MP3_TAGGED = b"ID3" + bytes(32)
+    WAV = b"RIFF" + bytes(4) + b"WAVE" + bytes(20)
+
+    def test_outgoing_path_sorts_lines_as_strings(self):
+        """Ровно тот случай, на котором /record/{conn_id} отдаёт 404: у исходящего
+        ALineNum=17e014 больше, чем BLineNum=13001, и в имени файла идёт вторым."""
+        ns = _oktell_audio_namespace()
+        self.assertEqual(
+            ns["_oktell_record_relative_paths"]("17e014", "13001", self.TS),
+            [
+                "20260820/1439/mix_13001_17e014__2026_08_20__14_39_11_130.mp3",
+                "20260820/1439/mix_13001_17e014__2026_08_20__14_39_11_130.wav",
+            ],
+        )
+
+    def test_incoming_path_and_broken_input(self):
+        ns = _oktell_audio_namespace()
+        self.assertEqual(
+            ns["_oktell_record_relative_paths"]("13001", "17e014", self.TS)[0],
+            "20260820/1439/mix_13001_17e014__2026_08_20__14_39_11_130.mp3",
+        )
+        self.assertEqual(ns["_oktell_record_relative_paths"]("", "13001", self.TS), [])
+        self.assertEqual(ns["_oktell_record_relative_paths"]("13001", "17e014", "2026-08-20"), [])
+
+    def test_path_url_is_built_next_to_query(self):
+        ns = _oktell_audio_namespace()
+        self.assertEqual(
+            ns["_oktell_record_path_url"]("20260820/1439/mix_a_b__x.mp3"),
+            "http://oktell-proxy.test:8085/record?path=20260820/1439/mix_a_b__x.mp3",
+        )
+
+    def test_direct_path_is_tried_before_conn_id_endpoint(self):
+        session = SequencedRequests({"/record?path=": FakeResponse(content=self.MP3)})
+        ns = _oktell_audio_namespace(session=session)
+
+        result = ns["_oktell_download_record"](CONN_ID, ["20260820/1439/mix_13001_17e014__x.mp3"])
+
+        self.assertEqual(result, (self.MP3, "audio/mpeg"))
+        self.assertEqual(len(session.calls), 1)
+        self.assertIn("/record?path=", session.calls[0][0])
+
+    def test_falls_back_to_conn_id_when_path_is_missing(self):
+        session = SequencedRequests({
+            "/record/" + CONN_ID: FakeResponse(content=self.MP3_TAGGED),
+        })
+        ns = _oktell_audio_namespace(session=session)
+
+        self.assertEqual(
+            ns["_oktell_download_record"](CONN_ID, ["20260820/1439/nope.mp3"]),
+            (self.MP3_TAGGED, "audio/mpeg"),
+        )
+        self.assertEqual(len(session.calls), 2)
+        self.assertIn("path=", session.calls[0][0])
+        self.assertTrue(session.calls[1][0].endswith("/record/" + CONN_ID))
+
+    def test_all_candidates_missing_returns_none(self):
+        session = SequencedRequests({}, default=FakeResponse(status_code=404))
+        ns = _oktell_audio_namespace(session=session)
+        self.assertIsNone(ns["_oktell_download_record"](CONN_ID, ["a.mp3", "a.wav"]))
+        self.assertEqual(len(session.calls), 3)
+
+    def test_wav_is_accepted_and_names_the_blob(self):
+        session = SequencedRequests({
+            "/record": FakeResponse(content=self.WAV, content_type="audio/wav"),
+        })
+        ns = _oktell_audio_namespace(session=session)
+        captured = {}
+
+        def upload(audio_bytes, filename, content_type):
+            captured.update(filename=filename, content_type=content_type)
+            return "bucket/Uploads/oktell.wav"
+
+        ns["_upload_external_record_to_gcs"] = upload
+        self.assertEqual(ns["_oktell_fetch_record_to_gcs"](CONN_ID), "bucket/Uploads/oktell.wav")
+        self.assertEqual(captured["filename"], "oktell-" + CONN_ID + ".wav")
+        self.assertEqual(ns["_oktell_detect_audio_format"](self.WAV), "wav")
+
+    def test_download_never_uses_bare_requests(self):
+        session = SequencedRequests({"/record": FakeResponse(content=self.MP3)})
+        ns = _oktell_audio_namespace(session=session)
+
+        ns["_oktell_download_record"](CONN_ID)
+
+        self.assertEqual(ns["_fake_requests"].calls, [])
+        self.assertEqual(len(session.calls), 1)
+
+    def test_pace_keeps_minimum_interval_between_requests(self):
+        ns = _oktell_audio_namespace()
+        ns["OKTELL_RECORD_MIN_INTERVAL_MS"] = 40
+        started = time.monotonic()
+        for _ in range(3):
+            ns["_oktell_record_pace"]()
+        self.assertGreaterEqual(time.monotonic() - started, 0.08)
+
+    def test_paths_are_resolved_in_one_query_per_batch(self):
+        ns = _oktell_audio_namespace()
+        queries = []
+        rows = [{
+            "conn_id": CONN_ID.upper(),
+            "ALineNum": "17e014",
+            "BLineNum": "13001",
+            "ts": self.TS,
+        }]
+
+        def fake_query(sql):
+            queries.append(sql)
+            return rows
+
+        ns["_oktell_query"] = fake_query
+        resolved = ns["_oktell_record_paths_by_conn"]([CONN_ID, CONN_ID, "not-a-uuid"])
+
+        self.assertEqual(len(queries), 1)
+        self.assertIn(CONN_ID, queries[0])
+        self.assertIn("A_Stat_Connections_1x1", queries[0])
+        self.assertEqual(
+            resolved[CONN_ID][0],
+            "20260820/1439/mix_13001_17e014__2026_08_20__14_39_11_130.mp3",
+        )
+
+    def test_sql_failure_degrades_to_conn_id_endpoint(self):
+        ns = _oktell_audio_namespace()
+
+        def broken_query(_sql):
+            raise RuntimeError("HTTP 500: ODBC timeout")
+
+        ns["_oktell_query"] = broken_query
+        self.assertEqual(ns["_oktell_record_paths_by_conn"]([CONN_ID]), {})
 
 
 if __name__ == "__main__":
