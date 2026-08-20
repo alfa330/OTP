@@ -31637,15 +31637,28 @@ def api_szov_wallboard_break_violations():
     date_to = (request.args.get('date_to') or '').strip() or date_from
     if date_to < date_from:
         date_from, date_to = date_to, date_from
+    direction = (request.args.get('direction') or '').strip().lower()
+    if direction not in (SZOV_BREAK_DIRECTION_LINE, SZOV_BREAK_DIRECTION_CHAT):
+        direction = SZOV_BREAK_DIRECTION_LINE
     try:
-        violations = db.get_szov_break_violations(date_from, date_to)
+        violations = db.get_szov_break_violations(date_from, date_to, direction=direction)
+        # Дни, когда человек работал, а смены в графике у него не было: сверять было не с чем.
+        # Без этой строки пустой журнал читался бы как «нарушений нет», хотя проверка просто
+        # не работала — по чату график сейчас почти не заполняют.
+        unscheduled = db.get_szov_break_unscheduled_days(direction, date_from, date_to)
     except Exception as exc:
         logging.error("Перерывы вне графика: журнал не прочитан: %s", exc)
         return jsonify({"error": "Не удалось получить журнал", "detail": str(exc)[:300]}), 500
     return jsonify({
         "date_from": date_from,
         "date_to": date_to,
+        "direction": direction,
         "violations": violations,
+        "unscheduled": {
+            "days": len(unscheduled),
+            "operators_max": max([item['operators'] for item in unscheduled] or [0]),
+            "by_day": unscheduled[:31],
+        },
         # Порог и допуск показываем рядом со списком: без них непонятно, почему перерыв
         # в 10 минут от плана в журнал не попал.
         "rules": {
@@ -31799,6 +31812,12 @@ SZOV_BREAK_REPORT_MAX_AGE_HOURS = _env_int('SZOV_BREAK_REPORT_MAX_AGE_HOURS', 24
 # полный список в iCore.
 SZOV_BREAK_NOTE_LIMIT = _env_int('SZOV_BREAK_NOTE_LIMIT', 6, minimum=1, maximum=30)
 
+# Направление, к которому относится нарушение. НЕ путать с ключом получателей отбивки
+# (SZOV_BROADCAST_DIRECTION_LINE = 'osnova'): там историческое значение, которое уже лежит в
+# базе подписок, а здесь — как направление называется сейчас на экране.
+SZOV_BREAK_DIRECTION_LINE = 'line'
+SZOV_BREAK_DIRECTION_CHAT = 'chat'
+
 SZOV_BREAK_KIND_OFF_SCHEDULE = 'off_schedule'   # перерыв в графике есть, но в другое время
 SZOV_BREAK_KIND_NOT_PLANNED = 'not_planned'     # смена есть, перерывов в ней не запланировано
 SZOV_BREAK_KIND_NO_SHIFT = 'no_shift'           # смены на этот день в графике нет вовсе
@@ -31882,11 +31901,17 @@ def _szov_break_planned_for_day(planned_breaks, operator_id, day):
     return plan
 
 
-def _szov_break_classify(episodes, planned_breaks, shift_days, now):
+def _szov_break_classify(episodes, planned_breaks, shift_days, now,
+                         direction=SZOV_BREAK_DIRECTION_LINE):
     """Эпизоды перерывов -> строки нарушений. Совпавшие с графиком не возвращаются вовсе.
 
     Правило ровно то, что в постановке: в момент, когда сотрудник вышел на перерыв, график
-    должен показывать перерыв ИМЕННО У НЕГО. Не показывает — нарушение."""
+    должен показывать перерыв ИМЕННО У НЕГО. Не показывает — нарушение.
+
+    Одно на оба направления: у «Линии» факт приезжает из статусов Oktell, у «Чата» — из
+    событий Chat2Desk, но сравнивается всё с одним и тем же графиком и по одним порогам.
+    Разъехавшиеся правила означали бы, что за одно и то же нарушение чатника и оператора
+    линии наказывают по-разному."""
     violations = []
     for episode in (episodes or []):
         started_at = episode['started_at']
@@ -31902,6 +31927,7 @@ def _szov_break_classify(episodes, planned_breaks, shift_days, now):
         row = {
             'operator_id': episode['operator_id'],
             'operator_name': episode['name'],
+            'direction': direction,
             'violation_date': day,
             'started_at': started_at,
             'ended_at': ended_at,
@@ -32036,11 +32062,13 @@ def _szov_broadcast_break_violations(hour_to=None, scheduled=False, now=None):
     ничего не помечают — иначе ручной запрос отбирал бы строки у плановой отправки."""
     try:
         if scheduled:
-            return db.get_unreported_szov_break_violations(SZOV_BREAK_REPORT_MAX_AGE_HOURS,
-                                                           now=now or _szov_break_now())
+            return db.get_unreported_szov_break_violations(
+                SZOV_BREAK_REPORT_MAX_AGE_HOURS, now=now or _szov_break_now(),
+                direction=SZOV_BREAK_DIRECTION_LINE)
         moment = now or _szov_break_now()
         return db.get_szov_break_violations_for_hour(
-            moment.date(), moment.hour if hour_to is None else hour_to)
+            moment.date(), moment.hour if hour_to is None else hour_to,
+            direction=SZOV_BREAK_DIRECTION_LINE)
     except Exception as exc:
         # Звонковые показатели важнее: журнал перерывов не должен уронить отбивку.
         logging.warning("Отбивка табло: нарушения перерывов недоступны: %s", exc)
@@ -33909,6 +33937,124 @@ def _szov_chat_wallboard_fetch_snapshot():
     }
 
 
+def _szov_chat_break_episodes(timelines, lookup, day_str):
+    """Эпизоды статуса «Перерыв» чат-менеджеров за день по лентам статусов.
+
+    Конец эпизода — время СЛЕДУЮЩЕГО статуса того же человека; у последнего события дня
+    конца ещё нет (человек на перерыве прямо сейчас), и длительность уточнит следующий заход.
+
+    Считаем только статус «Перерыв» (решение владельца 20.08.2026). «Тренинг», «Занят»,
+    тех.перерыв и отпуск к расстановке перерывов в графике отношения не имеют."""
+    episodes = []
+    for name, entries in (timelines or {}).items():
+        operator = _szov_chat_wallboard_resolve(name, lookup)
+        if operator is None:
+            continue
+        ordered = sorted(entries or [], key=lambda item: item[0])
+        for index, entry in enumerate(ordered):
+            if entry[1] != 'break':
+                continue
+            started_at = _szov_break_parse_time(f"{day_str} 00:00:00")
+            if started_at is None:
+                continue
+            started_at += timedelta(seconds=int(entry[0]))
+            ended_at = None
+            if index + 1 < len(ordered):
+                ended_at = started_at + timedelta(seconds=int(ordered[index + 1][0]) - int(entry[0]))
+            episodes.append({
+                'operator_id': int(operator['id']),
+                'name': operator.get('name') or name,
+                'started_at': started_at,
+                'ended_at': ended_at,
+            })
+    return episodes
+
+
+def _szov_chat_break_scan_day(day_str, lookup, now, *, own_cache=False):
+    """Разобрать перерывы чатников за один день. (нарушения, id работавших без смены)."""
+    cache = ({'day': None, 'rows': {}, 'newest': None, 'truncated': False}
+             if own_cache else None)
+    events = _szov_chat_wallboard_fetch_events(day_str, cache=cache)
+    truncated = bool((cache or _szov_chat_wallboard_events_cache).get('truncated'))
+    timelines, _unmatched = _szov_chat_wallboard_timelines(events, lookup, truncated=truncated)
+    merged = _szov_break_merge_episodes(_szov_chat_break_episodes(timelines, lookup, day_str))
+    if not merged:
+        return [], set()
+    operator_ids = {episode['operator_id'] for episode in merged}
+    days = set()
+    for episode in merged:
+        day = episode['started_at'].date()
+        days.add(day)
+        days.add(day - timedelta(days=1))   # ночной хвост вчерашней смены
+    planned_breaks, shift_days = db.get_planned_breaks_for_days(operator_ids, days)
+    found = _szov_break_classify(merged, planned_breaks, shift_days, now,
+                                 direction=SZOV_BREAK_DIRECTION_CHAT)
+    # «Смены в графике нет» по чату — не нарушение, а отсутствие данных: график чат-менеджерам
+    # почти не заполняют (замер 18–20.08: работали 11–14 человек в день, смена была у 0–1).
+    # Владелец решил о них молчать, поэтому в журнал они не идут — только счётчиком.
+    violations = [row for row in found if row['kind'] != SZOV_BREAK_KIND_NO_SHIFT]
+    unscheduled = {row['operator_id'] for row in found if row['kind'] == SZOV_BREAK_KIND_NO_SHIFT}
+    return violations, unscheduled
+
+
+def _szov_chat_break_violations_scan(now=None):
+    """Сверить перерывы чат-менеджеров с графиком и записать несовпадения.
+
+    Своих суток из Chat2Desk не выкачиваем: события за день лежат в общем кэше табло и
+    догружаются по водяному знаку, поэтому заход стоит одну страницу. Квота Chat2Desk общая
+    на компанию — см. _szov_chat_wallboard_fetch_events."""
+    now = now or datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).replace(tzinfo=None, microsecond=0)
+    lookup, _department_id = _szov_chat_wallboard_operator_lookup()
+    if not lookup:
+        logging.warning("Перерывы чата: чат-менеджеров СЗоВ не нашли, разбор пропущен")
+        return 0
+    inserted = 0
+    day_str = now.strftime('%Y-%m-%d')
+    violations, unscheduled = _szov_chat_break_scan_day(day_str, lookup, now)
+    db.save_szov_break_unscheduled_day(SZOV_BREAK_DIRECTION_CHAT, day_str, len(unscheduled))
+    if violations:
+        inserted += db.save_szov_break_violations(violations)
+    # Под утро добираем вчерашний день: события Chat2Desk лежат по суткам, и перерыв,
+    # начавшийся в 23:50, иначе разобрался бы только один раз — в тот же день, ещё открытым.
+    if now.hour < SZOV_BREAK_SCAN_LOOKBACK_HOURS:
+        previous = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+        past_violations, past_unscheduled = _szov_chat_break_scan_day(
+            previous, lookup, now, own_cache=True)
+        db.save_szov_break_unscheduled_day(
+            SZOV_BREAK_DIRECTION_CHAT, previous, len(past_unscheduled))
+        if past_violations:
+            inserted += db.save_szov_break_violations(past_violations)
+    if inserted:
+        logging.info("Перерывы чата: найдено %d новых нарушений", inserted)
+    return inserted
+
+
+def _szov_chat_broadcast_break_violations(scheduled=False, now=None):
+    """Нарушения перерывов чатников для одного сообщения отбивки «Чата»."""
+    try:
+        moment = now or datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).replace(tzinfo=None)
+        if scheduled:
+            return db.get_unreported_szov_break_violations(
+                SZOV_BREAK_REPORT_MAX_AGE_HOURS, now=moment,
+                direction=SZOV_BREAK_DIRECTION_CHAT)
+        return db.get_szov_break_violations_for_hour(
+            moment.date(), moment.hour, direction=SZOV_BREAK_DIRECTION_CHAT)
+    except Exception as exc:
+        # Показатели чатов важнее: журнал перерывов не должен уронить отбивку.
+        logging.warning("Отбивка чатов: нарушения перерывов недоступны: %s", exc)
+        return []
+
+
+async def _szov_chat_break_violations_mark_reported(data):
+    """О чём отбивка «Чата» написала, о том второй раз не пишем."""
+    violation_ids = [item.get('id') for item in (data.get('break_violations') or [])]
+    if not violation_ids:
+        return
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        executor_pool, db.mark_szov_break_violations_reported, violation_ids)
+
+
 def _szov_chat_wallboard_snapshot():
     """Снимок направления «Чат»: Chat2Desk.
 
@@ -34705,14 +34851,17 @@ def _szov_chat_broadcast_duration(seconds):
     return '—' if seconds is None else _szov_format_seconds_mmss(seconds)
 
 
-def _szov_chat_broadcast_collect():
+def _szov_chat_broadcast_collect(scheduled=False):
     """Показатели отбивки чатов — снимок табло, тот же, что на стене.
 
     Своих запросов к Chat2Desk не делаем: снимок направления уже лежит в кэше табло. Если
     Chat2Desk молчит дольше окна устаревания, снимок не отдастся вовсе и отбивка не уйдёт —
-    это лучше письма из одних прочерков."""
+    это лучше письма из одних прочерков.
+    scheduled — собираем плановую отправку: тогда нарушения перерывов берутся «о чём ещё не
+    писали», а не срезом текущего часа."""
     snapshot = _szov_chat_wallboard_snapshot()
     return {
+        'break_violations': _szov_chat_broadcast_break_violations(scheduled=scheduled),
         'generated_at': datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).strftime('%d.%m.%Y %H:%M'),
         'target_seconds': (_szov_wallboard_int((snapshot or {}).get('target_seconds'))
                            or SZOV_CHAT_WALLBOARD_TARGET_SECONDS),
@@ -34765,6 +34914,11 @@ def _szov_chat_broadcast_notes(data):
     notes = [note for note in _szov_chat_broadcast_deviations(data) if note != stale]
     now = data.get('now') or {}
     today = data.get('today') or {}
+
+    # Перерывы мимо графика — первыми среди дежурных строк, как и у «Линии»: это единственное
+    # в сообщении, что требует действия от супервайзера. Отклонением не считается по тому же
+    # решению владельца — иначе чат «только при отклонениях» гудел бы круглые сутки.
+    notes.extend(_szov_break_violation_notes(data.get('break_violations')))
 
     online = _szov_wallboard_int(now.get('operators_online'))
     parts = [f"{online} {_szov_plural(online, 'чатник', 'чатника', 'чатников')} на линии"]
@@ -34834,14 +34988,14 @@ def _szov_render_chat_wallboard_png(data):
         'Табло СЗоВ · чаты', f"Чаты · {data['generated_at']}", key_tiles, stat_tiles)
 
 
-async def _szov_chat_broadcast_prepare():
+async def _szov_chat_broadcast_prepare(scheduled=False):
     """Собрать отбивку чатов целиком: данные, текст и картинку.
 
     Отдельно от отправки, потому что получателей несколько: собирать один и тот же снимок
     по разу на каждый чат нельзя. Снимок тянем в пуле потоков — Chat2Desk это синхронный
     requests, и держать на нём event loop бота недопустимо."""
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(executor_pool, _szov_chat_broadcast_collect)
+    data = await loop.run_in_executor(executor_pool, _szov_chat_broadcast_collect, scheduled)
     text = _szov_chat_broadcast_text(data)
 
     media = []
@@ -34862,13 +35016,27 @@ async def _szov_chat_broadcast_send(chat_id):
     return data
 
 
+async def _szov_chat_broadcast_prepare_scheduled():
+    """Сбор плановой отбивки «Чата»: с нарушениями перерывов, о которых ещё не писали."""
+    return await _szov_chat_broadcast_prepare(scheduled=True)
+
+
 async def szov_chat_broadcast_job():
     """Плановая отбивка направления «Чат»."""
+    # Разбор перерывов чатников — до самой отбивки и независимо от неё: журнал в iCore обязан
+    # наполняться, даже когда отбивку никто не получает. У каждого направления свой разбор:
+    # факт у чата приезжает из Chat2Desk, у линии — из Oktell.
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor_pool, _szov_chat_break_violations_scan)
+    except Exception as exc:
+        logging.error("Перерывы чата: разбор не удался: %s", exc)
     await _szov_broadcast_run_job(
         direction=SZOV_BROADCAST_DIRECTION_CHAT,
         label="Отбивка табло (чат)",
-        prepare=_szov_chat_broadcast_prepare,
-        deviations=_szov_chat_broadcast_deviations)
+        prepare=_szov_chat_broadcast_prepare_scheduled,
+        deviations=_szov_chat_broadcast_deviations,
+        on_delivered=_szov_chat_break_violations_mark_reported)
 
 
 # --- Лиды amoCRM: выгрузка и отбивка ------------------------------------------------------------

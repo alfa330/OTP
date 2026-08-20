@@ -4102,6 +4102,44 @@ class Database:
                 ON szov_break_violations(started_at)
                 WHERE reported_at IS NULL;
             """)
+            # Направление нарушения. Появилось, когда ту же сверку включили чат-менеджерам:
+            # у «Линии» факт берётся из статусов Oktell, у «Чата» — из событий Chat2Desk,
+            # а правило и журнал общие. Прежние строки — все с «Линии», отсюда DEFAULT.
+            cursor.execute("""
+                ALTER TABLE szov_break_violations
+                ADD COLUMN IF NOT EXISTS direction VARCHAR(8) NOT NULL DEFAULT 'line';
+            """)
+            cursor.execute("""
+                ALTER TABLE szov_break_violations
+                DROP CONSTRAINT IF EXISTS szov_break_violations_direction;
+            """)
+            cursor.execute("""
+                ALTER TABLE szov_break_violations
+                ADD CONSTRAINT szov_break_violations_direction
+                CHECK (direction IN ('line', 'chat'));
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_szov_break_violations_direction_day
+                ON szov_break_violations(direction, violation_date DESC, started_at DESC);
+            """)
+            # Дни, когда человек работал, а смены в графике у него нет: сверять его перерывы
+            # не с чем. По «Чату» это пока почти все (замер 18–20.08: работали 11–14 чатников
+            # в день, смена была у 0–1), и владелец решил о них МОЛЧАТЬ — в отбивку они не
+            # идут. Но и делать вид, что нарушений нет, нельзя: журнал показывает счётчиком,
+            # у скольких человек перерывы за период вообще не проверялись. Храним агрегатом,
+            # а не строками, чтобы журнал не заполнился сообщениями об отсутствии данных.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS szov_break_unscheduled_days (
+                    direction VARCHAR(8) NOT NULL,
+                    day DATE NOT NULL,
+                    operators INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (direction, day),
+                    CONSTRAINT szov_break_unscheduled_days_direction
+                        CHECK (direction IN ('line', 'chat')),
+                    CONSTRAINT szov_break_unscheduled_days_operators CHECK (operators >= 0)
+                );
+            """)
             # Общий код автодозвона: номер, на который оператор один раз звонит,
             # чтобы телефон подключился к режиму автодозвона. Один на всех.
             cursor.execute("""
@@ -23802,6 +23840,7 @@ class Database:
                     None if row.get('planned_start_minutes') is None else int(row['planned_start_minutes']),
                     None if row.get('planned_end_minutes') is None else int(row['planned_end_minutes']),
                     None if row.get('deviation_minutes') is None else int(row['deviation_minutes']),
+                    str(row.get('direction') or 'line'),
                 ))
             except (KeyError, TypeError, ValueError):
                 continue
@@ -23813,8 +23852,9 @@ class Database:
                 cursor.execute("""
                     INSERT INTO szov_break_violations
                         (operator_id, violation_date, started_at, ended_at, duration_minutes,
-                         kind, planned_start_minutes, planned_end_minutes, deviation_minutes)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         kind, planned_start_minutes, planned_end_minutes, deviation_minutes,
+                         direction)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (operator_id, started_at) DO UPDATE
                     SET ended_at = EXCLUDED.ended_at,
                         duration_minutes = EXCLUDED.duration_minutes
@@ -23828,7 +23868,7 @@ class Database:
     _SZOV_BREAK_VIOLATION_COLUMNS = """
         v.id, v.operator_id, u.name, v.violation_date, v.started_at, v.ended_at,
         v.duration_minutes, v.kind, v.planned_start_minutes, v.planned_end_minutes,
-        v.deviation_minutes, v.detected_at, v.reported_at
+        v.deviation_minutes, v.detected_at, v.reported_at, v.direction
     """
 
     @staticmethod
@@ -23847,12 +23887,20 @@ class Database:
             "deviation_minutes": row[10],
             "detected_at": row[11].isoformat(timespec='seconds') if row[11] else None,
             "reported_at": row[12].isoformat(timespec='seconds') if row[12] else None,
+            "direction": row[13],
         }
 
-    def get_szov_break_violations(self, date_from=None, date_to=None, limit: int = 500) -> list:
-        """Нарушения за период — журнал для раздела «Табло СЗоВ»."""
+    def get_szov_break_violations(self, date_from=None, date_to=None, direction=None,
+                                  limit: int = 500) -> list:
+        """Нарушения за период — журнал для раздела «Табло СЗоВ».
+
+        direction сужает выборку до одного направления: у «Линии» и «Чата» свои экраны,
+        и мешать их в одном списке нельзя — источники разные и люди разные."""
         limit = max(1, min(int(limit or 500), 2000))
         clauses, params = [], []
+        if direction:
+            clauses.append("v.direction = %s")
+            params.append(str(direction))
         if date_from:
             clauses.append("v.violation_date >= %s")
             params.append(self._normalize_schedule_date(date_from))
@@ -23873,7 +23921,7 @@ class Database:
             rows = cursor.fetchall() or []
         return [self._szov_break_violation_row(row) for row in rows]
 
-    def get_szov_break_violations_for_hour(self, day, hour) -> list:
+    def get_szov_break_violations_for_hour(self, day, hour, direction='line') -> list:
         """Нарушения одного часа — срез для команды «/tablo ЧЧ:ММ» и предпросмотра."""
         day_obj = self._normalize_schedule_date(day)
         start = datetime.combine(day_obj, dt_time(hour=max(0, min(23, int(hour)))))
@@ -23882,17 +23930,20 @@ class Database:
                 SELECT {self._SZOV_BREAK_VIOLATION_COLUMNS}
                 FROM szov_break_violations v
                 LEFT JOIN users u ON u.id = v.operator_id
-                WHERE v.started_at >= %s AND v.started_at < %s
+                WHERE v.started_at >= %s AND v.started_at < %s AND v.direction = %s
                 ORDER BY v.started_at, v.id
-            """, (start, start + timedelta(hours=1)))
+            """, (start, start + timedelta(hours=1), str(direction)))
             rows = cursor.fetchall() or []
         return [self._szov_break_violation_row(row) for row in rows]
 
-    def get_unreported_szov_break_violations(self, max_age_hours: int = 24, now=None) -> list:
+    def get_unreported_szov_break_violations(self, max_age_hours: int = 24, now=None,
+                                             direction='line') -> list:
         """Нарушения, о которых отбивка ещё не писала, — не старше max_age_hours.
 
         Ограничение по возрасту обязательно: если получателей отбивки не было неделю,
-        первое же сообщение вывалило бы сотни строк за всю неделю."""
+        первое же сообщение вывалило бы сотни строк за всю неделю. Направление обязательно:
+        отбивка «Линии» не должна забирать нарушения чатников — о них напишет отбивка «Чата»,
+        и наоборот."""
         moment = now or datetime.now()
         since = moment - timedelta(hours=max(1, int(max_age_hours or 24)))
         with self._get_cursor() as cursor:
@@ -23900,11 +23951,45 @@ class Database:
                 SELECT {self._SZOV_BREAK_VIOLATION_COLUMNS}
                 FROM szov_break_violations v
                 LEFT JOIN users u ON u.id = v.operator_id
-                WHERE v.reported_at IS NULL AND v.started_at >= %s
+                WHERE v.reported_at IS NULL AND v.started_at >= %s AND v.direction = %s
                 ORDER BY v.started_at, v.id
-            """, (since,))
+            """, (since, str(direction)))
             rows = cursor.fetchall() or []
         return [self._szov_break_violation_row(row) for row in rows]
+
+    def save_szov_break_unscheduled_day(self, direction, day, operators) -> None:
+        """Сколько человек за день работали, но смены в графике у них нет.
+
+        Их перерывы сверять не с чем, и по решению владельца в отбивку они не идут. Но и
+        молчать совсем нельзя: журнал показывает это счётчиком, иначе пустой список читался
+        бы как «нарушений нет», хотя на самом деле проверка просто не работала."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO szov_break_unscheduled_days (direction, day, operators, updated_at)
+                VALUES (%s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                ON CONFLICT (direction, day) DO UPDATE
+                SET operators = EXCLUDED.operators,
+                    updated_at = EXCLUDED.updated_at
+            """, (str(direction), self._normalize_schedule_date(day), max(0, int(operators or 0))))
+
+    def get_szov_break_unscheduled_days(self, direction, date_from=None, date_to=None) -> list:
+        """Дни периода, в которые кто-то работал без смены в графике."""
+        clauses = ["direction = %s"]
+        params = [str(direction)]
+        if date_from:
+            clauses.append("day >= %s")
+            params.append(self._normalize_schedule_date(date_from))
+        if date_to:
+            clauses.append("day <= %s")
+            params.append(self._normalize_schedule_date(date_to))
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT day, operators FROM szov_break_unscheduled_days
+                WHERE {' AND '.join(clauses)} AND operators > 0
+                ORDER BY day DESC
+            """, tuple(params))
+            rows = cursor.fetchall() or []
+        return [{"day": row[0].strftime('%Y-%m-%d'), "operators": int(row[1])} for row in rows]
 
     def mark_szov_break_violations_reported(self, violation_ids) -> int:
         """Отметить, что об этих нарушениях отбивка уже написала."""
