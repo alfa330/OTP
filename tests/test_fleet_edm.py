@@ -350,6 +350,40 @@ class ParallelismTest(unittest.TestCase):
         self.assertEqual(engine._split_tasks({PARK_A: []}, concurrency=6), [])
 
 
+class ThrottleTest(unittest.TestCase):
+    """Просьба кабинета «помедленнее» — это ОДИН эпизод, а не отдельный ответ."""
+
+    def _client(self):
+        return FleetClient({'Session_id': 'x'}, 'UA', concurrency=6)
+
+    def test_echo_refusals_do_not_multiply_the_pause(self):
+        # При шести потоках отказ прилетает всем запросам, уже летящим по проводу.
+        # Если наращивать паузу на каждый, она растёт в полтора раза шесть раз
+        # подряд — так на проде и вышло 20 секунд простоя вместо секунды.
+        client = self._client()
+        first = client._note_throttled()
+        echoes = [client._note_throttled() for _ in range(5)]
+        self.assertEqual(first, 1.0)
+        self.assertTrue(all(value <= first for value in echoes))
+        self.assertEqual(client.concurrency, 5)     # поток убавили ровно один раз
+
+    def test_threads_return_only_after_a_long_quiet_stretch(self):
+        client = self._client()
+        client._note_throttled()
+        self.assertEqual(client.concurrency, 5)
+        for _ in range(199):
+            client._note_success()
+        self.assertEqual(client.concurrency, 5)
+        client._note_success()
+        self.assertEqual(client.concurrency, 6)
+
+    def test_growth_stops_at_the_measured_ceiling(self):
+        client = FleetClient({'Session_id': 'x'}, 'UA', concurrency=6)
+        for _ in range(1000):
+            client._note_success()
+        self.assertEqual(client.concurrency, 6)
+
+
 class ClientPagingTest(unittest.TestCase):
     """Курсорная постраничность — на подменённом транспорте, без сети."""
 
