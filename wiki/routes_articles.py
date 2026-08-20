@@ -117,6 +117,17 @@ def register(bp, wiki_route, db, log_ip, gcs):
         totals стоит на счётчиках главной, поэтому «29 статей» и список за
         плиткой берутся из одного числа.
         """
+        # Каталог — инструмент того, кто ВЕДЁТ базу знаний: он выкладывает разом
+        # черновики, архив и объём каждого раздела. По решению владельца
+        # читателю его не показывают, и гейт стоит здесь, а не только в меню:
+        # гард во фронте отсекает вкладку, но не запрос по прямому адресу.
+        caps = ctx['capabilities']
+        if not (caps.get('can_create') or caps.get('can_edit') or caps.get('can_publish')):
+            return jsonify({
+                "error": "Каталог статей доступен редакторам вики",
+                "code": "WIKI_EDITOR_ONLY",
+            }), 403
+
         _subjects, allowed, visible = _browse(cursor, ctx)
         counts = wiki_articles.catalog_counts(cursor, visible)
 

@@ -96,6 +96,27 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [homeTick, setHomeTick] = useState(0);
     const rootRef = useRef(null);
 
+    /* Способности считаем ДО загрузчиков: loadCatalog держит isEditor в
+       списке зависимостей, а const в теле компонента до своей строки лежит во
+       временной мёртвой зоне — объявление ниже уронило бы раздел. */
+    const capabilities = state?.capabilities || {};
+    const granted = Object.keys(CAPABILITY_LABELS).filter((key) => capabilities[key]);
+    const counters = state?.counters;
+    const subjects = state?.subjects || {};
+    const canManageStructure = !!(capabilities.can_manage_structure || capabilities.can_manage_access);
+    const canManageAccess = !!capabilities.can_manage_access;
+    /* Право раздавать доступ живёт отдельно от способностей: у супервайзера нет
+       ни can_manage_structure, ни can_manage_access, но операторов он раздаёт —
+       значит вкладку «Структура» ему показать надо, пусть и без правки дерева. */
+    const canGrantAccess = state?.grant_ceiling != null;
+    const canEdit = !!(capabilities.can_edit || capabilities.can_publish);
+    /* Каталог — инструмент того, кто ведёт базу знаний: он показывает разом
+       черновики, архив и объём каждого раздела. Читателю всё это не нужно, и
+       по решению владельца вкладку ему не показываем. Формула та же, что у
+       счётчиков на главной (WikiLibrary: isEditor), — «редактор» обязан
+       означать одно и то же во всём разделе. */
+    const isEditor = !!(capabilities.can_create || canEdit);
+
     const loadPing = useCallback(() => {
         setLoading(true);
         return axios.get(`${base}/ping`, { headers })
@@ -112,28 +133,21 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
             .finally(() => setStructureLoading(false));
     }, [base, headers]);
 
+    /* Каталог грузим только редактору: и вкладка, и счётчики на главной
+       принадлежат ему одному, а сервер читателю всё равно ответит 403. */
     const loadCatalog = useCallback(() => {
+        if (!isEditor) { setCatalog(null); setCatalogLoading(false); return Promise.resolve(); }
         setCatalogLoading(true);
         return axios.get(`${base}/catalog`, { headers })
             .then((r) => setCatalog(r.data))
             .catch(() => setCatalog(null))
             .finally(() => setCatalogLoading(false));
-    }, [base, headers]);
+    }, [base, headers, isEditor]);
 
-    useEffect(() => { loadPing(); loadStructure(); loadCatalog(); },
-             [loadPing, loadStructure, loadCatalog]);
-
-    const capabilities = state?.capabilities || {};
-    const granted = Object.keys(CAPABILITY_LABELS).filter((key) => capabilities[key]);
-    const counters = state?.counters;
-    const subjects = state?.subjects || {};
-    const canManageStructure = !!(capabilities.can_manage_structure || capabilities.can_manage_access);
-    const canManageAccess = !!capabilities.can_manage_access;
-    /* Право раздавать доступ живёт отдельно от способностей: у супервайзера нет
-       ни can_manage_structure, ни can_manage_access, но операторов он раздаёт —
-       значит вкладку «Структура» ему показать надо, пусть и без правки дерева. */
-    const canGrantAccess = state?.grant_ceiling != null;
-    const canEdit = !!(capabilities.can_edit || capabilities.can_publish);
+    useEffect(() => { loadPing(); loadStructure(); }, [loadPing, loadStructure]);
+    // Отдельным эффектом: способности приходят из ping, то есть ПОЗЖЕ первого
+    // рендера, и общий эффект пропустил бы загрузку каталога у редактора.
+    useEffect(() => { loadCatalog(); }, [loadCatalog]);
 
     const tabs = useMemo(() => ([
         { key: 'library', label: 'Главная', icon: Home, show: true },
@@ -141,10 +155,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // был бы вреден — он мигал бы false во время загрузки ping, а эффект
         // ниже выкидывал бы человека из открытого чата.
         { key: 'assistant', label: 'Помощник', icon: Sparkles, show: true },
-        // Каталог по разделам. Стоит после помощника по просьбе владельца;
-        // гейта нет — сервер отдаёт только разделы периметра, и у человека без
-        // доступа вкладка честно говорит, что разделов ему не открыто.
-        { key: 'catalog', label: 'Статьи', icon: BookOpen, show: true },
+        // Каталог по разделам. Стоит после помощника по просьбе владельца.
+        { key: 'catalog', label: 'Статьи', icon: BookOpen, show: isEditor },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'parks', label: 'Парки', icon: Building2, show: true },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: true },
@@ -154,7 +166,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         { key: 'structure', label: 'Структура', icon: Layers,
           show: canManageStructure || canGrantAccess },
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
-    ].filter((t) => t.show)), [canManageStructure, canManageAccess, canGrantAccess]);
+    ].filter((t) => t.show)), [canManageStructure, canManageAccess, canGrantAccess, isEditor]);
 
     // Если права сузились между заходами, активная вкладка может исчезнуть.
     useEffect(() => {

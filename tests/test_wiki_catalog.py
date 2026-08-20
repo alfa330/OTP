@@ -345,6 +345,46 @@ class CatalogRouteTest(unittest.TestCase):
         self.qr_confirmed = True
         self.assertEqual(self.client.get('/api/wiki/catalog').status_code, 200)
 
+    def test_reader_gets_403(self):
+        """Каталог — для редакторов. Гейт на сервере, а не только в меню:
+        гард во фронте прячет вкладку, но не запрет по прямому адресу.
+        """
+        self.context['wiki_roles'] = [{
+            'id': 9, 'code': 'wiki_reader', 'can_read': True,
+            'can_create': False, 'can_edit': False, 'can_delete': False,
+            'can_publish': False, 'can_approve': False,
+            'can_manage_users': False, 'can_manage_structure': False,
+            'can_manage_access': False,
+        }]
+        self.context['otp_role'] = 'operator'
+        response = self.client.get('/api/wiki/catalog')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_EDITOR_ONLY')
+
+    def test_reader_still_gets_the_article_list(self):
+        """Закрыт КАТАЛОГ, а не чтение: витрина и поиск читателю нужны."""
+        self.context['wiki_roles'] = [{
+            'id': 9, 'code': 'wiki_reader', 'can_read': True,
+            'can_create': False, 'can_edit': False, 'can_delete': False,
+            'can_publish': False, 'can_approve': False,
+            'can_manage_users': False, 'can_manage_structure': False,
+            'can_manage_access': False,
+        }]
+        self.context['otp_role'] = 'operator'
+        self.assertEqual(self.client.get('/api/wiki/articles').status_code, 200)
+
+    def test_editor_without_publish_is_let_in(self):
+        """Достаточно любой из трёх способностей правки, а не всех сразу."""
+        self.context['wiki_roles'] = [{
+            'id': 8, 'code': 'wiki_editor', 'can_read': True,
+            'can_create': False, 'can_edit': True, 'can_delete': False,
+            'can_publish': False, 'can_approve': False,
+            'can_manage_users': False, 'can_manage_structure': False,
+            'can_manage_access': False,
+        }]
+        self.context['otp_role'] = 'operator'
+        self.assertEqual(self.client.get('/api/wiki/catalog').status_code, 200)
+
     def test_catalog_uses_the_personal_perimeter(self):
         """Тот же периметр, что у списка и поиска: иначе плитка солжёт."""
         self.client.get('/api/wiki/catalog')
