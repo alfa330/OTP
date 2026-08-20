@@ -1,14 +1,16 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { motion, useReducedMotion } from 'framer-motion';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, Home, KeyRound, Layers, MapPin,
+    Network,
     Building2, Loader2, Plus, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
 } from '../ui/ios';
 import WikiLibrary from './WikiLibrary';
-import WikiCatalog from './WikiCatalog';
+import WikiCatalog, { BucketSwitch } from './WikiCatalog';
 import WikiParks from './WikiParks';
 import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
@@ -63,6 +65,36 @@ const StatTile = ({ icon: Icon, value, label }) => (
     </div>
 );
 
+/* Переключатель половин вкладки «Статьи»: смотреть содержимое или править
+   разложение. Сегмент-контрол, а не две кнопки: это выбор ОДНОГО из двух
+   состояний одного экрана, и он обязан выглядеть так же, как переключатель
+   корзин ниже, — иначе два ряда пилюль читаются как разные механизмы. */
+const MODES = [
+    { key: 'catalog', label: 'Статьи', icon: BookOpen },
+    { key: 'structure', label: 'Структура', icon: Network },
+];
+
+const ModeSwitch = ({ value, onChange, allowed }) => (
+    <div className="inline-flex max-w-full gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
+        {MODES.filter((m) => allowed.includes(m.key)).map(({ key, label, icon: Icon }) => {
+            const on = value === key;
+            return (
+                <button
+                    key={key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => onChange(key)}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-medium transition ${
+                        on ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                >
+                    <Icon size={14} className={on ? 'text-indigo-600' : ''} /> {label}
+                </button>
+            );
+        })}
+    </div>
+);
+
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
                                    initialArticleSlug, onInitialArticleConsumed }) {
     const headers = useMemo(
@@ -88,6 +120,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        («9 черновиков» открывает каталог сразу в черновиках), а вкладка при
        уходе размонтируется и локальное состояние потеряла бы. */
     const [catalogBucket, setCatalogBucket] = useState('published');
+    /* Что показывает вкладка «Статьи»: каталог или правку структуры. Отдельной
+       вкладки «Структура» больше нет — по решению владельца обе половины одной
+       работы («что лежит» и «как разложено») собраны под одним пунктом меню и
+       переключаются здесь. */
+    const [catalogMode, setCatalogMode] = useState('catalog');
     /* Счётчик нажатий «Новая статья»: кнопка живёт в шапке раздела, редактор —
        во вкладке со статьями. Счётчик, а не флаг: после закрытия редактора его
        не нужно гасить, чтобы кнопка сработала во второй раз. */
@@ -95,6 +132,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     // Тем же способом заголовок раздела возвращает витрину на главную.
     const [homeTick, setHomeTick] = useState(0);
     const rootRef = useRef(null);
+    /* prefers-reduced-motion: CSS-переходы глушит правило в теме, но framer
+       пишет инлайновые стили и под него не подпадает — нужен свой флаг.
+       Тот же приём, что в поиске раздела (WikiSearch). */
+    const reduceMotion = useReducedMotion();
 
     /* Способности считаем ДО загрузчиков: loadCatalog держит isEditor в
        списке зависимостей, а const в теле компонента до своей строки лежит во
@@ -155,18 +196,38 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // был бы вреден — он мигал бы false во время загрузки ping, а эффект
         // ниже выкидывал бы человека из открытого чата.
         { key: 'assistant', label: 'Помощник', icon: Sparkles, show: true },
-        // Каталог по разделам. Стоит после помощника по просьбе владельца.
-        { key: 'catalog', label: 'Статьи', icon: BookOpen, show: isEditor },
+        /* Каталог и правка структуры — один пункт меню: «что лежит в разделе»
+           и «как разделы устроены» это две половины одной работы, и раньше
+           между ними приходилось прыгать по вкладкам. Внутри — переключатель.
+           Показываем тому, у кого есть хоть одна из половин. */
+        { key: 'catalog', label: 'Статьи', icon: BookOpen,
+          show: isEditor || canManageStructure || canGrantAccess },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
         { key: 'parks', label: 'Парки', icon: Building2, show: true },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: true },
-        // Отдельной вкладки «Доступы» нет: права выдаются из строки раздела на
-        // вкладке «Структура». Раздел там выбран тем, что человек на него нажал,
-        // а не селектом из плоского списка, где ветки СЗоВ и ОП одноимённые.
-        { key: 'structure', label: 'Структура', icon: Layers,
-          show: canManageStructure || canGrantAccess },
+        // Отдельных вкладок «Структура» и «Доступы» нет: структура переехала
+        // внутрь «Статей» переключателем, а права выдаются из строки раздела
+        // там же. Раздел выбран тем, что человек на него нажал, а не селектом
+        // из плоского списка, где ветки СЗоВ и ОП одноимённые.
         { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
     ].filter((t) => t.show)), [canManageStructure, canManageAccess, canGrantAccess, isEditor]);
+
+    /* Половины вкладки «Статьи» гейтятся по отдельности: каталог — редактору,
+       структура — тому, кто правит дерево или раздаёт доступы. Обычно человек
+       имеет обе (см. матрицу в wiki/access.py), но роль вики можно собрать
+       руками, и на такой сборке половина обязана просто не появиться. */
+    const catalogModes = useMemo(() => [
+        ...(isEditor ? ['catalog'] : []),
+        ...(canManageStructure || canGrantAccess ? ['structure'] : []),
+    ], [isEditor, canManageStructure, canGrantAccess]);
+
+    // Доступная человеку половина может не совпасть с выбранной — например,
+    // права сузились между заходами.
+    useEffect(() => {
+        if (catalogModes.length && !catalogModes.includes(catalogMode)) {
+            setCatalogMode(catalogModes[0]);
+        }
+    }, [catalogModes, catalogMode]);
 
     // Если права сузились между заходами, активная вкладка может исчезнуть.
     useEffect(() => {
@@ -473,22 +534,84 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                 )}
 
                 {tab === 'catalog' && (
-                    <WikiCatalog
-                        base={base}
-                        headers={headers}
-                        showToast={showToast}
-                        catalog={catalog}
-                        loading={catalogLoading}
-                        bucket={catalogBucket}
-                        onBucketChange={setCatalogBucket}
-                        /* Статья открывается на главной — там живут читалка,
-                           редактор и оглавление. Второго экрана статьи в
-                           каталоге быть не должно. */
-                        onOpenArticle={(slug) => {
-                            setTab('library');
-                            setSearchTarget({ slug });
-                        }}
-                    />
+                    <div className="space-y-3">
+                        {/* Оба переключателя в одной строке: половина вкладки
+                            слева, корзина справа. Друг под другом два одинаковых
+                            ряда пилюль читались как один механизм — разные места
+                            в строке и делают их различимыми.
+                            Переключатель половин прячем, когда выбирать не из
+                            чего: сегмент-контрол с одной кнопкой — это подпись,
+                            притворяющаяся управлением. */}
+                        {(catalogModes.length > 1 || catalogMode === 'catalog') && (
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                                {catalogModes.length > 1 && (
+                                    <ModeSwitch
+                                        value={catalogMode}
+                                        onChange={setCatalogMode}
+                                        allowed={catalogModes}
+                                    />
+                                )}
+                                {catalogMode === 'catalog' && (
+                                    <BucketSwitch
+                                        value={catalogBucket}
+                                        onChange={setCatalogBucket}
+                                        totals={catalog?.totals}
+                                    />
+                                )}
+                            </div>
+                        )}
+
+                        {/* Половина появляется со сдвигом в ту сторону, откуда
+                            пришла: «Структура» правее «Статей», значит и въезжает
+                            справа. Без направления переход читается как перерисовка,
+                            а не как переход. Анимируем ТОЛЬКО въезд: выезд старой
+                            половины схлопывал бы высоту и дёргал прокрутку —
+                            структура много выше каталога. */}
+                        <motion.div
+                            key={catalogMode}
+                            initial={reduceMotion
+                                ? { opacity: 0 }
+                                : { opacity: 0, x: catalogMode === 'structure' ? 16 : -16 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={reduceMotion
+                                ? { duration: 0 }
+                                : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                        >
+                            {catalogMode === 'catalog' ? (
+                                <WikiCatalog
+                                    base={base}
+                                    headers={headers}
+                                    showToast={showToast}
+                                    catalog={catalog}
+                                    loading={catalogLoading}
+                                    bucket={catalogBucket}
+                                    onBucketChange={setCatalogBucket}
+                                    /* Статья открывается на главной — там живут
+                                       читалка, редактор и оглавление. Второго
+                                       экрана статьи в каталоге быть не должно. */
+                                    onOpenArticle={(slug) => {
+                                        setTab('library');
+                                        setSearchTarget({ slug });
+                                    }}
+                                />
+                            ) : (
+                                <WikiStructure
+                                    base={base}
+                                    headers={headers}
+                                    showToast={showToast}
+                                    structure={structure}
+                                    loading={structureLoading}
+                                    canManageAccess={canManageAccess}
+                                    canManageStructure={canManageStructure}
+                                    /* Правка структуры меняет и каталог: раздел
+                                       переименовали или убрали в архив — дерево
+                                       рядом обязано это показать сразу, а не при
+                                       следующем заходе в раздел. */
+                                    reload={() => { loadStructure(); loadPing(); loadCatalog(); }}
+                                />
+                            )}
+                        </motion.div>
+                    </div>
                 )}
 
                 {tab === 'parks' && (
@@ -499,21 +622,19 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     <WikiOffices base={base} headers={headers} showToast={showToast} />
                 )}
 
-                {tab === 'structure' && (
-                    <WikiStructure
+                {tab === 'audit' && (
+                    <WikiAudit
                         base={base}
                         headers={headers}
                         showToast={showToast}
+                        /* Дерево нужно журналу, чтобы называть пространства и
+                           разделы словами: в записи лежат их идентификаторы. */
                         structure={structure}
-                        loading={structureLoading}
-                        canManageAccess={canManageAccess}
-                        canManageStructure={canManageStructure}
-                        reload={() => { loadStructure(); loadPing(); }}
+                        onOpenArticle={(slug) => {
+                            setTab('library');
+                            setSearchTarget({ slug });
+                        }}
                     />
-                )}
-
-                {tab === 'audit' && (
-                    <WikiAudit base={base} headers={headers} showToast={showToast} />
                 )}
             </div>
         </div>

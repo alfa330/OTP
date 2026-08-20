@@ -112,7 +112,7 @@ const toggled = (set, key) => {
    посмотреть. Пояснительной строки под кнопками нет по решению владельца:
    экран объясняет себя пустой правой колонкой, а вечная подпись сверху
    перестаёт читаться на второй день. */
-const BucketSwitch = ({ value, onChange, totals }) => (
+export const BucketSwitch = ({ value, onChange, totals }) => (
     <div className="inline-flex max-w-full gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
         {BUCKETS.map(({ key, label, icon: Icon }) => {
             const on = value === key;
@@ -482,10 +482,7 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     const treeEmpty = renderedSpaces.length === 0 && !showOrphans;
 
     return (
-        <div className="space-y-3">
-            <BucketSwitch value={bucket} onChange={onBucketChange} totals={totals} />
-
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
                 {/* ── Левая колонка: дерево ──────────────────────────────── */}
                 <aside className="lg:w-[320px] lg:shrink-0 2xl:w-[360px]">
                     <div className={`${iosCard} flex flex-col overflow-hidden lg:sticky lg:top-4 lg:max-h-[calc(100vh-2.5rem)]`}>
@@ -646,7 +643,6 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                         </>
                     )}
                 </section>
-            </div>
         </div>
     );
 }
