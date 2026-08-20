@@ -393,6 +393,11 @@ auth_maintenance_executor = ThreadPoolExecutor(max_workers=1)
 # отчёт за месяц собирается минутами — в общем пуле из 4 воркеров они бы
 # отбирали место у остальной работы приложения.
 group_late_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix='group-late')
+# «Провайдер ЭДО» держит свой пул на ОДНО место: выгрузка ходит в чужой кабинет
+# минутами подряд, и в общем пуле из четырёх воркеров она бы держала четверть
+# приложения. Одно место, а не три, потому что раздел и так пускает по одной
+# выгрузке за раз — темп запросов к Fleet мы не имеем права удваивать.
+fleet_edm_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fleet-edm')
 login_rate_limit_lock = threading.Lock()
 session_touch_gate_lock = threading.Lock()
 session_touch_next_due = {}
@@ -51389,6 +51394,26 @@ try:
     logging.info("Раздел «Ограничитель Перезвона»: Blueprint подключён на /api/oktell_guard")
 except Exception:
     logging.exception("Раздел «Ограничитель Перезвона»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Провайдер ЭДО» (выгрузка из диспетчерских Яндекс.Fleet) ──────────
+# Хелпер <ignoredErrors> передаётся аргументом: он живёт здесь, в монолите, а
+# обратный импорт из пакета был бы циклом. Без него выгрузка соберётся, просто с
+# зелёным уголком на каждом телефоне.
+try:
+    from fleet_edm.routes import build_fleet_edm_blueprint  # noqa: E402
+
+    app.register_blueprint(build_fleet_edm_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        pool=fleet_edm_pool,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+    ))
+    logging.info("Раздел «Провайдер ЭДО»: Blueprint подключён на /api/fleet_edm")
+except Exception:
+    logging.exception("Раздел «Провайдер ЭДО»: Blueprint НЕ подключён")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

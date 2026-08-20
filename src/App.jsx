@@ -147,6 +147,7 @@ const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupCh
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
+const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
@@ -271,6 +272,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     manage_users: 'Manage users',
     monitoring_scale: 'Monitoring scale',
     szov_wallboard: 'SZoV wallboard',
+    fleet_edm: 'EDM provider',
     operators: 'Operators',
     profile: 'Profile',
     qr_access: 'QR access',
@@ -1474,6 +1476,22 @@ const canAccessSzovWallboardForUser = (userLike) => {
     return isSupervisorRole(role)
         && normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
             === SZOV_WALLBOARD_DEPARTMENT_CODE;
+};
+
+// Раздел «Провайдер ЭДО» — выгрузка провайдеров водителей из диспетчерских Fleet.
+// Доступ уже, чем у табло: глобальные админы и глава СЗоВ, БЕЗ супервайзеров. Причина
+// не в иерархии, а в содержимом: раздел отдаёт файл с ФИО и телефонами десятков тысяч
+// водителей, и круг тех, кто может его унести, должен быть меньше круга тех, кто смотрит
+// нагрузку на линию. Ту же границу держит fleet_edm/access.py на бэкенде.
+const FLEET_EDM_DEPARTMENT_CODE = 'szov';
+
+const canAccessFleetEdmForUser = (userLike) => {
+    const role = normalizeRole(userLike?.role);
+    if (role === 'super_admin') return true;
+    // Глава отдела с базовой admin-ролью — не глобальный админ.
+    if (role === 'admin' && !isDepartmentHead(userLike)) return true;
+    return isDepartmentHead(userLike)
+        && aiQaHeadDepartmentCodesOf(userLike).includes(FLEET_EDM_DEPARTMENT_CODE);
 };
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
@@ -35377,6 +35395,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // владельца). Глава чужого отдела не проходит — назначение главой
             // заменяет базовую роль и режет периметр отделом, ровно как у табло СЗоВ.
             const canAccessOktellGuard = canAccessSzovWallboardForUser(user);
+            // «Провайдер ЭДО»: админы и глава СЗоВ (см. canAccessFleetEdmForUser).
+            const canAccessFleetEdm = canAccessFleetEdmForUser(user);
             // Раздел «Вики» выдан отделу. Тумблер на отделе, не в allowlist:
             // раздел общий, и в карте разделов пришлось бы держать его у всех.
             const wikiSectionEnabled = wikiEnabledFor(user);
@@ -38878,7 +38898,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     (requestedViewFromUrl !== 'chatapp_chats' || canAccessChatAppSection) &&
                     (requestedViewFromUrl !== 'group_late_bot' || canAccessGroupLateBotSection) &&
                     (requestedViewFromUrl !== 'szov_wallboard' || canAccessSzovWallboardSection) &&
-                    (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection);
+                    (requestedViewFromUrl !== 'four_you' || canAccessFourYouSection) &&
+                    (requestedViewFromUrl !== 'fleet_edm' || canAccessFleetEdm);
                 if (canOpenRequestedView) {
                     setView(requestedViewFromUrl);
                     return;
@@ -38888,7 +38909,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) setView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) setView('operators');
                 else setView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessFourYouSection, canAccessFleetEdm, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
@@ -43956,6 +43977,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (view === 'sip_settings' && canAccessSipSettings) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
+                // «Провайдер ЭДО» — выгрузка из диспетчерских, тоже свой предикат.
+                if (view === 'fleet_edm' && canAccessFleetEdm) return;
                 // «Вики» — база знаний. Раздел выдаётся ОТДЕЛУ тумблером
                 // (departments.wiki_enabled), а не allowlist'ом: он общий, и
                 // держать его в карте разделов пришлось бы у каждого отдела.
@@ -44617,6 +44640,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     </button>
                                                 </li>
                                             )}
+                                            {canAccessFleetEdm && (
+                                                <li>
+                                                    <button
+                                                        onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
+                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
+                                                    >
+                                                        <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
+                                                    </button>
+                                                </li>
+                                            )}
                                             {canAccessAiQaSection && (
                                                 <li>
                                                     <button
@@ -44892,6 +44925,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'oktell_guard' ? 'bg-blue-700' : ''}`}
                                                 >
                                                     <FaIcon className="fas fa-hourglass-half"></FaIcon> <span className="sidebar-text">Ограничитель «Перезвона»</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessFleetEdm && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'fleet_edm')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'fleet_edm' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-file-signature"></FaIcon> <span className="sidebar-text">Провайдер ЭДО</span>
                                                 </button>
                                             </li>
                                             )}
@@ -47449,6 +47492,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                 <OktellGuardView
                                     user={user}
+                                    showToast={showToast}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                />
+                            </Suspense>
+                        ))}
+                        {( view === "fleet_edm" && canAccessFleetEdm && (
+                            <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
+                                <FleetEdmView
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}

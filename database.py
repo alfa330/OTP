@@ -5470,6 +5470,7 @@ class Database:
             self._init_wiki_schema_tx(cursor)
             self._init_crm_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
+            self._init_fleet_edm_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -6165,6 +6166,27 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT oktell_guard_schema")
+
+    def _init_fleet_edm_schema_tx(self, cursor):
+        """Схема раздела «Провайдер ЭДО» (таблицы fleet_edm_*).
+
+        Под SAVEPOINT по той же причине, что и соседи: весь _init_db идёт одной
+        транзакцией, и упавший раздел не имеет права уронить старт приложения.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT fleet_edm_schema")
+        try:
+            from fleet_edm.schema import init_fleet_edm_schema
+            init_fleet_edm_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT fleet_edm_schema")
+            logging.exception(
+                "Схема раздела «Провайдер ЭДО» не применилась — раздел будет "
+                "недоступен, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT fleet_edm_schema")
 
     def _init_icore_phone_schema_tx(self, cursor):
         """Реестр релизов iCORE Phone — то, по чему телефоны решают, обновляться ли.
