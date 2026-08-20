@@ -2,7 +2,8 @@ import React, { useCallback, useRef } from 'react';
 import { Node, mergeAttributes } from '@tiptap/core';
 import { NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import {
-    AlignCenter, AlignLeft, AlignRight, GripVertical, Minus, Pencil, Play, Plus, Trash2,
+    AlignCenter, AlignLeft, AlignRight, ArrowDown, ArrowUp, GripVertical, Minus, Pencil,
+    Play, Plus, Trash2,
 } from 'lucide-react';
 
 import { findTrainer, defaultButtonLabel } from './registry';
@@ -56,7 +57,7 @@ const styleFor = (attrs) => {
 
 /* ── Вид узла в редакторе ─────────────────────────────────────────────────── */
 
-const TrainerNodeView = ({ node, updateAttributes, deleteNode, selected, editor }) => {
+const TrainerNodeView = ({ node, updateAttributes, deleteNode, selected, editor, getPos }) => {
     const { trainer: key, label, width, align } = node.attrs;
     const scenario = findTrainer(key);
     const wrapRef = useRef(null);
@@ -86,6 +87,43 @@ const TrainerNodeView = ({ node, updateAttributes, deleteNode, selected, editor 
         };
         window.addEventListener('pointermove', onMove);
         window.addEventListener('pointerup', onUp);
+    };
+
+    /* Перемещение кнопки по тексту на один блок вверх или вниз.
+     *
+     * Кнопки, а не только перетаскивание. Перетащить узел можно (у него есть
+     * ручка и draggable), но одного этого способа мало: на тачскрине
+     * перетаскивание внутри редактора работает через силу, а с клавиатуры
+     * недоступно вовсе. Здесь же перемещение — обычное действие панели.
+     *
+     * Реализовано транзакцией: удалить узел и вставить его рядом с соседним
+     * блоком. Позицию вставки считаем ДО удаления, а потом прогоняем через
+     * mapping — иначе при движении вниз она уехала бы на размер удалённого узла.
+     */
+    const move = (delta) => {
+        editor.chain().focus().command(({ tr, state, dispatch }) => {
+            const pos = typeof getPos === 'function' ? getPos() : null;
+            if (pos == null) return false;
+            const current = state.doc.nodeAt(pos);
+            if (!current) return false;
+
+            const resolved = state.doc.resolve(pos);
+            const parent = resolved.parent;
+            const index = resolved.index();
+            const targetIndex = index + delta;
+            if (targetIndex < 0 || targetIndex >= parent.childCount) return false;
+
+            let targetPos = resolved.start();
+            for (let i = 0; i < targetIndex; i += 1) targetPos += parent.child(i).nodeSize;
+            // Вниз — значит ПОСЛЕ соседнего блока, а не на его место.
+            if (delta > 0) targetPos += parent.child(targetIndex).nodeSize;
+
+            if (dispatch) {
+                tr.delete(pos, pos + current.nodeSize);
+                tr.insert(tr.mapping.map(targetPos), current);
+            }
+            return true;
+        }).run();
     };
 
     const rename = () => {
@@ -124,6 +162,12 @@ const TrainerNodeView = ({ node, updateAttributes, deleteNode, selected, editor 
                                 </button>
                             );
                         })}
+                        <button type="button" title="Переместить выше" onClick={() => move(-1)}>
+                            <ArrowUp size={13} />
+                        </button>
+                        <button type="button" title="Переместить ниже" onClick={() => move(1)}>
+                            <ArrowDown size={13} />
+                        </button>
                         <button type="button" title="Уменьшить" onClick={() => setWidth(clampWidth(width) - STEP)}>
                             <Minus size={13} />
                         </button>
