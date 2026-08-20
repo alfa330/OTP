@@ -604,6 +604,27 @@ class TasksSourceRulesTest(unittest.TestCase):
         self.assertIn("COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %(user_id)s", block)
         self.assertIn("'accepted': 'Работу приняли'", self.SOURCE)
 
+    def test_information_request_reaches_the_side_that_answers(self):
+        """«Просят информацию» — причина стороны постановки, а не исполнителя."""
+        block = self._block()
+        self.assertIn("t.info_request_id IS NOT NULL", block)
+        self.assertIn("r.kind <> 'info' OR r.seen_at < t.updated_at", block)
+        # Спрашивает исполнитель — ему же вопрос обратно не показываем.
+        self.assertIn("AND t.assigned_to IS DISTINCT FROM %(user_id)s", block)
+        self.assertIn("'info': 'Исполнителю не хватает информации'", self.SOURCE)
+        # Бэклог у этой причины НЕ отсекается: вопрос задал живой человек, и
+        # «задача ещё в очереди» ответа не отменяет.
+        info_start = block.index("OR (t.info_request_id IS NOT NULL")
+        info_tail = block[info_start:block.index("OR (t.assigned_to = %(user_id)s", info_start)]
+        self.assertNotIn("is_backlog", info_tail)
+
+    def test_information_request_is_classified_before_the_deadline_check(self):
+        """Зритель тут не исполнитель: «просрочена» и «не начата» — про другого."""
+        block = self._block()
+        info_at = block.index("THEN 'info'")
+        overdue_at = block.index("THEN 'overdue'")
+        self.assertLess(info_at, overdue_at)
+
     def test_accepted_is_classified_before_the_deadline_check(self):
         """У принятой задачи дедлайн давно позади — иначе она станет «просрочена»."""
         block = self._block()
@@ -614,7 +635,9 @@ class TasksSourceRulesTest(unittest.TestCase):
     def test_accepted_is_last_in_order(self):
         """Информация уступает делам: принятая уходит в конец списка."""
         block = self._block()
-        self.assertIn("ARRAY['overdue', 'returned', 'review', 'fresh', 'accepted']", block)
+        self.assertIn(
+            "ARRAY['overdue', 'returned', 'info', 'review', 'fresh', 'accepted']", block
+        )
 
     def test_now_is_process_clock_not_db_clock(self):
         """due_at хранится наивным во времени Алматы, база — в UTC.
