@@ -1432,15 +1432,32 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertIn('Обратите внимание: Иванов Иван вышел(а) на перерыв не по графику', text)
         self.assertIn('по графику в 14:00', text)
 
-    def test_break_violation_is_a_deviation_not_a_routine_line(self):
-        """Ради этого чат руководства и стоит в режиме «только при отклонениях»."""
+    def test_break_violation_is_a_routine_line_not_a_deviation(self):
+        """Решение владельца 20.08.2026: нарушения есть почти в каждом часу, и чат в режиме
+        «только при отклонениях» получал бы письмо круглые сутки — то есть режим потерял бы
+        смысл. Строка в сообщении остаётся, но сообщение из-за неё не рассылается."""
         ns = self._calm(break_violations=[{
             'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
             'kind': 'not_planned', 'planned_start_minutes': None,
         }])
-        deviations = ns['_szov_broadcast_deviations'](ns['_szov_broadcast_collect']())
-        self.assertEqual(len(deviations), 1)
-        self.assertIn('перерывов в графике на этот день нет', deviations[0])
+        data = ns['_szov_broadcast_collect']()
+        self.assertEqual(ns['_szov_broadcast_deviations'](data), [])
+        notes = ' '.join(ns['_szov_broadcast_notes'](data))
+        self.assertIn('перерывов в графике на этот день нет', notes)
+
+    def test_break_violations_come_before_the_head_count_lines(self):
+        """Единственное в сообщении, что требует действия, — выше описания нагрузки."""
+        ns = self._calm(
+            snapshot={'now': {'operators_on_break': 3}, 'today': {'sl_ratio': 0.9},
+                      'stale': False, 'age_seconds': 0},
+            break_violations=[{
+                'operator_name': 'Иванов Иван', 'started_at': '2026-08-19T16:30:00',
+                'kind': 'off_schedule', 'planned_start_minutes': 840,
+            }])
+        notes = ns['_szov_broadcast_notes'](ns['_szov_broadcast_collect']())
+        joined = '\n'.join(notes)
+        self.assertLess(joined.index('не по графику'), joined.index('на перерыве'))
+        self.assertLess(joined.index('не по графику'), joined.index('Среднее время разговора'))
 
     def test_no_break_violations_no_line_at_all(self):
         """Тихий час не должен добавлять в сообщение ни строки о перерывах."""
