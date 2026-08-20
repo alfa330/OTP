@@ -65,6 +65,12 @@ MAX_FILTER_IDS = 10000
 # на одной ступени. Берём шесть: почти весь выигрыш и никакого давления.
 DEFAULT_CONCURRENCY = 6
 
+# Через столько удачных ответов подряд возвращаем один убранный поток.
+# Двести — это меньше минуты работы: достаточно, чтобы не дёргать кабинет
+# сразу после его же просьбы, и достаточно быстро, чтобы длинный прогон не
+# доезжал на пониженной передаче.
+THROTTLE_RECOVERY_AFTER = 200
+
 DEFAULT_USER_AGENT = (
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36'
@@ -82,13 +88,18 @@ class FleetSessionExpired(FleetError):
 
 
 class FleetClient:
-    """Тонкая обёртка: сессия requests + троттлинг + распознавание «разлогинило».
+    """Тонкая обёртка: сессии по потоку + темп + распознавание «разлогинило».
 
-    Темп подбирается на ходу, как в разовых прогонах: старт 0,3 с между
-    запросами, после серии удачных ответов пауза сокращается до 0,12 с, на 429 —
-    растёт в 1,4 раза. Ни одного 429 за все прогоны мы так и не увидели, но
-    настоящий лимит Fleet неизвестен, и упереться в него на 147 тысячах строк
-    хочется меньше всего.
+    Темп задаётся не паузами между запросами, а числом одновременных: шесть
+    потоков — измеренная точка, где кабинет ещё не начинает копить очередь.
+    Своей сессии requests у каждого потока не случайно: один объект Session на
+    всех не рассчитан на параллельное использование, а мьютекс вокруг сетевого
+    вызова отменил бы саму параллельность.
+
+    Лимит у кабинета всё-таки есть — на длинных прогонах 429 приходит. Реакция
+    двойная: общая пауза для всех потоков (просят помедленнее нас целиком, а не
+    отдельный поток) плюс минус один поток. Возврат — только после двух сотен
+    удачных ответов и никогда выше исходных шести.
     """
 
     def __init__(self, cookies, user_agent=None, *, concurrency=DEFAULT_CONCURRENCY,
@@ -98,6 +109,8 @@ class FleetClient:
         self._max_delay = float(max_delay)
         self._timeout = timeout
         self.concurrency = max(1, int(concurrency))
+        self._initial_concurrency = self.concurrency
+        self._since_throttle = 0
         self.requests_count = 0
 
         # Соединения по одному на поток: requests.Session не рассчитан на
@@ -174,13 +187,27 @@ class FleetClient:
             self._backoff = min(self._max_delay, max(1.0, self._backoff * 1.5))
             self._pause_until = max(self._pause_until, time.time() + self._backoff)
             self.concurrency = max(2, self.concurrency - 1)
+            self._since_throttle = 0
             return self._backoff
 
     def _note_success(self):
+        """Поток возвращаем осторожно: убавляем сразу, прибавляем через сотни
+        удачных ответов.
+
+        Иначе один случайный 429 в начале прогона стоил бы скорости до самого
+        конца: на проде так и вышло — темп после единственной просадки застрял на
+        277 запросов/мин вместо 440. Схема обычная для сетевых клиентов: вниз
+        резко, вверх по чуть-чуть, и никогда выше исходного значения.
+        """
         with self._lock:
             if self._backoff:
                 self._backoff = max(0.0, self._backoff * 0.7)
             self.requests_count += 1
+            self._since_throttle += 1
+            if (self._since_throttle >= THROTTLE_RECOVERY_AFTER
+                    and self.concurrency < self._initial_concurrency):
+                self.concurrency += 1
+                self._since_throttle = 0
 
     def _request(self, method, path, *, park_id, body=None, attempts=7):
         url = BASE + path
