@@ -61,7 +61,8 @@ export const KAZAKHSTAN_CITY_OPTIONS = CITIES_BY_REGION.flatMap(([region, cities
 export const OPERATING_CITIES = [
     'Актау', 'Актобе', 'Алматы', 'Астана', 'Атырау', 'Жанаозен', 'Караганда',
     'Кокшетау', 'Костанай', 'Кызылорда', 'Павлодар', 'Петропавловск', 'Семей',
-    'Талдыкорган', 'Тараз', 'Туркестан', 'Уральск', 'Шымкент', 'Экибастуз',
+    'Талдыкорган', 'Тараз', 'Туркестан', 'Уральск', 'Усть-Каменогорск',
+    'Шымкент', 'Экибастуз',
 ];
 
 const KAZAKHSTAN_CITY_NAMES = new Set(KAZAKHSTAN_CITY_OPTIONS.map((option) => option.value));
