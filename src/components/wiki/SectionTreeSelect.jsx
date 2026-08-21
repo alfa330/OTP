@@ -1,7 +1,9 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import { selectableSections, sectionAncestors, sectionPathLabel } from './sectionPicker';
+import {
+    selectableSections, sectionAncestors, sectionPathLabel, sectionTreeRows,
+} from './sectionPicker';
 
 /* Выбор раздела деревом: родитель раскрывается, а не лежит в общем списке.
  *
@@ -19,20 +21,6 @@ import { selectableSections, sectionAncestors, sectionPathLabel } from './sectio
  * обязан переживать overflow модалки редактора, а скролл внутри него самого не
  * должен его закрывать.
  */
-
-const rowsOf = (sections, spaceId, expanded, depth = 0, parentId = null) =>
-    selectableSections(sections)
-        .filter((s) => s.space_id === spaceId && (s.parent_section_id || null) === parentId)
-        .flatMap((section) => {
-            const children = selectableSections(sections).filter(
-                (x) => x.space_id === spaceId && x.parent_section_id === section.id,
-            );
-            const isOpen = expanded.has(section.id);
-            return [
-                { section, depth, hasChildren: children.length > 0, isOpen },
-                ...(isOpen ? rowsOf(sections, spaceId, expanded, depth + 1, section.id) : []),
-            ];
-        });
 
 export default function SectionTreeSelect({
     sections = [], spaces = [], value, onChange, disabled = false,
@@ -208,7 +196,7 @@ export default function SectionTreeSelect({
                                 </button>
                             ))
                         ) : liveSpaces.map((space) => {
-                            const rows = rowsOf(sections, space.id, expanded);
+                            const rows = sectionTreeRows(sections, space.id, expanded);
                             if (!rows.length) return null;
                             return (
                                 <div key={space.id}>

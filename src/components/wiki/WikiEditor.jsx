@@ -104,6 +104,21 @@ export default function WikiEditor({
         return space ? `${space.name} › ${section.name}` : section.name;
     }, [sections, spaces]);
 
+    /* В выпадашке — только разделы, куда этот человек ВПРАВЕ положить статью.
+       Сервер проверяет ровно это (can_create в правиле раздела, routes_edit),
+       и предлагать ветку, на которой он ответит 403, значит выдавать отказ за
+       поломку. Раздел самой статьи остаётся в списке всегда: иначе поле
+       опустело бы у того, кто правит чужую статью, и сохранение молча увезло
+       бы её в другое место. Ответ без прав (структура ещё не пришла) не
+       фильтруем вовсе — пустая выпадашка хуже лишней строки. */
+    const creatableSections = useMemo(() => {
+        const list = sections || [];
+        if (!list.some((s) => s.permissions)) return list;
+        const current = String(sectionIds[0] ?? '');
+        return list.filter(
+            (s) => s.permissions?.can_create || String(s.id) === current);
+    }, [sections, sectionIds]);
+
     const editor = useEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
@@ -396,7 +411,7 @@ export default function WikiEditor({
                                 называются одинаково, и в общей выпадашке статья
                                 уезжала не туда. */}
                             <SectionTreeSelect
-                                sections={sections}
+                                sections={creatableSections}
                                 spaces={spaces}
                                 value={sectionIds[0] || null}
                                 onChange={(id) => { setSectionIds(id ? [id] : []); setDirty(true); }}

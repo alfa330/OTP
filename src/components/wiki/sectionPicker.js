@@ -39,12 +39,58 @@ export function sectionOptionLabel(section, prefix = '') {
  * ветку. Отсюда две вещи ниже: путь до раздела в подписи и выбор по шагам.
  */
 
+/* Ограничитель обхода — тот же, что в structureTree: сервер циклов не
+   допускает, но зациклиться здесь значит подвесить редактор намертво. */
+const MAX_DEPTH = 20;
+
+/**
+ * Родитель, ВИДИМЫЙ в этом же списке; иначе раздел сам становится корнем.
+ *
+ * Периметр человека часто начинается СЕРЕДИНОЙ дерева: руководителю СЗоВ видны
+ * «Супервайзер» и «Оператор», а «Коммерческий директор» над всей веткой — нет.
+ * Пока корнями считались только разделы с parent_section_id = null, такая ветка
+ * не показывалась вовсе: в выпадашке раздела статьи оставался один «Общий
+ * сотрудник», и человек не мог положить статью в СВОЙ раздел. Ровно это правило
+ * уже держат дерево структуры (structureTree.parentKeyOf) и дерево витрины
+ * (WikiLibrary) — здесь оно было потеряно.
+ */
+export function visibleParentId(section, visibleIds) {
+    const parent = section?.parent_section_id || null;
+    return parent && visibleIds.has(parent) ? parent : null;
+}
+
 /** Прямые потомки раздела (parentId = null — корни пространства). */
 export function sectionChildren(sections, spaceId, parentId = null) {
-    return selectableSections(sections).filter(
-        (s) => s.space_id === spaceId
-            && (s.parent_section_id || null) === (parentId || null),
+    const list = selectableSections(sections);
+    const shown = new Set(list.map((s) => s.id));
+    const target = parentId || null;
+    return list.filter(
+        (s) => s.space_id === spaceId && visibleParentId(s, shown) === target,
     );
+}
+
+/**
+ * Плоские строки дерева выбора: {section, depth, hasChildren, isOpen}.
+ *
+ * Строки идут в порядке обхода, свёрнутые ветки не разворачиваются. Живёт здесь,
+ * а не в компоненте, по той же причине, что и остальное в этом файле: это чистая
+ * функция над списком разделов, и «а что если родитель невидим» дешевле
+ * проверить тестом (tests/wiki_section_picker.test.mjs), чем браузером.
+ */
+export function sectionTreeRows(sections, spaceId, expanded, parentId = null, depth = 0) {
+    if (depth > MAX_DEPTH) return [];
+    return sectionChildren(sections, spaceId, parentId).flatMap((section) => {
+        const isOpen = !!expanded?.has(section.id);
+        return [
+            {
+                section,
+                depth,
+                hasChildren: sectionChildren(sections, spaceId, section.id).length > 0,
+                isOpen,
+            },
+            ...(isOpen ? sectionTreeRows(sections, spaceId, expanded, section.id, depth + 1) : []),
+        ];
+    });
 }
 
 /** Путь от корня до раздела включительно. Пустой массив, если раздел не найден. */
