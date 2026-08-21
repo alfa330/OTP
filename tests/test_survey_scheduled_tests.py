@@ -463,16 +463,32 @@ class SurveyTestFrontendTests(unittest.TestCase):
         self.assertIn("tabular-nums", countdown_block)
 
     def test_respondent_cards_replace_the_wide_table(self):
-        """Ответы сотрудников — раскрывающиеся строки, а не таблица.
+        """Ответы сотрудников — карточки по две в ряд, а не таблица.
 
         Таблица с колонкой на каждый вопрос читалась только вбок; проверяем,
         что её не вернули «на всякий случай» рядом с карточками.
         """
         self.assertIn("const respondentCards = useMemo(", self.src)
         self.assertIn("activeTab === 'answers'", self.src)
-        self.assertIn("setOpenedRespondentKey(expanded ? null : card.key)", self.src)
+        self.assertIn("sm:grid-cols-2", self.src)
+        self.assertIn("setOpenedRespondentKey(card.key)", self.src)
         self.assertNotIn("statsViewMode", self.src)
         self.assertNotIn("<table", self.src)
+
+    def test_opened_respondent_takes_the_whole_area_and_has_a_way_back(self):
+        """Разбор одного человека занимает всю область вкладки.
+
+        У теста на 25 вопросов ему нужен весь экран: внутри строки списка он
+        ужимался бы в щель между соседями. Значит, нужен и путь назад —
+        кнопкой и с клавиатуры.
+        """
+        self.assertIn("activeTab === 'answers' && !openedRespondent", self.src)
+        self.assertIn("activeTab === 'answers' && openedRespondent", self.src)
+        self.assertIn("Назад к списку", self.src)
+        self.assertIn("Esc — вернуться", self.src)
+        self.assertIn("if (event.key === 'Escape') setOpenedRespondentKey(null);", self.src)
+        # Раскрытие анимируем общим классом, а не своими стилями в разделе.
+        self.assertIn("animate-card-open", self.src)
 
     def test_section_has_no_modals(self):
         """В разделе не должно остаться ни одного оверлея.
@@ -510,9 +526,9 @@ class SurveyTestFrontendTests(unittest.TestCase):
 
     def test_tabs_are_a_large_segmented_control(self):
         """Вкладки должны читаться как навигация, а не как мелкая подпись."""
-        tabs_start = self.src.index("ariaLabel=\"Разделы опроса\"")
-        tabs = self.src[tabs_start - 400:tabs_start + 1400]
-        self.assertIn('size="lg"', tabs)
+        tabs_start = self.src.index('size="lg"')
+        tabs = self.src[tabs_start:tabs_start + 1800]
+        self.assertIn('ariaLabel="Разделы опроса"', tabs)
         for tab in ("'questions'", "'answers'", "'stats'"):
             self.assertIn(tab, tabs)
 

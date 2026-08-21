@@ -27,12 +27,6 @@ const SCOPE_ACTIVE = 'active';
 const SCOPE_ARCHIVE = 'archive';
 const LIST_PAGE_SIZE = 20;
 const LIST_SEARCH_DEBOUNCE_MS = 300;
-// Длительность раскрытия строки ответов — одна и та же в CSS и в размонтировании.
-// Кривая (0.4, 0, 0.2, 1) — ровная, с медленным началом и мягким приземлением.
-// Замеряли по кадрам: у «выразительных» кривых вроде (0.16, 1, 0.3, 1) и
-// (0.32, 0.72, 0, 1) панель набирала 79% высоты за первые 120 мс — глазами это
-// и есть «открывается резко», сколько бы ни стояло в duration.
-const ROW_EXPAND_MS = 450;
 
 const isManagerRole = (role) => isAdminLikeRole(role) || roleIsAny(role, ['sv', 'trainer']);
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
@@ -1149,18 +1143,21 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     // Средний балл теста — по тем, кто его прошёл. Медиана здесь была бы
     // честнее на выбросах, но в тесте важен именно средний процент: он же
     // уходит в качество оператора.
-    // Содержимое раскрытой строки держим смонтированным чуть дольше, чем
-    // открыта строка: иначе на закрытии оно исчезало бы мгновенно и
-    // анимировать было бы нечего. Одновременно открыта одна строка, поэтому
-    // в памяти всегда ровно один разбор, а не полсотни.
-    const [expandedRenderKey, setExpandedRenderKey] = useState(null);
+    const openedRespondent = useMemo(
+        () => respondentCardsAll.find((card) => card.key === openedRespondentKey) || null,
+        [openedRespondentKey, respondentCardsAll]
+    );
+
+    // Escape возвращает к списку карточек — так же, как кнопка «Назад».
+    // Обработчик снимаем вместе с закрытием: висящий слушатель перехватывал бы
+    // Escape у конструктора.
     useEffect(() => {
-        if (openedRespondentKey) {
-            setExpandedRenderKey(openedRespondentKey);
-            return undefined;
-        }
-        const timerId = window.setTimeout(() => setExpandedRenderKey(null), ROW_EXPAND_MS);
-        return () => window.clearTimeout(timerId);
+        if (!openedRespondentKey) return undefined;
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') setOpenedRespondentKey(null);
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
     }, [openedRespondentKey]);
 
     const respondentsSummary = useMemo(() => {
@@ -3014,7 +3011,13 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                     <IosSegmented
                                         size="lg"
                                         value={activeTab}
-                                        onChange={setActiveTab}
+                                        onChange={(tab) => {
+                                            // Уходя со вкладки, закрываем разбор: иначе
+                                            // возврат на «Ответы» показывал бы чужую
+                                            // карточку вместо списка.
+                                            if (tab !== 'answers') setOpenedRespondentKey(null);
+                                            setActiveTab(tab);
+                                        }}
                                         ariaLabel="Разделы опроса"
                                         options={[
                                             {
@@ -3411,9 +3414,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                     </div>
                                 )}
 
-                                {/* Manager answers tab */}
-                                {canManage && activeTab === 'answers' && (
-                                    <div className="space-y-3">
+                                {/* Manager answers tab.
+                                    Два состояния на одном месте: сетка карточек и
+                                    разбор одного человека во всю область. Разбор
+                                    НЕ модалка и не аккордеон внутри строки: у теста
+                                    на 25 вопросов ему нужен весь экран, а внутри
+                                    строки он ужимался бы в щель между соседями. */}
+                                {canManage && activeTab === 'answers' && !openedRespondent && (
+                                    <div className="animate-card-open space-y-3">
                                         <div className="flex flex-wrap items-center justify-between gap-2">
                                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
                                                 <span>
@@ -3453,140 +3461,131 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                             </div>
                                         )}
 
-                                        {/* Строка раскрывается на месте, без модалки: ответы одного
-                                            человека — продолжение его строки, а не отдельный экран,
-                                            и после закрытия не нужно искать, где ты был в списке. */}
-                                        <div className="space-y-2">
+                                        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                                             {respondentCards.map((card) => {
-                                                const expanded = card.key === openedRespondentKey;
                                                 const scoreColor = card.scoreValue == null
                                                     ? 'text-slate-400'
                                                     : (card.scoreValue >= 80
                                                         ? 'text-emerald-600'
                                                         : (card.scoreValue >= 60 ? 'text-blue-600' : 'text-amber-600'));
                                                 return (
-                                                    <div
+                                                    <button
                                                         key={card.key}
-                                                        className={`overflow-hidden rounded-2xl ring-1 transition-all duration-[400ms] ease-[cubic-bezier(0.4,0,0.2,1)] ${
-                                                            expanded
-                                                                ? 'bg-white ring-blue-200'
-                                                                : (card.isCompleted ? 'bg-white ring-slate-200/70' : 'bg-slate-50 ring-slate-200/60')
+                                                        type="button"
+                                                        disabled={!card.isCompleted}
+                                                        onClick={() => setOpenedRespondentKey(card.key)}
+                                                        className={`flex min-h-[92px] flex-col justify-between rounded-2xl px-4 py-3.5 text-left ring-1 transition-all duration-200 ${
+                                                            card.isCompleted
+                                                                ? 'bg-white ring-slate-200/70 hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(15,23,42,0.4)] hover:ring-blue-300 active:scale-[0.99]'
+                                                                : 'cursor-default bg-slate-50 ring-slate-200/60'
                                                         }`}
                                                     >
-                                                        {/* Свёрнутая строка — только имя и результат. Всё
-                                                            остальное (сколько верных, баллы, когда отправлено)
-                                                            переехало в шапку раскрытой части: в списке из
-                                                            полусотни человек эти подписи складывались в стену
-                                                            текста, по которой не пробежаться глазами. */}
-                                                        <button
-                                                            type="button"
-                                                            disabled={!card.isCompleted}
-                                                            aria-expanded={expanded}
-                                                            onClick={() => setOpenedRespondentKey(expanded ? null : card.key)}
-                                                            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${
-                                                                card.isCompleted ? 'hover:bg-slate-50/70' : 'cursor-default'
-                                                            }`}
-                                                        >
-                                                            <FaIcon
-                                                                className={`fas fa-chevron-right shrink-0 text-[11px] transition-transform duration-[400ms] ease-[cubic-bezier(0.4,0,0.2,1)] ${
-                                                                    card.isCompleted ? 'text-slate-400' : 'text-transparent'
-                                                                } ${expanded ? 'rotate-90' : ''}`}
-                                                            />
-                                                            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
-                                                                <span className={`truncate text-[13.5px] font-semibold ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
-                                                                    {card.name}
-                                                                </span>
+                                                        <div className={`text-[13.5px] font-semibold leading-snug ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
+                                                            {card.name}
+                                                        </div>
+                                                        <div className="mt-2 flex items-end justify-between gap-2">
+                                                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                                                                 {!card.isCompleted && <Badge color="amber">Не проходил</Badge>}
                                                                 {card.isDismissed && <Badge color="gray">Уволен</Badge>}
                                                                 {card.repeatIteration > 1 && <Badge color="blue">#{card.repeatIteration}</Badge>}
                                                             </div>
-                                                            {card.isCompleted && isTestStatsSurvey && card.hasScore && (
-                                                                <div className={`shrink-0 text-[15px] font-bold tabular-nums ${scoreColor}`}>
-                                                                    {formatPercent(card.scoreValue)}
-                                                                </div>
+                                                            {card.isCompleted && (
+                                                                isTestStatsSurvey && card.hasScore ? (
+                                                                    <span className={`shrink-0 text-[19px] font-bold leading-none tabular-nums ${scoreColor}`}>
+                                                                        {formatPercent(card.scoreValue)}
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="shrink-0 text-[11.5px] tabular-nums text-slate-500">
+                                                                        Ответов {card.answeredCount} из {card.questionsCount}
+                                                                    </span>
+                                                                )
                                                             )}
-                                                        </button>
-
-                                                        {/* Раскрытие через grid-template-rows: 0fr → 1fr —
-                                                            единственный способ анимировать переход к высоте
-                                                            «по содержимому» без измерения в JS. Содержимое
-                                                            монтируется всегда, иначе анимировать было бы
-                                                            нечего; лишним оно не будет — в списке за раз
-                                                            открыта одна строка. */}
-                                                        <div
-                                                            className={`grid transition-[grid-template-rows] duration-[400ms] ease-[cubic-bezier(0.4,0,0.2,1)] ${
-                                                                expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
-                                                            }`}
-                                                        >
-                                                            <div className="overflow-hidden">
-                                                                <div
-                                                                    className={`border-t border-slate-200/70 bg-slate-50/60 px-3.5 py-3 transition-[opacity,transform] duration-[260ms] ease-out ${
-                                                                        expanded
-                                                                            ? 'translate-y-0 opacity-100 delay-[120ms]'
-                                                                            : '-translate-y-1 opacity-0'
-                                                                    }`}
-                                                                >
-                                                                    {card.key === expandedRenderKey && (
-                                                                        <>
-                                                                            {/* Шапка раскрытой части: кто, сколько
-                                                                                верных и когда. Здесь этим цифрам есть
-                                                                                где встать, и они не мешают искать
-                                                                                человека в свёрнутом списке. */}
-                                                                            {/* Имя не повторяем: оно в строке прямо над
-                                                                                этой сводкой, и второй раз на том же экране
-                                                                                читалось бы как ошибка отрисовки. */}
-                                                                            <div className="mb-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
-                                                                                {isTestStatsSurvey ? (
-                                                                                    <>
-                                                                                        <span>
-                                                                                            Верно:{' '}
-                                                                                            <strong className="tabular-nums text-slate-800">
-                                                                                                {Number(card.testSummary?.correct_answers || 0)} из {Number(card.testSummary?.total_questions || 0)}
-                                                                                            </strong>
-                                                                                        </span>
-                                                                                        {card.hasScore && (
-                                                                                            <span>
-                                                                                                Баллы:{' '}
-                                                                                                <strong className="tabular-nums text-slate-800">
-                                                                                                    {formatPoints(card.testSummary?.earned_points)} / {formatPoints(card.testSummary?.max_points)}
-                                                                                                </strong>
-                                                                                            </span>
-                                                                                        )}
-                                                                                    </>
-                                                                                ) : (
-                                                                                    <span>
-                                                                                        Ответов:{' '}
-                                                                                        <strong className="tabular-nums text-slate-800">
-                                                                                            {card.answeredCount} из {card.questionsCount}
-                                                                                        </strong>
-                                                                                    </span>
-                                                                                )}
-                                                                                <span className="tabular-nums text-slate-400">
-                                                                                    {formatSurveyDateTime(card.submittedAt)}
-                                                                                </span>
-                                                                                {card.testSummary?.is_auto_submitted && (
-                                                                                    <Badge color="amber">Отправлено по времени</Badge>
-                                                                                )}
-                                                                            </div>
-                                                                            <AttemptReview
-                                                                                questions={card.questions}
-                                                                                isTest={isTestStatsSurvey}
-                                                                                getAnswer={(question, questionIndex) => {
-                                                                                    const resolved = resolveStatsQuestionAndAnswer(card.row, question, questionIndex);
-                                                                                    return resolved.answer
-                                                                                        ? { ...resolved.answer, __question: resolved.question }
-                                                                                        : null;
-                                                                                }}
-                                                                            />
-                                                                        </>
-                                                                    )}
-                                                                </div>
-                                                            </div>
                                                         </div>
-                                                    </div>
+                                                    </button>
                                                 );
                                             })}
                                         </div>
+                                    </div>
+                                )}
+
+                                {canManage && activeTab === 'answers' && openedRespondent && (
+                                    <div className="animate-card-open space-y-3">
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setOpenedRespondentKey(null)}
+                                                className={iosBtnGhost}
+                                            >
+                                                <FaIcon className="fas fa-chevron-left text-[11px]" />
+                                                Назад к списку
+                                            </button>
+                                            <span className="hidden text-[11.5px] text-slate-400 sm:block">
+                                                Esc — вернуться
+                                            </span>
+                                        </div>
+
+                                        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/70 pb-3">
+                                            <div className="min-w-0">
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <span className="text-[15px] font-bold text-slate-900">{openedRespondent.name}</span>
+                                                    {openedRespondent.isDismissed && <Badge color="gray">Уволен</Badge>}
+                                                    {openedRespondent.repeatIteration > 1 && <Badge color="blue">#{openedRespondent.repeatIteration}</Badge>}
+                                                    {openedRespondent.testSummary?.is_auto_submitted && (
+                                                        <Badge color="amber">Отправлено по времени</Badge>
+                                                    )}
+                                                </div>
+                                                <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                                                    {isTestStatsSurvey ? (
+                                                        <>
+                                                            <span>
+                                                                Верно:{' '}
+                                                                <strong className="tabular-nums text-slate-800">
+                                                                    {Number(openedRespondent.testSummary?.correct_answers || 0)} из {Number(openedRespondent.testSummary?.total_questions || 0)}
+                                                                </strong>
+                                                            </span>
+                                                            {openedRespondent.hasScore && (
+                                                                <span>
+                                                                    Баллы:{' '}
+                                                                    <strong className="tabular-nums text-slate-800">
+                                                                        {formatPoints(openedRespondent.testSummary?.earned_points)} / {formatPoints(openedRespondent.testSummary?.max_points)}
+                                                                    </strong>
+                                                                </span>
+                                                            )}
+                                                        </>
+                                                    ) : (
+                                                        <span>
+                                                            Ответов:{' '}
+                                                            <strong className="tabular-nums text-slate-800">
+                                                                {openedRespondent.answeredCount} из {openedRespondent.questionsCount}
+                                                            </strong>
+                                                        </span>
+                                                    )}
+                                                    <span className="tabular-nums text-slate-400">
+                                                        {formatSurveyDateTime(openedRespondent.submittedAt)}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            {isTestStatsSurvey && openedRespondent.hasScore && (
+                                                <div className={`shrink-0 text-[26px] font-bold leading-none tabular-nums ${
+                                                    openedRespondent.scoreValue >= 80
+                                                        ? 'text-emerald-600'
+                                                        : (openedRespondent.scoreValue >= 60 ? 'text-blue-600' : 'text-amber-600')
+                                                }`}>
+                                                    {formatPercent(openedRespondent.scoreValue)}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <AttemptReview
+                                            questions={openedRespondent.questions}
+                                            isTest={isTestStatsSurvey}
+                                            getAnswer={(question, questionIndex) => {
+                                                const resolved = resolveStatsQuestionAndAnswer(openedRespondent.row, question, questionIndex);
+                                                return resolved.answer
+                                                    ? { ...resolved.answer, __question: resolved.question }
+                                                    : null;
+                                            }}
+                                        />
                                     </div>
                                 )}
 

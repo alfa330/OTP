@@ -47,6 +47,13 @@ module.exports = {
           '0%': { opacity: '0' },
           '100%': { opacity: '1' }
         },
+        /* Раскрытие карточки на всю область: лёгкий рост от 0.97, а не выезд
+           со стороны — так это читается как «карточка развернулась», а не
+           «приехал другой экран». */
+        cardOpen: {
+          '0%': { opacity: '0', transform: 'scale(0.97)' },
+          '100%': { opacity: '1', transform: 'scale(1)' }
+        },
         scaleIn: {
           '0%': { opacity: '0', transform: 'scale(0.95) translateY(-10px)' },
           '100%': { opacity: '1', transform: 'scale(1) translateY(0)' }
@@ -66,6 +73,7 @@ module.exports = {
         'dropdown-reverse': 'dropdown-reverse 0.2s ease-in forwards',
         'fade-in': 'fadeIn 0.3s ease-out forwards',
         'scale-in': 'scaleIn 0.2s ease-out forwards',
+        'card-open': 'cardOpen 0.28s cubic-bezier(0.4, 0, 0.2, 1) both',
         'scale-out': 'scaleOut 0.2s ease-in forwards'
       }
     }
