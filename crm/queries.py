@@ -938,7 +938,7 @@ def delivery_payload(cursor, ticket_id):
                t.created_by, t.created_by_name,
                t.delivery_status, t.tg_message_id,
                q.chat_id, q.title, tp.title, d.name,
-               t.answers ->> 'iin', t.scenario_key
+               t.answers ->> 'iin', t.scenario_key, t.answers, t.flags
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id
           LEFT JOIN crm_topics tp ON tp.id = t.topic_id
@@ -961,6 +961,11 @@ def delivery_payload(cursor, ticket_id):
         'iin': row[15],
         # Нужен, чтобы понять, сама ли тематика сформулировала сообщение.
         'scenario_key': row[16],
+        # Ответы и метки — чтобы собрать карточку заново, а не разбирать
+        # обратно уже готовый текст: разбор собственного вывода это второе
+        # место, где живёт формат, и оно всегда отстаёт от первого.
+        'answers': row[17] or {},
+        'flags': row[18] or [],
         'department_name': row[14],
     }
 

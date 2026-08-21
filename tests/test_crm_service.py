@@ -154,6 +154,14 @@ PAYLOAD = {
     'delivery_status': 'pending', 'tg_message_id': None,
     'chat_id': -1001, 'queue_title': 'iTaxi', 'topic_title': None,
     'department_name': 'СЗоВ', 'scenario_key': 'sapar_docs_missing',
+    # Из ответов рисуется карточка — та самая картинка, что уходит в группу.
+    'answers': {
+        'iin': '060606202020', 'period': '2026-03', 'park': 'iTaxi', 'city': 'Астана',
+        'trips_in_park': 'yes', 'commission_charged': 'yes', 'corp_or_bonus': 'yes',
+        'provider_changed': {'value': 'no', 'detail': ''},
+        'relogin_done': 'yes', 'docs_after_relogin': 'no',
+    },
+    'flags': [],
 }
 
 
@@ -179,17 +187,55 @@ class ServiceCase(unittest.TestCase):
 
 
 class DeliveryTest(ServiceCase):
-    def test_successful_delivery_records_root_message(self):
-        """Корень нити обязателен: по нему находится тикет при ответе в группе."""
-        queries, transport = self.wire(payload=dict(PAYLOAD))
+    """Обращение уходит в группу КАРТИНКОЙ (ТЗ #206), подпись несёт данные.
+
+    Картинка — не украшение: разметка Telegram не умеет ни плашек, ни галочек
+    в кружках, а СЗоВ приложила к задаче именно такой макет. Зато с картинки
+    нельзя ни скопировать ИИН, ни нажать ссылку — поэтому и то, и другое обязано
+    остаться в подписи, и это здесь проверяется.
+    """
+
+    def test_ticket_goes_to_the_group_as_a_card(self):
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
         ok, error = service.deliver_ticket(self.db, 42)
 
-        self.assertTrue(ok)
-        self.assertIsNone(error)
-        self.assertEqual(len(transport.sent), 1)
+        self.assertTrue(ok, error)
+        self.assertEqual(transport.sent, [], 'текст ушёл вместо карточки')
+        self.assertEqual(len(transport.files), 1)
+        self.assertEqual(transport.files[0]['file_name'], 'ticket-42.png')
+        self.assertEqual(transport.files[0]['mimetype'], 'image/png')
+
+    def test_caption_carries_the_link_and_the_driver_data(self):
+        """Единственное, чего в картинке быть не может: нажимаемая ссылка и
+        текст, из которого ИИН можно скопировать в поиск Sapar."""
+        _queries, transport = self.wire(payload=dict(PAYLOAD))
+        service.deliver_ticket(self.db, 42)
+        caption = transport.files[0]['caption']
+
+        self.assertIn('Обращение №42', caption)
+        self.assertIn('ticket_id=42', caption)
+        self.assertIn('<b>ИИН:</b> 060606202020', caption)
+        self.assertIn('<b>Таксопарк:</b> iTaxi', caption)
+        self.assertIn('<b>Отчётный период:</b> март 2026', caption)
+        self.assertEqual(transport.files[0]['parse_mode'], 'HTML')
+        # Просьба и проверенные пункты стоят на картинке — второй раз в подписи
+        # они были бы лишним экраном прокрутки в рабочем чате.
+        self.assertNotIn('Проверено оператором', caption)
+
+    def test_successful_delivery_records_root_message(self):
+        """Корень нити обязателен: по нему находится тикет при ответе в группе.
+
+        В нить кладётся ТЕКСТ обращения, а не картинка: карточка — оформление
+        того же самого, а искать по переписке нужно словами.
+        """
+        queries, _transport = self.wire(payload=dict(PAYLOAD))
+        ok, error = service.deliver_ticket(self.db, 42)
+
+        self.assertTrue(ok, error)
         added = queries.find('add_message')
         self.assertEqual(len(added), 1)
         self.assertEqual(added[0]['direction'], 'out')
+        self.assertEqual(added[0]['body'], PAYLOAD['body'])
         self.assertEqual(added[0]['tg_message_id'], 555)
         self.assertEqual(added[0]['tg_chat_id'], -1001)
 
@@ -197,48 +243,50 @@ class DeliveryTest(ServiceCase):
         """Кнопок больше нет — убраны решением владельца 19.08.2026."""
         _queries, transport = self.wire(payload=dict(PAYLOAD))
         service.deliver_ticket(self.db, 42)
-        self.assertNotIn('reply_markup', transport.sent[0])
+        self.assertNotIn('reply_markup', transport.files[0])
 
-    def test_photo_goes_with_the_text_in_one_message(self):
-        """Просьба владельца: не отдельным сообщением.
-
-        Раньше подпись к медиа (1024 символа) текст обращения не вмещала. После
-        того как текст сократили — вмещает, и два сообщения там, где хватает
-        одного, в группе только мешают.
-        """
-        _queries, transport = self.wire(payload=dict(PAYLOAD))
+    def test_operator_screenshot_follows_the_card(self):
+        """Место фото в сообщении занято карточкой, поэтому скриншот идёт
+        следом реплаем. Альбомом их не склеить: на альбом не отвечают одним
+        реплаем, и ответ группы перестал бы находить обращение."""
+        queries, transport = self.wire(payload=dict(PAYLOAD))
         service.deliver_ticket(self.db, 42, attachment={
             'filename': 'shot.png', 'stream': b'x', 'mimetype': 'image/png'})
-        self.assertEqual(len(transport.files), 1)
-        self.assertEqual(transport.sent, [], 'текст ушёл вторым сообщением')
-        self.assertIn('Обращение №42', transport.files[0]['caption'])
-        self.assertEqual(transport.files[0]['parse_mode'], 'HTML')
-        # Файл — часть корневого сообщения, а не отдельная строка переписки.
-        messages = [kwargs for name, kwargs in _queries.calls if name == 'add_message']
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]['attachment']['kind'], 'photo')
 
-    def test_long_text_falls_back_to_two_messages(self):
-        """Подпись к медиа ограничена, и терять текст из-за этого нельзя."""
-        payload = dict(PAYLOAD, body='я' * 3000)
-        _queries, transport = self.wire(payload=payload)
-        service.deliver_ticket(self.db, 42, attachment={
-            'filename': 'shot.png', 'stream': b'x', 'mimetype': 'image/png'})
-        self.assertEqual(len(transport.sent), 1)
-        self.assertEqual(len(transport.files), 1)
+        self.assertEqual(len(transport.files), 2)
+        self.assertEqual(transport.files[0]['file_name'], 'ticket-42.png')
+        self.assertEqual(transport.files[1]['file_name'], 'shot.png')
+        self.assertEqual(transport.files[1]['reply_to_message_id'], 555)
+        messages = queries.find('add_message')
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[1]['attachment']['kind'], 'photo')
 
-    def test_photo_failure_still_delivers_the_ticket(self):
-        """Отказ на файле не должен терять обращение — уходит текстом."""
+    def test_card_refusal_falls_back_to_text(self):
+        """Оформление не стоит обращения: Telegram отказал на картинке —
+        уходим текстом, как раньше."""
         _queries, transport = self.wire(payload=dict(PAYLOAD))
-        transport._file_error = 'file too big'
-        ok, error = service.deliver_ticket(self.db, 42, attachment={
-            'filename': 'shot.png', 'stream': b'x', 'mimetype': 'image/png'})
+        transport._file_error = 'PHOTO_INVALID_DIMENSIONS'
+        ok, error = service.deliver_ticket(self.db, 42)
+
         self.assertTrue(ok, error)
         self.assertEqual(len(transport.sent), 1)
+        self.assertIn('Обращение №42', transport.sent[0]['text'])
+        # Текстовый путь берёт готовый текст обращения — тот же, что в карточке.
+        self.assertIn(PAYLOAD['body'], transport.sent[0]['text'])
+
+    def test_ticket_without_a_topic_goes_as_text(self):
+        """Рисовать нечего: у обращения без сценария нет ни блоков, ни просьбы."""
+        _queries, transport = self.wire(payload=dict(PAYLOAD, scenario_key=None))
+        ok, error = service.deliver_ticket(self.db, 42)
+
+        self.assertTrue(ok, error)
+        self.assertEqual(len(transport.sent), 1)
+        self.assertEqual(transport.files, [])
 
     def test_failed_delivery_keeps_the_ticket(self):
         """Telegram лежит — обращение остаётся с пометкой, а не пропадает."""
-        queries, _transport = self.wire(payload=dict(PAYLOAD), error='chat not found')
+        queries, transport = self.wire(payload=dict(PAYLOAD), error='chat not found')
+        transport._file_error = 'chat not found'
         ok, error = service.deliver_ticket(self.db, 42)
 
         self.assertFalse(ok)
@@ -259,6 +307,7 @@ class DeliveryTest(ServiceCase):
         self.assertTrue(ok)
         self.assertIsNone(error)
         self.assertEqual(transport.sent, [])
+        self.assertEqual(transport.files, [])
 
     def test_queue_without_chat_is_reported_not_silently_dropped(self):
         payload = dict(PAYLOAD, chat_id=None)
@@ -275,6 +324,14 @@ class DeliveryTest(ServiceCase):
         self.assertEqual(self.db.depth, 0)
         # Курсор берётся короткими порциями, а не одним на всю операцию.
         self.assertGreaterEqual(self.db.opened, 2)
+        self.assertEqual(self.db.max_depth, 1)
+
+    def test_card_is_drawn_outside_the_cursor(self):
+        """Рисование — это ещё и память, и десятки миллисекунд процессора.
+        Держать на них соединение пула нельзя: его делят SSE колокола и
+        аукциона, и он уже голодал однажды."""
+        self.wire(payload=dict(PAYLOAD))
+        service.deliver_ticket(self.db, 42)
         self.assertEqual(self.db.max_depth, 1)
 
 

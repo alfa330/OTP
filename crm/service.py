@@ -13,10 +13,11 @@
 секунд, пока Telegram думает, — прямой путь повторить это.
 """
 
+import io
 import logging
 from datetime import datetime, timedelta
 
-from . import queries, scenarios, telegram, transport
+from . import card, queries, scenarios, telegram, transport
 
 
 def _due_text(due_at):
@@ -56,41 +57,48 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
         return False, 'У очереди не привязана Telegram-группа'
 
     scenario = scenarios.get(payload['scenario_key']) or {}
-    text = telegram.build_ticket_message(
-        ticket_id=ticket_id,
-        subject=payload['subject'],
-        body=payload['body'],
-        queue_title=payload['queue_title'],
-        # Заголовок в группе — просьба тематики, а не тема обращения: по теме
-        # обращение ищут в iCORE (там название проблемы и ИИН), а группе нужно
-        # понять, что от неё хотят. Нет тематики — остаётся тема.
-        heading=scenario.get('group_title'),
-        priority=payload['priority'],
-        client_name=payload['client_name'],
-        client_phone=payload['client_phone'],
-        due_text=_due_text(payload['due_at']),
-        own_wording=bool(scenario.get('body_template')),
-    )
-    # Фото уходит ОДНИМ сообщением вместе с текстом, а не следом за ним:
-    # раньше подпись к медиа (1024 символа) текст обращения не вмещала, а после
-    # того как текст сократили — вмещает. Два сообщения там, где хватает одного,
-    # в рабочей группе только мешают. Не влезло — отправляем как раньше, двумя.
-    as_caption = attachment is not None and len(text) <= transport.CAPTION_LIMIT
-    if as_caption:
+    blocks = scenarios.body_blocks(payload['scenario_key'], payload['answers'],
+                                   flags=payload['flags']) if scenario else []
+    heading = (scenario.get('group_title') or payload['subject'] or '').strip()
+    subtitle = 'Обращение %s · %s' % (telegram.ticket_number(ticket_id),
+                                      payload['queue_title'] or '')
+    due_text = _due_text(payload['due_at'])
+
+    # Данные водителя уходят ПОДПИСЬЮ, а не на картинку: ИИН из картинки не
+    # скопировать, а с него и начинается работа специалиста в группе.
+    data_rows = [row for block in blocks if block['kind'] == scenarios.BLOCK_DATA
+                 for row in block['rows']]
+    picture = _card_png(ticket_id, heading=heading, subtitle=subtitle,
+                        blocks=[b for b in blocks if b['kind'] != scenarios.BLOCK_DATA])
+
+    if picture is not None:
+        caption = telegram.build_card_caption(
+            ticket_id=ticket_id, data_rows=data_rows,
+            priority=payload['priority'], due_text=due_text)
         result, error = transport.send_attachment(
-            payload['chat_id'],
-            file_name=attachment.get('filename') or 'attachment',
-            stream=attachment.get('stream'),
-            mimetype=attachment.get('mimetype'),
-            caption=text,
-            parse_mode='HTML',
-        )
+            payload['chat_id'], file_name='ticket-%d.png' % ticket_id,
+            stream=io.BytesIO(picture), mimetype='image/png',
+            caption=caption, parse_mode='HTML')
         if result is None:
-            # Отказ на файле не должен терять обращение: шлём текстом.
-            logging.warning('crm: обращение %s не ушло с фото (%s), отправляю текстом',
+            # Отказ на картинке не должен стоить обращения: шлём текстом, как
+            # раньше. В группе это выглядит скромнее, но доходит.
+            logging.warning('crm: карточка обращения %s не ушла (%s), отправляю текстом',
                             ticket_id, error)
-            as_caption = False
-    if not as_caption:
+            picture = None
+
+    if picture is None:
+        text = telegram.build_ticket_message(
+            ticket_id=ticket_id,
+            subject=payload['subject'],
+            body=payload['body'],
+            queue_title=payload['queue_title'],
+            heading=scenario.get('group_title'),
+            priority=payload['priority'],
+            client_name=payload['client_name'],
+            client_phone=payload['client_phone'],
+            due_text=due_text,
+            own_wording=bool(scenario.get('body_template')),
+        )
         result, error = transport.send_message(payload['chat_id'], text)
 
     if result is None:
@@ -105,23 +113,43 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
         queries.set_delivery(cursor, ticket_id, status='sent',
                              chat_id=payload['chat_id'], message_id=message_id, error=None)
         # Корневое сообщение ложится в нить строкой: по нему потом находится
-        # обращение, на которое ответили в группе.
+        # обращение, на которое ответили в группе. В нити хранится ТЕКСТ, а не
+        # картинка — карточка это оформление того же самого, и в переписке
+        # нужен текст, по которому ищут.
         queries.add_message(
             cursor, ticket_id=ticket_id, direction='out', body=payload['body'],
             author_user_id=payload['created_by'], author_name=payload['created_by_name'],
             tg_chat_id=payload['chat_id'], tg_message_id=message_id,
-            attachment=_attachment_row(result, attachment) if as_caption else None,
         )
         queries.add_event(cursor, ticket_id=ticket_id, kind='sent',
                           actor_user_id=payload['created_by'],
                           actor_name=payload['created_by_name'],
                           payload={'queue': payload['queue_title']})
 
-    if attachment is not None and not as_caption:
+    # Скриншот оператора идёт следом реплаем: место фото в сообщении занято
+    # карточкой, а склеивать их в альбом нельзя — на альбом не отвечают одним
+    # реплаем, и ответ группы перестал бы находить обращение.
+    if attachment is not None:
         _send_attachment(db, ticket_id, payload['chat_id'], message_id, attachment,
                          author_user_id=payload['created_by'],
                          author_name=payload['created_by_name'])
     return True, None
+
+
+def _card_png(ticket_id, *, heading, subtitle, blocks):
+    """Карточка картинкой. None — если нарисовать не вышло.
+
+    Обращение важнее оформления: сломанный шрифт или нехватка памяти не должны
+    стоить группе сообщения, поэтому любая ошибка рисования — это возврат к
+    текстовому виду, а не отказ отправки.
+    """
+    if not blocks:
+        return None
+    try:
+        return card.render_ticket_card(heading=heading, subtitle=subtitle, blocks=blocks)
+    except Exception as error:  # noqa: BLE001
+        logging.warning('crm: карточка обращения %s не нарисовалась: %s', ticket_id, error)
+        return None
 
 
 def _attachment_row(result, attachment):

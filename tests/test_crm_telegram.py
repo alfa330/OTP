@@ -306,12 +306,21 @@ class EveryGroupMessageCarriesTheIinTest(unittest.TestCase):
         text = telegram.build_status_notice(ticket_id=10, status='resolved', iin=self.IIN)
         self.assertIn(self.IIN, text)
 
+    def test_card_caption(self):
+        """Подпись к карточке — единственное место, откуда ИИН можно
+        скопировать: с картинки его не выделить."""
+        text = telegram.build_card_caption(
+            ticket_id=10,
+            data_rows=[{'label': 'ИИН', 'value': self.IIN},
+                       {'label': 'Таксопарк', 'value': 'iTaxi'}])
+        self.assertIn(self.IIN, text)
+
     def test_no_other_group_message_builder_appeared(self):
         """Список видов сообщений закрыт: появится новый — этот тест упадёт, и
         про ИИН в нём не забудут."""
         builders = sorted(name for name in dir(telegram) if name.startswith('build_'))
-        self.assertEqual(builders, ['build_reply_message', 'build_status_notice',
-                                    'build_ticket_message'])
+        self.assertEqual(builders, ['build_card_caption', 'build_reply_message',
+                                    'build_status_notice', 'build_ticket_message'])
 
 
 class BodyMarkupTest(unittest.TestCase):

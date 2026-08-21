@@ -44,6 +44,7 @@ STATUS_LABELS = {
 # Пределы Telegram: 4096 символов на сообщение и 1024 на подпись к медиа.
 # Режем с запасом — HTML-теги тоже считаются.
 MESSAGE_LIMIT = 4000
+CAPTION_LIMIT = 950
 
 # Кнопок «Беру в работу» и «Выполнено» под сообщением больше нет: владелец
 # убрал их 19.08.2026 — из группы они выглядели так, будто ничего не делают.
@@ -165,6 +166,36 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
     # время видны в карточке, куда ведёт ссылка в шапке.
 
     return _clip('\n'.join(lines), MESSAGE_LIMIT)
+
+
+def build_card_caption(*, ticket_id, data_rows, priority='normal', due_text=None):
+    """Подпись к карточке-картинке: то, чего в картинке физически быть не может.
+
+    Две вещи. Ссылка — с картинки не нажать, а специалисту из группы нужен не
+    раздел, а это обращение. И данные водителя текстом — ИИН из картинки не
+    скопировать, а первое, что с ним делают, это ищут по нему в Sapar. Ровно
+    так и на макете СЗоВ (#206): карточка, а под ней строки с ИИН, парком и
+    периодом.
+
+    Всё остальное (просьба, проверенные пункты, что оператор сделал) стоит на
+    картинке и здесь не повторяется — второй раз то же самое это не «удобнее»,
+    а лишний экран прокрутки в рабочем чате.
+    """
+    number = ticket_number(ticket_id)
+    link = ticket_link(ticket_id)
+    lines = ['<a href="%s">Обращение %s</a>' % (html.escape(link, quote=True), number)
+             if link else '<b>Обращение %s</b>' % number]
+
+    emoji = PRIORITY_EMOJI.get(priority, '')
+    if emoji:
+        lines.append('%s <b>Приоритет:</b> %s' % (emoji, PRIORITY_LABELS.get(priority, priority)))
+    if due_text:
+        lines.append('⏳ <b>Ответ нужен до:</b> %s' % html.escape(str(due_text)))
+
+    for row in data_rows or ():
+        lines.append('<b>%s:</b> %s' % (html.escape(str(row['label'])),
+                                        html.escape(str(row['value']))))
+    return _clip(chr(10).join(lines), CAPTION_LIMIT)
 
 
 def build_reply_message(*, ticket_id, author_name, body, iin=None):

@@ -1002,14 +1002,25 @@ def _fill_template(scenario, template, answers):
     return ' '.join(result.split()).strip(' ·')
 
 
-def _data_lines(scenario, answers):
-    """Данные водителя — по подписанной строке на каждое.
+# Виды смысловых блоков готового текста. Один и тот же разбор кормит и текст
+# для карточки, и картинку для группы (crm/card.py): формат, посчитанный дважды,
+# разъезжается на первой же правке — на этом раздел уже обжигался.
+BLOCK_WARNING = 'warning'    # метка «возможный массовый сбой»
+BLOCK_DATA = 'data'          # ИИН, таксопарк, город, отчётный период
+BLOCK_LIST = 'list'          # прочие ответы подписью и значением
+BLOCK_CHECKS = 'checks'      # что оператор проверил и что подтвердилось
+BLOCK_ACTIONS = 'actions'    # что оператор сделал руками
+BLOCK_TEXT = 'text'          # тематика написала сообщение сама (body_template)
+
+
+def _data_rows(scenario, answers):
+    """Данные водителя — подпись и значение на каждое.
 
     Порядок от главного к уточняющему: ИИН опознаёт водителя, парк и город
     говорят где, период — за когда. Чего в тематике нет (у посылок периода, у
     ошибки Sapar — периода), того и в блоке не будет.
     """
-    lines = []
+    rows = []
     for key in BODY_DATA:
         item = next((s for s in scenario['steps'] if s['key'] == key), None)
         if not item:
@@ -1017,57 +1028,48 @@ def _data_lines(scenario, answers):
         value = format_answer(item, answers)
         if not value or value == '—':
             continue
-        lines.append('%s: %s' % (BODY_DATA_LABELS[key], value))
-    return lines
+        rows.append({'label': BODY_DATA_LABELS[key], 'value': value})
+    return rows
 
 
-def render_body(scenario_key, answers, *, flags=()):
-    """Текст обращения для группы. Собирается системой и вручную не правится.
+def body_blocks(scenario_key, answers, *, flags=()):
+    """Готовое обращение как СТРУКТУРА, а не как текст.
 
-    Это прямое требование ТЗ: «Сам текст стандартной тематики вручную не
-    редактируется». Отсюда и формат — не проза, а перечень.
+    Отсюда растут оба представления: render_body собирает строки для карточки в
+    iCORE, crm.card рисует картинку для Telegram-группы. Пока разбор один, они
+    не могут показать разное.
 
-    Вид сообщения задан ТЗ задачи #206 (скриншот от СЗоВ). Блоки разделены
-    пустой строкой:
+    Вид сообщения задан ТЗ задачи #206 (скриншот от СЗоВ): данные водителя
+    подписями, проверенные пункты — поштучно со знаком.
 
-        ⚠️ метка, если есть
-        ИИН · Таксопарк · Город · Отчётный период — подписанными строками
-        суть обращения короткими подписями
-        🔍 Проверено оператором: N из M + сами пункты галочками
-        ✅ что оператор уже сделал руками — одной строкой
-
-    Пустая строка тут несёт смысл: и Telegram, и карточка обращения делят текст
-    по ней на блоки, поэтому это разметка, а не украшение.
-
-    Строки «✔️ Чек-лист выполнен: N из N» здесь больше нет. Она не могла быть
-    ничем, кроме «N из N» (без подтверждённого чек-листа обращение до отправки
-    не доходит), то есть не сообщала ничего — а место занимала в каждом
-    сообщении. Сам факт проверки виден по блоку «Проверено оператором».
+    Блока «чек-лист выполнен: N из N» здесь нет намеренно: другого значения у
+    него быть не могло (без подтверждённого чек-листа обращение до отправки не
+    доходит), то есть он не сообщал ничего, а место занимал в каждом сообщении.
     """
     scenario = get(scenario_key)
     if not scenario:
-        return ''
+        return []
     answers = answers or {}
     blocks = []
 
-    warnings = ['⚠️ %s' % FLAG_LABELS[flag] for flag in (flags or ()) if flag in FLAG_LABELS]
+    warnings = [FLAG_LABELS[flag] for flag in (flags or ()) if flag in FLAG_LABELS]
     if warnings:
-        blocks.append(warnings)
+        blocks.append({'kind': BLOCK_WARNING, 'items': warnings})
 
     # Тематика может собирать сообщение сама — когда у группы-получателя есть
     # свой заведённый формат и перечень «вопрос: ответ» ей только мешает.
     # Ничего не теряется: тест требует, чтобы каждый вопрос такой тематики
     # попал либо в тему, либо в тело.
     if scenario.get('body_template'):
-        blocks.append([_fill_template(scenario, scenario['body_template'], answers)])
-        line, gap = chr(10), chr(10) * 2
-        return gap.join(line.join(block) for block in blocks)
+        blocks.append({'kind': BLOCK_TEXT,
+                       'text': _fill_template(scenario, scenario['body_template'], answers)})
+        return blocks
 
-    data = _data_lines(scenario, answers)
-    if data:
-        blocks.append(data)
+    rows = _data_rows(scenario, answers)
+    if rows:
+        blocks.append({'kind': BLOCK_DATA, 'rows': rows})
 
-    # Ответы «да/нет» о ФАКТАХ идут списком с галочками: специалисту в группе
+    # Ответы «да/нет» о ФАКТАХ идут списком со знаками: специалисту в группе
     # нужно видеть каждый пункт отдельно, а не вычитывать его из склеенной
     # строки. Действия оператора отделены от фактов и остаются перечнем: «я это
     # сделал» и «это так» — разные вещи, и мешать их значило бы искажать отчёт.
@@ -1083,41 +1085,70 @@ def render_body(scenario_key, answers, *, flags=()):
             (done if value == 'да' else undone).append(action)
             continue
         if item['kind'] in (YESNO, YESNO_DATE) and value in FACT_MARKS:
-            facts.append((FACT_MARKS[value], item.get('short') or item['label']))
+            facts.append({'mark': FACT_MARKS[value],
+                          'text': item.get('short') or item['label'],
+                          # «Да» и «нет» знак говорит сам, а «неизвестно» — нет:
+                          # это отдельный ответ, и СЗоВ просила показывать его
+                          # словом, чтобы группа не прочитала незнание как «нет».
+                          'note': 'неизвестно' if value == 'неизвестно' else None})
             continue
         # Название действия — строчными и для перечня; как подпись строки оно не
         # годится, поэтому у таких вопросов берём полную формулировку.
         label = item['label'] if action else item.get('short') or item['label']
-        main.append('%s: %s' % (label, value))
+        main.append({'label': label, 'value': value})
 
     if main:
-        blocks.append(main)
+        blocks.append({'kind': BLOCK_LIST, 'rows': main})
 
     if facts:
         # «N из M» — сколько пунктов подтвердилось из показанных ниже. Число
         # считается по этому же списку: заголовок, который не сходится с тем,
         # что под ним, хуже, чем его отсутствие.
-        confirmed = sum(1 for mark, _label in facts if mark == FACT_MARKS['да'])
-        lines = ['🔍 Проверено оператором: %d из %d' % (confirmed, len(facts))]
-        for mark, label in facts:
-            # «Да» и «нет» знак говорит сам, а «неизвестно» — нет: это отдельный
-            # ответ, который СЗоВ просила показывать словом, чтобы группа не
-            # прочитала незнание как отрицание.
-            lines.append('%s %s: неизвестно' % (mark, label)
-                         if mark == FACT_MARKS['неизвестно'] else '%s %s' % (mark, label))
-        blocks.append(lines)
+        blocks.append({
+            'kind': BLOCK_CHECKS,
+            'confirmed': sum(1 for row in facts if row['mark'] == FACT_MARKS['да']),
+            'total': len(facts),
+            'rows': facts,
+        })
 
-    tail = []
-    if done:
-        tail.append('✅ Выполнено: %s' % ITEM_SEP.join(done))
-    if undone:
-        tail.append('❗ Не выполнено: %s' % ITEM_SEP.join(undone))
-    if tail:
-        blocks.append(tail)
+    if done or undone:
+        blocks.append({'kind': BLOCK_ACTIONS, 'done': done, 'undone': undone})
 
-    # Пустая строка между блоками — разметка, поэтому склейка явная.
+    return blocks
+
+
+def render_body(scenario_key, answers, *, flags=()):
+    """Текст обращения — то, что видно в карточке iCORE и в нити переписки.
+
+    Это прямое требование ТЗ #160: «Сам текст стандартной тематики вручную не
+    редактируется». Отсюда и формат — не проза, а перечень.
+
+    Пустая строка между блоками несёт смысл: по ней текст делят и карточка
+    обращения (ticketBody.js), и подпись к картинке. Поэтому склейка явная.
+    """
+    lines = []
+    for block in body_blocks(scenario_key, answers, flags=flags):
+        kind = block['kind']
+        if kind == BLOCK_WARNING:
+            lines.append(['⚠️ %s' % text for text in block['items']])
+        elif kind == BLOCK_TEXT:
+            lines.append([block['text']])
+        elif kind in (BLOCK_DATA, BLOCK_LIST):
+            lines.append(['%s: %s' % (row['label'], row['value']) for row in block['rows']])
+        elif kind == BLOCK_CHECKS:
+            checks = ['🔍 Проверено оператором: %d из %d' % (block['confirmed'], block['total'])]
+            checks += ['%s %s: %s' % (row['mark'], row['text'], row['note']) if row['note']
+                       else '%s %s' % (row['mark'], row['text']) for row in block['rows']]
+            lines.append(checks)
+        elif kind == BLOCK_ACTIONS:
+            tail = []
+            if block['done']:
+                tail.append('✅ Выполнено: %s' % ITEM_SEP.join(block['done']))
+            if block['undone']:
+                tail.append('❗ Не выполнено: %s' % ITEM_SEP.join(block['undone']))
+            lines.append(tail)
     line, gap = chr(10), chr(10) * 2
-    return gap.join(line.join(block) for block in blocks)
+    return gap.join(line.join(block) for block in lines)
 
 
 def render_subject(scenario_key, answers):
