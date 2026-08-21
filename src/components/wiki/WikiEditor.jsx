@@ -71,6 +71,7 @@ const Divider = () => <span className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />
 export default function WikiEditor({
     base, headers, showToast, article, sections, spaces = [], onClose, onSaved,
     pendingUpdateFile = null, onPendingUsed = null, onUpdateExisting = null,
+    features = null,
 }) {
     const isNew = !article?.id;
     // Статус берём из статьи, а не из «новизны»: существующий черновик тоже
@@ -79,6 +80,17 @@ export default function WikiEditor({
     const [title, setTitle] = useState(article?.title || '');
     const [summary, setSummary] = useState(article?.summary || '');
     const [articleType, setArticleType] = useState(article?.article_type || 'general');
+    /* Типы, доступные в ЭТОМ пространстве. «Тренажёр» — единственный тип, за
+       которым стоит целая вкладка: выключили «Тренажёры» — предлагать тип,
+       который потом негде собрать и нечем наполнить, нельзя.
+       Уже проставленный тип из списка НЕ выкидываем: статья, написанная до
+       выключения вкладки, иначе открылась бы с пустым селектом и сохранилась
+       бы «обычной» — молча сменив тип у чужого документа. */
+    const articleTypes = useMemo(() => ARTICLE_TYPES.filter(
+        (type) => type.value !== TRAINER_TYPE
+            || features?.catalog_trainers !== false
+            || article?.article_type === TRAINER_TYPE,
+    ), [features, article]);
     const [sectionIds, setSectionIds] = useState(article?.section_ids || []);
     const [saving, setSaving] = useState(false);
     const [dirty, setDirty] = useState(false);
@@ -399,7 +411,7 @@ export default function WikiEditor({
                                     setDirty(true);
                                     applyTypeTemplate(v);
                                 }}
-                                options={ARTICLE_TYPES}
+                                options={articleTypes}
                                 ariaLabel="Тип статьи"
                             />
                         </div>

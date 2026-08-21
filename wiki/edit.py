@@ -45,7 +45,7 @@ def _next_version(cursor, article_id):
 
 def create_article(cursor, *, slug, title, summary, content, article_type,
                    section_ids, tags, author_id, visibility_mode='inherit',
-                   strict_mode=False, ai_opt_out=False):
+                   strict_mode=False, ai_opt_out=False, space_ids=None):
     clean = sanitize_html(content)
     cursor.execute(
         """
@@ -59,7 +59,7 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
          visibility_mode, strict_mode, ai_opt_out, author_id, author_id, author_id),
     )
     article_id = cursor.fetchone()[0]
-    set_sections(cursor, article_id, section_ids)
+    set_sections(cursor, article_id, section_ids, space_ids)
     # Варианты написания считаем ОДИН раз при сохранении (внутри set_tags).
     # В оригинале они вычислялись на каждый поисковый запрос и превращались
     # в четыре обращения к движку.
@@ -231,10 +231,12 @@ def restore_version(cursor, article_id, version_id, *, editor_id, session_id):
 # раздела и по названию отдела: слаг задаётся переносом и правкам названия не
 # подвержен, название — запасной путь для базы, собранной руками.
 _FALLBACK_SECTION_SLUG = 'obschiy-sotrudnik'
-_FALLBACK_SPACE_NAME = 'Общий отдел'
+# «Общий отдел» после переезда пространств — верхний РАЗДЕЛ, а не
+# пространство: запасной поиск идёт по имени родителя.
+_FALLBACK_BRANCH_NAME = 'Общий отдел'
 
 
-def default_section_id(cursor):
+def default_section_id(cursor, space_ids=None):
     """Раздел «Общий отдел → Общий сотрудник» — куда падает статья без раздела.
 
     Статья вообще без раздела — ловушка, а не свобода: в режиме «наследовать»
@@ -244,7 +246,13 @@ def default_section_id(cursor):
     переключатель «Всё содержимое» у администратора доступов; теперь спасать не
     от чего — раздел проставляется сам.
 
-    Возвращает None, если общего отдела в базе нет. Сами его не создаём:
+    space_ids ОГРАНИЧИВАЕТ поиск пространствами, доступными автору, и это не
+    оптимизация, а граница: без неё статья автора из чужого пространства падала
+    бы в «Общий сотрудник» пространства iGroup — то есть ровно за ту границу,
+    ради которой пространства и заведены. Ничего не нашлось — возвращаем None:
+    статья без раздела чинится руками, а тихо уехавшая к другому клиенту — нет.
+
+    Возвращает None и когда общего раздела в базе нет. Сами его не создаём:
     молча заведённый публичный раздел раздал бы права шире, чем кто-либо
     просил, а это то самое, что отзывается труднее всего.
     """
@@ -253,22 +261,25 @@ def default_section_id(cursor):
         SELECT s.id
           FROM wiki_sections s
           JOIN wiki_spaces sp ON sp.id = s.space_id
+          LEFT JOIN wiki_sections parent ON parent.id = s.parent_section_id
          WHERE s.status = 'active' AND sp.status = 'active'
-           AND (s.slug = %(slug)s OR sp.name = %(space)s)
-         ORDER BY (s.slug = %(slug)s) DESC, (sp.name = %(space)s) DESC,
+           AND (%(spaces)s::int[] IS NULL OR s.space_id = ANY(%(spaces)s::int[]))
+           AND (s.slug = %(slug)s OR parent.name = %(branch)s)
+         ORDER BY (s.slug = %(slug)s) DESC, (parent.name = %(branch)s) DESC,
                   s.position, s.id
          LIMIT 1
         """,
-        {'slug': _FALLBACK_SECTION_SLUG, 'space': _FALLBACK_SPACE_NAME},
+        {'slug': _FALLBACK_SECTION_SLUG, 'branch': _FALLBACK_BRANCH_NAME,
+         'spaces': list(space_ids) if space_ids else None},
     )
     row = cursor.fetchone()
     return row[0] if row else None
 
 
-def set_sections(cursor, article_id, section_ids):
+def set_sections(cursor, article_id, section_ids, space_ids=None):
     wanted = {int(s) for s in (section_ids or []) if s}
     if not wanted:
-        fallback = default_section_id(cursor)
+        fallback = default_section_id(cursor, space_ids)
         if fallback:
             wanted = {fallback}
 

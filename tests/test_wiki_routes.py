@@ -12,6 +12,7 @@
 отдела править не может.
 """
 
+import datetime
 import sys
 import unittest
 from contextlib import contextmanager
@@ -359,7 +360,10 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
         structure.department_branch_taken = lambda cursor, **kwargs: None
 
         client, cursor = self._admin()
-        cursor.fetchone.return_value = (None,)   # пространство без отдела
+        # Роут читает у пространства СТАТУС: в архивное пространство раздел
+        # не заводится. Отдел пространства к правам на раздел отношения
+        # больше не имеет — границу держит список wiki_space_departments.
+        cursor.fetchone.return_value = ('active',)
         response = client.post('/api/wiki/sections',
                                json={'name': 'ОП', 'space_id': 1, 'department_id': 367})
 
@@ -388,7 +392,7 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
         structure.department_branch_taken = lambda cursor, **kwargs: 'ОП'
 
         client, cursor = self._admin()
-        cursor.fetchone.return_value = (None,)
+        cursor.fetchone.return_value = ('active',)
         response = client.post('/api/wiki/sections',
                                json={'name': 'Продажи', 'space_id': 1, 'department_id': 367})
 
@@ -706,6 +710,93 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
         r = client.delete('/api/wiki/access/section-rules/5')
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_CEILING')
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class AuditReadTest(_RouteHarness, unittest.TestCase):
+    """Чтение журнала: то, из-за чего вкладка была нечитаемой.
+
+    Проверяем не оформление, а контракт данных — время, названия объектов и
+    честность фильтра. Каждая из трёх вещей однажды уже была сломана.
+    """
+
+    ROW = (305, 2, 'Ядигаров Руслан', 'rule.upsert', 'section', 31,
+           'Оператор', None, True, 'Отдел продаж', None, None,
+           {'subject_type': 'department'},
+           datetime.datetime(2026, 8, 19, 17, 5, 4))
+
+    def _client(self):
+        client, cursor = self.build(make_context('admin', wiki_roles=[ADMIN_ROLE]))
+        cursor.fetchall.return_value = [self.ROW]
+        cursor.fetchone.return_value = (1,)
+        return client, cursor
+
+    def test_time_is_iso_string_not_gmt(self):
+        """Время отдаём строкой ISO без зоны.
+
+        В базе лежит местное алматинское время (schema._NOW), а datetime Flask
+        сериализует как «… GMT» — браузер прибавлял к нему ещё пять часов, и
+        журнал показывал события на пять часов вперёд.
+        """
+        client, _ = self._client()
+        item = client.get('/api/wiki/audit').get_json()['items'][0]
+        self.assertEqual('2026-08-19T17:05:04', item['created_at'])
+        self.assertNotIn('GMT', item['created_at'])
+
+    def test_row_carries_names_not_only_identifiers(self):
+        """Название объекта и получателя права — в ответе.
+
+        Без них строка журнала звучала как «выдано право субъекту 367 на
+        раздел 31», то есть не сообщала ничего.
+        """
+        client, _ = self._client()
+        item = client.get('/api/wiki/audit').get_json()['items'][0]
+        self.assertEqual('Оператор', item['entity_name'])
+        self.assertEqual('Отдел продаж', item['subject_name'])
+        self.assertTrue(item['entity_alive'])
+
+    # Первый execute — сама выборка; следом идут COUNT и раскладка по группам.
+    @staticmethod
+    def _list_query(cursor):
+        return cursor.execute.call_args_list[0][0]
+
+    def test_group_filter_selects_whole_group(self):
+        client, cursor = self._client()
+        client.get('/api/wiki/audit?group=access')
+        self.assertIn(list(structure.AUDIT_GROUPS['access']), self._list_query(cursor)[1])
+
+    def test_unknown_group_does_not_filter(self):
+        """Опечатка в фильтре не должна выдавать пустой журнал за «событий нет»."""
+        client, cursor = self._client()
+        client.get('/api/wiki/audit?group=нет-такой')
+        # Слово WHERE есть и внутри подзапросов, разворачивающих имя субъекта,
+        # поэтому смотрим не на текст, а на параметры: кроме окна их быть не
+        # должно.
+        self.assertEqual([100, 0], self._list_query(cursor)[1])
+
+    def test_one_letter_search_is_ignored(self):
+        """По одной букве ILIKE перебирает всю таблицу и возвращает почти всё."""
+        client, cursor = self._client()
+        client.get('/api/wiki/audit?q=a')
+        self.assertNotIn('ILIKE', self._list_query(cursor)[0])
+        cursor.execute.reset_mock()
+        client.get('/api/wiki/audit?q=ab')
+        self.assertIn('ILIKE', self._list_query(cursor)[0])
+
+    def test_broken_date_does_not_reach_sql(self):
+        client, cursor = self._client()
+        r = client.get('/api/wiki/audit?from=не-дата&to=2026-13-40')
+        self.assertEqual(200, r.status_code)
+        self.assertNotIn('created_at >=', self._list_query(cursor)[0])
+
+    def test_totals_only_on_first_page(self):
+        """Считать COUNT на каждой догруженной странице незачем: фильтр тот же."""
+        client, _ = self._client()
+        first = client.get('/api/wiki/audit').get_json()
+        self.assertIn('total', first)
+        self.assertIn('counts', first)
+        more = client.get('/api/wiki/audit?offset=50').get_json()
+        self.assertNotIn('total', more)
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')

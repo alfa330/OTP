@@ -388,7 +388,25 @@ class CatalogRouteTest(unittest.TestCase):
     def test_catalog_uses_the_personal_perimeter(self):
         """Тот же периметр, что у списка и поиска: иначе плитка солжёт."""
         self.client.get('/api/wiki/catalog')
-        self.assertEqual(self.perimeter_calls[-1], {'master_key': False})
+        self.assertEqual(self.perimeter_calls[-1],
+                         {'master_key': False, 'space_id': None})
+
+    def test_catalog_narrows_to_the_chosen_space(self):
+        """Переключатель в шапке доезжает до периметра, а не фильтрует ответ.
+
+        Сужать обязан сервер: статью чужого пространства видно ещё и по
+        авторству, мимо разделов, и фильтр по дереву во фронте её не отсеял бы.
+        """
+        self.client.get('/api/wiki/catalog?space_id=7')
+        self.assertEqual(self.perimeter_calls[-1],
+                         {'master_key': False, 'space_id': 7})
+
+    def test_broken_space_id_is_ignored_not_rejected(self):
+        """Мусор в адресе — как отсутствующий параметр, а не 400: витрина
+        не должна отказывать в списке статей из-за опечатки в ссылке."""
+        self.client.get('/api/wiki/catalog?space_id=abc')
+        self.assertEqual(self.perimeter_calls[-1],
+                         {'master_key': False, 'space_id': None})
 
     # ── /articles ────────────────────────────────────────────────────────
     def test_bucket_expands_into_its_statuses(self):

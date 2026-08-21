@@ -77,7 +77,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
         """
         wants_all = (str(request.args.get('scope') or '').strip().lower() == 'all'
                      and bool(ctx['capabilities'].get('can_manage_access')))
-        return _perimeter(cursor, ctx, master_key=wants_all)
+        # Пространство, выбранное переключателем в шапке. Сужает витрину до
+        # одной вики: у супер-админа их несколько, а на экране живёт одна.
+        # Проверять принадлежность параметра не нужно — сужаем УЖЕ посчитанный
+        # периметр, и чужого пространства в нём нет по построению.
+        return _perimeter(cursor, ctx, master_key=wants_all,
+                          space_id=_int_or_none(request.args.get('space_id')))
 
     # ── Список ───────────────────────────────────────────────────────────
     @wiki_route('/articles')

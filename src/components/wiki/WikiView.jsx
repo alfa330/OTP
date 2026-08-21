@@ -4,7 +4,8 @@ import { motion, useReducedMotion } from 'framer-motion';
 import {
     AlertCircle, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound, Layers, MapPin,
     Network,
-    Building2, Loader2, Plus, RefreshCw, ScrollText, ShieldCheck, Sparkles, Users,
+    Building2, ChevronDown, Loader2, Pencil, Plus, RefreshCw, ScrollText, ShieldCheck,
+    Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
@@ -17,6 +18,8 @@ import WikiStructure from './WikiStructure';
 import WikiTrainers from './WikiTrainers';
 import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
+import WikiSpaceModal from './WikiSpaceModal';
+import { effectiveFeatures } from './spaceFeatures';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import { getScrollContainer } from './scrollContainer';
@@ -103,6 +106,104 @@ const ModeSwitch = ({ value, onChange, allowed }) => (
     </div>
 );
 
+/* Переключатель пространств — правее заголовка раздела.
+ *
+ * Выпадающий список, а не ряд пилюль: пространств у клиента бывает и одно, и
+ * десять, а ряд пилюль на десяти именах отжимает поиск и «Обновить» на вторую
+ * строку. Одно пространство — списка нет вовсе: выбор из одного варианта это
+ * подпись, притворяющаяся управлением.
+ */
+const SpaceSwitch = ({ spaces, value, onChange, onCreate, onEdit }) => {
+    const [open, setOpen] = useState(false);
+    const boxRef = useRef(null);
+    const current = spaces.find((sp) => sp.id === value) || spaces[0];
+
+    /* Закрытие по клику мимо вешаем ТОЛЬКО пока список раскрыт: постоянный
+       слушатель на документе висел бы на каждом экране раздела ради окна,
+       которое открывают раз в месяц. */
+    useEffect(() => {
+        if (!open) return undefined;
+        const away = (event) => {
+            if (!boxRef.current?.contains(event.target)) setOpen(false);
+        };
+        document.addEventListener('mousedown', away);
+        return () => document.removeEventListener('mousedown', away);
+    }, [open]);
+
+    if (!current) return null;
+
+    return (
+        <div className="flex items-center gap-1.5">
+            <div ref={boxRef} className="relative">
+                <button
+                    type="button"
+                    onClick={() => spaces.length > 1 && setOpen((x) => !x)}
+                    aria-haspopup={spaces.length > 1 ? 'listbox' : undefined}
+                    aria-expanded={spaces.length > 1 ? open : undefined}
+                    className={`flex max-w-[220px] items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[13px] font-semibold text-slate-800 transition ${
+                        spaces.length > 1 ? 'hover:bg-slate-200 active:scale-[0.98]' : 'cursor-default'
+                    }`}
+                >
+                    <span className="min-w-0 truncate">{current.name}</span>
+                    {spaces.length > 1 && (
+                        <ChevronDown size={13}
+                            className={`shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+                    )}
+                </button>
+
+                {open && (
+                    <div
+                        role="listbox"
+                        className="absolute left-0 top-full z-30 mt-1.5 w-[240px] overflow-hidden rounded-2xl bg-white/95 p-1 shadow-xl ring-1 ring-slate-900/10 backdrop-blur-xl"
+                    >
+                        {spaces.map((sp) => (
+                            <button
+                                key={sp.id}
+                                type="button"
+                                role="option"
+                                aria-selected={sp.id === current.id}
+                                onClick={() => { onChange(sp.id); setOpen(false); }}
+                                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition ${
+                                    sp.id === current.id
+                                        ? 'bg-slate-100 font-semibold text-slate-900'
+                                        : 'text-slate-700 hover:bg-slate-50'
+                                }`}
+                            >
+                                <span className="min-w-0 flex-1 truncate">{sp.name}</span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* «+» и «править» показываем только тому, кто вправе: сервер
+                отвечает 403, и кнопка, ведущая в отказ, — это брак. */}
+            {onCreate && (
+                <button
+                    type="button"
+                    onClick={onCreate}
+                    aria-label="Новое пространство"
+                    title="Новое пространство"
+                    className="grid h-7 w-7 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+                >
+                    <Plus size={14} />
+                </button>
+            )}
+            {onEdit && (
+                <button
+                    type="button"
+                    onClick={onEdit}
+                    aria-label="Настроить пространство"
+                    title="Настроить пространство"
+                    className="grid h-7 w-7 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+                >
+                    <Pencil size={13} />
+                </button>
+            )}
+        </div>
+    );
+};
+
 export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast, user,
                                    initialArticleSlug, onInitialArticleConsumed }) {
     const headers = useMemo(
@@ -147,6 +248,18 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [editTarget, setEditTarget] = useState(null);   // {slug}
     // Тем же способом заголовок раздела возвращает витрину на главную.
     const [homeTick, setHomeTick] = useState(0);
+    /* Выбранное пространство. Переживает перезаход в раздел: человек работает
+       в одной вике неделями, и заново выбирать её при каждом входе — работа
+       вместо результата. Храним ИДЕНТИФИКАТОР, а не объект: список приходит с
+       сервера, и сохранённая копия устарела бы при первом переименовании. */
+    const [spaceId, setSpaceId] = useState(() => {
+        const saved = Number(localStorage.getItem('wiki:space'));
+        return Number.isFinite(saved) && saved > 0 ? saved : null;
+    });
+    const [spaceModal, setSpaceModal] = useState(null);   // {mode:'create'|'edit'}
+    /* Отделы для конструктора. Тянем их ОДИН раз на раздел, а не при каждом
+       открытии окна: список отделов компании меняется раз в квартал. */
+    const [departments, setDepartments] = useState([]);
     const rootRef = useRef(null);
     /* prefers-reduced-motion: CSS-переходы глушит правило в теме, но framer
        пишет инлайновые стили и под него не подпадает — нужен свой флаг.
@@ -174,6 +287,58 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        означать одно и то же во всём разделе. */
     const isEditor = !!(capabilities.can_create || canEdit);
 
+    /* Пространства приходят из ping вместе со способностями: набор вкладок
+       нужен раньше дерева разделов, иначе «Помощник» мигнул бы у того, кому
+       его выключили. */
+    const spaces = useMemo(() => state?.spaces || [], [state]);
+    /* Выбранное пространство может исчезнуть между заходами — его убрали в
+       архив или закрыли от отдела. Тогда берём первое доступное, а не пустоту:
+       раздел обязан открыться. */
+    const activeSpace = useMemo(
+        () => spaces.find((sp) => sp.id === spaceId) || spaces[0] || null,
+        [spaces, spaceId],
+    );
+    const features = useMemo(() => effectiveFeatures(activeSpace), [activeSpace]);
+
+    /* Пространство ДЛЯ КОНСТРУКТОРА берём из /structure, а не из ping: в ping
+       лежит только то, что нужно шапке (имя и тумблеры), без списка отделов —
+       знать, кому ещё выдана вика, читателю незачем. Окно правки открывает
+       супер-админ, и полную карточку ему отдаёт /structure. */
+    const editableSpace = useMemo(
+        () => (structure?.spaces || []).find((sp) => sp.id === activeSpace?.id) || activeSpace,
+        [structure, activeSpace],
+    );
+
+    /* Дерево, суженное до активного пространства. Витрина, каталог, оглавление
+       и журнал получают ИМЕННО его: сервер отдаёт всё, к чему у человека есть
+       доступ (в том числе соседнее пространство у супер-админа), а на экране
+       одновременно живёт ровно одно — то, что выбрано переключателем.
+       Сужаем здесь, в одном месте, а не в каждой витрине: пять независимых
+       фильтров по space_id разъедутся на первой же новой витрине. */
+    const scopedStructure = useMemo(() => {
+        if (!structure) return structure;
+        if (!activeSpace) return structure;
+        return {
+            ...structure,
+            spaces: (structure.spaces || []).filter((sp) => sp.id === activeSpace.id),
+            sections: (structure.sections || [])
+                .filter((x) => x.space_id === activeSpace.id),
+        };
+    }, [structure, activeSpace]);
+    const canManageSpaces = !!structure?.can_manage_spaces;
+
+    /* Запоминаем ФАКТИЧЕСКИ показанное пространство, а не то, что попросили:
+       после архивации выбранного иначе сохранился бы идентификатор, которого
+       больше нет, и следующий заход снова начинался бы с подстановки.
+       Выбор при этом НЕ переписываем: подстановка живёт в activeSpace и на
+       каждом рендере считается заново. Запись сюда ломала создание — только
+       что заведённое пространство ещё не приехало в ping, подстановка честно
+       давала первое из старого списка, и она же затирала выбор новым. Человек
+       нажимал «Создать» и оставался в прежней вике. */
+    useEffect(() => {
+        if (activeSpace) localStorage.setItem('wiki:space', String(activeSpace.id));
+    }, [activeSpace]);
+
     const loadPing = useCallback(() => {
         setLoading(true);
         return axios.get(`${base}/ping`, { headers })
@@ -195,50 +360,70 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const loadCatalog = useCallback(() => {
         if (!isEditor) { setCatalog(null); setCatalogLoading(false); return Promise.resolve(); }
         setCatalogLoading(true);
-        return axios.get(`${base}/catalog`, { headers })
+        /* Просим ФАКТИЧЕСКИ показанное пространство, а не сохранённое: до
+           первого ответа ping сохранённого может не быть вовсе, и каталог
+           пришёл бы за всю вику, а потом перезапросился. */
+        return axios.get(`${base}/catalog`,
+                         { headers, params: { space_id: activeSpace?.id || null } })
             .then((r) => setCatalog(r.data))
             .catch(() => setCatalog(null))
             .finally(() => setCatalogLoading(false));
-    }, [base, headers, isEditor]);
+    }, [base, headers, isEditor, activeSpace]);
 
     useEffect(() => { loadPing(); loadStructure(); }, [loadPing, loadStructure]);
+
+    /* Отделы — только тому, кто настраивает пространства: остальным этот
+       запрос вернёт 403 и добавит красную строку в консоль на каждом заходе. */
+    useEffect(() => {
+        if (!canManageSpaces) return;
+        axios.get(`${base}/access/subjects`, { headers })
+            .then((r) => setDepartments(r.data?.department || []))
+            .catch(() => setDepartments([]));
+    }, [base, headers, canManageSpaces]);
     // Отдельным эффектом: способности приходят из ping, то есть ПОЗЖЕ первого
     // рендера, и общий эффект пропустил бы загрузку каталога у редактора.
     useEffect(() => { loadCatalog(); }, [loadCatalog]);
 
+    /* Вкладку показывают ДВА независимых условия: способности человека и
+       тумблеры пространства. Их нельзя складывать в одно — они отвечают на
+       разные вопросы («вправе ли он» и «есть ли это здесь вообще»), и,
+       слитые, однажды прочитаются как «нет права» там, где просто выключено. */
     const tabs = useMemo(() => ([
         { key: 'library', label: 'Главная', icon: Home, show: true },
         // Показан всем: периметр считает сервер, и гейт по способности здесь
         // был бы вреден — он мигал бы false во время загрузки ping, а эффект
         // ниже выкидывал бы человека из открытого чата.
-        { key: 'assistant', label: 'Помощник', icon: Sparkles, show: true },
+        { key: 'assistant', label: 'Помощник', icon: Sparkles, show: features.assistant },
         /* Каталог и правка структуры — один пункт меню: «что лежит в разделе»
            и «как разделы устроены» это две половины одной работы, и раньше
            между ними приходилось прыгать по вкладкам. Внутри — переключатель.
            Показываем тому, у кого есть хоть одна из половин. */
         { key: 'catalog', label: 'Статьи', icon: BookOpen,
-          show: isEditor || canManageStructure || canGrantAccess },
-        { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: true },
-        { key: 'parks', label: 'Парки', icon: Building2, show: true },
-        { key: 'offices', label: 'Офисы', icon: MapPin, show: true },
+          show: features.catalog && (isEditor || canManageStructure || canGrantAccess) },
+        { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: features.overview },
+        { key: 'parks', label: 'Парки', icon: Building2, show: features.parks },
+        { key: 'offices', label: 'Офисы', icon: MapPin, show: features.offices },
         // Отдельных вкладок «Структура» и «Доступы» нет: структура переехала
         // внутрь «Статей» переключателем, а права выдаются из строки раздела
         // там же. Раздел выбран тем, что человек на него нажал, а не селектом
         // из плоского списка, где ветки СЗоВ и ОП одноимённые.
-        { key: 'audit', label: 'Журнал', icon: ScrollText, show: canManageAccess },
-    ].filter((t) => t.show)), [canManageStructure, canManageAccess, canGrantAccess, isEditor]);
+        { key: 'audit', label: 'Журнал', icon: ScrollText,
+          show: features.audit && canManageAccess },
+    ].filter((t) => t.show)),
+    [canManageStructure, canManageAccess, canGrantAccess, isEditor, features]);
 
     /* Половины вкладки «Статьи» гейтятся по отдельности: каталог — редактору,
        структура — тому, кто правит дерево или раздаёт доступы. Обычно человек
        имеет обе (см. матрицу в wiki/access.py), но роль вики можно собрать
        руками, и на такой сборке половина обязана просто не появиться. */
     const catalogModes = useMemo(() => [
-        ...(isEditor ? ['catalog'] : []),
-        ...(canManageStructure || canGrantAccess ? ['structure'] : []),
+        ...(isEditor && features.catalog_articles ? ['catalog'] : []),
+        ...((canManageStructure || canGrantAccess) && features.catalog_structure
+            ? ['structure'] : []),
         // Тренажёры — редактору: это инструмент того, кто СТАВИТ тренажёр в
         // статью. Читателю он не нужен, тренажёр к нему приходит кнопкой в тексте.
-        ...(isEditor ? ['trainers'] : []),
-    ], [isEditor, canManageStructure, canGrantAccess]);
+        ...(isEditor && features.catalog_trainers ? ['trainers'] : []),
+    ], [isEditor, canManageStructure, canGrantAccess, features]);
 
     /* Сторона, с которой въезжает выбранная половина. Предыдущую держим в ref,
        а не в состоянии: она нужна только для стартового смещения анимации, и
@@ -321,6 +506,21 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             <p className="text-[13px] text-slate-500">База знаний компании</p>
                         </div>
                     </div>
+
+                    {/* Переключатель пространств — сразу за названием раздела:
+                        он отвечает на вопрос «чья это вика», и ответ обязан
+                        стоять рядом с самим заголовком, а не в настройках. */}
+                    {spaces.length > 0 && (
+                        <SpaceSwitch
+                            spaces={spaces}
+                            value={activeSpace?.id}
+                            onChange={setSpaceId}
+                            onCreate={canManageSpaces
+                                ? () => setSpaceModal({ mode: 'create' }) : null}
+                            onEdit={canManageSpaces
+                                ? () => setSpaceModal({ mode: 'edit' }) : null}
+                        />
+                    )}
 
                     <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
                         {/* Поиск живёт прямо в шапке: поле растёт при фокусе, выдача
@@ -522,8 +722,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         base={base}
                         headers={headers}
                         showToast={showToast}
-                        structure={structure}
+                        structure={scopedStructure}
                         catalog={catalog}
+                        features={features}
+                        spaceId={activeSpace?.id || null}
                         canCreate={!!capabilities.can_create}
                         canEdit={canEdit}
                         createRequest={createRequest}
@@ -635,6 +837,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                     headers={headers}
                                     showToast={showToast}
                                     catalog={catalog}
+                                    space={activeSpace}
                                     loading={catalogLoading}
                                     bucket={catalogBucket}
                                     onBucketChange={setCatalogBucket}
@@ -662,7 +865,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                     base={base}
                                     headers={headers}
                                     showToast={showToast}
-                                    structure={structure}
+                                    structure={scopedStructure}
                                     loading={structureLoading}
                                     canManageAccess={canManageAccess}
                                     canManageStructure={canManageStructure}
@@ -691,7 +894,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         headers={headers}
                         showToast={showToast}
                         /* Дерево нужно журналу, чтобы называть пространства и
-                           разделы словами: в записи лежат их идентификаторы. */
+                           разделы словами: в записи лежат их идентификаторы.
+                           Здесь — ПОЛНОЕ, а не суженное: журнал показывает и
+                           записи о пространстве, которое сейчас не выбрано,
+                           и без его имени строка стала бы «пространство №7». */
                         structure={structure}
                         onOpenArticle={(slug) => {
                             setTab('library');
@@ -700,6 +906,25 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     />
                 )}
             </div>
+
+            {/* Конструктор пространства. Живёт на уровне раздела, а не вкладки:
+                его открывают из шапки, и он обязан работать с любой вкладки —
+                в том числе с той, которую сам сейчас выключит. */}
+            <WikiSpaceModal
+                open={!!spaceModal}
+                space={spaceModal?.mode === 'edit' ? editableSpace : null}
+                base={base}
+                headers={headers}
+                departments={departments}
+                showToast={showToast}
+                onClose={() => setSpaceModal(null)}
+                onSaved={(id) => {
+                    /* Новое пространство сразу становится текущим: его завели,
+                       чтобы в нём работать, а не чтобы найти в списке. */
+                    if (id) setSpaceId(id);
+                    refresh();
+                }}
+            />
         </div>
     );
 }

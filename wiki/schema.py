@@ -43,6 +43,44 @@ SUBJECT_TYPES = (
 # пространства (ОП / ОТП у «Коммерческого отдела»); 'common' — всё остальное.
 SECTION_KINDS = ('common', 'department')
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ТУМБЛЕРЫ ПРОСТРАНСТВА
+#
+# Пространство — это не только «чьи разделы», но и «из чего состоит раздел
+# Вики» у тех, кому оно выдано. Тез КЦ нужен свой набор статей и никакого
+# «Помощника», парков и офисов iGroup; у другого клиента наоборот.
+#
+# ОТСУТСТВИЕ ключа = тумблер ВКЛЮЧЁН. Иначе выкат отобрал бы у существующего
+# пространства всё сразу: у него в features пусто, и любая другая трактовка
+# пустоты означала бы «вики выключена целиком».
+#
+# «Главной» в списке нет намеренно: витрина статей — это и есть раздел, и
+# выключаемая главная оставила бы пространство без единственного экрана, куда
+# ведут все ссылки. Внутри неё выключается только рельс парков.
+SPACE_FEATURES = (
+    'assistant',          # вкладка «Помощник»
+    'catalog',            # вкладка «Статьи»…
+    'catalog_articles',   #   └ половина «Статьи»
+    'catalog_structure',  #   └ половина «Структура»
+    'catalog_trainers',   #   └ половина «Тренажёры»
+    'overview',           # вкладка «Обзор»
+    'parks',              # вкладка «Парки»
+    'offices',            # вкладка «Офисы»
+    'audit',              # вкладка «Журнал»
+    'library_park_rail',  # рельс парков на главной
+)
+
+
+def space_features(raw):
+    """Полный набор тумблеров: чего нет в JSONB — то включено.
+
+    Один вычислитель на весь пакет. Разложить «пусто = включено» по местам
+    использования значит однажды разойтись: витрина покажет вкладку, которую
+    сервер уже считает выключенной.
+    """
+    stored = raw if isinstance(raw, dict) else {}
+    return {key: stored.get(key, True) is not False for key in SPACE_FEATURES}
+
 # Тип статьи. Один источник правды на весь пакет: CHECK в wiki_articles,
 # белый список правки (routes_edit) и фильтр витрины (routes_articles) обязаны
 # брать значения отсюда — разойдись они, тип, который можно сохранить, стало бы
@@ -145,6 +183,11 @@ _STATEMENTS = [
         name          VARCHAR(255) NOT NULL,
         description   TEXT,
         icon          VARCHAR(64),
+        -- ВНИМАНИЕ: это НЕ граница пространства. Граница — список отделов в
+        -- wiki_space_departments (см. _SPACE_STATEMENTS); department_id здесь
+        -- остался от ручного режима доступа, где выдача отдела раскрывается во
+        -- все разделы его пространств (queries._MANUAL_SECTIONS_SQL). На проде
+        -- он пуст у всех пространств, и конструктор его не заполняет.
         department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
         status        VARCHAR(16) NOT NULL DEFAULT 'active'
                       CHECK (status IN ('active', 'archived')),
@@ -1238,6 +1281,173 @@ _ORG_STATEMENTS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРОСТРАНСТВО КАК ГРАНИЦА
+#
+# Раньше пространство было буфером ВНУТРИ одной вики: «Коммерческий отдел»,
+# «IT-отдел», «Общий отдел». Оно ничего не закрывало — department_id у него не
+# читал никто, и содержимое было общим на всю компанию. Из-за этого Тез КЦ,
+# которому вика iGroup не предназначена вовсе, видел её разделы, и затыкать это
+# приходилось поштучно на уровне раздела (wiki_section_public_departments у
+# «Общий сотрудник»).
+#
+# Теперь пространство — верхний уровень и настоящая граница: список отделов, за
+# который не выходит ни один его раздел, даже публичный. Бывшие пространства при
+# миграции стали верхними РАЗДЕЛАМИ единственного пространства «iGroup»:
+# структура сохранилась целиком, а уровней осталось столько же.
+#
+# ПУСТОЙ список отделов = пространство видно всем. Как и у публичного раздела,
+# это обратная совместимость, а не умолчание «на всякий случай».
+# ─────────────────────────────────────────────────────────────────────────────
+_SPACE_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_space_departments (
+        space_id      INTEGER NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE,
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        PRIMARY KEY (space_id, department_id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wiki_space_dept_space "
+    "ON wiki_space_departments (space_id);",
+
+    # Тумблеры вкладок. Пустой объект = всё включено (см. space_features).
+    "ALTER TABLE wiki_spaces ADD COLUMN IF NOT EXISTS "
+    "features JSONB NOT NULL DEFAULT '{}'::jsonb;",
+]
+
+# Код пространства, в которое переезжает всё, что было в вике до того, как
+# пространство стало границей.
+DEFAULT_SPACE_CODE = 'igroup'
+DEFAULT_SPACE_NAME = 'iGroup'
+
+
+def _slugify_ascii(value):
+    """Транслитерация в слаг. Дубль правила из routes_structure._slugify.
+
+    Здесь оно нужно ровно один раз — на миграции, когда роутов ещё нет в
+    обороте, а импортировать модуль с Flask-зависимостями из схемы нельзя.
+    """
+    table = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'e',
+        'ж': 'zh', 'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm',
+        'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u',
+        'ф': 'f', 'х': 'h', 'ц': 'c', 'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '',
+        'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+    }
+    out = []
+    for char in (value or '').strip().lower():
+        if char in table:
+            out.append(table[char])
+        elif char.isalnum():
+            out.append(char)
+        else:
+            out.append('-')
+    slug = '-'.join(filter(None, ''.join(out).split('-')))
+    return slug[:245] or 'razdel'
+
+
+def _free_section_slug(cursor, space_id, slug):
+    """Свободный слаг внутри пространства: base, base-2, base-3…"""
+    candidate, attempt = slug, 1
+    while True:
+        cursor.execute('SELECT 1 FROM wiki_sections WHERE space_id = %s AND slug = %s',
+                       (space_id, candidate))
+        if not cursor.fetchone():
+            return candidate
+        attempt += 1
+        candidate = '%s-%d' % (slug[:240], attempt)
+
+
+def _merge_legacy_spaces(cursor):
+    """Одноразовый переезд: бывшие пространства → верхние разделы «iGroup».
+
+    Идемпотентность держится на КОДЕ пространства: как только в базе есть
+    пространство с DEFAULT_SPACE_CODE, миграция пройдена и больше не трогает
+    ничего. Отдельного флага-таблицы не нужно — код и есть маркер.
+
+    По шагам:
+      1. заводит пространство «iGroup»;
+      2. каждое АКТИВНОЕ бывшее пространство превращает в верхний раздел этого
+         пространства и подвешивает под него его же корневые разделы;
+      3. архивные не оборачивает: их разделы переезжают как есть — плодить ради
+         архива пять пустых разделов значит переносить мусор дважды;
+      4. переписывает слаги, столкнувшиеся при слиянии, — ДО смены space_id,
+         иначе UNIQUE (space_id, slug) не даст перенести строку;
+      5. удаляет опустевшие строки бывших пространств ТОЛЬКО после переноса
+         разделов: на space_id висит ON DELETE CASCADE, и удаление раньше унесло
+         бы за собой всё дерево;
+      6. переносит границу отдела с публичного раздела на пространство.
+
+    На ПУСТОЙ базе шаги 2–5 вырождаются, а пространство всё равно создаётся:
+    вике нужен хотя бы один контейнер, иначе первый раздел некуда положить.
+    """
+    cursor.execute('SELECT id FROM wiki_spaces WHERE code = %s', (DEFAULT_SPACE_CODE,))
+    if cursor.fetchone():
+        return
+
+    cursor.execute('SELECT id, name, description, icon, status, position '
+                   '  FROM wiki_spaces ORDER BY position, id')
+    legacy = cursor.fetchall()
+
+    cursor.execute(
+        """
+        INSERT INTO wiki_spaces (code, name, description, position)
+        VALUES (%s, %s, %s, 0)
+        RETURNING id
+        """,
+        (DEFAULT_SPACE_CODE, DEFAULT_SPACE_NAME,
+         'Основное пространство вики: всё, что было в разделе до того, '
+         'как пространства стали границей между отделами.'),
+    )
+    space_id = cursor.fetchone()[0]
+
+    for legacy_id, name, description, icon, status, position in legacy:
+        if status == 'active':
+            slug = _free_section_slug(cursor, space_id, _slugify_ascii(name))
+            cursor.execute(
+                """
+                INSERT INTO wiki_sections (space_id, parent_section_id, name, slug,
+                                           description, icon, position, status)
+                VALUES (%s, NULL, %s, %s, %s, %s, %s, 'active')
+                RETURNING id
+                """,
+                (space_id, name, slug, description, icon, position),
+            )
+            wrapper_id = cursor.fetchone()[0]
+            cursor.execute(
+                'UPDATE wiki_sections SET parent_section_id = %s '
+                ' WHERE space_id = %s AND parent_section_id IS NULL AND id <> %s',
+                (wrapper_id, legacy_id, wrapper_id),
+            )
+
+        cursor.execute(
+            """
+            UPDATE wiki_sections s
+               SET slug = left(s.slug, 240) || '-' || s.id
+             WHERE s.space_id = %(legacy)s
+               AND EXISTS (SELECT 1 FROM wiki_sections t
+                            WHERE t.space_id = %(space)s AND t.slug = s.slug)
+            """,
+            {'legacy': legacy_id, 'space': space_id},
+        )
+        cursor.execute('UPDATE wiki_sections SET space_id = %s WHERE space_id = %s',
+                       (space_id, legacy_id))
+        cursor.execute('DELETE FROM wiki_spaces WHERE id = %s', (legacy_id,))
+
+    # Граница отдела у пространства — та, что уже выставлена руками у публичного
+    # раздела. Придумывать список заново нельзя: он либо шире выставленного (и
+    # тогда миграция сама открывает то, что закрывали), либо уже (и тогда молча
+    # отбирает доступ). Пусто — пространство остаётся видимым всем.
+    cursor.execute(
+        """
+        INSERT INTO wiki_space_departments (space_id, department_id)
+        SELECT DISTINCT %s, department_id FROM wiki_section_public_departments
+        ON CONFLICT DO NOTHING
+        """,
+        (space_id,),
+    )
+
+
 def _article_type_check_statement():
     """Пересобирает CHECK на article_type под текущий ARTICLE_TYPES.
 
@@ -1347,6 +1557,13 @@ def init_wiki_schema(cursor):
         cursor.execute(statement)
     for table in ('wiki_section_access_rules', 'wiki_article_access_rules'):
         cursor.execute(_subject_type_check_statement(table))
+
+    # Пространства — после _ORG_STATEMENTS: список отделов ссылается на
+    # departments, а переезд читает wiki_section_public_departments, которая
+    # заводится там же.
+    for statement in _SPACE_STATEMENTS:
+        cursor.execute(statement)
+    _merge_legacy_spaces(cursor)
 
     # Тип статьи: список в ARTICLE_TYPES растёт (последним пришёл 'trainer'), а
     # ограничение в базе создано вместе с таблицей и о новых значениях не знает.

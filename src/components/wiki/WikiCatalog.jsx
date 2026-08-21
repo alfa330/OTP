@@ -308,7 +308,7 @@ const Blank = ({ icon: Icon, title, text, children }) => (
 
 export default function WikiCatalog({ base, headers, showToast, catalog, loading,
                                       bucket, onBucketChange, onOpenArticle,
-                                      onEditArticle, reloadCatalog }) {
+                                      onEditArticle, reloadCatalog, space = null }) {
     const [selected, setSelected] = useState(null);   // {id, name, path} либо null
     const [items, setItems] = useState(null);         // null = ещё не ответили
     const [busy, setBusy] = useState(false);
@@ -318,13 +318,26 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
     const [openSections, setOpenSections] = useState(() => new Set());
     const [closedSpaces, setClosedSpaces] = useState(() => new Set());
     const resultRef = useRef(null);
-    /* Раздел, ответ по которому ещё ждём. Ответов теперь бывает два в полёте —
-       выбор раздела и тихое обновление после действия над строкой, — и без этой
-       отметки поздний ответ по ПРЕЖНЕМУ разделу лёг бы под шапку нового. */
+    /* Выборка, ответ по которой ещё ждём: «раздел + корзина». Ответов теперь
+       бывает два в полёте — выбор раздела и тихое обновление после действия над
+       строкой, — и без этой отметки поздний ответ по ПРЕЖНЕЙ выборке лёг бы под
+       шапку новой. Корзина в ключе не для красоты: переключение корзины сразу
+       после выбора раздела оставляет в полёте два запроса по ОДНОМУ разделу, и
+       по одному id их не различить — в «Черновиках» оказались бы опубликованные. */
     const wantedRef = useRef(null);
 
-    const spaces = catalog?.spaces || [];
-    const sections = catalog?.sections || [];
+    /* Каталог отдаёт ВСЁ, к чему у человека есть доступ, — в том числе соседнее
+       пространство у супер-админа. На экране одновременно живёт одно, выбранное
+       переключателем в шапке: дерево каталога и оглавление на главной обязаны
+       показывать одну и ту же вику, иначе счётчики разойдутся с содержимым. */
+    const spaces = useMemo(() => {
+        const all = catalog?.spaces || [];
+        return space ? all.filter((sp) => sp.id === space.id) : all;
+    }, [catalog, space]);
+    const sections = useMemo(() => {
+        const all = catalog?.sections || [];
+        return space ? all.filter((x) => x.space_id === space.id) : all;
+    }, [catalog, space]);
     const totals = catalog?.totals;
     const orphans = catalog?.orphans;
     const active = BUCKET_BY_KEY.get(bucket) || BUCKETS[0];
@@ -410,12 +423,13 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
        экране, пока сервер не ответит. Гасить всю правую колонку спиннером ради
        смены статуса одной строки значило бы мигать экраном на ровном месте. */
     const loadArticles = useCallback((id, { quiet = false } = {}) => {
-        wantedRef.current = id;
+        const wanted = `${id}:${bucket}`;
+        wantedRef.current = wanted;
         if (!quiet) { setBusy(true); setItems(null); }
         axios.get(`${base}/articles`, { headers, params: { section_id: id, bucket, limit: 200 } })
-            .then((r) => { if (wantedRef.current === id) setItems(r.data?.items || []); })
+            .then((r) => { if (wantedRef.current === wanted) setItems(r.data?.items || []); })
             .catch((e) => {
-                if (!quiet && wantedRef.current === id) setItems([]);
+                if (!quiet && wantedRef.current === wanted) setItems([]);
                 showToast?.(errText(e, 'Не удалось загрузить статьи раздела'), 'error');
             })
             .finally(() => { if (!quiet) setBusy(false); });

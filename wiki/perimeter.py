@@ -60,7 +60,7 @@ SELECT a.id
 """
 
 
-def read_perimeter(cursor, ctx, *, master_key=True):
+def read_perimeter(cursor, ctx, *, master_key=True, space_id=None):
     """Субъекты, разрешённые разделы и видимые статьи — за один проход.
 
     Ровно то, что раньше было локальным _perimeter в routes_articles: вынесено,
@@ -68,6 +68,16 @@ def read_perimeter(cursor, ctx, *, master_key=True):
 
     master_key=False — личный периметр без мастер-ключа администратора вики
     (см. шапку wiki/articles.py).
+
+    space_id СУЖАЕТ периметр до одного пространства — того, что выбрано
+    переключателем в шапке. Сужать обязательно ЗДЕСЬ, до расчёта статей, а не
+    отфильтровывать разделы во фронте: статья чужого пространства иначе
+    доезжает до витрины и попадает в «Без раздела» и «Популярные» — её раздел
+    отфильтрован, а сама она нет. Ровно это и случилось на первом прогоне.
+
+    Границу пространства сужение НЕ заменяет: allowed_section_ids уже отсёк
+    чужие пространства, и space_id выбирает из СВОИХ. Попросить чужое через
+    параметр нельзя — его разделов в периметре просто нет.
     """
     subjects = wiki_access.collect_subjects(
         user_id=ctx['user_id'], otp_role=ctx['otp_role'],
@@ -80,6 +90,13 @@ def read_perimeter(cursor, ctx, *, master_key=True):
                                            master_key=master_key)
     visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections,
                                                master_key=master_key)
+    if space_id:
+        # Сужать нужно ОБА множества, и статьи — по своим разделам, а не по
+        # уже суженному списку: статью видно ещё и по авторству, гостевой
+        # ссылке и личному правилу, мимо разделов. Сузишь только разделы —
+        # и собственная статья автора из соседней вики останется на витрине.
+        sections = queries.sections_of_space(cursor, sections, space_id)
+        visible = queries.articles_of_space(cursor, visible, space_id)
     return subjects, sections, visible
 
 

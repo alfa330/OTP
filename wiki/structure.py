@@ -7,22 +7,46 @@
 import json
 
 from .access import ROLE_LEVELS
+from .schema import space_features
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Пространства
+#
+# Верхний уровень вики и единственная жёсткая граница между отделами: раздел
+# живёт внутри пространства и за список его отделов не выходит, даже будучи
+# публичным. Плюс набор тумблеров — из каких вкладок состоит раздел «Вики» у
+# тех, кому пространство выдано. Историю переезда см. в wiki/schema.py.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SPACE_KEYS = ('id', 'code', 'name', 'description', 'icon', 'department_id',
-               'department_name', 'status', 'position', 'sections_count')
+               'department_name', 'status', 'position', 'sections_count',
+               'department_ids', 'features')
+
+
+def _shape_space(row):
+    space = dict(zip(_SPACE_KEYS, row))
+    space['department_ids'] = list(space['department_ids'] or [])
+    # Наружу отдаём ПОЛНЫЙ набор тумблеров, а не то, что лежит в базе: пустой
+    # объект означает «всё включено», и раскрывать его на каждой витрине
+    # отдельно — прямой путь к расхождению интерфейса с сервером.
+    space['features'] = space_features(space['features'])
+    return space
 
 
 def list_spaces(cursor, include_archived=False):
+    """Пространства со списком отделов. Список — агрегатом, а не вторым
+    запросом: пространств немного, но N+1 здесь повторялся бы на каждой
+    перерисовке конструктора."""
     cursor.execute(
         """
         SELECT sp.id, sp.code, sp.name, sp.description, sp.icon, sp.department_id,
                d.name AS department_name, sp.status, sp.position,
                (SELECT count(*) FROM wiki_sections s
-                 WHERE s.space_id = sp.id AND s.status = 'active') AS sections_count
+                 WHERE s.space_id = sp.id AND s.status = 'active') AS sections_count,
+               COALESCE((SELECT array_agg(sd.department_id ORDER BY sd.department_id)
+                           FROM wiki_space_departments sd
+                          WHERE sd.space_id = sp.id), '{}') AS department_ids,
+               sp.features
           FROM wiki_spaces sp
           LEFT JOIN departments d ON d.id = sp.department_id
          WHERE (%s OR sp.status = 'active')
@@ -30,23 +54,28 @@ def list_spaces(cursor, include_archived=False):
         """,
         (include_archived,),
     )
-    return [dict(zip(_SPACE_KEYS, row)) for row in cursor.fetchall()]
+    return [_shape_space(row) for row in cursor.fetchall()]
 
 
-def create_space(cursor, *, name, code, description, icon, department_id, created_by):
+def create_space(cursor, *, name, code, description, icon, department_id, created_by,
+                 features=None):
     cursor.execute(
         """
-        INSERT INTO wiki_spaces (code, name, description, icon, department_id, position, created_by)
+        INSERT INTO wiki_spaces (code, name, description, icon, department_id,
+                                 position, created_by, features)
         VALUES (%s, %s, %s, %s, %s,
-                COALESCE((SELECT max(position) + 1 FROM wiki_spaces), 0), %s)
+                COALESCE((SELECT max(position) + 1 FROM wiki_spaces), 0), %s,
+                %s::jsonb)
         RETURNING id
         """,
-        (code or None, name, description, icon, department_id, created_by),
+        (code or None, name, description, icon, department_id, created_by,
+         json.dumps(features or {})),
     )
     return cursor.fetchone()[0]
 
 
-_SPACE_UPDATABLE = ('name', 'description', 'icon', 'department_id', 'status', 'position', 'code')
+_SPACE_UPDATABLE = ('name', 'description', 'icon', 'department_id', 'status', 'position',
+                    'code', 'features')
 
 
 def update_space(cursor, space_id, fields):
@@ -54,14 +83,54 @@ def update_space(cursor, space_id, fields):
     sets, values = [], []
     for key in _SPACE_UPDATABLE:
         if key in fields:
-            sets.append(key + ' = %s')
-            values.append(fields[key])
+            # features приходит словарём: без явного каста psycopg2 отдал бы его
+            # как строку, а колонка jsonb такую подстановку не принимает.
+            sets.append(key + (' = %s::jsonb' if key == 'features' else ' = %s'))
+            values.append(json.dumps(fields[key]) if key == 'features' else fields[key])
     if not sets:
         return False
     sets.append("updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')")
     values.append(space_id)
     cursor.execute('UPDATE wiki_spaces SET ' + ', '.join(sets) + ' WHERE id = %s', values)
     return cursor.rowcount > 0
+
+
+def set_space_departments(cursor, space_id, department_ids):
+    """Переписать список отделов пространства.
+
+    Пустой список = видно всем: строк не остаётся, и периметр видит отсутствие
+    ограничения. Ровно то же соглашение, что у публичного раздела
+    (set_public_departments) — двух разных значений у «пусто» в одном разделе
+    быть не должно.
+    """
+    cursor.execute('DELETE FROM wiki_space_departments WHERE space_id = %s', (space_id,))
+    wanted = sorted({int(x) for x in (department_ids or []) if x})
+    if not wanted:
+        return
+    cursor.executemany(
+        'INSERT INTO wiki_space_departments (space_id, department_id) '
+        'VALUES (%s, %s) ON CONFLICT DO NOTHING',
+        [(space_id, dep) for dep in wanted],
+    )
+
+
+def space_open_to(cursor, space_id, department_ids):
+    """Открыто ли пространство хотя бы одному из перечисленных отделов.
+
+    Пустой список отделов у пространства = открыто всем, и это соглашение
+    здесь ТОЖЕ действует: иначе право на структуру внутри «общего»
+    пространства не получил бы никто, кроме супер-админа.
+    """
+    cursor.execute(
+        """
+        SELECT NOT EXISTS (SELECT 1 FROM wiki_space_departments WHERE space_id = %(space)s)
+            OR EXISTS (SELECT 1 FROM wiki_space_departments
+                        WHERE space_id = %(space)s AND department_id = ANY(%(depts)s))
+        """,
+        {'space': space_id, 'depts': list(department_ids or []) or [-1]},
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -601,23 +670,173 @@ def subject_department(cursor, subject_type, subject_id):
 # Журнал
 # ─────────────────────────────────────────────────────────────────────────────
 
-_AUDIT_KEYS = ('id', 'actor_id', 'actor_name', 'action', 'entity_type',
-               'entity_id', 'target_user_id', 'target_user_name', 'details', 'created_at')
+_AUDIT_KEYS = ('id', 'actor_id', 'actor_name', 'action', 'entity_type', 'entity_id',
+               'entity_name', 'entity_slug', 'entity_alive', 'subject_name',
+               'target_user_id', 'target_user_name', 'details', 'created_at')
+
+# Группы действий для фильтра «о чём запись». Перечислением, а не префиксом:
+# 'article.update' и 'article_rule.grant' начинаются одинаково, но это разные
+# вещи — текст статьи против доступа к ней. Действие, не попавшее ни в одну
+# группу, остаётся видно во вкладке «Все»: фильтр не должен прятать событие
+# только потому, что о нём здесь забыли.
+AUDIT_GROUPS = {
+    'access': ('rule.upsert', 'rule.delete',
+               'article_rule.grant', 'article_rule.deny', 'article_rule.delete',
+               'article.strict_bypass'),
+    'structure': ('space.create', 'space.update', 'space.archive',
+                  'section.create', 'section.update', 'section.archive',
+                  'section.move'),
+    'articles': ('article.create', 'article.update', 'article.archive',
+                 'article.restore', 'article.adopt', 'article.fork',
+                 'article.import', 'article.ai_draft', 'article.ai_update',
+                 'article.ai_edit'),
+    'places': ('park.create', 'park.update', 'park.archive',
+               'promotion.create', 'promotion.update', 'promotion.archive',
+               'office.create', 'office.update', 'office.archive',
+               'office.day.set', 'office.day.clear'),
+    'ack': ('ack.assign', 'ack.confirm'),
+}
+
+# Название объекта берём из самой таблицы объекта, а не из details: details
+# пишется в момент действия, у половины действий имени там нет вовсе, а у
+# остальных лежит имя на тот момент. Читателю журнала нужно понять, О ЧЁМ
+# запись, сегодня — поэтому имя актуальное, а факт «объекта больше нет»
+# показываем отдельным признаком, а не пустой строкой.
+_AUDIT_FROM = """
+      FROM wiki_audit_log a
+      LEFT JOIN users actor  ON actor.id  = a.actor_id
+      LEFT JOIN users target ON target.id = a.target_user_id
+      LEFT JOIN wiki_articles   art ON a.entity_type = 'article'   AND art.id = a.entity_id
+      LEFT JOIN wiki_sections   sec ON a.entity_type = 'section'   AND sec.id = a.entity_id
+      LEFT JOIN wiki_spaces     spc ON a.entity_type = 'space'     AND spc.id = a.entity_id
+      LEFT JOIN wiki_taxi_parks prk ON a.entity_type = 'park'      AND prk.id = a.entity_id
+      LEFT JOIN wiki_offices    off ON a.entity_type = 'office'    AND off.id = a.entity_id
+      LEFT JOIN wiki_promotions pro ON a.entity_type = 'promotion' AND pro.id = a.entity_id
+"""
+
+_AUDIT_ENTITY_NAME = (
+    "COALESCE(art.title, sec.name, spc.name, prk.name, off.name, pro.title)")
+
+_AUDIT_ENTITY_ALIVE = (
+    "(art.id IS NOT NULL OR sec.id IS NOT NULL OR spc.id IS NOT NULL"
+    " OR prk.id IS NOT NULL OR off.id IS NOT NULL OR pro.id IS NOT NULL)")
+
+# Кому выдали или у кого отобрали право. Субъект лежит в details парой
+# (subject_type, subject_id) — без имени запись читается как «выдано право
+# субъекту 17», то есть никак. Разворачиваем той же CASE-таблицей, что и
+# список правил статьи (edit.list_article_rules).
+_AUDIT_SUBJECT_ID = (
+    "(CASE WHEN a.details->>'subject_id' ~ '^[0-9]+$'"
+    " THEN (a.details->>'subject_id')::int END)")
+
+_AUDIT_SUBJECT_NAME = """
+    CASE a.details->>'subject_type'
+        WHEN 'department'      THEN (SELECT name FROM departments WHERE id = {sid})
+        WHEN 'department_head' THEN (SELECT name FROM departments WHERE id = {sid})
+        WHEN 'direction'       THEN (SELECT name FROM directions  WHERE id = {sid})
+        WHEN 'group'           THEN (SELECT name FROM groups      WHERE id = {sid})
+        WHEN 'wiki_role'       THEN (SELECT name FROM wiki_roles  WHERE id = {sid})
+        WHEN 'user'            THEN (SELECT name FROM users       WHERE id = {sid})
+    END
+""".format(sid=_AUDIT_SUBJECT_ID)
 
 
-def list_audit(cursor, limit=100, offset=0):
+def _audit_filters(group=None, query=None, date_from=None, date_to=None):
+    """Условия WHERE и параметры к ним.
+
+    Один код на выборку, счётчик и раскладку по группам: разъехавшись, они
+    дают «показано 20 из 3» и чипы с чужими числами.
+    """
+    where, params = [], []
+
+    actions = AUDIT_GROUPS.get(group)
+    if actions:
+        where.append('a.action = ANY(%s)')
+        params.append(list(actions))
+    if date_from:
+        where.append('a.created_at >= %s::date')
+        params.append(date_from)
+    if date_to:
+        # Верхняя граница включительно по дню: человек выбирает дату, а не
+        # момент, и «по 18 августа» обязано захватывать весь день.
+        where.append("a.created_at < %s::date + INTERVAL '1 day'")
+        params.append(date_to)
+    if query:
+        # Ищем по человеку, названию объекта, субъекту права и содержимому
+        # details: журнал читают вопросом «что было с этой статьёй» и «что
+        # выдали этой группе», а не «покажи мне action».
+        where.append(
+            '(actor.name ILIKE %s OR target.name ILIKE %s'
+            ' OR ' + _AUDIT_ENTITY_NAME + ' ILIKE %s'
+            ' OR (' + _AUDIT_SUBJECT_NAME.strip() + ') ILIKE %s'
+            ' OR a.details::text ILIKE %s)')
+        params.extend(['%%%s%%' % query] * 5)
+
+    clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+    return clause, params
+
+
+def count_audit(cursor, **filters):
+    """Сколько записей под фильтром — чтобы «Показать ещё» знала, когда
+    закончиться, а подпись могла назвать общее число."""
+    clause, params = _audit_filters(**filters)
+    cursor.execute('SELECT count(*) ' + _AUDIT_FROM + clause, params)
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+
+def audit_group_counts(cursor, **filters):
+    """Число записей в каждой группе при текущем поиске — для чипов фильтра.
+
+    Пустой чип рисовать незачем, а чтобы понять, что он пуст, число нужно
+    заранее. Считаем одним запросом по всем действиям сразу, а группу из
+    фильтра игнорируем: чипы должны показывать, что найдётся при переключении,
+    а не сколько уже выбрано.
+    """
+    filters.pop('group', None)
+    clause, params = _audit_filters(**filters)
+    cursor.execute('SELECT a.action, count(*) ' + _AUDIT_FROM + clause
+                   + ' GROUP BY a.action', params)
+    by_action = {row[0]: int(row[1]) for row in cursor.fetchall()}
+    counts = {'all': sum(by_action.values())}
+    for name, actions in AUDIT_GROUPS.items():
+        counts[name] = sum(by_action.get(action, 0) for action in actions)
+    return counts
+
+
+def list_audit(cursor, limit=100, offset=0, **filters):
     """Чтение журнала. В оригинале обе таблицы аудита писались, но не читались
-    ни API, ни интерфейсом — то есть аудита фактически не существовало."""
+    ни API, ни интерфейсом — то есть аудита фактически не существовало.
+
+    Время отдаём строкой ISO без зоны. В базе оно уже местное (Asia/Almaty,
+    см. schema._NOW), а Flask сериализует datetime как «… GMT» — браузер
+    честно прибавлял к местному времени ещё пять часов, и журнал показывал
+    события на пять часов вперёд. Остальной портал отдаёт даты isoformat().
+
+    ip_address намеренно не отдаём: на проде во всех записях лежит внутренний
+    адрес прокси Render (10.x), к человеку он отношения не имеет и в интерфейсе
+    был бы ложным следом.
+    """
+    clause, params = _audit_filters(**filters)
     cursor.execute(
         """
         SELECT a.id, a.actor_id, actor.name, a.action, a.entity_type, a.entity_id,
+               """ + _AUDIT_ENTITY_NAME + """,
+               art.slug,
+               """ + _AUDIT_ENTITY_ALIVE + """,
+               (""" + _AUDIT_SUBJECT_NAME.strip() + """),
                a.target_user_id, target.name, a.details, a.created_at
-          FROM wiki_audit_log a
-          LEFT JOIN users actor  ON actor.id  = a.actor_id
-          LEFT JOIN users target ON target.id = a.target_user_id
+        """ + _AUDIT_FROM + clause + """
          ORDER BY a.id DESC
          LIMIT %s OFFSET %s
         """,
-        (limit, offset),
+        params + [limit, offset],
     )
-    return [dict(zip(_AUDIT_KEYS, row)) for row in cursor.fetchall()]
+    items = []
+    for row in cursor.fetchall():
+        item = dict(zip(_AUDIT_KEYS, row))
+        created = item.get('created_at')
+        if hasattr(created, 'isoformat'):
+            item['created_at'] = created.isoformat()
+        items.append(item)
+    return items

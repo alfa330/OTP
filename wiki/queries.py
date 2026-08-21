@@ -154,6 +154,29 @@ def subject_params(subjects, user_id):
     }
 
 
+# Граница пространства — ПОСЛЕДНЕЕ слово о том, что человек видит.
+#
+# Накладывается поверх любого способа получить раздел: правила, публичность,
+# собственный раздел, гостевой доступ, ручная выдача. Именно поэтому она
+# оформлена отдельным фильтром снаружи, а не ещё одним условием в каждой ветке
+# UNION: ветку добавят, условие забудут — и граница протечёт ровно там.
+#
+# Пустой список отделов у пространства = видно всем (обратная совместимость,
+# см. wiki/schema.py). Собственный раздел и гостевая ссылка границу НЕ обходят:
+# пространство закрыли от отдела целиком, и «но это же его раздел» здесь не
+# аргумент — иначе Тез КЦ вернул бы себе доступ через любую из этих щелей.
+_SPACE_GATE_SQL = """
+SELECT p.id
+  FROM picked p
+  JOIN wiki_sections s ON s.id = p.id
+ WHERE NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+                    WHERE sd.space_id = s.space_id)
+    OR EXISTS (SELECT 1 FROM wiki_space_departments sd
+                WHERE sd.space_id = s.space_id
+                  AND sd.department_id = ANY(%(departments)s))
+"""
+
+
 # Разделы, доступные на чтение в АВТОМАТИЧЕСКОМ режиме.
 #
 # «Публичный» раздел с недавних пор не обязательно значит «всем в компании»:
@@ -186,7 +209,8 @@ subtree AS (
       FROM wiki_sections child
       JOIN subtree parent ON child.parent_section_id = parent.id
      WHERE child.status = 'active'
-)
+),
+picked AS (
 SELECT id FROM subtree
 UNION
 SELECT section_id FROM rule_hits
@@ -210,7 +234,8 @@ SELECT g.section_id
    AND g.section_id IS NOT NULL
    AND g.revoked_at IS NULL
    AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-"""
+)
+""" + _SPACE_GATE_SQL
 
 # Ручной режим: человек видит ровно то, что ему выдали, плюс публичное.
 # Выдача отдела раскрывается во все разделы пространств этого отдела.
@@ -234,7 +259,8 @@ subtree AS (
       FROM wiki_sections child
       JOIN subtree parent ON child.parent_section_id = parent.id
      WHERE child.status = 'active'
-)
+),
+picked AS (
 SELECT id FROM subtree
 UNION
 SELECT s.id FROM wiki_sections s
@@ -256,7 +282,8 @@ SELECT g.section_id
    AND g.section_id IS NOT NULL
    AND g.revoked_at IS NULL
    AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-"""
+)
+""" + _SPACE_GATE_SQL
 
 
 def allowed_section_ids(cursor, ctx, subjects, *, master_key=True):
@@ -283,6 +310,87 @@ def allowed_section_ids(cursor, ctx, subjects, *, master_key=True):
     sql = _MANUAL_SECTIONS_SQL if ctx.get('access_mode') == 'manual' else _AUTO_SECTIONS_SQL
     cursor.execute(sql, params)
     return {row[0] for row in cursor.fetchall()}
+
+
+def sections_of_space(cursor, section_ids, space_id):
+    """Из уже посчитанного периметра оставить разделы ОДНОГО пространства.
+
+    Отдельным запросом по готовому множеству, а не условием внутри периметра:
+    периметр отвечает на вопрос «что человеку доступно», а это — «что он сейчас
+    смотрит». Смешать их значит получить витрину, которая молча теряет доступ
+    вместе со сменой выбранного пространства.
+    """
+    ids = sorted(int(x) for x in (section_ids or ()))
+    if not ids:
+        return set()
+    cursor.execute(
+        'SELECT id FROM wiki_sections WHERE id = ANY(%s) AND space_id = %s',
+        (ids, int(space_id)),
+    )
+    return {row[0] for row in cursor.fetchall()}
+
+
+def articles_of_space(cursor, article_ids, space_id):
+    """Из уже посчитанного периметра оставить статьи ОДНОГО пространства.
+
+    Статья принадлежит пространству через свои разделы. Статья БЕЗ разделов не
+    принадлежит никакому — и остаётся видимой в любом: так живёт статья-
+    классификатор, которую заводит сама схема, и наследие импорта. Прятать их
+    по пространствам было бы нечестно: у них нет пространства, чтобы прятаться,
+    а границу они не пробивают — без раздела статью видно только тому, кому её
+    выдали правилом лично (см. wiki/articles.py: _VISIBLE_ARTICLES_SQL, ветка
+    inherited требует раздела из периметра).
+    """
+    ids = sorted(int(x) for x in (article_ids or ()))
+    if not ids:
+        return set()
+    cursor.execute(
+        """
+        SELECT a.id
+          FROM wiki_articles a
+         WHERE a.id = ANY(%(ids)s)
+           AND (EXISTS (SELECT 1 FROM wiki_article_sections x
+                          JOIN wiki_sections sec ON sec.id = x.section_id
+                         WHERE x.article_id = a.id AND sec.space_id = %(space)s)
+                OR NOT EXISTS (SELECT 1 FROM wiki_article_sections x
+                                WHERE x.article_id = a.id))
+        """,
+        {'ids': ids, 'space': int(space_id)},
+    )
+    return {row[0] for row in cursor.fetchall()}
+
+
+def spaces_for_user(cursor, ctx):
+    """Пространства, которые человеку можно предложить в переключателе.
+
+    Считается ПО ГРАНИЦЕ ПРОСТРАНСТВА, а не по разделам: пустое пространство,
+    только что заведённое под нового клиента, обязано появиться в переключателе
+    сразу — иначе его создатель не сможет в него зайти, чтобы завести первый
+    раздел, и конструктор окажется бесполезен ровно в момент создания.
+
+    Супер-админ видит все активные — он и настраивает границы.
+    """
+    if from_super_admin(ctx) or ctx['capabilities'].get('can_manage_access'):
+        cursor.execute("SELECT id FROM wiki_spaces WHERE status = 'active'")
+        return [row[0] for row in cursor.fetchall()]
+
+    departments = sorted({d for d in [ctx.get('department_id')]
+                          + list(ctx.get('headed_department_ids') or []) if d})
+    cursor.execute(
+        """
+        SELECT sp.id
+          FROM wiki_spaces sp
+         WHERE sp.status = 'active'
+           AND (NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+                             WHERE sd.space_id = sp.id)
+                OR EXISTS (SELECT 1 FROM wiki_space_departments sd
+                            WHERE sd.space_id = sp.id
+                              AND sd.department_id = ANY(%s)))
+         ORDER BY sp.position, sp.id
+        """,
+        (departments or [-1],),
+    )
+    return [row[0] for row in cursor.fetchall()]
 
 
 def section_rules_for_user(cursor, section_ids, subjects, user_id):

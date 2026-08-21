@@ -4,16 +4,37 @@
 обработчики, чтобы ни один файл не разросся до нечитаемого состояния.
 """
 
+import re
+from datetime import date
+
 from flask import jsonify, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
 from . import queries, structure
+from . import schema as wiki_schema
 from .schema import SUBJECT_TYPES
 
 
 def _body():
     return request.get_json(silent=True) or {}
+
+
+def _day_or_none(value):
+    """'2026-08-19' → та же строка, всё остальное → None.
+
+    Дату отдаём в SQL как есть (там стоит %s::date), поэтому проверяем форму
+    сами: непроверенная строка из запроса ушла бы в приведение типа и уронила
+    бы эндпоинт четырёхсоткой от базы вместо внятного ответа.
+    """
+    text = (value or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', text):
+        return None
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text
 
 
 def _int_or_none(value):
@@ -72,22 +93,41 @@ _SUBJECT_SCOPE_ERRORS = {
 def register(bp, wiki_route, db, log_ip):
     """Вешает обработчики на Blueprint. bp и wiki_route приходят из routes.py."""
 
-    def _may_manage_space(ctx, department_id):
-        """Глава отдела управляет структурой только своего отдела.
+    def _may_manage_space(ctx):
+        """Заводить пространства и двигать их границу вправе только супер-админ.
 
-        Это повторение штатного правила портала: админ с возглавляемым отделом
-        НЕ является глобальным админом (_is_global_admin_requester). Без этой
-        проверки глава одного отдела правил бы пространства чужого.
+        Решение владельца: пространство — это граница между отделами (и целыми
+        клиентами), а не элемент структуры. Глава отдела строит РАЗДЕЛЫ внутри
+        выданного ему пространства, как и раньше, но открыть пространство ещё
+        одному отделу или завести новое не может: это выдача доступа к вике
+        целиком, а её раздаёт один человек.
+
+        Роль вики с can_manage_access приравнена к супер-админу здесь так же,
+        как и во всём остальном разделе, — её назначают руками именно за этим.
         """
-        caps = ctx['capabilities']
-        if caps.get('can_manage_access'):
+        return bool(wiki_access.normalize_role(ctx['otp_role']) == 'super_admin'
+                    or (ctx['wiki_roles'] and ctx['capabilities'].get('can_manage_access')))
+
+    def _may_manage_section_here(cursor, ctx, *, space_id):
+        """Вправе ли человек трогать РАЗДЕЛ в этом пространстве.
+
+        Способность can_manage_structure проверяет сам роут; здесь остаётся
+        только граница пространства: роль вики, которой выдали правку структуры
+        без мастер-ключа, не должна строить дерево в пространстве, которого ей
+        не выдавали.
+
+        Отдельной ветки «глава отдела строит у себя» тут намеренно НЕТ: с
+        21.08.2026 руководитель не трогает структуру вовсе (см.
+        access.capabilities_from_otp_role — у роли 'admin' способности больше
+        нет). Написанная «на будущее», такая ветка была бы мёртвым правилом,
+        которое оживёт не тогда, когда надо.
+        """
+        if _may_manage_space(ctx):
             return True
-        if not caps.get('can_manage_structure'):
-            return False
-        headed = set(ctx.get('headed_department_ids') or [])
-        if not headed:
-            return False
-        return department_id is not None and int(department_id) in headed
+        departments = _grant_departments(ctx)
+        if departments is None:
+            return True
+        return structure.space_open_to(cursor, space_id, departments)
 
     def _grant_ceiling(ctx):
         """До какого уровня должности человек вправе открывать разделы.
@@ -237,52 +277,83 @@ def register(bp, wiki_route, db, log_ip):
             section['public_department_ids'] = public_departments.get(section['id'], [])
             visible.append(section)
 
+        # Пространства режем по ГРАНИЦЕ, а не по can_manage: способность
+        # управлять структурой есть и у главы отдела, а показывать ему
+        # пространство другого клиента нельзя — даже пустым, даже в списке.
+        # Пустое пространство остаётся в ответе (по нему ещё нет разделов, но
+        # именно в него сейчас пойдут заводить первый), чужое — нет.
+        own_spaces = set(queries.spaces_for_user(cursor, ctx))
         used_spaces = {s['space_id'] for s in visible}
         return jsonify({
-            "spaces": [sp for sp in spaces if can_manage or sp['id'] in used_spaces],
+            "spaces": [sp for sp in spaces
+                       if sp['id'] in own_spaces or sp['id'] in used_spaces],
             "sections": visible,
             "can_manage_structure": can_manage,
             "can_manage_access": bool(ctx['capabilities'].get('can_manage_access')),
+            # Заводить пространства и двигать их границу вправе только
+            # супер-админ — конструктор спрашивает об этом сервер, а не считает
+            # по роли сам.
+            "can_manage_spaces": _may_manage_space(ctx),
         })
 
     # ── Пространства ─────────────────────────────────────────────────────
+    def _feature_patch(raw):
+        """Тумблеры из тела запроса: только известные ключи, только булевы.
+
+        Храним ЛОЖНЫЕ значения вместе с истинными, а не «только выключенные»:
+        разреженный объект пришлось бы дочитывать умолчанием при каждой записи,
+        и первый же забытый ключ прочитался бы как «включено» после того, как
+        человек его выключил.
+        """
+        if not isinstance(raw, dict):
+            return None
+        return {key: bool(raw.get(key, True)) for key in wiki_schema.SPACE_FEATURES}
+
     @wiki_route('/spaces', methods=('GET', 'POST'), capability='can_manage_structure')
     def wiki_spaces(cursor, ctx):
         if request.method == 'GET':
             return jsonify({"items": structure.list_spaces(cursor, include_archived=True)})
+
+        if not _may_manage_space(ctx):
+            return jsonify({
+                "error": "Пространства заводит супер-администратор",
+                "code": "WIKI_SPACE_ADMIN_ONLY",
+            }), 403
 
         data = _body()
         name = _clean(data.get('name'))
         if not name:
             return jsonify({"error": "Укажите название пространства"}), 400
 
-        department_id = _int_or_none(data.get('department_id'))
-        if not _may_manage_space(ctx, department_id):
-            return jsonify({
-                "error": "Пространство можно создать только в своём отделе",
-                "code": "WIKI_DEPARTMENT_SCOPE",
-            }), 403
-
         space_id = structure.create_space(
             cursor, name=name, code=_clean(data.get('code'), 80),
             description=_clean(data.get('description'), 2000),
-            icon=_clean(data.get('icon'), 64), department_id=department_id,
+            icon=_clean(data.get('icon'), 64),
+            department_id=_int_or_none(data.get('department_id')),
             created_by=ctx['user_id'],
+            features=_feature_patch(data.get('features')) or {},
         )
+        if isinstance(data.get('department_ids'), list):
+            structure.set_space_departments(cursor, space_id, data['department_ids'])
         queries.log_action(cursor, actor_id=ctx['user_id'], action='space.create',
                            entity_type='space', entity_id=space_id,
-                           details={'name': name}, ip_address=log_ip())
+                           details={'name': name,
+                                    'department_ids': data.get('department_ids') or []},
+                           ip_address=log_ip())
         return jsonify({"id": space_id}), 201
 
     @wiki_route('/spaces/<int:space_id>', methods=('PATCH', 'DELETE'),
                 capability='can_manage_structure')
     def wiki_space_item(cursor, ctx, space_id):
-        cursor.execute('SELECT department_id, name FROM wiki_spaces WHERE id = %s', (space_id,))
+        cursor.execute('SELECT name FROM wiki_spaces WHERE id = %s', (space_id,))
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Пространство не найдено"}), 404
-        if not _may_manage_space(ctx, row[0]):
-            return jsonify({"error": "Это пространство относится к другому отделу"}), 403
+        if not _may_manage_space(ctx):
+            return jsonify({
+                "error": "Пространства настраивает супер-администратор",
+                "code": "WIKI_SPACE_ADMIN_ONLY",
+            }), 403
 
         if request.method == 'DELETE':
             # Архивируем, а не удаляем: за пространством стоят разделы и статьи,
@@ -290,7 +361,7 @@ def register(bp, wiki_route, db, log_ip):
             structure.update_space(cursor, space_id, {'status': 'archived'})
             queries.log_action(cursor, actor_id=ctx['user_id'], action='space.archive',
                                entity_type='space', entity_id=space_id,
-                               details={'name': row[1]}, ip_address=log_ip())
+                               details={'name': row[0]}, ip_address=log_ip())
             return jsonify({"status": "archived"})
 
         data = _body()
@@ -304,8 +375,20 @@ def register(bp, wiki_route, db, log_ip):
             fields['status'] = data['status']
         if 'position' in data:
             fields['position'] = _int_or_none(data['position']) or 0
-        if not structure.update_space(cursor, space_id, fields):
+        features = _feature_patch(data.get('features'))
+        if features is not None:
+            fields['features'] = features
+
+        # Список отделов — не поле таблицы, поэтому «нечего обновлять» считается
+        # с его учётом: запрос, который несёт ТОЛЬКО отделы, обязан сработать.
+        touched_departments = isinstance(data.get('department_ids'), list)
+        if not fields and not touched_departments:
             return jsonify({"error": "Нечего обновлять"}), 400
+        if fields and not structure.update_space(cursor, space_id, fields):
+            return jsonify({"error": "Нечего обновлять"}), 400
+        if touched_departments:
+            structure.set_space_departments(cursor, space_id, data['department_ids'])
+            fields['department_ids'] = sorted({int(x) for x in data['department_ids'] if x})
         queries.log_action(cursor, actor_id=ctx['user_id'], action='space.update',
                            entity_type='space', entity_id=space_id,
                            details=fields, ip_address=log_ip())
@@ -325,12 +408,20 @@ def register(bp, wiki_route, db, log_ip):
         if not name or not space_id:
             return jsonify({"error": "Укажите пространство и название раздела"}), 400
 
-        cursor.execute('SELECT department_id FROM wiki_spaces WHERE id = %s', (space_id,))
+        cursor.execute("SELECT status FROM wiki_spaces WHERE id = %s", (space_id,))
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Пространство не найдено"}), 404
-        if not _may_manage_space(ctx, row[0]):
-            return jsonify({"error": "Это пространство относится к другому отделу"}), 403
+        if row[0] != 'active':
+            return jsonify({
+                "error": "Пространство в архиве — сначала верните его из архива",
+                "code": "WIKI_SPACE_ARCHIVED",
+            }), 400
+        if not _may_manage_section_here(cursor, ctx, space_id=space_id):
+            return jsonify({
+                "error": "Это пространство выдано другим отделам",
+                "code": "WIKI_DEPARTMENT_SCOPE",
+            }), 403
 
         scope = data.get('visibility_scope')
         if scope not in ('public', 'restricted'):
@@ -390,8 +481,11 @@ def register(bp, wiki_route, db, log_ip):
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Раздел не найден"}), 404
-        if not _may_manage_space(ctx, row[1]):
-            return jsonify({"error": "Раздел относится к другому отделу"}), 403
+        if not _may_manage_section_here(cursor, ctx, space_id=row[2]):
+            return jsonify({
+                "error": "Раздел лежит в пространстве, выданном другим отделам",
+                "code": "WIKI_DEPARTMENT_SCOPE",
+            }), 403
         section_exists_space_id = row[2]
         section_parent_id = row[3]
         section_department_id = row[4]
@@ -421,12 +515,15 @@ def register(bp, wiki_route, db, log_ip):
                 target = cursor.fetchone()
                 if not target:
                     return jsonify({"error": "Пространство не найдено"}), 404
-                # Право нужно на ОБА пространства: иначе глава отдела вывез бы
-                # свой раздел в чужое дерево (или чужой — к себе).
-                if not _may_manage_space(ctx, target[0]):
+                # Переезд МЕЖДУ пространствами — только супер-админу: это вынос
+                # содержимого за границу, ради которой пространства и заведены.
+                # Главе отдела здесь отказываем, даже если оба пространства
+                # открыты его отделу: перенос статей чужому клиенту не должен
+                # зависеть от того, кому ещё выдано пространство.
+                if not _may_manage_space(ctx):
                     return jsonify({
-                        "error": "Это пространство относится к другому отделу",
-                        "code": "WIKI_DEPARTMENT_SCOPE",
+                        "error": "Перенос между пространствами выполняет супер-администратор",
+                        "code": "WIKI_SPACE_ADMIN_ONLY",
                     }), 403
                 if target[1] != 'active':
                     return jsonify({
@@ -828,4 +925,23 @@ def register(bp, wiki_route, db, log_ip):
     def wiki_audit(cursor, ctx):
         limit = min(max(_int_or_none(request.args.get('limit')) or 100, 1), 500)
         offset = max(_int_or_none(request.args.get('offset')) or 0, 0)
-        return jsonify({"items": structure.list_audit(cursor, limit=limit, offset=offset)})
+        # Поиск от двух символов: по одной букве ILIKE перебирает всю таблицу
+        # и всё равно возвращает почти всё.
+        query = (request.args.get('q') or '').strip()[:120]
+        filters = {
+            'group': (request.args.get('group') or '').strip() or None,
+            'query': query if len(query) >= 2 else None,
+            'date_from': _day_or_none(request.args.get('from')),
+            'date_to': _day_or_none(request.args.get('to')),
+        }
+
+        payload = {"items": structure.list_audit(cursor, limit=limit, offset=offset,
+                                                 **filters)}
+        # Пересчитывать итоги на каждой догруженной странице незачем: фильтр
+        # тот же, а COUNT по всей таблице — самая дорогая часть запроса.
+        # Без общего числа «Показать ещё» не знает, когда закончиться, а чипы
+        # не могут спрятать заведомо пустые группы.
+        if offset == 0:
+            payload["total"] = structure.count_audit(cursor, **filters)
+            payload["counts"] = structure.audit_group_counts(cursor, **filters)
+        return jsonify(payload)

@@ -39,14 +39,23 @@ wiki_section_access_rules AS (
 ),
 wiki_sections AS (
     SELECT id::int, parent_section_id::int, status::text,
-           visibility_scope::text, owner_user_id::int
+           visibility_scope::text, owner_user_id::int, space_id::int
       FROM (VALUES {sections}) AS t(
-        id, parent_section_id, status, visibility_scope, owner_user_id)
+        id, parent_section_id, status, visibility_scope, owner_user_id, space_id)
 ),
 wiki_guest_access AS (
     SELECT section_id::int, user_id::int,
            revoked_at::timestamp, expires_at::timestamp
       FROM (VALUES {guests}) AS t(section_id, user_id, revoked_at, expires_at)
+),
+-- Кому видно ПРОСТРАНСТВО. Пустая заглушка = видно всем, прежнее поведение;
+-- граница проверяется только там, где её наполняют. Стоит она снаружи всех
+-- веток периметра намеренно: пространство закрывает раздел независимо от того,
+-- каким способом он получен, — правилом, публичностью или гостевой ссылкой.
+wiki_space_departments AS (
+    SELECT space_id::int, department_id::int
+      FROM (VALUES {space_departments}) AS t(space_id, department_id)
+     WHERE space_id IS NOT NULL
 ),
 -- Кому виден публичный раздел. По умолчанию заглушка ПУСТАЯ: это и есть
 -- прежний смысл «публичного» — виден всем, — и все сценарии ниже опираются
@@ -60,19 +69,30 @@ wiki_section_public_departments AS (
 
 _EMPTY_GUESTS = "(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp)"
 
+# Дерево без единого правила: VALUES не бывает пустым, поэтому «правил нет»
+# выражается строкой из NULL — она не совпадёт ни с одним разделом.
+_EMPTY_RULES = ("(NULL::int, NULL::text, NULL::int, NULL::text, "
+                "NULL::boolean, NULL::boolean, NULL::int)")
+
 # Пустой список отделов у публичных разделов = «виден всем», прежнее поведение.
 _EMPTY_PUBLIC_DEPARTMENTS = "(NULL::int, NULL::int)"
+
+# То же соглашение у пространства: списка нет — видно всем.
+_EMPTY_SPACE_DEPARTMENTS = "(NULL::int, NULL::int)"
+
+# Пространство, в котором лежит всё дерево тестов.
+SPACE, OTHER_SPACE = 1, 2
 
 # Дерево, которое собирают руками во вкладке «Структура»:
 # Коммерческий директор → отдел (СЗоВ / ОП) → должность (рук / СВ / оператор).
 _TREE = [
-    "(1, NULL, 'active', 'restricted', NULL)",   # Коммерческий директор
-    "(2, NULL, 'active', 'restricted', NULL)",   # Руководитель группы
-    "(3, NULL, 'active', 'restricted', NULL)",   # Супервайзер
-    "(4, NULL, 'active', 'restricted', NULL)",   # Оператор
-    "(5, 4,    'active', 'restricted', NULL)",   # └ ОП
-    "(6, 4,    'active', 'restricted', NULL)",   # └ ОТП
-    "(7, NULL, 'active', 'public',     NULL)",   # Общий сотрудник
+    "(1, NULL, 'active', 'restricted', NULL, 1)",   # Коммерческий директор
+    "(2, NULL, 'active', 'restricted', NULL, 1)",   # Руководитель группы
+    "(3, NULL, 'active', 'restricted', NULL, 1)",   # Супервайзер
+    "(4, NULL, 'active', 'restricted', NULL, 1)",   # Оператор
+    "(5, 4,    'active', 'restricted', NULL, 1)",   # └ ОП
+    "(6, 4,    'active', 'restricted', NULL, 1)",   # └ ОТП
+    "(7, NULL, 'active', 'public',     NULL, 1)",   # Общий сотрудник
 ]
 
 # Правила — те, что выставляются во вкладке «Доступы».
@@ -103,13 +123,17 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         cls.conn = prod_db.connection()
 
     def sections(self, *, role, department_id=None, headed=(), user_id=10,
-                 rules=None, tree=None, guests=(), public_departments=()):
+                 rules=None, tree=None, guests=(), public_departments=(),
+                 space_departments=()):
         stub = _STUBS.format(
-            rules=', '.join(rules if rules is not None else _RULES),
+            rules=', '.join(rules if rules else (_RULES if rules is None
+                                                 else [_EMPTY_RULES])),
             sections=', '.join(tree if tree is not None else _TREE),
             guests=', '.join(guests) if guests else _EMPTY_GUESTS,
             public_departments=(', '.join(public_departments) if public_departments
                                 else _EMPTY_PUBLIC_DEPARTMENTS),
+            space_departments=(', '.join(space_departments) if space_departments
+                               else _EMPTY_SPACE_DEPARTMENTS),
         )
         # Боевой запрос начинается с "WITH RECURSIVE rule_hits AS (" —
         # заглушки встают первыми элементами того же WITH, текст запроса не меняется.
@@ -225,6 +249,61 @@ class SectionPerimeterSqlTest(unittest.TestCase):
         got = self.sections(role='operator', department_id=None,
                             public_departments=['(%d, %d)' % (COMMON, DEPT_OP)])
         self.assertNotIn(COMMON, got)
+
+    # ── Граница пространства ─────────────────────────────────────────────
+    #
+    # Пространство закрывает раздел ПОВЕРХ всего остального: правила, публичность
+    # и гостевая ссылка ниже неё. Ради этого граница и вынесена наружу union'а —
+    # проверяем именно то, что каждая из щелей закрыта.
+
+    def test_space_without_departments_stays_visible_to_everyone(self):
+        """Пространство без списка отделов = видно всем. Обратная совместимость:
+        у всех существующих пространств списка нет, и выкат не должен отобрать
+        доступ ни у кого."""
+        got = self.sections(role='operator', department_id=DEPT_OP)
+        self.assertIn(BRANCH_OP, got)
+        self.assertIn(COMMON, got)
+
+    def test_space_list_closes_everything_for_outside_department(self):
+        """Отдел вне списка пространства не видит НИ ОДНОГО его раздела —
+        ни того, что открыт правилом, ни публичного."""
+        got = self.sections(role='operator', department_id=DEPT_OTP,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertEqual(got, set(),
+                         'закрытое пространство не должно отдать ни одного раздела')
+
+    def test_space_list_keeps_access_for_listed_department(self):
+        got = self.sections(role='operator', department_id=DEPT_OP,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertIn(BRANCH_OP, got)
+        self.assertIn(COMMON, got)
+
+    def test_space_border_beats_own_section(self):
+        """Собственный раздел границу НЕ обходит.
+
+        Владелец раздела видит его без всяких правил — но если пространство
+        закрыли от его отдела, «это же мой раздел» не аргумент: иначе доступ
+        возвращался бы через владение.
+        """
+        tree = ["(7, NULL, 'active', 'restricted', 10, 1)"]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            tree=tree, rules=[],
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertNotIn(COMMON, got)
+
+    def test_space_border_beats_guest_access(self):
+        """Действующая гостевая ссылка тоже не пробивает границу пространства."""
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp)" % COMMON]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertNotIn(COMMON, got)
+
+    def test_other_space_border_does_not_touch_this_one(self):
+        """Список, выставленный ЧУЖОМУ пространству, на наше не действует."""
+        got = self.sections(role='operator', department_id=DEPT_OTP,
+                            space_departments=['(%d, %d)' % (OTHER_SPACE, DEPT_OP)])
+        self.assertIn(BRANCH_OTP, got)
 
     def test_public_list_does_not_touch_rule_based_access(self):
         """Сужение публичности не отбирает то, что выдано правилом.

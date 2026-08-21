@@ -21,7 +21,7 @@ from functools import wraps
 from flask import Blueprint, jsonify, request
 
 from . import access as wiki_access
-from . import queries
+from . import queries, structure
 
 
 # Человекочитаемые имена способностей — для внятного отказа.
@@ -214,6 +214,19 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
         }
         if ready:
             payload['counters'] = queries.counters(cursor)
+            # Пространства для переключателя — вместе с тумблерами вкладок.
+            # Именно здесь, а не в /structure: набор вкладок нужен раньше, чем
+            # дерево разделов, и вкладка «Помощник» не должна мигнуть у того,
+            # кому её выключили. Порядок и границу считает сервер.
+            allowed = set(queries.spaces_for_user(cursor, ctx))
+            # Счётчик пространств — по СВОИМ, а не по всем: «Пространств: 2» у
+            # сотрудника Тез КЦ сообщало бы, что рядом живёт чужая вика.
+            payload['counters']['spaces'] = len(allowed)
+            payload['spaces'] = [
+                {k: sp[k] for k in ('id', 'name', 'code', 'icon', 'features')}
+                for sp in structure.list_spaces(cursor)
+                if sp['id'] in allowed
+            ]
         return jsonify(payload)
 
     @wiki_route('/me')

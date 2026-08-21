@@ -98,7 +98,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                       homeTick = 0,
                                       onOpenParks, onOpenCatalog, reloadCatalog,
                                       initialSlug, onInitialSlugConsumed,
-                                      searchTarget, onSearchTargetConsumed }) {
+                                      searchTarget, onSearchTargetConsumed,
+                                      features = null, spaceId = null }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
        onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
        статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
@@ -256,14 +257,14 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         if (term.length < 2) { setFound(null); return; }
 
         setLoading(true);
-        axios.get(`${base}/search`, { headers, params: { q: term } })
+        axios.get(`${base}/search`, { headers, params: { q: term, space_id: spaceId } })
             .then((r) => setFound(r.data?.items || []))
             .catch((e) => {
                 setFound([]);
                 toast(errText(e, 'Поиск не сработал'), 'error');
             })
             .finally(() => setLoading(false));
-    }, [base, headers, query, toast]);
+    }, [base, headers, query, toast, spaceId]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);   // дебаунс только на поиск
@@ -275,19 +276,20 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
        остаются рабочим способом сузить выборку. */
     const loadIndex = useCallback(() => {
         setIndexLoading(true);
-        return axios.get(`${base}/articles`, { headers, params: { limit: 200 } })
+        return axios.get(`${base}/articles`,
+                         { headers, params: { limit: 200, space_id: spaceId } })
             .then((r) => setIndex(r.data?.items || []))
             .catch(() => setIndex([]))
             .finally(() => setIndexLoading(false));
-    }, [base, headers]);
+    }, [base, headers, spaceId]);
 
     const loadHome = useCallback(() => {
         setHomeLoading(true);
-        return axios.get(`${base}/home`, { headers })
+        return axios.get(`${base}/home`, { headers, params: { space_id: spaceId } })
             .then((r) => setHome(r.data))
             .catch(() => setHome(null))
             .finally(() => setHomeLoading(false));
-    }, [base, headers]);
+    }, [base, headers, spaceId]);
 
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
@@ -348,6 +350,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                     article={editing.id ? editing : null}
                     sections={sections}
                     spaces={spaces}
+                    features={features}
                     pendingUpdateFile={pendingUpdateFile}
                     onPendingUsed={() => setPendingUpdateFile(null)}
                     /* Документ оказался новой версией другой статьи: открываем
@@ -437,12 +440,18 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
 
     return (
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start">
-            <WikiParkRail
-                parks={parks}
-                canManage={parksCanManage}
-                onOpenPark={(slug) => setOpenParkSlug(slug)}
-                onOpenParks={onOpenParks}
-            />
+            {/* Рельс парков — тумблер пространства: у вики без парков он занимал
+                бы колонку под пустой список. Сравнение с false, а не проверка
+                истинности: пока ping не ответил, features нет вовсе, и рельс
+                обязан остаться на месте, а не мигнуть. */}
+            {features?.library_park_rail !== false && (
+                <WikiParkRail
+                    parks={parks}
+                    canManage={parksCanManage}
+                    onOpenPark={(slug) => setOpenParkSlug(slug)}
+                    onOpenParks={onOpenParks}
+                />
+            )}
 
             <div className="flex min-w-0 flex-1 flex-col gap-3">
                 {/* Обложка витрины: где человек находится и одно поле, с которого

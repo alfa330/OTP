@@ -12,12 +12,11 @@ from . import access as wiki_access
 from . import articles as wiki_articles
 from . import edit as wiki_edit
 from . import queries
-from .schema import SUBJECT_TYPES
+from .schema import ARTICLE_TYPES, SUBJECT_TYPES
 from .ai import embed as ai_embed
 from .ai import index as ai_index
 from .routes_structure import PERMISSION_FIELDS, _clean, _int_or_none, _slugify
 
-ARTICLE_TYPES = ('general', 'job_description', 'regulation', 'instruction', 'tool_description')
 ARTICLE_STATUSES = ('draft', 'on_approval', 'published', 'requires_verification',
                     'archived', 'expired')
 
@@ -257,6 +256,10 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             # статьёй»), отрицательная — периметру, где по умолчанию разрешено.
             ai_opt_out=(not data['ai_support']) if 'ai_support' in data
                        else bool(data.get('ai_opt_out')),
+            # Запасной раздел ищется только в пространствах автора: без этой
+            # границы статья без раздела уехала бы в «Общий сотрудник» чужого
+            # пространства (см. wiki_edit.default_section_id).
+            space_ids=queries.spaces_for_user(cursor, ctx),
         )
         # СТАТУС ПРИ СОЗДАНИИ. Раньше он игнорировался молча: create_article
         # всегда пишет 'draft', а кнопка «Опубликовать» в редакторе присылала
@@ -380,7 +383,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             session_id=_session_id(), comment=_clean(data.get('comment'), 500))
 
         if 'section_ids' in data:
-            wiki_edit.set_sections(cursor, article_id, data['section_ids'])
+            wiki_edit.set_sections(cursor, article_id, data['section_ids'],
+                                   queries.spaces_for_user(cursor, ctx))
             changed = True
         if 'tags' in data:
             wiki_edit.set_tags(cursor, article_id, data['tags'])
@@ -492,10 +496,26 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
     @wiki_route('/access/article-rules/<int:rule_id>', methods=('DELETE',),
                 capability='can_manage_access')
     def wiki_article_rule_item(cursor, ctx, rule_id):
+        # Субъект и права читаем ДО удаления: после DELETE в журнал попал бы
+        # один rule_id, и запись «Право на статью отозвано» не сказала бы, у
+        # кого именно и какое. Тот же приём, что у правил раздела.
+        cursor.execute(
+            'SELECT subject_type, subject_id, subject_role, mode, '
+            + ', '.join(PERMISSION_FIELDS)
+            + ' FROM wiki_article_access_rules WHERE id = %s', (rule_id,))
+        rule = cursor.fetchone()
+        removed = {'rule_id': rule_id}
+        if rule:
+            removed.update({'subject_type': rule[0], 'subject_id': rule[1],
+                            'subject_role': rule[2], 'mode': rule[3]})
+            removed.update(dict(zip(PERMISSION_FIELDS, rule[4:])))
+
         article_id = wiki_edit.delete_article_rule(cursor, rule_id)
         if article_id is None:
             return jsonify({"error": "Правило не найдено"}), 404
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article_rule.delete',
                            entity_type='article', entity_id=article_id,
-                           details={'rule_id': rule_id}, ip_address=log_ip())
+                           target_user_id=(removed.get('subject_id')
+                                           if removed.get('subject_type') == 'user' else None),
+                           details=removed, ip_address=log_ip())
         return jsonify({"status": "deleted"})

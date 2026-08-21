@@ -266,7 +266,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     // разделы — постоянно, а архив нужен, только когда что-то возвращают.
     const [tab, setTab] = useState('sections');
 
-    const [spaceModal, setSpaceModal] = useState(null);   // {id?, name, ...}
     const [sectionModal, setSectionModal] = useState(null);
     const [accessSection, setAccessSection] = useState(null);
     const [probeOpen, setProbeOpen] = useState(false);
@@ -302,8 +301,9 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const spaces = structure?.spaces || [];
     const sections = structure?.sections || [];
 
+    /* Архивное пространство до дерева не доходит: его разделы правит не эта
+       вкладка, а возврат из архива — шапка раздела. */
     const activeSpaces = useMemo(() => spaces.filter((x) => x.status !== 'archived'), [spaces]);
-    const archivedSpaces = useMemo(() => spaces.filter((x) => x.status === 'archived'), [spaces]);
     const archivedSections = useMemo(
         () => sections.filter((x) => x.status === 'archived'), [sections]);
 
@@ -364,51 +364,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const spaceName = useMemo(
         () => new Map(spaces.map((sp) => [sp.id, sp.name])), [spaces]);
 
-    /* Из какого пространства раздел уезжает. Держим не в состоянии модалки, а
-       выводим из списка: состояние модалки правится на каждый ввод, и копия
-       исходного значения в нём разошлась бы с деревом после reload. */
-    const originalSpaceId = sectionModal?.id
-        ? sections.find((x) => x.id === sectionModal.id)?.space_id
-        : null;
-    const movingSection = !!originalSpaceId
-        && Number(sectionModal?.space_id) !== Number(originalSpaceId);
-
-    const archiveSpace = (space) => {
-        setBusy(true);
-        axios.delete(`${base}/spaces/${space.id}`, { headers })
-            .then(() => { showToast?.('Пространство убрано в архив', 'success'); reload(); })
-            .catch((e) => showToast?.(errText(e, 'Не удалось убрать в архив'), 'error'))
-            .finally(() => setBusy(false));
-    };
-
-    const restoreSpace = (space) => {
-        setBusy(true);
-        axios.patch(`${base}/spaces/${space.id}`, { status: 'active' }, { headers })
-            .then(() => { showToast?.('Пространство возвращено из архива', 'success'); reload(); })
-            .catch((e) => showToast?.(errText(e, 'Не удалось вернуть'), 'error'))
-            .finally(() => setBusy(false));
-    };
-
-    const saveSpace = () => {
-        const payload = {
-            name: spaceModal.name,
-            description: spaceModal.description || null,
-            department_id: spaceModal.department_id || null,
-        };
-        setBusy(true);
-        const request = spaceModal.id
-            ? axios.patch(`${base}/spaces/${spaceModal.id}`, payload, { headers })
-            : axios.post(`${base}/spaces`, payload, { headers });
-        request
-            .then(() => {
-                showToast?.(spaceModal.id ? 'Пространство обновлено' : 'Пространство создано', 'success');
-                setSpaceModal(null);
-                reload();
-            })
-            .catch((e) => showToast?.(errText(e, 'Не удалось сохранить'), 'error'))
-            .finally(() => setBusy(false));
-    };
-
     const saveSection = () => {
         const payload = {
             space_id: sectionModal.space_id,
@@ -431,12 +386,8 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             : axios.post(`${base}/sections`, payload, { headers });
         request
             .then(() => {
-                showToast?.(
-                    // Переезд называем переездом: «обновлён» на перенесённой
-                    // ветке не даёт понять, случилось ли главное.
-                    movingSection ? 'Раздел перенесён в другое пространство'
-                        : sectionModal.id ? 'Раздел обновлён' : 'Раздел создан',
-                    'success');
+                showToast?.(sectionModal.id ? 'Раздел обновлён' : 'Раздел создан',
+                            'success');
                 setSectionModal(null);
                 reload();
             })
@@ -468,16 +419,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             .finally(() => setBusy(false));
     };
 
-    const moveSpace = (space, direction) => {
-        const patches = reorderPatches(activeSpaces, space.id, direction);
-        if (!patches.length) return;
-        setBusy(true);
-        Promise.all(patches.map((patch) => axios.patch(
-            `${base}/spaces/${patch.id}`, { position: patch.position }, { headers })))
-            .then(() => reload())
-            .catch((e) => showToast?.(errText(e, 'Не удалось изменить порядок'), 'error'))
-            .finally(() => setBusy(false));
-    };
 
     const restoreSection = (section) => {
         setBusy(true);
@@ -486,11 +427,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             .catch((e) => showToast?.(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
     };
-
-    const departmentOptions = useMemo(() => ([
-        { value: '', label: 'Без привязки к отделу' },
-        ...departments.map((d) => ({ value: String(d.id), label: d.name })),
-    ]), [departments]);
 
     return (
         <div className="space-y-5">
@@ -506,28 +442,21 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                             <UserSearch size={14} /> Проверить доступ
                         </button>
                     )}
-                    {tab === 'spaces' && canManageStructure && (
-                        <button
-                            type="button"
-                            className={iosBtnPrimary}
-                            onClick={() => setSpaceModal({ name: '', description: '', department_id: '' })}
-                        >
-                            <Plus size={15} /> Пространство
-                        </button>
-                    )}
                 </div>
             </div>
 
             <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
                 {[
-                    // Супервайзеру видны только «Разделы»: пространства и архив —
-                    // это правка дерева, которой у него нет.
-                    canManageStructure && { key: 'spaces', label: 'Пространства', icon: Layers,
-                      count: activeSpaces.length },
+                    /* Супервайзеру виден только «Архив» без правки: архив — это
+                       правка дерева, которой у него нет.
+                       Вкладки «Пространства» здесь больше нет: пространство
+                       настраивается в шапке раздела, рядом с переключателем, —
+                       там же, где его выбирают. Две точки правки одного и того
+                       же расходятся, и вторая всегда оказывается забытой. */
                     { key: 'sections', label: 'Разделы', icon: FolderTree,
                       count: sections.filter((x) => x.status !== 'archived').length },
                     canManageStructure && { key: 'archive', label: 'Архив', icon: Archive,
-                      count: archivedSpaces.length + archivedSections.length },
+                      count: archivedSections.length },
                 ].filter(Boolean).map(({ key, label, icon: Icon, count }) => (
                     <button
                         key={key}
@@ -625,59 +554,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                     </p>
                 </div>
             )}
-
-            {/* ── Вкладка «Пространства» ── */}
-            {!loading && tab === 'spaces' && activeSpaces.map((space, index) => (
-                <div key={space.id} className={`${iosCard} flex flex-wrap items-center gap-2 px-4 py-3`}>
-                    <Layers size={15} className="shrink-0 text-indigo-500" />
-                    <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[14px] font-semibold text-slate-900">{space.name}</span>
-                            {space.department_name && (
-                                <IosBadge tone="slate">{space.department_name}</IosBadge>
-                            )}
-                        </div>
-                        <div className="mt-0.5 text-[11.5px] text-slate-400">
-                            <span className="tabular-nums">
-                                {(tree.get(space.id) || []).length} разделов
-                            </span>
-                            {space.description && <span> · {space.description}</span>}
-                        </div>
-                    </div>
-                    {/* Те же «три точки», что и у раздела: строки соседние, и
-                        два разных способа вызвать одни и те же действия читались
-                        бы как два разных вида объектов. */}
-                    <IosMenu
-                        label={`Действия с пространством «${space.name}»`}
-                        disabled={busy}
-                        items={[
-                            { key: 'section', label: 'Добавить раздел', icon: Plus,
-                              onSelect: () => setSectionModal({
-                                  space_id: space.id, name: '', description: '',
-                                  visibility_scope: 'restricted', parent_section_id: '',
-                                  department_id: '', public_department_ids: [],
-                              }) },
-                            { key: 'edit', label: 'Изменить пространство', icon: Pencil,
-                              onSelect: () => setSpaceModal({
-                                  id: space.id, name: space.name,
-                                  description: space.description || '',
-                                  department_id: space.department_id ? String(space.department_id) : '',
-                              }) },
-                            /* Порядок пространств — тот же разговор, что и у
-                               разделов: position сервер хранил, менять его было
-                               нечем. Пункт исчезает на краю списка. */
-                            index > 0 && { key: 'up', label: 'Переместить выше', icon: ArrowUp,
-                              separatorBefore: true, onSelect: () => moveSpace(space, -1) },
-                            index < activeSpaces.length - 1 && {
-                              key: 'down', label: 'Переместить ниже', icon: ArrowDown,
-                              separatorBefore: index === 0, onSelect: () => moveSpace(space, 1) },
-                            { key: 'archive', label: 'Убрать в архив', icon: Archive,
-                              danger: true, separatorBefore: true,
-                              onSelect: () => archiveSpace(space) },
-                        ]}
-                    />
-                </div>
-            ))}
 
             {/* ── Вкладка «Разделы» ── */}
             {!loading && tab === 'sections' && spaceViews.map(({ space, rows, total, hits }) => {
@@ -797,7 +673,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                 исчезают. У пространства это принципиально — физическое удаление
                 снесло бы каскадом все его разделы вместе со статьями. */}
             {!loading && tab === 'archive' && (
-                archivedSpaces.length === 0 && archivedSections.length === 0 ? (
+                archivedSections.length === 0 ? (
                     <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                         <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                             <Archive size={22} />
@@ -810,37 +686,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                     </div>
                 ) : (
                     <div className="space-y-5">
-                        {archivedSpaces.length > 0 && (
-                            <section className="space-y-1.5">
-                                <div className="px-1 text-[12px] font-medium text-slate-500">Пространства</div>
-                                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                                    {archivedSpaces.map((space) => (
-                                        <div key={space.id} className="flex items-center gap-2 px-4 py-2.5">
-                                            <Layers size={15} className="shrink-0 text-slate-300" />
-                                            <div className="min-w-0 flex-1">
-                                                <div className="truncate text-[13.5px] font-medium text-slate-900">
-                                                    {space.name}
-                                                </div>
-                                                {space.department_name && (
-                                                    <div className="mt-0.5 text-[11.5px] text-slate-400">
-                                                        {space.department_name}
-                                                    </div>
-                                                )}
-                                            </div>
-                                            <button
-                                                type="button"
-                                                disabled={busy}
-                                                className={iosBtnGhost}
-                                                onClick={() => restoreSpace(space)}
-                                            >
-                                                <ArchiveRestore size={13} /> Вернуть
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            </section>
-                        )}
-
                         {archivedSections.length > 0 && (
                             <section className="space-y-1.5">
                                 <div className="px-1 text-[12px] font-medium text-slate-500">Разделы</div>
@@ -878,66 +723,6 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                     </div>
                 )
             )}
-
-            {/* ── Пространство ── */}
-            <IosModal
-                open={!!spaceModal}
-                onClose={() => setSpaceModal(null)}
-                title={spaceModal?.id ? 'Изменить пространство' : 'Новое пространство'}
-                subtitle="Верхний уровень структуры — обычно отдел или направление"
-                footer={(
-                    <>
-                        <button type="button" className={iosBtnSecondary} onClick={() => setSpaceModal(null)}>
-                            Отмена
-                        </button>
-                        <button
-                            type="button"
-                            className={iosBtnPrimary}
-                            disabled={busy || !spaceModal?.name?.trim()}
-                            onClick={saveSpace}
-                        >
-                            {busy && <Loader2 size={14} className="animate-spin" />} Сохранить
-                        </button>
-                    </>
-                )}
-            >
-                {spaceModal && (
-                    <div className="space-y-3.5">
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Название</label>
-                            <input
-                                className={iosInput}
-                                value={spaceModal.name}
-                                autoFocus
-                                onChange={(e) => setSpaceModal({ ...spaceModal, name: e.target.value })}
-                                placeholder="Например: Отдел продаж"
-                            />
-                        </div>
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Описание</label>
-                            <textarea
-                                className={`${iosInput} min-h-[76px] resize-y`}
-                                value={spaceModal.description}
-                                onChange={(e) => setSpaceModal({ ...spaceModal, description: e.target.value })}
-                            />
-                        </div>
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">Отдел</label>
-                            <CustomSelect
-                                variant="ios"
-                                value={spaceModal.department_id}
-                                onChange={(v) => setSpaceModal({ ...spaceModal, department_id: v })}
-                                options={departmentOptions}
-                                ariaLabel="Отдел пространства"
-                            />
-                            <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
-                                Привязка необязательна. Она нужна, только если хотите выдавать
-                                доступ ко всему пространству одной строкой — по отделу.
-                            </p>
-                        </div>
-                    </div>
-                )}
-            </IosModal>
 
             {/* ── Раздел ── */}
             <IosModal
@@ -980,37 +765,11 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 placeholder="Например: Регламенты"
                             />
                         </div>
-                        {/* Пространство. Раньше поля не было вовсе: раздел,
-                            созданный не там, приходилось заводить заново
-                            вручную вместе со всеми подразделами и правилами. */}
-                        <div>
-                            <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
-                                Пространство
-                            </label>
-                            <CustomSelect
-                                variant="ios"
-                                value={String(sectionModal.space_id || '')}
-                                onChange={(v) => setSectionModal({
-                                    ...sectionModal,
-                                    space_id: Number(v),
-                                    /* Родитель остался в прежнем дереве — в новом
-                                       пространстве его нет. Сбрасываем в корень,
-                                       иначе в поле висит имя раздела, которого в
-                                       выбранном пространстве не существует. */
-                                    parent_section_id: '',
-                                })}
-                                options={activeSpaces.map((sp) => ({
-                                    value: String(sp.id), label: sp.name,
-                                }))}
-                                ariaLabel="Пространство раздела"
-                            />
-                            {sectionModal.id && movingSection && (
-                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-amber-600">
-                                    Раздел переедет из пространства «{spaceName.get(originalSpaceId) || '—'}»
-                                    вместе со всеми подразделами. Права и статьи остаются при нём.
-                                </p>
-                            )}
-                        </div>
+                        {/* Поля «Пространство» здесь нет: пространство выбрано
+                            переключателем в шапке раздела, и второй выбор того же
+                            в форме означал бы, что раздел можно завести не туда,
+                            куда человек только что переключился. Перенос между
+                            пространствами — отдельная операция супер-админа. */}
                         <div>
                             <label className="mb-1 block px-1 text-[12px] font-medium text-slate-500">
                                 Вложить в раздел
