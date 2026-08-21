@@ -28,7 +28,11 @@ const SCOPE_ARCHIVE = 'archive';
 const LIST_PAGE_SIZE = 20;
 const LIST_SEARCH_DEBOUNCE_MS = 300;
 // Длительность раскрытия строки ответов — одна и та же в CSS и в размонтировании.
-const ROW_EXPAND_MS = 300;
+// Кривая (0.4, 0, 0.2, 1) — ровная, с медленным началом и мягким приземлением.
+// Замеряли по кадрам: у «выразительных» кривых вроде (0.16, 1, 0.3, 1) и
+// (0.32, 0.72, 0, 1) панель набирала 79% высоты за первые 120 мс — глазами это
+// и есть «открывается резко», сколько бы ни стояло в duration.
+const ROW_EXPAND_MS = 450;
 
 const isManagerRole = (role) => isAdminLikeRole(role) || roleIsAny(role, ['sv', 'trainer']);
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
@@ -323,14 +327,14 @@ const hasSurveyAnswer = (question, answer) => {
  * превращаться в подсказку.
  */
 const ReviewOptionRow = ({ option, isMultiple, isChosen, isCorrect, revealCorrect }) => {
-    // Зелёный — верный вариант, красный — неверный, независимо от того, что
-    // человек выбрал: так с одного взгляда видно, где правда, а где нет.
-    // Отметка (галочка / крестик) при этом показывает ЕГО выбор — иначе на
-    // вопросе с несколькими ответами было бы не разобрать, что он отметил.
+    // Красный — только там, где человек ОШИБСЯ: выбрал вариант, который
+    // оказался неверным. Прочие неверные варианты красить не надо — их никто
+    // не выбирал, и три красные строки из четырёх читались бы как «всё плохо»
+    // вместо «вот здесь ошибка». Зелёный остаётся у правильных: и у того,
+    // что человек угадал, и у того, что пропустил.
     const rightChoice = revealCorrect && isChosen && isCorrect;
     const wrongChoice = revealCorrect && isChosen && !isCorrect;
     const missedRight = revealCorrect && !isChosen && isCorrect;
-    const skippedWrong = revealCorrect && !isChosen && !isCorrect;
 
     const tone = rightChoice
         ? 'bg-emerald-50 ring-emerald-200'
@@ -338,9 +342,7 @@ const ReviewOptionRow = ({ option, isMultiple, isChosen, isCorrect, revealCorrec
             ? 'bg-rose-50 ring-rose-300'
             : missedRight
                 ? 'bg-emerald-50/50 ring-emerald-200'
-                : skippedWrong
-                    ? 'bg-rose-50/40 ring-rose-200'
-                    : (isChosen ? 'bg-slate-100 ring-slate-200' : 'bg-white ring-slate-200/70');
+                : (isChosen ? 'bg-slate-100 ring-slate-200' : 'bg-white ring-slate-200/70');
 
     const markTone = rightChoice
         ? 'border-emerald-500 bg-emerald-500 text-white'
@@ -348,13 +350,11 @@ const ReviewOptionRow = ({ option, isMultiple, isChosen, isCorrect, revealCorrec
             ? 'border-rose-500 bg-rose-500 text-white'
             : missedRight
                 ? 'border-emerald-400 text-emerald-600'
-                : skippedWrong
-                    ? 'border-rose-300 text-transparent'
-                    : (isChosen ? 'border-slate-400 bg-slate-400 text-white' : 'border-slate-300 text-transparent');
+                : (isChosen ? 'border-slate-400 bg-slate-400 text-white' : 'border-slate-300 text-transparent');
 
     const textTone = rightChoice || missedRight
         ? 'text-emerald-900'
-        : (wrongChoice ? 'text-rose-900' : (skippedWrong ? 'text-rose-800/80' : 'text-slate-700'));
+        : (wrongChoice ? 'text-rose-900' : 'text-slate-700');
 
     return (
         <div className={`flex items-center gap-2.5 rounded-xl px-3 py-2 ring-1 transition-colors ${tone}`}>
@@ -372,7 +372,6 @@ const ReviewOptionRow = ({ option, isMultiple, isChosen, isCorrect, revealCorrec
                 {rightChoice && <span className="text-emerald-700">Верно · выбрано</span>}
                 {wrongChoice && <span className="text-rose-600">Неверно · выбрано</span>}
                 {missedRight && <span className="text-emerald-700">Правильный</span>}
-                {skippedWrong && <span className="text-rose-400">Неверный</span>}
                 {!revealCorrect && isChosen && <span className="text-slate-500">Выбрано</span>}
             </span>
         </div>
@@ -3293,32 +3292,19 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                                 <div
                                                                                     key={`${question.id}_${option}`}
                                                                                     className={`flex items-center gap-2.5 rounded-xl px-3 py-2 ring-1 ${
-                                                                                        isCorrect
-                                                                                            ? 'bg-emerald-50 ring-emerald-200'
-                                                                                            : (isTestQuestions ? 'bg-rose-50/40 ring-rose-200' : 'bg-white ring-slate-200/70')
+                                                                                        isCorrect ? 'bg-emerald-50 ring-emerald-200' : 'bg-white ring-slate-200/70'
                                                                                     }`}
                                                                                 >
                                                                                     <span className={`grid h-[18px] w-[18px] shrink-0 place-items-center border-2 text-[9px] ${
                                                                                         question.type === 'multiple' ? 'rounded-[5px]' : 'rounded-full'
-                                                                                    } ${
-                                                                                        isCorrect
-                                                                                            ? 'border-emerald-500 bg-emerald-500 text-white'
-                                                                                            : (isTestQuestions ? 'border-rose-300 text-transparent' : 'border-slate-300 text-transparent')
-                                                                                    }`}>
+                                                                                    } ${isCorrect ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 text-transparent'}`}>
                                                                                         <FaIcon className="fas fa-check" />
                                                                                     </span>
-                                                                                    <span className={`min-w-0 flex-1 break-words text-[13px] ${
-                                                                                        isCorrect
-                                                                                            ? 'text-emerald-900'
-                                                                                            : (isTestQuestions ? 'text-rose-800/80' : 'text-slate-700')
-                                                                                    }`}>
+                                                                                    <span className={`min-w-0 flex-1 break-words text-[13px] ${isCorrect ? 'text-emerald-900' : 'text-slate-700'}`}>
                                                                                         {option}
                                                                                     </span>
                                                                                     {isCorrect && (
                                                                                         <span className="shrink-0 text-[11px] font-medium text-emerald-700">Правильный</span>
-                                                                                    )}
-                                                                                    {!isCorrect && isTestQuestions && (
-                                                                                        <span className="shrink-0 text-[11px] font-medium text-rose-400">Неверный</span>
                                                                                     )}
                                                                                 </div>
                                                                             );
@@ -3481,7 +3467,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                 return (
                                                     <div
                                                         key={card.key}
-                                                        className={`overflow-hidden rounded-2xl ring-1 transition-all duration-300 ease-out ${
+                                                        className={`overflow-hidden rounded-2xl ring-1 transition-all duration-[400ms] ease-[cubic-bezier(0.4,0,0.2,1)] ${
                                                             expanded
                                                                 ? 'bg-white ring-blue-200'
                                                                 : (card.isCompleted ? 'bg-white ring-slate-200/70' : 'bg-slate-50 ring-slate-200/60')
@@ -3497,7 +3483,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             }`}
                                                         >
                                                             <FaIcon
-                                                                className={`fas fa-chevron-right shrink-0 text-[11px] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                                                                className={`fas fa-chevron-right shrink-0 text-[11px] transition-transform duration-[400ms] ease-[cubic-bezier(0.4,0,0.2,1)] ${
                                                                     card.isCompleted ? 'text-slate-400' : 'text-transparent'
                                                                 } ${expanded ? 'rotate-90' : ''}`}
                                                             />
@@ -3543,12 +3529,18 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             нечего; лишним оно не будет — в списке за раз
                                                             открыта одна строка. */}
                                                         <div
-                                                            className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
-                                                                expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                                                            className={`grid transition-[grid-template-rows] duration-[400ms] ease-[cubic-bezier(0.4,0,0.2,1)] ${
+                                                                expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
                                                             }`}
                                                         >
                                                             <div className="overflow-hidden">
-                                                                <div className="border-t border-slate-200/70 bg-slate-50/60 px-3.5 py-3">
+                                                                <div
+                                                                    className={`border-t border-slate-200/70 bg-slate-50/60 px-3.5 py-3 transition-[opacity,transform] duration-[260ms] ease-out ${
+                                                                        expanded
+                                                                            ? 'translate-y-0 opacity-100 delay-[120ms]'
+                                                                            : '-translate-y-1 opacity-0'
+                                                                    }`}
+                                                                >
                                                                     {card.key === expandedRenderKey && (
                                                                         <AttemptReview
                                                                             questions={card.questions}
