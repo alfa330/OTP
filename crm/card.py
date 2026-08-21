@@ -223,9 +223,12 @@ def _draw_warning(canvas, items):
     canvas.space(-6)
 
 
-def _draw_rows(canvas, rows, measure):
+def _draw_rows(canvas, rows, measure, title=None):
     """Пары «подпись — значение». Подпись бледная, значение тёмное: перечень
     читается по столбцу ответов, а не построчно целиком."""
+    if title:
+        _write(canvas, (PAD, canvas.y), title, FONTS.bold(13), INK)
+        canvas.space(23)
     label_font, value_font = FONTS.regular(12.5), FONTS.medium(13)
     label_width = max([_text_width(measure, row['label'] + ':', label_font)
                        for row in rows] + [0])
@@ -289,6 +292,8 @@ DRAWERS = {
     'warning': lambda canvas, block, measure: _draw_warning(canvas, block['items']),
     'data': lambda canvas, block, measure: _draw_rows(canvas, block['rows'], measure),
     'list': lambda canvas, block, measure: _draw_rows(canvas, block['rows'], measure),
+    'sapar': lambda canvas, block, measure: _draw_rows(canvas, block['rows'], measure,
+                                                       title=block.get('title')),
     'checks': _draw_checks,
     'actions': _draw_actions,
     'text': lambda canvas, block, measure: _draw_text(canvas, block['text'], measure),

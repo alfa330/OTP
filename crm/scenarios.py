@@ -79,6 +79,7 @@ BLOCKED = 'blocked'    # обязательная проверка не выпо
 CLOSE = 'close'        # вопрос решился по ходу: закрыть без сообщения в группу
 SWITCH = 'switch'      # это другая тематика — перевести туда
 INCOMPLETE = 'incomplete'  # не хватает ответов или вложения
+PASS = 'pass'          # предпроверка ничего не решила — продолжаем интервью
 
 # Метка на обращении (не блокирует отправку, но видна и в группе, и в карточке).
 FLAG_MASS_OUTAGE = 'mass_outage'
@@ -762,6 +763,139 @@ def get(key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Предпроверка по Sapar
+#
+# Половину интервью можно не проводить: по ИИН и периоду Sapar сам говорит,
+# сформированы ли документы за месяц по парку, есть ли они у водителя и
+# подписаны ли. Вопрос, на который есть машинный ответ, человеку не задают, и
+# рабочую группу им не занимают — это и просил владелец в задаче #206.
+#
+# Правила лежат данными, как и всё остальное здесь: по одному набору на
+# тематику, порядок условий = приоритет. Сеть сюда не заходит — снимок приносит
+# crm.sapar, а решение принимается чистой функцией, которую можно прогнать
+# тестом без единого запроса.
+#
+# Условия снимка (считает _sapar_conditions):
+#   month_not_ready — документы за месяц по ПАРКУ ещё не выгружены
+#   no_documents    — у водителя за период документов нет
+#   all_signed      — все его документы уже подписаны
+#   has_documents   — документы есть (что бы с ними ни было)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MONTH_NOT_READY = (
+    CLOSE,
+    'Документы за {period} по парку ещё не сформированы — Яндекс их не выгрузил. '
+    'Это касается всех водителей, а не только этого: объясните водителю, что нужно '
+    'дождаться выгрузки. Обращение в группу не отправляем.',
+)
+
+SAPAR_PRECHECK = {
+    'sapar_docs_missing': [
+        ('month_not_ready', _MONTH_NOT_READY),
+        ('has_documents', (CLOSE,
+                           'Документы за {period} в Sapar есть ({statuses}). '
+                           'Попросите водителя обновить страницу и открыть раздел заново — '
+                           'если после этого документы не видны, заводите тематику '
+                           '«Ошибка в работе Sapar».')),
+        # Документов нет — жалоба подтвердилась, дальше нужны проверки оператора:
+        # они и отвечают на вопрос, ДОЛЖНЫ ли документы были сформироваться.
+        ('no_documents', (PASS, None)),
+    ],
+    'sapar_sign_error': [
+        ('month_not_ready', _MONTH_NOT_READY),
+        ('no_documents', (SWITCH,
+                          'За {period} документов у водителя в Sapar нет — подписывать '
+                          'нечего. Это тематика «Документы не поступили».',
+                          'sapar_docs_missing')),
+        ('all_signed', (CLOSE,
+                        'Документы за {period} уже подписаны ({statuses}) — ошибка '
+                        'подписания больше не актуальна.')),
+        ('has_documents', (PASS, None)),
+    ],
+    'sapar_payment_required': [
+        ('month_not_ready', _MONTH_NOT_READY),
+        ('no_documents', (CLOSE,
+                          'За {period} документов у водителя в Sapar нет, значит '
+                          'требование оплаты к их подписанию не относится. '
+                          'Уточните у водителя, за что именно просят оплату.')),
+        ('has_documents', (PASS, None)),
+    ],
+    # Вся тематика отвечается машинально: её вопрос и есть «какой статус».
+    'sapar_sign_status': [
+        ('month_not_ready', _MONTH_NOT_READY),
+        ('no_documents', (CLOSE,
+                          'За {period} документы у водителя не сформированы.')),
+        ('has_documents', (CLOSE,
+                           'Статус документов за {period}: {statuses}. '
+                           'Этого достаточно для ответа водителю — в группу не пишем.')),
+    ],
+}
+
+_MONTHS = ('январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль',
+           'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь')
+
+
+def _sapar_conditions(snapshot):
+    documents = snapshot.get('documents') or []
+    return {
+        'month_not_ready': snapshot.get('month_ready') is False,
+        'no_documents': not documents,
+        'all_signed': bool(documents) and all(d.get('signed') for d in documents),
+        'has_documents': bool(documents),
+    }
+
+
+def sapar_period_text(snapshot):
+    month, year = snapshot.get('month'), snapshot.get('year')
+    try:
+        return '%s %s' % (_MONTHS[int(month) - 1], int(year))
+    except (TypeError, ValueError, IndexError):
+        return 'выбранный период'
+
+
+def sapar_statuses_text(snapshot):
+    """Статусы документов одной строкой, без повторов и в порядке появления."""
+    seen, out = set(), []
+    for document in snapshot.get('documents') or []:
+        label = document.get('status_label') or 'статус неизвестен'
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    return ITEM_SEP.join(out) if out else 'документов нет'
+
+
+def sapar_verdict(scenario_key, snapshot):
+    """Что предпроверка Sapar говорит про обращение.
+
+    Возвращает {'outcome': …, 'message': …, 'switch_to': …}. PASS означает
+    «Sapar ничего не решил, продолжаем интервью» — и это же ответ, когда Sapar
+    недоступен: считать молчание сервиса за «документов нет» нельзя, по такому
+    выводу обращение закрыли бы зря.
+    """
+    rules = SAPAR_PRECHECK.get(str(scenario_key or ''))
+    if not rules or not (snapshot or {}).get('available'):
+        return {'outcome': PASS, 'message': None, 'switch_to': None}
+
+    conditions = _sapar_conditions(snapshot)
+    for name, rule_item in rules:
+        if not conditions.get(name):
+            continue
+        outcome, template = rule_item[0], rule_item[1]
+        if not template:
+            return {'outcome': outcome, 'message': None, 'switch_to': None}
+        message = template.format(period=sapar_period_text(snapshot),
+                                  statuses=sapar_statuses_text(snapshot))
+        return {'outcome': outcome, 'message': message,
+                'switch_to': rule_item[2] if len(rule_item) > 2 else None}
+    return {'outcome': PASS, 'message': None, 'switch_to': None}
+
+
+def sapar_needed(scenario_key):
+    """Есть ли у тематики что спрашивать у Sapar. Нужно интерфейсу и роутам."""
+    return str(scenario_key or '') in SAPAR_PRECHECK
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Проверка ответов
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1010,7 +1144,13 @@ BLOCK_DATA = 'data'          # ИИН, таксопарк, город, отчё�
 BLOCK_LIST = 'list'          # прочие ответы подписью и значением
 BLOCK_CHECKS = 'checks'      # что оператор проверил и что подтвердилось
 BLOCK_ACTIONS = 'actions'    # что оператор сделал руками
+BLOCK_SAPAR = 'sapar'        # что про водителя знает сам Sapar
 BLOCK_TEXT = 'text'          # тематика написала сообщение сама (body_template)
+
+# Снимок Sapar кладётся в ответы под служебным ключом: он не вопрос оператору,
+# но в обращении обязан остаться. Ключ с подчёркиваниями — чтобы он не сошёлся
+# с ключом будущего шага.
+SAPAR_ANSWER_KEY = '__sapar__'
 
 
 def _data_rows(scenario, answers):
@@ -1029,6 +1169,23 @@ def _data_rows(scenario, answers):
         if not value or value == '—':
             continue
         rows.append({'label': BODY_DATA_LABELS[key], 'value': value})
+    return rows
+
+
+def _sapar_rows(snapshot):
+    """Снимок Sapar в две-три строки. Пусто — если Sapar не спрашивали."""
+    if not isinstance(snapshot, dict) or not snapshot.get('available'):
+        return []
+    documents = snapshot.get('documents') or []
+    rows = [{
+        'label': 'Документы',
+        'value': ('%d — %s' % (len(documents), sapar_statuses_text(snapshot))
+                  if documents else 'за этот период нет'),
+    }]
+    if not documents and snapshot.get('month_ready') is False:
+        rows.append({'label': 'Выгрузка за месяц', 'value': 'по парку ещё не сформирована'})
+    if snapshot.get('driver_name'):
+        rows.append({'label': 'Водитель', 'value': snapshot['driver_name']})
     return rows
 
 
@@ -1068,6 +1225,12 @@ def body_blocks(scenario_key, answers, *, flags=()):
     rows = _data_rows(scenario, answers)
     if rows:
         blocks.append({'kind': BLOCK_DATA, 'rows': rows})
+
+    rows = _sapar_rows(answers.get(SAPAR_ANSWER_KEY))
+    if rows:
+        # Специалист в группе первым делом лезет в Sapar сам. Раз мы уже
+        # спросили — пусть видит ответ здесь и не повторяет работу.
+        blocks.append({'kind': BLOCK_SAPAR, 'title': 'По данным Sapar', 'rows': rows})
 
     # Ответы «да/нет» о ФАКТАХ идут списком со знаками: специалисту в группе
     # нужно видеть каждый пункт отдельно, а не вычитывать его из склеенной
@@ -1133,8 +1296,9 @@ def render_body(scenario_key, answers, *, flags=()):
             lines.append(['⚠️ %s' % text for text in block['items']])
         elif kind == BLOCK_TEXT:
             lines.append([block['text']])
-        elif kind in (BLOCK_DATA, BLOCK_LIST):
-            lines.append(['%s: %s' % (row['label'], row['value']) for row in block['rows']])
+        elif kind in (BLOCK_DATA, BLOCK_LIST, BLOCK_SAPAR):
+            rows = ['%s: %s' % (row['label'], row['value']) for row in block['rows']]
+            lines.append(([block['title'] + ':'] if block.get('title') else []) + rows)
         elif kind == BLOCK_CHECKS:
             checks = ['🔍 Проверено оператором: %d из %d' % (block['confirmed'], block['total'])]
             checks += ['%s %s: %s' % (row['mark'], row['text'], row['note']) if row['note']
@@ -1185,6 +1349,9 @@ def public_catalog():
         'attachment_hint': item.get('attachment_hint'),
         'checks': item.get('checks', []),
         'checks_each': bool(item.get('checks_each')),
+        # Есть ли у тематики предпроверка по Sapar: мастер по этому флагу
+        # решает, спрашивать ли сервис после ИИН и периода.
+        'sapar': sapar_needed(item['key']),
         'steps': item['steps'],
         'groups': all_groups(item),
         'rules': [{'when': list(r['when']), 'outcome': r['outcome'], 'message': r['message'],

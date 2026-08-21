@@ -285,3 +285,81 @@ export const missingGroup = (scenario, answers, missing) => {
         message: step ? problems[step.key] : null,
     };
 };
+
+/* ─── Предпроверка по Sapar ───────────────────────────────────────────────── */
+
+/* Экран, после которого имеет смысл спросить Sapar: тот, где стоит ИИН.
+ *
+ * Не «первый экран» и не номер: экраны у вопроса заданы по ключу и у разных
+ * тематик идут в разном составе. Привязка к самому вопросу переживёт любую
+ * перестановку.
+ */
+export const saparGroup = (scenario) => {
+    if (!scenario?.sapar) return null;
+    const step = (scenario.steps || []).find((item) => item.key === 'iin');
+    return step ? step.group : null;
+};
+
+/* Ключ проверки: пара «ИИН + период». По нему видно, что спрашивать заново
+ * нечего — оператор просто вернулся на шаг назад и нажал «Далее» ещё раз.
+ * Лишний запрос тут не страшен, но и полсекунды ожидания на ровном месте
+ * оператору не нужны. */
+export const saparKey = (answers) => {
+    const iin = String(answerValue(answers, 'iin') ?? '').trim();
+    const period = String(answerValue(answers, 'period') ?? '').trim();
+    return iin && period ? `${iin}|${period}` : '';
+};
+
+export const IIN_PATTERN = /^[0-9]{12}$/;
+export const PERIOD_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+/* Спрашивать ли Sapar прямо сейчас.
+ *
+ * Условий четыре, и каждое из них однажды было причиной лишнего запроса:
+ * тематика без предпроверки, другой экран, недозаполненные ИИН или период,
+ * и та же пара, которую уже спросили.
+ */
+export const needsSaparCheck = (scenario, group, answers, checkedKey) => {
+    if (!scenario?.sapar || !group || group !== saparGroup(scenario)) return false;
+    const iin = String(answerValue(answers, 'iin') ?? '').trim();
+    const period = String(answerValue(answers, 'period') ?? '').trim();
+    if (!IIN_PATTERN.test(iin) || !PERIOD_PATTERN.test(period)) return false;
+    return saparKey(answers) !== checkedKey;
+};
+
+/* Снимок Sapar → как его показать оператору.
+ *
+ * tone решает не только цвет: «документов нет» и «документы есть» это
+ * противоположные ответы, и одинаково серыми их показывать нельзя.
+ */
+export const describeSnapshot = (snapshot) => {
+    if (!snapshot || !snapshot.available) {
+        return {
+            tone: 'muted',
+            title: 'Sapar не ответил',
+            lines: ['Проверьте данные сами и продолжайте по вопросам.'],
+        };
+    }
+    const documents = snapshot.documents || [];
+    if (!documents.length) {
+        return {
+            tone: 'amber',
+            title: 'Документов за период нет',
+            lines: snapshot.month_ready === false
+                ? ['Выгрузка за месяц по парку ещё не сформирована.']
+                : ['У водителя за этот период документов в Sapar не найдено.'],
+        };
+    }
+    const statuses = [];
+    for (const document of documents) {
+        const label = document.status_label || 'статус неизвестен';
+        if (!statuses.includes(label)) statuses.push(label);
+    }
+    return {
+        tone: 'green',
+        title: documents.length === 1
+            ? 'Документ за период найден'
+            : `Документов за период: ${documents.length}`,
+        lines: [statuses.join(' · '), snapshot.driver_name].filter(Boolean),
+    };
+};

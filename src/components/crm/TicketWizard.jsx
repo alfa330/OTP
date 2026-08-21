@@ -12,8 +12,8 @@ import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
     MISSING_ATTACHMENT, answerValue, carryOver, checksAreComplete, checksPayload,
-    groupCatalog, groupIsComplete, groupsOf, localVerdict, missingGroup,
-    referenceOptions, rowsOfGroup, stepIsComplete, toggleCheck,
+    describeSnapshot, groupCatalog, groupIsComplete, groupsOf, localVerdict, missingGroup,
+    needsSaparCheck, referenceOptions, rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -39,6 +39,7 @@ const OUTCOME = {
     BLOCKED: 'blocked',
     CLOSE: 'close',
     SWITCH: 'switch',
+    PASS: 'pass',
     INCOMPLETE: 'incomplete',
 };
 
@@ -227,6 +228,40 @@ const OutcomeBar = ({ verdict, onDismiss, onSwitch }) => {
 
 /* ─── Сценарий закончился: единственный случай, когда занимаем весь экран ── */
 
+/* Что Sapar ответил про водителя. Показывается на всех следующих экранах:
+ * оператор отвечает на вопросы, глядя на эти данные, и прятать их за кнопку
+ * значило бы заставлять его помнить их наизусть.
+ *
+ * Тон несёт смысл: «документы есть» и «документов нет» — противоположные
+ * ответы, и одинаково серыми их показывать нельзя. Отдельный тон у молчания
+ * сервиса: это не ответ, а его отсутствие. */
+const SAPAR_TONE = {
+    green: { box: 'bg-emerald-50/70 ring-emerald-100', icon: 'text-emerald-600' },
+    amber: { box: 'bg-amber-50/70 ring-amber-100', icon: 'text-amber-600' },
+    muted: { box: 'bg-slate-50 ring-slate-200/70', icon: 'text-slate-400' },
+};
+
+const SaparNote = ({ snapshot }) => {
+    const note = describeSnapshot(snapshot);
+    const tone = SAPAR_TONE[note.tone] || SAPAR_TONE.muted;
+    return (
+        <div className={`flex items-start gap-2.5 rounded-2xl px-3.5 py-3 ring-1 ${tone.box}`}>
+            <span className={`mt-[1px] shrink-0 ${tone.icon}`}>
+                {note.tone === 'green' ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+            </span>
+            <div className="min-w-0 space-y-0.5">
+                <div className="text-[13px] font-semibold text-slate-800">
+                    Sapar: {note.title}
+                </div>
+                {note.lines.map((line) => (
+                    <div key={line} className="text-[12.5px] leading-snug text-slate-600">{line}</div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+
 const ClosedScreen = ({ verdict, onClose }) => (
     <div className="flex flex-col items-center gap-3 py-8 text-center">
         <span className="grid h-12 w-12 place-items-center rounded-full bg-emerald-50 text-emerald-600">
@@ -261,6 +296,9 @@ export default function TicketWizard({
     const [dismissed, setDismissed] = useState(null);
     const [missing, setMissing] = useState({});
     const [preview, setPreview] = useState(null);
+    // Что ответил Sapar по ИИН и периоду, и по какой паре мы его спрашивали.
+    const [saparSnapshot, setSaparSnapshot] = useState(null);
+    const [saparChecked, setSaparChecked] = useState('');
     const [busy, setBusy] = useState(false);
     const fileRef = useRef(null);
 
@@ -288,6 +326,7 @@ export default function TicketWizard({
         setScenarioKey(''); setPhase('pick'); setGroupIndex(0); setAnswers({});
         setChecksConfirmed(false); setCheckedItems([]); setAttachment(null); setVerdict(null);
         setDismissed(null); setMissing({}); setPreview(null);
+        setSaparSnapshot(null); setSaparChecked('');
         if (fileRef.current) fileRef.current.value = '';
     }, []);
 
@@ -340,9 +379,54 @@ export default function TicketWizard({
     const canLeaveGroup = scenario && group
         && groupIsComplete(scenario, group, { answers, attachment });
 
-    const goNext = () => {
+    const goNext = async () => {
+        // Пока оператор не ушёл с экрана с ИИН — спрашиваем Sapar. Половина
+        // вопросов дальше существует только потому, что раньше эти данные
+        // узнавали у водителя; часть обращений на этом и заканчивается.
+        if (needsSaparCheck(scenario, group, answers, saparChecked)) {
+            const passed = await askSapar();
+            if (!passed) return;
+        }
         if (groupIndex + 1 < groups.length) { setGroupIndex(groupIndex + 1); return; }
         askServer();
+    };
+
+    /* Спрашивает Sapar. true — идём дальше, false — мастер остался на месте
+       (обращение закрыто, переводится в другую тематику или мы просто ждём).
+
+       Отказ Sapar НЕ останавливает оператора: считать молчание сервиса за
+       «документов нет» нельзя, а работать надо в любом случае. */
+    const askSapar = async () => {
+        setBusy(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/crm/scenarios/${scenarioKey}/sapar`,
+                { iin: answerValue(answers, 'iin'), period: answerValue(answers, 'period') },
+                { headers: headers() },
+            );
+            const { snapshot, verdict: hit } = response.data || {};
+            setSaparChecked(saparKey(answers));
+            setSaparSnapshot(snapshot || null);
+            if (!hit || hit.outcome === OUTCOME.PASS) return true;
+            if (hit.outcome === OUTCOME.CLOSE) {
+                setVerdict(hit);
+                setPhase('closed');
+                return false;
+            }
+            setVerdict({
+                ...hit,
+                signature: `sapar:${saparKey(answers)}`,
+                switch_title: (catalog || []).find((s) => s.key === hit.switch_to)?.title,
+            });
+            return false;
+        } catch (error) {
+            // Сеть или отказ — не повод держать оператора: идём по вопросам.
+            setSaparChecked(saparKey(answers));
+            setSaparSnapshot(null);
+            return true;
+        } finally {
+            setBusy(false);
+        }
     };
 
     const goBack = () => {
@@ -626,6 +710,8 @@ export default function TicketWizard({
                                         onDismiss={() => { setDismissed(verdict.signature); setVerdict(null); }}
                                         onSwitch={switchScenario} />
                         )}
+
+                        {saparSnapshot && <SaparNote snapshot={saparSnapshot} />}
 
                         {groupRows.map((row, rowIndex) => (
                             /* Пара половинных вопросов — одной строкой; на узком

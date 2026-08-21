@@ -18,6 +18,7 @@ import {
   stepIsVisible,
   toggleCheck,
   visibleSteps,
+  describeSnapshot, needsSaparCheck, saparGroup, saparKey,
 } from '../src/components/crm/wizardRules.js';
 
 /* Эти тесты написаны по следам реальной поломки: шаг с вложением никогда не
@@ -342,4 +343,70 @@ test('пункт отмечается и снимается, массив не �
   assert.deepEqual(before, [0, 2], 'исходный массив тронут');
   assert.deepEqual(toggleCheck(after, 2), [0, 1]);
   assert.deepEqual(toggleCheck(undefined, 3), [3]);
+});
+
+/* ─── Предпроверка по Sapar ───────────────────────────────────────────────── */
+
+const SAPAR_SCENARIO = {
+  key: 'sapar_docs_missing',
+  sapar: true,
+  steps: [
+    { key: 'iin', kind: 'iin', group: 'Водитель и период' },
+    { key: 'period', kind: 'period', group: 'Водитель и период' },
+    { key: 'trips_in_park', kind: 'yesno', group: 'Что происходит' },
+  ],
+};
+
+const FILLED = { iin: '060606060606', period: '2026-02' };
+
+test('Sapar спрашивают на экране, где стоит ИИН', () => {
+  assert.equal(saparGroup(SAPAR_SCENARIO), 'Водитель и период');
+  assert.equal(saparGroup({ ...SAPAR_SCENARIO, sapar: false }), null);
+});
+
+test('спрашиваем только с заполненными ИИН и периодом', () => {
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Водитель и период', FILLED, ''), true);
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Водитель и период',
+                               { iin: '123', period: '2026-02' }, ''), false);
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Водитель и период',
+                               { iin: '060606060606' }, ''), false);
+  // Кириллические цифры и прочая экзотика ИИН не образуют.
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Водитель и период',
+                               { ...FILLED, iin: '٠٦٠٦٠٦٠٦٠٦٠٦' }, ''), false);
+});
+
+test('на другом экране и у тематики без предпроверки не спрашиваем', () => {
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Что происходит', FILLED, ''), false);
+  assert.equal(needsSaparCheck({ ...SAPAR_SCENARIO, sapar: false },
+                               'Водитель и период', FILLED, ''), false);
+});
+
+test('ту же пару «ИИН + период» второй раз не спрашиваем', () => {
+  const key = saparKey(FILLED);
+  assert.equal(key, '060606060606|2026-02');
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Водитель и период', FILLED, key), false);
+  // Сменили период — это уже другой вопрос.
+  assert.equal(needsSaparCheck(SAPAR_SCENARIO, 'Водитель и период',
+                               { ...FILLED, period: '2026-03' }, key), true);
+});
+
+test('снимок описывается по смыслу, а не одним серым текстом', () => {
+  const found = describeSnapshot({
+    available: true, month_ready: true, driver_name: 'Кенжебаев Б.',
+    documents: [{ status_label: 'подписан', signed: true },
+                { status_label: 'подписан', signed: true }],
+  });
+  assert.equal(found.tone, 'green');
+  assert.equal(found.title, 'Документов за период: 2');
+  // Повторяющийся статус не дублируется.
+  assert.deepEqual(found.lines, ['подписан', 'Кенжебаев Б.']);
+
+  const none = describeSnapshot({ available: true, month_ready: false, documents: [] });
+  assert.equal(none.tone, 'amber');
+  assert.match(none.lines[0], /по парку/);
+
+  const silent = describeSnapshot({ available: false });
+  assert.equal(silent.tone, 'muted');
+  // Молчание сервиса НЕ выдаётся за «документов нет».
+  assert.doesNotMatch(silent.title, /нет/);
 });

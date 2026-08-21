@@ -23,7 +23,7 @@ from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, queries, scenarios, schema, service, telegram, transport
+from . import access, queries, sapar, scenarios, schema, service, telegram, transport
 
 # Вложение к обращению. Предел Telegram для загрузки ботом — 20 МБ, больше не
 # примет ни при каких условиях, поэтому отсекаем на входе с понятным текстом.
@@ -363,6 +363,35 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             }
         return jsonify(verdict)
 
+    @crm_route('/scenarios/<key>/sapar', methods=('POST',))
+    def crm_scenario_sapar(key, ctx):
+        """Что Sapar знает про водителя за период — до всех вопросов оператору.
+
+        Половина интервью существует только потому, что раньше эти данные
+        приходилось узнавать у водителя. Теперь: ввели ИИН и период — и сразу
+        видно, сформированы ли документы по парку, есть ли они у водителя и
+        подписаны ли. Часть обращений на этом и заканчивается, не доходя до
+        рабочей группы.
+
+        Sapar молчит — не беда: вердикт «продолжаем», оператор идёт по вопросам
+        как раньше. Считать молчание сервиса за «документов нет» нельзя, по
+        такому выводу обращение закрыли бы зря.
+        """
+        data = _payload()
+        iin = str(data.get('iin') or '').strip()
+        period = str(data.get('period') or '').strip()
+        if not scenarios.sapar_needed(key):
+            return jsonify({"skipped": True, "verdict": {"outcome": scenarios.PASS}})
+        if not scenarios._IIN_RE.match(iin):
+            return jsonify({"error": "ИИН должен состоять ровно из 12 цифр"}), 400
+        if not scenarios._PERIOD_RE.match(period):
+            return jsonify({"error": "Укажите месяц и год отчётного периода"}), 400
+
+        year, month = period.split('-')
+        snapshot = sapar.driver_snapshot(iin, int(month), int(year))
+        verdict = scenarios.sapar_verdict(key, snapshot)
+        return jsonify({"snapshot": snapshot, "verdict": verdict})
+
     @crm_route('/reports/scenarios')
     def crm_scenario_report(ctx):
         """Разбивка обращений по тематикам (ТЗ #29)."""
@@ -404,6 +433,25 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         attachment, attach_error = _attachment()
         if attach_error:
             return jsonify({"error": attach_error}), 400
+
+        # Спрашиваем Sapar САМИ, а не верим снимку с клиента: иначе достаточно
+        # было бы прислать «документы есть», чтобы пройти проверку, которой на
+        # самом деле не было. Сеть — до курсора: пул делят SSE колокола и
+        # аукциона, держать на нём соединение нельзя.
+        sapar_verdict = None
+        if scenarios.sapar_needed(scenario_key):
+            snapshot = _sapar_snapshot(answers)
+            if snapshot is not None:
+                answers[scenarios.SAPAR_ANSWER_KEY] = snapshot
+                sapar_verdict = scenarios.sapar_verdict(scenario_key, snapshot)
+                if sapar_verdict['outcome'] != scenarios.PASS:
+                    return jsonify({
+                        "error": sapar_verdict.get('message')
+                                 or 'Обращение не нужно отправлять в группу',
+                        "code": 'CRM_SAPAR_' + sapar_verdict['outcome'].upper(),
+                        "verdict": sapar_verdict,
+                        "snapshot": snapshot,
+                    }), 409
 
         # Пересчитываем вердикт на сервере по тем же правилам, что показывал
         # предпросмотр: между предпросмотром и отправкой ответы могли измениться.
@@ -462,6 +510,15 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "delivered": sent,
             "delivery_error": None if sent else send_error,
         }), 201
+
+    def _sapar_snapshot(answers):
+        """Снимок Sapar по ответам мастера. None — спрашивать не по чему."""
+        iin = str(scenarios._value(answers, 'iin') or '').strip()
+        period = str(scenarios._value(answers, 'period') or '').strip()
+        if not (scenarios._IIN_RE.match(iin) and scenarios._PERIOD_RE.match(period)):
+            return None
+        year, month = period.split('-')
+        return sapar.driver_snapshot(iin, int(month), int(year))
 
     @crm_route('/tickets/<int:ticket_id>')
     def crm_ticket_show(ticket_id, ctx):
