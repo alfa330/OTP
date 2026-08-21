@@ -6,8 +6,38 @@ import {
 
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { TRAINERS, TRAINER_CARDS, findTrainer } from './trainers/registry';
+import iconTaxiPro from './trainers/icon-taxi-pro.png';
+import iconSapar from './trainers/icon-sapar.png';
 
 const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
+
+/* Значок приложения или сайта, который отрабатывают в тренажёре.
+ *
+ * Карта лежит ЗДЕСЬ, а не в registry.js: реестр сценариев чистый (его читают
+ * тесты через node), а импорт картинки node выполнить не может. Незнакомый
+ * ключ — просто пустая витрина, тренажёр от этого не ломается. */
+const TRAINER_ICONS = {
+    'taxi-pro-avr': iconTaxiPro,
+    'sapar-site-avr': iconSapar,
+};
+
+/* Телефон боком со значком на экране — по образцу, который дал владелец.
+ *
+ * Место под него в карточке пустовало, а показать там надо ровно то, чего в
+ * тексте нет: КАКОЕ приложение человек увидит внутри. Рисуем корпус, а не
+ * вставляем готовый рендер: так значок ложится ровно на экран и модель живёт в
+ * тех же цветах, что учебный телефон в самом тренажёре. */
+const TrainerShowcase = ({ icon, app }) => (
+    <div className="wiki-trainer-showcase" aria-hidden="true">
+        <div className="wiki-trainer-showcase__phone">
+            <div className="wiki-trainer-showcase__screen">
+                <span className="wiki-trainer-showcase__notch" />
+                {icon && <img src={icon} alt="" loading="lazy" />}
+            </div>
+        </div>
+        <span className="wiki-trainer-showcase__caption">{app}</span>
+    </div>
+);
 
 /* Третья половина вкладки «Статьи»: тренажёры.
  *
@@ -103,7 +133,8 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                         const card = TRAINER_CARDS.find((c) => c.key === trainer.key);
                         const articles = usages?.[trainer.key] || [];
                         return (
-                            <article key={trainer.key} className={`${iosCard} flex flex-col gap-3 p-4`}>
+                            <article key={trainer.key} className={`${iosCard} flex gap-4 p-4`}>
+                              <div className="flex min-w-0 flex-1 flex-col gap-3">
                                 <header className="flex items-start gap-3">
                                     <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl
                                                     bg-indigo-50 text-indigo-600">
@@ -182,6 +213,9 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                                 >
                                     <PlayCircle size={15} /> Пройти тренажёр
                                 </button>
+                              </div>
+
+                              <TrainerShowcase icon={TRAINER_ICONS[trainer.key]} app={trainer.app} />
                             </article>
                         );
                     })}
