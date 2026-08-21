@@ -16,6 +16,7 @@ import {
 } from './ticketBody';
 import {
     attachmentKind, authorBadge, continuesRun, groupByDay, indexByTgId, messageSnippet, quoteOf,
+    shortAuthorName,
 } from './threadView';
 import {
     isOverdue, markTicketSeen, mergeTicketsById, previewAuthor, previewText,
@@ -338,9 +339,13 @@ const MessageBubble = ({
 }) => {
     const outgoing = message.direction === 'out';
     const note = message.direction === 'note';
-    // Кружок с инициалами — только у входящих: у своих реплик и так понятно,
-    // кто написал, а у заметки автора нет вовсе.
+    // Кружок с инициалами — только у входящих: сторону своей реплики держит
+    // цвет пузыря, а у заметки автора нет вовсе. Кто именно написал — подписано
+    // внутри пузыря, в том числе у своих: обращение ведут несколько человек, и
+    // «наша сторона» это не один и тот же сотрудник.
     const badge = !outgoing && !note ? authorBadge(message) : null;
+    // ФИО целиком в подпись не влезает — берём фамилию с именем.
+    const author = outgoing ? shortAuthorName(message.author_name) : message.author_name;
 
     return (
         <div id={`crm-msg-${message.id}`}
@@ -404,11 +409,16 @@ const MessageBubble = ({
                         </span>
                     </button>
                 )}
-                {!outgoing && message.author_name && !grouped && (
+                {author && !grouped && (
+                    /* Подпись у обеих сторон. На синем пузыре цвет из палитры
+                       не читается, поэтому там имя белёсое — различать по цвету
+                       на своей стороне всё равно некого. */
                     <div className={`mb-0.5 text-[11.5px] font-semibold ${
-                        note ? 'text-amber-700' : badge ? badge.tone : 'text-slate-600'
+                        note ? 'text-amber-700'
+                            : outgoing ? 'text-white/85'
+                                : badge ? badge.tone : 'text-slate-600'
                     }`}>
-                        {message.author_name}
+                        {author}
                     </div>
                 )}
                 {message.body

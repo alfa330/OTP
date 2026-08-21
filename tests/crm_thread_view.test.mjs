@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   AUTHOR_TONES, attachmentKind, authorBadge, authorInitials, authorKey, authorTone,
   continuesRun, dayKey, dayLabel, groupByDay, indexByTgId,
-  messageSnippet, quoteOf,
+  messageSnippet, quoteOf, shortAuthorName,
 } from '../src/components/crm/threadView.js';
 
 /* В нить обращения падает ВСЯ ветка обсуждения из группы: сотрудники отвечают
@@ -40,6 +40,13 @@ test('цитата берёт сообщение, на которое ответ
   assert.equal(quote.text, 'Документы не поступили');
   assert.equal(quote.author, 'Оператор');
   assert.equal(quote.missing, false);
+});
+
+test('цитату своего сообщения подписываем так же коротко, как пузырь', () => {
+  const mine = msg({ id: 1, tg_message_id: 100, direction: 'out',
+                     author_name: 'Сарсенова Айгуль Маратовна', body: 'Ждём ответа' });
+  const answer = msg({ id: 2, tg_message_id: 101, reply_to_tg_message_id: 100 });
+  assert.equal(quoteOf(answer, indexByTgId([mine, answer])).author, 'Сарсенова Айгуль');
 });
 
 test('обычное сообщение цитаты не имеет', () => {
@@ -151,4 +158,22 @@ test('серия — это тот же автор, та же сторона и 
   assert.equal(continuesRun(first, outgoing), false);
   // У самого первого сообщения нити предшественника нет.
   assert.equal(continuesRun(undefined, first), false);
+});
+
+/* Подпись СВОЕГО сообщения: у наших в базе ФИО целиком, а в пузырь идут
+ * фамилия с именем — иначе подпись переносится второй строкой. */
+
+test('от ФИО в подписи остаются фамилия и имя', () => {
+  assert.equal(shortAuthorName('Нурланов Асхат Бекзатович'), 'Нурланов Асхат');
+});
+
+test('короткое имя не режется и лишних пробелов не набирает', () => {
+  assert.equal(shortAuthorName('Гаухар'), 'Гаухар');
+  assert.equal(shortAuthorName('  Нурланов   Асхат  '), 'Нурланов Асхат');
+});
+
+test('автора без имени подписывать нечем — пустая строка, а не "undefined"', () => {
+  for (const empty of [null, undefined, '', '   ']) {
+    assert.equal(shortAuthorName(empty), '');
+  }
 });

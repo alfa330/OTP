@@ -13,8 +13,8 @@
 
 /* Палитра имён. Семь цветов, как в Telegram: больше — и они перестают
  * различаться, меньше — в переписке на пятерых двое окажутся одного цвета.
- * Цвет нужен только на светлом пузыре входящего: у исходящих имя не
- * показывается вовсе, там и так понятно, кто написал. */
+ * Цвет нужен только на светлом пузыре входящего: на синем пузыре своего
+ * сообщения имя подписано белым — там различать некого, сторона одна. */
 export const AUTHOR_TONES = [
     'text-rose-600', 'text-amber-600', 'text-emerald-600', 'text-sky-600',
     'text-violet-600', 'text-fuchsia-600', 'text-teal-600',
@@ -75,7 +75,10 @@ export const quoteOf = (message, index) => {
     if (found.id === message.id) return null;
     return {
         id: found.id,
-        author: found.author_name || (found.direction === 'out' ? 'Оператор' : null),
+        // Подписываем цитату так же, как сам пузырь: фамилия с именем. Иначе
+        // над коротким ответом висит ФИО целиком, а под ним — то же имя вдвое
+        // короче, и выглядит это как два разных человека.
+        author: shortAuthorName(found.author_name) || (found.direction === 'out' ? 'Оператор' : null),
         text: messageSnippet(found),
         missing: false,
     };
@@ -124,6 +127,16 @@ export const authorInitials = (name) => {
     const letters = words.slice(0, 2).map((word) => word[0]);
     return letters.join('').toUpperCase();
 };
+
+/* Подпись автора в пузыре своего сообщения. В базе у нас лежит ФИО целиком
+ * («Нурланов Асхат Бекзатович»), и целиком оно в подпись не годится: пузырь
+ * занимает три четверти колонки, подпись переносится второй строкой и отжимает
+ * сам текст. Берём первые два слова — фамилия с именем различают сотрудников,
+ * отчество не различает никого. */
+export const shortAuthorName = (name, words = 2) => String(name || '')
+    .trim().split(/\s+/).filter(Boolean)
+    .slice(0, words)
+    .join(' ');
 
 export const authorBadge = (message) => {
     const index = toneIndex(message);
