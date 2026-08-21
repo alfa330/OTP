@@ -1764,7 +1764,25 @@
     border-radius: 22px;
 }
 
-.wt-helper__leo { display: flex; justify-content: center; }
+/* Слот барса задаёт размер САМ, а не берёт его от рисунка внутри. Так надо
+   потому, что на время смены настроения в слоте лежат ДВА барса: старый гаснет,
+   новый проявляется. Если бы размер зависел от содержимого, колонка на каждом
+   шаге дёргалась бы вдвое, а замер пробежки (slotRef) уезжал вместе с высотой.
+   Пропорция — из viewBox рисунка. */
+.wt-helper__leo {
+    position: relative;
+    width: clamp(120px, 11vw, 176px);
+    aspect-ratio: 120 / 132;
+}
+
+.wt-helper__leo-layer {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    justify-content: center;
+}
+
+.wt-helper__leo-layer .wt-leo { width: 100%; }
 
 .wt-leo { width: clamp(120px, 11vw, 176px); height: auto; }
 
@@ -1790,6 +1808,8 @@
     border-radius: 3px;
     transform: translateX(-50%) rotate(45deg);
 }
+
+.wt-bubble__text { display: block; }
 
 .wt-bubble__who {
     display: block;
@@ -1878,7 +1898,13 @@
 .wt-side__progress { display: flex; flex-direction: column; gap: 8px; }
 
 .wt-side__percent { display: flex; align-items: baseline; gap: 2px; }
-.wt-side__percent b { font-size: 34px; font-weight: 650; line-height: 1; font-variant-numeric: tabular-nums; }
+.wt-side__percent b {
+    font-size: 34px;
+    font-weight: 650;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    transition: color 0.42s ease;
+}
 .wt-side__percent i { font-size: 16px; font-style: normal; font-weight: 600; color: var(--wt-mute); }
 
 .wt-bar {
@@ -1894,7 +1920,7 @@
     height: 100%;
     background: linear-gradient(90deg, var(--wt-accent), #7c86f5);
     border-radius: 999px;
-    transition: width 0.32s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: width 0.55s cubic-bezier(0.32, 0.72, 0.28, 1);
 }
 
 .wt-side__progress > span { font-size: 13px; font-weight: 600; color: var(--wt-ink-soft); }
@@ -1912,7 +1938,16 @@
     list-style: none;
 }
 
-.wt-steps li { display: flex; align-items: flex-start; gap: 9px; }
+/* Шаг переезжает по списку плавно: цвет строки, цвет и фон кружка меняются
+   переходом, а не подменой. Мгновенная подмена читалась как мигание — на
+   карточке одновременно гасла одна строка и загоралась другая, и заметить, КУДА
+   переехала отметка, было нельзя. */
+.wt-steps li {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    transition: color 0.42s ease, font-weight 0.42s ease;
+}
 
 .wt-steps li i {
     display: grid;
@@ -1926,9 +1961,11 @@
     color: var(--wt-mute);
     background: var(--wt-line-soft);
     border-radius: 999px;
+    transition: color 0.42s ease, background 0.42s ease, transform 0.42s cubic-bezier(0.32, 0.72, 0.28, 1);
 }
 
 .wt-steps li.is-current { color: var(--wt-ink); font-weight: 600; }
+.wt-steps li.is-current i { transform: scale(1.08); }
 .wt-steps li.is-current i { color: #fff; background: var(--wt-accent); }
 .wt-steps li.is-done { color: var(--wt-ink-soft); }
 .wt-steps li.is-done i { color: #fff; background: var(--wt-green); }
@@ -1999,7 +2036,7 @@
     50% { transform: rotate(-2deg); }
 }
 
-.wt-leo__tail { transform-origin: 86px 112px; animation: wt-tail 3.4s ease-in-out infinite; }
+.wt-leo__tail { transform-origin: 86px 112px; animation: wt-tail 4.6s ease-in-out infinite; }
 .wt-leo__head { transform-origin: 60px 84px; }
 /* Рот открывается ОТ ЛИНИИ ГУБ вниз, поэтому origin — верх собственного бокса.
    Раньше здесь стояло `transform-origin: 60px 80px` вместе с transform-box:
@@ -2011,18 +2048,28 @@
     transform-origin: center top;
 }
 
-.wt-leo--speak .wt-leo__head { animation: wt-nod 2.4s ease-in-out infinite; }
-.wt-leo--speak .wt-leo__mouth { animation: wt-talk 0.62s ease-in-out infinite; }
-.wt-leo--hint .wt-leo__paw { transform-origin: 92px 100px; animation: wt-wave 1.1s ease-in-out infinite; }
-.wt-leo--error .wt-leo__head { animation: wt-shake 0.42s ease-in-out 1; }
-.wt-leo--success .wt-leo__body { transform-origin: 60px 116px; animation: wt-hop 1.1s ease-in-out infinite; }
-.wt-leo--success .wt-leo__spark { animation: wt-twinkle 1.5s ease-in-out infinite; }
+/* Темп эмоций. Все длительности примерно вдвое больше прежних, и это правка по
+   замечанию владельца: барс «менял эмоции слишком быстро». Причина была не в
+   самой мимике, а в её частоте — рот открывался и закрывался трижды в секунду
+   (0.62s), голова кивала каждые две, лапка махала каждую. Рядом с этим текст
+   реплики читать было нельзя: в периферийном зрении постоянно что-то дёргалось,
+   и глаз уходил на движение вместо экрана телефона.
+   Бег (wt-leo--run выше) НЕ замедлен: у бегущего зверя лапы обязаны частить,
+   иначе он скользит, а не бежит. */
+.wt-leo--speak .wt-leo__head { animation: wt-nod 4.2s ease-in-out infinite; }
+.wt-leo--speak .wt-leo__mouth { animation: wt-talk 1.25s ease-in-out infinite; }
+.wt-leo--hint .wt-leo__paw { transform-origin: 92px 100px; animation: wt-wave 1.9s ease-in-out infinite; }
+/* Встряска — с задержкой: барс в этот момент ещё проявляется поверх прежнего
+   настроения, и без паузы половина движения проходит на прозрачном рисунке. */
+.wt-leo--error .wt-leo__head { animation: wt-shake 0.72s ease-in-out 0.22s 1; }
+.wt-leo--success .wt-leo__body { transform-origin: 60px 116px; animation: wt-hop 1.8s ease-in-out infinite; }
+.wt-leo--success .wt-leo__spark { animation: wt-twinkle 2.4s ease-in-out infinite; }
 .wt-leo__eyes {
     /* transform-box обязателен: без него transform-origin в SVG считается от
        начала координат всего рисунка, и глаза при «мигании» уезжают вбок. */
     transform-box: fill-box;
     transform-origin: center;
-    animation: wt-blink 6.2s infinite;
+    animation: wt-blink 7.6s infinite;
 }
 
 @keyframes wt-tail {
@@ -2032,12 +2079,12 @@
 
 @keyframes wt-nod {
     0%, 100% { transform: translateY(0) rotate(0deg); }
-    50% { transform: translateY(-1.5px) rotate(-1.4deg); }
+    50% { transform: translateY(-1.6px) rotate(-1.4deg); }
 }
 
 @keyframes wt-talk {
     0%, 100% { transform: scaleY(1); }
-    50% { transform: scaleY(0.62); }
+    50% { transform: scaleY(0.76); }
 }
 
 @keyframes wt-wave {

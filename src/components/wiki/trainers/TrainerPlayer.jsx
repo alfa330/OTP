@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { motion, useReducedMotion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { HelpCircle, RotateCcw, X } from 'lucide-react';
 
 import { APPLE_FONT } from '../../ui/ios';
@@ -193,6 +193,20 @@ export function TrainerPlayer({
     const EASE = [0.16, 1, 0.3, 1];
     const EASE_LEAVE = [0.4, 0, 1, 1];
 
+    /* Смена содержимого карточек — отдельная, НЕ такая же, как появление.
+     *
+     * Шаг меняет сразу три вещи: выражение барса, реплику и строку цели. Пока
+     * они переключались мгновенно, глаз получал три вспышки подряд и не успевал
+     * прочитать ни одну: человек нажимал, экран мигал, и приходилось искать
+     * заново, что изменилось. Теперь всё три уходят и приходят одной кривой и
+     * одной длительностью — смена читается как один плавный переход.
+     *
+     * Барсу нужен перекрёстный переход (старое настроение гаснет, новое
+     * проявляется поверх), тексту — простое проявление на месте: два слоя
+     * текста разной длины наложились бы друг на друга нечитаемой кашей. */
+    const SWAP = reduceMotion ? 0 : 0.42;
+    const SWAP_EASE = [0.32, 0.72, 0.28, 1];
+
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
     useEffect(() => { setRun(startRun(scenario)); }, [scenario]);
 
@@ -201,6 +215,8 @@ export function TrainerPlayer({
     const finished = isFinished(run);
     const said = speech(run);
     const percent = progressPercent(run);
+    const mood = finished ? 'success' : (MOOD[said.tone] || 'speak');
+    const goal = stepGoal(run);
 
     /* Функциональные обновления, а не tap(run, …): между нажатием и отрисовкой
        может прийти второе нажатие (двойной тап по кнопке телефона), и на
@@ -282,20 +298,57 @@ export function TrainerPlayer({
                     зверь окажется в двух местах сразу. */}
                 <div className="wt-helper__leo" ref={slotRef}
                     style={{ opacity: settled || leaving ? 1 : 0 }}>
-                    <SnowLeopard state={finished ? 'success' : (MOOD[said.tone] || 'speak')} />
+                    {/* Перекрёстный переход настроения. Слой абсолютный, размер
+                        держит сам слот — иначе на время перехода в колонке стояли
+                        бы два барса друг под другом, а замер пробежки (slotRef)
+                        уехал бы вместе с высотой. */}
+                    <AnimatePresence initial={false}>
+                        <motion.span
+                            key={mood}
+                            className="wt-helper__leo-layer"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: SWAP, ease: 'easeInOut' }}
+                        >
+                            <SnowLeopard state={mood} />
+                        </motion.span>
+                    </AnimatePresence>
                 </div>
                 <div className={`wt-bubble wt-bubble--${said.tone}`}>
                     <span className="wt-bubble__who">Барс</span>
-                    {/* aria-live: реплика меняется без перехода фокуса, и без
-                        объявления человек со скринридером не узнаёт, что нажал
-                        не туда. */}
-                    <p aria-live="polite">{withCodes(said.text, run.world.codes)}</p>
+                    {/* aria-live остаётся на постоянном узле: перевесить его на
+                        сменяемый абзац — значит потерять объявление, потому что
+                        скринридер следит за ИЗМЕНЕНИЯМИ внутри области, а не за
+                        её заменой. */}
+                    <p aria-live="polite">
+                        {/* key по тексту: новая реплика проявляется на месте.
+                            Уход не анимируем — старый абзац исчезает мгновенно,
+                            а новый уже занимает его место прозрачным, поэтому
+                            карточка меняет высоту один раз, а не дважды. */}
+                        <motion.span
+                            key={said.text}
+                            className="wt-bubble__text"
+                            initial={{ opacity: 0, y: 5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: SWAP, ease: SWAP_EASE }}
+                        >
+                            {withCodes(said.text, run.world.codes)}
+                        </motion.span>
+                    </p>
                 </div>
 
                 {!finished && (
                     <div className="wt-goal">
                         <span>Сейчас</span>
-                        <b>{stepGoal(run)}</b>
+                        <motion.b
+                            key={goal}
+                            initial={{ opacity: 0, y: 5 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: SWAP, ease: SWAP_EASE, delay: SWAP * 0.25 }}
+                        >
+                            {goal}
+                        </motion.b>
                     </div>
                 )}
 
