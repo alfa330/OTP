@@ -17,7 +17,8 @@ from crm import sapar, scenarios as sc
 
 def snapshot(**over):
     base = {'available': True, 'month_ready': True, 'month': 2, 'year': 2026,
-            'documents': [], 'driver_name': None, 'error': None, 'iin': '060606060606'}
+            'documents': [], 'park_documents': [], 'driver_name': None,
+            'error': None, 'iin': '060606060606'}
     base.update(over)
     return base
 
@@ -64,12 +65,22 @@ class VerdictTest(unittest.TestCase):
         self.assertIn('подписан', verdict['message'])
 
     def test_docs_missing_works_the_other_way_round(self):
-        """У «документы не поступили» логика зеркальная: документы ЕСТЬ —
-        значит жалоба не подтвердилась и разбираться надо с отображением."""
-        self.assertEqual(sc.sapar_verdict('sapar_docs_missing',
-                                          snapshot(documents=[document()]))['outcome'], sc.CLOSE)
+        """У «документы не поступили» логика зеркальная остальным тематикам.
+
+        Документов НЕТ — жалоба подтвердилась, идём по проверкам и пишем в
+        группу. Документы ЕСТЬ — они поступили, и вопрос уже не «почему их
+        нет», а «почему водитель их не видит»: мастер переводит в «Ошибку в
+        работе Sapar», а не закрывает обращение (просьба владельца 21.08.2026 —
+        закрытое обращение заставляло оператора начинать заново).
+        """
         self.assertEqual(sc.sapar_verdict('sapar_docs_missing',
                                           snapshot(documents=[]))['outcome'], sc.PASS)
+        found = sc.sapar_verdict('sapar_docs_missing', snapshot(documents=[document()]))
+        self.assertEqual(found['outcome'], sc.SWITCH)
+        self.assertEqual(found['switch_to'], 'sapar_service_error')
+        # Сначала обновить страницу — иначе перевод превратится в «завести
+        # второе обращение по тому же поводу».
+        self.assertIn('обновить страницу', found['message'])
 
     def test_status_topic_is_answered_without_the_group(self):
         """Вопрос тематики — «какой статус». На него есть машинный ответ."""
@@ -181,19 +192,48 @@ class ClientTest(unittest.TestCase):
             return FakeResponse(payload() if callable(payload) else payload)
         sapar.requests.request = fake
 
-    def test_documents_are_parsed_from_both_lists(self):
+    def test_documents_are_the_yandex_ones(self):
+        """Решают закрывающие документы Яндекса; АВР парка лежит отдельно."""
         self.answer(self.DOCUMENTS)
         state = sapar.driver_snapshot('880317351347', 7, 2026)
 
         self.assertTrue(state['available'])
-        self.assertEqual(len(state['documents']), 2)
+        self.assertEqual(len(state['documents']), 1)
         self.assertEqual(state['documents'][0]['status_label'], 'подписан')
         self.assertTrue(state['documents'][0]['signed'])
-        self.assertEqual(state['documents'][1]['status_label'], 'ожидает')
+        self.assertEqual(len(state['park_documents']), 1)
+        self.assertEqual(state['park_documents'][0]['status_label'], 'ожидает')
         self.assertEqual(state['driver_name'], 'Кенжебаев Бекет Маратбекулы')
         # Документы есть — значит месяц заведомо сформирован, второй запрос лишний.
         self.assertTrue(state['month_ready'])
         self.assertEqual(len(self.calls), 1)
+
+    def test_park_avr_alone_is_not_arrived_documents(self):
+        """Из-за этого раздел мог закрыть верную жалобу.
+
+        АВР парка приходит и тем, кому подписывать нечего: на выборке
+        21.08.2026 у 7 водителей из 25 с ArrivalStatus=NotArrived ручка всё
+        равно вернула строку АВР. Считать её документом — значит сказать
+        «документы есть» примерно четверти тех, у кого их нет, и закрыть
+        обращение «Документы не поступили» по верной жалобе.
+        """
+        def payload(*_args):
+            # Документов Яндекса нет — клиент спросит ещё и готовность месяца.
+            path = self.calls[-1]['url'] if self.calls else ''
+            if 'are-docs-ready-to-sign' in path:
+                return {'Response': {'AreDocsReadyForSign': True}, 'Code': 200}
+            return {'Response': {'YandexDocuments': [],
+                                 'TaxiParkDocuments': [{'AvrId': 2, 'Status': 'Active',
+                                                        'Name': 'Иванов И.', 'AvrSum': 0.0}]},
+                    'Code': 200}
+        self.answer(payload)
+        state = sapar.driver_snapshot('640516301600', 7, 2026)
+
+        self.assertEqual(state['documents'], [])
+        self.assertEqual(len(state['park_documents']), 1)
+        # И тематики видят именно «документов нет».
+        self.assertEqual(sc.sapar_verdict('sapar_sign_error', state)['outcome'], sc.SWITCH)
+        self.assertEqual(sc.sapar_verdict('sapar_docs_missing', state)['outcome'], sc.PASS)
 
     def test_iin_and_period_reach_the_service(self):
         self.answer(self.DOCUMENTS)
@@ -265,6 +305,14 @@ class SnapshotReachesTheGroupTest(unittest.TestCase):
                 'relogin_done': 'yes', 'docs_after_relogin': 'no'}
         base.update(over)
         return base
+
+    def test_park_avr_stays_out_of_the_group_message(self):
+        """АВР парка отвечает не на тот вопрос, ради которого пишут в группу."""
+        state = snapshot(documents=[], park_documents=[document('Active')])
+        answers = self.answers(**{sc.SAPAR_ANSWER_KEY: state})
+        body = sc.render_body('sapar_docs_missing', answers)
+        self.assertIn('Документы: за этот период не поступали', body)
+        self.assertNotIn('активен', body)
 
     def test_snapshot_becomes_a_block(self):
         answers = self.answers(**{sc.SAPAR_ANSWER_KEY: snapshot(documents=[document()])})

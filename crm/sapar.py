@@ -50,6 +50,18 @@ STATUS_LABELS = {
 # со строкой: у Яндекса и у парка это разные слова про одно и то же.
 SIGNED = ('Подписано', 'Signed')
 
+# ГЛАВНОЕ ПРО ЭТУ РУЧКУ. «Документы поступили водителю на подписание» — это
+# непустой YandexDocuments, и ТОЛЬКО он. TaxiParkDocuments (АВР парка) приходит
+# и тем, кому подписывать нечего: на выборке 21.08.2026 у 7 водителей из 25 без
+# документов ручка всё равно вернула строку АВР в статусе Active или Signed.
+#
+# Проверено на 75 водителях за 07.2026, разбитых по ArrivalStatus самого Sapar:
+# Arrived — документы Яндекса есть у всех 50, NotArrived — нет ни у одного из 25.
+# То есть `ArrivalStatus == Arrived` и «непустой YandexDocuments» — одно и то же,
+# а объединение двух списков дало бы «документы есть» примерно четверти тех, у
+# кого их нет. Для тематики «Документы не поступили» это означало бы закрытое
+# обращение по верной жалобе — поэтому решает только список Яндекса.
+
 # Готовность документов ПО ПАРКУ за месяц одна на всех, и спрашивать её на каждое
 # обращение незачем: в начале месяца её успевают спросить десятки операторов
 # подряд, и ответ у всех будет один.
@@ -148,18 +160,20 @@ def driver_snapshot(iin, month, year):
     """Что Sapar знает про водителя за период. Никогда не бросает исключение.
 
     Возвращает словарь:
-        available     — удалось ли спросить (False = Sapar молчит или не настроен)
-        month_ready   — сформированы ли документы за месяц по парку (True/False/None)
-        documents     — список документов водителя со статусами
-        driver_name   — ФИО из Sapar, если Sapar его знает
-        error         — текст отказа, если он был
+        available       — удалось ли спросить (False = Sapar молчит или не настроен)
+        month_ready     — сформированы ли документы за месяц по парку (True/False/None)
+        documents       — закрывающие документы Яндекса: ими и решается всё
+        park_documents  — АВР парка, СПРАВОЧНО (см. заметку про SIGNED выше)
+        driver_name     — ФИО из Sapar, если Sapar его знает
+        error           — текст отказа, если он был
 
-    documents = [] при available=True означает именно «документов нет», и на
-    этом можно строить решения. При available=False список пуст ровно потому,
-    что мы не спрашивали, и решать по нему нельзя — для того и флаг.
+    documents = [] при available=True означает именно «документы не поступили»,
+    и на этом можно строить решения. При available=False список пуст ровно
+    потому, что мы не спрашивали, и решать по нему нельзя — для того и флаг.
     """
     snapshot = {'available': False, 'month_ready': None, 'documents': [],
-                'driver_name': None, 'error': None, 'iin': str(iin or '').strip(),
+                'park_documents': [], 'driver_name': None, 'error': None,
+                'iin': str(iin or '').strip(),
                 'month': int(month), 'year': int(year)}
     if not configured():
         snapshot['error'] = 'Доступ к Sapar не настроен'
@@ -174,12 +188,14 @@ def driver_snapshot(iin, month, year):
 
     payload = payload or {}
     documents = [_document(row, 'yandex') for row in (payload.get('YandexDocuments') or [])]
-    documents += [_document(row, 'park') for row in (payload.get('TaxiParkDocuments') or [])]
+    park = [_document(row, 'park') for row in (payload.get('TaxiParkDocuments') or [])]
     snapshot['available'] = True
     snapshot['documents'] = documents
-    snapshot['driver_name'] = next((d['driver_name'] for d in documents if d['driver_name']), None)
-    # Готовность по парку спрашиваем только когда у водителя пусто: если
-    # документы у него есть, месяц заведомо сформирован, и второй запрос
+    snapshot['park_documents'] = park
+    snapshot['driver_name'] = next((d['driver_name'] for d in documents + park
+                                    if d['driver_name']), None)
+    # Готовность по парку спрашиваем только когда водителю ничего не поступило:
+    # если документы у него есть, месяц заведомо сформирован, и второй запрос
     # ничего не добавит.
     snapshot['month_ready'] = True if documents else month_documents_ready(month, year)
     return snapshot
