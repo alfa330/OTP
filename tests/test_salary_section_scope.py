@@ -36,7 +36,8 @@ class SalaryCatalogTests(unittest.TestCase):
         )
         self.assertEqual(
             re.findall(r"key: '([a-z_]+)'", self.catalog),
-            ["call", "chat", "converter", "tez_line", "tez_op", "op_osnova", "op_potok"],
+            ["call", "chat", "converter", "tez_line", "tez_op", "op_osnova", "op_potok",
+             "op_verificator", "op_yandex_reg"],
         )
 
     def test_ready_departments_and_types_are_derived(self):
