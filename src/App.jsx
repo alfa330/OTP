@@ -44479,7 +44479,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             onClick={(e) => handleSidebarViewNavigation(e, 'voice_trainer')}
                                             className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'voice_trainer' ? 'bg-blue-700' : ''}`}
                                         >
-                                            <FaIcon className="fas fa-microphone-lines"></FaIcon>
+                                            <FaIcon className="fas fa-microphone"></FaIcon>
                                             <span className="sidebar-text">Тренажёр</span>
                                         </button>
                                     </li>
