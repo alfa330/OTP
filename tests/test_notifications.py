@@ -980,15 +980,54 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
         start = self.DATABASE.index('def _init_bell_notify_schema_tx(self, cursor):')
         return self.DATABASE[start:self.DATABASE.index('def _init_amo_leads_schema_tx', start)]
 
+    # Таблицы, у которых обязан быть триггер колокола. Список жёсткий
+    # намеренно: он ловит удаление триггера у живого источника. Но одного его
+    # мало — см. второй тест ниже, он закрывает обратную сторону.
+    BELL_TRIGGER_TABLES = ('events', 'four_you_images', 'lms_notifications',
+                           'survey_assignments', 'wiki_ack_assignments',
+                           'tasks', 'task_action_reads', 'event_reads',
+                           'four_you_reads', 'birthday_reads', 'crm_tickets')
+
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""
         block = self._trigger_block()
-        for table in ('events', 'four_you_images', 'lms_notifications',
-                      'survey_assignments', 'wiki_ack_assignments',
-                      'tasks', 'task_action_reads', 'event_reads',
-                      'four_you_reads', 'birthday_reads',
-                      'crm_tickets'):
+        for table in self.BELL_TRIGGER_TABLES:
             self.assertIn("'%s'" % table, block)
+
+    def test_expected_list_covers_every_table_that_has_a_trigger(self):
+        """Обратная сторона: таблица с триггером, ВЫПАВШАЯ из списка выше.
+
+        Проверка сверху односторонняя — она ищет таблицы из списка в тексте
+        функции. Уберите таблицу ИЗ списка, и не упадёт ничего: тест просто
+        перестанет её проверять, ровно так же молча, как предупреждает его
+        собственный docstring.
+
+        Это не гипотеза. Строку `birthday_reads` пришлось разрешать руками при
+        переносе коммита между ветками (в одной стороне конфликта был
+        `task_assignees`, в другой — `birthday_reads`), и любое «взял одну
+        сторону целиком» унесло бы соседнюю таблицу, не покраснев ни одним
+        тестом. Поэтому ожидания сверяются с тем, что РЕАЛЬНО объявлено в
+        _init_bell_notify_schema_tx, в обе стороны.
+        """
+        # Множество, а не список: объявлений триггеров БОЛЬШЕ, чем таблиц —
+        # у survey_assignments и wiki_ack_assignments их по два (отдельно на
+        # INSERT и на UPDATE). Без дедупликации assertEqual сравнивал бы 13 с
+        # 11 и падал бы на ровном месте.
+        #
+        # И \s* после открывающей скобки обязателен: четыре объявления
+        # написаны с переносом строки после неё, и шаблон без \s* терял
+        # crm_tickets — обратная проверка тогда «не находила» существующий
+        # триггер и врала бы в другую сторону.
+        block = self._trigger_block()
+        declared = {m.group(1) for m in re.finditer(
+            r"\(\s*'trg_\w+',\s*'(\w+)'", block)}
+        self.assertTrue(declared, 'не нашёл ни одного объявления триггера — '
+                                  'изменился формат списка, проверка ослепла')
+        self.assertEqual(
+            declared, set(self.BELL_TRIGGER_TABLES),
+            'список ожидаемых таблиц разошёлся с объявленными триггерами: '
+            'лишняя — триггера нет, недостающая — источник без проверки',
+        )
 
     def test_watermark_updates_wake_only_the_same_user(self):
         block = self._trigger_block()
