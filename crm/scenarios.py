@@ -118,8 +118,15 @@ def rule(when, outcome, message, **extra):
 STEP_IIN = step('iin', 'ИИН водителя', IIN,
                 hint='Ровно 12 цифр')
 STEP_PERIOD = step('period', 'Отчётный период', PERIOD,
-                   hint='Месяц и год. Проверьте период сами и приложите скриншот, '
-                        'где видно, что комиссия парка снималась именно в нём')
+                   # Про «за», а не «в», написано первым не случайно: документы
+                   # за июль приходят в августе, и оператор, спросивший водителя
+                   # «за какой месяц», слышит в ответ месяц ожидания. Дальше
+                   # предпроверка честно отвечает «за август документов нет», и
+                   # это выглядит поломкой сервиса.
+                   hint='Месяц, ЗА который документы, а не месяц, когда их ждут: '
+                        'документы за июль приходят в августе. Проверьте период сами '
+                        'и приложите скриншот, где видно, что комиссия парка '
+                        'снималась именно в нём')
 # Было одно свободное поле «Парк или регион», и оно делало двойную работу:
 # операторы писали в него то «iTaxi», то «iTaxi, Алматы», то «ай» и «ноль»
 # (это реальные значения с прода). Разделили на два вопроса и оба перевели на
@@ -784,9 +791,9 @@ def get(key):
 
 _MONTH_NOT_READY = (
     CLOSE,
-    'Документы за {period} по парку ещё не сформированы — Яндекс их не выгрузил. '
-    'Это касается всех водителей, а не только этого: объясните водителю, что нужно '
-    'дождаться выгрузки. Обращение в группу не отправляем.',
+    'Документы за {period} по парку ещё не сформированы: этот месяц не закончился, '
+    'и документов за него нет ни у одного водителя.{open_hint} '
+    'Обращение в группу не отправляем.',
 )
 
 SAPAR_PRECHECK = {
@@ -859,6 +866,27 @@ def sapar_period_text(snapshot):
         return 'выбранный период'
 
 
+def sapar_open_period_hint(snapshot):
+    """Подсказка про период, который подписывают сейчас. Пусто — если нечего сказать.
+
+    Главная путаница этой предпроверки: «отчётный период» — это месяц, ЗА
+    который документы, а водитель называет месяц, В КОТОРОМ он их ждёт.
+    Документы за июль приходят в августе, и «за август документов нет» звучит
+    как поломка, пока не сказано, что сейчас подписывают июль.
+    """
+    period = (snapshot or {}).get('open_period')
+    if not period:
+        return ''
+    text = ' Сейчас подписываются документы за %s' % sapar_period_text(period)
+    documents = period.get('documents') or []
+    if documents:
+        statuses = ITEM_SEP.join(dict.fromkeys(
+            d.get('status_label') or 'статус неизвестен' for d in documents))
+        return text + (' — у водителя они есть (%s). Уточните, за какой отчётный '
+                       'период он ждёт документы.' % statuses)
+    return text + ' — у водителя их там тоже нет.'
+
+
 def sapar_statuses_text(snapshot):
     """Статусы документов одной строкой, без повторов и в порядке появления."""
     seen, out = set(), []
@@ -890,7 +918,8 @@ def sapar_verdict(scenario_key, snapshot):
         if not template:
             return {'outcome': outcome, 'message': None, 'switch_to': None}
         message = template.format(period=sapar_period_text(snapshot),
-                                  statuses=sapar_statuses_text(snapshot))
+                                  statuses=sapar_statuses_text(snapshot),
+                                  open_hint=sapar_open_period_hint(snapshot))
         return {'outcome': outcome, 'message': message,
                 'switch_to': rule_item[2] if len(rule_item) > 2 else None}
     return {'outcome': PASS, 'message': None, 'switch_to': None}

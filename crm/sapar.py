@@ -191,6 +191,8 @@ def driver_snapshot(iin, month, year):
         available       — удалось ли спросить (False = Sapar молчит или не настроен)
         month_ready     — выгружены ли документы за месяц по парку.
                           False только про незакончившийся месяц, None = не знаем
+        open_period     — период, который подписывают СЕЙЧАС, и документы
+                          водителя в нём; None, если это и есть выбранный период
         documents       — закрывающие документы Яндекса: ими и решается всё
         park_documents  — АВР парка, СПРАВОЧНО (см. заметку про SIGNED выше)
         driver_name     — ФИО из Sapar, если Sapar его знает
@@ -201,8 +203,8 @@ def driver_snapshot(iin, month, year):
     потому, что мы не спрашивали, и решать по нему нельзя — для того и флаг.
     """
     snapshot = {'available': False, 'month_ready': None, 'documents': [],
-                'park_documents': [], 'driver_name': None, 'error': None,
-                'iin': str(iin or '').strip(),
+                'park_documents': [], 'open_period': None, 'driver_name': None,
+                'error': None, 'iin': str(iin or '').strip(),
                 'month': int(month), 'year': int(year)}
     if not configured():
         snapshot['error'] = 'Доступ к Sapar не настроен'
@@ -227,4 +229,32 @@ def driver_snapshot(iin, month, year):
     # документы у него есть, месяц заведомо выгружен, и второй запрос ничего не
     # добавит.
     snapshot['month_ready'] = True if documents else _documents_expected(month, year)
+    if not documents and snapshot['month_ready'] is False:
+        snapshot['open_period'] = _open_period_for(snapshot['iin'], month, year)
     return snapshot
+
+
+def _open_period_for(iin, month, year):
+    """Период, который подписывают сейчас, и документы водителя в нём.
+
+    Зачем. `Month/Year` в API — это ОТЧЁТНЫЙ период, а не месяц получения:
+    документы за июль приходят и подписываются в августе (в чек-листе ТЗ это
+    прямо сказано — «15–31 числа месяца»). Оператор же выбирает месяц, в
+    котором водитель ждёт документы, и получает «за август документов нет» —
+    формально верно и совершенно непонятно.
+
+    Поэтому, когда за выбранный месяц пусто и месяц ещё не закончился, мы
+    смотрим предыдущий: если подписание за него идёт прямо сейчас, оператору
+    показывается «сейчас подписывают июль, и там документы есть».
+    """
+    previous = (int(month) - 1) or 12
+    previous_year = int(year) - 1 if int(month) == 1 else int(year)
+    if not signing_period_open(previous, previous_year):
+        return None
+    payload, error = _call('/taxipark-api/get-driver-documents-by-iin',
+                           body={'DriverIin': iin, 'Month': previous, 'Year': previous_year})
+    if error:
+        return None
+    documents = [_document(row, 'yandex')
+                 for row in ((payload or {}).get('YandexDocuments') or [])]
+    return {'month': previous, 'year': previous_year, 'documents': documents}

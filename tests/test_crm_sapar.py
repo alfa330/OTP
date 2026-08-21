@@ -151,8 +151,12 @@ class FakeResponse(object):
         return self._payload
 
 
-class ClientTest(unittest.TestCase):
-    """Разбор ответа Sapar. Формат снят с живого API 21.08.2026."""
+class SaparClientCase(unittest.TestCase):
+    """Обвязка: фальшивый requests и токен. Своих проверок не несёт.
+
+    Отдельным классом, а не наследованием от набора тестов: иначе каждый
+    наследник прогонял бы ещё и все тесты родителя.
+    """
 
     DOCUMENTS = {
         'Response': {
@@ -191,6 +195,13 @@ class ClientTest(unittest.TestCase):
             self.calls.append({'method': method, 'url': url, **kwargs})
             return FakeResponse(payload() if callable(payload) else payload)
         sapar.requests.request = fake
+
+    def paths(self):
+        return [call['url'].split('/')[-1].split('?')[0] for call in self.calls]
+
+
+class ClientTest(SaparClientCase):
+    """Разбор ответа Sapar. Формат снят с живого API 21.08.2026."""
 
     def test_documents_are_the_yandex_ones(self):
         """Решают закрывающие документы Яндекса; АВР парка лежит отдельно."""
@@ -243,19 +254,23 @@ class ClientTest(unittest.TestCase):
         self.assertIn('get-driver-documents-by-iin', self.calls[0]['url'])
         self.assertTrue(self.calls[0]['headers']['Authorization'].startswith('Bearer '))
 
-    def test_empty_answer_asks_whether_the_month_is_ready(self):
+    def test_empty_answer_asks_the_park_about_the_month(self):
         def payload(*_args):
             path = self.calls[-1]['url'] if self.calls else ''
             if 'are-docs-ready-to-sign' in path:
                 return {'Response': {'AreDocsReadyForSign': False}, 'Code': 200}
             return {'Response': {'YandexDocuments': [], 'TaxiParkDocuments': []}, 'Code': 200}
         self.answer(payload)
-        state = sapar.driver_snapshot('000000000000', 8, 2026)
+        state = sapar.driver_snapshot('000000000000', 12, 2099)
 
         self.assertTrue(state['available'])
         self.assertEqual(state['documents'], [])
         self.assertIs(state['month_ready'], False)
-        self.assertEqual(len(self.calls), 2)
+        # Документы водителя → месяц выбранный → месяц предыдущий (не идёт ли
+        # подписание за него). Больше ничего не спрашиваем.
+        self.assertEqual(self.paths(),
+                         ['get-driver-documents-by-iin', 'are-docs-ready-to-sign',
+                          'are-docs-ready-to-sign'])
 
     def test_park_answer_is_asked_once_for_everyone(self):
         """Ответ по парку один на всех, и в начале месяца его спрашивают
@@ -294,7 +309,7 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
-class ClosedPeriodTest(ClientTest):
+class ClosedPeriodTest(SaparClientCase):
     """Флаг `are-docs-ready-to-sign` — про ОТКРЫТОЕ подписание, а не про выгрузку.
 
     Замер 21.08.2026: `true` только у июля, при этом документы за июнь есть у
@@ -402,3 +417,67 @@ class SnapshotReachesTheGroupTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OpenPeriodHintTest(SaparClientCase):
+    """Отчётный период — месяц, ЗА который документы, а не месяц ожидания.
+
+    Документы за июль приходят и подписываются в августе. Оператор спрашивает
+    водителя «за какой месяц», слышит «за август» — и получает «за август
+    документов нет». Формально верно и выглядит поломкой сервиса, поэтому в
+    ответе обязано быть сказано, какой период подписывают сейчас.
+    """
+
+    def setUp(self):
+        super(OpenPeriodHintTest, self).setUp()
+        self._real_today = sapar._today
+        import datetime
+        sapar._today = lambda: datetime.date(2026, 8, 21)
+
+    def tearDown(self):
+        sapar._today = self._real_today
+        super(OpenPeriodHintTest, self).tearDown()
+
+    def answer_august_empty_july_signed(self):
+        def payload(*_args):
+            call = self.calls[-1] if self.calls else {}
+            path, body = call.get('url', ''), call.get('json') or {}
+            if 'are-docs-ready-to-sign' in path:
+                return {'Response': {'AreDocsReadyForSign':
+                                     (call.get('params') or {}).get('month') == 7},
+                        'Code': 200}
+            if body.get('Month') == 7:
+                return {'Response': {'YandexDocuments': [
+                    {'ServiceId': 1, 'DriverIin': body['DriverIin'], 'DriverFio': 'Иванов И.',
+                     'Status': 'Подписано', 'Sum': 1.0}], 'TaxiParkDocuments': []}, 'Code': 200}
+            return {'Response': {'YandexDocuments': [], 'TaxiParkDocuments': []}, 'Code': 200}
+        self.answer(payload)
+
+    def test_snapshot_carries_the_period_being_signed_now(self):
+        self.answer_august_empty_july_signed()
+        state = sapar.driver_snapshot('060606060606', 8, 2026)
+
+        self.assertIs(state['month_ready'], False)
+        self.assertEqual(state['open_period']['month'], 7)
+        self.assertEqual(len(state['open_period']['documents']), 1)
+
+    def test_message_names_it_instead_of_a_bare_refusal(self):
+        self.answer_august_empty_july_signed()
+        state = sapar.driver_snapshot('060606060606', 8, 2026)
+        message = sc.sapar_verdict('sapar_docs_missing', state)['message']
+
+        self.assertIn('август 2026', message)
+        self.assertIn('июль 2026', message)
+        self.assertIn('у водителя они есть', message)
+        self.assertNotIn('{', message)
+
+    def test_closed_month_asks_nothing_extra(self):
+        """Про прошлый закрытый месяц подсказка не нужна и не запрашивается."""
+        self.answer_august_empty_july_signed()
+        state = sapar.driver_snapshot('060606060606', 6, 2026)
+        self.assertIsNone(state['open_period'])
+        self.assertIsNone(state['month_ready'])
+
+    def test_the_period_field_warns_about_the_trap(self):
+        """Подсказка у вопроса — первая линия обороны от этой путаницы."""
+        self.assertIn('ЗА который', sc.STEP_PERIOD['hint'])
