@@ -248,7 +248,7 @@ export class VoiceLink {
      * Произносит текст: читает SSE от нашего сервера и играет куски по мере
      * прихода. Возвращает замеры, включая слышимую паузу.
      */
-    async speak(text, { turnId = null, since = 0 } = {}) {
+    async speak(text, { turnId = null, since = 0, sessionId = null } = {}) {
         this.speaking = true;
         this.playAt = 0;
         let firstAudibleMs = null;
@@ -257,7 +257,7 @@ export class VoiceLink {
         const response = await fetch(`${this.apiBaseUrl}/api/trainer/speak`, {
             method: 'POST',
             headers: { ...this.headers(), 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, turn_id: turnId }),
+            body: JSON.stringify({ text, turn_id: turnId, session_id: sessionId }),
         });
         if (!response.ok || !response.body) {
             this.speaking = false;

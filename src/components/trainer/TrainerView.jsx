@@ -174,7 +174,9 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
     const speak = useCallback(async (text, turnId, since) => {
         setPhase('speaking');
         try {
-            const result = await linkRef.current.speak(text, { turnId, since });
+            const result = await linkRef.current.speak(text, {
+                turnId, since, sessionId: sessionRef.current,
+            });
             if (result?.voice_to_voice_ms && turnId) {
                 setTurns((prev) => prev.map((t) => (t.id === turnId
                     ? { ...t, pace_ms: result.voice_to_voice_ms } : t)));

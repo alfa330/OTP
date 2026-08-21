@@ -223,11 +223,23 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         payload = _body()
         text = (payload.get('text') or '').strip()[:MAX_TEXT]
         turn_id = payload.get('turn_id')
+        session_id = payload.get('session_id')
         if not text:
             return jsonify({'error': 'нечего произносить'}), 400
 
         model = env('TRAINER_LIVE_MODEL', 'gemini-3.1-flash-live-preview')
         api_key = env('GEMINI_API_KEY')
+        # Голос берём из сессии, а не из тела запроса: иначе его можно было бы
+        # подменить из браузера. Проверка по списку — там только мужские голоса,
+        # отобранные замером основного тона.
+        voice = scenarios.MENTOR_VOICE
+        if session_id:
+            with db._get_cursor() as cursor:
+                cursor.execute('SELECT tts_voice FROM trainer_sessions WHERE id = %s AND user_id = %s',
+                               (session_id, user['id']))
+                row = cursor.fetchone()
+            if row and row[0] in scenarios.MALE_VOICES:
+                voice = row[0]
 
         def generate():
             import websocket  # локальный импорт: нужен только этой ручке
@@ -242,7 +254,11 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     f'BidiGenerateContent?key={api_key}', timeout=60)
                 socket.send(json.dumps({'setup': {
                     'model': f'models/{model}',
-                    'generationConfig': {'responseModalities': ['AUDIO']}}}))
+                    'generationConfig': {
+                        'responseModalities': ['AUDIO'],
+                        'speechConfig': {'voiceConfig': {
+                            'prebuiltVoiceConfig': {'voiceName': voice}}},
+                    }}}))
                 socket.send(json.dumps({'clientContent': {
                     'turns': [{'role': 'user',
                                'parts': [{'text': scenarios.SAY_EXACTLY + text}]}],
@@ -333,7 +349,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                  'stt-rt-v5',
                  _driver_provider(), _driver_model(),
                  env('TRAINER_LIVE_MODEL', 'gemini-3.1-flash-live-preview'),
-                 env('TRAINER_TTS_VOICE', 'Kore'),
+                 (scenario or {}).get('voice') if scenario
+                 else scenarios.MENTOR_VOICE,
                  json.dumps(RATES_USD, ensure_ascii=False),
                  json.dumps(payload.get('client') or {}, ensure_ascii=False)))
             row = cursor.fetchone()

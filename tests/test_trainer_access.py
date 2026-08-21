@@ -174,5 +174,44 @@ class ScenarioTest(unittest.TestCase):
         self.assertIn('НИКОГДА не помогаешь', scenarios.COMMON)
 
 
+
+class VoiceTest(unittest.TestCase):
+    """Голос собеседника — мужской у ВСЕХ персонажей.
+
+    Пол голосов Gemini в документации не указан, поэтому набор отобран замером
+    основного тона (22.08.2026). Проверка была не лишней: Fenrir при мужском
+    имени дал 229 Гц, а прежний дефолт Kore — 167 Гц, то есть водитель говорил
+    женским голосом.
+    """
+
+    def test_every_scenario_speaks_with_a_male_voice(self):
+        from voice_trainer import scenarios
+
+        for key, scenario in scenarios.SCENARIOS.items():
+            voice = scenario.get('voice')
+            self.assertIn(voice, scenarios.MALE_VOICES,
+                          f'у сценария {key} голос {voice} не из мужского набора')
+
+    def test_mentor_voice_is_male_too(self):
+        from voice_trainer import scenarios
+
+        self.assertIn(scenarios.MENTOR_VOICE, scenarios.MALE_VOICES)
+
+    def test_male_set_stays_below_the_female_range(self):
+        """Порог, а не список имён: если кто-то добавит голос с высоким тоном,
+        тест обязан упасть, а не молча пропустить его в набор."""
+        from voice_trainer import scenarios
+
+        for voice, f0 in scenarios.MALE_VOICES.items():
+            self.assertLess(f0, 160, f'{voice}: {f0} Гц — это не мужской диапазон')
+
+    def test_scenarios_use_distinct_voices(self):
+        """Персонажи должны различаться на слух, иначе сценарии сливаются."""
+        from voice_trainer import scenarios
+
+        voices = [s['voice'] for s in scenarios.SCENARIOS.values()]
+        self.assertEqual(len(voices), len(set(voices)))
+
+
 if __name__ == '__main__':
     unittest.main()
