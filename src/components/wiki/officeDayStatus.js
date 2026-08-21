@@ -17,7 +17,9 @@
  * 'manual' против 'auto'.
  */
 
-import { officeStatusOn } from './officeSchedule';
+// С расширением: модуль читают и тесты через node --test, а там ESM без
+// расширения не разрешается (carMatch.js импортирует так же).
+import { officeStatusOn } from './officeSchedule.js';
 
 export const DAY_STATE_LABELS = {
     open: 'Открыт',
@@ -98,17 +100,55 @@ export const formatDay = (dayISO) => {
     return found ? `${found[3]}.${found[2]}.${found[1]}` : '—';
 };
 
+/** Отметка времени сервера → '19.08.2026'. День ('2026-08-19') и время
+ *  ('2026-08-19T23:45:02') принимаются одинаково: «обновлено» приезжает с
+ *  минутами, а день недели — без, и звать для этого две функции незачем. */
+export const formatStamp = (iso) => formatDay(String(iso || '').slice(0, 10));
+
+/** То же с минутами: '19.08.2026, 23:45'. Зоны у отметки нет — сервер пишет
+ *  её сразу по Алматы, и переводить время браузера было бы ошибкой. */
+export const formatStampTime = (iso) => {
+    const text = String(iso || '').trim();
+    const day = formatStamp(text);
+    if (day === '—') return '—';
+    const time = /T(\d{2}):(\d{2})/.exec(text);
+    return time ? `${day}, ${time[1]}:${time[2]}` : day;
+};
+
+/** Откуда взялось состояние строки — расшифровка source для колонки
+ *  «Обновлено»: без неё дата не отвечает на вопрос «кто это записал». */
+export const DAY_SOURCE_LABELS = {
+    record: 'отметка дежурного',
+    snapshot: 'ночной снимок',
+    schedule: 'правка справочника',
+};
+
 /**
  * Статус офиса за день.
- * { state, label, note, source, recordedOn, from, until }
+ * { state, label, note, source, recordedOn, updatedAt, from, until }
  *
  * source: 'record' — отметка человека, 'snapshot' — ночной снимок,
- * 'schedule' — расчёт по графику (тогда recordedOn пустой: за этот день ничего
- * не фиксировали, и дата «обновлено» была бы выдумкой).
+ * 'schedule' — расчёт по графику.
+ *
+ * recordedOn — ЗА какой день запись, updatedAt — КОГДА данные строки последний
+ * раз меняли. Это и есть колонка ТЗ «Обновлено», и она не может быть пустой у
+ * работающего офиса: даже когда за день ничего не отмечали, состояние взято из
+ * графика, а график лежит в записи офиса — значит, дата правки записи и есть
+ * дата актуальности строки. Раньше сюда уезжал recordedOn, то есть колонка
+ * повторяла выбранную в календаре дату, а у большинства строк стоял прочерк.
+ *
+ * Единственный прочерк, который остаётся, — «офиса в городе нет» (буква п. 4.3
+ * ТЗ): обновлять там нечего.
  */
 export function officeDayStatus(office, dayISO) {
     if (office?.no_office) {
-        return { state: 'absent', label: DAY_STATE_LABELS.absent, source: 'record', recordedOn: null };
+        return {
+            state: 'absent',
+            label: DAY_STATE_LABELS.absent,
+            source: 'record',
+            recordedOn: null,
+            updatedAt: null,
+        };
     }
 
     const day = office?.day;
@@ -119,18 +159,26 @@ export function officeDayStatus(office, dayISO) {
             note: day.note || null,
             source: day.source === 'manual' ? 'record' : 'snapshot',
             recordedOn: day.recorded_on || null,
+            // Отметка старее правки справочника не бывает: её и ставят поверх
+            // графика. Но если сервер отметку отдал без времени (старые строки
+            // до появления recorded_at), падать на прочерк незачем.
+            updatedAt: day.recorded_at || office?.updated_at || null,
         };
     }
 
     const status = officeStatusOn(office?.schedule, dayISO);
-    if (status.state === 'none') {
-        return { state: 'none', label: DAY_STATE_LABELS.none, source: 'schedule', recordedOn: null };
-    }
-    return {
-        state: status.state,
-        label: DAY_STATE_LABELS[status.state],
+    const base = {
         source: 'schedule',
         recordedOn: null,
+        updatedAt: office?.updated_at || null,
+    };
+    if (status.state === 'none') {
+        return { ...base, state: 'none', label: DAY_STATE_LABELS.none };
+    }
+    return {
+        ...base,
+        state: status.state,
+        label: DAY_STATE_LABELS[status.state],
         from: status.from,
         until: status.until,
     };

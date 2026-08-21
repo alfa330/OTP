@@ -380,26 +380,6 @@ export default function WikiOffices({ base, headers, showToast }) {
         return order.map((key) => ({ city: key, items: byCity.get(key) }));
     }, [visible, grouped]);
 
-    /* Заголовок города — только там, где в городе больше одного офиса.
-       Карточка стала короткой (название, адрес, статус), и у города с
-       единственным офисом заголовок повторял её первую строку слово в слово:
-       «Актобе» над «Актобе». Города-одиночки идут подряд одной сеткой — иначе
-       в раскладке «две в ряд» каждый занимал бы целый ряд под одну карточку. */
-    const blocks = useMemo(() => {
-        if (!groups) return null;
-        const out = [];
-        groups.forEach((group) => {
-            if (group.items.length > 1) {
-                out.push({ city: group.city, items: group.items });
-                return;
-            }
-            const last = out[out.length - 1];
-            if (last && !last.city) last.items.push(group.items[0]);
-            else out.push({ city: null, items: [...group.items] });
-        });
-        return out;
-    }, [groups]);
-
     // Одна карточка в ряд или две — выбор человека, а не порог экрана: прежняя
     // сетка включала вторую колонку сама от 2xl и никого не спрашивала. На узком
     // экране колонка всё равно одна: две по 300 px нечитаемы.
@@ -596,6 +576,8 @@ export default function WikiOffices({ base, headers, showToast }) {
             {!loading && visible.length > 0 && view === 'table' && (
                 <OfficeTable
                     offices={visible}
+                    groups={groups}
+                    officeCount={officeCount}
                     dayISO={dayISO}
                     isToday={isToday}
                     canManage={canManage}
@@ -608,34 +590,41 @@ export default function WikiOffices({ base, headers, showToast }) {
             )}
 
             {!loading && visible.length > 0 && view !== 'table' && (
-                blocks
+                groups
                     /* Между городами воздуха больше, чем между карточками внутри
                        города: одинаковый отступ и делал список сплошным, а
-                       заголовок города читался как подпись к первой карточке. */
+                       заголовок города читался как подпись к первой карточке.
+                       Заголовок стоит у КАЖДОГО города, даже если офис в нём
+                       один: сорок пять карточек без ровного деления и есть та
+                       самая «непонятно, где какой город». Города-одиночки
+                       пробовали пускать одной сеткой с городом подписью на
+                       карточке — подпись в 11 пикселей рядом с заголовком в 20
+                       читалась как другой уровень, а не как тот же. */
                     ? <div className="space-y-5">
-                        {blocks.map((block) => (block.city ? (
-                            <section key={`city:${block.city}`} className="space-y-2.5">
+                        {groups.map((group) => (
+                            <section key={group.city} className="space-y-2.5">
                                 <div className="flex items-baseline gap-3">
                                     <h3 className="text-[20px] font-semibold leading-none tracking-tight text-slate-900">
-                                        {block.city}
+                                        {group.city}
                                     </h3>
-                                    <span className="shrink-0 text-[12.5px] font-medium tabular-nums text-slate-400">
-                                        {officeCount(block.items.length)}
-                                    </span>
+                                    {/* Записи «офиса в городе нет» в счёт не идут:
+                                        «1 офис» над карточкой «Офиса в городе
+                                        нет» — прямое противоречие. */}
+                                    {group.items.some((office) => !office.no_office) && (
+                                        <span className="shrink-0 text-[12.5px] font-medium tabular-nums text-slate-400">
+                                            {officeCount(group.items.filter((office) => !office.no_office).length)}
+                                        </span>
+                                    )}
                                     {/* Линия до правого края: карточки заполнены
                                         только слева, и без неё граница города
                                         читалась лишь в первой трети ширины. */}
                                     <div className="h-px min-w-6 flex-1 bg-slate-200" />
                                 </div>
                                 <div className={grid}>
-                                    {block.items.map((office) => renderCard(office, false))}
+                                    {group.items.map((office) => renderCard(office, false))}
                                 </div>
                             </section>
-                        ) : (
-                            <div key={`plain:${block.items[0].id}`} className={grid}>
-                                {block.items.map((office) => renderCard(office, true))}
-                            </div>
-                        )))}
+                        ))}
                       </div>
                     : <div className={grid}>{visible.map((office) => renderCard(office, true))}</div>
             )}

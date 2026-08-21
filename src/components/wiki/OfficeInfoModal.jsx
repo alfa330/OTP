@@ -8,7 +8,9 @@ import {
 } from '../ui/ios';
 import OfficeMap from './OfficeMap';
 import { OfficeStatusBadge } from './officeBadges';
-import { formatDay, officeDayStatus } from './officeDayStatus';
+import {
+    DAY_SOURCE_LABELS, formatDay, formatStampTime, officeDayStatus,
+} from './officeDayStatus';
 import { breakLines, dayHoursOn, scheduleLines } from './officeSchedule';
 
 /* Всё про один офис — по нажатию на его адрес.
@@ -123,6 +125,16 @@ export default function OfficeInfoModal({
                             {status.recordedOn && (
                                 <span className="text-slate-400"> · отметка на {formatDay(status.recordedOn)}</span>
                             )}
+                        </p>
+                    )}
+
+                    {/* Свежесть данных — здесь с минутами и источником: в
+                        таблице на это есть только колонка с датой. */}
+                    {status.updatedAt && (
+                        <p className="mt-2 text-[12.5px] tabular-nums text-slate-400">
+                            обновлено {formatStampTime(status.updatedAt)}
+                            {DAY_SOURCE_LABELS[status.source]
+                                && ` · ${DAY_SOURCE_LABELS[status.source]}`}
                         </p>
                     )}
                 </Panel>

@@ -25,6 +25,7 @@
   "test:wiki-section-grants": "node --test tests/wiki_section_grants.test.mjs",
   "test:wiki-section-access": "node --test tests/wiki_section_access_render.test.mjs",
     "test:wiki-office-schedule": "node --test tests/wiki_office_schedule.test.mjs",
+    "test:wiki-office-day": "node --test tests/wiki_office_day_status.test.mjs",
     "test:wiki-park-points": "node --test tests/wiki_park_points.test.mjs",
     "test:wiki-trainer": "node --test tests/wiki_trainer_runner.test.mjs",
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",

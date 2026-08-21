@@ -354,17 +354,33 @@ def schedule_state_on(schedule, day):
     return 'open' if normalized.get(DAY_CODES[day.weekday()]) else 'closed'
 
 
+def _day_payload(state, note, source, day, recorded_at):
+    """Статус дня для клиента.
+
+    Два поля про время, и путать их нельзя: recorded_on — ЗА какой день запись
+    («был закрыт 19 августа»), recorded_at — КОГДА её сделали. Колонка ТЗ
+    «Обновлено» — про второе; раньше в неё уезжало первое, и она повторяла
+    выбранную в календаре дату вместо того, чтобы говорить о свежести данных.
+    """
+    return {
+        'state': state,
+        'note': note,
+        'source': source,
+        'recorded_on': day.isoformat() if day else None,
+        'recorded_at': recorded_at.isoformat() if recorded_at else None,
+    }
+
+
 def read_office_day(cursor, office_id, day):
     cursor.execute(
-        'SELECT state, note, source, day FROM wiki_office_days '
+        'SELECT state, note, source, day, recorded_at FROM wiki_office_days '
         ' WHERE office_id = %s AND day = %s::date',
         (office_id, day),
     )
     row = cursor.fetchone()
     if not row:
         return None
-    return {'state': row[0], 'note': row[1], 'source': row[2],
-            'recorded_on': row[3].isoformat() if row[3] else None}
+    return _day_payload(*row)
 
 
 def set_office_day(cursor, office_id, day, state, note=None, recorded_by=None):
@@ -604,13 +620,13 @@ def set_park_online_phones(cursor, park_id, phones):
 _OFFICE_KEYS = ('id', 'slug', 'name', 'city', 'address', 'address_note', 'phone',
                 'map_url', 'map_resolved_url', 'lat', 'lon', 'schedule',
                 'is_online', 'all_parks', 'kind', 'partner_label', 'status', 'position',
-                'no_office')
+                'no_office', 'updated_at')
 
 _OFFICE_COLUMNS = """
     o.id, o.slug, o.name, o.city, o.address, o.address_note, o.phone,
     o.map_url, o.map_resolved_url, o.lat, o.lon, o.schedule,
     o.is_online, o.all_parks, o.kind, o.partner_label, o.status, o.position,
-    o.no_office
+    o.no_office, o.updated_at
 """
 
 
@@ -620,6 +636,10 @@ def _office_row(row):
     office = dict(zip(_OFFICE_KEYS, row[:len(_OFFICE_KEYS)]))
     office['lat'] = float(office['lat']) if office['lat'] is not None else None
     office['lon'] = float(office['lon']) if office['lon'] is not None else None
+    # Своим isoformat, а не через jsonify: тот отдал бы RFC 1123 («Thu, 21 Aug
+    # 2026 …»), и клиенту пришлось бы разбирать английские месяцы.
+    if office['updated_at'] is not None:
+        office['updated_at'] = office['updated_at'].isoformat()
     return office
 
 
@@ -640,7 +660,7 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
     # и любой %-формат поверх них пришлось бы удваивать ещё раз.
     cursor.execute(
         'SELECT ' + _OFFICE_COLUMNS + """,
-               d.state, d.note, d.source, d.day
+               d.state, d.note, d.source, d.day, d.recorded_at
           FROM wiki_offices o
           LEFT JOIN wiki_office_days d
                  ON d.office_id = o.id AND d.day = %(day)s::date
@@ -663,13 +683,9 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
     offices = []
     for row in cursor.fetchall():
         office = _office_row(row)
-        state, note, source, recorded_on = row[len(_OFFICE_KEYS):]
-        office['day'] = {
-            'state': state,
-            'note': note,
-            'source': source,
-            'recorded_on': recorded_on.isoformat() if recorded_on else None,
-        } if state else None
+        state, note, source, recorded_on, recorded_at = row[len(_OFFICE_KEYS):]
+        office['day'] = _day_payload(state, note, source, recorded_on, recorded_at) \
+            if state else None
         offices.append(office)
     if not offices:
         return []

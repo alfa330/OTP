@@ -14,8 +14,9 @@ from urllib.parse import quote
 
 from wiki import offices as wiki_offices
 from wiki.offices import (
-    DAY_CODES, MAX_PHONES_PER_POINT, clean_phones, link_phones, normalize_schedule,
-    parse_day, parse_map_coords, parse_page_coords, resolve_map_link,
+    DAY_CODES, MAX_PHONES_PER_POINT, _day_payload, _office_row, _OFFICE_KEYS,
+    clean_phones, link_phones, normalize_schedule,
+    parse_day, parse_map_coords, parse_page_coords, read_office_day, resolve_map_link,
     schedule_state_on, snapshot_offices_day, tile_is_valid, unwrap_map_link,
 )
 
@@ -533,6 +534,89 @@ class SnapshotOfficesDayTest(unittest.TestCase):
         cursor = _SnapshotCursor([(1, _KOSTANAY)])
         self.assertEqual(snapshot_offices_day(cursor, 'позавчера'), 0)
         self.assertEqual(cursor.rows, {})
+
+
+class _DayCursor:
+    """Курсор на один SELECT из wiki_office_days."""
+
+    def __init__(self, row):
+        self.row = row
+
+    def execute(self, sql, params=None):
+        text = ' '.join(sql.split())
+        assert 'recorded_at' in text, 'запрос должен тянуть recorded_at: %s' % text
+        self.captured = text
+
+    def fetchone(self):
+        return self.row
+
+
+class DayPayloadTest(unittest.TestCase):
+    """Колонка ТЗ «Обновлено» — про свежесть данных, а не про выбранный день.
+
+    recorded_on («за какой день запись») и recorded_at («когда её сделали») —
+    разные вещи, и раньше в «Обновлено» уезжала первая: колонка повторяла дату
+    из календаря, а у офисов без отметки стоял прочерк.
+    """
+
+    def test_both_times_are_returned_and_not_confused(self):
+        payload = _day_payload('closed', 'Прорвало трубу', 'manual',
+                               date(2026, 8, 19), datetime(2026, 8, 19, 7, 41, 2))
+        self.assertEqual(payload['recorded_on'], '2026-08-19')
+        self.assertEqual(payload['recorded_at'], '2026-08-19T07:41:02')
+        self.assertEqual(payload['state'], 'closed')
+        self.assertEqual(payload['note'], 'Прорвало трубу')
+
+    def test_snapshot_of_yesterday_keeps_its_own_time(self):
+        # Снимок пишется в 23:45 ЗА этот день — времена намеренно расходятся.
+        payload = _day_payload('open', None, 'auto',
+                               date(2026, 8, 19), datetime(2026, 8, 19, 23, 45, 3))
+        self.assertEqual(payload['source'], 'auto')
+        self.assertNotEqual(payload['recorded_on'], payload['recorded_at'])
+
+    def test_missing_times_are_none_not_crash(self):
+        payload = _day_payload('open', None, 'auto', None, None)
+        self.assertIsNone(payload['recorded_on'])
+        self.assertIsNone(payload['recorded_at'])
+
+    def test_read_office_day_asks_for_recorded_at(self):
+        cursor = _DayCursor(('closed', None, 'manual',
+                             date(2026, 8, 19), datetime(2026, 8, 19, 7, 41, 2)))
+        payload = read_office_day(cursor, 7, '2026-08-19')
+        self.assertEqual(payload['recorded_at'], '2026-08-19T07:41:02')
+
+    def test_read_office_day_without_row_is_none(self):
+        self.assertIsNone(read_office_day(_DayCursor(None), 7, '2026-08-19'))
+
+
+class OfficeRowTest(unittest.TestCase):
+    """updated_at обязан доехать до клиента строкой ISO.
+
+    Без него «Обновлено» у офиса, за день которого никто ничего не отмечал,
+    остаётся пустым — а это большинство строк: ночной снимок пишется только в
+    23:45, и до вечера свежесть данных задаёт правка справочника.
+    """
+
+    def _row(self, **over):
+        values = {key: None for key in _OFFICE_KEYS}
+        values.update({'id': 1, 'name': 'Офис Актау', 'city': 'Актау',
+                       'lat': None, 'lon': None})
+        values.update(over)
+        return tuple(values[key] for key in _OFFICE_KEYS)
+
+    def test_updated_at_is_iso_not_datetime(self):
+        office = _office_row(self._row(updated_at=datetime(2026, 8, 14, 10, 7, 11)))
+        # Своим isoformat, а не через jsonify: тот отдал бы RFC 1123 с
+        # английским названием месяца, и клиенту пришлось бы его разбирать.
+        self.assertEqual(office['updated_at'], '2026-08-14T10:07:11')
+
+    def test_updated_at_may_be_absent(self):
+        self.assertIsNone(_office_row(self._row())['updated_at'])
+
+    def test_coordinates_still_become_floats(self):
+        office = _office_row(self._row(lat=43.238293, lon=76.945465))
+        self.assertIsInstance(office['lat'], float)
+        self.assertIsInstance(office['lon'], float)
 
 
 if __name__ == '__main__':
