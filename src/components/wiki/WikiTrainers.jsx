@@ -8,7 +8,7 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { TRAINERS, TRAINER_CARDS, findTrainer } from './trainers/registry';
 import iconTaxiPro from './trainers/icon-taxi-pro.png';
 import iconSapar from './trainers/icon-sapar.png';
-import phoneTilted from './trainers/phone-tilted.png';
+import { PHONE_TILTED } from '../../assets/phoneTilted';
 
 const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
 
@@ -61,19 +61,17 @@ const TRAINER_ICONS = {
  * Место справа от списка шагов пустовало, а показать там надо ровно то, чего в
  * тексте нет: КАКОЕ приложение человек увидит внутри тренажёра.
  *
- * Корпус — рендер, который дал владелец, а не нарисованный мной: рисованный
- * читался как другая модель и стоял под другим углом. Значок кладётся на экран
- * трансформацией плоскости экрана: числа в CSS — это единичные векторы его
- * сторон, снятые с самого рендера (верхняя кромка и левая кромка экрана), и
- * центр экрана в долях картинки. Поэтому плитка лежит НА экране, а не поверх
- * картинки прямоугольником.
+ * Корпус — общий ресурс портала (src/assets/phoneTilted.js): рендер владельца с
+ * пустым белым экраном. Там же лежит геометрия экрана — центр, ширина и наклон
+ * в долях картинки; CSS ниже повторяет эти же числа, и меняться они должны
+ * вместе.
  */
 const TrainerShowcase = ({ icon }) => (
     /* Витрина декоративная: название приложения уже стоит подписью под
        заголовком, и повторять его для скринридера значит читать одно и то же
        дважды. Поэтому aria-hidden и пустые alt. */
     <div className="wiki-trainer-showcase" aria-hidden="true">
-        <img className="wiki-trainer-showcase__phone" src={phoneTilted} alt="" loading="lazy" />
+        <img className="wiki-trainer-showcase__phone" src={PHONE_TILTED.src} alt="" loading="lazy" />
         {icon && <img className="wiki-trainer-showcase__icon" src={icon} alt="" loading="lazy" />}
     </div>
 );
