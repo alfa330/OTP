@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, FileText, Folder, FolderOpen, Layers, Loader2, Search } from 'lucide-react';
 import { iosCard } from '../ui/ios';
 import { getScrollContainer } from './scrollContainer';
+import { groupByType } from './articleTypes';
 
 /* Правая колонка витрины — оглавление раздела: дерево «отдел → раздел → статьи».
  *
@@ -66,6 +67,24 @@ function useFitToViewport(ref) {
 }
 
 const rowBase = 'flex w-full items-center gap-1.5 rounded-lg py-1.5 pr-2.5 text-left text-[12.5px] transition';
+
+/* Полоска между типами статей внутри раздела: подпись и волосяная линия.
+ *
+ * Намеренно НЕ кнопка и не сворачивается. Раздел уже раскрывается нажатием, и
+ * вторая раскрывашка внутри него дала бы два уровня, которые надо открывать
+ * подряд, чтобы дойти до статьи. Здесь нужно только разделить: где кончаются
+ * должностные инструкции и начинаются обычные статьи. */
+const TypeStrip = ({ label, depth }) => (
+    <div
+        style={{ paddingLeft: `${18 + depth * 12}px` }}
+        className="flex items-center gap-2 pb-0.5 pr-2.5 pt-2 first:pt-0.5"
+    >
+        <span className="shrink-0 text-[9.5px] font-bold uppercase tracking-[0.07em] text-slate-400">
+            {label}
+        </span>
+        <span className="h-px min-w-0 flex-1 bg-slate-200" />
+    </div>
+);
 
 /* Верхний уровень оглавления — отдел (или «Без раздела»). Карточка, а не мелкая
    надпись: в исходной вике это самая заметная строка списка, по ней человек и
@@ -184,6 +203,18 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
         </button>
     );
 
+    /* Список статей одной ветки: либо плоско, либо с полосками по типам.
+       Одна точка на оглавление и на группу «Без раздела» — правило «полоска
+       появляется от второго типа» должно быть одним и тем же в обоих местах. */
+    const renderArticles = (items, depth, keyPrefix) => {
+        const groups = groupByType(items);
+        if (!groups) return items.map((article) => renderArticle(article, depth));
+        return groups.flatMap((group) => [
+            <TypeStrip key={`${keyPrefix}-${group.key}`} label={group.label} depth={depth} />,
+            ...group.items.map((article) => renderArticle(article, depth)),
+        ]);
+    };
+
     const renderSpace = ({ space, rows }) => {
         const spaceClosed = !needle && closedSpaces.has(space.id);
 
@@ -234,7 +265,7 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
                 </button>,
             );
 
-            if (open) own.forEach((article) => body.push(renderArticle(article, depth + 1)));
+            if (open) body.push(...renderArticles(own, depth + 1, `t-${section.id}`));
             else hideDeeperThan = depth;
         });
 
@@ -311,7 +342,7 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
                             closed={!needle && closedSpaces.has(ORPHANS)}
                             onToggle={() => setClosedSpaces((prev) => toggled(prev, ORPHANS))}
                         >
-                            {shownOrphans.map((article) => renderArticle(article, 0))}
+                            {renderArticles(shownOrphans, 0, 't-orphans')}
                         </GroupCard>
                     )}
 

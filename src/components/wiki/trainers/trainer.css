@@ -1721,7 +1721,9 @@
 .wt-hands {
     position: absolute;
     left: 50%;
-    bottom: -18px;
+    /* Телефон поднят над нижним краем: прижатый к самому низу, он читался как
+       лежащий на столе, а не как поднятый к глазам. */
+    bottom: 5%;
     transform: translateX(-50%);
     pointer-events: none;
 }

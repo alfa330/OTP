@@ -49,6 +49,7 @@ const MODEL_URL = `${import.meta.env.BASE_URL || '/'}models/vento.glb`;
 export default function CarStage({ world, tap, toggle, target, plate = '000 XXX 02' }) {
     const canvasRef = useRef(null);
     const sceneRef = useRef(null);
+    const screenRef = useRef(null);
     const dragRef = useRef(null);
     const [ready, setReady] = useState(false);
     const [failed, setFailed] = useState(false);
@@ -63,11 +64,11 @@ export default function CarStage({ world, tap, toggle, target, plate = '000 XXX 
         const scene = createCarScene(canvas, {
             modelUrl: MODEL_URL,
             plate,
-            onReady: () => { setReady(true); refreshFrame(); },
+            onReady: () => { setReady(true); refreshFrame(); syncPhoneRect(); },
             onError: () => setFailed(true),
         });
         sceneRef.current = scene;
-        const onResize = () => scene.resize();
+        const onResize = () => { scene.resize(); syncPhoneRect(); };
         window.addEventListener('resize', onResize);
         return () => {
             window.removeEventListener('resize', onResize);
@@ -75,6 +76,26 @@ export default function CarStage({ world, tap, toggle, target, plate = '000 XXX 
             sceneRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    /* Где на холсте лежит экран телефона.
+     *
+     * Сцена рисует в этот прямоугольник второй кадр — тот, что «в телефоне».
+     * Координаты меряются по факту, а не задаются числами: корпус двигается
+     * вместе с раскладкой, и разъехавшись на пиксель, кадр вылезет за рамку. */
+    const syncPhoneRect = useCallback(() => {
+        const scene = sceneRef.current;
+        const canvas = canvasRef.current;
+        const screen = screenRef.current;
+        if (!scene || !canvas || !screen) return;
+        const box = canvas.getBoundingClientRect();
+        const inner = screen.getBoundingClientRect();
+        scene.setPhoneRect({
+            x: inner.left - box.left,
+            y: inner.top - box.top,
+            w: inner.width,
+            h: inner.height,
+        });
     }, []);
 
     /* Что сейчас в объективе — считает чистый модуль, сцена лишь сообщает, где
@@ -85,6 +106,13 @@ export default function CarStage({ world, tap, toggle, target, plate = '000 XXX 
         if (!scene?.isReady()) return;
         setFrame(readFrame(scene.camera(), world));
     }, [world]);
+
+    /* Первый замер — после того, как раскладка встала: на монтировании корпус
+       ещё не имеет размеров, и прямоугольник вышел бы нулевым. */
+    useEffect(() => {
+        const frame = requestAnimationFrame(syncPhoneRect);
+        return () => cancelAnimationFrame(frame);
+    }, [syncPhoneRect, ready]);
 
     // Мир поменялся (открыли дверь) — двери в сцене и подпись под рамкой следом.
     useEffect(() => {
@@ -210,7 +238,7 @@ export default function CarStage({ world, tap, toggle, target, plate = '000 XXX 
                 <span className="wt-hands__thumb wt-hands__thumb--left" aria-hidden="true" />
                 <span className="wt-hands__thumb wt-hands__thumb--right" aria-hidden="true" />
                 <div className="wt-hands__phone">
-                    <div className="wt-cam">
+                    <div className="wt-cam" ref={screenRef}>
                         <div className="wt-cam__top">
                             <span className="wt-cam__app">Яндекс Про · Фотоконтроль</span>
                         </div>

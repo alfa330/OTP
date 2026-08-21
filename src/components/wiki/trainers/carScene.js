@@ -22,10 +22,26 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 /* Детали, которые открываются. Ключ — флаг мира сценария, значение — имя меша
    в модели. Имена ТОЧНЫЕ: по префиксу «door_» сюда попали бы стёкла. */
+/* Ось вращения задаётся в МИРОВЫХ координатах, а не именем локальной оси.
+ *
+ * Так было не сразу: сначала дверь вращали вокруг локальной «z», считая её
+ * вертикалью модели. На деле локальные оси меша после конвертера смотрят иначе,
+ * и дверь поднималась вверх вокруг продольной оси машины — знак угла при этом
+ * не менял вообще ничего (габариты при +1 и −1 совпадали до сотых). Мировая ось
+ * от внутренней ориентации модели не зависит: 'yaw' — вертикаль, вокруг неё
+ * распахиваются двери; 'pitch' — поперечная ось, вокруг неё поднимаются крышка
+ * багажника и капот.
+ */
 const OPENABLE = {
-    doorFrontLeft: { mesh: 'door_lf_hi_ok', axis: 'z', edge: 'min', angle: 1.0 },
-    doorRearLeft: { mesh: 'door_lr_hi_ok', axis: 'z', edge: 'min', angle: 1.0 },
-    trunkOpen: { mesh: 'boot_hi_ok', axis: 'x', edge: 'min', angle: -0.62 },
+    doorFrontLeft: { mesh: 'door_lf_hi_ok', axis: 'yaw', edge: 'min', angle: -1.15 },
+    doorRearLeft: { mesh: 'door_lr_hi_ok', axis: 'yaw', edge: 'min', angle: -1.15 },
+    trunkOpen: { mesh: 'boot_hi_ok', axis: 'pitch', edge: 'min', angle: -0.95 },
+};
+
+/** Мировые оси вращения: вертикаль для дверей, поперечная для крышек. */
+const WORLD_AXIS = {
+    yaw: new THREE.Vector3(0, 1, 0),
+    pitch: new THREE.Vector3(1, 0, 0),
 };
 
 /* Длина реальной машины. Нормализуем по ней, а не делим на сто: следующая
@@ -96,6 +112,16 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
     scene.add(fill);
 
     const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 120);
+
+    /* Вторая камера — та, что «в телефоне».
+     *
+     * Экран не дыра в мире: у телефона свой объектив, шире человеческого
+     * взгляда, поэтому машина в кадре выглядит МЕЛЬЧЕ, чем вокруг корпуса.
+     * Рисуем её вторым проходом в прямоугольник экрана через scissor: это
+     * дешевле отдельного холста (один контекст WebGL вместо двух) и дешевле
+     * рендера в текстуру с последующей выдачей её в DOM. */
+    const phoneCamera = new THREE.PerspectiveCamera(64, 0.46, 0.1, 120);
+    let phoneRect = null;
     const root = new THREE.Group();
     scene.add(root);
 
@@ -132,6 +158,12 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             Math.cos(a) * state.distance,
         );
         camera.lookAt(0, LOOK_HEIGHT, 0);
+        /* Телефон человек держит перед собой, опустив руки от глаз. Целится
+           объектив чуть НИЖЕ середины борта: так машина поднимается к середине
+           экрана и попадает в рамку-подсказку, а не сползает под неё. */
+        phoneCamera.position.copy(camera.position);
+        phoneCamera.position.y -= 0.14;
+        phoneCamera.lookAt(0, LOOK_HEIGHT - 0.55, 0);
     }
 
     function tick() {
@@ -147,18 +179,36 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             const diff = goal - now;
             if (Math.abs(diff) > 0.002) {
                 angles[key] = now + diff * 0.18;
-                hinges[key].rotation[spec.axis] = angles[key];
+                hinges[key].setRotationFromAxisAngle(hinges[key].userData.axis, angles[key]);
                 animating = true;
             } else if (now !== goal) {
                 angles[key] = goal;
-                hinges[key].rotation[spec.axis] = goal;
+                hinges[key].setRotationFromAxisAngle(hinges[key].userData.axis, goal);
             }
         });
 
         if (needsRender || animating) {
             needsRender = false;
             applyCamera();
+
+            const width = canvas.clientWidth || 1;
+            const height = canvas.clientHeight || 1;
+            renderer.setScissorTest(false);
+            renderer.setViewport(0, 0, width, height);
             renderer.render(scene, camera);
+
+            /* Кадр внутри телефона. Прямоугольник приходит из разметки, а
+               WebGL считает Y снизу — отсюда переворот. */
+            if (phoneRect && phoneRect.w > 8 && phoneRect.h > 8) {
+                const bottom = height - (phoneRect.y + phoneRect.h);
+                renderer.setScissorTest(true);
+                renderer.setViewport(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
+                renderer.setScissor(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
+                phoneCamera.aspect = phoneRect.w / phoneRect.h;
+                phoneCamera.updateProjectionMatrix();
+                renderer.render(scene, phoneCamera);
+                renderer.setScissorTest(false);
+            }
         }
         if (animating) frame = requestAnimationFrame(tick);
     }
@@ -176,7 +226,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
        же — тогда поворот группы крутит дверь вокруг кромки, а не вокруг центра.
        Край выбирается в МИРОВЫХ координатах (нос машины смотрит в -Z), а сама
        точка переводится в локальные: там у модели вертикаль всё ещё Z. */
-    function makeHinge(mesh, edge) {
+    function makeHinge(mesh, edge, axisName) {
         const box = new THREE.Box3().setFromObject(mesh);
         const centre = box.getCenter(new THREE.Vector3());
         const worldPivot = new THREE.Vector3(
@@ -188,6 +238,14 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
         mesh.parent.add(hinge);
         mesh.position.sub(pivot);
         hinge.add(mesh);
+
+        // Мировую ось переводим в систему шарнира: крутить надо вокруг
+        // вертикали ДВОРА, а не вокруг того, что модель считает вертикалью.
+        const parentQuaternion = new THREE.Quaternion();
+        hinge.parent.getWorldQuaternion(parentQuaternion);
+        hinge.userData.axis = WORLD_AXIS[axisName].clone()
+            .applyQuaternion(parentQuaternion.clone().invert())
+            .normalize();
         return hinge;
     }
 
@@ -238,7 +296,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
         Object.entries(OPENABLE).forEach(([key, spec]) => {
             const mesh = parts[spec.mesh];
             if (!mesh) return;
-            hinges[key] = makeHinge(mesh, spec.edge);
+            hinges[key] = makeHinge(mesh, spec.edge, spec.axis);
             opened[key] = false;
             angles[key] = 0;
             mesh.userData.openKey = key;
@@ -256,9 +314,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             const depth = 0.3;
             const well = new THREE.Mesh(
                 new THREE.BoxGeometry(bootSize.x * 0.86, depth, bootSize.z * 0.78),
-                new THREE.MeshStandardMaterial({
-                    color: 0x33363c, roughness: 0.96, metalness: 0, side: THREE.BackSide,
-                }),
+                new THREE.MeshBasicMaterial({ color: 0x2c2f35, side: THREE.BackSide }),
             );
             well.position.set(bootMid.x, bootBox.min.y - depth / 2 + 0.1, bootMid.z - 0.06);
             scene.add(well);
@@ -286,7 +342,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
            казахстанский, и расхождение с тем, что человек видит в кадре, —
            первое, на чём тренажёр теряет доверие. */
         const plateMap = plateTexture(plate);
-        const plateGeometry = new THREE.PlaneGeometry(0.46, 0.1);
+        const plateGeometry = new THREE.PlaneGeometry(0.52, 0.125);
         const plateMaterial = new THREE.MeshBasicMaterial({ map: plateMap, toneMapped: false });
 
         /* Задний номер крепится К КРЫШКЕ багажника, а не к воздуху за машиной:
@@ -302,7 +358,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             const scale = root.scale.x || 1;
             rear.scale.setScalar(1 / scale);
             rear.position.copy(bootHinge.worldToLocal(
-                new THREE.Vector3(0, 0.74, size.z / 2 - 0.055),
+                new THREE.Vector3(0, 0.74, size.z / 2 - 0.043),
             ));
         } else {
             rear.position.set(0, 0.74, size.z / 2 - 0.055);
@@ -354,6 +410,13 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             caster.setFromCamera(point, camera);
             const hit = caster.intersectObjects(pickTargets, false)[0];
             return hit ? hit.object.userData.openKey || null : null;
+        },
+        /** Прямоугольник экрана телефона в координатах холста (CSS-пиксели).
+         *  В него вторым проходом рисуется кадр телефонного объектива. */
+        setPhoneRect(rect) {
+            phoneRect = rect && rect.w > 8 && rect.h > 8
+                ? { x: rect.x, y: rect.y, w: rect.w, h: rect.h } : null;
+            invalidate();
         },
         /** Где стоит человек — это уходит в правила кадра. */
         camera: () => ({ azimuth: state.azimuth, distance: state.distance }),
