@@ -41,7 +41,8 @@
     "test:salary-potok": "node --test tests/salary_potok.test.mjs",
     "test:salary-verificator": "node --test tests/salary_verificator.test.mjs",
     "test:salary-yandex-reg": "node --test tests/salary_yandex_reg.test.mjs",
-    "test:salary-op-render": "node --test tests/salary_op_calculator_render.test.mjs"
+    "test:salary-op-render": "node --test tests/salary_op_calculator_render.test.mjs",
+    "test:trainings": "node --test tests/trainings_summary.test.mjs"
   },
   "dependencies": {
     "@tiptap/extension-highlight": "^3.29.2",

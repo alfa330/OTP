@@ -158,6 +158,7 @@ const WazzupChatsView = lazyWithRetry(() => import('./components/wazzup/WazzupCh
 const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAppChatsView'));
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
+const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
@@ -37532,17 +37533,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     initialData?.id
                 ), [existingTrainingsByOperator, selectedOperatorIdList, date, startTime, endTime, initialData?.id]);
 
-                const reasons = [
-                    "Обратная связь",
-                    "Собрание",
-                    "Мотивационная беседа",
-                    "Дисциплинарный тренинг",
-                    "Тренинг по качеству. Разбор ошибок",
-                    "Тренинг по качеству. Объяснение МШ",
-                    "Тренинг по продукту",
-                    "Практика в офисе таксопарка",
-                    "Другое"
-                ];
+                // Список тем ДОЛЖЕН совпадать с серверным (trainings/schema.py).
+                // Здесь было 9 значений при 11 на сервере, и расхождение стоило
+                // данных: 164 записи «Тех. сбой» и 79 «Мониторинг» при открытии
+                // на редактирование теряли причину — select не находил значение,
+                // и validate() требовал выбрать другое.
+                //
+                // «Мониторинг» возвращён: тема живая, ей пользуются.
+                // «Тех. сбой» — архивная: показывается только если запись под
+                // ней и заведена (иначе привычка заводить сбои тренингом никуда
+                // бы не ушла, а раздел «Тех. сбои» существует с марта 2026).
+                const reasons = useMemo(() => {
+                    const active = [
+                        "Обратная связь",
+                        "Собрание",
+                        "Мотивационная беседа",
+                        "Дисциплинарный тренинг",
+                        "Тренинг по качеству. Разбор ошибок",
+                        "Тренинг по качеству. Объяснение МШ",
+                        "Тренинг по продукту",
+                        "Мониторинг",
+                        "Практика в офисе таксопарка",
+                        "Другое"
+                    ];
+                    const current = initialData?.reason;
+                    return current && !active.includes(current) ? [...active, current] : active;
+                }, [initialData?.reason]);
 
                 // Сброс/применение initialData при открытии
                 useEffect(() => {
@@ -38045,756 +38061,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 window.TrainingModal = TrainingModal;
             }
 
-            const TrainingsView = useMemo(() => {
-                const TrainingsViewComponent = ({ user, operators, showToast, apiBaseUrl }) => {  // operators - список операторов (все для админа, свои для св)
-                // Preserve selected month across remounts — read/write from localStorage
-                const [month, setMonth] = useState(() => {
-                    try {
-                        return localStorage.getItem('trainings_month') || new Date().toISOString().slice(0,7);
-                    } catch (e) {
-                        return new Date().toISOString().slice(0,7);
-                    }
-                });
-
-                useEffect(() => {
-                    try {
-                        localStorage.setItem('trainings_month', month);
-                    } catch (e) {
-                        // ignore storage errors
-                    }
-                }, [month]);
-                const [trainings, setTrainings] = useState({}); // {operator_id: [trainings]}
-                const [showModal, setShowModal] = useState(false);
-                const [modalOperatorIds, setModalOperatorIds] = useState([]);
-                const [editingTraining, setEditingTraining] = useState(null);
-                // Группировка операторов по SV
-                const [svGroups, setSvGroups] = useState([]);
-                // Which SV groups are expanded (visible). For SV users only their own group is expanded by default.
-                const [expandedSv, setExpandedSv] = useState({});
-                const [search, setSearch] = useState("");
-                const [operatorsLoaded, setOperatorsLoaded] = useState(false);
-                const [calendarView, setCalendarView] = useState(false);
-                // 'active' or 'fired' — переключатель, какие операторы показывать
-                const [operatorsTab, setOperatorsTab] = useState('active');
-                const [calendarModal, setCalendarModal] = useState({ open: false, date: '', trainings: [] });
-                const [selectedCalendarTraining, setSelectedCalendarTraining] = useState(null);
-                // Цвета для SV — гарантированно уникальные в текущей сессии
-                // Используем кэширование: при первом запросе для нового имени
-                // назначаем цвет по схеме HSL с равномерным шагом (golden angle)
-                const _svColorMap = {};
-                const _goldenAngle = 137.508; // degrees — хорошо распределяет цвета
-                function getSvColor(svName) {
-                    if (!svName) return '#999999';
-                    if (_svColorMap[svName]) return _svColorMap[svName];
-                    // индекс = количество уже назначенных цветов
-                    const idx = Object.keys(_svColorMap).length;
-                    // hue shifts by golden angle * idx to avoid clustering
-                    const hue = (idx * _goldenAngle) % 360;
-                    // pick comfortable saturation/lightness for visibility
-                    const color = `hsl(${Math.round(hue)}, 65%, 45%)`;
-                    _svColorMap[svName] = color;
-                    return color;
-                }
-
-                const buildGroupedTrainings = (rows = []) => {
-                    const grouped = {};
-                    (Array.isArray(rows) ? rows : []).forEach((trainingItem) => {
-                        const operatorId = Number(trainingItem?.operator_id);
-                        if (!Number.isFinite(operatorId)) return;
-                        if (!grouped[operatorId]) grouped[operatorId] = [];
-                        grouped[operatorId].push(trainingItem);
-                    });
-                    return grouped;
-                };
-
-                const getTrainingErrorMessage = (error) => {
-                    const responseMessage = error?.response?.data?.error;
-                    const responseItemMessage = error?.response?.data?.errors?.[0]?.error;
-                    const fallbackMessage = error?.message;
-                    return String(responseMessage || responseItemMessage || fallbackMessage || 'Неизвестная ошибка');
-                };
-
-                const operatorsById = useMemo(() => new Map(
-                    (Array.isArray(operators) ? operators : [])
-                        .map((operator) => [Number(operator?.id), operator])
-                        .filter(([id]) => Number.isFinite(id))
-                ), [operators]);
-
-                const selectableOperators = useMemo(() => {
-                    const sourceOperators = Array.isArray(operators) ? operators : [];
-                    return sourceOperators
-                        .filter((operator) => operatorsTab === 'active' ? (operator.status !== 'fired') : (operator.status === 'fired'))
-                        .slice()
-                        .sort((left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'ru', { sensitivity: 'base' }));
-                }, [operators, operatorsTab]);
-
-                const modalOperators = useMemo(
-                    () => modalOperatorIds.map((id) => operatorsById.get(Number(id))).filter(Boolean),
-                    [modalOperatorIds, operatorsById]
-                );
-
-                const refreshTrainings = async () => {
-                    const response = await axios.get(`${apiBaseUrl}/api/trainings?month=${month}`, {
-                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                    });
-                    setTrainings(buildGroupedTrainings(response?.data?.trainings || []));
-                };
-
-                useEffect(() => {
-                    // Флаг, что операторы загружены (не пустой массив)
-                    if (operators && operators.length > 0) {
-                        setOperatorsLoaded(true);
-                    }
-                }, [operators]);
-
-                useEffect(() => {
-                    // Получаем тренинги только если операторы загружены
-                    if (!operatorsLoaded || !user?.id) return;
-                    refreshTrainings().catch((error) => {
-                        console.error('Error loading trainings:', error);
-                        showToast('Ошибка при загрузке тренингов', 'error');
-                    });
-                }, [month, operatorsLoaded, user?.id, apiBaseUrl]);
-
-                useEffect(() => {
-                    // Группируем операторов по SV (supervisor)
-                    const svMap = {};
-                    operators.forEach(op => {
-                        if (!svMap[op.supervisor_name]) svMap[op.supervisor_name] = [];
-                        svMap[op.supervisor_name].push(op);
-                    });
-                    setSvGroups(Object.entries(svMap)); // [[svName, [operators]]]
-                }, [operators]);
-
-                // Initialize which groups are expanded when svGroups or user changes.
-                useEffect(() => {
-                    const map = {};
-                    svGroups.forEach(([svName]) => {
-                        if (user?.role === 'sv') {
-                            map[svName] = (svName === user.name);
-                        } else {
-                            map[svName] = true; // non-SV users (admins) see all groups expanded by default
-                        }
-                    });
-                    setExpandedSv(map);
-                }, [svGroups, user && user.role, user && user.name]);
-
-                const handleAdd = (opId) => {
-                    setModalOperatorIds([Number(opId)]);
-                    setEditingTraining(null);
-                    setShowModal(true);
-                };
-
-                const handleHeaderAdd = () => {
-                    setModalOperatorIds([]);
-                    setEditingTraining(null);
-                    setShowModal(true);
-                };
-
-                const handleEdit = (opId, training) => {
-                    setModalOperatorIds([Number(opId)]);
-                    // Передаём копию объекта, чтобы не было мутаций
-                    setEditingTraining({ ...training });
-                    setShowModal(true);
-                };
-
-                const handleDelete = async (trainingId) => {
-                    try {
-                        await axios.delete(`${apiBaseUrl}/api/trainings/${trainingId}`, {
-                            headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                        });
-                        await refreshTrainings();
-                        showToast('Тренинг успешно удален', 'success');
-                    } catch (error) {
-                        console.error('Error deleting training:', error);
-                        showToast('Ошибка при удалении тренинга', 'error');
-                        throw error;
-                    }
-                };
-
-                const handleSave = async (data) => {
-                    const headers = {
-                        headers: withAccessTokenHeader({ 'X-User-Id': user.id })
-                    };
-
-                    if (editingTraining) {
-                        try {
-                            await axios.put(`${apiBaseUrl}/api/trainings/${editingTraining.id}`, data, headers);
-                            await refreshTrainings();
-                            showToast('Тренинг успешно обновлен', 'success');
-                            return;
-                        } catch (error) {
-                            console.error('Error updating training:', error);
-                            showToast(error?.response?.data?.overlap
-                                ? 'У оператора уже есть тренинг, который пересекается по времени'
-                                : 'Ошибка при обновлении тренинга', 'error');
-                            throw error;
-                        }
-                    }
-
-                    const targetOperatorIds = modalOperatorIds
-                        .map((id) => Number(id))
-                        .filter((id) => Number.isFinite(id));
-
-                    if (targetOperatorIds.length === 0) {
-                        const message = 'Выберите хотя бы одного оператора';
-                        showToast(message, 'error');
-                        throw new Error(message);
-                    }
-
-                    const response = await axios.post(
-                        `${apiBaseUrl}/api/trainings`,
-                        { ...data, operator_ids: targetOperatorIds },
-                        headers
-                    );
-                    const payload = response?.data || {};
-                    await refreshTrainings();
-
-                    if (response.status === 207 || payload.status === 'partial_success') {
-                        const createdCount = Number(payload?.created_count || 0);
-                        const totalCount = targetOperatorIds.length;
-                        const hasOverlapError = (Array.isArray(payload?.errors) ? payload.errors : []).some(item => item?.overlap);
-                        const firstErrorMessage = hasOverlapError
-                            ? 'У части операторов уже есть пересекающийся тренинг'
-                            : String(payload?.errors?.[0]?.error || 'Часть тренингов не удалось создать');
-                        showToast(`Создано для ${createdCount} из ${totalCount}. ${firstErrorMessage}`, 'info');
-                        return;
-                    }
-
-                    const createdCount = Number(payload?.created_count || targetOperatorIds.length || 0);
-                    if (createdCount > 0) {
-                        showToast(
-                            createdCount === 1
-                                ? 'Тренинг успешно добавлен'
-                                : `Тренинг добавлен для ${createdCount} операторов`,
-                            'success'
-                        );
-                        return;
-                    }
-                };
-
-                // ...existing code...
-            // Компонент тренинга с useState
-            const TrainingBox = ({ training, onEdit, onDelete }) => {
-                const [showDetails, setShowDetails] = useState(false);
-                const [confirmDelete, setConfirmDelete] = useState(false);
-                const maxCommentLength = 50;
-                const isLongComment = training?.comment && training.comment.length > maxCommentLength;
-                const shortComment = isLongComment ? training.comment.slice(0, maxCommentLength) + "..." : training.comment || "";
-
-                useEffect(() => {
-                    if (!showDetails) {
-                    setConfirmDelete(false);
-                    }
-                }, [showDetails]);
-
-                // Закрытие модалки по Escape
-                useEffect(() => {
-                    const onKey = (e) => {
-                    if (e.key === "Escape") setShowDetails(false);
-                    };
-                    if (showDetails) window.addEventListener("keydown", onKey);
-                    return () => window.removeEventListener("keydown", onKey);
-                }, [showDetails]);
-
-                const parseMinutes = (start, end) => {
-                    if (!start || !end) return "";
-                    const [sh, sm] = start.split(":").map(Number);
-                    const [eh, em] = end.split(":").map(Number);
-                    if ([sh, sm, eh, em].some((n) => Number.isNaN(n))) return "";
-                    const mins = (eh * 60 + em) - (sh * 60 + sm);
-                    return mins > 0 ? mins : "";
-                };
-
-                const minutes = parseMinutes(training?.start_time, training?.end_time);
-
-                const formatDate = (dateStr) => {
-                    if (!dateStr) return "";
-                    const toDate = (v) => {
-                    const d = new Date(v);
-                    if (!isNaN(d)) return d;
-                    const parts = String(v).split(/[-/. ]/);
-                    if (parts.length === 3) {
-                        const [a, b, c] = parts;
-                        const maybe = new Date(`${c}-${b}-${a}`);
-                        if (!isNaN(maybe)) return maybe;
-                    }
-                    return null;
-                    };
-
-                    const d = toDate(dateStr);
-                    if (!d) return String(dateStr);
-
-                    const months = ['янв.', 'февр.', 'мар.', 'апр.', 'май', 'июн.', 'июл.', 'авг.', 'сент.', 'окт.', 'нояб.', 'дек.'];
-                    const dd = String(d.getDate()).padStart(2, '0');
-                    const mon = months[d.getMonth()] || '';
-                    const yyyy = d.getFullYear();
-                    const hh = String(d.getHours()).padStart(2, '0');
-                    const mm = String(d.getMinutes()).padStart(2, '0');
-
-                    return `${dd} ${mon} ${yyyy} ${hh}:${mm}`;
-                };
-
-                const formattedDate = formatDate(training?.date);
-
-                return (
-                    <>
-                    {/* Карточка */}
-                    <div
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setShowDetails(true)}
-                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setShowDetails(true); }}
-                        className="flex flex-col bg-white border border-gray-300 rounded-lg shadow px-3 py-2 mx-1 w-40 min-w-[140px] max-w-[160px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition focus:outline-none focus:ring-4 focus:ring-blue-200"
-                        aria-label={`Тренинг ${training?.reason} ${formattedDate}`}
-                    >
-                        <div className="flex items-center justify-between mb-1">
-                        <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">
-                            {minutes ? `${minutes} мин.` : "—"}
-                        </span>
-                        <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">
-                            {formattedDate || "—"}
-                        </span>
-                        </div>
-
-                        <div className="mb-1">
-                        <span className="block text-xs font-semibold text-green-700 bg-green-50 border border-green-500 rounded px-1 py-0.5 text-center truncate">
-                            {training?.reason || "—"}
-                        </span>
-                        </div>
-
-                        {training?.comment ? (
-                        <div className="mt-1 text-xs text-gray-500 w-full text-center truncate" style={{ maxWidth: "120px" }}>
-                            {shortComment}
-                            {isLongComment && <span className="text-blue-500 ml-1"> (ещё)</span>}
-                        </div>
-                        ) : (
-                        <div className="mt-1 text-xs text-gray-400 text-center">Нет комментария</div>
-                        )}
-                    </div>
-
-                    {/* Детальная модалка */}
-                    {showDetails && (
-                        <>
-                        {/* Backdrop */}
-                        <div
-                            className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity"
-                            onClick={() => setShowDetails(false)}
-                            aria-hidden="true"
-                        />
-
-                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                            <div
-                            className="bg-white rounded-lg shadow-2xl max-w-md w-full p-5 relative transform transition-all"
-                            role="dialog"
-                            aria-modal="true"
-                            aria-labelledby="training-details-title"
-                            onClick={(e) => e.stopPropagation()}
-                            >
-                            {/* Верхняя панель: кнопка удаления + заголовок */}
-                            <button
-                                onClick={() => setConfirmDelete(true)}
-                                title="Удалить"
-                                className="absolute top-3 right-3 bg-red-500 hover:bg-red-600 text-white p-2 rounded-full shadow border-2 border-white flex items-center justify-center"
-                                style={{ width: 40, height: 40 }}
-                                aria-label="Удалить тренинг"
-                            >
-                                <FaIcon className="fas fa-trash" />
-                            </button>
-
-                            <h3 id="training-details-title" className="text-xl font-semibold mb-4 text-center">
-                                Детали тренинга
-                            </h3>
-
-                            <div className="space-y-3">
-                                <div className="flex justify-between gap-3">
-                                <div>
-                                    <label className="block text-sm text-gray-600">Время</label>
-                                    <input value={minutes ? `${minutes} мин.` : ""} disabled className="w-28 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm text-gray-600">Дата</label>
-                                    <input value={formattedDate} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-700" />
-                                </div>
-                                </div>
-
-                                <div>
-                                <label className="block text-sm text-gray-600">Причина</label>
-                                <input value={training?.reason || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label className="block text-sm text-gray-600">Время начала</label>
-                                    <input value={training?.start_time || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm text-gray-600">Время окончания</label>
-                                    <input value={training?.end_time || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                </div>
-                                </div>
-
-                                <div>
-                                <label className="block text-sm text-gray-600">Комментарий</label>
-                                <textarea value={training?.comment || ""} disabled rows={3} className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                </div>
-                                
-                                {/*
-                                <div>
-                                <label className="block text-sm text-gray-600">Засчитывать в часы</label>
-                                <input value={training?.count_in_hours ? 'Да' : 'Нет'} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700" />
-                                </div>
-                                */}
-
-                                <div>
-                                <label className="block text-sm text-gray-600">Создал</label>
-                                <input value={training?.created_by_name || ""} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
-                                </div>
-                            </div>
-
-                            {/* Действия */}
-                            <div className="flex justify-center gap-3 mt-5">
-                                <button
-                                onClick={() => { setShowDetails(false); onEdit && onEdit(training); }}
-                                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded flex items-center gap-2"
-                                >
-                                <FaIcon className="fas fa-pen"></FaIcon> Редактировать
-                                </button>
-                                <button
-                                onClick={() => setShowDetails(false)}
-                                className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
-                                >
-                                Закрыть
-                                </button>
-                            </div>
-
-                            {/* Подтверждение удаления */}
-                            {confirmDelete && (
-                                <div className="mt-4 bg-red-50 border border-red-200 p-3 rounded text-center">
-                                <p className="text-sm text-red-700 mb-3">Подтвердите удаление тренинга — это действие нельзя отменить.</p>
-                                <div className="flex justify-center gap-3">
-                                    <button
-                                    onClick={() => {
-                                        try {
-                                        onDelete && onDelete(training);
-                                        } finally {
-                                        setConfirmDelete(false);
-                                        setShowDetails(false);
-                                        }
-                                    }}
-                                    className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded"
-                                    >
-                                    Удалить
-                                    </button>
-                                    <button
-                                    onClick={() => setConfirmDelete(false)}
-                                    className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded"
-                                    >
-                                    Отмена
-                                    </button>
-                                </div>
-                                </div>
-                            )}
-                            </div>
-                        </div>
-                        </>
-                    )}
-                    </>
-                );
-                };
-
-                return (
-                    <div className="mt-6">
-                        <div className="sticky top-0 z-10 bg-blue-50 py-2 px-4 rounded-xl shadow mb-4 flex flex-col md:flex-row md:items-center gap-4 border border-blue-200">
-                            <div>
-                                <label className="block text-xs font-medium text-gray-700 mb-1">Месяц:</label>
-                                <input type="month" value={month} onChange={e => setMonth(e.target.value)} className="p-1 border rounded text-xs" />
-                            </div>
-                            <div className="flex-1">
-                                <label className="block text-xs font-medium text-gray-700 mb-1">Поиск:</label>
-                                <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по оператору или супервайзеру..." className="p-1 border rounded w-full text-xs" />
-                            </div>
-
-                            {/* Tabs: Активные / Уволенные */}
-                            <div className="flex items-center gap-2" style={{ marginTop: 20 }}>
-                                <button
-                                    onClick={() => setOperatorsTab('active')}
-                                    className={`px-3 py-1 rounded-lg text-xs font-semibold ${operatorsTab === 'active' ? 'bg-green-600 text-white' : 'bg-white text-gray-700 border border-gray-200'}`}
-                                >
-                                    Активные
-                                </button>
-                                <button
-                                    onClick={() => setOperatorsTab('fired')}
-                                    className={`px-3 py-1 rounded-lg text-xs font-semibold ${operatorsTab === 'fired' ? 'bg-red-600 text-white' : 'bg-white text-gray-700 border border-gray-200'}`}
-                                >
-                                    Уволенные
-                                </button>
-                            </div>
-
-                            <div className="hidden md:block h-10 border-l border-gray-300 mx-1" aria-hidden="true" />
-
-                            <button
-                                onClick={handleHeaderAdd}
-                                className="px-3 py-1 rounded-lg border border-green-600 text-xs font-semibold transition inline-flex items-center gap-2 bg-green-600 text-white hover:bg-green-700 hover:border-green-700"
-                            >
-                                <FaIcon className="fas fa-plus" />
-                                Добавить тренинг
-                            </button>
-
-                            <button onClick={() => setCalendarView(v => !v)} className={`px-3 py-1 rounded-lg border text-xs font-semibold ${calendarView ? 'bg-blue-500 text-white' : 'bg-white text-blue-700 border-blue-400'} hover:bg-blue-100 transition`}>
-                                {calendarView ? 'Список' : 'Календарь'}
-                            </button>
-                        </div>
-                        {calendarView ? (
-                            (() => {
-                                // Общий календарь по всем SV (с учётом фильтра Active/ Fired)
-                                const searchLower = search.trim().toLowerCase();
-                                // Фильтруем операторов по выбранной вкладке (активные/уволенные)
-                                const filteredOperatorsForCalendar = operators.filter(op => operatorsTab === 'active' ? (op.status !== 'fired') : (op.status === 'fired'));
-                                // Собираем SV по id только для отфильтрованных операторов
-                                const svById = {};
-                                filteredOperatorsForCalendar.forEach(op => {
-                                    svById[String(op.id)] = op.supervisor_name;
-                                });
-                                // Собираем тренинги по датам и SV (только для отфильтрованных операторов)
-                                const calendarData = {}; // {date: {svName: [trainings]}}
-                                Object.entries(trainings).forEach(([opId, list]) => {
-                                    if (!svById[opId]) return; // пропускаем операторы вне выбранного статуса
-                                    const svName = svById[opId] || "";
-                                    list.forEach(t => {
-                                        if (!calendarData[t.date]) calendarData[t.date] = {};
-                                        if (!calendarData[t.date][svName]) calendarData[t.date][svName] = [];
-                                        calendarData[t.date][svName].push({ ...t, operator: filteredOperatorsForCalendar.find(o => String(o.id) == opId)?.name || "" });
-                                    });
-                                });
-                                // Календарь месяца
-                                const [year, monthNum] = month.split('-').map(Number);
-                                const daysInMonth = new Date(year, monthNum, 0).getDate();
-                                const daysArr = Array.from({ length: daysInMonth }, (_, i) => i + 1);
-                                const monthLabel = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][monthNum-1];
-                                // Собираем все SV, которые есть в этом месяце (только из отфильтрованных операторов)
-                                const svNames = Array.from(new Set(filteredOperatorsForCalendar.map(op => op.supervisor_name)));
-                                return (
-                                    <div className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                        <h2 className="text-xl font-bold text-blue-800 mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">Календарь тренингов по всем супервайзерам</h2>
-                                        {/* Легенда цветов SV */}
-                                        <div className="flex flex-wrap gap-4 mb-4 items-center">
-                                            {svNames.map(svName => (
-                                                <div key={svName} className="flex items-center gap-2">
-                                                    {/* Цветной маркер убран, только имя супервайзера */}
-                                                    <span className="text-sm font-medium text-gray-700 px-2 py-0.5 rounded" style={{border:`2px solid ${getSvColor(svName)}`}}>{svName === user.name ? 'Вы' : svName}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                        <div className="grid grid-cols-7 gap-2 mb-4">
-                                            {daysArr.map(day => {
-                                                const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                                                const svTrainings = calendarData[dateStr] || {};
-                                                const totalCount = Object.values(svTrainings).reduce((acc, arr) => acc + arr.length, 0);
-                                                return (
-                                                    <div key={dateStr} className={`bg-white rounded-lg shadow flex flex-col items-center justify-between p-1 cursor-pointer border ${totalCount ? 'border-blue-500' : 'border-gray-200'} hover:ring-2 hover:ring-blue-300 min-h-[60px]`} onClick={() => {
-                                                        if (totalCount) setCalendarModal({ open: true, date: dateStr, trainings: svTrainings });
-                                                    }}>
-                                                        {/* Цветные счетчики по SV */}
-                                                        <div className="flex flex-row flex-wrap justify-center items-center w-full mt-1 mb-1 gap-1" style={{minHeight:'22px'}}>
-                                                            {svNames.map(svName => {
-                                                                const count = svTrainings[svName]?.length || 0;
-                                                                return count > 0 ? (
-                                                                    <span key={svName} title={svName} className="inline-flex items-center justify-center rounded-full text-white text-xs font-bold" style={{width:'22px',height:'22px',background:getSvColor(svName)}}>{count}</span>
-                                                                ) : null;
-                                                            })}
-                                                        </div>
-                                                        {/* День-месяц снизу */}
-                                                        <span className="text-xs font-bold text-gray-700 mb-1">{day}-{monthLabel}</span>
-                                                    </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                );
-                            })()
-                        ) : (
-                            (() => {
-                                // Фильтруем группы операторов по вкладке (активные / уволенные)
-                                const displaySvGroups = svGroups
-                                    .map(([svName, ops]) => [svName, ops.filter(op => operatorsTab === 'active' ? (op.status !== 'fired') : (op.status === 'fired'))])
-                                    .filter(([svName, ops]) => ops.length > 0);
-
-                                return displaySvGroups.map(([svName, ops]) => {
-                                    const searchLower = search.trim().toLowerCase();
-                                    const filteredOps = ops.filter(op => op.name.toLowerCase().includes(searchLower) || searchLower === "");
-                                    const showGroup = (svName && svName.toLowerCase().includes(searchLower)) || filteredOps.length > 0 || searchLower === "";
-                                    if (!showGroup) return null;
-
-                                    const isMyGroup = svName === user.name;
-                                    const isSvUser = user?.role === 'sv';
-                                    const isExpanded = !!expandedSv[svName];
-
-                                    return (
-                                        <div key={svName} className="mb-10 border-2 border-blue-300 rounded-xl bg-blue-50 shadow-lg py-4 px-6">
-                                        {/* Header: имя СВ + тулбар (кнопка разворачивания) */}
-                                        <div className="flex items-center justify-between mb-4 tracking-wide uppercase border-b border-blue-200 pb-2">
-                                            <h2 className="text-xl font-bold text-blue-800">
-                                            Супервайзер: {isMyGroup ? 'Вы' : svName}
-                                            </h2>
-
-                                            {/* Кнопка для св — у админа тоже есть (разворачивать/сворачивать) */}
-                                            <div className="flex items-center gap-2">
-                                            {/* Покажем количество операторов */}
-                                            <span className="text-sm text-gray-600 mr-2">{filteredOps.length} оператор(ов)</span>
-
-                                            <button
-                                                onClick={() => setExpandedSv(prev => ({ ...prev, [svName]: !prev[svName] }))}
-                                                className="flex items-center gap-2 px-3 py-1 rounded-lg text-xs font-semibold border hover:bg-white transition"
-                                                aria-expanded={isExpanded}
-                                                aria-controls={`sv-group-${svName}`}
-                                                title={isExpanded ? 'Свернуть группу' : 'Показать группу'}
-                                            >
-                                                {isExpanded ? (
-                                                <>
-                                                    <FaIcon className="fas fa-chevron-up" aria-hidden="true" /> Свернуть
-                                                </>
-                                                ) : (
-                                                <>
-                                                    <FaIcon className="fas fa-chevron-down" aria-hidden="true" /> Показать
-                                                </>
-                                                )}
-                                            </button>
-                                            </div>
-                                        </div>
-
-                                        {/* Контент — показываем только если группа развернута */}
-                                        {isExpanded ? (
-                                            <div id={`sv-group-${svName}`} className="space-y-4">
-                                            {filteredOps.map(op => (
-                                                <div key={op.id} className="flex items-center bg-white rounded-lg shadow p-2 mb-2 border border-gray-200">
-                                                <span className="font-semibold text-gray-900 w-36 min-w-[140px] text-sm truncate">{op.name}</span>
-                                                <div className="flex flex-row flex-wrap items-center ml-2">
-                                                    {(trainings[op.id] || []).map(t => (
-                                                    <TrainingBox
-                                                        key={t.id}
-                                                        training={t}
-                                                        onEdit={() => handleEdit(op.id, t)}
-                                                        onDelete={() => handleDelete(t.id)}
-                                                    />
-                                                    ))}
-                                                    <button onClick={() => handleAdd(op.id)} className="ml-2 px-2 py-1 rounded-lg border border-dashed border-green-400 text-green-600 bg-white hover:bg-green-50 transition text-xs">+</button>
-                                                </div>
-                                                </div>
-                                            ))}
-                                            </div>
-                                        ) : (
-                                            /* Если св вошёл под своим аккаунтом — другие группы скрыты по умолчанию,
-                                            но виден заголовок с кнопкой (чтобы св мог раскрыть) */
-                                            <div className="p-3 text-sm text-gray-500 italic">
-                                            Операторы скрыты. Нажмите «Показать», чтобы раскрыть группу.
-                                            </div>
-                                        )}
-                                        </div>
-                                    );
-                                    });
-                            })()
-                        )}
-                        <TrainingModal
-                            isOpen={showModal}
-                            onClose={() => setShowModal(false)}
-                            onSave={handleSave}
-                            initialData={editingTraining || {}}
-                            selectedOperators={modalOperators}
-                            selectedOperatorIds={modalOperatorIds}
-                            selectableOperators={selectableOperators}
-                            onSelectedOperatorsChange={setModalOperatorIds}
-                            existingTrainingsByOperator={trainings}
-                        />
-                        {/* Модальное окно календаря по дню (общий) */}
-                        {calendarModal.open && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }}>
-                                <div className="bg-white p-8 rounded-2xl shadow-2xl max-w-2xl w-full relative flex flex-col gap-4" style={{marginLeft: '0px'}} onClick={e => e.stopPropagation()}>
-                                    <button onClick={() => { setCalendarModal({ open: false, date: '', trainings: [] }); setSelectedCalendarTraining(null); }} className="absolute top-4 right-4 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
-                                        <FaIcon className="fas fa-times fa-lg"></FaIcon>
-                                    </button>
-                                    <h3 className="text-2xl font-bold mb-2 text-center text-blue-800">Тренинги за {(() => { const [y,m,d]=calendarModal.date.split('-'); return `${d}.${m}.${y}`; })()}</h3>
-                                    <div className="space-y-6 overflow-y-auto" style={{maxHeight: '60vh', paddingRight: '8px'}}>
-                                        {(() => {
-                                            // calendarModal.trainings: {svName: [trainings]}
-                                            return Object.entries(calendarModal.trainings).map(([svName, list]) => (
-                                                <div key={svName} className="mb-2">
-                                                    <div className="font-semibold mb-2 flex items-center gap-2">
-                                                        {/* Цветной маркер убран, только имя супервайзера */}
-                                                        <span style={{border:`2px solid ${getSvColor(svName)}`,padding:'2px 8px',borderRadius:'6px',color:getSvColor(svName),fontWeight:'bold'}}>{svName}</span>
-                                                    </div>
-                                                    <div className="flex flex-wrap gap-3">
-                                                        {list.map(t => (
-                                                            <div key={t.id} className="bg-gray-50 border border-gray-300 rounded-xl shadow px-3 py-3 min-w-[160px] max-w-[200px] cursor-pointer hover:ring-2 hover:ring-blue-300 transition flex flex-col gap-1" onClick={() => { setSelectedCalendarTraining({ ...t, operator: t.operator }); }}>
-                                                                <div className="flex flex-row items-center justify-between w-full mb-1">
-                                                                    <span className="border border-blue-400 rounded px-1 py-0.5 text-xs font-medium text-blue-700 bg-blue-50">{(() => { const [sh,sm]=t.start_time.split(':').map(Number); const [eh,em]=t.end_time.split(':').map(Number); let mins=(eh*60+em)-(sh*60+sm); return !isNaN(mins)&&mins>=0?`${mins} мин.`:''; })()}</span>
-                                                                    <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-50">{(() => { const [y,m,d]=t.date.split('-'); return `${d}.${m}.${y}`; })()}</span>
-                                                                </div>
-                                                                <div className="w-full mb-1">
-                                                                    <span className="border border-green-500 rounded px-1 py-0.5 text-xs font-semibold text-green-700 bg-green-50 truncate w-full block text-center">{t.reason}</span>
-                                                                </div>
-                                                                <div className="w-full mb-1">
-                                                                    <span className="border border-gray-400 rounded px-1 py-0.5 text-xs font-medium text-gray-700 bg-gray-100 block text-center">{t.operator}</span>
-                                                                </div>
-                                                                {t.comment && (
-                                                                    <div className="mt-0.5 text-xs text-gray-500 w-full text-center truncate" style={{maxWidth:'160px'}}>{t.comment.length>50?t.comment.slice(0,50)+'...':t.comment}</div>
-                                                                )}
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            ));
-                                        })()}
-                                    </div>
-                                </div>
-                                {selectedCalendarTraining && (
-                                    <div className="bg-white p-6 rounded-lg shadow-lg max-w-md w-full relative ml-4" style={{marginRight: '40px'}} onClick={e => e.stopPropagation()}>
-                                        <button onClick={() => setSelectedCalendarTraining(null)} className="absolute top-3 right-3 text-gray-500 hover:text-gray-700 p-2 rounded-full bg-gray-100 border border-gray-300">
-                                            <FaIcon className="fas fa-times fa-lg"></FaIcon>
-                                        </button>
-                                        <h3 className="text-xl font-semibold mb-4 text-center">Детали тренинга</h3>
-                                        <div className="space-y-4">
-                                            <div className="flex justify-between items-center">
-                                                <div>
-                                                    <label className="block text-sm font-medium text-gray-700 mb-1">Оператор</label>
-                                                    <input type="text" value={selectedCalendarTraining.operator || selectedCalendarTraining.operatorName || ''} disabled className="w-38 p-2 border rounded bg-gray-100 text-blue-700 font-semibold" />
-                                                </div>
-                                                <div>
-                                                    <label className="block text-sm font-medium text-gray-700 mb-1">Дата</label>
-                                                    <input type="text" value={(() => { const [y,m,d]=selectedCalendarTraining.date.split('-'); return `${d}.${m}.${y}`; })()} disabled className="w-28 p-2 border rounded bg-gray-100 text-gray-500" />
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">Причина</label>
-                                                <input type="text" value={selectedCalendarTraining.reason} disabled className="w-full p-2 border rounded bg-gray-100 text-green-700 font-semibold" />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">Время начала</label>
-                                                <input type="text" value={selectedCalendarTraining.start_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">Время окончания</label>
-                                                <input type="text" value={selectedCalendarTraining.end_time} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">Комментарий</label>
-                                                <textarea value={selectedCalendarTraining.comment || ''} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-500" rows={3} />
-                                            </div>
-                                            <div>
-                                                <label className="block text-sm font-medium text-gray-700 mb-1">Создал</label>
-                                                <input type="text" value={selectedCalendarTraining.created_by_name || ''} disabled className="w-full p-2 border rounded bg-gray-100 text-gray-700 font-semibold" />
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                );
-                };
-
-                return TrainingsViewComponent;
-            }, []);
+            // Раздел «Тренинги» переехал в src/components/trainings/ и грузится
+            // лениво (см. импорт наверху файла). Здесь он жил с момента создания:
+            // 750 строк своей вёрстки и свой список тем из 9 значений при 11 на
+            // сервере. TrainingModal и TrainingOperatorMultiSelect ниже НЕ уносим —
+            // на них через window.TrainingModal опирается «Учёт часов».
             
             // Restore active JWT session on mount
             useEffect(() => {
@@ -47293,7 +46564,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         canEdit={isAdminLikeRole}
                                     />
                                 ))}
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "trainings" && (
+                                    <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренингов…</div>}>
+                                        <TrainingsView
+                                            user={user}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            showToast={showToast}
+                                            departments={departments}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (
                                     <TasksView
@@ -48433,7 +47714,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                 </div>
                                 )} 
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "trainings" && (
+                                    <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренингов…</div>}>
+                                        <TrainingsView
+                                            user={user}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            showToast={showToast}
+                                            departments={departments}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {( view === "contests" && (<ContestsApp user={user} operators={users} directions={directions} />))}
                                 {( view === "technical_issues" && (<TechnicalIssuesView user={user} operators={users} directions={directions} showToast={showToast} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} />))}
                                 {( view === "tasks" && (
@@ -48767,7 +48058,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     )}
                                   </div>
                                 )} 
-                                {( view === "trainings" && (<TrainingsView user={user} operators={users} showToast={showToast} apiBaseUrl={API_BASE_URL} />))}
+                                {( view === "trainings" && (
+                                    <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренингов…</div>}>
+                                        <TrainingsView
+                                            user={user}
+                                            apiBaseUrl={API_BASE_URL}
+                                            withAccessTokenHeader={withAccessTokenHeader}
+                                            showToast={showToast}
+                                            departments={departments}
+                                        />
+                                    </Suspense>
+                                ))}
                                 {(view === 'hours' || view === 'evaluation') && (
                                   <div className="mb-6">
                                     <label className="block mb-2 font-semibold text-gray-700 flex items-center gap-2">

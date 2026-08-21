@@ -24700,10 +24700,32 @@ def get_trainings():
                 t.created_at,
                 cb.name as created_by_name,
                 t.count_in_hours,
-                t.topic_id
+                t.topic_id,
+                u.name           AS operator_name,
+                u.department_id  AS operator_department_id,
+                u.status         AS operator_status,
+                grp.id           AS group_id,
+                grp.name         AS group_name
             FROM trainings t
             JOIN users u ON t.operator_id = u.id
             LEFT JOIN users cb ON t.created_by = cb.id
+            -- Группа НА ДАТУ ТРЕНИНГА, а не текущая. Разница не теоретическая:
+            -- 120 тренингов из 1648 принадлежат людям без открытого членства
+            -- (в основном уволенным), и по текущей группе они все свалились бы
+            -- в «Без группы», хотя на дату тренинга группа у них была.
+            -- Пересекающихся членств в проде 7 операторо-месяцев — берём самое
+            -- позднее из накрывающих, чтобы у тренинга была одна группа, а не
+            -- дубль строки на каждое членство.
+            LEFT JOIN LATERAL (
+                SELECT g.id, g.name
+                  FROM group_operator_memberships gom
+                  JOIN groups g ON g.id = gom.group_id
+                 WHERE gom.operator_id = t.operator_id
+                   AND gom.start_date <= t.training_date
+                   AND (gom.end_date IS NULL OR gom.end_date >= t.training_date)
+                 ORDER BY gom.start_date DESC, gom.id DESC
+                 LIMIT 1
+            ) grp ON TRUE
         """
         where_clauses = []
         params = []
@@ -24818,6 +24840,15 @@ def get_trainings():
                     # Корпоративная тема, если тренинг проводили по ней. У
                     # базовых тем None — там причина и есть тема.
                     "topic_id": row[10],
+                    # Портрет получателя и его группа НА ДАТУ ТРЕНИНГА. Раздел
+                    # раньше склеивал это на клиенте из /api/admin/users, а тот
+                    # отдаёт админу только роль operator и только ТЕКУЩУЮ
+                    # группу: 11 тренингов супервайзеров были не видны вовсе.
+                    "operator_name": row[11],
+                    "operator_department_id": row[12],
+                    "operator_status": row[13],
+                    "group_id": row[14],
+                    "group_name": row[15],
                 }
                 for row in cursor.fetchall()
             ]
