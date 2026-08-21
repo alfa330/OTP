@@ -60,23 +60,74 @@ const LOOK_HEIGHT = 0.75;     // смотрим в середину борта, 
 export const MIN_DISTANCE = 1.6;
 export const MAX_DISTANCE = 9;
 
-/** Казахстанский учебный номер вместо немецкого из модели. */
-const plateTexture = (text) => {
+/* Где в атласе кузова лежит номерной знак.
+ *
+ * У модели один атлас на весь кузов, и номер в нём нарисован ОДИН — его
+ * показывают и передний бампер, и крышка багажника. Плашка повёрнута на 90°:
+ * в текстуре она вертикальная, 22 на 88 пикселей.
+ *
+ * Числа получены разметкой самой картинки сеткой, а не на глаз: сместись на
+ * пару пикселей — и поверх штатного номера ляжет полоса не на своём месте.
+ */
+const PLATE_IN_ATLAS = { x: 96, y: 34, w: 24, h: 90 };
+
+/** Перерисовать номерной знак прямо в атласе кузова. */
+const plateInTexture = (source, text) => {
+    const image = source?.image;
+    if (!image?.width) return null;
+
     const canvas = document.createElement('canvas');
-    canvas.width = 512; canvas.height = 112;
+    canvas.width = image.width;
+    canvas.height = image.height;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#f4f5f6'; ctx.fillRect(0, 0, 512, 112);
-    ctx.strokeStyle = '#15171a'; ctx.lineWidth = 5;
-    ctx.strokeRect(3, 3, 506, 106);
-    // Синяя полоса с кодом страны — по ней номер и читается как казахстанский.
-    ctx.fillStyle = '#1c4fd8'; ctx.fillRect(432, 6, 74, 100);
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 34px -apple-system, Arial, sans-serif';
-    ctx.textAlign = 'center'; ctx.fillText('KZ', 469, 76);
-    ctx.fillStyle = '#15171a'; ctx.font = 'bold 62px -apple-system, Arial, sans-serif';
-    ctx.fillText(text, 212, 78);
+    ctx.drawImage(image, 0, 0);
+
+    /* Рисуем в повёрнутой системе координат: так номер задаётся как обычный
+       горизонтальный, а в атлас ложится вертикально, как там и было. */
+    const { x, y, w, h } = PLATE_IN_ATLAS;
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate(Math.PI / 2);
+    const plateW = h, plateH = w;          // после поворота стороны меняются
+    ctx.fillStyle = '#f2f3f5';
+    ctx.fillRect(-plateW / 2, -plateH / 2, plateW, plateH);
+    ctx.strokeStyle = '#15171a';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(-plateW / 2 + 1, -plateH / 2 + 1, plateW - 2, plateH - 2);
+    // Синий блок с кодом страны — справа, как на казахстанских номерах.
+    const blue = plateH * 0.7;
+    const gap = 2;
+    ctx.fillStyle = '#1c4fd8';
+    ctx.fillRect(plateW / 2 - blue - gap, -plateH / 2 + gap, blue, plateH - gap * 2);
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${Math.round(plateH * 0.34)}px Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('KZ', plateW / 2 - blue / 2 - gap, 0);
+
+    /* Кегль подбираем по фактической ширине строки, а не на глаз: «000 XXX 02»
+       не влезало в оставшееся поле, и у номера срезался первый знак. */
+    const room = plateW - blue - gap * 4;
+    let size = Math.round(plateH * 0.6);
+    ctx.fillStyle = '#15171a';
+    for (; size > 4; size -= 1) {
+        ctx.font = `bold ${size}px Arial, sans-serif`;
+        if (ctx.measureText(text).width <= room) break;
+    }
+    ctx.fillText(text, -plateW / 2 + gap * 2 + room / 2, 1);
+    ctx.restore();
+
     const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
+    // Параметры копируем с исходной: у glTF-текстур flipY выключен, и без этого
+    // весь кузов покрылся бы перевёрнутым атласом.
+    texture.flipY = source.flipY;
+    texture.colorSpace = source.colorSpace;
+    texture.wrapS = source.wrapS;
+    texture.wrapT = source.wrapT;
+    texture.repeat.copy(source.repeat);
+    texture.offset.copy(source.offset);
     texture.anisotropy = 4;
+    texture.needsUpdate = true;
     return texture;
 };
 
@@ -276,6 +327,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
 
         const parts = {};
         const glassMeshes = [];
+        const bodyMeshes = [];
         gltf.scene.traverse((node) => {
             if (!node.isMesh) return;
             parts[node.name] = node;
@@ -288,6 +340,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
                 node.material.color = new THREE.Color(bodyColor);
                 node.material.metalness = 0.3;
                 node.material.roughness = 0.35;
+                bodyMeshes.push(node);
             } else if (material.startsWith('secondary')) {
                 node.material = node.material.clone();
                 node.material.color = new THREE.Color(0x2b2f36);
@@ -487,39 +540,15 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
         shadow.position.y = 0.012;
         scene.add(shadow);
 
-        /* Учебный госномер поверх штатного немецкого: в тексте шага назван
-           казахстанский, и расхождение с тем, что человек видит в кадре, —
-           первое, на чём тренажёр теряет доверие. */
-        const plateMap = plateTexture(plate);
-        const plateGeometry = new THREE.PlaneGeometry(0.52, 0.125);
-        const plateMaterial = new THREE.MeshBasicMaterial({ map: plateMap, toneMapped: false });
-
-        /* Задний номер крепится К КРЫШКЕ багажника, а не к воздуху за машиной:
-           у Vento он там и стоит, и при открытии обязан уезжать вверх вместе с
-           ней. Плашка, оставленная в сцене, повисала бы в проёме, а рядом с
-           поднятой крышкой был бы виден второй, заводской номер. */
-        const rear = new THREE.Mesh(plateGeometry, plateMaterial);
-        const bootHinge = hinges.trunkOpen;
-        if (bootHinge) {
-            bootHinge.add(rear);
-            // Внутри модели свой масштаб (она приехала в сантиметрах) — плашку
-            // возвращаем к метрам, иначе номер станет размером с машину.
-            const scale = root.scale.x || 1;
-            rear.scale.setScalar(1 / scale);
-            rear.position.copy(bootHinge.worldToLocal(
-                new THREE.Vector3(0, 0.74, size.z / 2 - 0.043),
-            ));
-        } else {
-            rear.position.set(0, 0.74, size.z / 2 - 0.055);
-            scene.add(rear);
+        /* Учебный госномер. Вписываем его в АТЛАС кузова, а не вешаем плоскость
+           перед бампером: плоскость «парит» над кривой поверхностью и с ребра
+           видно, что она отдельная деталь. В текстуре номер один на машину,
+           поэтому правка сразу меняет и передний, и задний знак. */
+        const atlas = bodyMeshes[0]?.material?.map;
+        const withPlate = atlas ? plateInTexture(atlas, plate) : null;
+        if (withPlate) {
+            bodyMeshes.forEach((node) => { node.material.map = withPlate; });
         }
-
-        const front = new THREE.Mesh(plateGeometry, plateMaterial);
-        /* Спереди плашка стоит ЧУТЬ ПЕРЕД носом: в центре бампера у модели
-           углубление, и вровень с габаритом номер тонет в геометрии. */
-        front.position.set(0, 0.37, -size.z / 2 - 0.02);
-        front.rotation.y = Math.PI;
-        scene.add(front);
 
         state.ready = true;
         resize();
