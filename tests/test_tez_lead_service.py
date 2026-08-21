@@ -891,6 +891,26 @@ class BatchWriteTests(unittest.TestCase):
         self.assertIn("stats['skipped']", body)
         self.assertIn('logging.warning', body)
 
+    def test_phone_date_conflict_is_cleared_before_insert(self):
+        """У успешек ДВА уникальных ключа, а ON CONFLICT держит только lead_id.
+
+        Прод 18.08.2026: успешка номера была забронирована переносом на лид
+        ИЮЛЯ, затем тот же номер пришёл в базу АВГУСТА. Победитель — августовский
+        лид, но июльская строка продолжала занимать (номер, дата поездки):
+        UniqueViolation роняла ВЕСЬ пересчёт, и за период не писалось ничего.
+        Успешки замерли на 17.08, пока TEZ APP и Binotel отвечали штатно.
+        Проигравшую строку обязаны снести до вставки — тогда индекс остаётся
+        сторожем инварианта, а не миной под ночной сверкой.
+        """
+        body = self._body('apply_tez_lead_outcomes', size=20000)
+        insert_at = body.index('INSERT INTO tez_lead_successes')
+        before_insert = body[:insert_at]
+        self.assertIn('DELETE FROM tez_lead_successes s', before_insert)
+        self.assertIn('USING (VALUES %s) AS w (lead_id, phone_norm, success_date)',
+                      before_insert)
+        # Сносим ЧУЖУЮ строку, свою же (тот же лид) обновляет ON CONFLICT.
+        self.assertIn('s.lead_id <> w.lead_id', before_insert)
+
     def test_first_orders_are_written_with_execute_values(self):
         body = self._body('save_tez_first_orders')
         self.assertIn('execute_values', body)

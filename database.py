@@ -19161,6 +19161,31 @@ class Database:
                     bool(item.get('is_late')),
                 ))
             if success_rows:
+                # У таблицы ДВА уникальных ключа: lead_id и (phone_norm,
+                # success_date). ON CONFLICT умеет держать только один, и держит
+                # lead_id — поэтому смена владельца успешки роняет весь пересчёт.
+                # Так и случилось на проде 18.08.2026: успешка номера была
+                # забронирована переносом на лид ИЮЛЯ, а потом тот же номер
+                # пришёл в базу АВГУСТА. Победителем становится августовский лид
+                # (см. _drop_duplicate_successes), но июльская строка остаётся на
+                # месте и занимает (номер, дата) — UniqueViolation, откат всей
+                # транзакции, и за период не записывается НИЧЕГО. Успешки встали
+                # на 17.08, пока Binotel и TEZ APP работали штатно.
+                # Поэтому проигравшую строку убираем явно, до вставки: сам индекс
+                # остаётся сторожем инварианта «одна поездка — одна успешка».
+                execute_values(
+                    cursor,
+                    """
+                    DELETE FROM tez_lead_successes s
+                    USING (VALUES %s) AS w (lead_id, phone_norm, success_date)
+                    WHERE s.phone_norm = w.phone_norm
+                      AND s.success_date = w.success_date
+                      AND s.lead_id <> w.lead_id
+                    """,
+                    [(row[0], row[1], row[7]) for row in success_rows],
+                    template="(%s::uuid, %s::varchar, %s::date)",
+                    page_size=500,
+                )
                 execute_values(
                     cursor,
                     """
