@@ -2714,7 +2714,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                         </div>
                     </div>
 
-                    <div className="flex-1 divide-y divide-slate-100 overflow-y-auto">
+                    <div className="thin-scroll flex-1 divide-y divide-slate-100 overflow-y-auto">
                         {isLoading && <SurveysListSkeleton />}
                         {!isLoading && surveyRows.length === 0 && (
                             <div className="p-8 text-center">
@@ -3039,7 +3039,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             </div>
 
                             {/* Detail body */}
-                            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+                            <div className="thin-scroll flex-1 space-y-3 overflow-y-auto p-5">
 
                                 {/* Опрос в архиве, а сотрудник его не проходил.
                                     Без этой строки на месте формы оставалась
@@ -3473,12 +3473,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                 : (card.isCompleted ? 'bg-white ring-slate-200/70' : 'bg-slate-50 ring-slate-200/60')
                                                         }`}
                                                     >
+                                                        {/* Свёрнутая строка — только имя и результат. Всё
+                                                            остальное (сколько верных, баллы, когда отправлено)
+                                                            переехало в шапку раскрытой части: в списке из
+                                                            полусотни человек эти подписи складывались в стену
+                                                            текста, по которой не пробежаться глазами. */}
                                                         <button
                                                             type="button"
                                                             disabled={!card.isCompleted}
                                                             aria-expanded={expanded}
                                                             onClick={() => setOpenedRespondentKey(expanded ? null : card.key)}
-                                                            className={`flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors ${
+                                                            className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition-colors ${
                                                                 card.isCompleted ? 'hover:bg-slate-50/70' : 'cursor-default'
                                                             }`}
                                                         >
@@ -3487,37 +3492,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                     card.isCompleted ? 'text-slate-400' : 'text-transparent'
                                                                 } ${expanded ? 'rotate-90' : ''}`}
                                                             />
-                                                            <div className="min-w-0 flex-1">
-                                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                                                                    <span className={`truncate text-[13.5px] font-semibold ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
-                                                                        {card.name}
-                                                                    </span>
-                                                                    {!card.isCompleted && <Badge color="amber">Не проходил</Badge>}
-                                                                    {card.isDismissed && <Badge color="gray">Уволен</Badge>}
-                                                                    {card.repeatIteration > 1 && <Badge color="blue">#{card.repeatIteration}</Badge>}
-                                                                    {card.testSummary?.is_auto_submitted && <Badge color="amber">по времени</Badge>}
-                                                                </div>
-                                                                {card.isCompleted && (
-                                                                    <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11.5px] text-slate-500">
-                                                                        <span className="tabular-nums">
-                                                                            {isTestStatsSurvey
-                                                                                ? `Верно ${Number(card.testSummary?.correct_answers || 0)} из ${Number(card.testSummary?.total_questions || 0)}`
-                                                                                : `Ответов ${card.answeredCount} из ${card.questionsCount}`}
-                                                                        </span>
-                                                                        <span className="tabular-nums text-slate-400">
-                                                                            {formatSurveyDateTime(card.submittedAt)}
-                                                                        </span>
-                                                                    </div>
-                                                                )}
+                                                            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                                                                <span className={`truncate text-[13.5px] font-semibold ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
+                                                                    {card.name}
+                                                                </span>
+                                                                {!card.isCompleted && <Badge color="amber">Не проходил</Badge>}
+                                                                {card.isDismissed && <Badge color="gray">Уволен</Badge>}
+                                                                {card.repeatIteration > 1 && <Badge color="blue">#{card.repeatIteration}</Badge>}
                                                             </div>
                                                             {card.isCompleted && isTestStatsSurvey && card.hasScore && (
-                                                                <div className="shrink-0 text-right">
-                                                                    <div className={`text-[17px] font-bold tabular-nums ${scoreColor}`}>
-                                                                        {formatPercent(card.scoreValue)}
-                                                                    </div>
-                                                                    <div className="text-[10.5px] tabular-nums text-slate-400">
-                                                                        {formatPoints(card.testSummary?.earned_points)} / {formatPoints(card.testSummary?.max_points)}
-                                                                    </div>
+                                                                <div className={`shrink-0 text-[15px] font-bold tabular-nums ${scoreColor}`}>
+                                                                    {formatPercent(card.scoreValue)}
                                                                 </div>
                                                             )}
                                                         </button>
@@ -3542,16 +3527,58 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                     }`}
                                                                 >
                                                                     {card.key === expandedRenderKey && (
-                                                                        <AttemptReview
-                                                                            questions={card.questions}
-                                                                            isTest={isTestStatsSurvey}
-                                                                            getAnswer={(question, questionIndex) => {
-                                                                                const resolved = resolveStatsQuestionAndAnswer(card.row, question, questionIndex);
-                                                                                return resolved.answer
-                                                                                    ? { ...resolved.answer, __question: resolved.question }
-                                                                                    : null;
-                                                                            }}
-                                                                        />
+                                                                        <>
+                                                                            {/* Шапка раскрытой части: кто, сколько
+                                                                                верных и когда. Здесь этим цифрам есть
+                                                                                где встать, и они не мешают искать
+                                                                                человека в свёрнутом списке. */}
+                                                                            {/* Имя не повторяем: оно в строке прямо над
+                                                                                этой сводкой, и второй раз на том же экране
+                                                                                читалось бы как ошибка отрисовки. */}
+                                                                            <div className="mb-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                                                                                {isTestStatsSurvey ? (
+                                                                                    <>
+                                                                                        <span>
+                                                                                            Верно:{' '}
+                                                                                            <strong className="tabular-nums text-slate-800">
+                                                                                                {Number(card.testSummary?.correct_answers || 0)} из {Number(card.testSummary?.total_questions || 0)}
+                                                                                            </strong>
+                                                                                        </span>
+                                                                                        {card.hasScore && (
+                                                                                            <span>
+                                                                                                Баллы:{' '}
+                                                                                                <strong className="tabular-nums text-slate-800">
+                                                                                                    {formatPoints(card.testSummary?.earned_points)} / {formatPoints(card.testSummary?.max_points)}
+                                                                                                </strong>
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <span>
+                                                                                        Ответов:{' '}
+                                                                                        <strong className="tabular-nums text-slate-800">
+                                                                                            {card.answeredCount} из {card.questionsCount}
+                                                                                        </strong>
+                                                                                    </span>
+                                                                                )}
+                                                                                <span className="tabular-nums text-slate-400">
+                                                                                    {formatSurveyDateTime(card.submittedAt)}
+                                                                                </span>
+                                                                                {card.testSummary?.is_auto_submitted && (
+                                                                                    <Badge color="amber">Отправлено по времени</Badge>
+                                                                                )}
+                                                                            </div>
+                                                                            <AttemptReview
+                                                                                questions={card.questions}
+                                                                                isTest={isTestStatsSurvey}
+                                                                                getAnswer={(question, questionIndex) => {
+                                                                                    const resolved = resolveStatsQuestionAndAnswer(card.row, question, questionIndex);
+                                                                                    return resolved.answer
+                                                                                        ? { ...resolved.answer, __question: resolved.question }
+                                                                                        : null;
+                                                                                }}
+                                                                            />
+                                                                        </>
                                                                     )}
                                                                 </div>
                                                             </div>

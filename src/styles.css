@@ -951,18 +951,27 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
 
    Ползунок чуть плотнее, чем у уведомлений: под ним не белая карточка, а
    узорное полотно переписки, и на нём светло-серая полоска теряется. */
-.crm-scroll::-webkit-scrollbar {
+/* `.thin-scroll` — то же самое под общим именем: разделы, которым нужен такой
+   же ползунок, не должны заводить четвёртую копию правил (их и так три:
+   .notifications-scroll, .ios-modal-scroll и этот). У .notifications-scroll,
+   кстати, ровно та ошибка, о которой предупреждает комментарий ниже, —
+   `scrollbar-width` задан рядом с псевдоэлементами. */
+.crm-scroll::-webkit-scrollbar,
+.thin-scroll::-webkit-scrollbar {
     width: 3px;
     height: 3px;
 }
-.crm-scroll::-webkit-scrollbar-track {
+.crm-scroll::-webkit-scrollbar-track,
+.thin-scroll::-webkit-scrollbar-track {
     background: transparent;
 }
-.crm-scroll::-webkit-scrollbar-thumb {
+.crm-scroll::-webkit-scrollbar-thumb,
+.thin-scroll::-webkit-scrollbar-thumb {
     background: rgba(100, 116, 139, 0.32);
     border-radius: 9999px;
 }
-.crm-scroll::-webkit-scrollbar-thumb:hover {
+.crm-scroll::-webkit-scrollbar-thumb:hover,
+.thin-scroll::-webkit-scrollbar-thumb:hover {
     background: rgba(71, 85, 105, 0.6);
 }
 
@@ -972,7 +981,8 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
    стандартное свойство отдаём только тем, кто псевдоэлементы не понимает,
    то есть Firefox. */
 @supports not selector(::-webkit-scrollbar) {
-    .crm-scroll {
+    .crm-scroll,
+    .thin-scroll {
         scrollbar-width: thin;
         scrollbar-color: rgba(100, 116, 139, 0.35) transparent;
     }
