@@ -120,7 +120,10 @@ def register(bp, wiki_route, db, log_ip):
         один справочник, разнесённый по двум экранам, и разные пороги на них
         читались бы как случайность.
         """
-        return wiki_access.has_write_capability(ctx['capabilities'])
+        # Способности ДОЛЖНОСТИ, а не итоговые: справочник общекомпанейский,
+        # и доступ, выписанный правилом на ОДИН раздел вики, открывать его не
+        # должен (см. queries.load_capabilities, инцидент 21.08.2026).
+        return wiki_access.has_write_capability(ctx['role_capabilities'])
 
     def _forbidden():
         return jsonify({"error": "Справочник правит тот, у кого есть права сверх чтения",

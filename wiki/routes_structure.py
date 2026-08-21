@@ -13,7 +13,7 @@ from . import access as wiki_access
 from . import articles as wiki_articles
 from . import queries, structure
 from . import schema as wiki_schema
-from .schema import SUBJECT_TYPES
+from .schema import CAPABILITY_TITLES, SUBJECT_TYPES
 
 
 def _body():
@@ -183,13 +183,7 @@ def register(bp, wiki_route, db, log_ip):
         структурой видел бы в дереве чужие отделы. Раздел вне периметра остаётся
         в ответе (он нужен вкладке «Структура»), но помечен accessible=false.
         """
-        subjects = wiki_access.collect_subjects(
-            user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            department_id=ctx['department_id'],
-            headed_department_ids=ctx['headed_department_ids'],
-            direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
-            wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-        )
+        subjects = ctx['subjects']
         allowed = queries.allowed_section_ids(cursor, ctx, subjects, master_key=False)
         rules_by_section = queries.section_rules_for_user(cursor, allowed, subjects,
                                                           ctx['user_id'])
@@ -702,6 +696,12 @@ def register(bp, wiki_route, db, log_ip):
                 # (null — без границы). Форма по ним убирает субъекты, которые
                 # уводят за пределы отдела: роль в системе и роль вики.
                 "grant_departments": _grant_departments(ctx),
+                # Третье измерение выдачи: КАКИЕ права он вправе поставить.
+                # Потолок и границу форма получает отсюда же, а про это узнавала
+                # бы только по 403 на заполненной форме — то есть молчаливым
+                # отказом с обратной стороны стола.
+                "grantable": [key for key in PERMISSION_FIELDS
+                              if ctx['role_capabilities'].get(key)],
             })
 
         data = _body()
@@ -772,6 +772,34 @@ def register(bp, wiki_route, db, log_ip):
         # Право без чтения бессмысленно: нельзя править то, чего не видишь.
         if any(permissions[k] for k in PERMISSION_FIELDS[1:]):
             permissions['can_read'] = True
+
+        # ── Выписать можно только то, что умеешь сам ─────────────────
+        #
+        # До 21.08.2026 эта граница держалась случайно: право, выписанное сверх
+        # способностей раздающего, всё равно гасло у адресата (wiki/access.py),
+        # и проверять было нечего. Теперь выписанное право работает — значит
+        # «супервайзер выдал оператору удаление, которого у самого супервайзера
+        # нет» стало бы настоящей выдачей, причём мимо лестницы GRANT_CEILING.
+        #
+        # Сверяемся со способностями ДОЛЖНОСТИ, а не с итоговыми: право,
+        # полученное самим раздающим из правила, дальше не передаётся. Иначе
+        # одна выдача сверху делает человека раздающим то же право по всему
+        # своему отделу — мимо лестницы GRANT_CEILING.
+        #
+        # Отказ называет право поимённо: молчаливо снять галочку и сохранить
+        # правило урезанным — тот же класс отказа, от которого чинили сам
+        # инцидент, только с обратной стороны стола. Форма о границе знает
+        # заранее: набор доступных галочек едет в GET /access/section-rules
+        # полем grantable.
+        beyond = [key for key in PERMISSION_FIELDS
+                  if permissions[key] and not ctx['role_capabilities'].get(key)]
+        if beyond:
+            return jsonify({
+                "error": "Нельзя выдать право, которого нет у вас самих: %s" % ', '.join(
+                    CAPABILITY_TITLES.get(key, key) for key in beyond),
+                "code": "WIKI_GRANT_BEYOND_SELF",
+                "required": beyond,
+            }), 403
 
         rule_id = structure.upsert_section_rule(
             cursor, section_id=section_id, subject_type=subject_type,
@@ -878,10 +906,6 @@ def register(bp, wiki_route, db, log_ip):
         if not target:
             return jsonify({"error": "Пользователь не найден"}), 404
 
-        target['capabilities'] = wiki_access.resolve_capabilities(
-            target['otp_role'], target['wiki_roles'],
-            is_department_head=bool(target['headed_department_ids']),
-        )
         subjects = wiki_access.collect_subjects(
             user_id=target['user_id'], otp_role=target['otp_role'],
             department_id=target['department_id'],
@@ -889,6 +913,11 @@ def register(bp, wiki_route, db, log_ip):
             direction_id=target['direction_id'], group_ids=target['group_ids'],
             wiki_role_ids=[r.get('id') for r in target['wiki_roles']],
         )
+        # Тем же расчётом, что и у самого себя: объяснение прав обязано
+        # совпадать с правами. Считать способности здесь отдельно значило бы
+        # завести второй источник истины — раньше он тут и стоял, и ответ
+        # «почему он это видит» умалчивал о правах, выписанных правилами.
+        queries.load_capabilities(cursor, target, subjects)
         allowed = queries.allowed_section_ids(cursor, target, subjects, master_key=False)
         rules_by_section = queries.section_rules_for_user(cursor, allowed, subjects,
                                                           target['user_id'])
@@ -916,6 +945,9 @@ def register(bp, wiki_route, db, log_ip):
             "otp_role": target['otp_role'],
             "access_mode": target['access_mode'],
             "capabilities": target['capabilities'],
+            # Отдельно — способности одной лишь должности: разница с итоговыми
+            # и есть ответ «что человеку добавили правилами».
+            "role_capabilities": target['role_capabilities'],
             "subjects": subjects,
             "sections": sections,
         })

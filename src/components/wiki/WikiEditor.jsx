@@ -131,6 +131,31 @@ export default function WikiEditor({
             (s) => s.permissions?.can_create || String(s.id) === current);
     }, [sections, sectionIds]);
 
+    /* «Опубликовать» — это ПРАВО, а не просто кнопка. У существующей статьи его
+       уже посчитал сервер (article.permissions), у новой оно берётся из правила
+       раздела, куда её кладут, — так же, как список разделов выше.
+
+       Раньше кнопка стояла на одном лишь статусе, и человек с правом только
+       править жал её, чтобы получить отказ тостом (routes_edit: «Нет права
+       публиковать эту статью»). Пока правки в разделе доставались только
+       супервайзеру и выше, у которых право выпуска есть всегда, это не
+       выстреливало; с 21.08.2026 правку выдают правилом поимённо, и выдать
+       можно одну лишь правку.
+
+       Неизвестность толкуем в пользу кнопки: права ещё не приехали — показываем.
+       Спрятать кнопку у того, кто вправе публиковать, хуже, чем показать её
+       лишний раз: во втором случае человек увидит внятный отказ, в первом —
+       ничего. */
+    const mayPublish = useMemo(() => {
+        if (article?.permissions) return !!article.permissions.can_publish;
+        const list = sections || [];
+        if (!list.some((s) => s.permissions)) return true;
+        const chosen = sectionIds.map(String);
+        if (!chosen.length) return true;
+        return list.some((s) => chosen.includes(String(s.id))
+            && s.permissions?.can_publish);
+    }, [article, sections, sectionIds]);
+
     const editor = useEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
@@ -370,7 +395,7 @@ export default function WikiEditor({
                         {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
                         Сохранить
                     </button>
-                    {!isPublished && (
+                    {!isPublished && mayPublish && (
                         <button
                             type="button"
                             className={iosBtnPrimary}

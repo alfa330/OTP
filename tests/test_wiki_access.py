@@ -586,5 +586,101 @@ class RuleUniquenessDDLTest(unittest.TestCase):
                       '\n'.join(schema._ORG_STATEMENTS))
 
 
+class GrantedCapabilitiesTest(unittest.TestCase):
+    """Инцидент 21.08.2026: выписанное правилом право обязано работать.
+
+    Оператору СЗоВ выписали персональное правило на раздел «Супервайзер» со
+    всеми шестью правами. Правило сохранилось и показывалось в «Структуре», а
+    человек не мог ни завести статью, ни поправить букву: способность
+    выводилась ТОЛЬКО из должности, у 'operator' сверх чтения нет ничего, и
+    право гасло молча. Ровно та же ловушка сработала 19.08.2026 у супервайзера
+    с публикацией — лечили точечно, добавив способность роли, и она вернулась.
+    """
+
+    FULL_RULE = {name: True for name in PERMISSION_COLUMNS}
+
+    def caps(self, otp_role, granted=None, wiki_roles=()):
+        """Так способности считает боевой путь: queries.load_capabilities."""
+        return access.merge_capabilities(
+            resolve_capabilities(otp_role, list(wiki_roles)),
+            access.capabilities_from_grants(granted or {}))
+
+    def test_operator_with_a_rule_may_edit(self):
+        perms = resolve_article_permissions(
+            capabilities=self.caps('operator', self.FULL_RULE),
+            section_rules=[grant(**self.FULL_RULE)], otp_role='operator')
+        self.assertTrue(perms['can_edit'], 'выписанное правилом право снова гасится')
+        self.assertTrue(perms['can_create'])
+
+    def test_rule_elsewhere_does_not_open_this_article(self):
+        """Способность поднялась, но «где именно» по-прежнему решает правило.
+
+        Иначе объединение превратилось бы в «можно везде» — а это ровно то, от
+        чего оберегает гейт способностей, и снимать его целиком нельзя.
+        """
+        perms = resolve_article_permissions(
+            capabilities=self.caps('operator', self.FULL_RULE),
+            section_rules=[grant(can_read=True)], otp_role='operator')
+        self.assertTrue(perms['can_read'])
+        self.assertFalse(perms['can_edit'])
+
+    def test_grants_never_reach_management(self):
+        """Правило не выдаёт can_manage_* — и не должно уметь этого в принципе."""
+        caps = access.capabilities_from_grants(
+            dict(self.FULL_RULE, can_manage_access=True,
+                 can_manage_structure=True, can_manage_users=True))
+        for name in ('can_manage_access', 'can_manage_structure', 'can_manage_users'):
+            self.assertFalse(caps[name], name)
+
+    def test_rule_columns_are_a_subset_of_capabilities(self):
+        """Страж схемы: право правила, которого нет среди способностей, потеряется молча."""
+        self.assertLessEqual(set(PERMISSION_COLUMNS), set(CAPABILITY_COLUMNS))
+
+    def test_nothing_granted_changes_nothing(self):
+        """Человек без единого правила остаётся ровно при способностях должности."""
+        for role in ('operator', 'trainee', 'trainer', 'sv', 'admin'):
+            self.assertEqual(self.caps(role, {}), capabilities_from_otp_role(role), role)
+
+
+class OwnerKeepsEditTest(unittest.TestCase):
+    """«Владелец раздела и автор статьи всегда могут её править» — теперь правда.
+
+    Так было написано в resolve_article_permissions, но строчкой ниже право
+    гасил гейт способностей: у оператора и стажёра can_edit нет, и назначенный
+    владельцем раздела человек молча терял свой же раздел.
+    """
+
+    def test_section_owner_edits_without_the_role(self):
+        perms = resolve_article_permissions(
+            capabilities=capabilities_from_otp_role('operator'),
+            section_rules=[grant(can_read=True)],
+            otp_role='operator', is_section_owner=True)
+        self.assertTrue(perms['can_edit'])
+
+    def test_article_author_edits_without_the_role(self):
+        perms = resolve_article_permissions(
+            capabilities=capabilities_from_otp_role('operator'),
+            otp_role='operator', is_article_owner=True)
+        self.assertTrue(perms['can_edit'])
+
+    def test_deny_still_beats_ownership(self):
+        """Запрет правилом сильнее и здесь: он применяется ДО гейта способностей."""
+        perms = resolve_article_permissions(
+            capabilities=capabilities_from_otp_role('operator'),
+            visibility_mode='restricted',
+            article_rules=[grant(can_read=True), deny(can_edit=True)],
+            otp_role='operator', is_article_owner=True)
+        self.assertFalse(perms['can_edit'])
+
+    def test_ownership_does_not_hand_out_the_rest(self):
+        """Владение открывает чтение и правку — не удаление и не публикацию."""
+        perms = resolve_article_permissions(
+            capabilities=capabilities_from_otp_role('operator'),
+            section_rules=[grant(can_read=True, can_delete=True, can_publish=True)],
+            otp_role='operator', is_section_owner=True)
+        self.assertFalse(perms['can_delete'])
+        self.assertFalse(perms['can_publish'])
+
+
 if __name__ == '__main__':
     unittest.main()

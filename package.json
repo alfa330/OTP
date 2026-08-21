@@ -22,6 +22,8 @@
     "test:wiki-section-picker": "node --test tests/wiki_section_picker.test.mjs",
     "test:wiki-structure-tree": "node --test tests/wiki_structure_tree.test.mjs",
     "test:wiki-space-features": "node --test tests/wiki_space_features.test.mjs",
+  "test:wiki-section-grants": "node --test tests/wiki_section_grants.test.mjs",
+  "test:wiki-section-access": "node --test tests/wiki_section_access_render.test.mjs",
     "test:wiki-office-schedule": "node --test tests/wiki_office_schedule.test.mjs",
     "test:wiki-park-points": "node --test tests/wiki_park_points.test.mjs",
     "test:wiki-trainer": "node --test tests/wiki_trainer_runner.test.mjs",

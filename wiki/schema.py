@@ -128,6 +128,21 @@ CAPABILITY_COLUMNS = (
     'can_manage_users', 'can_manage_structure', 'can_manage_access',
 )
 
+# Человекочитаемые названия прав — для внятного отказа. Живут здесь, рядом с
+# самими колонками, а не в routes.py: их читают и декоратор роута, и оба места,
+# где выписывают правила, а третья копия однажды разошлась бы с первыми двумя.
+CAPABILITY_TITLES = {
+    'can_read': 'чтение',
+    'can_create': 'создание статей',
+    'can_edit': 'правка статей',
+    'can_delete': 'удаление',
+    'can_publish': 'публикация',
+    'can_approve': 'согласование',
+    'can_manage_users': 'управление людьми',
+    'can_manage_structure': 'управление структурой',
+    'can_manage_access': 'управление доступами',
+}
+
 _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 
 _STATEMENTS = [

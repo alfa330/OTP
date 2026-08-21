@@ -250,6 +250,9 @@ class TrainersRouteTest(unittest.TestCase):
 
         patches = [
             (queries, 'load_access_context', lambda _c, _u: dict(context)),
+            # Курсор здесь один на все запросы; расчёт способностей ходит в базу
+            # первым и без подмены разобрал бы чужие строки как выписанные права.
+            (queries, 'granted_rule_rights', lambda _c, _s, _u: ({}, [])),
             (queries, 'log_action', lambda *a, **k: None),
             (wiki_perimeter, 'read_perimeter', fake_perimeter),
         ]

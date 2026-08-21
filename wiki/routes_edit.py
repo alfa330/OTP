@@ -12,7 +12,7 @@ from . import access as wiki_access
 from . import articles as wiki_articles
 from . import edit as wiki_edit
 from . import queries
-from .schema import ARTICLE_TYPES, SUBJECT_TYPES
+from .schema import ARTICLE_TYPES, CAPABILITY_TITLES, SUBJECT_TYPES
 from .ai import embed as ai_embed
 from .ai import index as ai_index
 from .routes_structure import PERMISSION_FIELDS, _clean, _int_or_none, _slugify
@@ -72,16 +72,44 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             return None
 
     def _perimeter(cursor, ctx):
-        subjects = wiki_access.collect_subjects(
-            user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            department_id=ctx['department_id'],
-            headed_department_ids=ctx['headed_department_ids'],
-            direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
-            wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-        )
+        subjects = ctx['subjects']
         sections = queries.allowed_section_ids(cursor, ctx, subjects)
         visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections)
         return subjects, sections, visible
+
+    def _forbidden_sections(cursor, ctx, section_ids):
+        """Разделы из списка, куда этот человек класть статьи не вправе.
+
+        Возвращает их НАЗВАНИЯ — отказ обязан говорить, какой именно раздел
+        закрыт: список приходит из формы, где разделов может быть несколько.
+
+        Право то же, что и у создания, — can_create в правиле раздела. Проверять
+        надо КАЖДЫЙ раздел, а не «хоть один»: set_sections кладёт статью во все
+        переданные разом (wiki/edit.py), и проверка any() пропускала статью в
+        соседнюю ветку заодно с разрешённой. Пока правку раздела получал только
+        супервайзер и выше, у которых правило есть на всю свою ветку, это не
+        стреляло; с 21.08.2026 право выписывают поимённо на один раздел.
+        """
+        wanted = sorted({int(s) for s in (section_ids or ()) if _int_or_none(s)})
+        if not wanted or ctx['capabilities'].get('can_manage_access'):
+            return []
+        rules = queries.section_rules_for_user(cursor, wanted, ctx['subjects'],
+                                               ctx['user_id'])
+        denied = [sid for sid in wanted
+                  if not any(rule.get('can_create') for rule in rules.get(sid, ()))]
+        if not denied:
+            return []
+        cursor.execute('SELECT id, name FROM wiki_sections WHERE id = ANY(%s)',
+                       (denied,))
+        names = dict(cursor.fetchall())
+        return [names.get(sid) or ('раздел %d' % sid) for sid in denied]
+
+    def _section_forbidden(names, verb='добавлять статьи в'):
+        return jsonify({
+            "error": "Нет права %s %s" % (
+                verb, ', '.join('«%s»' % name for name in names)),
+            "code": "WIKI_SECTION_FORBIDDEN",
+        }), 403
 
     def _load_with_permissions(cursor, ctx, article_id):
         """Статья + эффективные права. Возвращает (article, permissions, error)."""
@@ -216,19 +244,22 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             return jsonify({"error": "Укажите название статьи"}), 400
 
         subjects, sections, _visible = _perimeter(cursor, ctx)
-        # Создавать можно только в разделах, где есть право на создание.
-        if section_ids:
-            rules = queries.section_rules_for_user(
-                cursor, [int(s) for s in section_ids], subjects, ctx['user_id'])
-            allowed_here = any(
-                rule.get('can_create')
-                for section_rules in rules.values() for rule in section_rules
-            )
-            if not allowed_here and not ctx['capabilities'].get('can_manage_access'):
-                return jsonify({
-                    "error": "Нет права создавать статьи в выбранном разделе",
-                    "code": "WIKI_SECTION_FORBIDDEN",
-                }), 403
+        # Создавать можно только в разделах, где есть право на создание —
+        # в КАЖДОМ выбранном, см. _forbidden_sections.
+        #
+        # Пустой список раздела не отменяет: статья без разделов не видна никому,
+        # поэтому она падает в запасной «Общий сотрудник» (wiki/edit.py:
+        # default_section_id). Спрашивать право надо и на него — иначе не
+        # выбрать раздел вовсе становится способом положить статью туда, куда
+        # человека не пускали.
+        targets = list(section_ids)
+        if not targets:
+            fallback = wiki_edit.default_section_id(
+                cursor, queries.spaces_for_user(cursor, ctx))
+            targets = [fallback] if fallback else []
+        denied = _forbidden_sections(cursor, ctx, targets)
+        if denied:
+            return _section_forbidden(denied, 'создавать статьи в')
 
         slug = _clean(data.get('slug'), 200) or _slugify(title)
         base_slug, suffix = slug, 2
@@ -383,6 +414,17 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             session_id=_session_id(), comment=_clean(data.get('comment'), 500))
 
         if 'section_ids' in data:
+            # Перенос статьи — распоряжение содержимым ДВУХ разделов: того,
+            # откуда её забирают, и того, куда кладут. Права не спрашивали
+            # вовсе, и статью можно было молча увезти в раздел, куда автор не
+            # ходит (числилось известным дефектом с 19.08.2026). Поэтому
+            # проверяем симметричную разность: убрать статью из чужого раздела —
+            # то же перемещение, только в другую сторону.
+            wanted = {int(s) for s in (data['section_ids'] or []) if _int_or_none(s)}
+            touched = wanted ^ set(article.get('section_ids') or ())
+            denied = _forbidden_sections(cursor, ctx, sorted(touched))
+            if denied:
+                return _section_forbidden(denied, 'переносить статьи в')
             wiki_edit.set_sections(cursor, article_id, data['section_ids'],
                                    queries.spaces_for_user(cursor, ctx))
             changed = True
@@ -478,6 +520,37 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                 permissions = {key: True for key in PERMISSION_FIELDS}
         elif any(permissions[k] for k in PERMISSION_FIELDS[1:]):
             permissions['can_read'] = True
+
+        # ── Выписать можно только то, что умеешь сам ─────────────────
+        #
+        # До 21.08.2026 эта граница держалась случайно: право, выписанное сверх
+        # способностей раздающего, всё равно гасло у адресата (wiki/access.py),
+        # и проверять было нечего. Теперь выписанное право работает — значит
+        # «супервайзер выдал оператору удаление, которого у самого супервайзера
+        # нет» стало бы настоящей выдачей, причём мимо лестницы GRANT_CEILING.
+        #
+        # Сверяемся со способностями ДОЛЖНОСТИ, а не с итоговыми: право,
+        # полученное самим раздающим из правила, дальше не передаётся. Иначе
+        # одна выдача сверху делает человека раздающим то же право по всему
+        # своему отделу — мимо лестницы GRANT_CEILING.
+        #
+        # Отказ называет право поимённо: молчаливо снять галочку и сохранить
+        # правило урезанным — тот же класс отказа, от которого чинили сам
+        # инцидент, только с обратной стороны стола. Форма о границе знает
+        # заранее: набор доступных галочек едет в GET /access/section-rules
+        # полем grantable.
+        # Запрета это не касается: mode='deny' ничего не выдаёт, и требовать
+        # права ради того, чтобы его отобрать, было бы наоборот.
+        beyond = [] if mode == 'deny' else [
+            key for key in PERMISSION_FIELDS
+            if permissions[key] and not ctx['role_capabilities'].get(key)]
+        if beyond:
+            return jsonify({
+                "error": "Нельзя выдать право, которого нет у вас самих: %s" % ', '.join(
+                    CAPABILITY_TITLES.get(key, key) for key in beyond),
+                "code": "WIKI_GRANT_BEYOND_SELF",
+                "required": beyond,
+            }), 403
 
         rule_id = wiki_edit.upsert_article_rule(
             cursor, article_id=article_id, subject_type=subject_type,

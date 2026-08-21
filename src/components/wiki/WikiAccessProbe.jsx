@@ -5,6 +5,7 @@ import {
     iosCard, iosBtnPrimary, iosBtnSecondary, IosBadge, IosModal,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { CAPABILITY_LABELS } from './sectionGrants';
 
 /* «Почему этот человек видит этот раздел».
  *
@@ -18,6 +19,18 @@ import CustomSelect from '../ui/CustomSelect';
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
+
+const capabilityList = (caps) => Object.keys(CAPABILITY_LABELS)
+    .filter((key) => caps?.[key])
+    .map((key) => CAPABILITY_LABELS[key])
+    .join(', ');
+
+/* Что человеку дали ПРАВИЛА сверх должности. Пусто — строку не рисуем: она
+   отвечает на вопрос «откуда право», и без разницы отвечать нечего. */
+const addedByRules = (data) => Object.keys(CAPABILITY_LABELS)
+    .filter((key) => data?.capabilities?.[key] && !data?.role_capabilities?.[key])
+    .map((key) => CAPABILITY_LABELS[key])
+    .join(', ');
 
 /* Словарь портала, а не свой. Раньше здесь стояли «руководитель» и «директор»,
    которых больше нигде в системе нет: поиск по слову «админ» не находил никого,
@@ -113,6 +126,24 @@ export default function WikiAccessProbe({ base, headers, open, onClose }) {
                             </IosBadge>
                             <IosBadge tone="blue">разделов: {probe.data.sections?.length || 0}</IosBadge>
                         </div>
+                        {/* Экран называется «почему», но про ПРАВА молчал: по
+                            человеку с персональным правилом он отвечал
+                            «разделов: N» и не говорил, что вся правка у него из
+                            одного правила. Разница двух наборов способностей и
+                            есть ответ (wiki/queries.py: load_capabilities). */}
+                        {probe.data.capabilities && (
+                            <div className="px-1 text-[11.5px] leading-relaxed text-slate-500">
+                                <span className="text-slate-400">Права по должности: </span>
+                                {capabilityList(probe.data.role_capabilities) || '— только вход'}
+                                {addedByRules(probe.data) && (
+                                    <>
+                                        <br />
+                                        <span className="text-slate-400">Добавлено правилами: </span>
+                                        <span className="text-blue-700">{addedByRules(probe.data)}</span>
+                                    </>
+                                )}
+                            </div>
+                        )}
                         <div className={`${iosCard} max-h-72 overflow-y-auto`}>
                             {(probe.data.sections || []).length === 0 && (
                                 <div className="px-3 py-8 text-center text-[12.5px] text-slate-400">

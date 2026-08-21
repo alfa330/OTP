@@ -3,7 +3,6 @@
 from flask import jsonify, request
 
 from . import ack as wiki_ack
-from . import access as wiki_access
 from . import articles as wiki_articles
 from . import queries
 from .routes_structure import _int_or_none
@@ -16,13 +15,7 @@ def _body():
 def register(bp, wiki_route, db, log_ip):
 
     def _visible(cursor, ctx):
-        subjects = wiki_access.collect_subjects(
-            user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-            department_id=ctx['department_id'],
-            headed_department_ids=ctx['headed_department_ids'],
-            direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
-            wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-        )
+        subjects = ctx['subjects']
         sections = queries.allowed_section_ids(cursor, ctx, subjects)
         return wiki_articles.visible_article_ids(cursor, ctx, subjects, sections)
 
@@ -73,8 +66,12 @@ def register(bp, wiki_route, db, log_ip):
         return jsonify({"status": "acknowledged"})
 
     # ── Назначение и отчёт ───────────────────────────────────────────────
+    # capability_from_role: назначение обязательного чтения — это про ЛЮДЕЙ
+    # (ниже department_id раскрывается в весь состав отдела), а не про
+    # содержимое раздела. Право выпускать, выписанное правилом на один раздел,
+    # такую дверь открывать не должно — см. queries.load_capabilities.
     @wiki_route('/articles/<int:article_id>/ack/assign', methods=('POST',),
-                capability='can_publish')
+                capability='can_publish', capability_from_role=True)
     def wiki_ack_assign(cursor, ctx, article_id):
         if article_id not in _visible(cursor, ctx):
             return jsonify({"error": "Статья не найдена"}), 404
@@ -104,7 +101,8 @@ def register(bp, wiki_route, db, log_ip):
                            ip_address=log_ip())
         return jsonify({"assigned": created, "summary": wiki_ack.summary(cursor, article_id)})
 
-    @wiki_route('/articles/<int:article_id>/ack/report', capability='can_publish')
+    @wiki_route('/articles/<int:article_id>/ack/report', capability='can_publish',
+                capability_from_role=True)
     def wiki_ack_report(cursor, ctx, article_id):
         if article_id not in _visible(cursor, ctx):
             return jsonify({"error": "Статья не найдена"}), 404

@@ -37,7 +37,6 @@ all() по пустому множеству: у статьи без разде�
 
 import hashlib
 
-from . import access as wiki_access
 from . import articles as wiki_articles
 from . import queries
 
@@ -79,13 +78,11 @@ def read_perimeter(cursor, ctx, *, master_key=True, space_id=None):
     чужие пространства, и space_id выбирает из СВОИХ. Попросить чужое через
     параметр нельзя — его разделов в периметре просто нет.
     """
-    subjects = wiki_access.collect_subjects(
-        user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-        department_id=ctx['department_id'],
-        headed_department_ids=ctx['headed_department_ids'],
-        direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
-        wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-    )
+    # Субъекты уже посчитаны декоратором wiki_route и лежат в контексте:
+    # выводить их второй раз из тех же полей значило бы завести второй
+    # источник истины — ровно на таком раздвоении сломалась исходная вика
+    # (см. шапку модуля).
+    subjects = ctx['subjects']
     sections = queries.allowed_section_ids(cursor, ctx, subjects,
                                            master_key=master_key)
     visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections,

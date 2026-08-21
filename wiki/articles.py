@@ -61,7 +61,14 @@ SELECT a.id
    (a.status = 'published'
     OR a.author_id = %(user_id)s
     OR a.owner_user_id = %(user_id)s
-    OR %(can_see_drafts)s)
+    OR %(can_see_drafts)s
+    -- ...а также тот, кому право ВЫПУСКАТЬ выписано правилом раздела — но
+    -- только в этих разделах. Выпустить можно лишь то, что видишь, и молчать
+    -- об этом нельзя; открывать же ему заодно черновики остальных разделов
+    -- периметра правило не просило.
+    OR EXISTS (SELECT 1 FROM wiki_article_sections ds
+                WHERE ds.article_id = a.id
+                  AND ds.section_id = ANY(%(draft_sections)s)))
    -- архив показываем только управляющим структурой
    AND (a.status <> 'archived' OR %(can_see_archived)s)
    AND (
@@ -116,6 +123,17 @@ SELECT a.id
 
 def _subject_params(ctx, subjects, sections, master_key=True):
     caps = ctx['capabilities']
+    # Черновики и архив — вопрос про ВСЮ витрину сразу, поэтому считаются по
+    # способностям ДОЛЖНОСТИ, а не по итоговым: право, выписанное правилом на
+    # один раздел, не должно показывать чужие черновики в остальных
+    # (queries.load_capabilities, инцидент 21.08.2026). Выписанное право
+    # выпускать учитывается ниже — поразделно, через draft_sections.
+    # Ключ обязателен, а не «если есть»: умолчание пришлось бы выбрать, и любое
+    # из двух плохо. Широкое молча открыло бы чужие черновики тому, кто просто
+    # не прошёл через load_capabilities; узкое так же молча спрятало бы их от
+    # руководителя. Отсутствие ключа — это ошибка сборки контекста, и падать ей
+    # положено громко.
+    role_caps = ctx['role_capabilities']
     role = str(ctx.get('otp_role') or '').strip().lower()
     return dict(
         subject_params(subjects, ctx['user_id']),
@@ -137,10 +155,13 @@ def _subject_params(ctx, subjects, sections, master_key=True):
         # (wiki/access.py: решение владельца), поэтому чужие черновики В СВОЁМ
         # ПЕРИМЕТРЕ он видит — это следствие права выпуска, а не регресс того
         # ужесточения. Тренер по-прежнему за гейтом.
-        'can_see_drafts': bool(caps.get('can_publish')
-                               or caps.get('can_manage_access')),
-        'can_see_archived': bool(caps.get('can_manage_structure')
-                                 or caps.get('can_manage_access')),
+        'can_see_drafts': bool(role_caps.get('can_publish')
+                               or role_caps.get('can_manage_access')),
+        'can_see_archived': bool(role_caps.get('can_manage_structure')
+                                 or role_caps.get('can_manage_access')),
+        # Разделы, где право выпускать пришло из правила. Пусто — заведомо
+        # непопадающее значение, как и у 'sections': NULL сравнивать нельзя.
+        'draft_sections': list(ctx.get('publish_sections') or ()) or [-1],
         },
     )
 

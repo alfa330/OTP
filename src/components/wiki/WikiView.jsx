@@ -23,6 +23,7 @@ import { effectiveFeatures } from './spaceFeatures';
 const WikiAssistant = lazy(() => import('./WikiAssistant'));
 import { CLASSIFIER_SLUG } from './WikiArticle';
 import { getScrollContainer } from './scrollContainer';
+import { CAPABILITY_LABELS } from './sectionGrants';
 import './wiki-theme.css';
 
 /* Раздел «Вики» — корпоративная база знаний.
@@ -40,18 +41,6 @@ import './wiki-theme.css';
  * сработали бы от темы системы — darkMode в tailwind.config.cjs не задан,
  * значит Tailwind работает в режиме media.
  */
-
-const CAPABILITY_LABELS = {
-    can_read: 'Читать',
-    can_create: 'Создавать',
-    can_edit: 'Редактировать',
-    can_delete: 'Удалять',
-    can_publish: 'Публиковать',
-    can_approve: 'Согласовывать',
-    can_manage_users: 'Управлять людьми',
-    can_manage_structure: 'Управлять структурой',
-    can_manage_access: 'Управлять доступами',
-};
 
 const ACCESS_MODE_LABELS = { auto: 'Автоматический', manual: 'Ручная выдача' };
 

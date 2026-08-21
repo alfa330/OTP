@@ -79,7 +79,7 @@ ARTICLE = {
 class EditGuardTest(unittest.TestCase):
     """Каркас: подменяем слой данных, проверяем только решения о правах."""
 
-    def build(self, context, *, section_rules):
+    def build(self, context, *, section_rules, granted=None):
         cursor = MagicMock()
         cursor.fetchone.return_value = None
         cursor.fetchall.return_value = []
@@ -95,6 +95,14 @@ class EditGuardTest(unittest.TestCase):
 
         patches = [
             (queries, 'load_access_context', lambda _c, _u: dict(context)),
+            # Права, УЖЕ выписанные человеку правилами: с 21.08.2026 из них
+            # считается способность (queries.load_capabilities). По умолчанию
+            # берём те же правила раздела — ровно так это и работает на боевом
+            # пути, где выписанное правило поднимает способность само.
+            (queries, 'granted_rule_rights',
+             lambda _c, _s, _u: (dict(granted if granted is not None
+                                      else (section_rules[0] if section_rules else {})),
+                                 [])),
             (queries, 'allowed_section_ids', lambda _c, _ctx, _s: {3}),
             (queries, 'section_rules_for_user',
              lambda _c, ids, _s, _u: ({3: section_rules} if ids else {})),
@@ -127,19 +135,122 @@ class EditGuardTest(unittest.TestCase):
         app.config['TESTING'] = True
         return app.test_client()
 
-    def test_editor_can_edit_but_not_delete(self):
-        """Ровно тот случай, который в оригинале позволял СВ снести любую статью."""
+    def test_rule_may_grant_beyond_the_role(self):
+        """Правило сильнее умолчания должности — но ровно там, где выписано.
+
+        До 21.08.2026 тест требовал обратного: правило разрешает удаление, а у
+        роли такой способности нет — значит нельзя. Эта трактовка и гасила
+        выданное право молча (инцидент разобран в шапке
+        access.capabilities_from_grants): способность — не потолок, а «вправе ли
+        в принципе», и выписанное правило её поднимает.
+
+        Прежний страж «СВ не сносит ЛЮБУЮ статью» никуда не делся, он просто
+        стоит в двух других местах: удаление работает только в разделе, где оно
+        выписано (следующий тест), а поставить галочку «Удалять» может лишь тот,
+        у кого право удалять есть у самого (routes_structure:
+        WIKI_GRANT_BEYOND_SELF).
+        """
         rules = [{'can_read': True, 'can_create': True, 'can_edit': True,
                   'can_delete': True, 'can_publish': True, 'can_approve': False}]
         client = self.build(make_context('sv', [EDITOR_ROLE]), section_rules=rules)
 
         self.assertEqual(client.patch('/api/wiki/articles/7',
                                       json={'title': 'Новое'}).status_code, 200)
+        self.assertEqual(client.delete('/api/wiki/articles/7').status_code, 200)
 
+    def test_rule_without_delete_still_refuses(self):
+        """Обратная половина: чего в правиле нет, того нет и после починки."""
+        rules = [{'can_read': True, 'can_create': True, 'can_edit': True,
+                  'can_delete': False, 'can_publish': True, 'can_approve': False}]
+        client = self.build(make_context('sv', [EDITOR_ROLE]), section_rules=rules)
+
+        self.assertEqual(client.patch('/api/wiki/articles/7',
+                                      json={'title': 'Новое'}).status_code, 200)
         response = client.delete('/api/wiki/articles/7')
-        self.assertEqual(response.status_code, 403,
-                         'правило разрешает удаление, но у роли нет такой способности')
+        self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json().get('required'), 'can_delete')
+
+    # ── Инцидент 21.08.2026: оператор с персональным правилом ────────────
+    #
+    # Оператору СЗоВ выписали правило на раздел «Супервайзер» со всеми шестью
+    # правами. Правило сохранилось и показывалось, а человек не мог ни завести
+    # статью, ни поправить букву: способность выводилась из одной лишь
+    # должности, у 'operator' сверх чтения нет ничего, и право гасло молча —
+    # в декораторе роута (403 на POST /articles) и в расчёте прав на статью.
+    #
+    # Прежний test_create_requires_capability ставил section_rules=[] и этот
+    # сценарий не видел вовсе, поэтому ловушка вернулась второй раз подряд.
+    FULL_RULE = {'can_read': True, 'can_create': True, 'can_edit': True,
+                 'can_delete': True, 'can_publish': True, 'can_approve': True}
+
+    def test_operator_with_personal_rule_may_edit(self):
+        client = self.build(make_context('operator'), section_rules=[self.FULL_RULE])
+        self.assertEqual(client.patch('/api/wiki/articles/7',
+                                      json={'title': 'Новое'}).status_code, 200)
+
+    def test_operator_with_personal_rule_passes_the_route_gate(self):
+        """POST /articles обязан дойти до проверки раздела, а не упасть в декораторе."""
+        client = self.build(make_context('operator'), section_rules=[self.FULL_RULE])
+        response = client.post('/api/wiki/articles',
+                               json={'title': 'Новая', 'section_ids': [3]})
+        self.assertNotEqual(response.status_code, 403, response.get_json())
+
+    def test_create_checks_every_chosen_section(self):
+        """Право нужно на КАЖДОМ выбранном разделе, а не «хоть на одном».
+
+        set_sections кладёт статью во все переданные разом (wiki/edit.py),
+        поэтому прежняя проверка any() пропускала её в соседнюю ветку заодно с
+        разрешённой. Стенд отдаёт правила только для раздела 3 — раздел 9
+        остаётся без прав.
+        """
+        client = self.build(make_context('operator'), section_rules=[self.FULL_RULE])
+        response = client.post('/api/wiki/articles',
+                               json={'title': 'Новая', 'section_ids': [3, 9]})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_FORBIDDEN')
+
+    def test_create_without_a_section_checks_the_fallback(self):
+        """Не выбрать раздел — не способ обойти проверку.
+
+        Статья без разделов падает в запасной «Общий сотрудник»
+        (wiki/edit.py: default_section_id), и право спрашивается на него.
+        """
+        self.addCleanup(setattr, wiki_edit, 'default_section_id',
+                        wiki_edit.default_section_id)
+        wiki_edit.default_section_id = lambda *a, **k: 9
+
+        client = self.build(make_context('operator'), section_rules=[self.FULL_RULE])
+        response = client.post('/api/wiki/articles', json={'title': 'Новая'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_FORBIDDEN')
+
+    def test_move_to_a_foreign_section_is_refused(self):
+        """Статью нельзя молча увезти в раздел, к которому прав нет."""
+        client = self.build(make_context('sv', [EDITOR_ROLE]),
+                            section_rules=[self.FULL_RULE])
+        response = client.patch('/api/wiki/articles/7', json={'section_ids': [9]})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_FORBIDDEN')
+
+    def test_move_inside_allowed_sections_passes(self):
+        """Раздел статьи не меняется — проверять нечего, правка проходит."""
+        client = self.build(make_context('sv', [EDITOR_ROLE]),
+                            section_rules=[self.FULL_RULE])
+        self.assertEqual(
+            client.patch('/api/wiki/articles/7', json={'section_ids': [3]}).status_code,
+            200)
+
+    def test_rule_in_another_section_does_not_travel(self):
+        """Способность поднялась, но раздел решает сам.
+
+        Право выписано где-то ещё (granted), а на разделе этой статьи правил
+        нет — значит правки нет. Иначе объединение способностей превратилось бы
+        в «можно везде», а решает по-прежнему правило объекта.
+        """
+        client = self.build(make_context('operator'), section_rules=[],
+                            granted=self.FULL_RULE)
+        self.assertEqual(client.patch('/api/wiki/articles/7',
+                                      json={'title': 'x'}).status_code, 403)
 
     def test_delete_needs_rule_too(self):
         """Способность есть, а правило на разделе — нет."""

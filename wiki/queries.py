@@ -10,6 +10,7 @@
 без транзакции. Здесь контекст доступа собирается одним CTE.
 """
 
+from . import access as wiki_access
 from .access import normalize_role
 
 # Один запрос вместо пяти: профиль, возглавляемые отделы, активные группы
@@ -393,23 +394,76 @@ def spaces_for_user(cursor, ctx):
     return [row[0] for row in cursor.fetchall()]
 
 
+# Правила разделов, действующие на человека, — С УЧЁТОМ «вместе с подразделами».
+#
+# Тумблер в интерфейсе обещает дословно: «Те же права во всех вложенных
+# разделах, включая созданные позже» (WikiSectionAccess.jsx). До 21.08.2026
+# вглубь уходило только ЧТЕНИЕ: рекурсия по потомкам жила в _AUTO_SECTIONS_SQL,
+# то есть в периметре, а права записи брались отдельным плоским запросом по
+# точному section_id. Правка подразделов молча не работала — тот же класс
+# отказа, что и в самом инциденте, только с другой стороны.
+#
+# Поэтому распространение считается ОДИН раз и здесь, а оба потребителя —
+# способности и права на конкретном разделе — читают один результат.
+_SECTION_RIGHTS_CTE = """
+WITH RECURSIVE section_rights_all AS (
+    SELECT r.section_id, r.grant_subsections AS deep, 0 AS depth,
+           r.can_read, r.can_create, r.can_edit,
+           r.can_delete, r.can_publish, r.can_approve
+      FROM wiki_section_access_rules r
+      JOIN wiki_sections s ON s.id = r.section_id AND s.status = 'active'
+     WHERE (""" + SUBJECT_MATCH + """)
+     UNION ALL
+    SELECT child.id, parent.deep, parent.depth + 1,
+           parent.can_read, parent.can_create, parent.can_edit,
+           parent.can_delete, parent.can_publish, parent.can_approve
+      FROM wiki_sections child
+      JOIN section_rights_all parent ON child.parent_section_id = parent.section_id
+     -- Ограничитель на случай битого дерева: сервер петель не допускает, но
+     -- зациклиться здесь значит подвесить запрос (та же защита стоит в
+     -- structure.section_branch_department).
+     WHERE parent.deep AND child.status = 'active' AND parent.depth < 50
+),
+-- Граница пространства — последнее слово о том, что человек видит, и правило
+-- её не отменяет (см. _SPACE_GATE_SQL). Стоит она здесь, а не у каждого
+-- вызывающего: без неё забытое правило на раздел в закрытом от отдела
+-- пространстве вечно поднимало бы способность — вкладки редактора открылись
+-- бы, а править было бы нечего. Заодно закрывается adopt/fork
+-- (routes_edit._target_section), который спрашивает правило по одному
+-- section_id мимо allowed_section_ids.
+section_rights AS (
+    SELECT sr.section_id, sr.can_read, sr.can_create, sr.can_edit,
+           sr.can_delete, sr.can_publish, sr.can_approve
+      FROM section_rights_all sr
+      JOIN wiki_sections s ON s.id = sr.section_id
+     WHERE NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+                        WHERE sd.space_id = s.space_id)
+        OR EXISTS (SELECT 1 FROM wiki_space_departments sd
+                    WHERE sd.space_id = s.space_id
+                      AND sd.department_id = ANY(%(departments)s))
+)
+"""
+
+
 def section_rules_for_user(cursor, section_ids, subjects, user_id):
     """Правила разделов, действующие на пользователя, — для расчёта прав записи.
 
     Возвращает {section_id: [правило, ...]}. Одним запросом на все разделы:
     в оригинале матрица доступа делала по два запроса на каждую должность.
+
+    Правило родителя с тумблером «вместе с подразделами» попадает сюда наравне
+    с собственным правилом раздела — распространение считает общий
+    _SECTION_RIGHTS_CTE, чтобы «вглубь» значило одно и то же и в периметре
+    чтения, и в правах записи.
     """
     if not section_ids:
         return {}
     cursor.execute(
-        """
-        SELECT r.section_id, r.can_read, r.can_create, r.can_edit,
-               r.can_delete, r.can_publish, r.can_approve
-          FROM wiki_section_access_rules r
-         WHERE r.section_id = ANY(%(sections)s)
-           AND (
-"""  + SUBJECT_MATCH + """
-           )
+        _SECTION_RIGHTS_CTE + """
+        SELECT section_id, can_read, can_create, can_edit,
+               can_delete, can_publish, can_approve
+          FROM section_rights
+         WHERE section_id = ANY(%(sections)s)
         """,
         dict(subject_params(subjects, user_id), sections=list(section_ids)),
     )
@@ -418,6 +472,100 @@ def section_rules_for_user(cursor, section_ids, subjects, user_id):
     for row in cursor.fetchall():
         result.setdefault(row[0], []).append(dict(zip(keys, row[1:])))
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Способности человека: должность ПЛЮС то, что ему уже выписали правилами
+#
+# Инцидент 21.08.2026 разобран в шапке access.capabilities_from_grants: право,
+# выписанное правилом, гасло молча, потому что способность выводилась из одной
+# лишь должности. Здесь — вторая половина починки: собрать выписанное.
+#
+# Одним запросом на оба вида правил. Разделы берём только активные: правило
+# архивного раздела не должно поднимать способность — самого раздела уже нет.
+# Правила статей входят сводкой, без разделов, и только mode='grant': запрет
+# ничего не разрешает, а способность из него была бы прямым переворотом смысла.
+# Границей пространства ветка статей намеренно не накрыта: статья лежит сразу в
+# нескольких разделах, джойн вышел бы дороже смысла — способность всё равно
+# бесполезна, пока сама статья вне периметра.
+# ─────────────────────────────────────────────────────────────────────────────
+_GRANTED_RIGHTS_SQL = _SECTION_RIGHTS_CTE + """
+SELECT section_id, can_read, can_create, can_edit,
+       can_delete, can_publish, can_approve
+  FROM section_rights
+ UNION ALL
+SELECT NULL::int, r.can_read, r.can_create, r.can_edit,
+       r.can_delete, r.can_publish, r.can_approve
+  FROM wiki_article_access_rules r
+ WHERE r.mode = 'grant'
+   AND (""" + SUBJECT_MATCH + """)
+"""
+
+
+def granted_rule_rights(cursor, subjects, user_id):
+    """Что человеку УЖЕ выписано правилами.
+
+    Возвращает (permissions, publish_sections):
+      permissions      — словарь PERMISSION_COLUMNS, «право выписано хоть где»;
+      publish_sections — разделы, где выписано именно право публиковать.
+
+    Второе значение нужно витрине: черновик — это то, что ещё предстоит
+    выпустить, и не показать его тому, кому выпуск поручили, значит повторить
+    ту же ловушку молчаливого отказа этажом выше (wiki/articles.py).
+    """
+    cursor.execute(_GRANTED_RIGHTS_SQL, subject_params(subjects, user_id))
+    keys = ('can_read', 'can_create', 'can_edit', 'can_delete',
+            'can_publish', 'can_approve')
+    permissions = {name: False for name in keys}
+    publish_sections = set()
+    for row in cursor.fetchall():
+        section_id, flags = row[0], dict(zip(keys, row[1:]))
+        for name in keys:
+            if flags[name]:
+                permissions[name] = True
+        if flags['can_publish'] and section_id is not None:
+            publish_sections.add(int(section_id))
+    return permissions, sorted(publish_sections)
+
+
+def load_capabilities(cursor, ctx, subjects):
+    """Проставить в ctx способности человека. Одна реализация на весь раздел.
+
+    Кладёт три ключа и ничего не возвращает — вызывающему нужен ровно ctx:
+
+      role_capabilities — только от должности и ролей вики. Ими гейтится то,
+                          что живёт ВНЕ разделов: справочники «Парки» и
+                          «Офисы», черновики и архив во всех витринах сразу.
+                          Доступ, выписанный на ОДИН раздел, открывать
+                          общекомпанейский справочник не должен;
+      capabilities      — итоговые: роль ПЛЮС выписанное правилами. Ими гейтятся
+                          роуты и считаются права на конкретном объекте;
+      publish_sections  — разделы, где право публиковать пришло из правила.
+
+    Второй запрос на HTTP-запрос — осознанная цена. Правил в разделе десятки, а
+    не тысячи, запрос идёт по тем же индексам, что и периметр, и он дешевле
+    любого способа узнать то же самое позже: без него каждый гейт считал бы
+    выписанные права заново и они бы разошлись — ровно так эта вика уже
+    ломалась (см. шапку wiki/articles.py).
+    """
+    role_capabilities = wiki_access.resolve_capabilities(
+        ctx['otp_role'], ctx['wiki_roles'],
+        is_department_head=bool(ctx['headed_department_ids']),
+    )
+    # В ручном режиме правила не действуют вовсе: периметр берётся из
+    # wiki_user_manual_access (allowed_section_ids выбирает _MANUAL_SECTIONS_SQL).
+    # Поднимать способность правилом, которое его же периметр игнорирует,
+    # значит выдать право, которым негде воспользоваться.
+    if ctx.get('access_mode') == 'manual':
+        granted, publish_sections = {}, []
+    else:
+        granted, publish_sections = granted_rule_rights(cursor, subjects,
+                                                        ctx['user_id'])
+    ctx['role_capabilities'] = role_capabilities
+    ctx['capabilities'] = wiki_access.merge_capabilities(
+        role_capabilities, wiki_access.capabilities_from_grants(granted))
+    ctx['publish_sections'] = publish_sections
+    return ctx['capabilities']
 
 
 def log_action(cursor, *, actor_id, action, entity_type=None, entity_id=None,

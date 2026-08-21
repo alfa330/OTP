@@ -50,8 +50,16 @@ EDITOR_CAPS = {'can_read': True, 'can_create': True, 'can_edit': True}
 EMPTY_SUBJECTS = collect_subjects(user_id=42, otp_role='operator')
 
 
-def ctx(caps, role='admin'):
+def ctx(caps, role='admin', role_caps=None):
+    """Контекст запроса, как его собирает queries.load_capabilities.
+
+    Способностей два набора: итоговые (должность плюс выписанное правилами) и
+    только должностные. Черновики и архив во всей витрине считаются по вторым —
+    правило на один раздел не должно открывать чужие черновики в остальных.
+    """
     return {'user_id': 42, 'otp_role': role, 'capabilities': dict(caps),
+            'role_capabilities': dict(role_caps if role_caps is not None else caps),
+            'publish_sections': [],
             'department_id': None, 'direction_id': None,
             'headed_department_ids': [], 'group_ids': [], 'wiki_roles': [],
             'access_mode': 'auto'}
@@ -63,6 +71,32 @@ class SubjectParamsTest(unittest.TestCase):
     def params(self, caps, role='admin', master_key=True):
         return wiki_articles._subject_params(ctx(caps, role), EMPTY_SUBJECTS,
                                             {1}, master_key)
+
+    def test_drafts_follow_the_role_not_the_rule(self):
+        """Черновики во всей витрине — по способностям ДОЛЖНОСТИ.
+
+        С 21.08.2026 право, выписанное правилом раздела, поднимает итоговые
+        способности (queries.load_capabilities). Если бы можно_видеть_черновики
+        считалось по ним, персональное правило с can_publish на одном разделе
+        открыло бы чужие черновики во всём периметре человека.
+        """
+        params = wiki_articles._subject_params(
+            ctx({'can_read': True, 'can_publish': True}, 'operator',
+                role_caps={'can_read': True}),
+            EMPTY_SUBJECTS, {1})
+        self.assertFalse(params['can_see_drafts'])
+
+    def test_granted_publisher_gets_his_own_sections(self):
+        """Зато разделы, где выпуск ему поручен, приезжают отдельным списком."""
+        context = ctx({'can_read': True, 'can_publish': True}, 'operator',
+                      role_caps={'can_read': True})
+        context['publish_sections'] = [3]
+        params = wiki_articles._subject_params(context, EMPTY_SUBJECTS, {1})
+        self.assertEqual(params['draft_sections'], [3])
+
+    def test_no_granted_sections_is_a_miss_not_a_match(self):
+        """Пустой список обязан не совпадать ни с чем, а не совпасть со всем."""
+        self.assertEqual(self.params(EDITOR_CAPS)['draft_sections'], [-1])
 
     def test_master_key_reaches_sql_by_default(self):
         self.assertTrue(self.params(WIKI_ADMIN_CAPS)['is_wiki_admin'])

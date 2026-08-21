@@ -87,6 +87,17 @@ def register(bp, wiki_route, db, log_ip, gcs):
         return '/api/wiki/file/%s' % file_id
 
     # ── Импорт документа ─────────────────────────────────────────────────
+    #
+    # Шесть роутов ниже (/import, /import/ai, /articles/ai/update,
+    # /articles/ai/edit, /articles/similar, /upload) СОЗНАТЕЛЬНО гейтятся
+    # союзными способностями, а не ролевыми (queries.load_capabilities). Они не
+    # выдают доступ к содержимому — это инструменты того же can_create:
+    # конвертация документа, картинка в редактор, поиск дублей. Закрыть их по
+    # должности значило бы вернуть молчаливый отказ этажом ниже: «статью завести
+    # можно, картинку вставить нельзя».
+    #
+    # Цена здесь не доступ, а деньги и исходящий текст: три роута зовут платные
+    # модели, /upload пишет файл в GCS, потолка расхода на человека нет.
     @wiki_route('/import', methods=('POST',), capability='can_create')
     def wiki_import(cursor, ctx):
         uploaded = request.files.get('file')
@@ -442,15 +453,8 @@ def register(bp, wiki_route, db, log_ip, gcs):
             except (TypeError, ValueError):
                 return jsonify({"error": "Неверный article_id"}), 400
 
-            from . import access as wiki_access
             from . import queries as wiki_queries
-            subjects = wiki_access.collect_subjects(
-                user_id=ctx['user_id'], otp_role=ctx['otp_role'],
-                department_id=ctx['department_id'],
-                headed_department_ids=ctx['headed_department_ids'],
-                direction_id=ctx['direction_id'], group_ids=ctx['group_ids'],
-                wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-            )
+            subjects = ctx['subjects']
             sections = wiki_queries.allowed_section_ids(cursor, ctx, subjects)
             article = wiki_articles.get_article(cursor, article_id=article_id)
             if not article:

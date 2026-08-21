@@ -58,7 +58,12 @@ class _RouteHarness:
     тянет за собой и все его тесты, и они начинают исполняться дважды.
     """
 
-    def build(self, context):
+    def build(self, context, granted=None):
+        """granted — права, УЖЕ выписанные человеку правилами (см.
+        queries.granted_rule_rights). Заглушка обязательна: курсор здесь один на
+        все запросы и отвечает всем одними и теми же строками, а расчёт
+        способностей ходит в базу первым — без подмены он разобрал бы чужую
+        выдачу как свою и сдвинул нумерацию execute()."""
         cursor = MagicMock()
         cursor.fetchone.return_value = None
         cursor.fetchall.return_value = []
@@ -75,6 +80,10 @@ class _RouteHarness:
         self._orig_load = queries.load_access_context
         queries.load_access_context = lambda _cursor, _uid: dict(context)
         self.addCleanup(setattr, queries, 'load_access_context', self._orig_load)
+
+        self._orig_granted = queries.granted_rule_rights
+        queries.granted_rule_rights = lambda _c, _s, _u: (dict(granted or {}), [])
+        self.addCleanup(setattr, queries, 'granted_rule_rights', self._orig_granted)
 
         app = Flask(__name__)
         app.register_blueprint(build_wiki_blueprint(
@@ -486,6 +495,35 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(denied.get_json().get('code'), 'WIKI_GRANT_CEILING')
 
+    def test_cannot_grant_a_right_you_lack_yourself(self):
+        """Выписать можно только то, что умеешь сам.
+
+        До 21.08.2026 эта граница держалась случайно: право сверх способностей
+        раздающего всё равно гасло у адресата. Теперь выписанное право работает,
+        и «супервайзер выдал оператору удаление, которого у самого супервайзера
+        нет» стало бы настоящей выдачей — мимо лестницы GRANT_CEILING.
+        """
+        self._stub_section(department_id=1)
+        client, _ = self.build(make_context('sv', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'can_read': True, 'can_delete': True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_BEYOND_SELF')
+        self.assertIn('can_delete', r.get_json().get('required'))
+
+    def test_grant_of_own_rights_still_passes(self):
+        """Обратная половина: то, что у раздающего есть, он выписывает свободно."""
+        self._stub_section(department_id=1)
+        self.addCleanup(setattr, structure, 'upsert_section_rule', structure.upsert_section_rule)
+        structure.upsert_section_rule = lambda cursor, **kw: 7
+
+        client, _ = self.build(make_context('sv', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'can_read': True, 'can_edit': True, 'can_publish': True})
+        self.assertEqual(r.status_code, 201, r.get_json())
+
     def test_supervisor_cannot_write_personal_rule_on_himself(self):
         """Дыра, ради которой проверяется роль адресата, а не только порог.
 
@@ -846,6 +884,35 @@ class DirectoryRouteTest(_RouteHarness, unittest.TestCase):
         client, _ = self.build(make_context('trainer'))
         r = client.post('/api/wiki/parks', json={'name': 'Парк'})
         self.assertNotEqual(r.status_code, 403)
+
+    FULL_RULE = {'can_read': True, 'can_create': True, 'can_edit': True,
+                 'can_delete': True, 'can_publish': True, 'can_approve': True}
+
+    def test_granted_rule_does_not_open_the_directories(self):
+        """Правило раздела — про содержимое РАЗДЕЛА, а справочники общие.
+
+        С 21.08.2026 выписанное правилом право поднимает способность
+        (queries.load_capabilities), и без отдельной оговорки персональное
+        правило на один раздел вики отдало бы оператору телефоны всех парков и
+        офисов компании. Гейт справочников намеренно остался на способностях
+        ДОЛЖНОСТИ (routes_parks._may_edit, routes_offices._may_edit).
+        """
+        client, _ = self.build(make_context('operator'), granted=self.FULL_RULE)
+        for method, url in self.WRITE_ROUTES:
+            r = getattr(client, method)(url, json={'name': 'x'})
+            self.assertEqual(r.status_code, 403, '%s %s' % (method, url))
+
+    def test_granted_rule_does_not_open_mandatory_reading(self):
+        """Назначение обязательного чтения — про ЛЮДЕЙ, а не про раздел.
+
+        Эндпоинт раскрывает department_id в весь состав отдела, поэтому он
+        объявлен с capability_from_role=True (routes_ack).
+        """
+        client, _ = self.build(make_context('operator'), granted=self.FULL_RULE)
+        r = client.post('/api/wiki/articles/7/ack/assign', json={'department_id': 1})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('required'), 'can_publish')
+        self.assertEqual(client.get('/api/wiki/articles/7/ack/report').status_code, 403)
 
     def test_can_manage_flag_follows_the_same_rule(self):
         """Флаг для интерфейса и гейт считаются одинаково.

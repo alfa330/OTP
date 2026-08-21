@@ -59,6 +59,20 @@ wiki_guest_access AS (
       FROM (VALUES {guests}) AS t(
         article_id, user_id, revoked_at, expires_at)
 ),
+-- Разделы и границы пространств. Синтетическое дерево: любой section_id из
+-- теста лежит в пространстве 1. Заглушки обязательны — без них запрос читал бы
+-- БОЕВУЮ wiki_sections, и тест зависел бы от того, в каком пространстве сегодня
+-- лежит раздел с этим номером на проде.
+wiki_sections AS (
+    SELECT i::int AS id, 1::int AS space_id FROM generate_series(1, 100) AS i
+),
+-- Пустая заглушка = пространство видно всем (прежнее поведение). Границу
+-- проверяет отдельный тест, передавая space_departments.
+wiki_space_departments AS (
+    SELECT space_id::int, department_id::int
+      FROM (VALUES {space_departments}) AS t(space_id, department_id)
+     WHERE space_id IS NOT NULL
+),
 """
 
 _EMPTY = {
@@ -66,6 +80,7 @@ _EMPTY = {
     'rules': "(NULL::int, NULL::text, NULL::int, NULL::text, NULL::text, NULL::bool, NULL::int)",
     'sections': "(NULL::int, NULL::int)",
     'guests': "(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp)",
+    'space_departments': "(NULL::int, NULL::int)",
 }
 
 
@@ -84,12 +99,13 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
     def visible(self, *, articles, rules=(), sections=(), guests=(),
                 user_id=10, role='operator', allowed_sections=(),
                 subjects=None, is_wiki_admin=False, can_see_drafts=False,
-                can_see_archived=False):
+                can_see_archived=False, draft_sections=(), space_departments=()):
         stub = _STUBS.format(
             articles=_values(articles, _EMPTY['articles']),
             rules=_values(rules, _EMPTY['rules']),
             sections=_values(sections, _EMPTY['sections']),
             guests=_values(guests, _EMPTY['guests']),
+            space_departments=_values(space_departments, _EMPTY['space_departments']),
         )
         # Боевой запрос начинается с "WITH my_rules AS (" — приклеиваем заглушки
         # перед ним, ничего не меняя в самом тексте.
@@ -120,6 +136,10 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
             is_super_admin=role == 'super_admin',
             can_see_drafts=can_see_drafts,
             can_see_archived=can_see_archived,
+            # Разделы, где право выпускать выписано ПРАВИЛОМ: черновик виден
+            # тому, кому поручили его выпустить, и только там (wiki/queries.py:
+            # granted_rule_rights). Пусто — заведомо непопадающее значение.
+            draft_sections=list(draft_sections) or [-1],
         )
         cur = self.conn.cursor()
         try:
@@ -143,6 +163,42 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
             articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
             sections=["(1, 5)"],
             allowed_sections=[7],
+        )
+        self.assertEqual(got, set())
+
+    # ── Черновик и тот, кому поручили выпуск ─────────────────────────────
+    #
+    # can_see_drafts — флаг на ВСЮ витрину, и считается он по способностям
+    # должности. Право выпускать, выписанное правилом на ОДИН раздел, всю
+    # витрину открывать не должно, но и молчать о черновиках этого раздела
+    # нельзя: выпустить можно только то, что видишь.
+
+    def test_draft_visible_where_publishing_was_granted(self):
+        got = self.visible(
+            articles=["(1, 'draft', 'inherit', false, 99, NULL, NULL)"],
+            sections=["(1, 5)"],
+            allowed_sections=[5],
+            draft_sections=[5],
+        )
+        self.assertEqual(got, {1})
+
+    def test_draft_stays_hidden_in_other_sections(self):
+        got = self.visible(
+            articles=["(1, 'draft', 'inherit', false, 99, NULL, NULL)"],
+            sections=["(1, 7)"],
+            allowed_sections=[5, 7],
+            draft_sections=[5],
+        )
+        self.assertEqual(got, set(),
+                         'право выпускать в одном разделе открыло черновик соседнего')
+
+    def test_granted_publisher_does_not_get_the_archive(self):
+        """Архив — отдельная дверь (can_manage_structure), правилом не открывается."""
+        got = self.visible(
+            articles=["(1, 'archived', 'inherit', false, 99, NULL, NULL)"],
+            sections=["(1, 5)"],
+            allowed_sections=[5],
+            draft_sections=[5],
         )
         self.assertEqual(got, set())
 

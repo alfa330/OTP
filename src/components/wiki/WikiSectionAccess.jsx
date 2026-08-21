@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Building2, ChevronDown, Globe, Loader2, Lock, Plus, Trash2, TriangleAlert,
+    Building2, ChevronDown, Globe, Loader2, Lock, Pencil, Plus, Trash2, TriangleAlert,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
@@ -9,6 +9,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { sectionAncestors } from './sectionPicker';
+import { grantableCheck, presetIsGrantable } from './sectionGrants';
 import useStableCallback from './useStableCallback';
 
 /* Доступ к разделу — прямо из строки раздела во вкладке «Структура».
@@ -156,7 +157,7 @@ const matrixKeyOf = (rule, department) => {
 };
 
 // ── Строка должности ────────────────────────────────────────────────────────
-const RoleRow = ({ row, draft, expanded, locked, onToggleExpand, onChange }) => {
+const RoleRow = ({ row, draft, expanded, locked, mayGrant, onToggleExpand, onChange }) => {
     const preset = presetOf(draft.permissions);
     const granted = PERMISSIONS.filter((p) => draft.permissions[p.key]);
 
@@ -204,7 +205,9 @@ const RoleRow = ({ row, draft, expanded, locked, onToggleExpand, onChange }) => 
             {expanded && (
                 <div className="space-y-3 px-4 pb-4">
                     <div className="flex gap-1 rounded-xl bg-slate-200/70 p-1">
-                        {PRESETS.map((p) => (
+                        {PRESETS.filter(
+                            (p) => presetIsGrantable(p, mayGrant),
+                        ).map((p) => (
                             <button
                                 key={p.key}
                                 type="button"
@@ -230,14 +233,19 @@ const RoleRow = ({ row, draft, expanded, locked, onToggleExpand, onChange }) => 
                                     <div className={`text-[13.5px] ${p.danger ? 'text-amber-700' : 'text-slate-800'}`}>
                                         {p.label}
                                     </div>
-                                    <div className="text-[11.5px] text-slate-400">{p.note}</div>
+                                    <div className="text-[11.5px] text-slate-400">
+                                        {mayGrant(p.key) ? p.note
+                                            : 'это право выдаёт вышестоящий руководитель'}
+                                    </div>
                                 </div>
                                 <IosToggle
                                     checked={!!draft.permissions[p.key]}
                                     // Снять чтение, оставив правку, нельзя: сервер всё
                                     // равно вернёт его обратно, и тумблер соврал бы.
-                                    disabled={p.key === 'can_read' && PERMISSIONS.some(
-                                        (x) => x.key !== 'can_read' && draft.permissions[x.key])}
+                                    // Право выше собственного — тоже: сервер откажет.
+                                    disabled={!mayGrant(p.key)
+                                        || (p.key === 'can_read' && PERMISSIONS.some(
+                                            (x) => x.key !== 'can_read' && draft.permissions[x.key]))}
                                     onChange={(v) => onChange({
                                         ...draft,
                                         permissions: withRead({ ...draft.permissions, [p.key]: v }),
@@ -279,6 +287,9 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
        однажды разошёлся бы с первым — всегда в сторону «показали, а сервер
        ответил 403». */
     const [grantDepartments, setGrantDepartments] = useState(null);
+    // Какие права этот раздающий вправе поставить. Приезжает вместе с потолком
+    // и границей отдела — тремя измерениями выдачи (routes_structure).
+    const [grantable, setGrantable] = useState(null);
     const [people, setPeople] = useState([]);
     const [catalog, setCatalog] = useState({});
     const [loading, setLoading] = useState(true);
@@ -307,6 +318,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                 // и от отдела раздела, поэтому считать его на клиенте нельзя.
                 setCeiling(r.data?.grant_ceiling ?? null);
                 setGrantDepartments(r.data?.grant_departments ?? null);
+                setGrantable(r.data?.grantable ?? null);
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
             .finally(() => setLoading(false));
@@ -344,6 +356,13 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
 
     const extraRules = useMemo(
         () => rules.filter((r) => !matrixKeyOf(r, department)), [rules, department]);
+    /* Свёрнутый блок — это правило, которого не видно. Именно так владелец
+       21.08.2026 искал выписанное им же точечное правило и видел вместо него
+       матрицу должностей. Есть правила — раскрываем; свернуть руками по-прежнему
+       можно, эффект срабатывает только на изменение их числа. */
+    useEffect(() => {
+        if (extraRules.length) setShowExtra(true);
+    }, [extraRules.length]);
 
     const dirty = useMemo(() => ROLE_ROWS.some((row) => {
         const state = matrix[row.key];
@@ -361,6 +380,8 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         : { subject_type: 'otp_role', subject_role: row.role, min_role_level: null });
 
     const isLocked = (row) => ceiling == null || rowWeight(row) > ceiling;
+
+    const mayGrant = useMemo(() => grantableCheck(grantable), [grantable]);
 
     const saveMatrix = () => {
         const jobs = [];
@@ -534,6 +555,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                         ) : ROLE_ROWS.map((row) => (
                             matrix[row.key] ? (
                                 <RoleRow
+                                    mayGrant={mayGrant}
                                     key={row.key}
                                     row={row}
                                     draft={matrix[row.key]}
@@ -603,6 +625,28 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                                 )}
                                             </div>
                                         </div>
+                                        {/* Правило можно было только снести и завести
+                                            заново — то есть на время правки снять
+                                            человеку доступ целиком. */}
+                                        <button
+                                            type="button"
+                                            disabled={busy}
+                                            onClick={() => setDraft({
+                                                editing: true,
+                                                subject_label: rule.subject_label
+                                                    || rule.subject_role || `#${rule.subject_id}`,
+                                                subject_type: rule.subject_type,
+                                                subject_id: rule.subject_id ?? '',
+                                                subject_role: rule.subject_role || 'operator',
+                                                min_role_level: rule.min_role_level ?? '',
+                                                grant_subsections: !!rule.grant_subsections,
+                                                permissions: permissionsOf(rule),
+                                            })}
+                                            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
+                                            aria-label="Изменить правило"
+                                        >
+                                            <Pencil size={14} />
+                                        </button>
                                         <button
                                             type="button"
                                             disabled={busy}
@@ -663,7 +707,17 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 onChange={(v) => setDraft({ ...draft, subject_type: v, subject_id: '' })}
                                 options={subjectKinds}
                                 ariaLabel="Тип субъекта"
+                                // Адресат — часть ключа правила (раздел + субъект +
+                                // порог). Сменить его на месте нельзя: получилось бы
+                                // второе правило, а первое осталось бы висеть.
+                                disabled={!!draft.editing}
                             />
+                            {draft.editing && (
+                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    Меняем права правила для «{draft.subject_label}».
+                                    Нужен другой адресат — заведите отдельное правило.
+                                </p>
+                            )}
                             {grantDepartments && (
                                 <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
                                     Правило вы адресуете своему отделу: людям, группам и
@@ -693,6 +747,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                     placeholder="Выберите сотрудника…"
                                     searchPlaceholder="Поиск по имени…"
                                     ariaLabel="Сотрудник"
+                                    disabled={!!draft.editing}
                                 />
                                 <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
                                     {peopleOptions.length
@@ -713,6 +768,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                         value: String(r.id), label: r.name,
                                     }))}
                                     ariaLabel="Роль в системе"
+                                    disabled={!!draft.editing}
                                 />
                                 <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-amber-700">
                                     Роль не знает границ отдела: правило подействует во всей компании.
@@ -741,13 +797,22 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                             <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                                 {PERMISSIONS.map((p) => (
                                     <div key={p.key} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
-                                        <span className={`text-[13.5px] ${p.danger ? 'text-amber-700' : 'text-slate-800'}`}>
+                                        <span className={`text-[13.5px] ${
+                                            !mayGrant(p.key) ? 'text-slate-400'
+                                                : p.danger ? 'text-amber-700' : 'text-slate-800'}`}>
                                             {p.label}
+                                            {!mayGrant(p.key) && (
+                                                <span className="ml-1.5 text-[11.5px] text-slate-400">
+                                                    выдаёт вышестоящий
+                                                </span>
+                                            )}
                                         </span>
                                         <IosToggle
                                             checked={!!draft.permissions[p.key]}
-                                            disabled={p.key === 'can_read' && PERMISSIONS.some(
-                                                (x) => x.key !== 'can_read' && draft.permissions[x.key])}
+                                            disabled={!mayGrant(p.key)
+                                                || (p.key === 'can_read' && PERMISSIONS.some(
+                                                    (x) => x.key !== 'can_read'
+                                                        && draft.permissions[x.key]))}
                                             onChange={(v) => setDraft({
                                                 ...draft,
                                                 permissions: withRead({ ...draft.permissions, [p.key]: v }),

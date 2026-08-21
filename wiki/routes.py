@@ -22,20 +22,7 @@ from flask import Blueprint, jsonify, request
 
 from . import access as wiki_access
 from . import queries, structure
-
-
-# Человекочитаемые имена способностей — для внятного отказа.
-CAPABILITY_TITLES = {
-    'can_read': 'чтение',
-    'can_create': 'создание статей',
-    'can_edit': 'правка статей',
-    'can_delete': 'удаление',
-    'can_publish': 'публикация',
-    'can_approve': 'согласование',
-    'can_manage_users': 'управление людьми',
-    'can_manage_structure': 'управление структурой',
-    'can_manage_access': 'управление доступами',
-}
+from .schema import CAPABILITY_TITLES
 
 
 def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
@@ -79,12 +66,19 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
         except Exception:
             return None
 
-    def wiki_route(rule, methods=('GET',), capability=None):
+    def wiki_route(rule, methods=('GET',), capability=None, capability_from_role=False):
         """Общий декоратор роута: preflight, авторизация, контекст доступа, ошибки.
 
         capability — имя способности, без которой роут отдаёт 403
         (например 'can_manage_access' для управления правилами).
         Передаёт в обработчик именованный аргумент ctx с контекстом доступа.
+
+        capability_from_role сужает проверку до способностей ДОЛЖНОСТИ: право,
+        выписанное правилом на один раздел, такой роут не открывает. Ставится
+        там, где действие выходит за пределы содержимого раздела — например
+        назначение обязательного чтения целому отделу. Флаг именно на объявлении
+        роута, а не в теле обработчика, чтобы у каждой двери было видно, про
+        содержимое она или про людей.
         """
         all_methods = tuple(methods) + ('OPTIONS',)
 
@@ -106,12 +100,27 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         if not context:
                             return jsonify({"error": "Пользователь не найден"}), 404
 
-                        capabilities = wiki_access.resolve_capabilities(
-                            context['otp_role'],
-                            context['wiki_roles'],
-                            is_department_head=bool(context['headed_department_ids']),
+                        # Субъекты считаем ЗДЕСЬ и кладём в контекст: их
+                        # просит и расчёт способностей, и /ping, и периметр.
+                        # Второй вывод тех же субъектов был бы вторым
+                        # источником истины — на таком раздвоении исходная вика
+                        # уже ломалась (см. шапку wiki/perimeter.py).
+                        context['subjects'] = wiki_access.collect_subjects(
+                            user_id=context['user_id'],
+                            otp_role=context['otp_role'],
+                            department_id=context['department_id'],
+                            headed_department_ids=context['headed_department_ids'],
+                            direction_id=context['direction_id'],
+                            group_ids=context['group_ids'],
+                            wiki_role_ids=[r.get('id') for r in context['wiki_roles']],
                         )
-                        context['capabilities'] = capabilities
+                        # Способности — должность и роли вики ПЛЮС то, что
+                        # человеку уже выписали правилами. До 21.08.2026
+                        # выписанное право записи гасло молча, потому что
+                        # способность выводилась из одной лишь должности
+                        # (wiki/access.py: capabilities_from_grants).
+                        capabilities = queries.load_capabilities(
+                            cursor, context, context['subjects'])
 
                         # Тумблер «раздел выдан отделу» — на бэкенде, а не
                         # только в меню: гард во фронте отсекает пункт, но не
@@ -145,7 +154,9 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                 "code": "SENSITIVE_ACCESS_REQUIRED",
                             }), 403
 
-                        if capability and not capabilities.get(capability):
+                        gate = (context['role_capabilities'] if capability_from_role
+                                else capabilities)
+                        if capability and not gate.get(capability):
                             # В тексте — КАКОГО права не хватило и откуда оно
                             # берётся. Прежнее «Недостаточно прав для этого
                             # действия» одинаково выглядело у оператора, у
@@ -191,6 +202,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "ok": True,
             "schema_ready": ready,
             "capabilities": ctx['capabilities'],
+            # Отдельно — способности одной лишь должности. Разница между
+            # наборами и есть ответ «что человеку добавили правилами»: без неё
+            # поддержка снова читает один плоский список и не понимает, откуда
+            # взялось право (тот же набор отдаёт /access/effective).
+            "role_capabilities": ctx['role_capabilities'],
             "access_mode": ctx['access_mode'],
             "wiki_roles": [r.get('code') for r in ctx['wiki_roles']],
             # До какого уровня должности человек вправе открывать разделы;
@@ -202,15 +218,7 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 is_wiki_admin=bool(ctx['wiki_roles'])
                 and bool(ctx['capabilities'].get('can_manage_access')),
             ),
-            "subjects": wiki_access.collect_subjects(
-                user_id=ctx['user_id'],
-                otp_role=ctx['otp_role'],
-                department_id=ctx['department_id'],
-                headed_department_ids=ctx['headed_department_ids'],
-                direction_id=ctx['direction_id'],
-                group_ids=ctx['group_ids'],
-                wiki_role_ids=[r.get('id') for r in ctx['wiki_roles']],
-            ),
+            "subjects": ctx['subjects'],
         }
         if ready:
             payload['counters'] = queries.counters(cursor)
@@ -236,6 +244,7 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "user_id": ctx['user_id'],
             "otp_role": ctx['otp_role'],
             "capabilities": ctx['capabilities'],
+            "role_capabilities": ctx['role_capabilities'],
             "access_mode": ctx['access_mode'],
             "wiki_roles": ctx['wiki_roles'],
             "department_id": ctx['department_id'],
