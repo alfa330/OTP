@@ -5555,6 +5555,7 @@ class Database:
             self._init_fleet_edm_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
             self._init_trainings_schema_tx(cursor)
+            self._init_trainer_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -6269,6 +6270,29 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT crm_schema")
+
+    def _init_trainer_schema_tx(self, cursor):
+        """Схема раздела «Тренажёр» (таблицы trainer_*).
+
+        SAVEPOINT по той же причине, что у соседей: весь _init_db идёт одной
+        транзакцией, и падение тестового раздела не должно ронять инициализацию
+        базы. При отказе раздел честно скажет о себе через /api/trainer/ping
+        (schema_ready=false), а остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT trainer_schema")
+        try:
+            from voice_trainer.schema import init_trainer_schema
+            init_trainer_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT trainer_schema")
+            logging.exception(
+                "Схема раздела «Тренажёр» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT trainer_schema")
 
     def _init_oktell_guard_schema_tx(self, cursor):
         """Схема раздела «Ограничитель Перезвона» (таблицы oktell_guard_*).

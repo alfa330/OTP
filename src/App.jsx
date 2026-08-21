@@ -159,6 +159,7 @@ const ChatAppChatsView = lazyWithRetry(() => import('./components/chatapp/ChatAp
 const GroupLateBotView = lazyWithRetry(() => import('./components/group_late/GroupLateBotView'));
 const CrmTicketsView = lazyWithRetry(() => import('./components/crm/CrmTicketsView'));
 const TrainingsView = lazyWithRetry(() => import('./components/trainings/TrainingsView'));
+const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView'));
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
@@ -278,6 +279,7 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     evaluation: 'My evaluations',
     events: 'Events',
     ai_qa: 'AI QA',
+    voice_trainer: 'Voice trainer',
     four_you: '4 You',
     hours: 'Hours',
     lms: 'LMS',
@@ -44464,6 +44466,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     </li>
                                     )}
 
+                                    {/* «Тренажёр» — голосовой разговор с ИИ и разбор после него.
+                                        Раздел тестовый: тратит платные квоты и раздаёт браузеру
+                                        ключи к внешним сервисам, поэтому только супер-админ.
+                                        Гейт продублирован на сервере — спрятанный пункт меню
+                                        доступом не является, раздел открывается и прямым адресом.
+                                        Объявлен ОДИН раз в общей части, как «Вики» и «Обращения». */}
+                                    {isSuperAdmin && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'voice_trainer')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'voice_trainer' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-microphone-lines"></FaIcon>
+                                            <span className="sidebar-text">Тренажёр</span>
+                                        </button>
+                                    </li>
+                                    )}
+
                                     {/* «Скачать телефон» — программа iCORE Phone сотруднику.
                                         Только отдел продаж и админы: телефон раздаётся там.
                                         Объявлен ОДИН раз в общей части меню, а не по ролевым
@@ -45039,6 +45060,16 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 />
                             </Suspense>
                         ))}
+                        {view === "voice_trainer" && isSuperAdmin && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка тренажёра…</div>}>
+                                <TrainerView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    user={user}
+                                />
+                            </Suspense>
+                        )}
                         {(isAdminLikeRole || isDepartmentHeadAdminEmployeeView) && (
                         <>
                             {view === 'qr_access' && (

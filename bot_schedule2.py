@@ -52199,6 +52199,33 @@ except Exception:
     logging.exception("Раздел «Тренинги»: Blueprint НЕ подключён")
 
 
+# ── Раздел «Тренажёр» (голосовой разговор с ИИ, только супер-админ) ──────────
+# Секреты приходят функцией env, а не импортом: раздел раздаёт браузеру КОРОТКИЕ
+# одноразовые ключи к Soniox и Gemini, чтобы звук шёл мимо нашего сервера (на
+# waitress WebSocket невозможен), и решать, откуда берутся постоянные ключи, он
+# не должен.
+try:
+    from voice_trainer.routes import build_trainer_blueprint  # noqa: E402
+    # env раздела: на Render читает окружение, локально — .env.codex.local.
+    # Монолит dotenv не подключает, а os.getenv на машине разработчика ключей
+    # не найдёт, и раздел молча оказался бы «без ключей».
+    from voice_trainer.env_local import env as _trainer_env  # noqa: E402
+
+    app.register_blueprint(build_trainer_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        # Та же трактовка «супер-админа», что и во всём портале: своя копия
+        # нормализации разошлась бы с общей молча.
+        is_super_admin_role=_is_super_admin_role,
+        env=_trainer_env,
+    ))
+    logging.info("Раздел «Тренажёр»: Blueprint подключён на /api/trainer")
+except Exception:
+    logging.exception("Раздел «Тренажёр»: Blueprint НЕ подключён")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Центр уведомлений — второй Blueprint, по той же схеме внедрения зависимостей.
 #

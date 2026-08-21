@@ -30,3 +30,8 @@ mammoth==1.12.0
 pypdf==6.15.0
 # call_qa (ИИ-оценка звонков): Claude и Soniox вызываются по HTTP через httpx/requests,
 # отдельные SDK не нужны. google-cloud-aiplatform (эмбеддинги/RAG) добавим вместе с pgvector.
+
+# Раздел «Тренажёр»: озвучка идёт по WebSocket к Gemini Live, а Flask
+# синхронный — нужен синхронный клиент. Локально пакет уже стоял, на
+# Render его бы не было, и раздел молча остался бы без голоса.
+websocket-client==1.9.0
