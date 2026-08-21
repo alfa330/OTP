@@ -11,9 +11,11 @@ import {
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
-    MISSING_ATTACHMENT, answerValue, carryOver, checksAreComplete, checksPayload,
+    CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterChecks, answerValue, carryOver,
+    checksAreComplete, checksPayload,
     describeSnapshot, groupCatalog, groupIsComplete, groupsOf, localVerdict, missingGroup,
-    needsSaparCheck, referenceOptions, rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
+    needsSaparCheck, nextStop, previousStop, referenceOptions, rowsOfGroup, saparKey,
+    stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -360,7 +362,9 @@ export default function TicketWizard({
         setVerdict(null);
         setDismissed(null);
         setMissing({});
-        setPhase(next?.checks?.length ? 'checks' : 'form');
+        // Первым идёт экран «кто и за какой период»: с него запускается
+        // предпроверка Sapar, и часть обращений на ней же и заканчивается.
+        setPhase('form');
     };
 
     const switchScenario = (key) => {
@@ -387,8 +391,17 @@ export default function TicketWizard({
             const passed = await askSapar();
             if (!passed) return;
         }
-        if (groupIndex + 1 < groups.length) { setGroupIndex(groupIndex + 1); return; }
-        askServer();
+        goTo(nextStop(scenario, groups, groupIndex, { checksReady }));
+    };
+
+    /* Один переход — одно место. Раньше «куда дальше» решалось в трёх кнопках
+       по-разному, и порядок экранов расходился между ними. */
+    const goTo = (stop) => {
+        if (stop.phase === 'submit') { askServer(); return; }
+        if (stop.phase === 'pick') { reset(); return; }
+        if (stop.phase === 'checks') { setPhase('checks'); return; }
+        setPhase('form');
+        setGroupIndex(stop.groupIndex);
     };
 
     /* Спрашивает Sapar. true — идём дальше, false — мастер остался на месте
@@ -432,9 +445,8 @@ export default function TicketWizard({
     const goBack = () => {
         setVerdict(null);
         if (phase === 'preview') { setPhase('form'); setGroupIndex(groups.length - 1); return; }
-        if (groupIndex > 0) { setGroupIndex(groupIndex - 1); return; }
-        if (scenario?.checks?.length) { setPhase('checks'); return; }
-        reset();
+        if (phase === 'checks') { goTo({ phase: 'form', groupIndex: CHECKS_AFTER_GROUP }); return; }
+        goTo(previousStop(scenario, groups, groupIndex));
     };
 
     const askServer = async () => {
@@ -514,9 +526,9 @@ export default function TicketWizard({
         if (phase === 'checks') {
             return (
                 <>
-                    <button type="button" onClick={reset} className={iosBtnSecondary}>Назад</button>
+                    <button type="button" onClick={goBack} className={iosBtnSecondary}>Назад</button>
                     <button type="button" disabled={!checksReady}
-                            onClick={() => { setPhase('form'); setGroupIndex(0); }}
+                            onClick={() => goTo(afterChecks(groups))}
                             className={iosBtnPrimary}>
                         <ShieldCheck size={14} /> Проверил — продолжить
                     </button>

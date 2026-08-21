@@ -18,7 +18,8 @@ import {
   stepIsVisible,
   toggleCheck,
   visibleSteps,
-  describeSnapshot, needsSaparCheck, saparGroup, saparKey,
+  afterChecks, describeSnapshot, needsSaparCheck, nextStop, previousStop,
+  saparGroup, saparKey,
 } from '../src/components/crm/wizardRules.js';
 
 /* Эти тесты написаны по следам реальной поломки: шаг с вложением никогда не
@@ -409,4 +410,45 @@ test('снимок описывается по смыслу, а не одним 
   assert.equal(silent.tone, 'muted');
   // Молчание сервиса НЕ выдаётся за «документов нет».
   assert.doesNotMatch(silent.title, /нет/);
+});
+
+/* ─── Порядок экранов: чек-лист после первого экрана ──────────────────────── */
+
+const WITH_CHECKS = { key: 'sapar_docs_missing', checks: ['раз', 'два'] };
+const NO_CHECKS = { key: 'free', checks: [] };
+const THREE = ['Водитель и период', 'Что происходит', 'Вложение'];
+
+test('чек-лист показывается ПОСЛЕ первого экрана, а не до него', () => {
+  // Просьба владельца: проверка по ИИН должна идти раньше чек-листа, иначе
+  // оператор проходит его для обращения, которое Sapar закрывает сам.
+  assert.deepEqual(nextStop(WITH_CHECKS, THREE, 0, { checksReady: false }),
+                   { phase: 'checks' });
+  assert.deepEqual(afterChecks(THREE), { phase: 'form', groupIndex: 1 });
+});
+
+test('пройденный чек-лист второй раз не показывается', () => {
+  assert.deepEqual(nextStop(WITH_CHECKS, THREE, 0, { checksReady: true }),
+                   { phase: 'form', groupIndex: 1 });
+});
+
+test('тематика без чек-листа идёт по экранам подряд', () => {
+  assert.deepEqual(nextStop(NO_CHECKS, THREE, 0, {}), { phase: 'form', groupIndex: 1 });
+  assert.deepEqual(nextStop(NO_CHECKS, THREE, 2, {}), { phase: 'submit' });
+});
+
+test('после последнего экрана спрашиваем сервер', () => {
+  assert.deepEqual(nextStop(WITH_CHECKS, THREE, 2, { checksReady: true }),
+                   { phase: 'submit' });
+  // Экранов после чек-листа может и не остаться — тогда сразу к проверке,
+  // а не в пустой шаг.
+  assert.deepEqual(afterChecks(['Водитель и период']), { phase: 'submit' });
+});
+
+test('«Назад» возвращает тем же путём, каким пришли', () => {
+  assert.deepEqual(previousStop(WITH_CHECKS, THREE, 2), { phase: 'form', groupIndex: 1 });
+  // Со второго экрана назад — на чек-лист, он теперь между первым и вторым.
+  assert.deepEqual(previousStop(WITH_CHECKS, THREE, 1), { phase: 'checks' });
+  assert.deepEqual(previousStop(NO_CHECKS, THREE, 1), { phase: 'form', groupIndex: 0 });
+  // С первого экрана — к выбору тематики.
+  assert.deepEqual(previousStop(WITH_CHECKS, THREE, 0), { phase: 'pick' });
 });

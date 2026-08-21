@@ -363,3 +363,53 @@ export const describeSnapshot = (snapshot) => {
         lines: [statuses.join(' · '), snapshot.driver_name].filter(Boolean),
     };
 };
+
+/* ─── Порядок экранов мастера ─────────────────────────────────────────────── */
+
+/* Чек-лист «Проверьте это до обращения» стоит ПОСЛЕ первого экрана вопросов,
+ * а не перед ним (просьба владельца 21.08.2026).
+ *
+ * Причина в предпроверке Sapar: она запускается, как только введены ИИН и
+ * период, и часть обращений на ней и заканчивается. Гонять оператора по
+ * чек-листу до того, как выяснилось, что обращение вообще не нужно, — работа
+ * впустую, а во время разговора с водителем это ещё и минута молчания.
+ *
+ * Правило одно на все тематики: у той, где Sapar не спрашивают, порядок тоже
+ * «сначала кто и за какой период, потом проверки» — оператор запоминает одну
+ * форму, а не две.
+ */
+export const CHECKS_AFTER_GROUP = 0;
+
+export const hasChecks = (scenario) => Boolean(scenario?.checks?.length);
+
+/* Куда вести оператора с экрана вопросов. Возвращает:
+ *   { phase: 'checks' }                 — показать чек-лист
+ *   { phase: 'form', groupIndex: N }    — следующий экран вопросов
+ *   { phase: 'submit' }                 — вопросы кончились, спрашиваем сервер
+ */
+export const nextStop = (scenario, groups, groupIndex, { checksReady = false } = {}) => {
+    if (hasChecks(scenario) && !checksReady && groupIndex === CHECKS_AFTER_GROUP) {
+        return { phase: 'checks' };
+    }
+    if (groupIndex + 1 < (groups || []).length) {
+        return { phase: 'form', groupIndex: groupIndex + 1 };
+    }
+    return { phase: 'submit' };
+};
+
+/* Куда вести кнопкой «Назад». { phase: 'pick' } — к выбору тематики. */
+export const previousStop = (scenario, groups, groupIndex) => {
+    if (groupIndex <= 0) return { phase: 'pick' };
+    if (hasChecks(scenario) && groupIndex === CHECKS_AFTER_GROUP + 1) {
+        return { phase: 'checks' };
+    }
+    return { phase: 'form', groupIndex: groupIndex - 1 };
+};
+
+/* Куда вести после подтверждённого чек-листа. Экранов может и не остаться —
+ * тогда сразу к проверке ответов, а не в пустой шаг. */
+export const afterChecks = (groups) => (
+    (groups || []).length > CHECKS_AFTER_GROUP + 1
+        ? { phase: 'form', groupIndex: CHECKS_AFTER_GROUP + 1 }
+        : { phase: 'submit' }
+);

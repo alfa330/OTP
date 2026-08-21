@@ -88,7 +88,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         }), 403
                     if manage and not access.can_manage_queues(ctx):
                         return jsonify({
-                            "error": "Настраивать очереди может только администратор",
+                            "error": "Настраивать очереди вам не разрешено",
                             "code": "CRM_FORBIDDEN",
                         }), 403
                     return handler(*args, ctx=ctx, **kwargs)

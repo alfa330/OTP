@@ -172,12 +172,26 @@ class SectionGateTest(unittest.TestCase):
 
 class ActionsTest(unittest.TestCase):
 
-    def test_only_global_admin_manages_queues(self):
+    def test_queues_are_managed_by_admins_heads_and_supervisors(self):
+        """Просьба владельца 21.08.2026: супервайзеру нужны очереди.
+
+        Глава отдела добавлен вместе с ним — иначе супервайзер может то, чего
+        не может его руководитель. Оператору очереди по-прежнему закрыты:
+        привязка чата отправляет обращения в чужую рабочую группу.
+        """
         self.assertTrue(access.can_manage_queues(ctx(role='super_admin')))
         self.assertTrue(access.can_manage_queues(ctx(role='admin')))
-        self.assertFalse(access.can_manage_queues(ctx(role='admin', headed=(3,))))
-        self.assertFalse(access.can_manage_queues(ctx(role='sv', groups=(1,))))
+        self.assertTrue(access.can_manage_queues(ctx(role='admin', headed=(3,))))
+        self.assertTrue(access.can_manage_queues(ctx(role='sv', groups=(1,))))
         self.assertFalse(access.can_manage_queues(ctx(role='operator')))
+        self.assertFalse(access.can_manage_queues(ctx(role='trainer')))
+
+    def test_managing_queues_still_needs_the_section(self):
+        """Периметр очередей — это периметр раздела: гейт can_open_section в
+        декораторе стоит РАНЬШЕ, и супервайзер чужого отдела до очередей не
+        доходит вовсе."""
+        outsider = ctx(role='sv', groups=(1,), department_code='tez')
+        self.assertFalse(access.can_open_section(outsider))
 
     def test_closed_ticket_takes_no_more_replies(self):
         me = ctx(role='operator', user_id=10)
