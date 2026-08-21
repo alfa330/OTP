@@ -49,17 +49,17 @@ class ScrubberTest(unittest.TestCase):
 
     def test_key_in_query_string_is_removed(self):
         out = self.emit('HTTP Request: POST https://generativelanguage.googleapis.com'
-                        '/v1alpha/auth_tokens?key=AIzaSyBQWr_a6THzAcv38m8UifwemOkBsRUoY7Q'
+                        '/v1alpha/auth_tokens?key=AIzaSyFAKEKEY_FOR_TESTS_000000000000000'
                         ' "HTTP/1.1 200 OK"')
-        self.assertNotIn('AIzaSyBQWr', out)
+        self.assertNotIn('AIzaSyFAKE', out)
         self.assertIn('<СКРЫТО>', out)
         # Адрес обязан остаться читаемым: иначе фильтр лечит утечку ценой логов.
         self.assertIn('auth_tokens?key=', out)
         self.assertIn('200 OK', out)
 
     def test_bare_google_key_anywhere_in_text(self):
-        out = self.emit('ключ AIzaSyBQWr_a6THzAcv38m8UifwemOkBsRUoY7Q в тексте')
-        self.assertNotIn('AIzaSyBQWr', out)
+        out = self.emit('ключ AIzaSyFAKEKEY_FOR_TESTS_000000000000000 в тексте')
+        self.assertNotIn('AIzaSyFAKE', out)
 
     def test_anthropic_key_is_removed(self):
         out = self.emit('x-api-key sk-ant-api03-abcdefghijklmnop свалился в лог')
@@ -78,9 +78,9 @@ class ScrubberTest(unittest.TestCase):
 
     def test_formatted_records_are_scrubbed_too(self):
         """Секрет часто приходит аргументом, а не готовой строкой."""
-        self.log.info('запрос %s', 'https://x/y?key=AIzaSyBQWr_a6THzAcv38m8UifwemOkBsRUoY7Q')
+        self.log.info('запрос %s', 'https://x/y?key=AIzaSyFAKEKEY_FOR_TESTS_000000000000000')
         out = self.buffer.getvalue()
-        self.assertNotIn('AIzaSyBQWr', out)
+        self.assertNotIn('AIzaSyFAKE', out)
 
 
 class CallSiteTest(unittest.TestCase):
@@ -90,8 +90,11 @@ class CallSiteTest(unittest.TestCase):
         offenders = []
         for path in ROOT.rglob('*.py'):
             text = str(path)
+            # Исключения только служебные. Прототип voice_trainer/server.py раньше
+            # стоял в списке — и молча держал ключ в четырёх адресах; вычищен
+            # 22.08.2026, и обратно в исключения не возвращается.
             if any(skip in text for skip in ('worktrees', 'node_modules', '__pycache__',
-                                             'tests', 'server.py', 'e2e_check.py')):
+                                             'tests')):
                 continue
             source = path.read_text(encoding='utf-8-sig', errors='ignore')
             for line in source.splitlines():
