@@ -349,3 +349,155 @@ class TopicUpdateFieldsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WritePathContractTest(unittest.TestCase):
+    """Контракт записи занятия: тема приходит ЛИБО причиной, ЛИБО id темы.
+
+    Регресс, найденный ревью уже после выката: в required_fields у POST
+    /api/trainings оставался 'reason', и проверка стояла ДО разбора темы —
+    поэтому весь корпоративный путь записи отвечал 400 «Missing required
+    fields», и по корпоративной теме нельзя было записать ни одного занятия.
+    Клиент отправляет topic_id, а причину сервер берёт у темы сам.
+    """
+
+    @staticmethod
+    def _source():
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+            return handle.read()
+
+    def _add_training_body(self):
+        source = self._source()
+        start = source.index('def add_training():')
+        end = source.index('def update_training(', start)
+        return source[start:end]
+
+    def test_reason_is_not_a_required_field(self):
+        body = self._add_training_body()
+        head = body[:body.index('raw_operator_ids')]
+        self.assertIn("required_fields = ['date', 'start_time', 'end_time']", head)
+        self.assertNotIn("'reason'", head.split('required_fields =')[1].split(']')[0] + ']')
+
+    def test_either_reason_or_topic_is_demanded(self):
+        body = self._add_training_body()
+        self.assertIn("if not data.get('topic_id') and not data.get('reason')", body)
+
+    def test_topic_is_resolved_before_the_reason_allowlist(self):
+        """Иначе название корпоративной темы проверялось бы по списку базовых."""
+        body = self._add_training_body()
+        self.assertLess(body.index('_resolve_training_topic'),
+                        body.index('_training_reason_catalog'))
+
+
+class GroupScopeGuardTest(unittest.TestCase):
+    """В ветке ?group_id= у каждой роли должна быть своя область видимости.
+
+    Регресс, найденный ревью: гейт роли расширили тренером и стажёром, а внутри
+    блока group_id отсекался только 'operator'. Тренер и стажёр проваливались
+    сквозь все проверки и читали любую группу любого отдела.
+    """
+
+    @staticmethod
+    def _handlers():
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+            source = handle.read()
+        # Границу функции ищем по следующему def на нулевом отступе: 'ORDER BY'
+        # встречается уже внутри LATERAL-подзапроса и обрезало бы блок раньше
+        # проверяемого места.
+        out = []
+        for name, after in (('def get_trainings():', 'def _training_reason_catalog'),
+                            ('def get_training_rejections():', 'def add_training_rejection')):
+            start = source.index(name)
+            end = source.index(after, start)
+            out.append((name, source[start:end]))
+        return out
+
+    def test_no_role_falls_through_the_group_branch(self):
+        for name, body in self._handlers():
+            block = body[body.index('if group_id is not None:'):]
+            block = block[:block.index('where_clauses.append')]
+            self.assertIn("elif role == 'trainer':", block, name)
+            self.assertIn('else:', block, name)
+            self.assertIn('Unsupported target role', block, name)
+            self.assertNotIn("elif role == 'operator':", block,
+                             '%s: operator-only отсечение снова пропускает тренера и стажёра' % name)
+
+    def test_trainer_is_bounded_by_own_department(self):
+        for name, body in self._handlers():
+            block = body[body.index('if group_id is not None:'):]
+            block = block[:block.index('where_clauses.append')]
+            self.assertIn('get_user_department_id', block, name)
+            self.assertIn("not your department's group", block, name)
+
+
+class ArchivedTopicEditTest(unittest.TestCase):
+    """Архивная тема запрещена для НОВОГО занятия, но не для правки старого.
+
+    Архив — единственный способ убрать тему с историей (удаление сервер
+    запрещает), значит «занятие по архивной теме» — нормальное конечное
+    состояние, и опечатку во времени в нём надо уметь починить.
+    """
+
+    @staticmethod
+    def _source():
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+            return handle.read()
+
+    def test_resolver_takes_the_records_current_topic(self):
+        source = self._source()
+        start = source.index('def _resolve_training_topic(')
+        end = source.index('def _training_time_to_minutes', start)
+        body = source[start:end]
+        self.assertIn('current_topic_id=None', body)
+        self.assertIn('keeping_own_topic', body)
+
+    def test_put_passes_the_current_topic(self):
+        source = self._source()
+        start = source.index('def update_training(')
+        end = source.index('def delete_training(', start)
+        body = source[start:end]
+        self.assertIn('current_topic_id=current_topic_id', body)
+
+    def test_post_does_not_pass_it(self):
+        """У новой записи текущей темы нет — архивную обязаны отклонить."""
+        source = self._source()
+        start = source.index('def add_training():')
+        end = source.index('def update_training(', start)
+        body = source[start:end]
+        self.assertIn("_resolve_training_topic(requester, requester_id, data.get('topic_id'))", body)
+
+
+class SupervisorTargetRolesTest(unittest.TestCase):
+    """Кому СВ вправе записать занятие.
+
+    Аудитория корпоративной темы (решение владельца) — все активные сотрудники
+    отдела; со старым набором ('operator',) супервайзер не смог бы закрыть охват
+    в принципе, а «Отметить всех в списке» отдавало частичный успех с
+    непонятными отказами. Граница отдела при этом остаётся.
+    """
+
+    @staticmethod
+    def _source():
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+            return handle.read()
+
+    def test_constant_covers_the_whole_audience(self):
+        source = self._source()
+        line = next(item for item in source.splitlines()
+                    if item.startswith('TRAINING_TARGET_ROLES ='))
+        for role in ('operator', 'trainee', 'sv', 'trainer'):
+            self.assertIn("'%s'" % role, line)
+
+    def test_all_four_training_handlers_use_it(self):
+        """POST (одиночный и батч), PUT и DELETE — один набор ролей на всех:
+        иначе занятие можно было бы создать, но нельзя удалить."""
+        source = self._source()
+        start = source.index('def add_training():')
+        end = source.index('def get_training_rejections():', start)
+        body = source[start:end]
+        self.assertEqual(body.count('supervisor_target_roles=TRAINING_TARGET_ROLES'), 4)
+        self.assertNotIn("supervisor_target_roles=('operator',)", body)

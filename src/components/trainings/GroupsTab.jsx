@@ -106,7 +106,12 @@ export default function GroupsTab({
         })),
     ]), [activeBucket]);
 
-    // Что в итоге показываем. Чем глубже спустились по каскаду, тем уже выборка.
+    /* Что в итоге показываем. Чем глубже спустились по каскаду, тем уже выборка.
+     *
+     * Поиск смотрит и на НАЗВАНИЕ ГРУППЫ, а не только на имя и тему. Названия
+     * групп в портале строятся из имени супервайзера («Ешан Алмас группа
+     * Основа»), и без этого поиск «Алмас» отвечал «Ничего не найдено», хотя
+     * группа с таким названием на экране была. */
     const shown = useMemo(() => {
         const base = activePerson
             ? activePerson.trainings
@@ -118,22 +123,44 @@ export default function GroupsTab({
         return base.filter((item) => (
             String(item?.operator_name || '').toLowerCase().includes(needle)
             || String(item?.reason || '').toLowerCase().includes(needle)
+            || String(item?.group_name || '').toLowerCase().includes(needle)
         ));
     }, [activePerson, activeBucket, departmentScoped, search]);
 
+    /* Совпало НАЗВАНИЕ группы — показываем группу целиком; совпало имя
+     * человека — только его. Иначе выходила бессмыслица: названия групп в
+     * портале строятся из имени супервайзера («Ешан Алмас группа Основа»),
+     * поиск «Алмас» попадал в название, карточка оставалась, а список людей в
+     * ней уже был отфильтрован по тому же слову и оказывался пустым — карточка
+     * заявляла 28 занятий и не показывала ни одной строки. */
     const visibleBuckets = useMemo(() => {
         const needle = search.trim().toLowerCase();
         if (!needle) return buckets;
         return buckets
-            .map((bucket) => ({
-                ...bucket,
-                people: bucket.people.filter((person) => String(person.name).toLowerCase().includes(needle)),
-            }))
-            .filter((bucket) => bucket.people.length > 0
-                || String(bucket.name).toLowerCase().includes(needle));
+            .map((bucket) => {
+                if (String(bucket.name).toLowerCase().includes(needle)) return bucket;
+                return {
+                    ...bucket,
+                    people: bucket.people.filter(
+                        (person) => String(person.name).toLowerCase().includes(needle),
+                    ),
+                };
+            })
+            .filter((bucket) => bucket.people.length > 0);
     }, [buckets, search]);
 
     const hasFilters = Boolean(departmentId || groupKey || personId || search.trim());
+
+    // Карточки строятся из visibleBuckets, поэтому и «пусто ли» для них надо
+    // спрашивать у них же. Раньше пустое состояние решалось по `shown`, и в
+    // виде карточек экран мог сказать «ничего не найдено», имея непустой список
+    // групп под руками.
+    const cardsMode = view === VIEW_CARDS && !activePerson;
+    const shownBuckets = useMemo(
+        () => visibleBuckets.filter((bucket) => !groupKey || bucket.key === groupKey),
+        [visibleBuckets, groupKey],
+    );
+    const nothingToShow = cardsMode ? shownBuckets.length === 0 : shown.length === 0;
 
     return (
         <div className="space-y-3">
@@ -192,7 +219,7 @@ export default function GroupsTab({
 
             {loading && <LoadingBlock />}
 
-            {!loading && shown.length === 0 && (
+            {!loading && nothingToShow && (
                 <EmptyBlock
                     icon={Users2}
                     title={hasFilters ? 'Ничего не найдено' : 'В этом месяце тренингов не было'}
@@ -205,7 +232,7 @@ export default function GroupsTab({
             {/* Календарь показывает выбранную выборку целиком: он отвечает на
                 «что было в этот день», и сужение отделом или группой для него
                 так же осмысленно, как для списка. */}
-            {!loading && shown.length > 0 && view === VIEW_CALENDAR && (
+            {!loading && !nothingToShow && view === VIEW_CALENDAR && (
                 <TrainingsCalendar
                     month={month}
                     sessions={shown}
@@ -217,7 +244,7 @@ export default function GroupsTab({
 
             {/* Раскрыт конкретный сотрудник — показываем его занятия списком,
                 вид карточек/строк здесь уже ничего не различает. */}
-            {!loading && shown.length > 0 && view !== VIEW_CALENDAR && activePerson && (
+            {!loading && !nothingToShow && view !== VIEW_CALENDAR && activePerson && (
                 <div className="space-y-3">
                     <PersonHeader person={activePerson} groupName={activeBucket?.name} />
                     <SessionList
@@ -231,10 +258,9 @@ export default function GroupsTab({
                 </div>
             )}
 
-            {!loading && shown.length > 0 && view === VIEW_CARDS && !activePerson && (
+            {!loading && !nothingToShow && cardsMode && (
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                    {visibleBuckets
-                        .filter((bucket) => !groupKey || bucket.key === groupKey)
+                    {shownBuckets
                         .map((bucket) => (
                             <GroupCard
                                 key={bucket.key}
@@ -245,7 +271,7 @@ export default function GroupsTab({
                 </div>
             )}
 
-            {!loading && shown.length > 0 && view === VIEW_ROWS && !activePerson && (
+            {!loading && !nothingToShow && view === VIEW_ROWS && !activePerson && (
                 <SessionList
                     sessions={shown}
                     showPerson

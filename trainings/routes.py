@@ -137,6 +137,11 @@ def build_trainings_blueprint(*, db, require_api_key, build_cors_preflight_respo
             )
             audience = queries.department_audience_counts(cursor)
 
+        if not ctx['can_manage']:
+            # «О чём тема» написано для того, кто будет её проводить, — в форме
+            # так и подписано. Рядовому сотруднику отдаём только название.
+            topics = [dict(item, description=None) for item in topics]
+
         return jsonify({
             "status": "success",
             "schema_ready": True,
@@ -157,9 +162,16 @@ def build_trainings_blueprint(*, db, require_api_key, build_cors_preflight_respo
             "audience_by_department": {str(key): value for key, value in audience.items()},
         }), 200
 
-    @topics_route('/<int:topic_id>/audience', methods=('GET',))
+    @topics_route('/<int:topic_id>/audience', methods=('GET',), manage=True)
     def topic_audience(ctx, topic_id):
-        """Кому тему провели и кому осталось — список для набора пачки."""
+        """Кому тему провели и кому осталось — список для набора пачки.
+
+        manage=True не для симметрии: это поимённый список всего отдела с
+        отметкой, кто тренинг прошёл, а кто нет. Рядовому сотруднику такой
+        список не нужен и видеть его он не должен, хотя сам справочник тем ему
+        открыт. Гейт стоит на сервере, а не в интерфейсе: спрятанная кнопка
+        доступом не является.
+        """
         with db._get_cursor() as cursor:
             topic = queries.get_topic(cursor, topic_id)
             if not topic:

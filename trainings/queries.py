@@ -64,22 +64,36 @@ def list_topics(cursor, department_ids=None, include_archived=False):
         FROM training_topics t
         LEFT JOIN departments d ON d.id = t.department_id
         LEFT JOIN users cb      ON cb.id = t.created_by
-        LEFT JOIN (
-            SELECT topic_id,
-                   COUNT(DISTINCT operator_id) AS covered_count,
-                   COUNT(*)                    AS session_count,
-                   MIN(training_date)          AS first_date,
-                   MAX(training_date)          AS last_date
-              FROM trainings
-             WHERE topic_id IS NOT NULL
-             GROUP BY topic_id
-        ) s ON s.topic_id = t.id
-        LEFT JOIN (
-            SELECT u.department_id, COUNT(*) AS audience_count
+        -- Числитель охвата считается по ТОЙ ЖЕ аудитории, что и знаменатель, —
+        -- коррелированным подзапросом, а не отдельной группировкой по теме.
+        -- Иначе уволенный, которому тему когда-то провели, остаётся в числителе
+        -- и выпадает из знаменателя: карточка показывала бы «68 из 68», пока в
+        -- списке раскатки честно висят непройденные новички.
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*)             AS session_count,
+                   MIN(tr.training_date) AS first_date,
+                   MAX(tr.training_date) AS last_date,
+                   COUNT(DISTINCT tr.operator_id) FILTER (
+                       WHERE EXISTS (
+                           SELECT 1 FROM users u
+                            WHERE u.id = tr.operator_id
+                              AND (t.department_id IS NULL OR u.department_id = t.department_id)
+                              AND %(audience)s
+                       )
+                   ) AS covered_count
+              FROM trainings tr
+             WHERE tr.topic_id = t.id
+        ) s ON TRUE
+        -- Размер аудитории. `t.department_id IS NULL` — это «общая тема», то
+        -- есть весь портал, а НЕ «сотрудники без отдела»: равенство с NULL
+        -- никогда не выполняется, и на JOIN по department_id общая тема
+        -- получала бы охват 0 из 0 навсегда.
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS audience_count
               FROM users u
-             WHERE %(audience)s
-             GROUP BY u.department_id
-        ) a ON a.department_id = t.department_id
+             WHERE (t.department_id IS NULL OR u.department_id = t.department_id)
+               AND %(audience)s
+        ) a ON TRUE
     """ % {'audience': AUDIENCE_PREDICATE}
 
     if where:
@@ -129,7 +143,10 @@ def topic_audience(cursor, topic_id, department_id):
     ровно то, чем эту пачку набирают.
     """
     params = [topic_id]
-    dept_clause = "u.department_id IS NULL" if department_id is None else "u.department_id = %s"
+    # NULL у темы означает «общая, на весь портал», а не «сотрудники без
+    # отдела»: сравнение с NULL никогда не выполняется, и такая тема получала
+    # бы пустую аудиторию навсегда.
+    dept_clause = "TRUE" if department_id is None else "u.department_id = %s"
     if department_id is not None:
         params.append(int(department_id))
 
@@ -140,16 +157,25 @@ def topic_audience(cursor, topic_id, department_id):
             u.name,
             LOWER(COALESCE(u.role, ''))              AS role,
             sv.name                                   AS supervisor_name,
-            g.name                                    AS group_name,
+            grp.name                                  AS group_name,
             done.session_count,
             done.last_date
           FROM users u
           LEFT JOIN users sv ON sv.id = u.supervisor_id
-          LEFT JOIN group_operator_memberships gom
-                 ON gom.operator_id = u.id
-                AND gom.start_date <= CURRENT_DATE
-                AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
-          LEFT JOIN groups g ON g.id = gom.group_id
+          -- LATERAL ... LIMIT 1, а не обычный JOIN: у части людей два членства
+          -- накрывают сегодняшний день (в проде такие есть), и обычный JOIN
+          -- вернул бы человека дважды — а по длине этого списка считаются и
+          -- охват, и «осталось».
+          LEFT JOIN LATERAL (
+              SELECT g.name
+                FROM group_operator_memberships gom
+                JOIN groups g ON g.id = gom.group_id
+               WHERE gom.operator_id = u.id
+                 AND gom.start_date <= CURRENT_DATE
+                 AND (gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE)
+               ORDER BY gom.start_date DESC, gom.id DESC
+               LIMIT 1
+          ) grp ON TRUE
           LEFT JOIN (
               SELECT operator_id, COUNT(*) AS session_count, MAX(training_date) AS last_date
                 FROM trainings
@@ -251,8 +277,12 @@ def delete_topic(cursor, topic_id):
 
 
 def department_audience_counts(cursor):
-    """Размер аудитории по каждому отделу — для знаменателя охвата на фронте
-    (в том числе у темы, по которой ещё ни одного тренинга не провели)."""
+    """Размер аудитории по каждому отделу — справочно для фронта.
+
+    Ключ 'all' — вся аудитория портала: это знаменатель общей темы
+    (department_id IS NULL). Отдельной строкой, потому что в GROUP BY по
+    department_id общая тема попала бы в корзину «без отдела», а это не она.
+    """
     cursor.execute(
         """
         SELECT u.department_id, COUNT(*)
@@ -261,7 +291,9 @@ def department_audience_counts(cursor):
          GROUP BY u.department_id
         """ % {'audience': AUDIENCE_PREDICATE}
     )
-    return {row[0]: int(row[1]) for row in cursor.fetchall()}
+    counts = {row[0]: int(row[1]) for row in cursor.fetchall()}
+    counts['all'] = sum(counts.values())
+    return counts
 
 
 def _topic_row(row):

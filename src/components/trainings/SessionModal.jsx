@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Clock, Users, AlertTriangle } from 'lucide-react';
 import {
     IosModal, IosBadge, IosToggle, IosHint, iosInput, iosBtnPrimary, iosBtnSecondary, iosGroupLabel,
@@ -6,7 +6,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { Field } from '../wiki/formField';
 import {
-    durationMinutes, formatDuration, timeToMinutes, pluralPeople, plural, errText,
+    durationMinutes, formatDuration, timeToMinutes, pluralPeople, plural, errText, todayIso,
 } from './constants';
 import useEscapeClose from './useEscapeClose';
 
@@ -54,23 +54,32 @@ export default function SessionModal({
 
     useEscapeClose(open, onClose);
 
+    // См. пояснение в эффекте сброса ниже.
+    const defaultPeopleIdsRef = useRef(defaultPeopleIds);
+    defaultPeopleIdsRef.current = defaultPeopleIds;
+
     const archived = useMemo(() => new Set(archivedReasons), [archivedReasons]);
 
     useEffect(() => {
         if (!open) return;
-        setDate(initial?.date || new Date().toISOString().slice(0, 10));
+        setDate(initial?.date || todayIso());
         setStartTime(initial?.start_time || '');
         setEndTime(initial?.end_time || '');
         setComment(initial?.comment || '');
         setCountInHours(initial?.count_in_hours ?? true);
         setError('');
-        setPeopleIds(isEdit ? [] : (defaultPeopleIds || []).map(Number).filter(Number.isFinite));
+        setPeopleIds(isEdit ? [] : (defaultPeopleIdsRef.current || []).map(Number).filter(Number.isFinite));
         if (lockedTopicId) setChoice(`topic:${lockedTopicId}`);
         else if (initial?.topic_id) setChoice(`topic:${initial.topic_id}`);
         else if (initial?.reason) setChoice(`reason:${initial.reason}`);
         else setChoice('');
-    // initial приходит новым объектом на каждое открытие — этого достаточно.
-    }, [open, initial, isEdit, lockedTopicId, defaultPeopleIds]);
+    // Сбрасываем форму только на ОТКРЫТИЕ. defaultPeopleIds в зависимостях
+    // стоять не может: родитель отдаёт `... || []`, то есть новый массив на
+    // каждый свой рендер, — и любой чужой перерисовки (закрылся тост, тикнул
+    // таймер) было достаточно, чтобы наполовину заполненная форма обнулилась.
+    // Актуальное значение живёт в ref и читается в момент открытия.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, initial, isEdit, lockedTopicId]);
 
     const selectedTopic = useMemo(() => {
         if (!choice.startsWith('topic:')) return null;
@@ -162,7 +171,9 @@ export default function SessionModal({
                 date,
                 start_time: startTime,
                 end_time: endTime,
-                comment: comment.trim() || null,
+                // Пустая строка, а не null: сервер меняет комментарий по НАЛИЧИЮ
+                // ключа, и стёртый комментарий обязан доехать как стёртый.
+                comment: comment.trim(),
             };
             if (isCorporate) {
                 // Причину и зачёт в часы сервер возьмёт у темы — не отправляем
@@ -272,7 +283,7 @@ export default function SessionModal({
                         <input
                             type="date"
                             value={date}
-                            max={new Date().toISOString().slice(0, 10)}
+                            max={todayIso()}
                             onChange={(event) => setDate(event.target.value)}
                             className={`${iosInput} bg-white ring-1 ring-slate-200/70`}
                         />

@@ -80,7 +80,7 @@ export function readMonth() {
         const raw = localStorage.getItem(MONTH_KEY);
         if (raw && /^\d{4}-\d{2}$/.test(raw)) return raw;
     } catch (e) { /* ignore */ }
-    return new Date().toISOString().slice(0, 7);
+    return currentMonthIso();
 }
 
 export function writeMonth(month) {
@@ -90,6 +90,24 @@ export function writeMonth(month) {
 }
 
 /* ── Время и длительность ───────────────────────────────────────────────── */
+
+/* Сегодняшняя дата ПО ЧАСАМ ПОЛЬЗОВАТЕЛЯ, а не по UTC.
+ *
+ * `new Date().toISOString().slice(0, 10)` — привычная короткая запись, но она
+ * даёт UTC, а портал живёт в Asia/Almaty (UTC+5). С полуночи до пяти утра по
+ * местному времени UTC ещё вчерашний: форма занятия открывалась на вчерашней
+ * дате, а сегодняшнюю запрещал `max` — ночная смена не могла записать занятие,
+ * которое только что провела. */
+export function todayIso() {
+    const now = new Date();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${now.getFullYear()}-${month}-${day}`;
+}
+
+export function currentMonthIso() {
+    return todayIso().slice(0, 7);
+}
 
 export function timeToMinutes(value) {
     if (!value) return null;

@@ -24748,7 +24748,16 @@ def get_trainings():
                 _same_dept = _req_dept is not None and group.get('department_id') == _req_dept
                 if not (_same_dept or db.supervisor_has_group_access_for_period(requester_id, group_id, period_start, period_end)):
                     return jsonify({"error": "Forbidden: not your group"}), 403
-            elif role == 'operator':
+            elif role == 'trainer':
+                # Тренер — только группы своего отдела. Ветка добавлена вместе с
+                # его доступом к разделу: без неё он проваливался сквозь все
+                # проверки этого блока и читал любую группу любого отдела.
+                trainer_dept = db.get_user_department_id(requester_id)
+                if trainer_dept is None or group.get('department_id') != trainer_dept:
+                    return jsonify({"error": "Forbidden: not your department's group"}), 403
+            else:
+                # operator, trainee и всё, что появится позже: у них нет области
+                # видимости по группам, и молча пропускать их нельзя.
                 return jsonify({"error": "Unsupported target role"}), 400
 
             where_clauses.append("""
@@ -24859,6 +24868,16 @@ def get_trainings():
         logging.error(f"Error fetching trainings: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
 
+# Кому супервайзер вправе записать занятие. Раньше здесь был только
+# ('operator',), и с решением владельца «охват считается по всем активным
+# сотрудникам отдела» это стало противоречием: в аудиторию корпоративной темы
+# попадают операторы, стажёры, супервайзеры и тренеры, а записать занятие СВ мог
+# только оператору — то есть закрыть охват он не мог в принципе, а «Отметить
+# всех в списке» отдавало частичный успех с непонятными отказами.
+# Граница отдела при этом остаётся: её проверяет _requester_can_access_target_user.
+TRAINING_TARGET_ROLES = ('operator', 'trainee', 'sv', 'trainer')
+
+
 def _training_reason_catalog():
     """Справочник базовых тем — из одного места, а не копией в каждом роуте.
 
@@ -24883,7 +24902,7 @@ def _training_reason_catalog():
         return legacy, legacy, ()
 
 
-def _resolve_training_topic(requester, requester_id, topic_id):
+def _resolve_training_topic(requester, requester_id, topic_id, current_topic_id=None):
     """Проверить корпоративную тему и вернуть, что записывать в тренинг.
 
     Возвращает (topic, error). У корпоративного тренинга `reason` — это
@@ -24891,6 +24910,13 @@ def _resolve_training_topic(requester, requester_id, topic_id):
     «Мои часы» у самого сотрудника и лист «Тренинги» в выгрузке, и подставить
     туда служебное «Другое» означало бы показать человеку не то, что ему
     провели.
+
+    current_topic_id — тема, которая У ЗАПИСИ УЖЕ СТОИТ (только для правки).
+    Архивная тема запрещена для НОВЫХ занятий, но правку существующего занятия
+    она блокировать не должна: архив — единственный способ убрать тему с
+    историей (удаление сервер запрещает), то есть «занятие по архивной теме» —
+    это нормальное конечное состояние, и починить в нём опечатку во времени
+    обязано быть можно. То же правило, что у архивной базовой причины в PUT.
     """
     if topic_id in (None, '', 'null'):
         return None, None
@@ -24910,7 +24936,11 @@ def _resolve_training_topic(requester, requester_id, topic_id):
     if not topic:
         return None, ("Тема не найдена", 404)
     if topic['is_archived']:
-        return None, ("Тема в архиве — по ней нельзя проводить новые тренинги", 409)
+        keeping_own_topic = (
+            current_topic_id is not None and int(current_topic_id) == topic_id_int
+        )
+        if not keeping_own_topic:
+            return None, ("Тема в архиве — по ней нельзя проводить новые тренинги", 409)
 
     role = _normalize_user_role(requester[3])
     headed_dept = _headed_department_id(requester_id)
@@ -25006,10 +25036,17 @@ def _training_group_scope_error(requester, requester_id, group_id, operator_id, 
 def add_training():
     try:
         data = request.get_json(silent=True) or {}
-        required_fields = ['date', 'start_time', 'end_time', 'reason']
+        required_fields = ['date', 'start_time', 'end_time']
         if not data or not all(field in data for field in required_fields):
             logging.warning(f"Missing required fields in add_training: {data}")
             return jsonify({"error": "Missing required fields"}), 400
+        # Тема приходит ЛИБО как базовая причина, ЛИБО как id корпоративной.
+        # 'reason' был в required_fields, и это отсекало весь корпоративный
+        # путь записи на входе: клиент отправляет topic_id, а причину сервер
+        # берёт у темы сам — до этой проверки дело просто не доходило.
+        if not data.get('topic_id') and not data.get('reason'):
+            logging.warning("Neither reason nor topic_id in add_training: %s", data)
+            return jsonify({"error": "Укажите тему занятия"}), 400
 
         raw_operator_ids = _normalize_int_id_list(data.get('operator_ids'))
         if raw_operator_ids:
@@ -25094,7 +25131,7 @@ def add_training():
                     requester_id,
                     operator_ids[0],
                     allow_self=False,
-                    supervisor_target_roles=('operator',),
+                    supervisor_target_roles=TRAINING_TARGET_ROLES,
                     not_found_message="Operator not found",
                     forbidden_message="Forbidden for this operator"
                 )
@@ -25170,7 +25207,7 @@ def add_training():
                         requester_id,
                         raw_operator_id,
                         allow_self=False,
-                        supervisor_target_roles=('operator',),
+                        supervisor_target_roles=TRAINING_TARGET_ROLES,
                         not_found_message="Operator not found",
                         forbidden_message="Forbidden for this operator"
                     )
@@ -25317,7 +25354,7 @@ def update_training(training_id):
                 requester_id,
                 training[1],
                 allow_self=False,
-                supervisor_target_roles=('operator',),
+                supervisor_target_roles=TRAINING_TARGET_ROLES,
                 not_found_message="Operator not found",
                 forbidden_message="Forbidden for this operator"
             )
@@ -25345,13 +25382,16 @@ def update_training(training_id):
                 return jsonify({"error": "Invalid end time format"}), 400
         # Тема правки. Если пришёл topic_id — причина берётся у темы; если
         # пришла причина — сверяем со справочником базовых тем.
-        topic, topic_error = _resolve_training_topic(requester, requester_id, data.get('topic_id'))
+        current_topic_id = training[5] if len(training) > 5 else None
+        topic, topic_error = _resolve_training_topic(
+            requester, requester_id, data.get('topic_id'), current_topic_id=current_topic_id
+        )
         if topic_error:
             message, status_code = topic_error
             return jsonify({"error": message}), status_code
 
         effective_reason = data.get('reason')
-        effective_topic_id = training[5] if len(training) > 5 else None
+        effective_topic_id = current_topic_id
         effective_count_in_hours = data.get('count_in_hours')
 
         if topic:
@@ -25394,7 +25434,9 @@ def update_training(training_id):
             start_time=data.get('start_time'),
             end_time=data.get('end_time'),
             reason=effective_reason,
-            comment=data.get('comment'),
+            # Ключ есть в запросе — пишем, даже если он пустой (человек стёр
+            # комментарий). Ключа нет — не трогаем.
+            **({'comment': data.get('comment')} if 'comment' in data else {}),
             count_in_hours=effective_count_in_hours,
             # Передаём всегда: переезд «корпоративная тема → базовая причина»
             # должен снять привязку, а update_training различает «не пришло»
@@ -25438,7 +25480,7 @@ def delete_training(training_id):
             requester_id,
             training[1],
             allow_self=False,
-            supervisor_target_roles=('operator',),
+            supervisor_target_roles=TRAINING_TARGET_ROLES,
             not_found_message="Operator not found",
             forbidden_message="Forbidden for this operator"
         )
@@ -25532,7 +25574,16 @@ def get_training_rejections():
                 _same_dept = _req_dept is not None and group.get('department_id') == _req_dept
                 if not (_same_dept or db.supervisor_has_group_access_for_period(requester_id, group_id, period_start, period_end)):
                     return jsonify({"error": "Forbidden: not your group"}), 403
-            elif role == 'operator':
+            elif role == 'trainer':
+                # Тренер — только группы своего отдела. Ветка добавлена вместе с
+                # его доступом к разделу: без неё он проваливался сквозь все
+                # проверки этого блока и читал любую группу любого отдела.
+                trainer_dept = db.get_user_department_id(requester_id)
+                if trainer_dept is None or group.get('department_id') != trainer_dept:
+                    return jsonify({"error": "Forbidden: not your department's group"}), 403
+            else:
+                # operator, trainee и всё, что появится позже: у них нет области
+                # видимости по группам, и молча пропускать их нельзя.
                 return jsonify({"error": "Unsupported target role"}), 400
 
             where_clauses.append("""

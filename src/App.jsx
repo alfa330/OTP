@@ -5946,7 +5946,22 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (!user || !trainingModalState.operatorId) return;
             setIsTrainingActionLoading(true);
             try {
-            const trainingPayload = selectedGroupId ? { ...data, group_id: selectedGroupId } : data;
+            // Отправляем только те поля, которые принимает API, а не весь
+            // объект тренинга. TrainingModal возвращает {...initialData, ...},
+            // то есть эхом гонит обратно ВСЁ, что пришло с сервера, — а с
+            // появлением group_id/group_name в ответе /api/trainings это стало
+            // менять поведение сервера: он видел group_id и уходил в проверку
+            // «оператор состоит в этой группе на дату», которой здесь никто не
+            // просил. Группу к запросу добавляет только выбор группы на экране.
+            const trainingPayload = {
+                date: data?.date,
+                start_time: data?.start_time,
+                end_time: data?.end_time,
+                reason: data?.reason,
+                comment: data?.comment ?? null,
+                count_in_hours: data?.count_in_hours,
+                ...(selectedGroupId ? { group_id: selectedGroupId } : {}),
+            };
             if (trainingModalState.training?.id) {
                 await axios.put(`${API_BASE_URL}/api/trainings/${trainingModalState.training.id}`, trainingPayload, {
                 headers: {

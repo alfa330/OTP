@@ -31663,7 +31663,7 @@ class Database:
     _UNSET = object()
 
     def update_training(self, training_id, training_date=None, start_time=None, end_time=None,
-                        reason=None, comment=None, count_in_hours=None, topic_id=_UNSET):
+                        reason=None, comment=_UNSET, count_in_hours=None, topic_id=_UNSET):
         updates = []
         params = []
         if training_date:
@@ -31674,8 +31674,11 @@ class Database:
             updates.append("end_time = %s"); params.append(end_time)
         if reason:
             updates.append("reason = %s"); params.append(reason)
-        if comment is not None:
-            updates.append("comment = %s"); params.append(comment)
+        # Через _UNSET, а не через None: комментарий — единственное поле, которое
+        # человек осмысленно СТИРАЕТ, а с проверкой `is not None` пустая правка
+        # молча не доезжала и старый текст оставался в базе.
+        if comment is not Database._UNSET:
+            updates.append("comment = %s"); params.append(comment or None)
         if count_in_hours is not None:
             updates.append("count_in_hours = %s"); params.append(count_in_hours)
         if topic_id is not Database._UNSET:

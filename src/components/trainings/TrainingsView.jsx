@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { BookOpen, Users2, Plus } from 'lucide-react';
 import { APPLE_FONT, iosBtnSecondary, IosModal, IosBadge } from '../ui/ios';
@@ -13,6 +13,7 @@ import SessionList from './SessionList';
 import { ErrorBlock } from './pieces';
 import {
     TAB_TOPICS, TAB_GROUPS, FAMILY_CORPORATE, TOPIC_KIND_LABELS,
+    buildTopicSummaries, sortTopicSummaries,
     readPrefs, writePrefs, readMonth, writeMonth,
     formatMonth, formatDuration, durationMinutes,
     pluralPeople, pluralSessions, errText,
@@ -61,7 +62,11 @@ export default function TrainingsView({
     const [topicModal, setTopicModal] = useState(null);          // {topic} | {}
     const [rolloutTopic, setRolloutTopic] = useState(null);
     const [rollout, setRollout] = useState({ loading: false, data: null, error: '' });
-    const [openTopic, setOpenTopic] = useState(null);            // сводка темы в модалке
+    /* Раскрытая тема — КЛЮЧ, а не снимок сводки. Со снимком удаление занятия из
+     * модалки оставляло на экране удалённую строку и старые счётчики: список
+     * тренингов обновлялся, сводки пересчитывались, а в state лежал прежний
+     * объект. */
+    const [openTopicKey, setOpenTopicKey] = useState(null);
 
     const headers = useMemo(
         () => ({ headers: withAccessTokenHeader({ 'X-User-Id': user?.id }) }),
@@ -77,16 +82,29 @@ export default function TrainingsView({
 
     /* ── Загрузка ───────────────────────────────────────────────────────── */
 
+    /* Гонка месяцев. Два быстрых клика по стрелке — два запроса в полёте, и
+     * ответ ПРЕДЫДУЩЕГО месяца, придя позже, перетирал данные текущего. Помним,
+     * какой месяц запрошен последним, и принимаем только его ответ. */
+    const wantedMonthRef = useRef(month);
     const loadTrainings = useCallback(async (targetMonth) => {
+        wantedMonthRef.current = targetMonth;
         const response = await axios.get(
             `${apiBaseUrl}/api/trainings?month=${encodeURIComponent(targetMonth)}`, headers,
         );
+        if (wantedMonthRef.current !== targetMonth) return;
         const rows = Array.isArray(response?.data?.trainings) ? response.data.trainings : [];
         setTrainings(rows);
     }, [apiBaseUrl, headers]);
 
+    /* include_archived=1 — обязательно. Архив это единственный способ убрать
+     * тему с историей (удаление сервер запрещает), и без архивных тем в ответе
+     * пункт «Вернуть из архива» был бы недостижим: заархивированная тема
+     * исчезала из раздела навсегда. В список карточек они при этом не
+     * подмешиваются — для них отдельный срез «Архив». */
     const loadCatalog = useCallback(async () => {
-        const response = await axios.get(`${apiBaseUrl}/api/training_topics`, headers);
+        const response = await axios.get(
+            `${apiBaseUrl}/api/training_topics?include_archived=1`, headers,
+        );
         setCatalog(response?.data || null);
     }, [apiBaseUrl, headers]);
 
@@ -142,6 +160,19 @@ export default function TrainingsView({
         () => (Array.isArray(catalog?.archived_reasons) ? catalog.archived_reasons : []), [catalog]);
     const canManage = Boolean(catalog?.can_manage);
     const canChooseDepartment = Boolean(catalog?.unscoped);
+
+    /* Сводки по темам считаются ЗДЕСЬ, а не во вкладке: их нужно и списку
+     * карточек, и раскрытой теме. Два независимых расчёта одного и того же
+     * однажды разошлись бы, и это увидели бы как «в карточке одно число, а
+     * внутри другое». */
+    const summaries = useMemo(() => sortTopicSummaries(
+        buildTopicSummaries({ trainings, topics, archivedReasons }),
+    ), [trainings, topics, archivedReasons]);
+
+    const openTopic = useMemo(
+        () => (openTopicKey ? summaries.find((item) => item.key === openTopicKey) || null : null),
+        [openTopicKey, summaries],
+    );
 
     const scopeDepartmentName = useMemo(() => {
         const id = catalog?.scope_department_id;
@@ -341,10 +372,7 @@ export default function TrainingsView({
             {!loadError && tab === TAB_TOPICS && (
                 <TopicsTab
                     month={month}
-                    trainings={trainings}
-                    topics={topics}
-                    defaultReasons={defaultReasons}
-                    archivedReasons={archivedReasons}
+                    summaries={summaries}
                     loading={loading}
                     canManage={canManage}
                     view={topicView}
@@ -354,7 +382,7 @@ export default function TrainingsView({
                     onArchiveTopic={archiveTopic}
                     onDeleteTopic={deleteTopic}
                     onRollout={openRollout}
-                    onOpenTopic={setOpenTopic}
+                    onOpenTopic={(summary) => setOpenTopicKey(summary.key)}
                     onAddSession={() => setSessionModal({})}
                 />
             )}
@@ -412,7 +440,7 @@ export default function TrainingsView({
 
             <IosModal
                 open={Boolean(openTopic)}
-                onClose={() => setOpenTopic(null)}
+                onClose={() => setOpenTopicKey(null)}
                 title={openTopic?.title || ''}
                 subtitle={openTopic
                     ? `${formatMonth(month)} · ${openTopic.monthSessions} ${pluralSessions(openTopic.monthSessions)}`
@@ -424,13 +452,13 @@ export default function TrainingsView({
                             && !openTopic.isArchivedTopic && (
                             <button
                                 type="button"
-                                onClick={() => { const topic = openTopic.topic; setOpenTopic(null); openRollout(topic); }}
+                                onClick={() => { const topic = openTopic.topic; setOpenTopicKey(null); openRollout(topic); }}
                                 className={iosBtnSecondary}
                             >
                                 <Plus size={14} /> Провести пачке
                             </button>
                         )}
-                        <button type="button" onClick={() => setOpenTopic(null)} className={iosBtnSecondary}>
+                        <button type="button" onClick={() => setOpenTopicKey(null)} className={iosBtnSecondary}>
                             Закрыть
                         </button>
                     </>
@@ -459,7 +487,7 @@ export default function TrainingsView({
                             showPerson
                             showTopic={false}
                             canManage={canManage}
-                            onEdit={(session) => { setOpenTopic(null); setSessionModal({ initial: session }); }}
+                            onEdit={(session) => { setOpenTopicKey(null); setSessionModal({ initial: session }); }}
                             onDelete={deleteSession}
                             emptyText="В этом месяце по теме не проводили"
                         />

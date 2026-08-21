@@ -5,7 +5,7 @@ import { iosCard, iosInput, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosBa
 import CustomSelect from '../ui/CustomSelect';
 import { SearchField, CoverageBar, EmptyBlock, LoadingBlock, ErrorBlock } from './pieces';
 import {
-    formatDayLong, formatDuration, durationMinutes, pluralPeople, plural, errText,
+    formatDayLong, formatDuration, durationMinutes, pluralPeople, plural, errText, todayIso,
 } from './constants';
 
 /* Раскатка корпоративной темы пачками.
@@ -64,7 +64,7 @@ export default function RolloutSheet({
         setSearch('');
         setGroupFilter('');
         setPicked(new Set());
-        setDate(new Date().toISOString().slice(0, 10));
+        setDate(todayIso());
         setStartTime('');
         setEndTime('');
         setError('');
@@ -330,7 +330,7 @@ export default function RolloutSheet({
                                 <input
                                     type="date"
                                     value={date}
-                                    max={new Date().toISOString().slice(0, 10)}
+                                    max={todayIso()}
                                     onChange={(event) => setDate(event.target.value)}
                                     className={`${iosInput} bg-white ring-1 ring-slate-200/70`}
                                 />

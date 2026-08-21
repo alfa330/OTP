@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { IosModal, iosCard, iosBtnSecondary } from '../ui/ios';
 import SessionList from './SessionList';
 import {
-    durationMinutes, formatDayLong, formatDuration, pluralSessions, pluralPeople,
+    durationMinutes, formatDayLong, formatDuration, pluralSessions, pluralPeople, todayIso,
 } from './constants';
 import useEscapeClose from './useEscapeClose';
 
@@ -67,7 +67,7 @@ export default function TrainingsCalendar({ month, sessions = [], canManage, onE
         return result;
     }, [year, monthNumber]);
 
-    const todayIso = new Date().toISOString().slice(0, 10);
+    const today = todayIso();
 
     const openDaySessions = useMemo(() => (
         openDay ? (byDay.get(openDay) || []) : []
@@ -101,7 +101,7 @@ export default function TrainingsCalendar({ month, sessions = [], canManage, onE
                         const items = byDay.get(day) || [];
                         const count = items.length;
                         const iso = `${year}-${String(monthNumber).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                        const isToday = iso === todayIso;
+                        const isToday = iso === today;
                         // Насыщенность вместо разных цветов: один смысл — «сколько»,
                         // значит одна шкала, а не палитра.
                         const weight = count === 0 ? 0 : Math.min(4, Math.ceil((count / Math.max(1, busiest)) * 4));

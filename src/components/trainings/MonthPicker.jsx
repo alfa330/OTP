@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, CalendarRange } from 'lucide-react';
-import { formatMonth } from './constants';
+import { formatMonth, currentMonthIso } from './constants';
 
 /* Выбор месяца в стиле раздела.
  *
@@ -29,7 +29,9 @@ export default function MonthPicker({ value, onChange, minYear = 2024 }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const buttonRef = useRef(null);
-    const currentMonth = useMemo(() => new Date().toISOString().slice(0, 7), []);
+    // Локальный месяц, а не UTC: в UTC+5 первые пять часов первого числа
+    // UTC ещё в прошлом месяце, и новый месяц был бы «будущим» и заблокирован.
+    const currentMonth = useMemo(() => currentMonthIso(), []);
     const [year, monthNumber] = useMemo(() => {
         const parts = String(value || currentMonth).split('-').map(Number);
         return [parts[0], parts[1]];

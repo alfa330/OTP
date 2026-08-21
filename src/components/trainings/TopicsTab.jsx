@@ -5,7 +5,7 @@ import { SearchField, ViewSwitcher, EmptyBlock, LoadingBlock, CoverageBar } from
 import {
     FAMILY_BASE, FAMILY_CORPORATE, FAMILY_LABELS, TOPIC_KIND_LABELS,
     VIEW_CARDS, VIEW_ROWS, TOPIC_VIEWS,
-    buildTopicSummaries, sortTopicSummaries, remainingCount, coveragePercent,
+    remainingCount, coveragePercent,
     formatDuration, formatDayShort, pluralPeople, pluralSessions, tileTone, initials,
 } from './constants';
 
@@ -22,18 +22,21 @@ import {
  * разная по составу, а не по оформлению.
  */
 
+// «Архив» — отдельный срез, а не строка в списке. Заархивированные темы не
+// должны мешаться в рабочем списке, но и исчезать навсегда им нельзя: архив это
+// единственный способ убрать тему с историей, и вернуть её надо откуда-то.
+const SCOPE_ARCHIVE = 'archive';
+
 const FAMILY_FILTERS = [
     { key: 'all', label: 'Все' },
     { key: FAMILY_BASE, label: FAMILY_LABELS[FAMILY_BASE] },
     { key: FAMILY_CORPORATE, label: FAMILY_LABELS[FAMILY_CORPORATE] },
+    { key: SCOPE_ARCHIVE, label: 'Архив' },
 ];
 
 export default function TopicsTab({
     month,
-    trainings,
-    topics,
-    defaultReasons,
-    archivedReasons,
+    summaries: allSummaries,
     loading,
     canManage,
     view,
@@ -50,25 +53,34 @@ export default function TopicsTab({
     const [search, setSearch] = useState('');
     const [onlyRemaining, setOnlyRemaining] = useState(false);
 
-    const summaries = useMemo(() => sortTopicSummaries(
-        buildTopicSummaries({ trainings, topics, archivedReasons }),
-    ), [trainings, topics, archivedReasons]);
+    // Живые темы и архив разведены сразу: архивная тема не должна попадать ни в
+    // «Все», ни в счётчики — иначе «Корпоративные 5» при трёх рабочих.
+    const summaries = useMemo(
+        () => (allSummaries || []).filter((item) => !item.isArchivedTopic),
+        [allSummaries],
+    );
+    const archived = useMemo(
+        () => (allSummaries || []).filter((item) => item.isArchivedTopic),
+        [allSummaries],
+    );
 
     const counts = useMemo(() => ({
         all: summaries.length,
         [FAMILY_BASE]: summaries.filter((item) => item.family === FAMILY_BASE).length,
         [FAMILY_CORPORATE]: summaries.filter((item) => item.family === FAMILY_CORPORATE).length,
-    }), [summaries]);
+        [SCOPE_ARCHIVE]: archived.length,
+    }), [summaries, archived]);
 
     const visible = useMemo(() => {
         const needle = search.trim().toLowerCase();
-        return summaries.filter((item) => {
-            if (family !== 'all' && item.family !== family) return false;
+        const source = family === SCOPE_ARCHIVE ? archived : summaries;
+        return source.filter((item) => {
+            if (family !== 'all' && family !== SCOPE_ARCHIVE && item.family !== family) return false;
             if (onlyRemaining && remainingCount(item) === 0) return false;
             if (needle && !String(item.title).toLowerCase().includes(needle)) return false;
             return true;
         });
-    }, [summaries, family, onlyRemaining, search]);
+    }, [summaries, archived, family, onlyRemaining, search]);
 
     const hasFilters = family !== 'all' || Boolean(search.trim()) || onlyRemaining;
     const remainingTotal = useMemo(
@@ -110,7 +122,9 @@ export default function TopicsTab({
         <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2 px-1">
                 <div className="flex rounded-xl bg-slate-100 p-1">
-                    {FAMILY_FILTERS.map((item) => (
+                    {FAMILY_FILTERS.filter(
+                        (item) => item.key !== SCOPE_ARCHIVE || counts[SCOPE_ARCHIVE] > 0,
+                    ).map((item) => (
                         <button
                             key={item.key}
                             type="button"
@@ -163,7 +177,9 @@ export default function TopicsTab({
             {!loading && visible.length === 0 && (
                 <EmptyBlock
                     icon={BookOpen}
-                    title={hasFilters ? 'Ничего не найдено' : 'В этом месяце тренингов не было'}
+                    title={family === SCOPE_ARCHIVE
+                        ? 'В архиве пусто'
+                        : (hasFilters ? 'Ничего не найдено' : 'В этом месяце тренингов не было')}
                     text={hasFilters
                         ? 'Попробуйте изменить условия поиска или снять фильтр.'
                         : 'Как только по какой-нибудь теме проведут занятие, она появится здесь. Корпоративные темы видны сразу — по ним можно начать раскатку.'}
@@ -210,7 +226,11 @@ function TopicCard({ summary, menu, canManage, onOpen, onRollout }) {
     const corporate = summary.family === FAMILY_CORPORATE;
     const remaining = remainingCount(summary);
     const percent = coveragePercent(summary);
-    const done = corporate && summary.audienceCount > 0 && remaining === 0;
+    /* «Прошли все» — только когда охват РЕАЛЬНО закрыт. Считать это по
+     * `remaining === 0` нельзя: у архивной темы remainingCount намеренно
+     * возвращает 0 (её не нужно догонять), и карточка архивной темы писала
+     * зелёным «Прошли все» при 30 из 68. */
+    const complete = summary.audienceCount > 0 && summary.coveredCount >= summary.audienceCount;
 
     return (
         <div className={`${iosCard} flex flex-col p-4`}>
@@ -268,8 +288,12 @@ function TopicCard({ summary, menu, canManage, onOpen, onRollout }) {
                     </div>
                     <CoverageBar covered={summary.coveredCount} audience={summary.audienceCount} />
                     <div className="flex items-center justify-between text-[11.5px]">
-                        <span className={done ? 'font-medium text-emerald-600' : 'text-slate-400'}>
-                            {done ? 'Прошли все' : `Осталось ${remaining}`}
+                        <span className={complete ? 'font-medium text-emerald-600' : 'text-slate-400'}>
+                            {complete
+                                ? 'Прошли все'
+                                : (summary.isArchivedTopic
+                                    ? 'Тема в архиве'
+                                    : `Осталось ${summary.audienceCount - summary.coveredCount}`)}
                         </span>
                         {percent != null && (
                             <span className="tabular-nums text-slate-400">{percent}%</span>
