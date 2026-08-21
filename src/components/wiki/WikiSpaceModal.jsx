@@ -7,10 +7,11 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Archive, Loader2, Plus } from 'lucide-react';
+import { Archive, Loader2, Plus, X } from 'lucide-react';
 
 import { IosModal, IosToggle, iosBtnPrimary, iosBtnSecondary, iosInput, iosGroupLabel }
     from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import { SPACE_TABS, spaceFeatures } from './spaceFeatures';
 
 /* Пустое пространство: все тумблеры включены. Новое пространство, у которого
@@ -29,6 +30,12 @@ export default function WikiSpaceModal({
     const creating = !space?.id;
     const [draft, setDraft] = useState(blankSpace);
     const [saving, setSaving] = useState(false);
+    /* Режим держим ОТДЕЛЬНО от списка, хотя на сервере пусто и значит «всем».
+       Иначе «Выбранным» с ещё пустым списком неотличимо от «Всем отделам»:
+       переключатель отскакивал бы назад, а сохранение молча открыло бы
+       пространство всей компании — ровно противоположное тому, что человек
+       только что выбрал. */
+    const [restricted, setRestricted] = useState(false);
 
     /* Черновик пересобирается при КАЖДОМ открытии, а не при первом монтировании:
        окно живёт в шапке и открывается для разных пространств подряд. Без сброса
@@ -43,6 +50,7 @@ export default function WikiSpaceModal({
                 features: spaceFeatures(space.features),
             }
             : blankSpace());
+        setRestricted((space?.department_ids || []).length > 0);
     }, [open, space]);
 
     const patch = (fields) => setDraft((prev) => ({ ...prev, ...fields }));
@@ -58,16 +66,37 @@ export default function WikiSpaceModal({
             : draft.department_ids.filter((x) => x !== id),
     });
 
-    const everyone = draft.department_ids.length === 0;
+    const everyone = !restricted;
+
+    const departmentOptions = useMemo(
+        () => departments.map((d) => ({ value: d.id, label: d.name })), [departments]);
+
+    const nameOfDepartment = (id) => departments.find((d) => d.id === id)?.name || `№${id}`;
+
+    /* В кнопке селектора — счёт, а не перечисление: названия отделов длинные
+       («СЗоВ — Служба заботы о водителях»), и уже на втором кнопка перестаёт
+       читаться. Сами отделы показаны чипами под ней. */
+    const renderDepartments = (values) => (
+        <span className="truncate">
+            {values.length === 1 ? nameOfDepartment(values[0]) : `Выбрано: ${values.length}`}
+        </span>
+    );
 
     const save = () => {
         const name = draft.name.trim();
         if (!name) { showToast?.('Укажите название пространства', 'error'); return; }
+        // Пустой список на сервере означает «видно всем», поэтому режим
+        // «Выбранным» без единого отдела сохранять нельзя: получилось бы
+        // обратное задуманному, и молча.
+        if (restricted && draft.department_ids.length === 0) {
+            showToast?.('Выберите хотя бы один отдел — или верните «Всем отделам»', 'error');
+            return;
+        }
         setSaving(true);
         const payload = {
             name,
             description: draft.description.trim() || null,
-            department_ids: draft.department_ids,
+            department_ids: restricted ? draft.department_ids : [],
             features: draft.features,
         };
         const request = creating
@@ -155,7 +184,13 @@ export default function WikiSpaceModal({
 
                 {/* ── Кому выдано ────────────────────────────────────────────
                     Это ГРАНИЦА, а не подсказка: раздел чужого пространства не
-                    откроется отделу ни правилом, ни публичностью, ни ссылкой. */}
+                    откроется отделу ни правилом, ни публичностью, ни ссылкой.
+
+                    Селектор с поиском, а не столбик тумблеров: отделов в
+                    компании больше, чем помещается в окно, и тумблеры росли бы
+                    списком, который приходится прокручивать, чтобы найти один
+                    нужный. Тот же общий примитив, что у выбора исполнителей
+                    задачи, — и ведёт себя он так же. */}
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Каким отделам видно</div>
                     <div className="flex gap-1 rounded-xl bg-slate-100 p-1">
@@ -168,15 +203,14 @@ export default function WikiSpaceModal({
                                 <button
                                     key={key}
                                     type="button"
-                                    /* «Выбранным» без выбора — это «всем», поэтому при
-                                       переключении отмечаем все отделы разом: дальше
-                                       человек снимает лишние. Ровно как у публичного
-                                       раздела — механика одна, и вести себя обязана
-                                       одинаково. */
-                                    onClick={() => patch({
-                                        department_ids: key === 'all'
-                                            ? [] : departments.map((d) => d.id),
-                                    })}
+                                    /* «Выбранным» переводит в режим выбора, но НЕ
+                                       отмечает все отделы разом: со списком-селектором
+                                       это значило бы показать «Выбрано: 5» и заставить
+                                       снимать лишние. Человек открывает список и
+                                       отмечает нужные — пустой выбор до первого
+                                       отмеченного честно подписан ниже. */
+                                    onClick={() => setRestricted(key === 'some')}
+                                    aria-pressed={active}
                                     className={`flex-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-[12.5px] font-medium transition ${
                                         active ? 'bg-white text-slate-900 shadow-sm'
                                                : 'text-slate-500 hover:text-slate-700'
@@ -189,28 +223,54 @@ export default function WikiSpaceModal({
                     </div>
 
                     {!everyone && (
-                        <div className="divide-y divide-slate-100 overflow-hidden rounded-xl bg-slate-50">
-                            {departments.map((d) => (
-                                <label
-                                    key={d.id}
-                                    className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2"
-                                >
-                                    <span className="min-w-0 flex-1 truncate text-[13px] text-slate-800">
-                                        {d.name}
-                                    </span>
-                                    <IosToggle
-                                        checked={draft.department_ids.includes(d.id)}
-                                        onChange={(v) => toggleDepartment(d.id, v)}
-                                    />
-                                </label>
-                            ))}
-                        </div>
+                        <>
+                            <CustomSelect
+                                variant="ios"
+                                multiple
+                                searchable
+                                searchPlaceholder="Поиск по названию отдела…"
+                                ariaLabel="Отделы, которым видно пространство"
+                                placeholder="Выберите отделы"
+                                value={draft.department_ids}
+                                options={departmentOptions}
+                                onChange={(next) => patch({
+                                    department_ids: (Array.isArray(next) ? next : []).map(Number),
+                                })}
+                                renderValue={renderDepartments}
+                            />
+                            {/* Отмеченные — чипами под селектором: в кнопке они
+                                обрезаются на второй-третьей строке, а список
+                                отделов пространства читают целиком. Крестик
+                                снимает отдел, не открывая список. */}
+                            {draft.department_ids.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                    {draft.department_ids.map((id) => (
+                                        <span
+                                            key={id}
+                                            className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 py-1 pl-2.5 pr-1 text-[12px] text-slate-700"
+                                        >
+                                            <span className="truncate">{nameOfDepartment(id)}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => toggleDepartment(id, false)}
+                                                aria-label={`Убрать отдел ${nameOfDepartment(id)}`}
+                                                className="grid h-4 w-4 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-600"
+                                            >
+                                                <X size={11} />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </>
                     )}
 
                     <p className="px-1 text-[11.5px] leading-relaxed text-slate-400">
                         {everyone
                             ? 'Пространство увидят сотрудники всех отделов.'
-                            : `Пространство увидят только отмеченные отделы (${draft.department_ids.length}). Остальным не будет видно ни одного его раздела — даже публичного.`}
+                            : draft.department_ids.length === 0
+                                ? 'Ни один отдел не выбран — пространство не увидит никто, кроме супер-администратора.'
+                                : `Пространство увидят только выбранные отделы (${draft.department_ids.length}). Остальным не будет видно ни одного его раздела — даже публичного.`}
                     </p>
                 </section>
 
