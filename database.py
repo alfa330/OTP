@@ -3506,6 +3506,20 @@ class Database:
                 WHERE survey_response_id IS NOT NULL;
             """)
 
+            # ── Архив опросов ────────────────────────────────────────────────
+            # Опрос живёт две недели: дальше он перестаёт быть «делом» —
+            # уходит в архив, пропадает из счётчиков раздела и колокола и
+            # больше не тревожит ни оператора, ни руководителя.
+            #
+            # Тесты не архивируются: у них есть собственное окно starts_at..ends_at,
+            # и после его закрытия они уже никого не дёргают.
+            #
+            # Отметка об отправке уведомления владельцу — отдельная колонка, а не
+            # флаг «архивирован»: Telegram может не ответить, и тогда напоминание
+            # должно уйти следующим прогоном, а не потеряться молча.
+            cursor.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP;")
+            cursor.execute("ALTER TABLE surveys ADD COLUMN IF NOT EXISTS archive_notified_at TIMESTAMP;")
+
             # Tasks table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -4565,6 +4579,10 @@ class Database:
                     ON surveys(ends_at) WHERE is_test AND ends_at IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS idx_survey_attempt_drafts_survey
                     ON survey_attempt_drafts(survey_id);
+                CREATE INDEX IF NOT EXISTS idx_surveys_archive_page
+                    ON surveys(archived_at, created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_surveys_archive_pending_notify
+                    ON surveys(archived_at) WHERE archive_notified_at IS NULL;
                 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
                 CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -5573,6 +5591,14 @@ class Database:
                     RETURN NULL;
                 ELSIF TG_TABLE_NAME = 'lms_notifications' THEN
                     targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'surveys' THEN
+                    -- Уход опроса в архив убирает его из сводки у ВСЕХ, кому он
+                    -- был назначен: адресатов достаём из назначений, своего
+                    -- поля с получателями у опроса нет.
+                    targets := ARRAY(
+                        SELECT sa.operator_id FROM survey_assignments sa
+                         WHERE sa.survey_id = NEW.id
+                    );
                 ELSIF TG_TABLE_NAME = 'survey_assignments' THEN
                     -- В черновике теста UPDATE всегда упоминает status и
                     -- started_at. Состав колокола меняется лишь при смене
@@ -5661,6 +5687,12 @@ class Database:
             ('trg_bell_four_you', 'four_you_images', 'AFTER INSERT', ''),
             ('trg_bell_lms', 'lms_notifications', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_surveys_insert', 'survey_assignments', 'AFTER INSERT', ''),
+            (
+                'trg_bell_surveys_archived',
+                'surveys',
+                'AFTER UPDATE OF archived_at',
+                'WHEN (OLD.archived_at IS DISTINCT FROM NEW.archived_at)',
+            ),
             (
                 'trg_bell_surveys',
                 'survey_assignments',
@@ -44196,6 +44228,14 @@ class Database:
     SURVEY_TEST_STATUS_ACTIVE = 'active'
     SURVEY_TEST_STATUS_FINISHED = 'finished'
 
+    # ── Архив опросов ─────────────────────────────────────────────────────
+    # Опрос старше двух недель уходит в архив: перестаёт считаться в бейдже
+    # раздела и в колоколе, но остаётся доступен на отдельной вкладке.
+    # Тесты не архивируются — у них есть своё окно, которое закрывается само.
+    SURVEY_ARCHIVE_AFTER_DAYS = 14
+    SURVEY_PAGE_SIZE_DEFAULT = 20
+    SURVEY_PAGE_SIZE_MAX = 100
+
     # Один список колонок на все выборки опросов: индексы читаются в
     # _serialize_survey_list, и расходиться между тремя запросами им нельзя.
     _SURVEY_LIST_COLUMNS = """
@@ -44218,7 +44258,8 @@ class Database:
                         s.starts_at,
                         s.ends_at,
                         s.single_attempt,
-                        s.affects_quality
+                        s.affects_quality,
+                        s.archived_at
     """
     _SURVEY_QUESTION_COLUMNS = """
                     q.id,
@@ -45451,6 +45492,7 @@ class Database:
             ends_at = row[17] if len(row) > 17 else None
             single_attempt = bool(row[18]) if len(row) > 18 and row[18] is not None else True
             affects_quality = bool(row[19]) if len(row) > 19 else False
+            archived_at = row[20] if len(row) > 20 else None
             test_status = self.survey_test_status(starts_at, ends_at, now=now) if is_test else None
 
             direction_ids = row[6] if isinstance(row[6], list) else []
@@ -45600,6 +45642,8 @@ class Database:
                 'description': row[2] or '',
                 'created_at': self._survey_dt_to_iso(row[3]),
                 'updated_at': self._survey_dt_to_iso(row[4]),
+                'archived_at': self._survey_dt_to_iso(archived_at),
+                'is_archived': archived_at is not None,
                 'created_by': {
                     'id': row[9],
                     'name': row[10] or 'Система',
@@ -45678,24 +45722,43 @@ class Database:
 
         return serialized
 
-    def get_surveys_for_management(self, requester_id, requester_role, scope_department_id=None):
+    def get_surveys_for_management(self, requester_id, requester_role, scope_department_id=None,
+                                   survey_ids=None):
+        """Полные карточки опросов со статистикой.
+
+        survey_ids сужает выборку до конкретных опросов — так работает открытие
+        одной карточки: список страниц отдаёт лёгкие строки (get_surveys_page),
+        а вопросы, ответы и статистику подтягивает уже выбранный опрос. Раньше
+        этот метод всегда выгружал ВСЕ опросы со всеми ответами всех операторов
+        ради списка из десятка заголовков.
+        """
         requester_id = int(requester_id)
         role = self._normalize_survey_role(requester_role)
 
         if not (role_has_min(role, 'admin') or role in ('sv', 'trainer')):
             return []
 
+        requested_ids = self._survey_int_id_list(survey_ids) if survey_ids is not None else None
+        if requested_ids is not None and not requested_ids:
+            return []
+        id_filter = " AND s.id = ANY(%s)" if requested_ids is not None else ""
+
         with self._get_cursor() as cursor:
             if role_has_min(role, 'admin') or role == 'trainer':
+                params = [requested_ids] if requested_ids is not None else []
                 cursor.execute(f"""
                     SELECT
                         {self._SURVEY_LIST_COLUMNS}
                     FROM surveys s
                     LEFT JOIN users creator ON creator.id = s.created_by
+                    WHERE TRUE{id_filter}
                     ORDER BY s.created_at DESC, s.id DESC
-                """)
+                """, tuple(params))
             else:
                 if scope_department_id is not None:
+                    params = [requester_id, int(scope_department_id)]
+                    if requested_ids is not None:
+                        params.append(requested_ids)
                     cursor.execute(f"""
                     SELECT DISTINCT
                         {self._SURVEY_LIST_COLUMNS}
@@ -45703,10 +45766,13 @@ class Database:
                     LEFT JOIN users creator ON creator.id = s.created_by
                     LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
                     LEFT JOIN users op ON op.id = sa.operator_id
-                    WHERE s.created_by = %s OR op.department_id = %s
+                    WHERE (s.created_by = %s OR op.department_id = %s){id_filter}
                     ORDER BY s.created_at DESC, s.id DESC
-                """, (requester_id, int(scope_department_id)))
+                """, tuple(params))
                 else:
+                    params = [requester_id, requester_id]
+                    if requested_ids is not None:
+                        params.append(requested_ids)
                     cursor.execute(f"""
                     SELECT DISTINCT
                         {self._SURVEY_LIST_COLUMNS}
@@ -45714,9 +45780,9 @@ class Database:
                     LEFT JOIN users creator ON creator.id = s.created_by
                     LEFT JOIN survey_assignments sa ON sa.survey_id = s.id
                     LEFT JOIN users op ON op.id = sa.operator_id
-                    WHERE s.created_by = %s OR op.supervisor_id = %s
+                    WHERE (s.created_by = %s OR op.supervisor_id = %s){id_filter}
                     ORDER BY s.created_at DESC, s.id DESC
-                """, (requester_id, requester_id))
+                """, tuple(params))
 
             surveys_rows = cursor.fetchall()
             if not surveys_rows:
@@ -45809,14 +45875,484 @@ class Database:
                 answers_rows=answers_rows
             )
 
-    def get_surveys_for_operator(self, operator_id):
+    # ── Страница списка, карточка и архив ─────────────────────────────────
+    #
+    # Раздел «Опросы» раньше жил одним запросом: /api/surveys выгружал ВСЕ
+    # опросы со всеми вопросами, назначениями, ответами и статистикой — ради
+    # списка заголовков слева. С ростом архива это и стало главным тормозом.
+    #
+    # Теперь их два: страница лёгких строк (заголовок + счётчики) и карточка
+    # одного опроса. Счётчики считает сама база агрегатом, а не Python по
+    # выгруженным назначениям.
+
+    @staticmethod
+    def _survey_assignment_visible_sql(role, scope_department_id, alias='sa'):
+        """Какие назначения этот пользователь вправе видеть в счётчиках.
+
+        Повторяет _get_visible_operator_ids_for_requester_tx, но предикатом:
+        считать «пройдено N из M» в SQL можно только там же, где идёт агрегат,
+        а тащить сюда список из тысяч id было бы тем же самым, от чего уходим.
+        """
+        if role_has_min(role, 'admin') or role == 'trainer':
+            return 'TRUE', []
+
+        if role == 'sv':
+            scope_filter = ''
+            params = []
+            if scope_department_id is not None:
+                scope_filter = ' AND vu.department_id = %s'
+                params.append(int(scope_department_id))
+            return (
+                f"""EXISTS (
+                    SELECT 1 FROM users vu
+                     WHERE vu.id = {alias}.operator_id
+                       AND LOWER(TRIM(COALESCE(vu.role, ''))) = 'operator'
+                       AND COALESCE(NULLIF(LOWER(TRIM(COALESCE(vu.status, 'working'))), ''), 'working')
+                           NOT IN ('fired', 'dismissal'){scope_filter}
+                )""",
+                params,
+            )
+
+        return 'FALSE', []
+
+    @staticmethod
+    def _survey_visible_sql(role, requester_id, scope_department_id):
+        """Какие опросы вообще попадают в список — дословно прежние правила."""
+        if role_has_min(role, 'admin') or role == 'trainer':
+            return 'TRUE', []
+
+        if role == 'sv':
+            if scope_department_id is not None:
+                return (
+                    """(s.created_by = %s OR EXISTS (
+                        SELECT 1 FROM survey_assignments sa2
+                          JOIN users op2 ON op2.id = sa2.operator_id
+                         WHERE sa2.survey_id = s.id AND op2.department_id = %s
+                    ))""",
+                    [int(requester_id), int(scope_department_id)],
+                )
+            return (
+                """(s.created_by = %s OR EXISTS (
+                    SELECT 1 FROM survey_assignments sa2
+                      JOIN users op2 ON op2.id = sa2.operator_id
+                     WHERE sa2.survey_id = s.id AND op2.supervisor_id = %s
+                ))""",
+                [int(requester_id), int(requester_id)],
+            )
+
+        return 'FALSE', []
+
+    @classmethod
+    def _normalize_survey_page(cls, page, page_size):
+        try:
+            page = int(page)
+        except Exception:
+            page = 1
+        try:
+            page_size = int(page_size)
+        except Exception:
+            page_size = cls.SURVEY_PAGE_SIZE_DEFAULT
+        page = max(1, page)
+        page_size = max(1, min(cls.SURVEY_PAGE_SIZE_MAX, page_size))
+        return page, page_size
+
+    @staticmethod
+    def _survey_search_pattern(search):
+        text = str(search or '').strip()
+        if not text:
+            return None
+        # Экранируем спецсимволы LIKE: без этого «%» в запросе означал бы
+        # «что угодно», а не сам символ процента.
+        escaped = text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        return f'%{escaped}%'
+
+    def _survey_page_envelope(self, items, total, page, page_size):
+        total = max(0, int(total or 0))
+        pages = (total + page_size - 1) // page_size if page_size > 0 else 0
+        return {
+            'items': items,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'pages': pages,
+        }
+
+    def get_surveys_page(self, requester_id, requester_role, scope_department_id=None,
+                         department_id=None, archived=False, search='', page=1, page_size=None):
+        """Страница списка для руководителя: заголовок и счётчики, без ответов."""
+        requester_id = int(requester_id)
+        role = self._normalize_survey_role(requester_role)
+        page, page_size = self._normalize_survey_page(
+            page, page_size if page_size is not None else self.SURVEY_PAGE_SIZE_DEFAULT
+        )
+
+        if not (role_has_min(role, 'admin') or role in ('sv', 'trainer')):
+            return self._survey_page_envelope([], 0, page, page_size)
+
+        visible_sql, visible_params = self._survey_visible_sql(role, requester_id, scope_department_id)
+        assignment_sql, assignment_params = self._survey_assignment_visible_sql(role, scope_department_id)
+
+        join_conditions = [assignment_sql]
+        join_params = list(assignment_params)
+        # Фильтр по отделу в шапке раздела — это срез состава, а не прав:
+        # опрос остаётся видимым, но «пройдено N из M» считается по людям
+        # выбранного отдела, и опросы без таких людей из списка уходят.
+        department_id = int(department_id) if department_id not in (None, '') else None
+        if department_id is not None:
+            join_conditions.append("""EXISTS (
+                SELECT 1 FROM users du WHERE du.id = sa.operator_id AND du.department_id = %s
+            )""")
+            join_params.append(department_id)
+
+        where_conditions = [visible_sql]
+        where_params = list(visible_params)
+        where_conditions.append('s.archived_at IS NOT NULL' if archived else 's.archived_at IS NULL')
+        pattern = self._survey_search_pattern(search)
+        if pattern:
+            where_conditions.append("(s.title ILIKE %s OR COALESCE(s.description, '') ILIKE %s)")
+            where_params.extend([pattern, pattern])
+
+        having_sql = 'HAVING COUNT(sa.id) > 0' if department_id is not None else ''
+
+        sql = f"""
+            SELECT
+                s.id,
+                s.title,
+                s.is_test,
+                s.created_at,
+                s.archived_at,
+                s.starts_at,
+                s.ends_at,
+                s.single_attempt,
+                s.affects_quality,
+                s.repeat_root_id,
+                s.repeat_iteration,
+                COUNT(sa.id) AS assigned_count,
+                COUNT(sa.id) FILTER (WHERE sa.status = 'completed') AS completed_count,
+                COUNT(*) OVER () AS total_rows
+            FROM surveys s
+            LEFT JOIN survey_assignments sa
+                   ON sa.survey_id = s.id AND {' AND '.join(join_conditions)}
+            WHERE {' AND '.join(where_conditions)}
+            GROUP BY s.id
+            {having_sql}
+            ORDER BY s.created_at DESC, s.id DESC
+            LIMIT %s OFFSET %s
+        """
+        params = tuple(join_params + where_params + [page_size, (page - 1) * page_size])
+
+        now = datetime.now()
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+
+        total = int(rows[0][13]) if rows else 0
+        items = [self._serialize_survey_list_row(row, now=now) for row in rows]
+        return self._survey_page_envelope(items, total, page, page_size)
+
+    def _serialize_survey_list_row(self, row, now=None):
+        survey_id = int(row[0])
+        is_test = bool(row[2])
+        starts_at = row[5]
+        ends_at = row[6]
+        assigned_count = int(row[11] or 0)
+        completed_count = int(row[12] or 0)
+        pending_count = max(0, assigned_count - completed_count)
+        try:
+            repeat_root_id = int(row[9]) if row[9] is not None else survey_id
+        except Exception:
+            repeat_root_id = survey_id
+        try:
+            repeat_iteration = max(1, int(row[10] or 1))
+        except Exception:
+            repeat_iteration = 1
+
+        return {
+            'id': survey_id,
+            'title': row[1],
+            'is_test': is_test,
+            'created_at': self._survey_dt_to_iso(row[3]),
+            'archived_at': self._survey_dt_to_iso(row[4]),
+            'is_archived': row[4] is not None,
+            'repeat': {
+                'root_id': repeat_root_id,
+                'iteration': repeat_iteration,
+                'is_repeat': repeat_iteration > 1,
+            },
+            'test': {
+                'status': self.survey_test_status(starts_at, ends_at, now=now),
+                'starts_at': self._survey_dt_to_iso(starts_at),
+                'ends_at': self._survey_dt_to_iso(ends_at),
+                'single_attempt': bool(row[7]) if row[7] is not None else True,
+                'affects_quality': bool(row[8]),
+            } if is_test else None,
+            'statistics': {
+                'assigned_count': assigned_count,
+                'completed_count': completed_count,
+                'pending_count': pending_count,
+                'completion_rate': round((completed_count / assigned_count) * 100, 1) if assigned_count else 0.0,
+            },
+        }
+
+    def get_operator_surveys_page(self, operator_id, archived=False, search='', page=1, page_size=None):
+        """Страница списка для оператора: назначенные ему опросы без вопросов."""
+        operator_id = int(operator_id)
+        page, page_size = self._normalize_survey_page(
+            page, page_size if page_size is not None else self.SURVEY_PAGE_SIZE_DEFAULT
+        )
+
+        where_conditions = [
+            'sa.operator_id = %s',
+            """(NOT COALESCE(s.is_test, FALSE)
+                OR s.starts_at IS NULL
+                OR s.starts_at <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))""",
+            's.archived_at IS NOT NULL' if archived else 's.archived_at IS NULL',
+        ]
+        params = [operator_id]
+        pattern = self._survey_search_pattern(search)
+        if pattern:
+            where_conditions.append("(s.title ILIKE %s OR COALESCE(s.description, '') ILIKE %s)")
+            params.extend([pattern, pattern])
+
+        # Колонки 0..13 — те же, что у управленческой страницы: их читает общий
+        # _serialize_survey_list_row. Своё у оператора идёт следом, с 14-й.
+        sql = f"""
+            SELECT
+                s.id,
+                s.title,
+                s.is_test,
+                s.created_at,
+                s.archived_at,
+                s.starts_at,
+                s.ends_at,
+                s.single_attempt,
+                s.affects_quality,
+                s.repeat_root_id,
+                s.repeat_iteration,
+                1 AS assigned_count,
+                CASE WHEN sa.status = 'completed' THEN 1 ELSE 0 END AS completed_count,
+                COUNT(*) OVER () AS total_rows,
+                sa.status,
+                sa.completed_at
+            FROM survey_assignments sa
+            JOIN surveys s ON s.id = sa.survey_id
+            WHERE {' AND '.join(where_conditions)}
+            ORDER BY
+                CASE WHEN sa.status = 'completed' THEN 1 ELSE 0 END,
+                sa.assigned_at DESC,
+                sa.id DESC
+            LIMIT %s OFFSET %s
+        """
+        params.extend([page_size, (page - 1) * page_size])
+
+        now = datetime.now()
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+
+        total = int(rows[0][13]) if rows else 0
+        items = []
+        for row in rows:
+            item = self._serialize_survey_list_row(row, now=now)
+            status = str(row[14] or 'assigned')
+            is_completed = status == 'completed'
+            single_attempt = bool(row[7]) if row[7] is not None else True
+            test_status = (item.get('test') or {}).get('status')
+            # Пройти можно только внутри окна теста; повторная попытка —
+            # только если тест это разрешает. То же правило, что в карточке.
+            can_submit = not is_completed
+            if item['is_test']:
+                can_submit = (
+                    test_status == self.SURVEY_TEST_STATUS_ACTIVE
+                    and (not is_completed or not single_attempt)
+                )
+            # Архив закрыт на ответы — сервер вернул бы SURVEY_ARCHIVED.
+            # Показывать форму, которую нельзя отправить, нечестно.
+            if item['is_archived']:
+                can_submit = False
+            item['my_assignment'] = {
+                'status': status,
+                'completed_at': self._survey_dt_to_iso(row[15]),
+                'can_submit': bool(can_submit),
+            }
+            items.append(item)
+        return self._survey_page_envelope(items, total, page, page_size)
+
+    def get_survey_detail_for_requester(self, survey_id, requester_id, requester_role,
+                                        scope_department_id=None):
+        """Карточка одного опроса: вопросы, ответы и статистика.
+
+        Руководителю отдаём и «соседей» по повторению: вкладка ответов сводит
+        все прогоны одного опроса, и без вопросов соседнего прогона ответ
+        не к чему привязать. Раньше эти данные приезжали в общем списке —
+        то есть вместе со всеми остальными опросами разом.
+        """
+        survey_id = int(survey_id)
+        role = self._normalize_survey_role(requester_role)
+
+        if role == 'operator':
+            surveys = self.get_surveys_for_operator(
+                requester_id, survey_ids=[survey_id], include_archived=True
+            )
+            if not surveys:
+                return None
+            return {'survey': surveys[0], 'repetitions': []}
+
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(repeat_root_id, id) FROM surveys WHERE id = %s",
+                (survey_id,)
+            )
+            root_row = cursor.fetchone()
+            if not root_row:
+                return None
+            root_id = int(root_row[0])
+            cursor.execute(
+                "SELECT id FROM surveys WHERE COALESCE(repeat_root_id, id) = %s",
+                (root_id,)
+            )
+            family_ids = [int(row[0]) for row in cursor.fetchall()]
+
+        surveys = self.get_surveys_for_management(
+            requester_id,
+            requester_role,
+            scope_department_id=scope_department_id,
+            survey_ids=family_ids or [survey_id]
+        )
+        selected = next((item for item in surveys if int(item.get('id')) == survey_id), None)
+        if selected is None:
+            return None
+
+        repetitions = [{
+            'id': int(item.get('id')),
+            'title': item.get('title'),
+            'iteration': int((item.get('repeat') or {}).get('iteration') or 1),
+            'questions': item.get('questions') or [],
+        } for item in surveys if int(item.get('id')) != survey_id]
+
+        return {'survey': selected, 'repetitions': repetitions}
+
+    def count_pending_surveys(self, requester_id, requester_role, scope_department_id=None):
+        """Число для бейджа раздела — одним COUNT вместо выгрузки всех опросов.
+
+        Архивные не считаются: в этом и смысл архива.
+        """
+        requester_id = int(requester_id)
+        role = self._normalize_survey_role(requester_role)
+
+        if role == 'operator':
+            sql = """
+                SELECT COUNT(*)
+                  FROM survey_assignments sa
+                  JOIN surveys s ON s.id = sa.survey_id
+                 WHERE sa.operator_id = %s
+                   AND COALESCE(sa.status, '') <> 'completed'
+                   AND s.archived_at IS NULL
+                   AND (NOT COALESCE(s.is_test, FALSE)
+                        OR ((s.starts_at IS NULL OR s.starts_at <= %s)
+                            AND (s.ends_at IS NULL OR s.ends_at > %s)))
+            """
+            now = datetime.now()
+            with self._get_cursor() as cursor:
+                cursor.execute(sql, (requester_id, now, now))
+                row = cursor.fetchone()
+            return int(row[0] or 0) if row else 0
+
+        if not (role_has_min(role, 'admin') or role in ('sv', 'trainer')):
+            return 0
+
+        visible_sql, visible_params = self._survey_visible_sql(role, requester_id, scope_department_id)
+        assignment_sql, assignment_params = self._survey_assignment_visible_sql(role, scope_department_id)
+        sql = f"""
+            SELECT COUNT(*)
+              FROM survey_assignments sa
+              JOIN surveys s ON s.id = sa.survey_id
+             WHERE COALESCE(sa.status, '') <> 'completed'
+               AND s.archived_at IS NULL
+               AND {assignment_sql}
+               AND {visible_sql}
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute(sql, tuple(assignment_params + visible_params))
+            row = cursor.fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def archive_stale_surveys(self, older_than_days=None, now=None):
+        """Уводит в архив опросы старше двух недель.
+
+        Тесты не трогаем: у них своё окно, и «архив» для них ничего не значит.
+        Возвращает число заархивированных — само уведомление владельцу уходит
+        отдельным шагом, только после успешной отправки (см.
+        collect_survey_archive_notifications).
+        """
+        threshold_days = int(older_than_days if older_than_days is not None else self.SURVEY_ARCHIVE_AFTER_DAYS)
+        moment = now or datetime.now()
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE surveys
+                   SET archived_at = %s
+                 WHERE archived_at IS NULL
+                   AND NOT COALESCE(is_test, FALSE)
+                   AND created_at <= %s - (%s * INTERVAL '1 day')
+                RETURNING id
+            """, (moment, moment, threshold_days))
+            return len(cursor.fetchall())
+
+    def collect_survey_archive_notifications(self, limit=100):
+        """Опросы, уехавшие в архив, о которых владельцу ещё не сообщили."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT s.id, s.title, s.archived_at, s.created_at, u.id, u.name, u.telegram_id,
+                       (SELECT COUNT(*) FROM survey_assignments sa WHERE sa.survey_id = s.id),
+                       (SELECT COUNT(*) FROM survey_assignments sa
+                         WHERE sa.survey_id = s.id AND sa.status = 'completed')
+                  FROM surveys s
+                  JOIN users u ON u.id = s.created_by
+                 WHERE s.archived_at IS NOT NULL
+                   AND s.archive_notified_at IS NULL
+                   AND u.telegram_id IS NOT NULL
+                 ORDER BY s.archived_at ASC, s.id ASC
+                 LIMIT %s
+            """, (int(limit),))
+            return [{
+                'id': int(row[0]),
+                'title': row[1] or f'Опрос #{row[0]}',
+                'archived_at': row[2],
+                'created_at': row[3],
+                'owner_id': int(row[4]),
+                'owner_name': row[5] or '',
+                'chat_id': row[6],
+                'assigned_count': int(row[7] or 0),
+                'completed_count': int(row[8] or 0),
+            } for row in cursor.fetchall()]
+
+    def mark_survey_archive_notified(self, survey_id, now=None):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                'UPDATE surveys SET archive_notified_at = %s WHERE id = %s AND archive_notified_at IS NULL',
+                (now or datetime.now(), int(survey_id))
+            )
+
+    def get_surveys_for_operator(self, operator_id, survey_ids=None, include_archived=False):
         operator_id = int(operator_id)
         now = datetime.now()
+
+        requested_ids = self._survey_int_id_list(survey_ids) if survey_ids is not None else None
+        if requested_ids is not None and not requested_ids:
+            return []
+        id_filter = " AND s.id = ANY(%s)" if requested_ids is not None else ""
+        # Архивный опрос оператору не показываем в списке, но открыть уже
+        # пройденный по прямой ссылке он должен: иначе «мой результат»
+        # исчезал бы вместе с уходом опроса в архив.
+        archive_filter = "" if include_archived else " AND s.archived_at IS NULL"
 
         with self._get_cursor() as cursor:
             # Запланированный тест оператору не отдаём вообще: он не должен
             # знать ни вопросов, ни вариантов до времени запуска.
-            cursor.execute("""
+            operator_params = [operator_id]
+            if requested_ids is not None:
+                operator_params.append(requested_ids)
+            cursor.execute(f"""
                 SELECT
                     s.id,
                     s.title,
@@ -45848,7 +46384,8 @@ class Database:
                     sr.earned_points,
                     sr.max_points,
                     sr.is_auto_submitted,
-                    sd.answers_json
+                    sd.answers_json,
+                    s.archived_at
                 FROM survey_assignments sa
                 JOIN surveys s ON s.id = sa.survey_id
                 LEFT JOIN users creator ON creator.id = s.created_by
@@ -45863,12 +46400,12 @@ class Database:
                       NOT COALESCE(s.is_test, FALSE)
                       OR s.starts_at IS NULL
                       OR s.starts_at <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                  )
+                  ){archive_filter}{id_filter}
                 ORDER BY
                     CASE WHEN sa.status = 'completed' THEN 1 ELSE 0 END,
                     sa.assigned_at DESC,
                     sa.id DESC
-            """, (operator_id,))
+            """, tuple(operator_params))
             surveys_rows = cursor.fetchall()
             if not surveys_rows:
                 return []
@@ -45949,6 +46486,8 @@ class Database:
                 ends_at = row[22] if len(row) > 22 else None
                 single_attempt = bool(row[23]) if len(row) > 23 and row[23] is not None else True
                 affects_quality = bool(row[24]) if len(row) > 24 else False
+                archived_at = row[31] if len(row) > 31 else None
+                is_archived = archived_at is not None
 
                 questions_source = sorted(
                     questions_by_survey.get(survey_id, []),
@@ -46061,13 +46600,17 @@ class Database:
                         }
 
                 # Пройти можно только внутри окна теста. Повторная попытка —
-                # только если тест это разрешает.
+                # только если тест это разрешает. Архивный опрос закрыт совсем:
+                # его можно открыть по ссылке и посмотреть свой результат,
+                # но отправить ответы уже нельзя.
                 can_submit = assignment_status != 'completed'
                 if is_test:
                     can_submit = (
                         test_status == self.SURVEY_TEST_STATUS_ACTIVE
                         and (assignment_status != 'completed' or not single_attempt)
                     )
+                if is_archived:
+                    can_submit = False
 
                 result.append({
                     'id': survey_id,
@@ -46075,6 +46618,8 @@ class Database:
                     'description': row[2] or '',
                     'created_at': self._survey_dt_to_iso(row[3]),
                     'updated_at': self._survey_dt_to_iso(row[4]),
+                    'archived_at': self._survey_dt_to_iso(archived_at),
+                    'is_archived': is_archived,
                     'created_by': {
                         'id': row[9],
                         'name': row[10] or 'Система',
@@ -46157,13 +46702,18 @@ class Database:
                 COALESCE(single_attempt, TRUE),
                 COALESCE(affects_quality, FALSE),
                 title,
-                created_by
+                created_by,
+                archived_at
             FROM surveys
             WHERE id = %s
         """, (survey_id,))
         survey_row = cursor.fetchone()
         if not survey_row:
             raise ValueError("SURVEY_NOT_FOUND")
+        # Архив — это закрытая дверь, а не только скрытая строка в списке:
+        # иначе ответ мог бы прийти по уже сохранённой вкладке.
+        if survey_row[8] is not None:
+            raise ValueError("SURVEY_ARCHIVED")
         is_test = bool(survey_row[1])
         starts_at = survey_row[2]
         ends_at = survey_row[3]

@@ -983,8 +983,11 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
     # Таблицы, у которых обязан быть триггер колокола. Список жёсткий
     # намеренно: он ловит удаление триггера у живого источника. Но одного его
     # мало — см. второй тест ниже, он закрывает обратную сторону.
+    # `surveys` — не назначения, а сам опрос: уход в архив убирает его из
+    # сводки у всех, кому он был назначен, и без своего триггера колокол узнал
+    # бы об этом только по возвращении фокуса на вкладку.
     BELL_TRIGGER_TABLES = ('events', 'four_you_images', 'lms_notifications',
-                           'survey_assignments', 'wiki_ack_assignments',
+                           'surveys', 'survey_assignments', 'wiki_ack_assignments',
                            'tasks', 'task_action_reads', 'event_reads',
                            'four_you_reads', 'birthday_reads', 'crm_tickets')
 

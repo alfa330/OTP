@@ -148,6 +148,9 @@ def surveys(cursor, viewer, limit):
     в SQL: назначение не завершено, а для теста ещё и открыто его окно —
     Database.survey_test_status считает ровно это по starts_at/ends_at.
 
+    Архивные опросы (старше двух недель) сюда не попадают: архив и заведён,
+    чтобы старое перестало числиться делом.
+
     Колокол — личный: он отвечает на вопрос «что ждёт меня». Управленческое
     число опросов «сколько не прошли мои люди» осталось бейджем самого раздела,
     у него другой смысл, и складывать их в одно было бы враньём.
@@ -168,6 +171,7 @@ def surveys(cursor, viewer, limit):
          WHERE sa.operator_id = %(user_id)s
            AND COALESCE(sa.status, '') <> 'completed'
            AND s.is_active
+           AND s.archived_at IS NULL
            AND (NOT s.is_test
                 OR ((s.starts_at IS NULL OR s.starts_at <= %(now)s)
                     AND (s.ends_at IS NULL OR s.ends_at > %(now)s)))
@@ -604,12 +608,14 @@ def next_change_at(cursor, viewer):
                 SELECT s.starts_at AS moment
                   FROM survey_assignments sa JOIN surveys s ON s.id = sa.survey_id
                  WHERE sa.operator_id = %(user_id)s AND COALESCE(sa.status, '') <> 'completed'
-                   AND s.is_active AND s.is_test AND s.starts_at > %(now)s
+                   AND s.is_active AND s.is_test AND s.archived_at IS NULL
+                   AND s.starts_at > %(now)s
                 UNION ALL
                 SELECT s.ends_at
                   FROM survey_assignments sa JOIN surveys s ON s.id = sa.survey_id
                  WHERE sa.operator_id = %(user_id)s AND COALESCE(sa.status, '') <> 'completed'
-                   AND s.is_active AND s.is_test AND s.ends_at > %(now)s
+                   AND s.is_active AND s.is_test AND s.archived_at IS NULL
+                   AND s.ends_at > %(now)s
             ) w""")
 
     if 'tasks' not in hidden:

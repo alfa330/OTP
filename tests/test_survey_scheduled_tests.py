@@ -462,12 +462,43 @@ class SurveyTestFrontendTests(unittest.TestCase):
         countdown_block = self.src[countdown_start - 400:countdown_start]
         self.assertIn("tabular-nums", countdown_block)
 
-    def test_stats_table_columns(self):
-        header_start = self.src.index("statsViewMode === 'scores' ? (")
-        header = self.src[header_start:header_start + 2200]
-        for column in ("Сотрудник", "Статус", "Начало", "Завершение", "Баллы",
-                       "Итоговая оценка", "В качество", "Верно", "Отвечено"):
-            self.assertIn(f">{column}</th>", header)
+    def test_respondent_cards_replace_the_wide_table(self):
+        """Ответы сотрудников — карточки и лист ответов, а не таблица.
+
+        Таблица с колонкой на каждый вопрос читалась только вбок; проверяем,
+        что её не вернули «на всякий случай» рядом с карточками.
+        """
+        self.assertIn("const respondentCards = useMemo(", self.src)
+        self.assertIn("activeTab === 'answers'", self.src)
+        self.assertIn("setOpenedRespondentKey(card.key)", self.src)
+        self.assertNotIn("statsViewMode", self.src)
+        self.assertNotIn("<table", self.src)
+
+    def test_answer_sheet_shows_correct_option_only_when_wrong(self):
+        """Правильный ответ — только там, где ошиблись: иначе это шум."""
+        sheet_start = self.src.index("Лист ответов сотрудника")
+        sheet = self.src[sheet_start:]
+        self.assertIn("isTestStatsSurvey && !isCorrect && expectedOptions.length > 0", sheet)
+        self.assertIn("Правильный ответ:", sheet)
+
+    def test_tabs_are_a_large_segmented_control(self):
+        """Вкладки должны читаться как навигация, а не как мелкая подпись."""
+        tabs_start = self.src.index("ariaLabel=\"Разделы опроса\"")
+        tabs = self.src[tabs_start - 400:tabs_start + 1400]
+        self.assertIn('size="lg"', tabs)
+        for tab in ("'questions'", "'answers'", "'stats'"):
+            self.assertIn(tab, tabs)
+
+    def test_list_is_paginated_and_has_archive_scope(self):
+        self.assertIn("const SCOPE_ARCHIVE = 'archive';", self.src)
+        self.assertIn("page_size: LIST_PAGE_SIZE", self.src)
+        self.assertIn("setListPage", self.src)
+        # Список — лёгкие строки, карточку тянем отдельно.
+        self.assertIn("/detail`", self.src)
+
+    def test_long_texts_hide_behind_the_i_hint(self):
+        self.assertIn("IosHint", self.src)
+        self.assertIn("label=\"О разделе\"", self.src)
 
 
 class KnowledgeTestJournalFrontendTests(unittest.TestCase):

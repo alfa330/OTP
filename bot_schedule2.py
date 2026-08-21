@@ -17353,6 +17353,7 @@ _SURVEY_ERROR_MESSAGES = {
     'SURVEY_ANSWERS_REQUIRED': ("Не переданы ответы", 400),
     'SURVEY_EMPTY_RESPONSE': ("Ответьте хотя бы на один вопрос", 400),
     'SURVEY_REPEAT_SOURCE_NOT_FOUND': ("Опрос для повтора не найден", 404),
+    'SURVEY_ARCHIVED': ("Опрос в архиве и больше не принимает ответы", 409),
 }
 _SURVEY_ERROR_PREFIX_MESSAGES = (
     ('SURVEY_QUESTION_TEXT_REQUIRED_', "Укажите текст вопроса", 400),
@@ -17382,6 +17383,34 @@ def _survey_error_response(code):
     return jsonify({"error": code}), 400
 
 
+def _survey_archived_scope_requested():
+    """scope=archive — вкладка «Архив». Любое другое значение — активные."""
+    return (request.args.get('scope') or '').strip().lower() in ('archive', 'archived')
+
+
+def _survey_department_filter_id():
+    """Фильтр по отделу из шапки раздела (не путать с периметром прав)."""
+    raw = (request.args.get('department_id') or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _survey_page_payload(page_data):
+    page_data = page_data or {}
+    return {
+        "surveys": page_data.get('items') or [],
+        "total": page_data.get('total') or 0,
+        "page": page_data.get('page') or 1,
+        "page_size": page_data.get('page_size') or 0,
+        "pages": page_data.get('pages') or 0,
+    }
+
+
 @app.route('/api/surveys', methods=['GET', 'POST', 'OPTIONS'])
 @require_api_key
 def handle_surveys():
@@ -17391,22 +17420,41 @@ def handle_surveys():
             return guard_response, guard_status
 
         if request.method == 'GET':
+            # Список — это страница ЛЁГКИХ строк: заголовок и счётчики.
+            # Вопросы, ответы и статистику приносит карточка выбранного опроса
+            # (GET /api/surveys/<id>), иначе один заход в раздел выкачивал бы
+            # все ответы всех сотрудников по всем опросам разом.
+            archived = _survey_archived_scope_requested()
+            search = (request.args.get('q') or '').strip()
+            page = request.args.get('page')
+            page_size = request.args.get('page_size')
+
             if requester_role == 'operator':
-                return jsonify({
-                    "status": "success",
-                    "surveys": db.get_surveys_for_operator(requester_id)
-                }), 200
+                page_data = db.get_operator_surveys_page(
+                    requester_id,
+                    archived=archived,
+                    search=search,
+                    page=page,
+                    page_size=page_size
+                )
+                return jsonify({"status": "success", **_survey_page_payload(page_data)}), 200
 
             scope_department_id = getattr(g, 'survey_scope_department_id', None)
+            page_data = db.get_surveys_page(
+                requester_id,
+                requester_role,
+                scope_department_id=scope_department_id,
+                department_id=_survey_department_filter_id(),
+                archived=archived,
+                search=search,
+                page=page,
+                page_size=page_size
+            )
             # Состав групп отдаём вместе со списком: назначение «на группу»
             # не должно стоить фронту отдельного запроса.
             return jsonify({
                 "status": "success",
-                "surveys": db.get_surveys_for_management(
-                    requester_id,
-                    requester_role,
-                    scope_department_id=scope_department_id
-                ),
+                **_survey_page_payload(page_data),
                 "groups": db.get_survey_assignable_groups(
                     requester_id,
                     requester_role,
@@ -17500,6 +17548,62 @@ def handle_surveys():
     except Exception as e:
         logging.error(f"Error in handle_surveys: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
+
+
+@app.route('/api/surveys/pending_count', methods=['GET', 'OPTIONS'])
+@require_api_key
+def survey_pending_count():
+    """Число для бейджа раздела в сайдбаре.
+
+    Раньше его считал фронт, выгрузив весь список опросов со всеми ответами —
+    ради одной цифры при каждом заходе. Архивные опросы в счёт не идут.
+    """
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        return jsonify({
+            "status": "success",
+            "count": db.count_pending_surveys(
+                requester_id,
+                requester_role,
+                scope_department_id=getattr(g, 'survey_scope_department_id', None)
+            )
+        }), 200
+    except Exception as e:
+        logging.error(f"Error in survey_pending_count: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/surveys/<int:survey_id>/detail', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_survey_detail(survey_id):
+    """Карточка одного опроса: вопросы, ответы и статистика."""
+    try:
+        requester_id, requester, requester_role, guard_response, guard_status = _surveys_route_guard()
+        if guard_response is not None:
+            return guard_response, guard_status
+
+        detail = db.get_survey_detail_for_requester(
+            survey_id,
+            requester_id,
+            requester_role,
+            scope_department_id=getattr(g, 'survey_scope_department_id', None)
+        )
+        if not detail:
+            return jsonify({"error": "Опрос не найден"}), 404
+
+        return jsonify({
+            "status": "success",
+            "survey": detail.get('survey'),
+            "repetitions": detail.get('repetitions') or []
+        }), 200
+    except ValueError as value_error:
+        return _survey_error_response(value_error)
+    except Exception as e:
+        logging.error(f"Error in get_survey_detail: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/surveys/<int:survey_id>', methods=['PUT', 'PATCH', 'DELETE', 'OPTIONS'])
@@ -52978,6 +53082,115 @@ async def run_survey_tests_autoclose_async():
         logging.exception("survey tests auto-close job failed")
 
 
+def _build_surveys_section_link():
+    """Ссылка на раздел «Опросы» для уведомления из cron.
+
+    Здесь нет запроса, значит нет Referer/Origin — берём настроенный адрес
+    приложения, тот же, что у задач.
+    """
+    base = (TASK_WEB_APP_BASE_URL or '').strip().rstrip('/')
+    if not base:
+        return ''
+    return f"{base}?view=surveys"
+
+
+SURVEY_ARCHIVE_NOTICE_MAX_TITLES = 10
+
+
+def _build_survey_archived_html(items):
+    """Одно письмо владельцу на всю пачку, а не письмо на каждый опрос.
+
+    В один день в архив уходит сразу несколько опросов (а при первом запуске —
+    вообще все накопившиеся), и отдельное сообщение на каждый превратило бы
+    уведомление в спам.
+    """
+    link = _build_surveys_section_link()
+    count = len(items)
+
+    def _line(item, bullet):
+        title = _escape_telegram_html(item.get('title') or 'Опрос', 120)
+        assigned = int(item.get('assigned_count') or 0)
+        completed = int(item.get('completed_count') or 0)
+        return f'{bullet}{title} — прошли {completed} из {assigned}'
+
+    if count == 1:
+        lines = ['📦 <b>Опрос ушёл в архив</b>', '', _line(items[0], '')]
+    else:
+        lines = [f'📦 <b>Опросы ушли в архив: {count}</b>', '']
+        lines.extend(_line(item, '• ') for item in items[:SURVEY_ARCHIVE_NOTICE_MAX_TITLES])
+        hidden = count - min(count, SURVEY_ARCHIVE_NOTICE_MAX_TITLES)
+        if hidden > 0:
+            lines.append(f'• …и ещё {hidden}')
+    lines.append('')
+    lines.append(
+        f'Опросы старше {db.SURVEY_ARCHIVE_AFTER_DAYS} дней больше не показываются '
+        'сотрудникам и не считаются в уведомлениях раздела. Ответы сохранены — '
+        'они на вкладке «Архив».'
+    )
+    if link:
+        lines.append(f'<a href="{_escape_telegram_html(link, 500)}">Открыть раздел «Опросы»</a>')
+    return '\n'.join(lines)
+
+
+def archive_stale_surveys_job():
+    """Архивирует опросы старше двух недель и сообщает об этом их владельцам.
+
+    Два шага, а не один: отметку об отправке ставим только после ответа
+    Telegram, иначе сообщение потерялось бы молча — так же, как у напоминаний
+    о дедлайнах задач.
+    """
+    try:
+        archived = db.archive_stale_surveys()
+    except Exception:
+        logging.exception("survey archive: failed to archive stale surveys")
+        archived = 0
+
+    try:
+        pending = db.collect_survey_archive_notifications()
+    except Exception:
+        logging.exception("survey archive: failed to collect notifications")
+        return {'archived': archived, 'notified': 0}
+
+    by_owner = {}
+    for item in pending:
+        chat_id = item.get('chat_id')
+        if not chat_id:
+            continue
+        by_owner.setdefault(chat_id, []).append(item)
+
+    notified = 0
+    for chat_id, items in by_owner.items():
+        try:
+            response = _send_telegram_text_message(
+                chat_id,
+                _build_survey_archived_html(items),
+                parse_mode='HTML'
+            )
+            if response.status_code != 200:
+                logging.error(
+                    "survey archive notice failed (owner chat %s, %s surveys): %s",
+                    chat_id, len(items), _get_telegram_error_text(response)
+                )
+                continue
+            for item in items:
+                db.mark_survey_archive_notified(item.get('id'))
+            notified += len(items)
+        except Exception:
+            logging.exception("survey archive notice crashed (owner chat %s)", chat_id)
+
+    if archived or notified:
+        logging.info("Surveys archived: %s, owners notified about: %s", archived, notified)
+    return {'archived': archived, 'notified': notified}
+
+
+async def run_survey_archive_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, archive_stale_surveys_job)
+    except Exception:
+        logging.exception("survey archive job failed")
+
+
 def wiki_office_status_snapshot_job():
     """Фиксирует статус офисов вики за уходящий день.
 
@@ -53648,6 +53861,18 @@ if __name__ == '__main__':
         CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty')),
         id='survey_tests_autoclose',
         misfire_grace_time=300,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # Архив опросов: раз в сутки в рабочее время. Реже нельзя — уведомление
+    # владельцу перестало бы быть своевременным; чаще незачем — порог измеряется
+    # неделями. Утро выбрано намеренно: ночная рассылка в Telegram — это шум.
+    scheduler.add_job(
+        run_survey_archive_async,
+        CronTrigger(hour=10, minute=0, timezone=ZoneInfo('Asia/Almaty')),
+        id='surveys_archive_daily',
+        misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
     )

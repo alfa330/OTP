@@ -41555,31 +41555,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const requestKey = `fetchSurveysPendingBadgeCount:${user?.id || 'anonymous'}:${role}`;
                 return runSingleFlight(requestKey, async () => {
                     try {
-                        const response = await axios.get(`${API_BASE_URL}/api/surveys`, {
+                        // Считает сервер одним COUNT. Раньше фронт выкачивал
+                        // ВЕСЬ список опросов со всеми ответами всех сотрудников
+                        // ради одной цифры — и делал это при каждом заходе.
+                        // Опросы из архива в счёт не идут: в этом смысл архива.
+                        const response = await axios.get(`${API_BASE_URL}/api/surveys/pending_count`, {
                             headers: withAccessTokenHeader({
                                 'X-User-Id': user.id
                             })
                         });
 
-                        const surveys = Array.isArray(response?.data?.surveys) ? response.data.surveys : [];
-                        let nextCount = 0;
-
-                        if (role === 'operator') {
-                            // Бейдж — только о том, что оператор ещё не прошёл и
-                            // ещё может пройти: тест с истёкшим временем и
-                            // разрешённый повтор уже пройденного не считаем.
-                            nextCount = surveys.filter((survey) => (
-                                survey?.my_assignment?.can_submit === true
-                                && String(survey?.my_assignment?.status || '').toLowerCase() !== 'completed'
-                            )).length;
-                        } else {
-                            nextCount = surveys.reduce((sum, survey) => {
-                                const pending = Number(survey?.statistics?.pending_count || 0);
-                                return sum + (Number.isFinite(pending) ? pending : 0);
-                            }, 0);
+                        const nextCount = Number(response?.data?.count || 0);
+                        if (isMounted.current) {
+                            setPendingSurveysBadgeCount(Number.isFinite(nextCount) ? Math.max(0, nextCount) : 0);
                         }
-
-                        if (isMounted.current) setPendingSurveysBadgeCount(Math.max(0, nextCount));
                     } catch (err) {
                         console.error('Fetch surveys badge count error:', err);
                         if (isMounted.current) setPendingSurveysBadgeCount(0);

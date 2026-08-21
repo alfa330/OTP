@@ -177,6 +177,60 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
     );
 };
 
+/**
+ * Сегментный контрол iOS: выбор одного из нескольких режимов.
+ *
+ * size='lg' — когда контрол работает панелью вкладок и должен читаться как
+ * навигация, а не как мелкая настройка рядом с содержимым. Именно на этом
+ * спотыкались в «Опросах»: вкладки были размером с подпись, и человек не
+ * понимал, что по ним надо нажимать.
+ *
+ * options: [{ value, label, icon?, count? }]
+ */
+export const IosSegmented = ({ value, options = [], onChange, size = 'md', stretch = false, className = '', ariaLabel }) => {
+    const large = size === 'lg';
+    const wide = stretch || large;
+    return (
+        <div
+            role="tablist"
+            aria-label={ariaLabel}
+            className={`${wide ? 'flex w-full' : 'inline-flex'} ${large ? 'gap-1 rounded-[12px] p-[4px]' : 'rounded-[10px] p-[3px]'} bg-slate-100 ${className}`}
+        >
+            {options.filter(Boolean).map((option) => {
+                const active = option.value === value;
+                return (
+                    <button
+                        key={option.value}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        onClick={() => onChange?.(option.value)}
+                        className={`relative inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-all active:scale-[0.98] ${
+                            wide ? 'flex-1' : ''
+                        } ${
+                            large
+                                ? 'rounded-[9px] px-3.5 py-2 text-[13.5px] font-semibold'
+                                : 'rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium'
+                        } ${
+                            active
+                                ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                    >
+                        {option.icon}
+                        <span>{option.label}</span>
+                        {Number.isFinite(option.count) && option.count > 0 && (
+                            <span className={`text-[11.5px] tabular-nums ${active ? 'text-slate-400' : 'text-slate-400'}`}>
+                                {option.count}
+                            </span>
+                        )}
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
+
 const BADGE_TONES = {
     slate: 'bg-slate-100 text-slate-600',
     green: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100',

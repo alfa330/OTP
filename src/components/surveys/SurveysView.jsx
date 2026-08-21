@@ -2,6 +2,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import { normalizeRole, isAdminLikeRole, roleIsAny } from '../../utils/roles';
+import {
+    APPLE_FONT,
+    IosHint,
+    IosMenu,
+    IosModal,
+    IosSection,
+    IosSegmented,
+    IosToggle,
+    iosBtnGhost,
+    iosCard,
+    iosInput
+} from '../ui/ios';
 
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
@@ -11,6 +23,11 @@ const QUESTION_TYPES = [
 ];
 const OTHER_ANSWER_MAX_LENGTH = 500;
 const QUESTION_TYPE_OTHER_ONLY = 'other_only';
+
+const SCOPE_ACTIVE = 'active';
+const SCOPE_ARCHIVE = 'archive';
+const LIST_PAGE_SIZE = 20;
+const LIST_SEARCH_DEBOUNCE_MS = 300;
 
 const isManagerRole = (role) => isAdminLikeRole(role) || roleIsAny(role, ['sv', 'trainer']);
 const questionTypeLabel = (type) => QUESTION_TYPES.find((item) => item.value === type)?.label || type;
@@ -25,7 +42,7 @@ const SkeletonBlock = ({ className = '' }) => (
 );
 
 const SurveysListSkeleton = ({ count = 4 }) => (
-    <div className="divide-y divide-gray-50">
+    <div className="divide-y divide-slate-50">
         {Array.from({ length: count }).map((_, i) => (
             <div key={i} className="px-4 py-3 space-y-2">
                 <SkeletonBlock className="h-4 w-3/4" />
@@ -185,10 +202,10 @@ const formatPoints = (value) => {
 
 const Badge = ({ children, color = 'gray' }) => {
     const colors = {
-        green: 'bg-emerald-100 text-emerald-700',
-        blue: 'bg-blue-100 text-blue-700',
-        amber: 'bg-amber-100 text-amber-700',
-        gray: 'bg-gray-100 text-gray-500',
+        green: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100',
+        blue: 'bg-blue-50 text-blue-700 ring-1 ring-blue-100',
+        amber: 'bg-amber-50 text-amber-700 ring-1 ring-amber-100',
+        gray: 'bg-slate-100 text-slate-600',
     };
     return (
         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${colors[color]}`}>
@@ -197,77 +214,33 @@ const Badge = ({ children, color = 'gray' }) => {
     );
 };
 
-const SectionTitle = ({ children }) => (
-    <div className="text-[11px] font-semibold uppercase tracking-widest text-gray-400 mb-2">{children}</div>
-);
-
 const ProgressBar = ({ value, color = 'blue' }) => {
     const colors = { blue: 'bg-blue-500', amber: 'bg-amber-400', emerald: 'bg-emerald-500' };
     const pct = Math.max(0, Math.min(100, Number(value) || 0));
     return (
-        <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
+        <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
             <div className={`h-full ${colors[color]} rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
         </div>
     );
 };
 
-const FormField = ({ label, children }) => (
-    <div className="space-y-1">
-        {label && <label className="block text-xs font-medium text-gray-500">{label}</label>}
-        {children}
-    </div>
-);
-
-const inputCls = "w-full px-3 py-2.5 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition placeholder-gray-400";
-
-/* ─── iOS / macOS styled primitives (survey builder) ─── */
-
-const APPLE_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif';
-// Заполненное поле в стиле iOS «grouped form» — светло-серое внутри белых карточек.
-const iosInput = "w-full px-3.5 py-2.5 text-[14px] rounded-xl bg-slate-100 border-0 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 focus:bg-white transition";
-const iosCard = "rounded-2xl bg-white ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)]";
-const iosGroupLabel = "px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-400";
-
-const IosToggle = ({ checked, onChange, disabled = false }) => (
-    <button
-        type="button"
-        role="switch"
-        aria-checked={!!checked}
-        disabled={disabled}
-        onClick={() => { if (!disabled) onChange(!checked); }}
-        className={`relative inline-flex h-[26px] w-[44px] shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
-            checked ? 'bg-emerald-500' : 'bg-slate-300'
-        } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-    >
-        <span
-            className={`inline-block h-[22px] w-[22px] transform rounded-full bg-white shadow-md transition-transform duration-200 ${
-                checked ? 'translate-x-[20px]' : 'translate-x-[2px]'
-            }`}
-        />
-    </button>
-);
-
-const IosSection = ({ title, hint, children, right = null }) => (
-    <section className="space-y-1.5">
-        {(title || right) && (
-            <div className="flex items-end justify-between gap-2">
-                {title ? <div className={iosGroupLabel}>{title}</div> : <span />}
-                {right}
-            </div>
-        )}
-        <div className={`${iosCard} p-4 space-y-3`}>
-            {children}
-        </div>
-        {hint && <div className="px-1 text-[11px] text-slate-400">{hint}</div>}
-    </section>
-);
-
 /* ─── main component ─── */
 
 const SurveysView = ({ user, operators = [], directions = [], departments = [], showToast, apiBaseUrl, onSurveyProgressChanged }) => {
-    const [surveys, setSurveys] = useState([]);
+    // Список — лёгкие строки страницы, карточка — отдельный запрос.
+    // Раньше раздел выкачивал все опросы со всеми ответами разом; теперь
+    // с сервера приезжает ровно то, что видно на экране.
+    const [surveyRows, setSurveyRows] = useState([]);
+    const [listTotal, setListTotal] = useState(0);
+    const [listScope, setListScope] = useState(SCOPE_ACTIVE);
+    const [listPage, setListPage] = useState(1);
+    const [listQueryInput, setListQueryInput] = useState('');
+    const [listQuery, setListQuery] = useState('');
     const [assignableGroups, setAssignableGroups] = useState([]);
     const [selectedSurveyId, setSelectedSurveyId] = useState('');
+    const [selectedSurvey, setSelectedSurvey] = useState(null);
+    const [selectedRepetitions, setSelectedRepetitions] = useState([]);
+    const [isDetailLoading, setIsDetailLoading] = useState(false);
     const [showBuilder, setShowBuilder] = useState(false);
     const [repeatSourceSurveyId, setRepeatSourceSurveyId] = useState(null);
     const [editingSurveyId, setEditingSurveyId] = useState(null);
@@ -278,9 +251,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     const [isSaving, setIsSaving] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isStatsExporting, setIsStatsExporting] = useState(false);
-    const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'stats'
-    const [statsViewMode, setStatsViewMode] = useState('answers'); // 'scores' | 'answers'
+    const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'answers' | 'stats'
     const [statsOperatorQuery, setStatsOperatorQuery] = useState('');
+    const [openedRespondentKey, setOpenedRespondentKey] = useState(null);
     const [departmentFilter, setDepartmentFilter] = useState('');
     const showToastRef = useRef(showToast);
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
@@ -333,22 +306,23 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             const id = Number(operator?.id);
             if (Number.isFinite(id)) map.set(id, operator);
         });
-        (surveys || []).forEach((survey) => {
-            (survey?.assignment?.operators || []).forEach((assignmentOperator) => {
-                const id = Number(assignmentOperator?.operator_id ?? assignmentOperator?.id);
-                if (!Number.isFinite(id) || map.has(id)) return;
-                map.set(id, {
-                    id,
-                    name: assignmentOperator?.operator_name || `#${id}`,
-                    status: assignmentOperator?.operator_status || '',
-                    direction: assignmentOperator?.direction || '',
-                    direction_id: assignmentOperator?.direction_id,
-                    department_id: assignmentOperator?.department_id ?? assignmentOperator?.departmentId
-                });
+        // Из открытой карточки добираем тех, кого нет в общем справочнике
+        // (например, уже уволенных): иначе в повторе и в статистике вместо
+        // фамилии остался бы «#123».
+        (selectedSurvey?.assignment?.operators || []).forEach((assignmentOperator) => {
+            const id = Number(assignmentOperator?.operator_id ?? assignmentOperator?.id);
+            if (!Number.isFinite(id) || map.has(id)) return;
+            map.set(id, {
+                id,
+                name: assignmentOperator?.operator_name || `#${id}`,
+                status: assignmentOperator?.operator_status || '',
+                direction: assignmentOperator?.direction || '',
+                direction_id: assignmentOperator?.direction_id,
+                department_id: assignmentOperator?.department_id ?? assignmentOperator?.departmentId
             });
         });
         return Array.from(map.values());
-    }, [operators, surveys]);
+    }, [operators, selectedSurvey?.assignment?.operators]);
 
     const normalizedOperators = useMemo(() => {
         return operatorSourceRows
@@ -512,23 +486,112 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         }));
     }, [filteredOperatorIds, hasFilteredOperators]);
 
-    const loadSurveys = useCallback(async () => {
+    // Строка поиска не должна дёргать сервер на каждой букве.
+    useEffect(() => {
+        const timerId = window.setTimeout(() => setListQuery(listQueryInput.trim()), LIST_SEARCH_DEBOUNCE_MS);
+        return () => window.clearTimeout(timerId);
+    }, [listQueryInput]);
+
+    // Смена вкладки, поиска или отдела возвращает на первую страницу:
+    // иначе после сужения списка человек оказывался бы на пустой странице.
+    useEffect(() => { setListPage(1); }, [listScope, listQuery, departmentFilter]);
+
+    const loadSurveyList = useCallback(async () => {
         if (!apiBaseUrl || !user?.id) return;
         setIsLoading(true);
         try {
-            const response = await axios.get(`${apiBaseUrl}/api/surveys`, { headers });
-            setSurveys(Array.isArray(response?.data?.surveys) ? response.data.surveys : []);
+            const response = await axios.get(`${apiBaseUrl}/api/surveys`, {
+                headers,
+                params: {
+                    scope: listScope,
+                    page: listPage,
+                    page_size: LIST_PAGE_SIZE,
+                    ...(listQuery ? { q: listQuery } : {}),
+                    ...(departmentFilter ? { department_id: departmentFilter } : {})
+                }
+            });
+            setSurveyRows(Array.isArray(response?.data?.surveys) ? response.data.surveys : []);
+            setListTotal(Number(response?.data?.total || 0));
             // Состав групп приходит тем же ответом — отдельный запрос не нужен.
-            setAssignableGroups(Array.isArray(response?.data?.groups) ? response.data.groups : []);
-            if (typeof onSurveyProgressChangedRef.current === 'function') {
-                onSurveyProgressChangedRef.current();
-            }
+            if (Array.isArray(response?.data?.groups)) setAssignableGroups(response.data.groups);
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось загрузить опросы', 'error');
+            setSurveyRows([]);
+            setListTotal(0);
         } finally {
             setIsLoading(false);
         }
+    }, [apiBaseUrl, departmentFilter, headers, listPage, listQuery, listScope, notify, user?.id]);
+
+    useEffect(() => { loadSurveyList(); }, [loadSurveyList]);
+
+    const loadSurveyDetail = useCallback(async (surveyId) => {
+        if (!apiBaseUrl || !user?.id || !surveyId) {
+            setSelectedSurvey(null);
+            setSelectedRepetitions([]);
+            return;
+        }
+        setIsDetailLoading(true);
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/surveys/${surveyId}/detail`, { headers });
+            setSelectedSurvey(response?.data?.survey || null);
+            setSelectedRepetitions(Array.isArray(response?.data?.repetitions) ? response.data.repetitions : []);
+        } catch (error) {
+            notify(error?.response?.data?.error || 'Не удалось открыть опрос', 'error');
+            setSelectedSurvey(null);
+            setSelectedRepetitions([]);
+        } finally {
+            setIsDetailLoading(false);
+        }
     }, [apiBaseUrl, headers, notify, user?.id]);
+
+    // Перечитать и список, и открытую карточку — после создания, правки,
+    // прохождения и удаления. Счётчики строки и содержимое карточки живут
+    // в разных запросах, и обновлять их надо парой.
+    const reloadSurveys = useCallback(async (surveyId) => {
+        const targetId = surveyId === undefined ? selectedSurveyId : surveyId;
+        await Promise.all([
+            loadSurveyList(),
+            targetId ? loadSurveyDetail(targetId) : Promise.resolve()
+        ]);
+        // Бейдж раздела — отдельный дешёвый счётчик; трогаем его при входе
+        // и после изменений, а не на каждую страницу и каждую букву поиска.
+        if (typeof onSurveyProgressChangedRef.current === 'function') {
+            onSurveyProgressChangedRef.current();
+        }
+    }, [loadSurveyDetail, loadSurveyList, selectedSurveyId]);
+
+    useEffect(() => {
+        if (typeof onSurveyProgressChangedRef.current === 'function') {
+            onSurveyProgressChangedRef.current();
+        }
+    }, []);
+
+    // Выбор по умолчанию — первая строка страницы; исчезнувший из выборки
+    // опрос уступает место первому доступному.
+    useEffect(() => {
+        if (isLoading) return;
+        if (selectedSurveyId && surveyRows.some((item) => String(item.id) === String(selectedSurveyId))) return;
+        setSelectedSurveyId(surveyRows[0]?.id || '');
+    }, [isLoading, selectedSurveyId, surveyRows]);
+
+    useEffect(() => { loadSurveyDetail(selectedSurveyId); }, [loadSurveyDetail, selectedSurveyId]);
+
+    useEffect(() => {
+        setStatsOperatorQuery('');
+        setOpenedRespondentKey(null);
+        setActiveTab('questions');
+    }, [selectedSurveyId]);
+
+    const listPages = useMemo(
+        () => Math.max(1, Math.ceil((Number(listTotal) || 0) / LIST_PAGE_SIZE)),
+        [listTotal]
+    );
+
+    const selectedListRow = useMemo(
+        () => surveyRows.find((item) => String(item.id) === String(selectedSurveyId)) || null,
+        [selectedSurveyId, surveyRows]
+    );
 
     const assignmentMatchesSelectedDepartment = useCallback((assignment) => {
         if (selectedDepartmentId == null) return true;
@@ -539,62 +602,51 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         return Number(mappedDepartmentId) === selectedDepartmentId;
     }, [operatorDepartmentIdById, selectedDepartmentId]);
 
+    // Счётчики строки списка считает сервер — уже с учётом отдела и прав.
+    // Пересчитывать их на клиенте нечем и незачем: назначений в лёгкой
+    // строке нет вовсе.
     const getSurveyDisplayMetrics = useCallback((survey) => {
         const statistics = survey?.statistics || {};
-        const fallbackAssigned = Number(statistics.assigned_count || 0);
-        const fallbackCompleted = Number(statistics.completed_count || 0);
-        const fallbackPending = Number(statistics.pending_count || Math.max(0, fallbackAssigned - fallbackCompleted));
-        const fallbackRate = Number(statistics.completion_rate || 0);
-        const assignments = Array.isArray(survey?.assignment?.operators) ? survey.assignment.operators : [];
+        const assignedCount = Number(statistics.assigned_count || 0);
+        const completedCount = Number(statistics.completed_count || 0);
+        const pendingCount = Number(statistics.pending_count ?? Math.max(0, assignedCount - completedCount));
+        const completionRate = Number(statistics.completion_rate || 0);
+        return {
+            assignedCount,
+            completedCount,
+            pendingCount,
+            completionRate: Number.isFinite(completionRate) ? completionRate : 0
+        };
+    }, []);
 
+    // В открытой карточке назначения есть, поэтому срез по отделу считается
+    // здесь — списку он уже приехал готовым.
+    const selectedSurveyDisplayMetrics = useMemo(() => {
+        const assignments = Array.isArray(selectedSurvey?.assignment?.operators)
+            ? selectedSurvey.assignment.operators
+            : [];
         if (selectedDepartmentId == null || assignments.length === 0) {
-            return {
-                assignedCount: fallbackAssigned,
-                completedCount: fallbackCompleted,
-                pendingCount: fallbackPending,
-                completionRate: Number.isFinite(fallbackRate) ? fallbackRate : 0
-            };
+            return getSurveyDisplayMetrics(selectedSurvey || selectedListRow);
         }
-
         const departmentAssignments = assignments.filter(assignmentMatchesSelectedDepartment);
         const assignedCount = departmentAssignments.length;
         const completedCount = departmentAssignments.filter(
             (assignment) => String(assignment?.status || '').trim().toLowerCase() === 'completed'
         ).length;
-        const pendingCount = Math.max(0, assignedCount - completedCount);
-        const completionRate = assignedCount > 0 ? Math.round((completedCount / assignedCount) * 1000) / 10 : 0;
+        return {
+            assignedCount,
+            completedCount,
+            pendingCount: Math.max(0, assignedCount - completedCount),
+            completionRate: assignedCount > 0 ? Math.round((completedCount / assignedCount) * 1000) / 10 : 0
+        };
+    }, [
+        assignmentMatchesSelectedDepartment,
+        getSurveyDisplayMetrics,
+        selectedDepartmentId,
+        selectedListRow,
+        selectedSurvey
+    ]);
 
-        return { assignedCount, completedCount, pendingCount, completionRate };
-    }, [assignmentMatchesSelectedDepartment, selectedDepartmentId]);
-
-    const visibleSurveys = useMemo(() => {
-        if (!canManage || selectedDepartmentId == null) return surveys;
-        return (surveys || []).filter((survey) => getSurveyDisplayMetrics(survey).assignedCount > 0);
-    }, [canManage, getSurveyDisplayMetrics, selectedDepartmentId, surveys]);
-
-    useEffect(() => { loadSurveys(); }, [loadSurveys]);
-
-    useEffect(() => {
-        if (!selectedSurveyId && visibleSurveys[0]?.id) setSelectedSurveyId(visibleSurveys[0].id);
-        if (selectedSurveyId && !visibleSurveys.some((item) => String(item.id) === String(selectedSurveyId))) {
-            setSelectedSurveyId(visibleSurveys[0]?.id || '');
-        }
-    }, [selectedSurveyId, visibleSurveys]);
-
-    useEffect(() => {
-        setStatsOperatorQuery('');
-        const currentSurvey = (visibleSurveys || []).find((item) => String(item.id) === String(selectedSurveyId));
-        setStatsViewMode(currentSurvey?.is_test ? 'scores' : 'answers');
-    }, [selectedSurveyId, visibleSurveys]);
-
-    const selectedSurvey = useMemo(
-        () => visibleSurveys.find((item) => String(item.id) === String(selectedSurveyId)) || null,
-        [selectedSurveyId, visibleSurveys]
-    );
-    const selectedSurveyDisplayMetrics = useMemo(
-        () => getSurveyDisplayMetrics(selectedSurvey),
-        [getSurveyDisplayMetrics, selectedSurvey]
-    );
     const isTestStatsSurvey = !!selectedSurvey?.is_test;
     const selectedSurveyQuestionMetaById = useMemo(() => {
         const map = new Map();
@@ -610,23 +662,25 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         return map;
     }, [selectedSurvey?.questions]);
 
+    // Вопросы соседних прогонов повтора: ответ из прошлого запуска надо
+    // показывать с ТЕМ вопросом, на который отвечали, а не с нынешним.
     const surveyQuestionsBySurveyId = useMemo(() => {
         const map = new Map();
-        (surveys || []).forEach((survey) => {
-            const surveyId = Number(survey?.id);
-            if (!Number.isFinite(surveyId)) return;
-            const questions = Array.isArray(survey?.questions)
-                ? [...survey.questions].sort((a, b) => {
-                    const posA = Number(a?.position) || 0;
-                    const posB = Number(b?.position) || 0;
-                    if (posA !== posB) return posA - posB;
-                    return (Number(a?.id) || 0) - (Number(b?.id) || 0);
-                })
-                : [];
-            map.set(surveyId, questions);
+        const sortQuestions = (questions) => (Array.isArray(questions) ? [...questions] : []).sort((a, b) => {
+            const posA = Number(a?.position) || 0;
+            const posB = Number(b?.position) || 0;
+            if (posA !== posB) return posA - posB;
+            return (Number(a?.id) || 0) - (Number(b?.id) || 0);
+        });
+        const selectedId = Number(selectedSurvey?.id);
+        if (Number.isFinite(selectedId)) map.set(selectedId, sortQuestions(selectedSurvey?.questions));
+        (selectedRepetitions || []).forEach((repetition) => {
+            const repetitionId = Number(repetition?.id);
+            if (!Number.isFinite(repetitionId)) return;
+            map.set(repetitionId, sortQuestions(repetition?.questions));
         });
         return map;
-    }, [surveys]);
+    }, [selectedRepetitions, selectedSurvey?.id, selectedSurvey?.questions]);
 
     const detailedStatsSourceRows = useMemo(() => {
         const allRepetitionRows = Array.isArray(selectedSurvey?.statistics?.responses_detailed_all_repetitions)
@@ -642,17 +696,6 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         if (!canManage || selectedDepartmentId == null) return detailedStatsSourceRows;
         return detailedStatsSourceRows.filter((row) => assignmentMatchesSelectedDepartment(row));
     }, [assignmentMatchesSelectedDepartment, canManage, detailedStatsSourceRows, selectedDepartmentId]);
-
-    const detailedStatsRows = useMemo(() => {
-        const rows = departmentFilteredDetailedStatsRows;
-        const query = String(statsOperatorQuery || '').trim().toLowerCase();
-        if (!query) return rows;
-        return rows.filter((row) => {
-            const name = String(row?.operator_name || '').toLowerCase();
-            const idText = String(row?.operator_id || '');
-            return name.includes(query) || idText.includes(query);
-        });
-    }, [departmentFilteredDetailedStatsRows, statsOperatorQuery]);
 
     const resolveStatsQuestionAndAnswer = useCallback((row, baseQuestion, questionIndex) => {
         const rowSurveyId = Number(row?.repeat_survey_id);
@@ -862,6 +905,106 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         selectedSurvey?.questions,
         selectedSurvey?.statistics?.question_stats
     ]);
+
+
+    /* ─── Вкладка «Ответы»: карточки сотрудников вместо широкой таблицы ─── */
+
+    // Таблица с колонкой на каждый вопрос читалась только вбок и только при
+    // трёх вопросах. Здесь — карточка на человека, а его ответы открываются
+    // отдельным листом: вопрос, ответ, а у теста ещё и правильный вариант.
+    const respondentsTotalCount = departmentFilteredDetailedStatsRows.length;
+
+    // Карточки строим по ВСЕМ сотрудникам среза, а поиск фильтрует уже готовые:
+    // иначе цифры в шапке вкладки («прошли», «средний результат») прыгали бы
+    // от набора в строке поиска и перестали бы что-либо значить.
+    const respondentCardsAll = useMemo(() => {
+        const cards = departmentFilteredDetailedStatsRows.map((row) => {
+            const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
+            const operatorId = Number(row?.operator_id || 0);
+            const testSummary = row?.test_summary || {};
+            const scoreRaw = testSummary?.score_percent;
+            const hasScore = (
+                scoreRaw !== null
+                && scoreRaw !== undefined
+                && `${scoreRaw}`.trim() !== ''
+                && Number.isFinite(Number(scoreRaw))
+            );
+            const rowQuestions = surveyQuestionsBySurveyId.get(repeatSurveyId)
+                || (selectedSurvey?.questions || []);
+            const answeredCount = rowQuestions.reduce((count, question, questionIndex) => {
+                const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
+                return count + (hasSurveyAnswer(resolved.question, resolved.answer) ? 1 : 0);
+            }, 0);
+
+            return {
+                key: `${operatorId}_${repeatSurveyId}`,
+                row,
+                operatorId,
+                repeatSurveyId,
+                questions: rowQuestions,
+                name: row?.operator_name || `#${row?.operator_id || '—'}`,
+                isDismissed: !!row?.is_operator_dismissed,
+                isCompleted: String(row?.status || '').toLowerCase() === 'completed',
+                submittedAt: row?.submitted_at,
+                repeatIteration: Number(
+                    row?.repeat_iteration != null ? row.repeat_iteration : (selectedSurvey?.repeat?.iteration || 1)
+                ),
+                answeredCount,
+                questionsCount: rowQuestions.length,
+                testSummary,
+                hasScore,
+                scoreValue: hasScore ? Number(scoreRaw) : null
+            };
+        });
+
+        // Прошедшие — сверху: вкладка о них. Внутри группы тест сортируем по
+        // результату, обычный опрос — по времени отправки.
+        return cards.sort((a, b) => {
+            if (a.isCompleted !== b.isCompleted) return a.isCompleted ? -1 : 1;
+            if (isTestStatsSurvey && a.hasScore && b.hasScore && a.scoreValue !== b.scoreValue) {
+                return b.scoreValue - a.scoreValue;
+            }
+            return String(a.name).localeCompare(String(b.name), 'ru', { sensitivity: 'base' });
+        });
+    }, [
+        departmentFilteredDetailedStatsRows,
+        hasSurveyAnswer,
+        isTestStatsSurvey,
+        resolveStatsQuestionAndAnswer,
+        selectedSurvey?.id,
+        selectedSurvey?.questions,
+        selectedSurvey?.repeat?.iteration,
+        surveyQuestionsBySurveyId
+    ]);
+
+    const respondentCards = useMemo(() => {
+        const query = String(statsOperatorQuery || '').trim().toLowerCase();
+        if (!query) return respondentCardsAll;
+        return respondentCardsAll.filter((card) => (
+            card.name.toLowerCase().includes(query) || String(card.operatorId).includes(query)
+        ));
+    }, [respondentCardsAll, statsOperatorQuery]);
+
+    const openedRespondent = useMemo(
+        () => respondentCardsAll.find((card) => card.key === openedRespondentKey) || null,
+        [openedRespondentKey, respondentCardsAll]
+    );
+
+    // Средний балл теста — по тем, кто его прошёл. Медиана здесь была бы
+    // честнее на выбросах, но в тесте важен именно средний процент: он же
+    // уходит в качество оператора.
+    const respondentsSummary = useMemo(() => {
+        const completed = respondentCardsAll.filter((card) => card.isCompleted);
+        const scored = completed.filter((card) => card.hasScore);
+        const averageScore = scored.length
+            ? scored.reduce((sum, card) => sum + card.scoreValue, 0) / scored.length
+            : null;
+        return {
+            completedCount: completed.length,
+            pendingCount: Math.max(0, respondentCardsAll.length - completed.length),
+            averageScore
+        };
+    }, [respondentCardsAll]);
 
     const formatSurveyDateTime = useCallback((value) => {
         if (!value) return '—';
@@ -1251,6 +1394,32 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         setShowBuilder(true);
     }, [canManage, sanitizeOperatorIds]);
 
+    // Строка списка лёгкая — в ней нет ни вопросов, ни назначений. Поэтому
+    // «Редактировать» и «Повторить» из меню строки сначала берут карточку,
+    // а уже потом открывают конструктор.
+    const openSurveyInBuilder = useCallback(async (surveyId, mode) => {
+        if (!canManage || !surveyId) return;
+        let survey = (selectedSurvey && String(selectedSurvey.id) === String(surveyId))
+            ? selectedSurvey
+            : null;
+        if (!survey) {
+            try {
+                const response = await axios.get(`${apiBaseUrl}/api/surveys/${surveyId}/detail`, { headers });
+                survey = response?.data?.survey || null;
+            } catch (error) {
+                notify(error?.response?.data?.error || 'Не удалось открыть опрос', 'error');
+                return;
+            }
+        }
+        if (!survey) return;
+        if (mode === 'repeat') startRepeatSurvey(survey);
+        else startEditSurvey(survey);
+    }, [apiBaseUrl, canManage, headers, notify, selectedSurvey, startEditSurvey, startRepeatSurvey]);
+
+    const startEditSurveyById = useCallback((surveyId) => openSurveyInBuilder(surveyId, 'edit'), [openSurveyInBuilder]);
+    const startRepeatSurveyById = useCallback((surveyId) => openSurveyInBuilder(surveyId, 'repeat'), [openSurveyInBuilder]);
+
+
     const createSurvey = async () => {
         if (!String(draft.title || '').trim()) return notify('Укажите название опроса', 'error');
         const assignmentOperatorIds = sanitizeOperatorIds(draft.operatorIds, { excludeDismissed: true });
@@ -1358,7 +1527,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 notify(isRepeatMode ? 'Повтор опроса создан' : 'Опрос создан', 'success');
             }
             closeBuilder();
-            await loadSurveys();
+            if (!isEditMode) {
+                // Новый опрос лежит в активных и сверху — иначе после создания
+                // человек оставался бы на третьей странице архива, с чужим
+                // поиском в строке, и решал, что ничего не сохранилось.
+                setListScope(SCOPE_ACTIVE);
+                setListPage(1);
+                setListQueryInput('');
+            }
+            await reloadSurveys();
         } catch (error) {
             notify(error?.response?.data?.error || (isEditMode ? 'Не удалось обновить опрос' : 'Не удалось создать опрос'), 'error');
         } finally {
@@ -1371,7 +1548,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         try {
             await axios.delete(`${apiBaseUrl}/api/surveys/${surveyId}`, { headers });
             notify('Опрос удален', 'success');
-            await loadSurveys();
+            if (String(surveyId) === String(selectedSurveyId)) {
+                // Открытую карточку гасим сразу: перечитывать удалённый опрос
+                // незачем, а выбор новой строки сделает эффект списка.
+                setSelectedSurveyId('');
+                setSelectedSurvey(null);
+                setSelectedRepetitions([]);
+            }
+            await loadSurveyList();
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось удалить опрос', 'error');
         }
@@ -1418,12 +1602,12 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 notify('Опрос успешно пройден', 'success');
             }
             setRetakeSurveyId(null);
-            await loadSurveys();
+            await reloadSurveys();
         } catch (error) {
             notify(error?.response?.data?.error || 'Не удалось отправить ответы', 'error');
             // Время могло истечь ровно во время отправки — тогда результат
             // закроет автоотправка, а список надо обновить.
-            if (error?.response?.status === 409) await loadSurveys();
+            if (error?.response?.status === 409) await reloadSurveys();
         } finally {
             setIsSubmitting(false);
         }
@@ -1529,30 +1713,29 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             });
 
         const options = Array.isArray(stat.options) ? stat.options : [];
-        const topOptions = Array.isArray(stat.top_options) ? stat.top_options : [];
 
         return (
-            <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}`} className="border border-gray-100 rounded-xl p-4 space-y-3 bg-gray-50">
+            <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}`} className="border border-slate-100 rounded-xl p-4 space-y-3 bg-slate-50">
                 {/* Question header */}
                 <div className="flex items-start justify-between gap-2">
                     <div>
-                        <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Вопрос #{index + 1}</div>
-                        <div className="text-sm font-medium text-gray-800">{questionText}</div>
+                        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-0.5">Вопрос #{index + 1}</div>
+                        <div className="text-sm font-medium text-slate-800">{questionText}</div>
                     </div>
                     <Badge color={stat.type === 'rating' ? 'amber' : 'blue'}>
                         {questionTypeLabel(stat.type)}
                     </Badge>
                 </div>
 
-                {skippedCount > 0 && <div className="text-[11px] text-gray-400">Пропустили: {skippedCount}</div>}
+                {skippedCount > 0 && <div className="text-[11px] text-slate-400">Пропустили: {skippedCount}</div>}
 
                 {/* Rating stats */}
                 {stat.type === 'rating' && (
                     <div className="space-y-2">
-                        <div className="flex gap-4 text-xs text-gray-600">
-                            <span>Среднее: <strong className="text-gray-800">{stat.average_rating ?? '—'}</strong></span>
-                            <span>Медиана: <strong className="text-gray-800">{stat.median_rating ?? '—'}</strong></span>
-                            <span>Диапазон: <strong className="text-gray-800">{stat.min_rating ?? '—'}–{stat.max_rating ?? '—'}</strong></span>
+                        <div className="flex gap-4 text-xs text-slate-600">
+                            <span>Среднее: <strong className="text-slate-800">{stat.average_rating ?? '—'}</strong></span>
+                            <span>Медиана: <strong className="text-slate-800">{stat.median_rating ?? '—'}</strong></span>
+                            <span>Диапазон: <strong className="text-slate-800">{stat.min_rating ?? '—'}–{stat.max_rating ?? '—'}</strong></span>
                         </div>
                         <div className="space-y-1.5">
                             {ratingDistribution.map((bucket) => {
@@ -1561,11 +1744,11 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 const percentAnswers = Number(bucket.percent_of_answers || 0);
                                 return (
                                     <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}_rating_${value}`} className="flex items-center gap-2">
-                                        <span className="text-[11px] w-8 shrink-0 text-gray-600">{value} ★</span>
+                                        <span className="text-[11px] w-8 shrink-0 text-slate-600">{value} ★</span>
                                         <div className="flex-1 h-2 bg-amber-100 rounded-full overflow-hidden">
                                             <div className="h-full bg-amber-400 rounded-full transition-all duration-500" style={{ width: percentToWidth(percentAnswers) }} />
                                         </div>
-                                        <span className="text-[11px] text-gray-500 w-20 text-right shrink-0">{count} ({formatPercent(percentAnswers)})</span>
+                                        <span className="text-[11px] text-slate-500 w-20 text-right shrink-0">{count} ({formatPercent(percentAnswers)})</span>
                                     </div>
                                 );
                             })}
@@ -1577,11 +1760,15 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 {stat.type !== 'rating' && (
                     <div className="space-y-1.5">
                         {stat.type === 'multiple' && (
-                            <div className="text-[11px] text-gray-500">
-                                Всего выборов: <strong className="text-gray-700">{Number(stat.selections_total || 0)}</strong> (можно несколько)
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                                Всего выборов: <strong className="tabular-nums text-slate-700">{Number(stat.selections_total || 0)}</strong>
+                                <IosHint
+                                    label="Про сумму выборов"
+                                    text="В вопросе с несколькими ответами один человек мог отметить сразу несколько вариантов, поэтому сумма выборов больше числа ответивших."
+                                />
                             </div>
                         )}
-                        {options.length === 0 && <div className="text-[11px] text-gray-400">Данных пока нет.</div>}
+                        {options.length === 0 && <div className="text-[11px] text-slate-400">Данных пока нет.</div>}
                         {options.map((option, optionIndex) => {
                             const optionLabel = String(option?.option || `Вариант ${optionIndex + 1}`);
                             const optionCount = Number(option?.count || 0);
@@ -1594,10 +1781,10 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                     className={`space-y-1 ${isCorrectOption ? 'rounded-md border border-emerald-200 bg-emerald-50/70 p-1.5' : ''}`}
                                 >
                                     <div className="flex items-center justify-between gap-2 text-[11px]">
-                                        <span className={`truncate ${isCorrectOption ? 'text-emerald-700 font-semibold' : 'text-gray-700'}`} title={optionLabel}>
+                                        <span className={`truncate ${isCorrectOption ? 'text-emerald-700 font-semibold' : 'text-slate-700'}`} title={optionLabel}>
                                             {optionLabel}
                                         </span>
-                                        <span className="shrink-0 text-gray-500">{optionCount} ({formatPercent(percentRespondents)})</span>
+                                        <span className="shrink-0 text-slate-500">{optionCount} ({formatPercent(percentRespondents)})</span>
                                     </div>
                                     {isCorrectOption && (
                                         <div className="text-[10px] text-emerald-700 font-medium">
@@ -1608,11 +1795,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 </div>
                             );
                         })}
-                        {topOptions.length > 0 && (
-                            <div className="text-[11px] text-gray-500 pt-1 border-t border-gray-200">
-                                Топ: {topOptions.map((o) => `${o.option} (${o.count})`).join(', ')}
-                            </div>
-                        )}
+
                     </div>
                 )}
             </div>
@@ -1621,58 +1804,66 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
 
     /* ─── render ─── */
     return (
-        <div className="space-y-5">
+        // Шрифт задаём на корне раздела, а не только в конструкторе: половина
+        // экрана в SF Pro, половина в системном — это и читается как «разные
+        // куски сайта».
+        <div className="space-y-5" style={{ fontFamily: APPLE_FONT }}>
 
             {/* ── Page header ── */}
-            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                <div className="px-6 py-5 flex items-center justify-between gap-4 flex-wrap">
+            <div className={`${iosCard} overflow-hidden`}>
+                <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
                     <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-sm">
-                            <FaIcon className="fas fa-list-alt text-white text-base" />
+                        <div className="grid h-10 w-10 place-items-center rounded-xl bg-blue-600 shadow-sm">
+                            <FaIcon className="fas fa-list-alt text-base text-white" />
                         </div>
-                        <div>
-                            <h2 className="text-xl font-bold text-gray-900 leading-tight">Опросы</h2>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                                {canManage ? 'Создание и назначение опросов по стажу, направлению и операторам' : 'Назначенные вам опросы'}
-                            </p>
+                        <div className="flex items-center gap-2">
+                            <h2 className="text-[19px] font-bold leading-tight text-slate-900">Опросы</h2>
+                            {/* Пояснение к разделу нужно один раз, а строку под
+                                заголовком занимало всегда — прячем под «i». */}
+                            <IosHint
+                                label="О разделе"
+                                text={canManage
+                                    ? 'Создание и назначение опросов и тестов по стажу, направлению, группам и конкретным сотрудникам. Опросы старше двух недель уходят в архив: они перестают показываться сотрудникам и не считаются в уведомлениях раздела.'
+                                    : 'Здесь показаны назначенные вам опросы и тесты. Опросы старше двух недель уходят в архив — пройти их уже нельзя, но свои ответы можно посмотреть на вкладке «Архив».'}
+                            />
                         </div>
                     </div>
                     {canManage && (
-                        <div className="flex items-center justify-end gap-2 flex-wrap">
-                        {canFilterByDepartment && (
-                            <div className="flex items-center gap-2">
-                                <FaIcon className="fa-solid fa-layer-group text-gray-400" />
-                                <select
-                                    value={departmentFilter}
-                                    onChange={(event) => setDepartmentFilter(event.target.value)}
-                                    className="px-3 py-2 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-                                    title="Фильтр по отделу"
-                                >
-                                    <option value="">Все отделы</option>
-                                    {departmentOptions.map((department) => (
-                                        <option key={department.id} value={department.id}>{department.name}</option>
-                                    ))}
-                                </select>
-                            </div>
-                        )}
-                        <button
-                            onClick={() => {
-                                if (showBuilder) {
-                                    closeBuilder();
-                                    return;
-                                }
-                                if (!isRepeatMode) resetBuilder();
-                                setShowBuilder(true);
-                            }}
-                            className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all shadow-sm ${
-                                showBuilder
-                                    ? 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                            }`}
-                        >
-                            <FaIcon className={`fas ${showBuilder ? 'fa-times' : 'fa-plus'} text-xs`} />
-                            {showBuilder ? 'Отменить' : 'Создать опрос'}
-                        </button>
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                            {canFilterByDepartment && (
+                                <div className="flex items-center gap-2">
+                                    <FaIcon className="fa-solid fa-layer-group text-slate-400" />
+                                    <select
+                                        value={departmentFilter}
+                                        onChange={(event) => setDepartmentFilter(event.target.value)}
+                                        className="rounded-xl bg-slate-100 px-3 py-2 text-[13px] text-slate-800 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                                        title="Фильтр по отделу"
+                                    >
+                                        <option value="">Все отделы</option>
+                                        {departmentOptions.map((department) => (
+                                            <option key={department.id} value={department.id}>{department.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
+                            <button
+                                onClick={() => {
+                                    if (showBuilder) {
+                                        closeBuilder();
+                                        return;
+                                    }
+                                    if (!isRepeatMode) resetBuilder();
+                                    setShowBuilder(true);
+                                }}
+                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13.5px] font-semibold shadow-sm transition-all active:scale-[0.98] ${
+                                    showBuilder
+                                        ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                        : 'bg-blue-600 text-white hover:bg-blue-700'
+                                }`}
+                            >
+                                <FaIcon className={`fas ${showBuilder ? 'fa-times' : 'fa-plus'} text-xs`} />
+                                {showBuilder ? 'Отменить' : 'Создать опрос'}
+                            </button>
                         </div>
                     )}
                 </div>
@@ -2255,29 +2446,60 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 </div>
             )}
 
-            {/* ── Main content: list + detail ── */}
-            <div className="grid grid-cols-1 xl:grid-cols-5 gap-5">
+            {/* ── Main content: list + detail ──
+                На широком экране обе колонки держат высоту окна и прокручиваются
+                внутри себя: страница списка на 20 строк иначе уводила бы кнопки
+                «Назад / Вперёд» далеко вниз, за пределы экрана. На узком —
+                колонки складываются в столбик и растут как обычно. */}
+            <div className="grid grid-cols-1 gap-5 xl:h-[calc(100vh-13rem)] xl:min-h-[520px] xl:grid-cols-5">
 
                 {/* Survey list */}
-                <div className="xl:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
-                    <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-                        <span className="text-sm font-semibold text-gray-800">Список опросов</span>
-                        {visibleSurveys.length > 0 && <Badge color="gray">{visibleSurveys.length}</Badge>}
+                <div className={`xl:col-span-2 ${iosCard} flex flex-col overflow-hidden`}>
+                    <div className="space-y-3 border-b border-slate-200/70 px-4 pb-3 pt-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-[13.5px] font-semibold text-slate-900">Список опросов</span>
+                            <span className="text-[12px] tabular-nums text-slate-400">{listTotal}</span>
+                        </div>
+                        {/* Активные и архив — разные списки, а не фильтр внутри одного:
+                            архив копится и без разделения затопил бы рабочую очередь. */}
+                        <IosSegmented
+                            value={listScope}
+                            onChange={setListScope}
+                            stretch
+                            ariaLabel="Активные или архив"
+                            options={[
+                                { value: SCOPE_ACTIVE, label: 'Активные' },
+                                { value: SCOPE_ARCHIVE, label: 'Архив' }
+                            ]}
+                        />
+                        <div className="relative">
+                            <FaIcon className="fas fa-search pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400" />
+                            <input
+                                value={listQueryInput}
+                                onChange={(event) => setListQueryInput(event.target.value)}
+                                placeholder="Поиск по названию"
+                                className={`${iosInput} py-2 pl-8 text-[13px]`}
+                            />
+                        </div>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto divide-y divide-gray-50">
+                    <div className="flex-1 divide-y divide-slate-100 overflow-y-auto">
                         {isLoading && <SurveysListSkeleton />}
-                        {!isLoading && visibleSurveys.length === 0 && (
+                        {!isLoading && surveyRows.length === 0 && (
                             <div className="p-8 text-center">
-                                <div className="w-12 h-12 rounded-2xl bg-gray-50 flex items-center justify-center mx-auto mb-3">
-                                    <FaIcon className="fas fa-clipboard-list text-gray-300 text-xl" />
+                                <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-slate-50">
+                                    <FaIcon className={`fas ${listScope === SCOPE_ARCHIVE ? 'fa-box-archive' : 'fa-clipboard-list'} text-xl text-slate-300`} />
                                 </div>
-                                <p className="text-sm text-gray-400">
-                                    {isOperator ? 'Назначенных опросов пока нет' : 'Опросов пока нет'}
+                                <p className="text-[13px] text-slate-400">
+                                    {listQuery
+                                        ? 'Ничего не нашлось'
+                                        : (listScope === SCOPE_ARCHIVE
+                                            ? 'В архиве пока пусто'
+                                            : (isOperator ? 'Назначенных опросов пока нет' : 'Опросов пока нет'))}
                                 </p>
                             </div>
                         )}
-                        {!isLoading && visibleSurveys.map((survey) => {
+                        {!isLoading && surveyRows.map((survey) => {
                             const isSelected = String(survey.id) === String(selectedSurveyId);
                             const isCompleted = survey?.my_assignment?.status === 'completed';
                             const displayMetrics = getSurveyDisplayMetrics(survey);
@@ -2287,23 +2509,31 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             return (
                                 <div
                                     key={survey.id}
-                                    className={`group relative px-4 py-3 transition-colors cursor-pointer ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
+                                    role="button"
+                                    tabIndex={0}
+                                    className={`group relative cursor-pointer px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50/70' : 'hover:bg-slate-50'}`}
                                     onClick={() => setSelectedSurveyId(survey.id)}
+                                    onKeyDown={(event) => {
+                                        if (event.key === 'Enter' || event.key === ' ') {
+                                            event.preventDefault();
+                                            setSelectedSurveyId(survey.id);
+                                        }
+                                    }}
                                 >
-                                    {isSelected && <div className="absolute left-0 inset-y-0 w-0.5 bg-blue-500 rounded-r-full" />}
+                                    {isSelected && <div className="absolute inset-y-0 left-0 w-0.5 rounded-r-full bg-blue-500" />}
                                     <div className="flex items-start justify-between gap-2">
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex items-center gap-1.5 min-w-0">
-                                                <div className={`text-sm font-semibold truncate ${isSelected ? 'text-blue-700' : 'text-gray-800'}`}>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex min-w-0 items-center gap-1.5">
+                                                <div className={`truncate text-[13.5px] font-semibold ${isSelected ? 'text-blue-700' : 'text-slate-800'}`}>
                                                     {survey.title}
                                                 </div>
                                                 {survey?.is_test && (
-                                                    <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
+                                                    <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
                                                         Тест
                                                     </span>
                                                 )}
                                                 {repeatIteration > 1 && (
-                                                    <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">
+                                                    <span className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
                                                         #{repeatIteration}
                                                     </span>
                                                 )}
@@ -2314,7 +2544,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                 )}
                                                 {canManage ? (
                                                     <div className="space-y-1">
-                                                        <div className="flex items-center justify-between text-[11px] text-gray-500">
+                                                        <div className="flex items-center justify-between text-[11px] text-slate-500">
                                                             <span>Пройдено: {displayMetrics.completedCount || 0} из {displayMetrics.assignedCount || 0}</span>
                                                             <span className="tabular-nums">{completionRate}%</span>
                                                         </div>
@@ -2328,41 +2558,90 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                             </div>
                                         </div>
                                         {canManage && (
-                                            <button
-                                                onClick={(e) => { e.stopPropagation(); removeSurvey(survey.id); }}
-                                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg hover:bg-red-50 text-red-600 transition-colors text-xs font-medium"
-                                                title="Удалить"
-                                            >
-                                                <FaIcon className="fas fa-trash-alt text-xs" />
-                                                <span>Удалить</span>
-                                            </button>
+                                            /* Действия за «тремя точками»: строка списка не должна
+                                               нести кнопку «Удалить» рядом с каждым названием. */
+                                            <div onClick={(event) => event.stopPropagation()}>
+                                                <IosMenu
+                                                    align="right"
+                                                    items={[
+                                                        {
+                                                            key: 'edit',
+                                                            label: 'Редактировать',
+                                                            icon: (props) => <FaIcon {...props} className="fas fa-edit" />,
+                                                            onSelect: () => { setSelectedSurveyId(survey.id); startEditSurveyById(survey.id); }
+                                                        },
+                                                        {
+                                                            key: 'repeat',
+                                                            label: 'Повторить',
+                                                            icon: (props) => <FaIcon {...props} className="fas fa-redo" />,
+                                                            onSelect: () => { setSelectedSurveyId(survey.id); startRepeatSurveyById(survey.id); }
+                                                        },
+                                                        {
+                                                            key: 'delete',
+                                                            label: 'Удалить',
+                                                            danger: true,
+                                                            separatorBefore: true,
+                                                            icon: (props) => <FaIcon {...props} className="fas fa-trash-alt" />,
+                                                            onSelect: () => removeSurvey(survey.id)
+                                                        }
+                                                    ]}
+                                                />
+                                            </div>
                                         )}
                                     </div>
                                 </div>
                             );
                         })}
                     </div>
+
+                    {listPages > 1 && (
+                        <div className="flex items-center justify-between gap-2 border-t border-slate-200/70 px-3 py-2.5">
+                            <button
+                                type="button"
+                                onClick={() => setListPage((page) => Math.max(1, page - 1))}
+                                disabled={listPage <= 1 || isLoading}
+                                className={`${iosBtnGhost} disabled:opacity-40`}
+                            >
+                                <FaIcon className="fas fa-chevron-left text-[11px]" />
+                                Назад
+                            </button>
+                            <span className="text-[12px] tabular-nums text-slate-500">
+                                {listPage} / {listPages}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setListPage((page) => Math.min(listPages, page + 1))}
+                                disabled={listPage >= listPages || isLoading}
+                                className={`${iosBtnGhost} disabled:opacity-40`}
+                            >
+                                Вперёд
+                                <FaIcon className="fas fa-chevron-right text-[11px]" />
+                            </button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Survey detail */}
-                <div className="xl:col-span-3 bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
+                <div className={`xl:col-span-3 ${iosCard} flex flex-col overflow-hidden`}>
                     {!selectedSurvey ? (
-                        <div className="flex-1 flex items-center justify-center p-12 text-center">
+                        <div className="flex flex-1 items-center justify-center p-12 text-center">
                             <div>
-                                <div className="w-14 h-14 rounded-2xl bg-gray-50 flex items-center justify-center mx-auto mb-3">
-                                    <FaIcon className="fas fa-hand-point-left text-gray-300 text-2xl" />
+                                <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-slate-50">
+                                    <FaIcon className={`fas ${isDetailLoading ? 'fa-spinner fa-spin' : 'fa-hand-point-left'} text-2xl text-slate-300`} />
                                 </div>
-                                <p className="text-sm text-gray-400">Выберите опрос из списка</p>
+                                <p className="text-[13px] text-slate-400">
+                                    {isDetailLoading ? 'Открываем опрос…' : 'Выберите опрос из списка'}
+                                </p>
                             </div>
                         </div>
                     ) : (
                         <>
                             {/* Detail header */}
-                            <div className="px-5 py-4 border-b border-gray-100">
+                            <div className="space-y-3 border-b border-slate-200/70 px-5 py-4">
                                 <div className="flex items-start justify-between gap-3">
-                                    <div>
+                                    <div className="min-w-0">
                                         <div className="flex flex-wrap items-center gap-2">
-                                            <h3 className="text-base font-bold text-gray-900">{selectedSurvey.title}</h3>
+                                            <h3 className="text-[15px] font-bold text-slate-900">{selectedSurvey.title}</h3>
                                             {selectedSurvey?.is_test && <Badge color="blue">Тест</Badge>}
                                             {selectedSurvey?.is_test && testStatusMeta(liveTestStatus) && (
                                                 <Badge color={testStatusMeta(liveTestStatus).color}>
@@ -2370,22 +2649,46 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                     {testStatusMeta(liveTestStatus).label}
                                                 </Badge>
                                             )}
+                                            {Number(selectedSurvey?.repeat?.iteration || 1) > 1 && (
+                                                <Badge color="blue">Повторение #{Number(selectedSurvey.repeat.iteration)}</Badge>
+                                            )}
+                                            {selectedSurvey?.is_archived && (
+                                                <Badge color="gray">
+                                                    <FaIcon className="fas fa-box-archive mr-1 text-[9px]" />
+                                                    В архиве
+                                                </Badge>
+                                            )}
+                                            {/* Длинное пояснение — под «i»: на экране оно нужно один
+                                                раз, а место занимало бы всегда. */}
+                                            {selectedSurvey.description && (
+                                                <IosHint text={selectedSurvey.description} label="Описание опроса" />
+                                            )}
                                         </div>
-                                        {selectedSurvey.description && (
-                                            <p className="text-sm text-gray-500 mt-0.5">{selectedSurvey.description}</p>
-                                        )}
-                                        {Number(selectedSurvey?.repeat?.iteration || 1) > 1 && (
-                                            <p className="text-xs text-blue-600 mt-1">
-                                                Повторение #{Number(selectedSurvey?.repeat?.iteration || 1)}
-                                            </p>
-                                        )}
+                                        <div className="mt-1 text-[11.5px] text-slate-400">
+                                            {selectedSurvey?.is_archived
+                                                ? `В архиве с ${formatSurveyDateTime(selectedSurvey?.archived_at)}`
+                                                : `Создан ${formatSurveyDateTime(selectedSurvey?.created_at)}`}
+                                        </div>
                                     </div>
+
+                                    {/* Действия карточки, включая выгрузку: наверху и на виду,
+                                        независимо от того, какая вкладка открыта. */}
                                     {canManage && (
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex shrink-0 items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={exportSurveyStatsExcel}
+                                                disabled={isStatsExporting || !selectedSurvey?.id}
+                                                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 px-3 py-2 text-[12.5px] font-semibold text-emerald-700 transition-all hover:bg-emerald-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                                                title="Выгрузить результаты в Excel"
+                                            >
+                                                <FaIcon className={`fas ${isStatsExporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`} />
+                                                {isStatsExporting ? 'Экспорт…' : 'Excel'}
+                                            </button>
                                             <button
                                                 type="button"
                                                 onClick={() => startEditSurvey(selectedSurvey)}
-                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 transition-colors"
+                                                className={iosBtnGhost}
                                                 title="Редактировать опрос"
                                             >
                                                 <FaIcon className="fas fa-edit" />
@@ -2394,7 +2697,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                             <button
                                                 type="button"
                                                 onClick={() => startRepeatSurvey(selectedSurvey)}
-                                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors"
+                                                className={iosBtnGhost}
                                                 title="Создать повтор опроса"
                                             >
                                                 <FaIcon className="fas fa-redo" />
@@ -2402,118 +2705,122 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                             </button>
                                         </div>
                                     )}
-                                    {isOperator && (
-                                        <Badge color={selectedSurvey?.my_assignment?.status === 'completed' ? 'green' : 'amber'}>
-                                            {selectedSurvey?.my_assignment?.status === 'completed' ? 'Пройден' : 'Назначен'}
-                                        </Badge>
-                                    )}
+                                    {isOperator && (() => {
+                                        const completed = selectedSurvey?.my_assignment?.status === 'completed';
+                                        // «Назначен» на архивном опросе звучало бы как «ещё надо
+                                        // пройти», хотя пройти его уже нельзя.
+                                        const label = completed
+                                            ? 'Пройден'
+                                            : (selectedSurvey?.is_archived ? 'Не пройден' : 'Назначен');
+                                        return <Badge color={completed ? 'green' : (selectedSurvey?.is_archived ? 'gray' : 'amber')}>{label}</Badge>;
+                                    })()}
                                 </div>
 
                                 {/* Окно теста: одно место, где видно расписание и правила */}
                                 {selectedSurvey?.is_test && (
-                                    <div className="flex flex-wrap gap-2 mt-3">
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-hourglass-start text-gray-400 text-[10px]" />
-                                            Начало: <strong className="text-gray-700 tabular-nums">{formatSurveyDateTime(selectedTestInfo?.starts_at)}</strong>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11.5px] text-slate-500">
+                                            <FaIcon className="fas fa-hourglass-start text-[10px] text-slate-400" />
+                                            <span className="tabular-nums text-slate-700">{formatSurveyDateTime(selectedTestInfo?.starts_at)}</span>
+                                            <span className="text-slate-300">→</span>
+                                            <span className="tabular-nums text-slate-700">{formatSurveyDateTime(selectedTestInfo?.ends_at)}</span>
                                         </div>
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-hourglass-end text-gray-400 text-[10px]" />
-                                            Завершение: <strong className="text-gray-700 tabular-nums">{formatSurveyDateTime(selectedTestInfo?.ends_at)}</strong>
-                                        </div>
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-star text-gray-400 text-[10px]" />
-                                            Максимум: <strong className="text-gray-700 tabular-nums">{formatPoints(selectedTestInfo?.max_points)}</strong> балл.
+                                        <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11.5px] text-slate-500">
+                                            <FaIcon className="fas fa-star text-[10px] text-slate-400" />
+                                            Максимум: <strong className="tabular-nums text-slate-700">{formatPoints(selectedTestInfo?.max_points)}</strong>
                                         </div>
                                         {selectedTestInfo?.single_attempt !== false && (
-                                            <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                <FaIcon className="fas fa-lock text-gray-400 text-[10px]" />
-                                                Одна попытка
-                                            </div>
+                                            <Badge color="gray">Одна попытка</Badge>
                                         )}
                                         {selectedTestInfo?.affects_quality && (
-                                            <div className="flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 rounded-lg px-2.5 py-1.5">
-                                                <FaIcon className="fas fa-award text-blue-400 text-[10px]" />
-                                                Идёт в качество оператора
-                                            </div>
+                                            <Badge color="blue">Идёт в качество</Badge>
                                         )}
                                     </div>
                                 )}
 
-                                {/* Meta row */}
-                                {(!canManage || activeTab === 'stats') && (
-                                    <div className="flex flex-wrap gap-2 mt-3">
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-users text-gray-400 text-[10px]" />
-                                            Операторов: <strong className="text-gray-700">{selectedSurveyDisplayMetrics.assignedCount || 0}</strong>
-                                        </div>
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-clock text-gray-400 text-[10px]" />
-                                            Стаж:{' '}
-                                            <strong className="text-gray-700">
-                                                {selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null
-                                                    ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}`
-                                                    : 'Любой'}
-                                            </strong>
-                                        </div>
-                                        {canManage && (
-                                            <>
-                                                <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                    <FaIcon className="fas fa-check-circle text-gray-400 text-[10px]" />
-                                                    Пройдено: <strong className="text-gray-700">{selectedSurveyDisplayMetrics.completedCount || 0} / {selectedSurveyDisplayMetrics.assignedCount || 0}</strong>
-                                                </div>
-                                                <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-2.5 py-1.5">
-                                                    <FaIcon className="fas fa-hourglass-half text-gray-400 text-[10px]" />
-                                                    Ожидают: <strong className="text-gray-700">{selectedSurveyDisplayMetrics.pendingCount || 0}</strong>
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
-                                )}
-                                {canManage && activeTab === 'questions' && (
-                                    <div className="flex flex-wrap gap-2 mt-3">
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-blue-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-list-ul text-blue-400 text-[10px]" />
-                                            Вопросов: <strong className="text-gray-700">{(selectedSurvey?.questions || []).length}</strong>
-                                        </div>
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-blue-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-asterisk text-blue-400 text-[10px]" />
-                                            Обязательных:{' '}
-                                            <strong className="text-gray-700">
-                                                {(selectedSurvey?.questions || []).filter((question) => question?.required).length}
-                                            </strong>
-                                        </div>
-                                        <div className="flex items-center gap-1.5 text-xs text-gray-500 bg-blue-50 rounded-lg px-2.5 py-1.5">
-                                            <FaIcon className="fas fa-comment-dots text-blue-400 text-[10px]" />
-                                            С полем «Другое»:{' '}
-                                            <strong className="text-gray-700">
-                                                {(selectedSurvey?.questions || []).filter((question) => question?.allow_other).length}
-                                            </strong>
-                                        </div>
-                                    </div>
-                                )}
+                                {/* Сводка одной строкой: раньше набор плашек менялся вместе
+                                    со вкладкой и на каждой был свой — это и был лишний шум. */}
+                                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11.5px] text-slate-500">
+                                    {canManage && (
+                                        <>
+                                            <span className="inline-flex items-center gap-1.5">
+                                                <FaIcon className="fas fa-users text-[10px] text-slate-400" />
+                                                Сотрудников: <strong className="tabular-nums text-slate-700">{selectedSurveyDisplayMetrics.assignedCount || 0}</strong>
+                                            </span>
+                                            <span className="inline-flex items-center gap-1.5">
+                                                <FaIcon className="fas fa-check-circle text-[10px] text-slate-400" />
+                                                Прошли: <strong className="tabular-nums text-slate-700">{selectedSurveyDisplayMetrics.completedCount || 0}</strong>
+                                            </span>
+                                        </>
+                                    )}
+                                    <span className="inline-flex items-center gap-1.5">
+                                        <FaIcon className="fas fa-list-ul text-[10px] text-slate-400" />
+                                        Вопросов: <strong className="tabular-nums text-slate-700">{(selectedSurvey?.questions || []).length}</strong>
+                                    </span>
+                                    <IosHint
+                                        align="right"
+                                        label="Кому назначен опрос"
+                                        text={`Стаж: ${
+                                            selectedSurvey?.assignment?.tenure_weeks_min != null || selectedSurvey?.assignment?.tenure_weeks_max != null
+                                                ? `${selectedSurvey?.assignment?.tenure_weeks_min != null ? `от ${selectedSurvey.assignment.tenure_weeks_min} нед.` : 'без минимума'}${selectedSurvey?.assignment?.tenure_weeks_max != null ? ` до ${selectedSurvey.assignment.tenure_weeks_max} нед.` : ''}`
+                                                : 'любой'
+                                        }. Обязательных вопросов: ${(selectedSurvey?.questions || []).filter((question) => question?.required).length}. С полем «Другое»: ${(selectedSurvey?.questions || []).filter((question) => question?.allow_other).length}.${
+                                            canManage ? ` Ещё не прошли: ${selectedSurveyDisplayMetrics.pendingCount || 0}.` : ''
+                                        }`}
+                                    />
+                                </div>
 
-                                {/* Tabs for manager */}
+                                {/* Вкладки. Крупный сегментный контрол во всю ширину:
+                                    прежние мелкие пилюли читались как подпись, и люди
+                                    не понимали, что по ним надо нажимать. */}
                                 {canManage && (
-                                    <div className="flex gap-1 mt-3">
-                                        {['questions', 'stats'].map((tab) => (
-                                            <button
-                                                key={tab}
-                                                onClick={() => setActiveTab(tab)}
-                                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                                                    activeTab === tab
-                                                        ? 'bg-blue-600 text-white shadow-sm'
-                                                        : 'text-gray-500 hover:bg-gray-100'
-                                                }`}
-                                            >
-                                                {tab === 'questions' ? <><FaIcon className="fas fa-question-circle mr-1" />Вопросы</> : <><FaIcon className="fas fa-chart-bar mr-1" />Статистика</>}
-                                            </button>
-                                        ))}
-                                    </div>
+                                    <IosSegmented
+                                        size="lg"
+                                        value={activeTab}
+                                        onChange={setActiveTab}
+                                        ariaLabel="Разделы опроса"
+                                        options={[
+                                            {
+                                                value: 'questions',
+                                                label: 'Вопросы',
+                                                icon: <FaIcon className="fas fa-question-circle text-[12px]" />
+                                            },
+                                            {
+                                                value: 'answers',
+                                                label: 'Ответы',
+                                                icon: <FaIcon className="fas fa-user-check text-[12px]" />,
+                                                count: respondentsTotalCount
+                                            },
+                                            {
+                                                value: 'stats',
+                                                label: 'Статистика',
+                                                icon: <FaIcon className="fas fa-chart-bar text-[12px]" />
+                                            }
+                                        ]}
+                                    />
                                 )}
                             </div>
 
                             {/* Detail body */}
                             <div className="flex-1 overflow-y-auto p-5 space-y-3">
+
+                                {/* Опрос в архиве, а сотрудник его не проходил.
+                                    Без этой строки на месте формы оставалась
+                                    пустая карточка, и было непонятно, сломалось
+                                    что-то или так и задумано. */}
+                                {isOperator && selectedSurvey?.is_archived && !isSelectedSurveyCompleted && (
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                                        <div className="flex items-start gap-3">
+                                            <FaIcon className="fas fa-box-archive mt-0.5 text-slate-400" />
+                                            <div className="text-[13.5px] text-slate-700">
+                                                <div className="font-semibold">Опрос ушёл в архив</div>
+                                                <div className="mt-1 text-[13px] text-slate-500">
+                                                    Прошло больше двух недель с его создания — пройти опрос уже нельзя.
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* Время теста истекло, а попытка не отправлена */}
                                 {isOperator && isTestTimeOver && !isSelectedSurveyCompleted && (() => {
@@ -2560,14 +2867,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const answer = answers[question.id] || {};
                                             return (
-                                                <div key={question.id} className="border border-gray-200 rounded-xl p-4 space-y-3">
+                                                <div key={question.id} className="border border-slate-200 rounded-xl p-4 space-y-3">
                                                     <div className="flex items-start justify-between gap-2">
                                                         <div>
-                                                            <div className="text-[11px] text-gray-400 mb-1">
+                                                            <div className="text-[11px] text-slate-400 mb-1">
                                                                 #{index + 1} · {questionTypeLabel(question.type)}
                                                                 {question.required && <span className="text-red-400 ml-1">*</span>}
                                                             </div>
-                                                            <div className="text-sm font-medium text-gray-800">{question.text}</div>
+                                                            <div className="text-sm font-medium text-slate-800">{question.text}</div>
                                                         </div>
                                                         {selectedSurvey?.is_test && question.points != null && (
                                                             <span
@@ -2594,7 +2901,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                         className={`w-10 h-10 rounded-xl font-semibold text-sm border-2 transition-all ${
                                                                             active
                                                                                 ? 'bg-amber-500 text-white border-amber-500 shadow-sm scale-105'
-                                                                                : 'border-gray-200 text-gray-500 hover:border-amber-300 hover:text-amber-500'
+                                                                                : 'border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-500'
                                                                         }`}
                                                                     >
                                                                         {value}
@@ -2610,13 +2917,13 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                     <label
                                                                         key={`${question.id}_${option}`}
                                                                         className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer border transition-all ${
-                                                                            selected ? 'border-blue-200 bg-blue-50' : 'border-transparent hover:bg-gray-50'
+                                                                            selected ? 'border-blue-200 bg-blue-50' : 'border-transparent hover:bg-slate-50'
                                                                         }`}
                                                                     >
                                                                         <div className={`w-4 h-4 shrink-0 flex items-center justify-center transition-all ${
                                                                             question.type === 'single'
-                                                                                ? `rounded-full border-2 ${selected ? 'border-blue-600' : 'border-gray-300'}`
-                                                                                : `rounded border-2 ${selected ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`
+                                                                                ? `rounded-full border-2 ${selected ? 'border-blue-600' : 'border-slate-300'}`
+                                                                                : `rounded border-2 ${selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'}`
                                                                         }`}>
                                                                             {selected && question.type === 'single' && <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />}
                                                                             {selected && question.type === 'multiple' && <FaIcon className="fas fa-check text-white text-[8px]" />}
@@ -2638,7 +2945,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                                 }
                                                                             }}
                                                                         />
-                                                                        <span className="text-sm text-gray-700">{option}</span>
+                                                                        <span className="text-sm text-slate-700">{option}</span>
                                                                     </label>
                                                                 );
                                                             })}
@@ -2659,9 +2966,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                         }}
                                                                         maxLength={OTHER_ANSWER_MAX_LENGTH}
                                                                         placeholder="Другое..."
-                                                                        className={inputCls}
+                                                                        className={iosInput}
                                                                     />
-                                                                    <div className="text-[10px] text-gray-400 text-right">
+                                                                    <div className="text-[10px] text-slate-400 text-right">
                                                                         {String(answer.answer_text || '').length}/{OTHER_ANSWER_MAX_LENGTH}
                                                                     </div>
                                                                 </div>
@@ -2688,30 +2995,30 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 {!isOperator && (!canManage || activeTab === 'questions') && (
                                     <div className="space-y-2">
                                         {(selectedSurvey.questions || []).length === 0 && (
-                                            <div className="rounded-xl border border-gray-100 bg-gray-50 p-4 text-sm text-gray-400">
+                                            <div className="rounded-xl border border-slate-100 bg-slate-50 p-4 text-sm text-slate-400">
                                                 В этом опросе нет сохраненных вопросов.
                                             </div>
                                         )}
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const normalizedOptions = toUniqueTrimmedList(question.options);
                                             return (
-                                                <div key={question.id} className="flex gap-3 items-start p-3 rounded-xl border border-gray-100 bg-gray-50/60">
+                                                <div key={question.id} className="flex gap-3 items-start p-3 rounded-xl border border-slate-100 bg-slate-50/60">
                                                     <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
                                                         <span className="text-[10px] font-bold text-blue-500">{index + 1}</span>
                                                     </div>
                                                     <div className="flex-1">
-                                                        <div className="text-sm font-medium text-gray-800">{question.text}</div>
+                                                        <div className="text-sm font-medium text-slate-800">{question.text}</div>
                                                         <div className="flex items-center gap-2 mt-1">
                                                             <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
                                                             {question.required && <Badge color="blue">Обязательный</Badge>}
                                                         </div>
                                                         {question.type !== 'rating' && (
                                                             <div className="mt-2 space-y-1">
-                                                                <div className="text-[11px] text-gray-400">Варианты ответа</div>
+                                                                <div className="text-[11px] text-slate-400">Варианты ответа</div>
                                                                 {normalizedOptions.length > 0 ? (
                                                                     <div className="flex flex-wrap gap-1.5">
                                                                         {normalizedOptions.map((option) => (
-                                                                            <span key={`${question.id}_${option}`} className="inline-flex items-center px-2 py-0.5 rounded bg-white border border-gray-200 text-xs text-gray-700">
+                                                                            <span key={`${question.id}_${option}`} className="inline-flex items-center px-2 py-0.5 rounded bg-white border border-slate-200 text-xs text-slate-700">
                                                                                 {option}
                                                                             </span>
                                                                         ))}
@@ -2722,7 +3029,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                         )}
                                                                     </div>
                                                                 ) : (
-                                                                    <div className="text-xs text-gray-500">
+                                                                    <div className="text-xs text-slate-500">
                                                                         {question.allow_other ? 'Только поле «Другое»' : 'Без фиксированных вариантов'}
                                                                     </div>
                                                                 )}
@@ -2735,11 +3042,11 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                         ? toUniqueTrimmedList(question.correct_options).join(', ')
                                                                         : '—'}
                                                                 </span>
-                                                                <span className="text-gray-500 tabular-nums">
+                                                                <span className="text-slate-500 tabular-nums">
                                                                     Баллы: {formatPoints(question.points)}
                                                                 </span>
                                                                 {question.partial_credit && (
-                                                                    <span className="text-gray-500">Частичный зачёт</span>
+                                                                    <span className="text-slate-500">Частичный зачёт</span>
                                                                 )}
                                                             </div>
                                                         )}
@@ -2754,9 +3061,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 {isOperator && isSelectedSurveyCompleted && !isRetakingSelectedTest && (
                                     <div className="space-y-3">
                                         <div className="flex flex-wrap items-center justify-between gap-2">
-                                            <div className="text-xs text-gray-500">
+                                            <div className="text-xs text-slate-500">
                                                 Отправлено:{' '}
-                                                <strong className="text-gray-700 tabular-nums">
+                                                <strong className="text-slate-700 tabular-nums">
                                                     {formatSurveyDateTime(selectedSurvey?.my_response?.submitted_at || selectedSurvey?.my_assignment?.submitted_at)}
                                                 </strong>
                                             </div>
@@ -2828,13 +3135,13 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                 : null;
                                             const earnedPoints = Number(answer?.earned_points);
                                             return (
-                                                <div key={question.id} className="p-3 rounded-xl border border-gray-100 bg-gray-50/60 space-y-2">
+                                                <div key={question.id} className="p-3 rounded-xl border border-slate-100 bg-slate-50/60 space-y-2">
                                                     <div className="flex items-start gap-3">
                                                         <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
                                                             <span className="text-[10px] font-bold text-blue-500">{index + 1}</span>
                                                         </div>
                                                         <div className="flex-1 min-w-0">
-                                                            <div className="text-sm font-medium text-gray-800">{question.text}</div>
+                                                            <div className="text-sm font-medium text-slate-800">{question.text}</div>
                                                             <div className="flex flex-wrap items-center gap-2 mt-1">
                                                                 <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
                                                                 {question.required && <Badge color="blue">Обязательный</Badge>}
@@ -2849,17 +3156,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             </div>
                                                         </div>
                                                     </div>
-                                                    <div className="ml-9 text-sm text-gray-700">
-                                                        <span className="text-gray-500 mr-1">Ваш ответ:</span>
-                                                        <strong className="font-medium text-gray-800 break-words">
+                                                    <div className="ml-9 text-sm text-slate-700">
+                                                        <span className="text-slate-500 mr-1">Ваш ответ:</span>
+                                                        <strong className="font-medium text-slate-800 break-words">
                                                             {formatQuestionAnswerText(question, answer)}
                                                         </strong>
                                                     </div>
                                                     {/* Правильный ответ показываем только когда он открыт:
                                                         при разрешённом повторе внутри окна это была бы подсказка. */}
                                                     {selectedSurvey?.is_test && expectedOptions.length > 0 && (
-                                                        <div className="ml-9 text-sm text-gray-700">
-                                                            <span className="text-gray-500 mr-1">Правильный ответ:</span>
+                                                        <div className="ml-9 text-sm text-slate-700">
+                                                            <span className="text-slate-500 mr-1">Правильный ответ:</span>
                                                             <strong className="font-medium text-emerald-700 break-words">
                                                                 {expectedOptions.join(', ')}
                                                             </strong>
@@ -2871,302 +3178,119 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                     </div>
                                 )}
 
-                                {/* Manager stats tab */}
-                                {canManage && activeTab === 'stats' && (
+                                {/* Manager answers tab */}
+                                {canManage && activeTab === 'answers' && (
                                     <div className="space-y-3">
-                                        {displayQuestionStats.length === 0 && (
-                                            <div className="text-center py-8">
-                                                <FaIcon className="fas fa-chart-bar text-gray-200 text-3xl mb-2 block" />
-                                                <p className="text-sm text-gray-400">Данных для статистики пока нет</p>
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
+                                                <span>
+                                                    Прошли:{' '}
+                                                    <strong className="tabular-nums text-slate-800">{respondentsSummary.completedCount}</strong>
+                                                </span>
+                                                <span>
+                                                    Ещё нет:{' '}
+                                                    <strong className="tabular-nums text-slate-800">{respondentsSummary.pendingCount}</strong>
+                                                </span>
+                                                {isTestStatsSurvey && respondentsSummary.averageScore != null && (
+                                                    <span>
+                                                        Средний результат:{' '}
+                                                        <strong className="tabular-nums text-slate-800">
+                                                            {formatPercent(respondentsSummary.averageScore)}
+                                                        </strong>
+                                                    </span>
+                                                )}
                                             </div>
-                                        )}
-                                        {displayQuestionStats.map((stat, index) => renderDetailedQuestionStats(stat, index))}
-
-                                        <div className="border border-gray-100 rounded-xl p-4 bg-white space-y-3">
-                                            <div className="flex items-center justify-between gap-3 flex-wrap">
-                                                <div>
-                                                    <h4 className="text-sm font-semibold text-gray-800">
-                                                        {isTestStatsSurvey && statsViewMode === 'scores' ? 'Общий балл сотрудников' : 'Ответы сотрудников'}
-                                                    </h4>
-                                                    <p className="text-[11px] text-gray-500 mt-0.5">
-                                                        {isTestStatsSurvey && statsViewMode === 'scores'
-                                                            ? 'Сводная таблица по результатам теста для каждого сотрудника.'
-                                                            : 'Табличный просмотр: что выбрал и что написал каждый сотрудник.'}
-                                                    </p>
-                                                </div>
-                                                <div className="flex items-center gap-2 flex-wrap">
-                                                    {isTestStatsSurvey && (
-                                                        <div className="inline-flex rounded-lg border border-gray-200 p-0.5 bg-gray-50">
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => setStatsViewMode('scores')}
-                                                                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                                                                    statsViewMode === 'scores'
-                                                                        ? 'bg-blue-600 text-white'
-                                                                        : 'text-gray-600 hover:bg-gray-100'
-                                                                }`}
-                                                            >
-                                                                Общий балл
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => setStatsViewMode('answers')}
-                                                                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
-                                                                    statsViewMode === 'answers'
-                                                                        ? 'bg-blue-600 text-white'
-                                                                        : 'text-gray-600 hover:bg-gray-100'
-                                                                }`}
-                                                            >
-                                                                Ответы
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                    <button
-                                                        type="button"
-                                                        onClick={exportSurveyStatsExcel}
-                                                        disabled={isStatsExporting || !selectedSurvey?.id}
-                                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                                        title="Выгрузить статистику в Excel"
-                                                    >
-                                                        <FaIcon className={`fas ${isStatsExporting ? 'fa-spinner fa-spin' : 'fa-file-excel'}`} />
-                                                        {isStatsExporting ? 'Экспорт...' : 'Excel'}
-                                                    </button>
-                                                    <Badge color="blue">
-                                                        {detailedStatsRows.length}/{departmentFilteredDetailedStatsRows.length}
-                                                    </Badge>
-                                                </div>
-                                            </div>
-
-                                            <div className="relative max-w-sm">
-                                                <FaIcon className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs" />
+                                            <div className="relative w-full max-w-[240px]">
+                                                <FaIcon className="fas fa-search pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400" />
                                                 <input
                                                     value={statsOperatorQuery}
                                                     onChange={(e) => setStatsOperatorQuery(e.target.value)}
                                                     placeholder="Поиск по сотруднику"
-                                                    className={`${inputCls} pl-8 py-2`}
+                                                    className={`${iosInput} py-2 pl-8 text-[13px]`}
                                                 />
                                             </div>
-
-                                            <div className="overflow-x-auto border border-gray-100 rounded-lg">
-                                                {isTestStatsSurvey && statsViewMode === 'scores' ? (
-                                                    <table className="min-w-full divide-y divide-gray-100 text-xs">
-                                                        <thead className="bg-gray-50">
-                                                            <tr>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Начало</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Завершение</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Баллы</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Итоговая оценка</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">В качество</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Верно</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отвечено</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody className="divide-y divide-gray-100">
-                                                            {detailedStatsRows.length === 0 && (
-                                                                <tr>
-                                                                    <td className="px-3 py-4 text-center text-gray-400" colSpan={10}>
-                                                                        Сотрудники не найдены
-                                                                    </td>
-                                                                </tr>
-                                                            )}
-                                                            {detailedStatsRows.map((row) => {
-                                                                const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
-                                                                const repeatIteration = Number(
-                                                                    row?.repeat_iteration != null
-                                                                        ? row.repeat_iteration
-                                                                        : (selectedSurvey?.repeat?.iteration || 1)
-                                                                );
-                                                                const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
-                                                                const testSummary = row?.test_summary || {};
-                                                                const totalQuestions = Number(testSummary?.total_questions || 0);
-                                                                const answeredQuestions = Number(testSummary?.answered_questions || 0);
-                                                                const correctAnswers = Number(testSummary?.correct_answers || 0);
-                                                                const scoreRaw = testSummary?.score_percent;
-                                                                const hasScore = (
-                                                                    scoreRaw !== null
-                                                                    && scoreRaw !== undefined
-                                                                    && `${scoreRaw}`.trim() !== ''
-                                                                    && Number.isFinite(Number(scoreRaw))
-                                                                );
-                                                                const scoreValue = hasScore ? Number(scoreRaw) : 0;
-                                                                return (
-                                                                    <tr key={`stats_score_row_${row?.operator_id}_${repeatSurveyId}`}>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <span>{row?.operator_name || `#${row?.operator_id || '—'}`}</span>
-                                                                                {row?.is_operator_dismissed && <Badge color="amber">Уволен</Badge>}
-                                                                            </div>
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <Badge color={isCompleted ? 'green' : 'amber'}>
-                                                                                    {isCompleted ? 'Пройден' : 'Назначен'}
-                                                                                </Badge>
-                                                                                {testSummary?.is_auto_submitted && (
-                                                                                    <Badge color="amber">по времени</Badge>
-                                                                                )}
-                                                                            </div>
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600 tabular-nums">
-                                                                            {formatSurveyDateTime(row?.started_at)}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600 tabular-nums">
-                                                                            {formatSurveyDateTime(row?.submitted_at)}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                            <Badge color={repeatIteration > 1 ? 'blue' : 'gray'}>
-                                                                                #{repeatIteration}
-                                                                            </Badge>
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 tabular-nums">
-                                                                            {hasScore
-                                                                                ? `${formatPoints(testSummary?.earned_points)} / ${formatPoints(testSummary?.max_points)}`
-                                                                                : <span className="text-gray-400">—</span>}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 align-top">
-                                                                            {hasScore ? (
-                                                                                <div className="min-w-[140px] space-y-1">
-                                                                                    <div className="text-sm font-semibold text-gray-800 tabular-nums">
-                                                                                        {scoreValue.toFixed(1).replace(/\.0$/, '')}%
-                                                                                    </div>
-                                                                                    <ProgressBar
-                                                                                        value={scoreValue}
-                                                                                        color={scoreValue >= 80 ? 'emerald' : (scoreValue >= 60 ? 'blue' : 'amber')}
-                                                                                    />
-                                                                                </div>
-                                                                            ) : (
-                                                                                <span className="text-gray-400">—</span>
-                                                                            )}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                            {testSummary?.sent_to_quality ? (
-                                                                                <span className="inline-flex items-center gap-1 text-emerald-700">
-                                                                                    <FaIcon className="fas fa-check text-[10px]" />
-                                                                                    Тестирование знаний
-                                                                                </span>
-                                                                            ) : (
-                                                                                <span className="text-gray-400">—</span>
-                                                                            )}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 tabular-nums">
-                                                                            {totalQuestions > 0 ? `${correctAnswers}/${totalQuestions}` : '—'}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-700 tabular-nums">
-                                                                            {totalQuestions > 0 ? `${answeredQuestions}/${totalQuestions}` : '—'}
-                                                                        </td>
-                                                                    </tr>
-                                                                );
-                                                            })}
-                                                        </tbody>
-                                                    </table>
-                                                ) : (
-                                                    <table className="min-w-full divide-y divide-gray-100 text-xs">
-                                                        <thead className="bg-gray-50">
-                                                            <tr>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Сотрудник</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Статус</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Отправлено</th>
-                                                                <th className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">Повтор</th>
-                                                                {(selectedSurvey?.questions || []).map((question, qIndex) => (
-                                                                    <th key={`table_q_${question.id}`} className="px-3 py-2 text-left font-semibold text-gray-600 min-w-[260px]">
-                                                                        <div className="text-[10px] text-gray-400 mb-0.5">Вопрос #{qIndex + 1}</div>
-                                                                        <div className="line-clamp-2">{question.text}</div>
-                                                                    </th>
-                                                                ))}
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody className="divide-y divide-gray-100">
-                                                            {detailedStatsRows.length === 0 && (
-                                                                <tr>
-                                                                    <td
-                                                                        className="px-3 py-4 text-center text-gray-400"
-                                                                        colSpan={4 + (selectedSurvey?.questions || []).length}
-                                                                    >
-                                                                        Сотрудники не найдены
-                                                                    </td>
-                                                                </tr>
-                                                            )}
-                                                            {detailedStatsRows.map((row) => {
-                                                                const isCompleted = String(row?.status || '').toLowerCase() === 'completed';
-                                                                const repeatIteration = Number(
-                                                                    row?.repeat_iteration != null
-                                                                        ? row.repeat_iteration
-                                                                        : (selectedSurvey?.repeat?.iteration || 1)
-                                                                );
-                                                                const repeatSurveyId = Number(row?.repeat_survey_id || selectedSurvey?.id || 0);
-                                                                return (
-                                                                    <tr key={`stats_row_${row?.operator_id}_${repeatSurveyId}`}>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-800 font-medium">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <span>{row?.operator_name || `#${row?.operator_id || '—'}`}</span>
-                                                                                {row?.is_operator_dismissed && <Badge color="amber">Уволен</Badge>}
-                                                                            </div>
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                            <Badge color={isCompleted ? 'green' : 'amber'}>
-                                                                                {isCompleted ? 'Пройден' : 'Назначен'}
-                                                                            </Badge>
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap text-gray-600">
-                                                                            {formatSurveyDateTime(row?.submitted_at)}
-                                                                        </td>
-                                                                        <td className="px-3 py-2.5 whitespace-nowrap">
-                                                                            <Badge color={repeatIteration > 1 ? 'blue' : 'gray'}>
-                                                                                #{repeatIteration}
-                                                                            </Badge>
-                                                                        </td>
-                                                                        {(selectedSurvey?.questions || []).map((question, questionIndex) => {
-                                                                            const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
-                                                                            const hasAnswer = hasSurveyAnswer(resolved.question, resolved.answer);
-                                                                            const isCorrect = isTestStatsSurvey ? isTestAnswerCorrect(resolved.question, resolved.answer) : false;
-                                                                            const expectedOptions = isTestStatsSurvey ? getExpectedOptionsForTest(resolved.question, resolved.answer) : [];
-                                                                            const answerStatus = isTestStatsSurvey
-                                                                                ? testAnswerStatusMeta(resolved.question, resolved.answer, hasAnswer)
-                                                                                : null;
-                                                                            const answerEarnedPoints = Number(resolved.answer?.earned_points);
-                                                                            const answerCellClass = (
-                                                                                isTestStatsSurvey && hasAnswer
-                                                                                    ? (isCorrect
-                                                                                        ? 'bg-emerald-50/70'
-                                                                                        : (answerStatus?.color === 'blue' ? 'bg-blue-50/70' : 'bg-amber-50/70'))
-                                                                                    : ''
-                                                                            );
-                                                                            return (
-                                                                                <td key={`stats_row_${row?.operator_id}_${repeatSurveyId}_q_${question.id}`} className={`px-3 py-2.5 align-top text-gray-700 ${answerCellClass}`}>
-                                                                                    <div className={`max-w-[300px] break-words ${isTestStatsSurvey && hasAnswer && isCorrect ? 'text-emerald-800 font-medium' : ''}`}>
-                                                                                        {formatQuestionAnswerText(resolved.question, resolved.answer)}
-                                                                                    </div>
-                                                                                    {isTestStatsSurvey && (
-                                                                                        <div className="mt-1 space-y-1">
-                                                                                            <div className="flex flex-wrap items-center gap-1.5">
-                                                                                                <Badge color={answerStatus.color}>{answerStatus.label}</Badge>
-                                                                                                {Number.isFinite(answerEarnedPoints) && (
-                                                                                                    <span className="text-[10px] tabular-nums text-slate-500">
-                                                                                                        {formatPoints(answerEarnedPoints)} / {formatPoints(resolved.question?.points)}
-                                                                                                    </span>
-                                                                                                )}
-                                                                                            </div>
-                                                                                            {expectedOptions.length > 0 && (
-                                                                                                <div className="text-[10px] text-emerald-700 break-words">
-                                                                                                    Правильный: {expectedOptions.join(', ')}
-                                                                                                </div>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    )}
-                                                                                </td>
-                                                                            );
-                                                                        })}
-                                                                    </tr>
-                                                                );
-                                                            })}
-                                                        </tbody>
-                                                    </table>
-                                                )}
-                                            </div>
                                         </div>
+
+                                        {respondentCards.length === 0 && (
+                                            <div className="py-10 text-center">
+                                                <FaIcon className="fas fa-user-check mb-2 block text-3xl text-slate-200" />
+                                                <p className="text-[13px] text-slate-400">
+                                                    {statsOperatorQuery ? 'Сотрудники не найдены' : 'Ответов пока нет'}
+                                                </p>
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                            {respondentCards.map((card) => {
+                                                const scoreColor = card.scoreValue == null
+                                                    ? 'text-slate-400'
+                                                    : (card.scoreValue >= 80
+                                                        ? 'text-emerald-600'
+                                                        : (card.scoreValue >= 60 ? 'text-blue-600' : 'text-amber-600'));
+                                                return (
+                                                    <button
+                                                        key={card.key}
+                                                        type="button"
+                                                        disabled={!card.isCompleted}
+                                                        onClick={() => setOpenedRespondentKey(card.key)}
+                                                        className={`rounded-2xl px-3.5 py-3 text-left ring-1 transition-all ${
+                                                            card.isCompleted
+                                                                ? 'bg-white ring-slate-200/70 hover:ring-blue-300 active:scale-[0.99]'
+                                                                : 'cursor-default bg-slate-50 ring-slate-200/60'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-start justify-between gap-2">
+                                                            <div className="min-w-0">
+                                                                <div className={`truncate text-[13.5px] font-semibold ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
+                                                                    {card.name}
+                                                                </div>
+                                                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                                                    {!card.isCompleted && <Badge color="amber">Не проходил</Badge>}
+                                                                    {card.isDismissed && <Badge color="gray">Уволен</Badge>}
+                                                                    {card.repeatIteration > 1 && <Badge color="blue">#{card.repeatIteration}</Badge>}
+                                                                    {card.testSummary?.is_auto_submitted && <Badge color="amber">по времени</Badge>}
+                                                                </div>
+                                                            </div>
+                                                            {card.isCompleted && isTestStatsSurvey && card.hasScore && (
+                                                                <div className="shrink-0 text-right">
+                                                                    <div className={`text-[17px] font-bold tabular-nums ${scoreColor}`}>
+                                                                        {formatPercent(card.scoreValue)}
+                                                                    </div>
+                                                                    <div className="text-[10.5px] tabular-nums text-slate-400">
+                                                                        {formatPoints(card.testSummary?.earned_points)} / {formatPoints(card.testSummary?.max_points)}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        {card.isCompleted && (
+                                                            <div className="mt-2 flex items-center justify-between gap-2 text-[11.5px] text-slate-500">
+                                                                <span className="tabular-nums">
+                                                                    {isTestStatsSurvey
+                                                                        ? `Верно ${Number(card.testSummary?.correct_answers || 0)} из ${Number(card.testSummary?.total_questions || 0)}`
+                                                                        : `Ответов ${card.answeredCount} из ${card.questionsCount}`}
+                                                                </span>
+                                                                <span className="tabular-nums text-slate-400">
+                                                                    {formatSurveyDateTime(card.submittedAt)}
+                                                                </span>
+                                                            </div>
+                                                        )}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Manager stats tab */}
+                                {canManage && activeTab === 'stats' && (
+                                    <div className="space-y-3">
+                                        {displayQuestionStats.length === 0 && (
+                                            <div className="py-10 text-center">
+                                                <FaIcon className="fas fa-chart-bar mb-2 block text-3xl text-slate-200" />
+                                                <p className="text-[13px] text-slate-400">Данных для статистики пока нет</p>
+                                            </div>
+                                        )}
+                                        {displayQuestionStats.map((stat, index) => renderDetailedQuestionStats(stat, index))}
                                     </div>
                                 )}
                             </div>
@@ -3174,6 +3298,119 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                     )}
                 </div>
             </div>
+
+            {/* ── Лист ответов сотрудника ──
+                Вопрос и ответ подряд, как в тестовых сервисах: правильный вариант
+                показываем только там, где ответили неверно — иначе он превращается
+                в шум над каждым угаданным вопросом. */}
+            {canManage && (
+                <IosModal
+                    open={!!openedRespondent}
+                    onClose={() => setOpenedRespondentKey(null)}
+                    maxWidth="max-w-2xl"
+                    title={openedRespondent?.name || 'Ответы сотрудника'}
+                    subtitle={openedRespondent
+                        ? `${selectedSurvey?.title || ''} · ${formatSurveyDateTime(openedRespondent.submittedAt)}`
+                        : ''}
+                >
+                    {openedRespondent && (
+                        <div className="space-y-3">
+                            {isTestStatsSurvey && openedRespondent.hasScore && (
+                                <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
+                                    <div>
+                                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                            Результат теста
+                                        </div>
+                                        <div className="mt-1 text-[24px] font-bold tabular-nums text-slate-900">
+                                            {formatPercent(openedRespondent.scoreValue)}
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1 text-right text-[12px] text-slate-500">
+                                        <div>
+                                            Баллы:{' '}
+                                            <strong className="tabular-nums text-slate-800">
+                                                {formatPoints(openedRespondent.testSummary?.earned_points)} / {formatPoints(openedRespondent.testSummary?.max_points)}
+                                            </strong>
+                                        </div>
+                                        <div>
+                                            Верных:{' '}
+                                            <strong className="tabular-nums text-slate-800">
+                                                {Number(openedRespondent.testSummary?.correct_answers || 0)} / {Number(openedRespondent.testSummary?.total_questions || 0)}
+                                            </strong>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {openedRespondent.questions.length === 0 && (
+                                <div className="py-8 text-center text-[13px] text-slate-400">В этом опросе нет вопросов</div>
+                            )}
+
+                            {openedRespondent.questions.map((question, questionIndex) => {
+                                const resolved = resolveStatsQuestionAndAnswer(openedRespondent.row, question, questionIndex);
+                                const resolvedQuestion = resolved.question || question;
+                                const hasAnswer = hasSurveyAnswer(resolvedQuestion, resolved.answer);
+                                const isCorrect = isTestStatsSurvey && isTestAnswerCorrect(resolvedQuestion, resolved.answer);
+                                const answerStatus = isTestStatsSurvey
+                                    ? testAnswerStatusMeta(resolvedQuestion, resolved.answer, hasAnswer)
+                                    : null;
+                                const expectedOptions = isTestStatsSurvey
+                                    ? getExpectedOptionsForTest(resolvedQuestion, resolved.answer)
+                                    : [];
+                                const answerEarnedPoints = Number(resolved.answer?.earned_points);
+                                return (
+                                    <div key={`sheet_q_${questionIndex}_${resolvedQuestion?.id || 'q'}`} className={`${iosCard} p-4`}>
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                                    Вопрос {questionIndex + 1}
+                                                </div>
+                                                <div className="mt-0.5 text-[13.5px] font-medium text-slate-900">
+                                                    {resolvedQuestion?.text || `Вопрос ${questionIndex + 1}`}
+                                                </div>
+                                            </div>
+                                            {answerStatus && (
+                                                <div className="flex shrink-0 items-center gap-2">
+                                                    <Badge color={answerStatus.color}>{answerStatus.label}</Badge>
+                                                    {Number.isFinite(answerEarnedPoints) && (
+                                                        <span className="text-[11px] tabular-nums text-slate-400">
+                                                            {formatPoints(answerEarnedPoints)} / {formatPoints(resolvedQuestion?.points)}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className={`mt-2.5 rounded-xl px-3 py-2.5 text-[13px] ${
+                                            !hasAnswer
+                                                ? 'bg-slate-50 text-slate-400'
+                                                : (isTestStatsSurvey
+                                                    ? (isCorrect
+                                                        ? 'bg-emerald-50 text-emerald-800'
+                                                        : (answerStatus?.color === 'blue' ? 'bg-blue-50 text-blue-800' : 'bg-amber-50 text-amber-800'))
+                                                    : 'bg-slate-50 text-slate-800')
+                                        }`}>
+                                            {hasAnswer
+                                                ? (String(resolvedQuestion?.type || '') === 'rating'
+                                                    // Голая цифра «3» не говорит, из скольки она.
+                                                    ? `${formatQuestionAnswerText(resolvedQuestion, resolved.answer)} из 5`
+                                                    : formatQuestionAnswerText(resolvedQuestion, resolved.answer))
+                                                : 'Нет ответа'}
+                                        </div>
+
+                                        {isTestStatsSurvey && !isCorrect && expectedOptions.length > 0 && (
+                                            <div className="mt-2 text-[12px] text-slate-500">
+                                                Правильный ответ:{' '}
+                                                <strong className="font-medium text-emerald-700">{expectedOptions.join(', ')}</strong>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </IosModal>
+            )}
         </div>
     );
 };
