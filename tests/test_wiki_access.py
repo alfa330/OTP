@@ -106,16 +106,41 @@ class CapabilitiesTest(unittest.TestCase):
         self.assertFalse(forbidden['can_publish'],
                          'без правила раздела способность публиковать не работает')
 
-    def test_department_head_is_not_a_global_admin(self):
-        # В OTP isAdminLikeRole специально вычитает глав отделов из глобальных
-        # админов. Повторяем: структура — да, пользователи и доступы — нет.
-        head = capabilities_from_otp_role('admin', is_department_head=True)
-        self.assertTrue(head['can_manage_structure'])
-        self.assertFalse(head['can_manage_users'])
-        self.assertFalse(head['can_manage_access'])
+    def test_head_runs_content_not_structure(self):
+        """Руководитель ведёт содержимое, а устройство раздела — нет.
 
-        globaladmin = capabilities_from_otp_role('admin', is_department_head=False)
-        self.assertTrue(globaladmin['can_manage_access'])
+        Решение владельца 21.08.2026: «не может добавлять разделы и подразделы,
+        не может их удалять либо править, только раздавать доступы». Мастер-ключ
+        can_manage_access убран вместе со структурой — именно он открывал
+        руководителю чужие отделы (витрина ?scope=all, обход запретов,
+        master_key в периметре).
+        """
+        for is_head in (True, False):
+            caps = capabilities_from_otp_role('admin', is_department_head=is_head)
+            self.assertTrue(caps['can_create'] and caps['can_edit']
+                            and caps['can_publish'] and caps['can_approve'],
+                            'руководитель ведёт статьи (глава отдела: %s)' % is_head)
+            self.assertFalse(caps['can_manage_structure'], 'дерево разделов — не его')
+            self.assertFalse(caps['can_manage_users'])
+            self.assertFalse(caps['can_manage_access'])
+
+    def test_director_keeps_everything(self):
+        """Структура и мастер-ключ остались у директора — иначе их нет ни у кого."""
+        caps = capabilities_from_otp_role('super_admin')
+        self.assertTrue(caps['can_manage_structure'])
+        self.assertTrue(caps['can_manage_access'])
+        self.assertTrue(caps['can_manage_users'])
+
+    def test_hand_made_wiki_role_still_carries_master_key(self):
+        """Роль вики назначают руками — она по-прежнему может дать всё.
+
+        После того как должность 'admin' перестала носить мастер-ключ, это
+        единственный способ выдать его не директору.
+        """
+        caps = resolve_capabilities('admin', [{'can_manage_access': True,
+                                               'can_manage_structure': True}])
+        self.assertTrue(caps['can_manage_access'])
+        self.assertTrue(caps['can_manage_structure'])
 
     def test_wiki_roles_win_over_otp_role(self):
         caps = resolve_capabilities('operator', [{'can_delete': True}])

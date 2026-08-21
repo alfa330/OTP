@@ -138,24 +138,30 @@ class WikiRouteGuardTest(_RouteHarness, unittest.TestCase):
         response = client.post('/api/wiki/spaces', json={})
         self.assertEqual(response.status_code, 400)
 
-    # ── Граница главы отдела ─────────────────────────────────────────────
-    def test_department_head_cannot_create_space_in_foreign_department(self):
-        """Админ с возглавляемым отделом — не глобальный админ.
+    # ── Руководитель не трогает структуру ────────────────────────────────
+    def test_head_cannot_touch_structure_even_in_own_department(self):
+        """«Не может добавлять разделы и подразделы, не может их удалять либо править».
 
-        Если это правило не повторить, глава одного отдела получил бы власть
-        над структурой всех остальных.
+        Решение владельца 21.08.2026. Раньше глава отдела заводил пространства
+        и разделы у себя (гейт был на границе отдела); теперь дерево целиком за
+        директором, а руководителю остаётся выдача доступа.
         """
         client, _ = self.build(make_context('admin', headed=[7], department_id=7))
-        response = client.post('/api/wiki/spaces', json={'name': 'Чужое', 'department_id': 9})
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+        for method, url in (('post', '/api/wiki/spaces'),
+                            ('post', '/api/wiki/sections'),
+                            ('patch', '/api/wiki/spaces/1'),
+                            ('patch', '/api/wiki/sections/1'),
+                            ('delete', '/api/wiki/sections/1')):
+            response = getattr(client, method)(
+                url, json={'name': 'Своё', 'space_id': 1, 'department_id': 7})
+            self.assertEqual(response.status_code, 403, '%s %s' % (method, url))
+            self.assertEqual(response.get_json().get('required'), 'can_manage_structure')
 
-    def test_department_head_can_create_space_in_own_department(self):
-        client, cursor = self.build(make_context('admin', headed=[7], department_id=7))
-        cursor.fetchone.return_value = (123,)
-        response = client.post('/api/wiki/spaces', json={'name': 'Своё', 'department_id': 7})
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.get_json().get('id'), 123)
+    def test_head_keeps_access_granting(self):
+        """Отобрана структура, но не выдача доступа: вкладка ему нужна ради неё."""
+        client, _ = self.build(make_context('admin', headed=[7], department_id=7))
+        self.assertEqual(client.get('/api/wiki/access/people').status_code, 200)
+        self.assertEqual(client.get('/api/wiki/access/subjects').status_code, 200)
 
     # ── Preflight ────────────────────────────────────────────────────────
     def test_options_never_requires_permissions(self):
@@ -414,18 +420,17 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
         self.assertIsNone(captured['department_id'])
         self.assertEqual(captured['section_kind'], 'common')
 
-    def test_subjects_catalog_open_to_structure_manager(self):
-        """Справочник отделов нужен форме раздела, а её открывает глава отдела.
+    def test_subjects_catalog_open_to_the_one_who_grants(self):
+        """Справочник нужен форме правила, а её открывает раздающий доступ.
 
-        Глава отдела мастер-ключа can_manage_access не носит
-        (department-head-permission-semantics), и пока гейт был только на нём,
-        селектор «Отдел ветки» у него оставался пустым.
+        Способностей can_manage_* у руководителя больше нет вовсе, и пока гейт
+        стоял только на них, списки в форме приезжали пустыми.
         """
         client, _ = self.build(make_context('admin', headed=[7], department_id=7))
         self.assertEqual(client.get('/api/wiki/access/subjects').status_code, 200)
-        # Гейт правил он теперь проходит (потолок 30), спотыкается уже о пустое
-        # тело — 400, а не 403. Раньше здесь стоял 403: до появления лестницы
-        # правила раздавал только носитель мастер-ключа.
+        # Гейт правил он проходит по лестнице, спотыкается уже о пустое тело —
+        # 400, а не 403. Раньше здесь стоял 403: до появления лестницы правила
+        # раздавал только носитель мастер-ключа.
         self.assertEqual(
             client.post('/api/wiki/access/section-rules', json={}).status_code, 400)
 

@@ -181,16 +181,17 @@ class MoveSectionRouteTest(_RouteHarness, unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(self.moves, [])
 
-    def test_department_head_cannot_move_into_foreign_space(self):
-        """Граница отдела: право нужно на ОБА пространства, не только на исходное."""
-        client, cursor = self._client(make_context('admin', headed=[7], department_id=7))
-        cursor.fetchone.side_effect = [
-            ('Оператор', 7, 1, None, None),   # своё пространство — править вправе
-            (9, 'active'),                    # целевое — чужого отдела
-        ]
+    def test_head_does_not_move_sections_at_all(self):
+        """Руководитель дерево не двигает — ни у себя, ни к соседям.
+
+        До 21.08.2026 он переносил разделы внутри своего отдела, и тест
+        сторожил границу второго пространства. Теперь структура целиком за
+        директором, и отказ приходит раньше — на способности.
+        """
+        client, _cursor = self._client(make_context('admin', headed=[7], department_id=7))
         response = client.patch('/api/wiki/sections/10', json={'space_id': 2})
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+        self.assertEqual(response.get_json().get('required'), 'can_manage_structure')
         self.assertEqual(self.moves, [])
 
     def test_department_branch_conflict_in_target_space(self):
