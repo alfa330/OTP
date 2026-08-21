@@ -134,10 +134,10 @@ export function TrainerPlayer({
     /* Барс выглядывает и ждёт: без паузы голова мелькает за долю секунды, и
        вместо «подглядывает» получается «что-то дёрнулось». */
     useEffect(() => {
-        if (phase !== 'peek') return undefined;
+        if (phase !== 'peek' || leaving) return undefined;
         const timer = setTimeout(() => setPhase('cards'), narrow ? 120 : 1000);
         return () => clearTimeout(timer);
-    }, [phase, narrow]);
+    }, [phase, narrow, leaving]);
 
     /* Маршрут пробежки считается по факту: откуда барс выглядывает и где стоит
        его место в карточке. Числами это не задать — карточка и телефон меняют
@@ -147,7 +147,7 @@ export function TrainerPlayer({
     const phoneWrapRef = useRef(null);
     const [runPath, setRunPath] = useState(null);
     useEffect(() => {
-        if (phase !== 'run') return;
+        if (phase !== 'run' || leaving) return;
         const from = runnerRef.current?.getBoundingClientRect();
         const to = slotRef.current?.getBoundingClientRect();
         // Не смогли измерить — не задерживаем человека: барс просто окажется на
@@ -160,9 +160,14 @@ export function TrainerPlayer({
         });
     }, [phase]);
 
-    /* Плавность одна на все такты: та же кривая, что у модалок портала
-       (ui/ios.jsx) — быстрый старт, мягкое приземление. */
+    /* Появление и уход — РАЗНЫЕ кривые, и это не украшательство.
+       EASE (та же, что у модалок портала) — быстрый старт и мягкое приземление:
+       предмет влетает и встаёт на место. На уходе она даёт обратное: телефон
+       сразу проваливался почти на весь экран, а последние полсотни пикселей полз
+       ещё четверть секунды — «упал, завис и снова поехал». Уход должен
+       РАЗГОНЯТЬСЯ: медленно тронулся, дальше быстрее, и предмет уносит вниз. */
     const EASE = [0.16, 1, 0.3, 1];
+    const EASE_LEAVE = [0.4, 0, 1, 1];
 
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
     useEffect(() => { setRun(startRun(scenario)); }, [scenario]);
@@ -211,7 +216,10 @@ export function TrainerPlayer({
                 aria-hidden="true"
                 initial={{ opacity: animateEntrance && !reduceMotion ? 0 : 1 }}
                 animate={{ opacity: leaving ? 0 : (shown ? 1 : 0) }}
-                transition={{ duration: reduceMotion ? 0 : (leaving ? 0.26 : 0.34), ease: 'easeOut' }}
+                transition={{
+                    duration: reduceMotion ? 0 : (leaving ? 0.36 : 0.34),
+                    ease: leaving ? 'easeIn' : 'easeOut',
+                }}
             />
 
             {/* ── СЛЕВА: помощник ────────────────────────────────────────────
@@ -227,7 +235,10 @@ export function TrainerPlayer({
                 animate={leaving
                     ? { opacity: 0, x: 120, scale: 0.94 }
                     : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
-                transition={{ duration: leaving ? 0.26 : 0.46, ease: EASE }}
+                transition={{
+                    duration: leaving ? 0.24 : 0.46,
+                    ease: leaving ? EASE_LEAVE : EASE,
+                }}
                 onAnimationComplete={() => {
                     if (!leaving) setPhase((p) => (p === 'cards' ? (narrow ? 'done' : 'run') : p));
                 }}
@@ -303,6 +314,7 @@ export function TrainerPlayer({
                                на проявлении, и пробежка обрывалась через четверть
                                секунды в двадцати пикселях от старта. */
                             onAnimationComplete={(definition) => {
+                                if (leaving) return;
                                 if (definition && definition.x !== undefined) setPhase('done');
                             }}
                         >
@@ -316,7 +328,10 @@ export function TrainerPlayer({
                     data-screen={step.screen}
                     initial={animateEntrance && !reduceMotion ? { y: '110%' } : false}
                     animate={{ y: leaving ? '112%' : 0 }}
-                    transition={{ duration: reduceMotion ? 0 : (leaving ? 0.42 : 0.62), ease: EASE }}
+                    transition={{
+                        duration: reduceMotion ? 0 : (leaving ? 0.44 : 0.62),
+                        ease: leaving ? EASE_LEAVE : EASE,
+                    }}
                     onAnimationComplete={() => {
                         if (leaving) onExited?.();
                         else setPhase((p) => (p === 'rise' ? 'peek' : p));
@@ -376,7 +391,10 @@ export function TrainerPlayer({
                 animate={leaving
                     ? { opacity: 0, x: -120, scale: 0.94 }
                     : (cardsOut ? { opacity: 1, x: 0, scale: 1 } : {})}
-                transition={{ duration: leaving ? 0.26 : 0.46, ease: EASE }}
+                transition={{
+                    duration: leaving ? 0.24 : 0.46,
+                    ease: leaving ? EASE_LEAVE : EASE,
+                }}
             >
                 <header className="wt-side__head">
                     <span>{scenario.subtitle}</span>
