@@ -54115,13 +54115,20 @@ if __name__ == '__main__':
     # Архив опросов: раз в сутки в рабочее время. Реже нельзя — уведомление
     # владельцу перестало бы быть своевременным; чаще незачем — порог измеряется
     # неделями. Утро выбрано намеренно: ночная рассылка в Telegram — это шум.
+    #
+    # Плюс догоняющий прогон вскоре после старта: сервис перезапускается на
+    # каждом деплое и засыпает по бездействию, и пропущенное окно 10:00 иначе
+    # откладывало бы архивацию на сутки. Прогон идемпотентен — архивирует
+    # только просроченное и пишет только тем, кому ещё не писали, поэтому
+    # лишних сообщений от перезапуска не будет.
     scheduler.add_job(
         run_survey_archive_async,
         CronTrigger(hour=10, minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='surveys_archive_daily',
         misfire_grace_time=3600,
         max_instances=1,
-        coalesce=True
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=2)
     )
 
     if _chat2desk_sync_enabled():

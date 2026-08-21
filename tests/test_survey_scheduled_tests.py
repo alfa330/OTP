@@ -459,27 +459,54 @@ class SurveyTestFrontendTests(unittest.TestCase):
     def test_numbers_use_tabular_nums(self):
         # Числа в таймере и баллах не должны «прыгать» при обновлении.
         countdown_start = self.src.index("formatCountdown(testMsLeft)")
-        countdown_block = self.src[countdown_start - 400:countdown_start]
+        countdown_block = self.src[countdown_start - 700:countdown_start]
         self.assertIn("tabular-nums", countdown_block)
 
     def test_respondent_cards_replace_the_wide_table(self):
-        """Ответы сотрудников — карточки и лист ответов, а не таблица.
+        """Ответы сотрудников — раскрывающиеся строки, а не таблица.
 
         Таблица с колонкой на каждый вопрос читалась только вбок; проверяем,
         что её не вернули «на всякий случай» рядом с карточками.
         """
         self.assertIn("const respondentCards = useMemo(", self.src)
         self.assertIn("activeTab === 'answers'", self.src)
-        self.assertIn("setOpenedRespondentKey(card.key)", self.src)
+        self.assertIn("setOpenedRespondentKey(expanded ? null : card.key)", self.src)
         self.assertNotIn("statsViewMode", self.src)
         self.assertNotIn("<table", self.src)
 
-    def test_answer_sheet_shows_correct_option_only_when_wrong(self):
-        """Правильный ответ — только там, где ошиблись: иначе это шум."""
-        sheet_start = self.src.index("Лист ответов сотрудника")
-        sheet = self.src[sheet_start:]
-        self.assertIn("isTestStatsSurvey && !isCorrect && expectedOptions.length > 0", sheet)
-        self.assertIn("Правильный ответ:", sheet)
+    def test_section_has_no_modals(self):
+        """В разделе не должно остаться ни одного оверлея.
+
+        Ответы сотрудника раскрываются в строке, конструктор — обычная панель.
+        Проверяем и по компоненту модалки, и по признакам ручного оверлея.
+        """
+        self.assertNotIn("IosModal", self.src)
+        self.assertNotIn("aria-modal", self.src)
+        self.assertNotIn("fixed inset-0", self.src)
+        # Прокрутку страницы конструктор больше не блокирует.
+        self.assertNotIn("document.body.style.overflow", self.src)
+
+    def test_test_review_lists_every_option_with_markers(self):
+        """Разбор теста — все варианты сразу: что выбрал и что было верным.
+
+        Строкой «правильный ответ: Город, Номер телефона» это не читается:
+        глазами приходится сопоставлять два списка, и не видно, чего человек
+        НЕ выбрал, хотя следовало.
+        """
+        review_start = self.src.index("const ReviewOptionRow = (")
+        review = self.src[review_start:self.src.index("const AttemptReview = (")]
+        for mark in ("rightChoice", "wrongChoice", "missedRight"):
+            self.assertIn(mark, review)
+        self.assertIn("Правильный", review)
+        self.assertIn("Выбрано", review)
+        # Оператору внутри открытого окна теста правильные варианты не
+        # приходят — разбор не должен превращаться в подсказку.
+        self.assertIn("revealCorrect", review)
+        self.assertIn("const revealCorrect = isTest && expectedOptions.length > 0;", self.src)
+
+    def test_review_is_shared_by_manager_and_operator(self):
+        """Один разбор на оба места: иначе они разъедутся правилами показа."""
+        self.assertEqual(self.src.count("<AttemptReview"), 2)
 
     def test_tabs_are_a_large_segmented_control(self):
         """Вкладки должны читаться как навигация, а не как мелкая подпись."""

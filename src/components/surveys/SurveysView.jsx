@@ -6,7 +6,6 @@ import {
     APPLE_FONT,
     IosHint,
     IosMenu,
-    IosModal,
     IosSection,
     IosSegmented,
     IosToggle,
@@ -220,6 +219,236 @@ const ProgressBar = ({ value, color = 'blue' }) => {
     return (
         <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
             <div className={`h-full ${colors[color]} rounded-full transition-all duration-500`} style={{ width: `${pct}%` }} />
+        </div>
+    );
+};
+
+/* ─── Разбор ответа: чистые правила, общие для всех трёх мест показа ───
+   Ими пользуются вкладка «Ответы» у руководителя, свой результат у оператора
+   и статистика. Раньше это были useCallback внутри компонента — переиспользовать
+   их из отдельного блока разбора попытки было нечем. */
+
+const formatQuestionAnswerText = (question, answer) => {
+    if (!question || !answer) return '—';
+    if (question.type === 'rating') {
+        const rating = Number(answer.rating_value);
+        return Number.isFinite(rating) ? `${rating}` : '—';
+    }
+
+    const selectedOptions = Array.isArray(answer.selected_options)
+        ? answer.selected_options.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+    const otherText = String(answer.answer_text || '').trim();
+
+    if (selectedOptions.length > 0 && otherText) {
+        return `${selectedOptions.join(', ')}; Другое: ${otherText}`;
+    }
+    if (selectedOptions.length > 0) {
+        return selectedOptions.join(', ');
+    }
+    if (otherText) {
+        return `Другое: ${otherText}`;
+    }
+    return '—';
+};
+
+const getExpectedOptionsForTest = (question, answer) => {
+    const fromAnswer = toUniqueTrimmedList(answer?.expected_options);
+    if (fromAnswer.length > 0) return fromAnswer;
+    return toUniqueTrimmedList(question?.correct_options);
+};
+
+const isTestAnswerCorrect = (question, answer) => {
+    if (!question || !answer) return false;
+    if (typeof answer?.is_correct === 'boolean') return answer.is_correct;
+
+    const type = String(question?.type || '');
+    const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+    const answerText = String(answer?.answer_text || '').trim();
+    const expectedOptions = getExpectedOptionsForTest(question, answer);
+
+    if (type === 'single') {
+        return (
+            expectedOptions.length === 1
+            && selectedOptions.length === 1
+            && selectedOptions[0] === expectedOptions[0]
+            && !answerText
+        );
+    }
+    if (type === 'multiple') {
+        return (
+            expectedOptions.length > 0
+            && selectedOptions.length === expectedOptions.length
+            && expectedOptions.every((option) => selectedOptions.includes(option))
+            && !answerText
+        );
+    }
+    return false;
+};
+
+// Частичный зачёт: сервер присылает и признак, и начисленный балл.
+const isTestAnswerPartiallyCorrect = (answer) => (
+    answer?.is_partially_correct === true
+    || (answer?.is_correct !== true && Number(answer?.earned_points) > 0)
+);
+
+const testAnswerStatusMeta = (question, answer, hasAnswer) => {
+    if (!hasAnswer) return { label: 'Нет ответа', color: 'gray' };
+    if (isTestAnswerCorrect(question, answer)) return { label: 'Верно', color: 'green' };
+    if (isTestAnswerPartiallyCorrect(answer)) return { label: 'Частично', color: 'blue' };
+    return { label: 'Неверно', color: 'amber' };
+};
+
+const hasSurveyAnswer = (question, answer) => {
+    if (!question || !answer) return false;
+    if (question.type === 'rating') {
+        return Number.isFinite(Number(answer?.rating_value));
+    }
+    const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+    const answerText = String(answer?.answer_text || '').trim();
+    return selectedOptions.length > 0 || answerText.length > 0;
+};
+
+/* ─── Разбор попытки ───
+ *
+ * В тесте показываем ВСЕ варианты, как на любом тестовом сайте: видно и что
+ * человек выбрал, и что было правильным, и — главное — чего он НЕ выбрал,
+ * хотя следовало. Строкой «правильный ответ: Город, Номер телефона» это не
+ * читается: глазами приходится сопоставлять два списка.
+ *
+ * Правильные варианты рисуем только если они известны: оператору внутри
+ * открытого окна теста сервер их не отдаёт, и «пустой» разбор не должен
+ * превращаться в подсказку.
+ */
+const ReviewOptionRow = ({ option, isMultiple, isChosen, isCorrect, revealCorrect }) => {
+    const wrongChoice = revealCorrect && isChosen && !isCorrect;
+    const rightChoice = revealCorrect && isChosen && isCorrect;
+    const missedRight = revealCorrect && !isChosen && isCorrect;
+
+    const tone = rightChoice
+        ? 'bg-emerald-50 ring-emerald-200'
+        : wrongChoice
+            ? 'bg-rose-50 ring-rose-200'
+            : missedRight
+                ? 'bg-emerald-50/40 ring-emerald-200'
+                : (isChosen ? 'bg-slate-100 ring-slate-200' : 'bg-white ring-slate-200/70');
+
+    const markTone = rightChoice
+        ? 'border-emerald-500 bg-emerald-500 text-white'
+        : wrongChoice
+            ? 'border-rose-500 bg-rose-500 text-white'
+            : missedRight
+                ? 'border-emerald-400 text-emerald-600'
+                : (isChosen ? 'border-slate-400 bg-slate-400 text-white' : 'border-slate-300 text-transparent');
+
+    return (
+        <div className={`flex items-center gap-2.5 rounded-xl px-3 py-2 ring-1 ${tone}`}>
+            <span
+                className={`grid h-[18px] w-[18px] shrink-0 place-items-center border-2 text-[9px] ${
+                    isMultiple ? 'rounded-[5px]' : 'rounded-full'
+                } ${markTone}`}
+            >
+                <FaIcon className={`fas ${wrongChoice ? 'fa-times' : 'fa-check'}`} />
+            </span>
+            <span className={`min-w-0 flex-1 break-words text-[13px] ${
+                rightChoice || missedRight ? 'text-emerald-900' : (wrongChoice ? 'text-rose-900' : 'text-slate-700')
+            }`}>
+                {option}
+            </span>
+            <span className="shrink-0 text-[11px] font-medium">
+                {rightChoice && <span className="text-emerald-700">Верно</span>}
+                {wrongChoice && <span className="text-rose-600">Выбрано</span>}
+                {missedRight && <span className="text-emerald-700">Правильный</span>}
+                {!revealCorrect && isChosen && <span className="text-slate-500">Выбрано</span>}
+            </span>
+        </div>
+    );
+};
+
+const AttemptReview = ({ questions = [], getAnswer, isTest = false, selfView = false }) => {
+    if (!questions.length) {
+        return <div className="py-6 text-center text-[13px] text-slate-400">В этом опросе нет вопросов</div>;
+    }
+    return (
+        <div className="space-y-2.5">
+            {questions.map((question, index) => {
+                const answer = getAnswer(question, index);
+                const resolvedQuestion = answer?.__question || question;
+                const hasAnswer = hasSurveyAnswer(resolvedQuestion, answer);
+                const expectedOptions = isTest ? getExpectedOptionsForTest(resolvedQuestion, answer) : [];
+                const revealCorrect = isTest && expectedOptions.length > 0;
+                const status = isTest ? testAnswerStatusMeta(resolvedQuestion, answer, hasAnswer) : null;
+                const earnedPoints = Number(answer?.earned_points);
+                const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+                const otherText = String(answer?.answer_text || '').trim();
+                const options = toUniqueTrimmedList(resolvedQuestion?.options);
+                const type = String(resolvedQuestion?.type || '');
+
+                return (
+                    <div key={`review_${index}_${resolvedQuestion?.id || 'q'}`} className="rounded-2xl bg-white p-3.5 ring-1 ring-slate-200/70">
+                        <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                                <div className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+                                    Вопрос {index + 1}
+                                </div>
+                                <div className="mt-0.5 text-[13.5px] font-medium text-slate-900">
+                                    {resolvedQuestion?.text || `Вопрос ${index + 1}`}
+                                </div>
+                            </div>
+                            {status && (
+                                <div className="flex shrink-0 items-center gap-2">
+                                    <Badge color={status.color}>{status.label}</Badge>
+                                    {Number.isFinite(earnedPoints) && (
+                                        <span className="text-[11px] tabular-nums text-slate-400">
+                                            {formatPoints(earnedPoints)} / {formatPoints(resolvedQuestion?.points)}
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="mt-2.5 space-y-1.5">
+                            {/* Тест — всегда полный список вариантов. Обычный опрос
+                                этого не требует: там нет «правильного», и пять строк
+                                вместо одного ответа были бы шумом. */}
+                            {isTest && type !== 'rating' && options.length > 0 && options.map((option) => (
+                                <ReviewOptionRow
+                                    key={`review_${index}_opt_${option}`}
+                                    option={option}
+                                    isMultiple={type === 'multiple'}
+                                    isChosen={selectedOptions.includes(option)}
+                                    isCorrect={expectedOptions.includes(option)}
+                                    revealCorrect={revealCorrect}
+                                />
+                            ))}
+
+                            {(!isTest || type === 'rating' || options.length === 0) && (
+                                <div className={`rounded-xl px-3 py-2.5 text-[13px] ${
+                                    !hasAnswer ? 'bg-slate-50 text-slate-400' : 'bg-slate-50 text-slate-800'
+                                }`}>
+                                    {hasAnswer
+                                        ? (type === 'rating'
+                                            ? `${formatQuestionAnswerText(resolvedQuestion, answer)} из 5`
+                                            : formatQuestionAnswerText(resolvedQuestion, answer))
+                                        : 'Нет ответа'}
+                                </div>
+                            )}
+
+                            {isTest && type !== 'rating' && options.length > 0 && !hasAnswer && (
+                                <div className="rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] text-slate-400">
+                                    {selfView ? 'Вы не ответили на этот вопрос' : 'Сотрудник не ответил на этот вопрос'}
+                                </div>
+                            )}
+
+                            {isTest && otherText && (
+                                <div className="rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] text-slate-600">
+                                    Свой вариант: {otherText}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            })}
         </div>
     );
 };
@@ -725,87 +954,6 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         };
     }, [surveyQuestionsBySurveyId]);
 
-    const formatQuestionAnswerText = useCallback((question, answer) => {
-        if (!question || !answer) return '—';
-        if (question.type === 'rating') {
-            const rating = Number(answer.rating_value);
-            return Number.isFinite(rating) ? `${rating}` : '—';
-        }
-
-        const selectedOptions = Array.isArray(answer.selected_options)
-            ? answer.selected_options.map((item) => String(item || '').trim()).filter(Boolean)
-            : [];
-        const otherText = String(answer.answer_text || '').trim();
-
-        if (selectedOptions.length > 0 && otherText) {
-            return `${selectedOptions.join(', ')}; Другое: ${otherText}`;
-        }
-        if (selectedOptions.length > 0) {
-            return selectedOptions.join(', ');
-        }
-        if (otherText) {
-            return `Другое: ${otherText}`;
-        }
-        return '—';
-    }, []);
-
-    const getExpectedOptionsForTest = useCallback((question, answer) => {
-        const fromAnswer = toUniqueTrimmedList(answer?.expected_options);
-        if (fromAnswer.length > 0) return fromAnswer;
-        return toUniqueTrimmedList(question?.correct_options);
-    }, []);
-
-    const isTestAnswerCorrect = useCallback((question, answer) => {
-        if (!question || !answer) return false;
-        if (typeof answer?.is_correct === 'boolean') return answer.is_correct;
-
-        const type = String(question?.type || '');
-        const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
-        const answerText = String(answer?.answer_text || '').trim();
-        const expectedOptions = getExpectedOptionsForTest(question, answer);
-
-        if (type === 'single') {
-            return (
-                expectedOptions.length === 1
-                && selectedOptions.length === 1
-                && selectedOptions[0] === expectedOptions[0]
-                && !answerText
-            );
-        }
-        if (type === 'multiple') {
-            return (
-                expectedOptions.length > 0
-                && selectedOptions.length === expectedOptions.length
-                && expectedOptions.every((option) => selectedOptions.includes(option))
-                && !answerText
-            );
-        }
-        return false;
-    }, [getExpectedOptionsForTest]);
-
-    // Частичный зачёт: сервер присылает и признак, и начисленный балл.
-    const isTestAnswerPartiallyCorrect = useCallback((answer) => (
-        answer?.is_partially_correct === true
-        || (answer?.is_correct !== true && Number(answer?.earned_points) > 0)
-    ), []);
-
-    const testAnswerStatusMeta = useCallback((question, answer, hasAnswer) => {
-        if (!hasAnswer) return { label: 'Нет ответа', color: 'gray' };
-        if (isTestAnswerCorrect(question, answer)) return { label: 'Верно', color: 'green' };
-        if (isTestAnswerPartiallyCorrect(answer)) return { label: 'Частично', color: 'blue' };
-        return { label: 'Неверно', color: 'amber' };
-    }, [isTestAnswerCorrect, isTestAnswerPartiallyCorrect]);
-
-    const hasSurveyAnswer = useCallback((question, answer) => {
-        if (!question || !answer) return false;
-        if (question.type === 'rating') {
-            return Number.isFinite(Number(answer?.rating_value));
-        }
-        const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
-        const answerText = String(answer?.answer_text || '').trim();
-        return selectedOptions.length > 0 || answerText.length > 0;
-    }, []);
-
     const displayQuestionStats = useMemo(() => {
         const serverStats = Array.isArray(selectedSurvey?.statistics?.question_stats)
             ? selectedSurvey.statistics.question_stats
@@ -985,11 +1133,6 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         ));
     }, [respondentCardsAll, statsOperatorQuery]);
 
-    const openedRespondent = useMemo(
-        () => respondentCardsAll.find((card) => card.key === openedRespondentKey) || null,
-        [openedRespondentKey, respondentCardsAll]
-    );
-
     // Средний балл теста — по тем, кто его прошёл. Медиана здесь была бы
     // честнее на выбросах, но в тесте важен именно средний процент: он же
     // уходит в качество оператора.
@@ -1098,6 +1241,30 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         && !isTestTimeOver
         && (!isSelectedSurveyCompleted || isRetakingSelectedTest)
     );
+
+    // Прогресс прохождения считаем по тем же правилам, по которым сервер
+    // считает вопрос отвеченным, — иначе полоса дошла бы до конца, а отправка
+    // упёрлась бы в «ответьте на все обязательные вопросы».
+    const isFillAnswerFilled = useCallback((question, answer) => {
+        if (!question) return false;
+        if (question.type === 'rating') return Number.isFinite(Number(answer?.rating_value));
+        const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
+        const otherText = String(answer?.answer_text || '').trim();
+        return selectedOptions.length > 0 || otherText.length > 0;
+    }, []);
+
+    const fillProgress = useMemo(() => {
+        const questions = selectedSurvey?.questions || [];
+        const answered = questions.reduce(
+            (count, question) => count + (isFillAnswerFilled(question, answers[question.id]) ? 1 : 0),
+            0
+        );
+        return {
+            answered,
+            total: questions.length,
+            percent: questions.length ? (answered / questions.length) * 100 : 0
+        };
+    }, [answers, isFillAnswerFilled, selectedSurvey?.questions]);
 
     const attemptSaveTimerRef = useRef(null);
     const attemptSaveSurveyIdRef = useRef(null);
@@ -1260,20 +1427,23 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         resetBuilder();
     }, [resetBuilder]);
 
-    // Блокируем прокрутку фона и закрываем модалку по Escape, пока открыт конструктор.
+    // Escape закрывает конструктор. Прокрутку страницы больше НЕ блокируем:
+    // конструктор — обычная панель, а не оверлей, и заблокированный body
+    // просто не давал бы долистать до его нижней части.
     useEffect(() => {
         if (!showBuilder) return undefined;
         const onKeyDown = (event) => {
             if (event.key === 'Escape' && !isSaving) closeBuilder();
         };
-        const previousOverflow = document.body.style.overflow;
-        document.body.style.overflow = 'hidden';
         window.addEventListener('keydown', onKeyDown);
-        return () => {
-            document.body.style.overflow = previousOverflow;
-            window.removeEventListener('keydown', onKeyDown);
-        };
+        return () => window.removeEventListener('keydown', onKeyDown);
     }, [showBuilder, isSaving, closeBuilder]);
+
+    // Панель открывается на месте списка — если страница была прокручена,
+    // человек увидел бы её середину и решил, что ничего не произошло.
+    useEffect(() => {
+        if (showBuilder) window.scrollTo({ top: 0, behavior: 'smooth' });
+    }, [showBuilder]);
 
     const startRepeatSurvey = useCallback((survey) => {
         if (!survey || !canManage) return;
@@ -1672,6 +1842,16 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         return `${Math.max(0, Math.min(100, number))}%`;
     };
 
+    /* ─── Статистика по вопросу ───
+     *
+     * Одна карточка на вопрос, внутри — распределение ответов. Цветом
+     * выделен только правильный вариант теста: он единственный здесь несёт
+     * смысл, остальные полосы нейтральные, иначе рябит.
+     *
+     * Доля считается от числа ОТВЕТИВШИХ на этот вопрос, а не от всех
+     * назначенных: иначе у вопроса, который многие пропустили, все варианты
+     * выглядели бы одинаково провальными.
+     */
     const renderDetailedQuestionStats = (stat, index) => {
         if (!stat) return null;
 
@@ -1713,29 +1893,38 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             });
 
         const options = Array.isArray(stat.options) ? stat.options : [];
+        const leaderCount = options.reduce((max, option) => Math.max(max, Number(option?.count || 0)), 0);
 
         return (
-            <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}`} className="border border-slate-100 rounded-xl p-4 space-y-3 bg-slate-50">
-                {/* Question header */}
-                <div className="flex items-start justify-between gap-2">
-                    <div>
-                        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-0.5">Вопрос #{index + 1}</div>
-                        <div className="text-sm font-medium text-slate-800">{questionText}</div>
+            <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}`} className="rounded-2xl bg-white p-4 ring-1 ring-slate-200/70">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <div className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+                            Вопрос {index + 1}
+                        </div>
+                        <div className="mt-0.5 text-[13.5px] font-medium text-slate-900">{questionText}</div>
                     </div>
-                    <Badge color={stat.type === 'rating' ? 'amber' : 'blue'}>
-                        {questionTypeLabel(stat.type)}
-                    </Badge>
+                    <div className="shrink-0 text-right">
+                        <div className="text-[15px] font-semibold tabular-nums text-slate-900">{answeredCount}</div>
+                        <div className="text-[10.5px] text-slate-400">ответили</div>
+                    </div>
                 </div>
 
-                {skippedCount > 0 && <div className="text-[11px] text-slate-400">Пропустили: {skippedCount}</div>}
+                {skippedCount > 0 && (
+                    <div className="mt-1.5 text-[11.5px] text-slate-400">
+                        Пропустили: <span className="tabular-nums">{skippedCount}</span>
+                    </div>
+                )}
 
-                {/* Rating stats */}
                 {stat.type === 'rating' && (
-                    <div className="space-y-2">
-                        <div className="flex gap-4 text-xs text-slate-600">
-                            <span>Среднее: <strong className="text-slate-800">{stat.average_rating ?? '—'}</strong></span>
-                            <span>Медиана: <strong className="text-slate-800">{stat.median_rating ?? '—'}</strong></span>
-                            <span>Диапазон: <strong className="text-slate-800">{stat.min_rating ?? '—'}–{stat.max_rating ?? '—'}</strong></span>
+                    <div className="mt-3 space-y-2.5">
+                        <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-[12px] text-slate-500">
+                            <span className="text-[20px] font-semibold tabular-nums leading-none text-slate-900">
+                                {stat.average_rating ?? '—'}
+                            </span>
+                            <span>средняя из 5</span>
+                            <span>медиана <strong className="tabular-nums text-slate-700">{stat.median_rating ?? '—'}</strong></span>
+                            <span>разброс <strong className="tabular-nums text-slate-700">{stat.min_rating ?? '—'}–{stat.max_rating ?? '—'}</strong></span>
                         </div>
                         <div className="space-y-1.5">
                             {ratingDistribution.map((bucket) => {
@@ -1743,12 +1932,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 const count = Number(bucket.count || 0);
                                 const percentAnswers = Number(bucket.percent_of_answers || 0);
                                 return (
-                                    <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}_rating_${value}`} className="flex items-center gap-2">
-                                        <span className="text-[11px] w-8 shrink-0 text-slate-600">{value} ★</span>
-                                        <div className="flex-1 h-2 bg-amber-100 rounded-full overflow-hidden">
-                                            <div className="h-full bg-amber-400 rounded-full transition-all duration-500" style={{ width: percentToWidth(percentAnswers) }} />
+                                    <div key={`${selectedSurvey?.id || 'survey'}_stat_${index}_rating_${value}`} className="flex items-center gap-3">
+                                        <span className="w-6 shrink-0 text-[11.5px] tabular-nums text-slate-500">{value}</span>
+                                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
+                                            <div
+                                                className="h-full rounded-full bg-slate-400 transition-all duration-500"
+                                                style={{ width: percentToWidth(percentAnswers) }}
+                                            />
                                         </div>
-                                        <span className="text-[11px] text-slate-500 w-20 text-right shrink-0">{count} ({formatPercent(percentAnswers)})</span>
+                                        <span className="w-24 shrink-0 text-right text-[11.5px] tabular-nums text-slate-500">
+                                            {count} · {formatPercent(percentAnswers)}
+                                        </span>
                                     </div>
                                 );
                             })}
@@ -1756,46 +1950,55 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                     </div>
                 )}
 
-                {/* Choice stats */}
                 {stat.type !== 'rating' && (
-                    <div className="space-y-1.5">
-                        {stat.type === 'multiple' && (
-                            <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
-                                Всего выборов: <strong className="tabular-nums text-slate-700">{Number(stat.selections_total || 0)}</strong>
-                                <IosHint
-                                    label="Про сумму выборов"
-                                    text="В вопросе с несколькими ответами один человек мог отметить сразу несколько вариантов, поэтому сумма выборов больше числа ответивших."
-                                />
-                            </div>
+                    <div className="mt-3 space-y-1.5">
+                        {options.length === 0 && (
+                            <div className="text-[12px] text-slate-400">Ответов на этот вопрос пока нет.</div>
                         )}
-                        {options.length === 0 && <div className="text-[11px] text-slate-400">Данных пока нет.</div>}
                         {options.map((option, optionIndex) => {
                             const optionLabel = String(option?.option || `Вариант ${optionIndex + 1}`);
                             const optionCount = Number(option?.count || 0);
-                            const percentRespondents = Number(option?.percent_of_respondents != null ? option.percent_of_respondents : option?.percent || 0);
                             const percentAnswers = Number(option?.percent_of_answers != null ? option.percent_of_answers : option?.percent || 0);
                             const isCorrectOption = isTestStatsSurvey && expectedOptionsSet.has(optionLabel);
+                            const isLeader = leaderCount > 0 && optionCount === leaderCount;
                             return (
                                 <div
                                     key={`${selectedSurvey?.id || 'survey'}_stat_${index}_option_${optionIndex}`}
-                                    className={`space-y-1 ${isCorrectOption ? 'rounded-md border border-emerald-200 bg-emerald-50/70 p-1.5' : ''}`}
+                                    className={`rounded-xl px-3 py-2 ring-1 ${
+                                        isCorrectOption ? 'bg-emerald-50/60 ring-emerald-200' : 'bg-white ring-slate-200/70'
+                                    }`}
                                 >
-                                    <div className="flex items-center justify-between gap-2 text-[11px]">
-                                        <span className={`truncate ${isCorrectOption ? 'text-emerald-700 font-semibold' : 'text-slate-700'}`} title={optionLabel}>
+                                    <div className="flex items-center justify-between gap-2 text-[12.5px]">
+                                        <span className={`min-w-0 flex-1 truncate ${isCorrectOption ? 'font-medium text-emerald-900' : 'text-slate-700'}`} title={optionLabel}>
                                             {optionLabel}
+                                            {isCorrectOption && (
+                                                <FaIcon className="fas fa-check ml-1.5 text-[10px] text-emerald-600" />
+                                            )}
                                         </span>
-                                        <span className="shrink-0 text-slate-500">{optionCount} ({formatPercent(percentRespondents)})</span>
+                                        <span className="shrink-0 tabular-nums text-slate-500">
+                                            {optionCount} · {formatPercent(percentAnswers)}
+                                        </span>
                                     </div>
-                                    {isCorrectOption && (
-                                        <div className="text-[10px] text-emerald-700 font-medium">
-                                            Правильный ответ
-                                        </div>
-                                    )}
-                                    <ProgressBar value={percentRespondents} color={isCorrectOption ? 'emerald' : 'blue'} />
+                                    <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                                        <div
+                                            className={`h-full rounded-full transition-all duration-500 ${
+                                                isCorrectOption ? 'bg-emerald-500' : (isLeader ? 'bg-slate-500' : 'bg-slate-300')
+                                            }`}
+                                            style={{ width: percentToWidth(percentAnswers) }}
+                                        />
+                                    </div>
                                 </div>
                             );
                         })}
-
+                        {stat.type === 'multiple' && Number(stat.selections_total || 0) > 0 && (
+                            <div className="flex items-center gap-1.5 pt-0.5 text-[11px] text-slate-400">
+                                Всего выборов: <strong className="tabular-nums text-slate-600">{Number(stat.selections_total || 0)}</strong>
+                                <IosHint
+                                    label="Про сумму выборов"
+                                    text="В вопросе с несколькими ответами один человек мог отметить сразу несколько вариантов, поэтому сумма выборов больше числа ответивших, а доли в сумме дают больше 100%."
+                                />
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
@@ -1869,21 +2072,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 </div>
             </div>
 
-            {/* ── Survey Builder (iOS / macOS modal sheet) ── */}
+            {/* ── Конструктор опроса ──
+                Не модалка: конструктор — это отдельный режим работы, а не
+                короткое подтверждение. Затемнённый фон и оверлей поверх списка
+                мешали сверяться с уже созданными опросами, и на телефоне лист
+                на весь экран всё равно вырождался в страницу. Поэтому обычная
+                панель на месте списка: пока она открыта, список не нужен. */}
             {canManage && showBuilder && (
-                <div
-                    className="fixed inset-0 z-[80] flex items-stretch justify-center bg-slate-900/40 backdrop-blur-md sm:items-center sm:p-6"
-                    role="dialog"
-                    aria-modal="true"
-                    onClick={() => { if (!isSaving) closeBuilder(); }}
-                    style={{ fontFamily: APPLE_FONT }}
-                >
-                    <div
-                        className="flex w-full max-w-4xl flex-col overflow-hidden bg-slate-50 shadow-2xl ring-1 ring-slate-900/10 sm:max-h-[92vh] sm:rounded-3xl"
-                        onClick={(e) => e.stopPropagation()}
-                    >
+                <div className="flex flex-col overflow-hidden rounded-2xl bg-slate-50 ring-1 ring-slate-200/70">
+                    <div className="flex flex-col">
                         {/* Header */}
-                        <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white/80 px-5 py-3.5 backdrop-blur-xl">
+                        <div className="relative flex items-center justify-between gap-3 border-b border-slate-200/70 bg-white px-5 py-3.5">
                             <div className="flex min-w-0 items-center gap-3">
                                 <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl shadow-sm ${
                                     isEditMode ? 'bg-slate-900' : (isRepeatMode ? 'bg-indigo-500' : 'bg-blue-600')
@@ -1911,7 +2110,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                         </div>
 
                         {/* Body */}
-                        <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-5">
+                        <div className="space-y-5 px-4 py-5 sm:px-5">
 
                             {/* Repeat-mode hint */}
                             {isRepeatMode && (
@@ -2418,7 +2617,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                         </div>
 
                         {/* Footer */}
-                        <div className="flex items-center justify-between gap-3 border-t border-slate-200/70 bg-white/80 px-5 py-3 backdrop-blur-xl">
+                        <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-slate-200/70 bg-white/90 px-5 py-3 backdrop-blur-xl">
                             <div className="hidden text-[12px] text-slate-500 sm:block">
                                 {draft.questions.length} вопр. · {draft.operatorIds.length} оператор(ов)
                             </div>
@@ -2446,6 +2645,11 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                 </div>
             )}
 
+            {/* ── Список и карточка. Пока открыт конструктор, они скрыты:
+                две колонки под панелью редактирования — это две очереди
+                внимания на одном экране. ── */}
+            {!(canManage && showBuilder) && (
+            <>
             {/* ── Main content: list + detail ──
                 На широком экране обе колонки держат высоту окна и прокручиваются
                 внутри себя: страница списка на 20 строк иначе уводила бы кнопки
@@ -2849,32 +3053,50 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 {/* Operator fills out survey */}
                                 {isOperator && canFillSelectedSurvey && (
                                     <div className="space-y-3">
-                                        {selectedSurvey?.is_test && testMsLeft != null && (
-                                            <div className={`sticky top-0 z-10 -mx-1 flex items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 backdrop-blur ${
-                                                testMsLeft <= 60000
-                                                    ? 'bg-red-50/90 ring-1 ring-red-200'
-                                                    : 'bg-slate-50/90 ring-1 ring-slate-200/70'
-                                            }`}>
-                                                <div className="flex items-center gap-2 text-[13px] text-slate-600">
-                                                    <FaIcon className={`fas fa-stopwatch text-[11px] ${testMsLeft <= 60000 ? 'text-red-500' : 'text-slate-400'}`} />
-                                                    До завершения теста
+                                        {/* Шапка прохождения, как на тестовых сайтах: сколько
+                                            вопросов позади и сколько осталось времени. Без неё
+                                            в длинном тесте непонятно, где ты и успеваешь ли. */}
+                                        <div className="sticky top-0 z-10 -mx-1 space-y-2 rounded-xl bg-white/90 px-3.5 py-2.5 ring-1 ring-slate-200/70 backdrop-blur">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="text-[13px] text-slate-600">
+                                                    Отвечено{' '}
+                                                    <strong className="tabular-nums text-slate-900">
+                                                        {fillProgress.answered} из {fillProgress.total}
+                                                    </strong>
                                                 </div>
-                                                <div className={`text-[15px] font-semibold tabular-nums ${testMsLeft <= 60000 ? 'text-red-600' : 'text-slate-800'}`}>
-                                                    {formatCountdown(testMsLeft)}
-                                                </div>
+                                                {selectedSurvey?.is_test && testMsLeft != null && (
+                                                    <div className={`flex items-center gap-2 text-[15px] font-semibold tabular-nums ${
+                                                        testMsLeft <= 60000 ? 'text-red-600' : 'text-slate-800'
+                                                    }`}>
+                                                        <FaIcon className={`fas fa-stopwatch text-[11px] ${testMsLeft <= 60000 ? 'text-red-500' : 'text-slate-400'}`} />
+                                                        {formatCountdown(testMsLeft)}
+                                                    </div>
+                                                )}
                                             </div>
-                                        )}
+                                            <ProgressBar
+                                                value={fillProgress.percent}
+                                                color={fillProgress.answered === fillProgress.total ? 'emerald' : 'blue'}
+                                            />
+                                        </div>
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const answer = answers[question.id] || {};
+                                            const isAnswered = isFillAnswerFilled(question, answer);
                                             return (
-                                                <div key={question.id} className="border border-slate-200 rounded-xl p-4 space-y-3">
+                                                <div key={question.id} className={`space-y-3 rounded-2xl bg-white p-4 ring-1 transition-colors ${
+                                                    isAnswered ? 'ring-slate-200/70' : 'ring-slate-200'
+                                                }`}>
                                                     <div className="flex items-start justify-between gap-2">
                                                         <div>
-                                                            <div className="text-[11px] text-slate-400 mb-1">
-                                                                #{index + 1} · {questionTypeLabel(question.type)}
-                                                                {question.required && <span className="text-red-400 ml-1">*</span>}
+                                                            <div className="mb-1 flex items-center gap-2 text-[11px] text-slate-400">
+                                                                <span className={`grid h-[18px] w-[18px] place-items-center rounded-full text-[9px] font-bold ${
+                                                                    isAnswered ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                                                                }`}>
+                                                                    {isAnswered ? <FaIcon className="fas fa-check" /> : index + 1}
+                                                                </span>
+                                                                {questionTypeLabel(question.type)}
+                                                                {question.required && <span className="text-red-400">*</span>}
                                                             </div>
-                                                            <div className="text-sm font-medium text-slate-800">{question.text}</div>
+                                                            <div className="text-[14px] font-medium text-slate-900">{question.text}</div>
                                                         </div>
                                                         {selectedSurvey?.is_test && question.points != null && (
                                                             <span
@@ -2916,17 +3138,19 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                 return (
                                                                     <label
                                                                         key={`${question.id}_${option}`}
-                                                                        className={`flex items-center gap-3 p-2.5 rounded-lg cursor-pointer border transition-all ${
-                                                                            selected ? 'border-blue-200 bg-blue-50' : 'border-transparent hover:bg-slate-50'
+                                                                        className={`flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 ring-1 transition-all active:scale-[0.995] ${
+                                                                            selected
+                                                                                ? 'bg-blue-50 ring-blue-300'
+                                                                                : 'bg-white ring-slate-200/70 hover:ring-slate-300'
                                                                         }`}
                                                                     >
-                                                                        <div className={`w-4 h-4 shrink-0 flex items-center justify-center transition-all ${
+                                                                        <div className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center transition-all ${
                                                                             question.type === 'single'
                                                                                 ? `rounded-full border-2 ${selected ? 'border-blue-600' : 'border-slate-300'}`
-                                                                                : `rounded border-2 ${selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'}`
+                                                                                : `rounded-[5px] border-2 ${selected ? 'bg-blue-600 border-blue-600' : 'border-slate-300'}`
                                                                         }`}>
-                                                                            {selected && question.type === 'single' && <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />}
-                                                                            {selected && question.type === 'multiple' && <FaIcon className="fas fa-check text-white text-[8px]" />}
+                                                                            {selected && question.type === 'single' && <div className="h-2 w-2 rounded-full bg-blue-600" />}
+                                                                            {selected && question.type === 'multiple' && <FaIcon className="fas fa-check text-[9px] text-white" />}
                                                                         </div>
                                                                         <input
                                                                             type={question.type === 'single' ? 'radio' : 'checkbox'}
@@ -2945,7 +3169,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                                 }
                                                                             }}
                                                                         />
-                                                                        <span className="text-sm text-slate-700">{option}</span>
+                                                                        <span className="text-[13.5px] text-slate-800">{option}</span>
                                                                     </label>
                                                                 );
                                                             })}
@@ -3001,6 +3225,8 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         )}
                                         {(selectedSurvey.questions || []).map((question, index) => {
                                             const normalizedOptions = toUniqueTrimmedList(question.options);
+                                            const isTestQuestions = !!selectedSurvey?.is_test && question.type !== 'rating';
+                                            const correctOptions = toUniqueTrimmedList(question.correct_options);
                                             return (
                                                 <div key={question.id} className="flex gap-3 items-start p-3 rounded-xl border border-slate-100 bg-slate-50/60">
                                                     <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
@@ -3008,24 +3234,52 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                     </div>
                                                     <div className="flex-1">
                                                         <div className="text-sm font-medium text-slate-800">{question.text}</div>
-                                                        <div className="flex items-center gap-2 mt-1">
+                                                        <div className="mt-1 flex flex-wrap items-center gap-2">
                                                             <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
                                                             {question.required && <Badge color="blue">Обязательный</Badge>}
+                                                            {isTestQuestions && (
+                                                                <span className="text-[11px] tabular-nums text-slate-500">
+                                                                    {formatPoints(question.points)} балл.
+                                                                    {question.partial_credit && ' · частичный зачёт'}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         {question.type !== 'rating' && (
-                                                            <div className="mt-2 space-y-1">
-                                                                <div className="text-[11px] text-slate-400">Варианты ответа</div>
+                                                            <div className="mt-2 space-y-1.5">
                                                                 {normalizedOptions.length > 0 ? (
-                                                                    <div className="flex flex-wrap gap-1.5">
-                                                                        {normalizedOptions.map((option) => (
-                                                                            <span key={`${question.id}_${option}`} className="inline-flex items-center px-2 py-0.5 rounded bg-white border border-slate-200 text-xs text-slate-700">
-                                                                                {option}
-                                                                            </span>
-                                                                        ))}
+                                                                    /* В тесте правильный вариант отмечаем прямо в списке,
+                                                                       как на любом тестовом сайте. Отдельная строка
+                                                                       «Правильный ответ: Город, Номер телефона» заставляла
+                                                                       сверять глазами два списка — и была вторым местом,
+                                                                       где те же значения повторялись. */
+                                                                    <div className="space-y-1.5">
+                                                                        {normalizedOptions.map((option) => {
+                                                                            const isCorrect = isTestQuestions && correctOptions.includes(option);
+                                                                            return (
+                                                                                <div
+                                                                                    key={`${question.id}_${option}`}
+                                                                                    className={`flex items-center gap-2.5 rounded-xl px-3 py-2 ring-1 ${
+                                                                                        isCorrect ? 'bg-emerald-50 ring-emerald-200' : 'bg-white ring-slate-200/70'
+                                                                                    }`}
+                                                                                >
+                                                                                    <span className={`grid h-[18px] w-[18px] shrink-0 place-items-center border-2 text-[9px] ${
+                                                                                        question.type === 'multiple' ? 'rounded-[5px]' : 'rounded-full'
+                                                                                    } ${isCorrect ? 'border-emerald-500 bg-emerald-500 text-white' : 'border-slate-300 text-transparent'}`}>
+                                                                                        <FaIcon className="fas fa-check" />
+                                                                                    </span>
+                                                                                    <span className={`min-w-0 flex-1 break-words text-[13px] ${isCorrect ? 'text-emerald-900' : 'text-slate-700'}`}>
+                                                                                        {option}
+                                                                                    </span>
+                                                                                    {isCorrect && (
+                                                                                        <span className="shrink-0 text-[11px] font-medium text-emerald-700">Правильный</span>
+                                                                                    )}
+                                                                                </div>
+                                                                            );
+                                                                        })}
                                                                         {question.allow_other && (
-                                                                            <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-50 border border-amber-200 text-xs text-amber-700">
-                                                                                Другое
-                                                                            </span>
+                                                                            <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-700 ring-1 ring-amber-200">
+                                                                                Плюс свободное поле «Другое»
+                                                                            </div>
                                                                         )}
                                                                     </div>
                                                                 ) : (
@@ -3033,20 +3287,8 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                         {question.allow_other ? 'Только поле «Другое»' : 'Без фиксированных вариантов'}
                                                                     </div>
                                                                 )}
-                                                            </div>
-                                                        )}
-                                                        {selectedSurvey?.is_test && question.type !== 'rating' && (
-                                                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                                                                <span className="text-emerald-700">
-                                                                    Правильный ответ: {toUniqueTrimmedList(question.correct_options).length > 0
-                                                                        ? toUniqueTrimmedList(question.correct_options).join(', ')
-                                                                        : '—'}
-                                                                </span>
-                                                                <span className="text-slate-500 tabular-nums">
-                                                                    Баллы: {formatPoints(question.points)}
-                                                                </span>
-                                                                {question.partial_credit && (
-                                                                    <span className="text-slate-500">Частичный зачёт</span>
+                                                                {isTestQuestions && correctOptions.length === 0 && (
+                                                                    <div className="text-[12px] text-amber-600">Правильный вариант не отмечен</div>
                                                                 )}
                                                             </div>
                                                         )}
@@ -3122,59 +3364,17 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                 </div>
                                             );
                                         })()}
-                                        {(selectedSurvey.questions || []).map((question, index) => {
-                                            const answersByQuestion = selectedSurvey?.my_response?.answers_by_question || {};
-                                            const answer = answersByQuestion[String(question.id)] || answersByQuestion[question.id] || null;
-                                            const selectedOptions = toUniqueTrimmedList(answer?.selected_options);
-                                            const hasAnswer = question.type === 'rating'
-                                                ? Number.isFinite(Number(answer?.rating_value))
-                                                : (selectedOptions.length > 0 || String(answer?.answer_text || '').trim().length > 0);
-                                            const expectedOptions = getExpectedOptionsForTest(question, answer);
-                                            const answerStatus = selectedSurvey?.is_test
-                                                ? testAnswerStatusMeta(question, answer, hasAnswer)
-                                                : null;
-                                            const earnedPoints = Number(answer?.earned_points);
-                                            return (
-                                                <div key={question.id} className="p-3 rounded-xl border border-slate-100 bg-slate-50/60 space-y-2">
-                                                    <div className="flex items-start gap-3">
-                                                        <div className="w-6 h-6 rounded-lg bg-blue-50 flex items-center justify-center shrink-0 mt-0.5">
-                                                            <span className="text-[10px] font-bold text-blue-500">{index + 1}</span>
-                                                        </div>
-                                                        <div className="flex-1 min-w-0">
-                                                            <div className="text-sm font-medium text-slate-800">{question.text}</div>
-                                                            <div className="flex flex-wrap items-center gap-2 mt-1">
-                                                                <Badge color="gray">{questionTypeLabel(question.type)}</Badge>
-                                                                {question.required && <Badge color="blue">Обязательный</Badge>}
-                                                                {answerStatus && (
-                                                                    <Badge color={answerStatus.color}>{answerStatus.label}</Badge>
-                                                                )}
-                                                                {selectedSurvey?.is_test && Number.isFinite(earnedPoints) && (
-                                                                    <span className="text-[11px] tabular-nums text-slate-500">
-                                                                        {formatPoints(earnedPoints)} / {formatPoints(question.points)} балл.
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="ml-9 text-sm text-slate-700">
-                                                        <span className="text-slate-500 mr-1">Ваш ответ:</span>
-                                                        <strong className="font-medium text-slate-800 break-words">
-                                                            {formatQuestionAnswerText(question, answer)}
-                                                        </strong>
-                                                    </div>
-                                                    {/* Правильный ответ показываем только когда он открыт:
-                                                        при разрешённом повторе внутри окна это была бы подсказка. */}
-                                                    {selectedSurvey?.is_test && expectedOptions.length > 0 && (
-                                                        <div className="ml-9 text-sm text-slate-700">
-                                                            <span className="text-slate-500 mr-1">Правильный ответ:</span>
-                                                            <strong className="font-medium text-emerald-700 break-words">
-                                                                {expectedOptions.join(', ')}
-                                                            </strong>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
+                                        {/* Свой результат — тем же разбором, что видит руководитель:
+                                            все варианты, отмечено выбранное и правильное. */}
+                                        <AttemptReview
+                                            selfView
+                                            isTest={!!selectedSurvey?.is_test}
+                                            questions={selectedSurvey.questions || []}
+                                            getAnswer={(question) => {
+                                                const byQuestion = selectedSurvey?.my_response?.answers_by_question || {};
+                                                return byQuestion[String(question.id)] || byQuestion[question.id] || null;
+                                            }}
+                                        />
                                     </div>
                                 )}
 
@@ -3220,36 +3420,62 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                             </div>
                                         )}
 
-                                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                        {/* Строка раскрывается на месте, без модалки: ответы одного
+                                            человека — продолжение его строки, а не отдельный экран,
+                                            и после закрытия не нужно искать, где ты был в списке. */}
+                                        <div className="space-y-2">
                                             {respondentCards.map((card) => {
+                                                const expanded = card.key === openedRespondentKey;
                                                 const scoreColor = card.scoreValue == null
                                                     ? 'text-slate-400'
                                                     : (card.scoreValue >= 80
                                                         ? 'text-emerald-600'
                                                         : (card.scoreValue >= 60 ? 'text-blue-600' : 'text-amber-600'));
                                                 return (
-                                                    <button
+                                                    <div
                                                         key={card.key}
-                                                        type="button"
-                                                        disabled={!card.isCompleted}
-                                                        onClick={() => setOpenedRespondentKey(card.key)}
-                                                        className={`rounded-2xl px-3.5 py-3 text-left ring-1 transition-all ${
-                                                            card.isCompleted
-                                                                ? 'bg-white ring-slate-200/70 hover:ring-blue-300 active:scale-[0.99]'
-                                                                : 'cursor-default bg-slate-50 ring-slate-200/60'
+                                                        className={`overflow-hidden rounded-2xl ring-1 transition-all ${
+                                                            expanded
+                                                                ? 'bg-white ring-blue-200'
+                                                                : (card.isCompleted ? 'bg-white ring-slate-200/70' : 'bg-slate-50 ring-slate-200/60')
                                                         }`}
                                                     >
-                                                        <div className="flex items-start justify-between gap-2">
-                                                            <div className="min-w-0">
-                                                                <div className={`truncate text-[13.5px] font-semibold ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
-                                                                    {card.name}
-                                                                </div>
-                                                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                                        <button
+                                                            type="button"
+                                                            disabled={!card.isCompleted}
+                                                            aria-expanded={expanded}
+                                                            onClick={() => setOpenedRespondentKey(expanded ? null : card.key)}
+                                                            className={`flex w-full items-center gap-3 px-3.5 py-3 text-left transition-colors ${
+                                                                card.isCompleted ? 'hover:bg-slate-50/70' : 'cursor-default'
+                                                            }`}
+                                                        >
+                                                            <FaIcon
+                                                                className={`fas fa-chevron-right shrink-0 text-[11px] transition-transform ${
+                                                                    card.isCompleted ? 'text-slate-400' : 'text-transparent'
+                                                                } ${expanded ? 'rotate-90' : ''}`}
+                                                            />
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                                    <span className={`truncate text-[13.5px] font-semibold ${card.isCompleted ? 'text-slate-900' : 'text-slate-500'}`}>
+                                                                        {card.name}
+                                                                    </span>
                                                                     {!card.isCompleted && <Badge color="amber">Не проходил</Badge>}
                                                                     {card.isDismissed && <Badge color="gray">Уволен</Badge>}
                                                                     {card.repeatIteration > 1 && <Badge color="blue">#{card.repeatIteration}</Badge>}
                                                                     {card.testSummary?.is_auto_submitted && <Badge color="amber">по времени</Badge>}
                                                                 </div>
+                                                                {card.isCompleted && (
+                                                                    <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11.5px] text-slate-500">
+                                                                        <span className="tabular-nums">
+                                                                            {isTestStatsSurvey
+                                                                                ? `Верно ${Number(card.testSummary?.correct_answers || 0)} из ${Number(card.testSummary?.total_questions || 0)}`
+                                                                                : `Ответов ${card.answeredCount} из ${card.questionsCount}`}
+                                                                        </span>
+                                                                        <span className="tabular-nums text-slate-400">
+                                                                            {formatSurveyDateTime(card.submittedAt)}
+                                                                        </span>
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                             {card.isCompleted && isTestStatsSurvey && card.hasScore && (
                                                                 <div className="shrink-0 text-right">
@@ -3261,20 +3487,23 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                                     </div>
                                                                 </div>
                                                             )}
-                                                        </div>
-                                                        {card.isCompleted && (
-                                                            <div className="mt-2 flex items-center justify-between gap-2 text-[11.5px] text-slate-500">
-                                                                <span className="tabular-nums">
-                                                                    {isTestStatsSurvey
-                                                                        ? `Верно ${Number(card.testSummary?.correct_answers || 0)} из ${Number(card.testSummary?.total_questions || 0)}`
-                                                                        : `Ответов ${card.answeredCount} из ${card.questionsCount}`}
-                                                                </span>
-                                                                <span className="tabular-nums text-slate-400">
-                                                                    {formatSurveyDateTime(card.submittedAt)}
-                                                                </span>
+                                                        </button>
+
+                                                        {expanded && (
+                                                            <div className="border-t border-slate-200/70 bg-slate-50/60 px-3.5 py-3">
+                                                                <AttemptReview
+                                                                    questions={card.questions}
+                                                                    isTest={isTestStatsSurvey}
+                                                                    getAnswer={(question, questionIndex) => {
+                                                                        const resolved = resolveStatsQuestionAndAnswer(card.row, question, questionIndex);
+                                                                        return resolved.answer
+                                                                            ? { ...resolved.answer, __question: resolved.question }
+                                                                            : null;
+                                                                    }}
+                                                                />
                                                             </div>
                                                         )}
-                                                    </button>
+                                                    </div>
                                                 );
                                             })}
                                         </div>
@@ -3284,6 +3513,50 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 {/* Manager stats tab */}
                                 {canManage && activeTab === 'stats' && (
                                     <div className="space-y-3">
+                                        {/* Сводка сверху: до неё, чтобы понять «как прошло»,
+                                            приходилось складывать проценты по вопросам глазами. */}
+                                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                            {[
+                                                {
+                                                    key: 'assigned',
+                                                    label: 'Назначено',
+                                                    value: selectedSurveyDisplayMetrics.assignedCount || 0
+                                                },
+                                                {
+                                                    key: 'completed',
+                                                    label: 'Прошли',
+                                                    value: selectedSurveyDisplayMetrics.completedCount || 0
+                                                },
+                                                {
+                                                    key: 'rate',
+                                                    label: 'Доля прохождения',
+                                                    value: formatPercent(selectedSurveyDisplayMetrics.completionRate || 0)
+                                                },
+                                                isTestStatsSurvey
+                                                    ? {
+                                                        key: 'score',
+                                                        label: 'Средний результат',
+                                                        value: respondentsSummary.averageScore != null
+                                                            ? formatPercent(respondentsSummary.averageScore)
+                                                            : '—'
+                                                    }
+                                                    : {
+                                                        key: 'questions',
+                                                        label: 'Вопросов',
+                                                        value: (selectedSurvey?.questions || []).length
+                                                    }
+                                            ].map((tile) => (
+                                                <div key={tile.key} className="rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70">
+                                                    <div className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-400">
+                                                        {tile.label}
+                                                    </div>
+                                                    <div className="mt-1 text-[19px] font-semibold tabular-nums leading-none text-slate-900">
+                                                        {tile.value}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+
                                         {displayQuestionStats.length === 0 && (
                                             <div className="py-10 text-center">
                                                 <FaIcon className="fas fa-chart-bar mb-2 block text-3xl text-slate-200" />
@@ -3298,118 +3571,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                     )}
                 </div>
             </div>
-
-            {/* ── Лист ответов сотрудника ──
-                Вопрос и ответ подряд, как в тестовых сервисах: правильный вариант
-                показываем только там, где ответили неверно — иначе он превращается
-                в шум над каждым угаданным вопросом. */}
-            {canManage && (
-                <IosModal
-                    open={!!openedRespondent}
-                    onClose={() => setOpenedRespondentKey(null)}
-                    maxWidth="max-w-2xl"
-                    title={openedRespondent?.name || 'Ответы сотрудника'}
-                    subtitle={openedRespondent
-                        ? `${selectedSurvey?.title || ''} · ${formatSurveyDateTime(openedRespondent.submittedAt)}`
-                        : ''}
-                >
-                    {openedRespondent && (
-                        <div className="space-y-3">
-                            {isTestStatsSurvey && openedRespondent.hasScore && (
-                                <div className={`${iosCard} flex flex-wrap items-center justify-between gap-3 p-4`}>
-                                    <div>
-                                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                                            Результат теста
-                                        </div>
-                                        <div className="mt-1 text-[24px] font-bold tabular-nums text-slate-900">
-                                            {formatPercent(openedRespondent.scoreValue)}
-                                        </div>
-                                    </div>
-                                    <div className="space-y-1 text-right text-[12px] text-slate-500">
-                                        <div>
-                                            Баллы:{' '}
-                                            <strong className="tabular-nums text-slate-800">
-                                                {formatPoints(openedRespondent.testSummary?.earned_points)} / {formatPoints(openedRespondent.testSummary?.max_points)}
-                                            </strong>
-                                        </div>
-                                        <div>
-                                            Верных:{' '}
-                                            <strong className="tabular-nums text-slate-800">
-                                                {Number(openedRespondent.testSummary?.correct_answers || 0)} / {Number(openedRespondent.testSummary?.total_questions || 0)}
-                                            </strong>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {openedRespondent.questions.length === 0 && (
-                                <div className="py-8 text-center text-[13px] text-slate-400">В этом опросе нет вопросов</div>
-                            )}
-
-                            {openedRespondent.questions.map((question, questionIndex) => {
-                                const resolved = resolveStatsQuestionAndAnswer(openedRespondent.row, question, questionIndex);
-                                const resolvedQuestion = resolved.question || question;
-                                const hasAnswer = hasSurveyAnswer(resolvedQuestion, resolved.answer);
-                                const isCorrect = isTestStatsSurvey && isTestAnswerCorrect(resolvedQuestion, resolved.answer);
-                                const answerStatus = isTestStatsSurvey
-                                    ? testAnswerStatusMeta(resolvedQuestion, resolved.answer, hasAnswer)
-                                    : null;
-                                const expectedOptions = isTestStatsSurvey
-                                    ? getExpectedOptionsForTest(resolvedQuestion, resolved.answer)
-                                    : [];
-                                const answerEarnedPoints = Number(resolved.answer?.earned_points);
-                                return (
-                                    <div key={`sheet_q_${questionIndex}_${resolvedQuestion?.id || 'q'}`} className={`${iosCard} p-4`}>
-                                        <div className="flex items-start justify-between gap-3">
-                                            <div className="min-w-0">
-                                                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                                                    Вопрос {questionIndex + 1}
-                                                </div>
-                                                <div className="mt-0.5 text-[13.5px] font-medium text-slate-900">
-                                                    {resolvedQuestion?.text || `Вопрос ${questionIndex + 1}`}
-                                                </div>
-                                            </div>
-                                            {answerStatus && (
-                                                <div className="flex shrink-0 items-center gap-2">
-                                                    <Badge color={answerStatus.color}>{answerStatus.label}</Badge>
-                                                    {Number.isFinite(answerEarnedPoints) && (
-                                                        <span className="text-[11px] tabular-nums text-slate-400">
-                                                            {formatPoints(answerEarnedPoints)} / {formatPoints(resolvedQuestion?.points)}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        <div className={`mt-2.5 rounded-xl px-3 py-2.5 text-[13px] ${
-                                            !hasAnswer
-                                                ? 'bg-slate-50 text-slate-400'
-                                                : (isTestStatsSurvey
-                                                    ? (isCorrect
-                                                        ? 'bg-emerald-50 text-emerald-800'
-                                                        : (answerStatus?.color === 'blue' ? 'bg-blue-50 text-blue-800' : 'bg-amber-50 text-amber-800'))
-                                                    : 'bg-slate-50 text-slate-800')
-                                        }`}>
-                                            {hasAnswer
-                                                ? (String(resolvedQuestion?.type || '') === 'rating'
-                                                    // Голая цифра «3» не говорит, из скольки она.
-                                                    ? `${formatQuestionAnswerText(resolvedQuestion, resolved.answer)} из 5`
-                                                    : formatQuestionAnswerText(resolvedQuestion, resolved.answer))
-                                                : 'Нет ответа'}
-                                        </div>
-
-                                        {isTestStatsSurvey && !isCorrect && expectedOptions.length > 0 && (
-                                            <div className="mt-2 text-[12px] text-slate-500">
-                                                Правильный ответ:{' '}
-                                                <strong className="font-medium text-emerald-700">{expectedOptions.join(', ')}</strong>
-                                            </div>
-                                        )}
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    )}
-                </IosModal>
+            </>
             )}
         </div>
     );
