@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronRight, Loader2,
-    Paperclip, Send, ShieldCheck, X,
+    AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronRight, Copy, Loader2,
+    Paperclip, Send, ShieldCheck, UserCheck, X,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -11,11 +11,11 @@ import {
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
-    CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterChecks, answerValue, carryOver,
-    checksAreComplete, checksPayload,
-    describeSnapshot, groupCatalog, groupIsComplete, groupsOf, localVerdict, missingGroup,
-    needsSaparCheck, nextStop, periodLabel, periodOptions, previousStop, referenceOptions,
-    rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
+    CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterCategory, afterChecks, answerValue,
+    carryOver, checksAreComplete, checksPayload, describeSnapshot, entryCategories,
+    entryIsComplete, groupCatalog, groupIsComplete, groupsOf, hasChecks, localVerdict,
+    missingGroup, needsSaparCheck, nextStop, openStop, pairRows, periodLabel, periodOptions,
+    previousStop, referenceOptions, rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -43,6 +43,17 @@ const OUTCOME = {
     SWITCH: 'switch',
     PASS: 'pass',
     INCOMPLETE: 'incomplete',
+    // Разобраться может только супервайзер: обращение никуда не уходит, оператор
+    // передаёт ему готовый набор данных (инструкция #230, §4).
+    ESCALATE: 'escalate',
+};
+
+// Исходы проверки по ИИН — до выбора категории.
+const ENTRY = {
+    DOCUMENTS: 'documents',
+    NO_DOCUMENTS: 'no_documents',
+    CLOSE: 'close',
+    UNKNOWN: 'unknown',
 };
 
 const errorText = (error, fallback) => (
@@ -265,30 +276,103 @@ const SaparNote = ({ snapshot }) => {
 };
 
 
-const ClosedScreen = ({ verdict, onClose }) => (
-    <div className="flex flex-col items-center gap-3 py-8 text-center">
-        <span className="grid h-12 w-12 place-items-center rounded-full bg-emerald-50 text-emerald-600">
-            <CheckCircle2 size={22} />
-        </span>
-        <div className="text-[15px] font-semibold text-slate-900">
-            Обращение в группу не отправляем
+const ClosedScreen = ({ verdict, onClose }) => {
+    /* Консультация — не украшение к сообщению об исходе, а то, ради чего этот
+       экран и открылся: оператор проговаривает водителю именно эти пункты
+       (инструкция #230, §3.2). Поэтому список, а не абзац: по нему идут сверху
+       вниз во время разговора. */
+    const script = verdict.script || [];
+    return (
+        <div className="flex flex-col items-center gap-3 py-6 text-center">
+            <span className="grid h-12 w-12 place-items-center rounded-full bg-emerald-50 text-emerald-600">
+                <CheckCircle2 size={22} />
+            </span>
+            <div className="text-[15px] font-semibold text-slate-900">
+                Обращение в группу не отправляем
+            </div>
+            <p className="max-w-[440px] text-[13px] leading-relaxed text-slate-600">
+                {verdict.message}
+            </p>
+            {script.length > 0 && (
+                <div className={`${iosCard} mt-1 w-full divide-y divide-slate-100 text-left`}>
+                    <div className="px-4 py-2.5">
+                        <span className={iosGroupLabel}>Что сказать водителю</span>
+                    </div>
+                    {script.map((line, index) => (
+                        <div key={line} className="flex gap-2.5 px-4 py-2.5">
+                            <span className="mt-[2px] grid h-5 w-5 shrink-0 place-items-center rounded-full bg-slate-100 text-[11px] font-semibold tabular-nums text-slate-500">
+                                {index + 1}
+                            </span>
+                            <span className="text-[13px] leading-relaxed text-slate-700">{line}</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+            <button type="button" onClick={onClose} className={`mt-1 ${iosBtnPrimary}`}>
+                Понятно
+            </button>
         </div>
-        <p className="max-w-[420px] text-[13px] leading-relaxed text-slate-600">
-            {verdict.message}
-        </p>
-        <button type="button" onClick={onClose} className={`mt-1 ${iosBtnPrimary}`}>
-            Понятно
-        </button>
+    );
+};
+
+/* ─── Передача супервайзеру (инструкция #230, §4) ─────────────────────────── */
+
+/* Водитель настаивает, что Sapar был выбран вовремя и не менялся. Фактическую
+ * дату выбора провайдера может запросить только супервайзер — обращение никуда
+ * не уходит, оператор передаёт ему данные.
+ *
+ * Перечень собран системой из уже введённых ответов, а не набирается заново:
+ * шесть значений, переписанные в мессенджер по памяти, теряются по одному.
+ * Кнопка копирует ровно то, что показано, — расходиться экрану с буфером
+ * обмена нельзя. */
+const HandoffScreen = ({ handoff, onCopy, copied }) => (
+    <div className="space-y-3 py-2">
+        <div className="flex flex-col items-center gap-2 text-center">
+            <span className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-600">
+                <UserCheck size={22} />
+            </span>
+            <div className="text-[15px] font-semibold text-slate-900">{handoff.title}</div>
+            <p className="max-w-[440px] text-[13px] leading-relaxed text-slate-600">
+                {handoff.message}
+            </p>
+        </div>
+
+        <div className={`${iosCard} divide-y divide-slate-100`}>
+            {handoff.rows.map((row) => (
+                <div key={row.label} className="flex gap-3 px-4 py-2.5">
+                    <span className="w-[46%] shrink-0 text-[12.5px] text-slate-500">{row.label}</span>
+                    <span className="min-w-0 flex-1 break-words text-[13px] font-medium tabular-nums text-slate-800">
+                        {row.value}
+                    </span>
+                </div>
+            ))}
+        </div>
+
+        <div className="flex items-start gap-2.5 rounded-2xl bg-amber-50/70 px-3.5 py-3 ring-1 ring-amber-100">
+            <span className="mt-[1px] shrink-0 text-amber-600"><AlertTriangle size={16} /></span>
+            <div className="text-[13px] leading-relaxed text-slate-700">{handoff.note}</div>
+        </div>
+
+        {/* Кнопка одна: закрыть окно можно из подвала, и вторая кнопка «Понятно»
+            рядом только отвлекала бы от того единственного, что тут делают. */}
+        <div className="flex justify-center">
+            <button type="button" onClick={onCopy} className={iosBtnPrimary}>
+                {copied ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+                {copied ? 'Скопировано' : 'Скопировать'}
+            </button>
+        </div>
     </div>
 );
 
 /* ─── Мастер ──────────────────────────────────────────────────────────────── */
 
 export default function TicketWizard({
-    open, onClose, catalog, taxiParks = [], apiBaseUrl, headers, showToast, onCreated,
+    open, onClose, catalog, entries = [], taxiParks = [], apiBaseUrl, headers,
+    showToast, onCreated,
 }) {
     const [scenarioKey, setScenarioKey] = useState('');
-    const [phase, setPhase] = useState('pick');   // pick | checks | form | preview | closed
+    // pick | entry | category | checks | form | preview | closed | handoff
+    const [phase, setPhase] = useState('pick');
     const [groupIndex, setGroupIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [checksConfirmed, setChecksConfirmed] = useState(false);
@@ -302,6 +386,20 @@ export default function TicketWizard({
     // Что ответил Sapar по ИИН и периоду, и по какой паре мы его спрашивали.
     const [saparSnapshot, setSaparSnapshot] = useState(null);
     const [saparChecked, setSaparChecked] = useState('');
+    // Вход в тематику: сначала проверка по ИИН, категория — после неё.
+    const [entry, setEntry] = useState(null);
+    const [entryVerdict, setEntryVerdict] = useState(null);
+    // Вердикты категорий по тому же снимку: второй раз Sapar не спрашиваем.
+    const [categoryVerdicts, setCategoryVerdicts] = useState({});
+    // С какого экрана начался сценарий: часть ответов дана ещё на входе, и
+    // «Назад» с первого же экрана должно вести к категориям, а не в пустоту.
+    const [startGroup, setStartGroup] = useState(0);
+    // Категорию выбрал оператор или её открыла сама проверка. Решает, куда
+    // ведёт «Назад»: к списку категорий или обратно к данным водителя. В
+    // «документы не поступили» списка не было — возвращать в него нельзя.
+    const [categoryPicked, setCategoryPicked] = useState(false);
+    const [handoff, setHandoff] = useState(null);
+    const [copied, setCopied] = useState(false);
     const [busy, setBusy] = useState(false);
     const fileRef = useRef(null);
 
@@ -310,13 +408,22 @@ export default function TicketWizard({
         [catalog, scenarioKey],
     );
 
-    const catalogGroups = useMemo(() => groupCatalog(catalog), [catalog]);
+    const catalogGroups = useMemo(() => groupCatalog(catalog, entries), [catalog, entries]);
 
     const checksReady = useMemo(
         () => checksAreComplete(scenario, {
             confirmedAll: checksConfirmed, confirmedItems: checkedItems,
         }),
         [scenario, checksConfirmed, checkedItems],
+    );
+    const entryRows = useMemo(() => pairRows((entry && entry.steps) || []), [entry]);
+    /* Категории входа. Пока Sapar не ответил, «Документы не поступили» остаётся
+       в списке: решить за оператора нечем, а работать надо. */
+    const categories = useMemo(
+        () => entryCategories(entry, catalog, {
+            withNoDocuments: entryVerdict?.outcome === ENTRY.UNKNOWN,
+        }),
+        [entry, catalog, entryVerdict],
     );
     const groups = useMemo(() => groupsOf(scenario, answers), [scenario, answers]);
     const group = groups[groupIndex] || null;
@@ -330,6 +437,8 @@ export default function TicketWizard({
         setChecksConfirmed(false); setCheckedItems([]); setAttachment(null); setVerdict(null);
         setDismissed(null); setMissing({}); setPreview(null);
         setSaparSnapshot(null); setSaparChecked('');
+        setEntry(null); setEntryVerdict(null); setCategoryVerdicts({});
+        setStartGroup(0); setCategoryPicked(false); setHandoff(null); setCopied(false);
         if (fileRef.current) fileRef.current.value = '';
     }, []);
 
@@ -356,24 +465,135 @@ export default function TicketWizard({
         });
     }, [answers, scenario, phase, dismissed, catalog]);
 
-    const startScenario = (key) => {
-        const next = (catalog || []).find((item) => item.key === key);
+    const startScenario = (key, { carried = null } = {}) => {
+        const next = (catalog || []).find((item) => item.key === key) || null;
+        const state = { answers: carried || answers, attachment: null, checksReady: false };
         setScenarioKey(key);
-        setGroupIndex(0);
         setVerdict(null);
         setDismissed(null);
         setMissing({});
-        // Первым идёт экран «кто и за какой период»: с него запускается
-        // предпроверка Sapar, и часть обращений на ней же и заканчивается.
+        setHandoff(null);
+        if (!entry) {
+            // Без входа порядок прежний: первым экран «кто и за какой период»,
+            // с него же запускается предпроверка Sapar.
+            setGroupIndex(0);
+            setStartGroup(0);
+            setPhase('form');
+            return;
+        }
+        /* Со входом ИИН, период, парк и город уже введены, а проверка пройдена.
+           Показывать тот же экран второй раз незачем — ведём по инструкции:
+           чек-лист, потом первый экран, где действительно есть что заполнять. */
+        const groupList = groupsOf(next, state.answers);
+        const open = openStop(next, groupList, state);
+        const index = open.phase === 'form' ? open.groupIndex : Math.max(0, groupList.length - 1);
+        setGroupIndex(index);
+        setStartGroup(index);
+        const stop = afterCategory(next, groupList, state);
+        if (stop.phase === 'checks') { setPhase('checks'); return; }
+        if (stop.phase === 'submit') { setPhase('form'); return; }
         setPhase('form');
     };
 
     const switchScenario = (key) => {
-        setAnswers(carryOver(answers));
+        const carried = carryOver(answers);
+        setAnswers(carried);
         setChecksConfirmed(false);
+        setCheckedItems([]);
         setAttachment(null);
         if (fileRef.current) fileRef.current.value = '';
+        startScenario(key, { carried });
+    };
+
+    /* ─── Вход в тематику: проверка по ИИН до выбора категории ────────────── */
+
+    const startEntry = (item) => {
+        setEntry(item);
+        setEntryVerdict(null);
+        setCategoryVerdicts({});
+        setScenarioKey('');
+        setAnswers({});
+        setSaparSnapshot(null);
+        setSaparChecked('');
+        setVerdict(null);
+        setPhase('entry');
+    };
+
+    /* Спрашивает Sapar по введённым ИИН и периоду. Дальше три дороги, и все три
+       из инструкции: месяц ещё не закрыт — обращение не нужно; документы есть —
+       открываем категории; документов нет — это §3, и категорию тут выбирать
+       нечего, тематика одна.
+
+       Sapar промолчал — показываем все категории, включая «Документы не
+       поступили»: считать молчание сервиса за «документов нет» нельзя. */
+    const runEntryCheck = async () => {
+        setBusy(true);
+        try {
+            const response = await axios.post(
+                `${apiBaseUrl}/api/crm/entry/${entry.queue_code}/sapar`,
+                { iin: answerValue(answers, 'iin'), period: answerValue(answers, 'period') },
+                { headers: headers() },
+            );
+            const data = response.data || {};
+            setSaparSnapshot(data.snapshot || null);
+            setSaparChecked(saparKey(answers));
+            setCategoryVerdicts(data.categories || {});
+            const hit = data.verdict || { outcome: ENTRY.UNKNOWN };
+            setEntryVerdict(hit);
+            if (hit.outcome === ENTRY.CLOSE) {
+                setVerdict({ outcome: OUTCOME.CLOSE, message: hit.message });
+                setPhase('closed');
+                return;
+            }
+            if (hit.outcome === ENTRY.NO_DOCUMENTS && hit.scenario) {
+                setCategoryPicked(false);
+                startScenario(hit.scenario);
+                return;
+            }
+            setPhase('category');
+        } catch (error) {
+            // Отказ сети не повод держать оператора: категории он выберет сам.
+            setSaparSnapshot(null);
+            setSaparChecked(saparKey(answers));
+            setCategoryVerdicts({});
+            setEntryVerdict({ outcome: ENTRY.UNKNOWN, message: null });
+            setPhase('category');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    /* Категория выбрана. Вердикт по ней уже посчитан на входе тем же снимком —
+       второй раз Sapar не спрашиваем. */
+    const pickCategory = (key) => {
+        setCategoryPicked(true);
+        // Чек-лист у каждой категории свой: вернулся к списку и выбрал другую —
+        // подтверждать проверки надо заново.
+        setChecksConfirmed(false);
+        setCheckedItems([]);
+        setAttachment(null);
+        if (fileRef.current) fileRef.current.value = '';
+        const hit = categoryVerdicts[key];
+        if (hit && hit.outcome === OUTCOME.CLOSE) {
+            setVerdict(hit);
+            setScenarioKey(key);
+            setPhase('closed');
+            return;
+        }
+        if (hit && hit.outcome === OUTCOME.SWITCH && hit.switch_to) {
+            startScenario(hit.switch_to);
+            return;
+        }
         startScenario(key);
+    };
+
+    const copyHandoff = async () => {
+        try {
+            await navigator.clipboard.writeText(handoff.text);
+            setCopied(true);
+        } catch (error) {
+            showToast?.('Не удалось скопировать — выделите текст вручную', 'error');
+        }
     };
 
     const setAnswer = (key, value) => {
@@ -388,11 +608,30 @@ export default function TicketWizard({
         // Пока оператор не ушёл с экрана с ИИН — спрашиваем Sapar. Половина
         // вопросов дальше существует только потому, что раньше эти данные
         // узнавали у водителя; часть обращений на этом и заканчивается.
-        if (needsSaparCheck(scenario, group, answers, saparChecked)) {
+        //
+        // Со входом этот вопрос уже задан ДО выбора категории, и повторять его
+        // нельзя: тот же снимок стоил бы второго запроса в Sapar.
+        if (!entry && needsSaparCheck(scenario, group, answers, saparChecked)) {
             const passed = await askSapar();
             if (!passed) return;
         }
+        if (entry) {
+            // Чек-лист со входом идёт перед вопросами, а не между ними.
+            goTo(openStopFromHere());
+            return;
+        }
         goTo(nextStop(scenario, groups, groupIndex, { checksReady }));
+    };
+
+    /* Следующий экран, где ещё есть что заполнять. Считается от текущего, а не
+       от начала: пройденный экран заполнен, и вернуться на него «вперёд» нельзя. */
+    const openStopFromHere = () => {
+        const rest = groups.slice(groupIndex + 1);
+        const index = rest.findIndex(
+            (name) => !groupIsComplete(scenario, name, { answers, attachment }));
+        return index >= 0
+            ? { phase: 'form', groupIndex: groupIndex + 1 + index }
+            : { phase: 'submit' };
     };
 
     /* Один переход — одно место. Раньше «куда дальше» решалось в трёх кнопках
@@ -445,8 +684,27 @@ export default function TicketWizard({
 
     const goBack = () => {
         setVerdict(null);
+        if (phase === 'category') { setPhase('entry'); return; }
         if (phase === 'preview') { setPhase('form'); setGroupIndex(groups.length - 1); return; }
-        if (phase === 'checks') { goTo({ phase: 'form', groupIndex: CHECKS_AFTER_GROUP }); return; }
+        if (phase === 'checks') {
+            // Со входом чек-лист стоит сразу за выбором категории — туда и
+            // возвращаем. Без входа — на первый экран вопросов, как было.
+            if (entry) { setPhase(categoryPicked ? 'category' : 'entry'); return; }
+            goTo({ phase: 'form', groupIndex: CHECKS_AFTER_GROUP });
+            return;
+        }
+        if (entry) {
+            /* Экраны до startGroup заполнены ещё на входе — «Назад» с первого
+               рабочего экрана ведёт к чек-листу или к категориям, а не в них. */
+            if (groupIndex <= startGroup) {
+                setPhase(hasChecks(scenario) ? 'checks'
+                    : categoryPicked ? 'category' : 'entry');
+                return;
+            }
+            setPhase('form');
+            setGroupIndex(groupIndex - 1);
+            return;
+        }
         goTo(previousStop(scenario, groups, groupIndex));
     };
 
@@ -482,6 +740,11 @@ export default function TicketWizard({
             } else if (data.outcome === OUTCOME.CLOSE) {
                 setVerdict(data);
                 setPhase('closed');
+            } else if (data.outcome === OUTCOME.ESCALATE) {
+                setHandoff(data.handoff || null);
+                setCopied(false);
+                setPhase(data.handoff ? 'handoff' : 'closed');
+                if (!data.handoff) setVerdict(data);
             } else {
                 setVerdict(data);
             }
@@ -521,15 +784,41 @@ export default function TicketWizard({
     };
 
     const footer = (() => {
-        if (phase === 'pick' || phase === 'closed') {
+        if (phase === 'pick' || phase === 'closed' || phase === 'handoff') {
             return <button type="button" onClick={onClose} className={iosBtnSecondary}>Закрыть</button>;
+        }
+        if (phase === 'entry') {
+            return (
+                <>
+                    <button type="button" onClick={reset} className={iosBtnSecondary}>
+                        <ArrowLeft size={14} /> Назад
+                    </button>
+                    <button type="button" onClick={runEntryCheck}
+                            disabled={busy || !entryIsComplete(entry, answers)}
+                            className={iosBtnPrimary}>
+                        {busy ? <Loader2 size={14} className="animate-spin" />
+                            : <ShieldCheck size={14} />}
+                        Проверить документы
+                    </button>
+                </>
+            );
+        }
+        if (phase === 'category') {
+            return (
+                <button type="button" onClick={goBack} className={iosBtnSecondary}>
+                    <ArrowLeft size={14} /> Назад
+                </button>
+            );
         }
         if (phase === 'checks') {
             return (
                 <>
                     <button type="button" onClick={goBack} className={iosBtnSecondary}>Назад</button>
                     <button type="button" disabled={!checksReady}
-                            onClick={() => goTo(afterChecks(groups))}
+                            onClick={() => goTo(afterChecks(groups, entry
+                                ? openStop(scenario, groups,
+                                           { answers, attachment, checksReady: true })
+                                : null))}
                             className={iosBtnPrimary}>
                         <ShieldCheck size={14} /> Проверил — продолжить
                     </button>
@@ -550,6 +839,10 @@ export default function TicketWizard({
             );
         }
         const last = groupIndex + 1 >= groups.length;
+        // Тематика, из которой в группу ничего не уходит, не должна обещать
+        // отправку: «Документы не поступили» кончается передачей супервайзеру.
+        const finish = scenario?.final_outcome === OUTCOME.ESCALATE
+            ? 'Передать супервайзеру' : 'Проверить и отправить';
         return (
             <>
                 <button type="button" onClick={goBack} className={iosBtnSecondary}>
@@ -559,27 +852,37 @@ export default function TicketWizard({
                         className={iosBtnPrimary}>
                     {busy ? <Loader2 size={14} className="animate-spin" />
                         : last ? <CheckCircle2 size={14} /> : <ArrowRight size={14} />}
-                    {last ? 'Проверить и отправить' : 'Далее'}
+                    {last ? finish : 'Далее'}
                 </button>
             </>
         );
     })();
 
     const subtitle = phase === 'pick' ? 'Выберите тематику — дальше система задаст вопросы'
-        : phase === 'checks' ? 'Проверьте это до обращения'
-            : phase === 'preview' ? 'Так обращение увидят в группе'
-                : phase === 'closed' ? null
-                    : `${group} · шаг ${groupIndex + 1} из ${groups.length}`;
+        : phase === 'entry' ? 'Данные водителя — проверим документы за период'
+            : phase === 'category' ? 'Выберите категорию обращения'
+                : phase === 'checks' ? 'Проверьте это до обращения'
+                    : phase === 'preview' ? 'Так обращение увидят в группе'
+                        : (phase === 'closed' || phase === 'handoff') ? null
+                            // Экраны, заполненные на входе, оператор не видел —
+                            // и в счётчике их быть не должно: «шаг 2 из 2»
+                            // читается как «первый я пропустил».
+                            : `${group} · шаг ${groupIndex - startGroup + 1} из ${
+                                groups.length - startGroup}`;
 
     return (
         <IosModal open={open} onClose={onClose}
-                  title={scenario ? scenario.title : 'Новое обращение'}
+                  title={(phase === 'entry' || phase === 'category')
+                      ? (entry ? entry.title : 'Новое обращение')
+                      : scenario ? scenario.title
+                          : entry ? entry.title : 'Новое обращение'}
                   subtitle={subtitle} maxWidth="max-w-xl" footer={footer}>
             <div style={{ fontFamily: APPLE_FONT }}>
-                {phase === 'form' && groups.length > 1 && (
+                {phase === 'form' && groups.length - startGroup > 1 && (
                     <div className="mb-4 h-1 w-full overflow-hidden rounded-full bg-slate-100">
                         <div className="h-full rounded-full bg-blue-500 transition-all"
-                             style={{ width: `${((groupIndex + 1) / groups.length) * 100}%` }} />
+                             style={{ width: `${((groupIndex - startGroup + 1)
+                                 / (groups.length - startGroup)) * 100}%` }} />
                     </div>
                 )}
 
@@ -591,13 +894,15 @@ export default function TicketWizard({
                             названия в каждой строке. */}
                         {catalogGroups.map((group) => (
                             <div key={group.code}>
-                                {catalogGroups.length > 1 && group.title && (
+                                {catalogGroups.length > 1 && group.title && !group.entry && (
                                     <div className={`${iosGroupLabel} mb-1.5`}>{group.title}</div>
                                 )}
                                 <div className="space-y-1.5">
                                     {group.items.map((item) => (
                                         <button key={item.key} type="button" disabled={!item.is_ready}
-                                                onClick={() => startScenario(item.key)}
+                                                onClick={() => (item.entry
+                                                    ? startEntry(item.entry)
+                                                    : startScenario(item.key))}
                                                 className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
                                                     item.is_ready
                                                         ? 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
@@ -622,6 +927,64 @@ export default function TicketWizard({
                                 Тематики не настроены
                             </div>
                         )}
+                    </div>
+                )}
+
+                {/* Вход в тематику: сначала данные водителя, потом проверка.
+                    По инструкции #230 категорию выбирают уже зная, есть ли
+                    документы за период, — иначе выбор делается вслепую. */}
+                {phase === 'entry' && entry && (
+                    <div className="space-y-4">
+                        {entryRows.map((row, rowIndex) => (
+                            <div key={row.map((step) => step.key).join('+')}
+                                 className={row.length > 1
+                                     ? 'grid grid-cols-1 gap-4 sm:grid-cols-2' : undefined}>
+                                {row.map((step) => (
+                                    <Field key={step.key} step={step} value={answers[step.key]}
+                                           autoFocus={rowIndex === 0 && step === row[0]}
+                                           problem={missing[step.key]}
+                                           options={referenceOptions(step, { taxiParks })}
+                                           onChange={(value) => setAnswer(step.key, value)} />
+                                ))}
+                            </div>
+                        ))}
+                        <div className="flex items-start gap-2.5 px-1 text-[12.5px] leading-relaxed text-slate-500">
+                            <ShieldCheck size={14} className="mt-[2px] shrink-0 text-slate-400" />
+                            <span>
+                                По ИИН и периоду система сама проверит, поступили ли документы.
+                                От ответа зависит, какие категории обращения будут доступны.
+                            </span>
+                        </div>
+                    </div>
+                )}
+
+                {/* Категории открываются только после проверки (§2 инструкции). */}
+                {phase === 'category' && entry && (
+                    <div className="space-y-3">
+                        {saparSnapshot && <SaparNote snapshot={saparSnapshot} />}
+                        {entryVerdict?.outcome === ENTRY.UNKNOWN && !saparSnapshot && (
+                            <div className="flex items-start gap-2.5 rounded-2xl bg-slate-50 px-3.5 py-3 ring-1 ring-slate-200/70">
+                                <span className="mt-[1px] shrink-0 text-slate-400">
+                                    <AlertTriangle size={16} />
+                                </span>
+                                <div className="text-[13px] leading-relaxed text-slate-600">
+                                    Sapar не ответил — проверьте документы сами и выберите категорию.
+                                </div>
+                            </div>
+                        )}
+                        <div className="space-y-1.5">
+                            {categories.map((item) => (
+                                <button key={item.key} type="button"
+                                        onClick={() => pickCategory(item.key)}
+                                        className="flex w-full items-center gap-2 rounded-2xl bg-slate-50 px-4 py-3 text-left transition-all hover:bg-slate-100 active:scale-[0.99]">
+                                    <span className="min-w-0 flex-1 text-[14px] font-medium text-slate-900">
+                                        {item.title}
+                                    </span>
+                                    <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
+                                    <ChevronRight size={15} className="shrink-0 text-slate-400" />
+                                </button>
+                            ))}
+                        </div>
                     </div>
                 )}
 
@@ -714,6 +1077,10 @@ export default function TicketWizard({
 
                 {phase === 'closed' && verdict && (
                     <ClosedScreen verdict={verdict} onClose={onClose} />
+                )}
+
+                {phase === 'handoff' && handoff && (
+                    <HandoffScreen handoff={handoff} onCopy={copyHandoff} copied={copied} />
                 )}
 
                 {phase === 'form' && scenario && (

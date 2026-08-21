@@ -1399,6 +1399,9 @@ export default function CrmTicketsView({
     const [capabilities, setCapabilities] = useState(null);
     const [queues, setQueues] = useState([]);
     const [scenarioCatalog, setScenarioCatalog] = useState([]);
+    // Входы в тематики: очередь, у которой категорию выбирают ПОСЛЕ проверки
+    // по ИИН (инструкция #230). Приезжают тем же запросом, что и каталог.
+    const [scenarioEntries, setScenarioEntries] = useState([]);
     // Справочники, из которых мастер даёт выбирать. Приезжают вместе с каталогом
     // тематик — отдельный запрос за списком парков не нужен.
     const [taxiParks, setTaxiParks] = useState([]);
@@ -1473,9 +1476,11 @@ export default function CrmTicketsView({
             const response = await axios.get(`${apiBaseUrl}/api/crm/scenarios`,
                 { headers: headers() });
             setScenarioCatalog(response.data.items || []);
+            setScenarioEntries(response.data.entries || []);
             setTaxiParks(response.data.reference?.taxi_parks || []);
         } catch (err) {
             setScenarioCatalog([]);
+            setScenarioEntries([]);
             setTaxiParks([]);
         }
     }, [apiBaseUrl, headers]);
@@ -1816,6 +1821,7 @@ export default function CrmTicketsView({
                 open={composerOpen}
                 onClose={() => setComposerOpen(false)}
                 catalog={scenarioCatalog}
+                entries={scenarioEntries}
                 taxiParks={taxiParks}
                 apiBaseUrl={apiBaseUrl}
                 headers={headers}

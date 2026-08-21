@@ -323,6 +323,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         справочник Казахстана, он не меняется от нашей базы.
         """
         catalog = scenarios.public_catalog()
+        entries = scenarios.public_entries()
         with db._get_cursor() as cursor:
             ready = {}
             for item in catalog:
@@ -335,7 +336,12 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             parks = queries.taxi_parks(cursor)
         for item in catalog:
             item.update(ready.get(item['queue_code'], {'is_ready': False}))
-        return jsonify({"items": catalog, "reference": {"taxi_parks": parks}})
+        # Вход берёт готовность у своей очереди: у него нет своей — он и есть
+        # очередь, только со стороны оператора.
+        for item in entries:
+            item.update(ready.get(item['queue_code'], {'is_ready': False}))
+        return jsonify({"items": catalog, "entries": entries,
+                        "reference": {"taxi_parks": parks}})
 
     @crm_route('/scenarios/<key>/evaluate', methods=('POST',))
     def crm_scenario_evaluate(key, ctx):
@@ -391,6 +397,37 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         snapshot = sapar.driver_snapshot(iin, int(month), int(year))
         verdict = scenarios.sapar_verdict(key, snapshot)
         return jsonify({"snapshot": snapshot, "verdict": verdict})
+
+    @crm_route('/entry/<code>/sapar', methods=('POST',))
+    def crm_entry_sapar(code, ctx):
+        """Проверка по ИИН ДО выбора категории (инструкция #230, §2–§3).
+
+        Оператор выбрал тематику «iTaxi Sapar», ввёл ИИН, период, парк и город —
+        и до всякого выбора категории система отвечает, есть ли за этот период
+        документы. Есть — открываются категории; нет — оператор идёт по
+        консультации про провайдера; месяц ещё не закрыт — обращение не нужно.
+
+        Вердикты категорий считаются здесь же, по тому же снимку: иначе выбор
+        категории стоил бы второго запроса в Sapar за теми же самыми данными.
+        """
+        entry = scenarios.entry_for_queue(code)
+        if not entry:
+            return jsonify({"error": "Неизвестная тематика"}), 404
+        data = _payload()
+        iin = str(data.get('iin') or '').strip()
+        period = str(data.get('period') or '').strip()
+        if not scenarios._IIN_RE.match(iin):
+            return jsonify({"error": "ИИН должен состоять ровно из 12 цифр"}), 400
+        if not scenarios._PERIOD_RE.match(period):
+            return jsonify({"error": "Укажите месяц и год отчётного периода"}), 400
+
+        year, month = period.split('-')
+        snapshot = sapar.driver_snapshot(iin, int(month), int(year))
+        return jsonify({
+            "snapshot": snapshot,
+            "verdict": scenarios.sapar_entry_verdict(code, snapshot),
+            "categories": scenarios.entry_category_verdicts(code, snapshot),
+        })
 
     @crm_route('/reports/scenarios')
     def crm_scenario_report(ctx):

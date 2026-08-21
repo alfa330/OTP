@@ -177,10 +177,14 @@ export const toggleCheck = (confirmedItems, index) => {
  * Порядок групп — порядок первого появления в каталоге, то есть порядок,
  * заданный на сервере (crm/scenarios.py). Он же и порядок тематик внутри.
  */
-export const groupCatalog = (catalog) => {
+export const groupCatalog = (catalog, entries = []) => {
+    const byQueue = new Map((entries || []).map((entry) => [entry.queue_code, entry]));
     const groups = [];
     const byCode = new Map();
     for (const item of catalog || []) {
+        // Тематика, в которую ведёт только проверка по ИИН, в списке выбора не
+        // стоит: выбрать её оператор всё равно не может (инструкция #230, §3).
+        if (item.entry_only) continue;
         const code = item.queue_code || '';
         let group = byCode.get(code);
         if (!group) {
@@ -193,7 +197,33 @@ export const groupCatalog = (catalog) => {
         if (!group.title && item.queue_title) group.title = item.queue_title;
         group.items.push(item);
     }
+    /* Очередь со входом занимает в списке ОДНУ строку — саму тематику. Категории
+     * оператор увидит после проверки по ИИН, и раньше показывать их нельзя: он
+     * выбирал бы, не имея данных, на которых этот выбор основан. */
+    for (const group of groups) {
+        const entry = byQueue.get(group.code);
+        if (!entry) continue;
+        group.entry = entry;
+        group.items = [{
+            key: `entry:${entry.queue_code}`,
+            entry,
+            title: entry.title,
+            when_to_use: entry.when_to_use,
+            queue_code: entry.queue_code,
+            is_ready: entry.is_ready !== false,
+        }];
+    }
     return groups;
+};
+
+/* Категории входа — в порядке, заданном сервером, и только настроенные.
+ * Sapar промолчал (verdicts пуст) — показываем и «Документы не поступили»:
+ * решить за оператора нечем, а работать надо. */
+export const entryCategories = (entry, catalog, { withNoDocuments = false } = {}) => {
+    const keys = [...((entry && entry.categories) || [])];
+    if (withNoDocuments && entry && entry.no_documents) keys.push(entry.no_documents);
+    const byKey = new Map((catalog || []).map((item) => [item.key, item]));
+    return keys.map((key) => byKey.get(key)).filter(Boolean);
 };
 
 /* ─── Экраны вместо отдельных вопросов ────────────────────────────────────── */
@@ -245,8 +275,14 @@ export const referenceOptions = (step, { taxiParks = [] } = {}) => {
  * выглядит обрезанным. Так бывает у посылок — там город есть, а парка нет.
  * Вложение в пару не берём никогда: у него своя механика выбора файла.
  */
-export const rowsOfGroup = (scenario, group, answers) => {
-    const steps = stepsOfGroup(scenario, group, answers);
+export const rowsOfGroup = (scenario, group, answers) => (
+    pairRows(stepsOfGroup(scenario, group, answers))
+);
+
+/* Та же раскладка для произвольного списка вопросов: экран входа тоже показывает
+ * «Таксопарк» и «Город» одной строкой, и правило пары должно быть одно на оба
+ * места, а не переписано во втором. */
+export const pairRows = (steps) => {
     const rows = [];
     for (let index = 0; index < steps.length; index += 1) {
         const step = steps[index];
@@ -341,10 +377,13 @@ export const describeSnapshot = (snapshot) => {
         };
     }
     const documents = snapshot.documents || [];
+    /* Заголовки — словами инструкции #230, буква в букву. Оператор читает их и
+     * на экране проверки, и потом рядом с вопросами: разные формулировки одного
+     * и того же ответа читаются как два разных ответа. */
     if (!documents.length) {
         return {
             tone: 'amber',
-            title: 'Документов за период нет',
+            title: 'Нет документов. Документы не поступили',
             lines: snapshot.month_ready === false
                 ? ['Выгрузка за месяц по парку ещё не сформирована.']
                 : ['У водителя за этот период документов в Sapar не найдено.'],
@@ -357,10 +396,12 @@ export const describeSnapshot = (snapshot) => {
     }
     return {
         tone: 'green',
-        title: documents.length === 1
-            ? 'Документ за период найден'
-            : `Документов за период: ${documents.length}`,
-        lines: [statuses.join(' · '), snapshot.driver_name].filter(Boolean),
+        title: 'Есть документы за отчётный период',
+        lines: [
+            documents.length === 1 ? statuses.join(' · ')
+                : `${documents.length} шт. · ${statuses.join(' · ')}`,
+            snapshot.driver_name,
+        ].filter(Boolean),
     };
 };
 
@@ -381,6 +422,43 @@ export const describeSnapshot = (snapshot) => {
 export const CHECKS_AFTER_GROUP = 0;
 
 export const hasChecks = (scenario) => Boolean(scenario?.checks?.length);
+
+/* ─── Вход в тематику: проверка по ИИН до выбора категории ────────────────── */
+
+/* Можно ли спрашивать Sapar: экран входа заполнен, ИИН и период — настоящие.
+ * Формат проверяем здесь, а не только на сервере: иначе кнопка «Далее» уходит
+ * в запрос, который заведомо вернётся ошибкой. */
+export const entryIsComplete = (entry, answers) => {
+    const steps = (entry && entry.steps) || [];
+    if (!steps.length) return false;
+    if (!steps.every((step) => stepIsComplete(step, { answers }))) return false;
+    const iin = String(answerValue(answers, 'iin') ?? '').trim();
+    const period = String(answerValue(answers, 'period') ?? '').trim();
+    return IIN_PATTERN.test(iin) && PERIOD_PATTERN.test(period);
+};
+
+/* Первый экран, на котором ещё есть что заполнять.
+ *
+ * Нужен там, где часть ответов дана ДО выбора категории: ИИН, период, парк и
+ * город оператор ввёл на входе, и показывать ему тот же экран второй раз —
+ * лишний шаг. Заполнено всё — сразу к проверке ответов. */
+export const openStop = (scenario, groups, state = {}) => {
+    const index = (groups || []).findIndex(
+        (group) => !groupIsComplete(scenario, group, state));
+    return index >= 0 ? { phase: 'form', groupIndex: index } : { phase: 'submit' };
+};
+
+/* Куда вести после выбранной категории (инструкция #230, §2).
+ *
+ * Чек-лист снова стоит первым — и это не откат прежней правки, а её следствие:
+ * его отодвигали за первый экран ради проверки по ИИН, а она теперь проходит
+ * ещё до выбора категории. Порядок ровно как в инструкции: категория →
+ * проверки → вопросы → подтверждение. */
+export const afterCategory = (scenario, groups, state = {}) => (
+    hasChecks(scenario) && !state.checksReady
+        ? { phase: 'checks' }
+        : openStop(scenario, groups, state)
+);
 
 /* Куда вести оператора с экрана вопросов. Возвращает:
  *   { phase: 'checks' }                 — показать чек-лист
@@ -407,11 +485,16 @@ export const previousStop = (scenario, groups, groupIndex) => {
 };
 
 /* Куда вести после подтверждённого чек-листа. Экранов может и не остаться —
- * тогда сразу к проверке ответов, а не в пустой шаг. */
-export const afterChecks = (groups) => (
-    (groups || []).length > CHECKS_AFTER_GROUP + 1
-        ? { phase: 'form', groupIndex: CHECKS_AFTER_GROUP + 1 }
-        : { phase: 'submit' }
+ * тогда сразу к проверке ответов, а не в пустой шаг.
+ *
+ * resume — маршрут для входа по ИИН: там чек-лист стоит ПЕРЕД вопросами, и
+ * возвращаться после него надо на первый незаполненный экран, а не на второй по
+ * счёту. Не передали — прежний порядок, буква в букву. */
+export const afterChecks = (groups, resume = null) => (
+    resume || (
+        (groups || []).length > CHECKS_AFTER_GROUP + 1
+            ? { phase: 'form', groupIndex: CHECKS_AFTER_GROUP + 1 }
+            : { phase: 'submit' })
 );
 
 /* ─── Отчётный период одним списком ───────────────────────────────────────── */

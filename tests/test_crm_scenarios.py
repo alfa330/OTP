@@ -24,8 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # точка отсчёта: проверяя валидацию ИИН, нельзя чтобы обращение до неё
 # закрылось правилом «документы появились после повторного входа».
 NEUTRAL = {
+    # §4 инструкции #230: водитель настаивает, что Sapar был выбран вовремя и
+    # не менялся. Единственная ветка тематики, которая не закрывается сразу.
     'sapar_docs_missing': {
-        'trips_in_park': 'yes', 'relogin_done': 'yes', 'docs_after_relogin': 'no',
+        'provider_choice': sc.PROVIDER_KEPT,
     },
     'sapar_sign_error': {
         'docs_visible': 'yes', 'sapar_related': 'yes', 'apps_restarted': 'yes',
@@ -105,7 +107,9 @@ class CatalogTest(unittest.TestCase):
 
     def test_attachment_requirements_match_the_specification(self):
         expected = {
-            'sapar_docs_missing': sc.ATTACH_IMAGE,          # скриншот раздела без документов
+            # Инструкция #230: отсюда в группу ничего не уходит, а скриншот
+            # отсутствующих документов нужен был именно группе.
+            'sapar_docs_missing': sc.ATTACH_NONE,
             'sapar_sign_error': sc.ATTACH_IMAGE_OR_VIDEO,   # скриншот ИЛИ видео
             'sapar_payment_required': sc.ATTACH_IMAGE,      # скриншот оплаты
             'sapar_sign_status': sc.ATTACH_NONE,            # «скриншот не обязателен»
@@ -120,19 +124,25 @@ class CatalogTest(unittest.TestCase):
 class CommonMandatoryDataTest(unittest.TestCase):
     """Раздел 2 ТЗ: общие обязательные данные."""
 
+    # Точка отсчёта — «оплата за подписание»: там есть и ИИН с периодом, и
+    # чек-лист, и обязательное вложение. У «документов не поступило» после
+    # инструкции #230 нет ни чек-листа, ни вложения, и заканчивается она не
+    # отправкой — общие требования на ней уже не проверишь.
+    BASE = 'sapar_payment_required'
+
     def test_iin_must_be_exactly_twelve_digits(self):
         for bad in ('', '123', '1234567890123', '12345678901a', ' 123456789012 x'):
-            result = verdict('sapar_docs_missing', full('sapar_docs_missing', iin=bad))
+            result = verdict(self.BASE, full(self.BASE, iin=bad))
             self.assertEqual(result['outcome'], sc.INCOMPLETE, repr(bad))
             self.assertIn('iin', result['missing'], repr(bad))
 
     def test_twelve_digits_pass(self):
-        result = verdict('sapar_docs_missing', full('sapar_docs_missing', iin='123456789012'))
+        result = verdict(self.BASE, full(self.BASE, iin='123456789012'))
         self.assertEqual(result['outcome'], sc.READY)
 
     def test_reporting_period_is_month_and_year(self):
         for bad in ('2026', 'июль', '2026-13', '2026-00'):
-            result = verdict('sapar_docs_missing', full('sapar_docs_missing', period=bad))
+            result = verdict(self.BASE, full(self.BASE, period=bad))
             self.assertIn('period', result['missing'], repr(bad))
 
     def test_period_hint_mentions_the_commission_screenshot(self):
@@ -152,14 +162,12 @@ class CommonMandatoryDataTest(unittest.TestCase):
 
     def test_nothing_is_sent_without_confirmed_checks(self):
         """«Без проверки указания этих данных бот не должен отправлять сообщение»."""
-        result = verdict('sapar_docs_missing', full('sapar_docs_missing'),
-                         checks_confirmed=False)
+        result = verdict(self.BASE, full(self.BASE), checks_confirmed=False)
         self.assertEqual(result['outcome'], sc.INCOMPLETE)
         self.assertIn('__checks__', result['missing'])
 
     def test_nothing_is_sent_without_the_required_attachment(self):
-        result = verdict('sapar_docs_missing', full('sapar_docs_missing'),
-                         has_attachment=False)
+        result = verdict(self.BASE, full(self.BASE), has_attachment=False)
         self.assertEqual(result['outcome'], sc.INCOMPLETE)
         self.assertIn('__attachment__', result['missing'])
 
@@ -169,38 +177,176 @@ class CommonMandatoryDataTest(unittest.TestCase):
 
 
 class DocsMissingTest(unittest.TestCase):
-    """Тематика 1 «Документы не поступили»."""
+    """Тематика 1 «Документы не поступили» — инструкция #230, §3–§5.
+
+    Инструкция переписала эту тематику целиком. Раньше оператор выбирал её сам и
+    отправлял обращение в рабочую группу; теперь сюда ведёт только предпроверка
+    («документов за период нет»), а кончается всё разговором: либо консультацией
+    водителя, либо передачей данных супервайзеру. В группу отсюда не уходит
+    ничего — §5 перечисляет исходы, и отправки среди них нет.
+    """
 
     KEY = 'sapar_docs_missing'
 
-    def test_ready_when_all_conditions_met(self):
-        answers = full(self.KEY, trips_in_park='yes', relogin_done='yes',
-                       docs_after_relogin='no')
-        self.assertEqual(verdict(self.KEY, answers)['outcome'], sc.READY)
+    def test_topic_cannot_be_picked_from_the_list(self):
+        """«Тематика открывается сама после проверки по ИИН»."""
+        self.assertTrue(sc.get(self.KEY)['entry_only'])
+        entry = sc.entry_for_queue('itaxi_sapar')
+        self.assertNotIn(self.KEY, entry['categories'])
+        self.assertEqual(entry['no_documents'], self.KEY)
 
-    def test_no_trips_closes_without_sending(self):
-        """«Поездок в нашем парке не было — отсутствие документов может быть корректным»."""
-        result = verdict(self.KEY, full(self.KEY, trips_in_park='no'))
+    def test_provider_question_comes_first(self):
+        """§3.1: «В первую очередь необходимо уточнить у водителя…»."""
+        steps = [item['key'] for item in sc.get(self.KEY)['steps']]
+        self.assertEqual(steps[4], 'provider_choice')
+
+    def test_provider_options_cover_every_cause_from_the_specification(self):
+        step = next(s for s in sc.get(self.KEY)['steps'] if s['key'] == 'provider_choice')
+        self.assertEqual(step['options'], [
+            sc.PROVIDER_NOT_CHOSEN,   # водитель не выбрал провайдера
+            sc.PROVIDER_LATE,         # выбрал, но несвоевременно
+            sc.PROVIDER_CHANGED,      # менялся в течение отчётного периода
+            sc.PROVIDER_KEPT,         # §4: выбран вовремя и не менялся
+            sc.PROVIDER_UNKNOWN,      # «не помню» — не утверждение, а его отсутствие
+        ])
+
+    def test_every_cause_closes_with_the_consultation(self):
+        """§3.2: не выбрал, выбрал поздно или менял — консультация, не обращение."""
+        for choice in (sc.PROVIDER_NOT_CHOSEN, sc.PROVIDER_LATE, sc.PROVIDER_CHANGED,
+                       sc.PROVIDER_UNKNOWN):
+            result = verdict(self.KEY, full(self.KEY, provider_choice=choice))
+            self.assertEqual(result['outcome'], sc.CLOSE, choice)
+
+    def test_consultation_script_says_what_to_tell_the_driver(self):
+        """Консультация — содержание экрана, а не пояснение к нему."""
+        rules = {item['when'][1]: item for item in sc.get(self.KEY)['rules']}
+        script = rules[sc.PROVIDER_NOT_CHOSEN]['script']
+        self.assertIs(script, sc.PROVIDER_SCRIPT)
+        joined = ' '.join(script)
+        self.assertIn('Яндекс Про', joined)                 # инструкция по выбору
+        self.assertIn('до конца текущего месяца', joined)   # сохранить и не менять
+        self.assertIn('сентябре', joined)                   # прошлый период — позже
+        # Текст один на все причины: иначе одному водителю рассказали про сроки,
+        # а другому нет.
+        for choice in (sc.PROVIDER_LATE, sc.PROVIDER_CHANGED, sc.PROVIDER_UNKNOWN):
+            self.assertIs(rules[choice]['script'], sc.PROVIDER_SCRIPT, choice)
+
+    def test_driver_insists_provider_never_changed_goes_to_the_supervisor(self):
+        """§4: обращение не отправляется, данные уходят супервайзеру."""
+        result = verdict(self.KEY, full(self.KEY, provider_choice=sc.PROVIDER_KEPT))
+        self.assertEqual(result['outcome'], sc.ESCALATE)
+
+    def test_date_of_choice_is_asked_only_in_that_case(self):
+        """Дата нужна супервайзеру для сверки — в остальных ветках её не спрашивают."""
+        keys = {s['key'] for s in sc.visible_steps(
+            sc.get(self.KEY), {'provider_choice': sc.PROVIDER_NOT_CHOSEN})}
+        self.assertNotIn('provider_picked_at', keys)
+        keys = {s['key'] for s in sc.visible_steps(
+            sc.get(self.KEY), {'provider_choice': sc.PROVIDER_KEPT})}
+        self.assertIn('provider_picked_at', keys)
+
+    def test_date_of_choice_is_mandatory_for_the_supervisor(self):
+        answers = full(self.KEY, provider_choice=sc.PROVIDER_KEPT)
+        answers.pop('provider_picked_at')
+        result = verdict(self.KEY, answers)
+        self.assertEqual(result['outcome'], sc.INCOMPLETE)
+        self.assertIn('provider_picked_at', result['missing'])
+
+    def test_handoff_carries_everything_the_specification_lists(self):
+        """§4 перечисляет, что передать: ИИН, период, парк, город, слова
+        водителя и дату, когда, по его информации, был выбран Sapar."""
+        answers = full(self.KEY, iin='123456789012', park='iTaxi', city='Алматы',
+                       period='2026-07', provider_choice=sc.PROVIDER_KEPT,
+                       provider_picked_at='2026-06-20')
+        handoff = verdict(self.KEY, answers)['handoff']
+        self.assertEqual([row['label'] for row in handoff['rows']],
+                         ['ИИН', 'Отчётный период', 'Таксопарк', 'Город',
+                          'Со слов водителя', 'Дата выбора Sapar со слов водителя'])
+        self.assertIn('июль 2026', handoff['text'])
+        self.assertIn('20.06.2026', handoff['text'])
+        # Готовый текст и экран — одно и то же: копируют ровно то, что видно.
+        for row in handoff['rows']:
+            self.assertIn('%s: %s' % (row['label'], row['value']), handoff['text'])
+
+    def test_operator_is_warned_not_to_send_the_driver_back_to_the_provider(self):
+        """«До получения информации от супервайзера оператор не должен сообщать
+        водителю, что необходимо повторно выбрать провайдера»."""
+        answers = full(self.KEY, provider_choice=sc.PROVIDER_KEPT)
+        note = verdict(self.KEY, answers)['handoff']['note']
+        self.assertIn('не просите водителя выбрать провайдера заново', note)
+
+    def test_nothing_from_this_topic_reaches_the_group(self):
+        """§5: у «нет документов» отправки среди исходов нет ни в одной ветке."""
+        for choice in (sc.PROVIDER_NOT_CHOSEN, sc.PROVIDER_LATE, sc.PROVIDER_CHANGED,
+                       sc.PROVIDER_UNKNOWN, sc.PROVIDER_KEPT):
+            result = verdict(self.KEY, full(self.KEY, provider_choice=choice))
+            self.assertNotEqual(result['outcome'], sc.READY, choice)
+
+
+class EntryTest(unittest.TestCase):
+    """Вход в тематику: проверка по ИИН раньше выбора категории (§1–§3)."""
+
+    def snapshot(self, **over):
+        base = {'available': True, 'month_ready': True, 'documents': [],
+                'month': 7, 'year': 2026}
+        base.update(over)
+        return base
+
+    def test_entry_asks_exactly_the_four_mandatory_fields(self):
+        """§1: ИИН водителя, отчётный период, таксопарк, город."""
+        entry = sc.entry_for_queue('itaxi_sapar')
+        self.assertEqual([item['key'] for item in entry['steps']],
+                         ['iin', 'period', 'park', 'city'])
+
+    def test_categories_are_the_ones_from_the_specification(self):
+        """§2: пять пунктов инструкции — четыре тематики: «не удаётся подписать»
+        и «ошибка при подписании» это одно и то же интервью."""
+        entry = sc.entry_for_queue('itaxi_sapar')
+        self.assertEqual([sc.get(key)['title'] for key in entry['categories']], [
+            'Не удаётся подписать документы / ошибка при подписании',
+            'Отображается оплата за подписание документов',
+            'Проверить статус подписания документов',
+            'Ошибка в работе Sapar',
+        ])
+
+    def test_documents_found_opens_the_categories(self):
+        state = self.snapshot(documents=[{'signed': False, 'status_label': 'ждёт подписи'}])
+        result = sc.sapar_entry_verdict('itaxi_sapar', state)
+        self.assertEqual(result['outcome'], sc.ENTRY_DOCUMENTS)
+        self.assertIn(sc.ENTRY_DOCUMENTS_TEXT, result['message'])
+
+    def test_no_documents_leads_to_the_consultation_topic(self):
+        result = sc.sapar_entry_verdict('itaxi_sapar', self.snapshot())
+        self.assertEqual(result['outcome'], sc.ENTRY_NO_DOCUMENTS)
+        self.assertIn(sc.ENTRY_NO_DOCUMENTS_TEXT, result['message'])
+        self.assertEqual(result['scenario'], 'sapar_docs_missing')
+
+    def test_month_not_closed_needs_no_ticket_at_all(self):
+        result = sc.sapar_entry_verdict('itaxi_sapar',
+                                        self.snapshot(month_ready=False, month=8))
         self.assertEqual(result['outcome'], sc.CLOSE)
-        self.assertIn('корректным', result['message'])
+        self.assertIn('по парку ещё не сформированы', result['message'])
 
-    def test_without_relogin_operator_is_sent_back(self):
-        result = verdict(self.KEY, full(self.KEY, trips_in_park='yes', relogin_done='no'))
-        self.assertEqual(result['outcome'], sc.BLOCKED)
-        self.assertIn('войти заново', result['message'])
+    def test_silent_sapar_is_not_read_as_no_documents(self):
+        """Молчание сервиса — не ответ: решать нечем, спрашиваем оператора."""
+        result = sc.sapar_entry_verdict('itaxi_sapar', {'available': False})
+        self.assertEqual(result['outcome'], sc.ENTRY_UNKNOWN)
+        self.assertIsNone(result['scenario'])
 
-    def test_docs_appeared_after_relogin_closes_without_sending(self):
-        result = verdict(self.KEY, full(self.KEY, trips_in_park='yes', relogin_done='yes',
-                                        docs_after_relogin='yes'))
-        self.assertEqual(result['outcome'], sc.CLOSE)
+    def test_category_verdicts_are_counted_on_the_same_snapshot(self):
+        """Иначе выбор категории стоил бы второго запроса в Sapar."""
+        state = self.snapshot(documents=[{'signed': True, 'status_label': 'подписан'}])
+        verdicts = sc.entry_category_verdicts('itaxi_sapar', state)
+        self.assertEqual(set(verdicts), set(sc.entry_for_queue('itaxi_sapar')['categories']))
+        # Документы подписаны — ошибка подписания больше не актуальна.
+        self.assertEqual(verdicts['sapar_sign_error']['outcome'], sc.CLOSE)
 
-    def test_question_about_docs_after_relogin_appears_only_after_relogin(self):
-        """Иначе оператор упирается в обязательный вопрос, которого в его случае нет."""
-        answers = {'relogin_done': 'no'}
-        keys = {s['key'] for s in sc.visible_steps(sc.get(self.KEY), answers)}
-        self.assertNotIn('docs_after_relogin', keys)
-        keys = {s['key'] for s in sc.visible_steps(sc.get(self.KEY), {'relogin_done': 'yes'})}
-        self.assertIn('docs_after_relogin', keys)
+    def test_entry_reaches_the_interface(self):
+        entry = sc.public_entries()[0]
+        self.assertEqual(entry['queue_code'], 'itaxi_sapar')
+        self.assertTrue(entry['steps'])
+        self.assertTrue(entry['categories'])
+        self.assertEqual(entry['no_documents'], 'sapar_docs_missing')
 
 
 class SignErrorTest(unittest.TestCase):
@@ -487,11 +633,10 @@ class RenderTest(unittest.TestCase):
         self.assertIn('ИИН: 123456789012', sc.render_body('sapar_docs_missing', answers))
 
     def test_answered_questions_are_all_there(self):
-        answers = full('sapar_docs_missing', trips_in_park='yes', relogin_done='yes',
-                       docs_after_relogin='no')
-        body = sc.render_body('sapar_docs_missing', answers)
+        answers = full('sapar_payment_required', trips_in_park='yes', corp_or_bonus='no')
+        body = sc.render_body('sapar_payment_required', answers)
         self.assertIn('✅ Поездки выполнены в нашем парке', body)
-        self.assertIn('❌ Документы появились после повторного входа', body)
+        self.assertIn('❌ Начислялись корпоративные поездки или бонусы', body)
 
     def test_checked_facts_go_one_per_line_under_a_counted_heading(self):
         """ТЗ задачи #206: пункты проверки видны поштучно, каждый со знаком.
@@ -508,10 +653,9 @@ class RenderTest(unittest.TestCase):
     def test_heading_counts_exactly_the_lines_under_it(self):
         """Заголовок, который не сходится со списком под собой, хуже, чем его
         отсутствие: «5 из 5» над двумя крестиками читается как ошибка."""
-        answers = full('sapar_docs_missing',
-                       provider_changed={'value': 'no', 'detail': ''},
-                       docs_after_relogin='no')
-        block = next(b for b in sc.render_body('sapar_docs_missing', answers).split(chr(10) * 2)
+        answers = full('sapar_payment_required', corp_or_bonus='no')
+        block = next(b for b in sc.render_body('sapar_payment_required',
+                                               answers).split(chr(10) * 2)
                      if b.startswith('🔍'))
         lines = block.split(chr(10))
         head, items = lines[0], lines[1:]
@@ -537,9 +681,10 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(len(line.split(' · ')), 6, line)
 
     def test_yes_with_detail_is_readable(self):
-        body = sc.render_body('sapar_docs_missing', full(
-            'sapar_docs_missing', provider_changed={'value': 'yes', 'detail': '2026-07-10'}))
-        self.assertIn('Провайдер менялся: да (2026-07-10)', body)
+        body = sc.render_body('sapar_sign_error', full(
+            'sapar_sign_error',
+            cache_cleared={'value': 'yes', 'detail': 'без изменений'}))
+        self.assertIn('Очистка кэша: да (без изменений)', body)
 
     def test_datetime_is_written_the_way_people_read_it(self):
         body = sc.render_body('sapar_service_error',
@@ -561,8 +706,9 @@ class RenderTest(unittest.TestCase):
 
     def test_hidden_step_is_not_rendered(self):
         body = sc.render_body('sapar_docs_missing',
-                              full('sapar_docs_missing', relogin_done='no'))
-        self.assertNotIn('Появились ли документы', body)
+                              full('sapar_docs_missing',
+                                   provider_choice=sc.PROVIDER_NOT_CHOSEN))
+        self.assertNotIn('Дата выбора Sapar', body)
 
     def test_checklist_line_is_gone_on_purpose(self):
         """Строка «✔️ Чек-лист выполнен: N из N» ничего не сообщала.
@@ -580,8 +726,8 @@ class RenderTest(unittest.TestCase):
         """Предпросмотр не должен показывать текст, который никуда не уйдёт:
         иначе оператор правит в голове сообщение, которого не будет.
         """
-        answers = full('sapar_docs_missing')
-        without = sc.evaluate('sapar_docs_missing', answers, has_attachment=True,
+        answers = full('sapar_payment_required')
+        without = sc.evaluate('sapar_payment_required', answers, has_attachment=True,
                               checks_confirmed=False)
         self.assertNotEqual(without['outcome'], sc.READY)
         self.assertIn('__checks__', without['missing'])
@@ -646,26 +792,42 @@ class RulesAreDecidableTest(unittest.TestCase):
         Именно у вопроса, а не у типа: там, где ответ обязан быть точным,
         уклониться по-прежнему нельзя, иначе «неизвестно» расползётся по всем
         проверкам и обращение уйдёт в группу пустым.
-        """
-        docs = sc.get('sapar_docs_missing')
-        provider = next(s for s in docs['steps'] if s['key'] == 'provider_changed')
-        self.assertEqual(sc.yesno_values(provider), ('yes', 'no', 'unknown'))
-        self.assertIsNone(sc.validate_step(provider, {'provider_changed': {'value': 'unknown'}}))
 
-        strict = next(s for s in docs['steps'] if s['key'] == 'trips_in_park')
+        Ни одного такого вопроса сейчас нет — единственный был про провайдера, и
+        инструкция #230 заменила его списком причин с отдельным «не помнит».
+        Механизм проверяем на самом вопросе, а не на тематике: он остаётся в силе
+        для следующего вопроса, который оператор не сможет проверить сам.
+        """
+        lenient = sc.step('sample', 'Пример', sc.YESNO, allow_unknown=True)
+        self.assertEqual(sc.yesno_values(lenient), ('yes', 'no', 'unknown'))
+        self.assertIsNone(sc.validate_step(lenient, {'sample': {'value': 'unknown'}}))
+
+        strict = next(s for s in sc.get('sapar_payment_required')['steps']
+                      if s['key'] == 'trips_in_park')
         self.assertEqual(sc.yesno_values(strict), ('yes', 'no'))
         self.assertIsNotNone(sc.validate_step(strict, {'trips_in_park': 'unknown'}))
 
-    def test_unknown_provider_still_sends(self):
-        """Незнание провайдера не должно останавливать обращение."""
-        answers = full('sapar_docs_missing', provider_changed={'value': 'unknown'})
-        self.assertEqual(verdict('sapar_docs_missing', answers)['outcome'], sc.READY)
+    def test_driver_who_does_not_remember_is_not_forced_to_guess(self):
+        """То же требование, но в новой форме: §4 инструкции #230 держится на
+        том, что водитель УТВЕРЖДАЕТ, а «не помню» — не утверждение.
+
+        Раньше это был третий ответ «да/нет», теперь — вариант в списке причин.
+        Заставлять оператора выбрать за водителя один из четырёх точных ответов
+        нельзя: в супервайзерскую проверку ушли бы выдуманные данные.
+        """
+        step = next(s for s in sc.get('sapar_docs_missing')['steps']
+                    if s['key'] == 'provider_choice')
+        self.assertIn(sc.PROVIDER_UNKNOWN, step['options'])
+        result = verdict('sapar_docs_missing',
+                         full('sapar_docs_missing', provider_choice=sc.PROVIDER_UNKNOWN))
+        self.assertEqual(result['outcome'], sc.CLOSE)
+        self.assertNotEqual(result['outcome'], sc.ESCALATE)
 
     def test_unknown_reaches_the_group_as_a_word(self):
         """В группе должно быть видно «неизвестно», а не код и не «нет»."""
-        answers = full('sapar_docs_missing', provider_changed={'value': 'unknown'})
-        body = sc.render_body('sapar_docs_missing', answers)
-        self.assertIn('Провайдер менялся: неизвестно', body)
+        step = sc.step('sample', 'Пример', sc.YESNO, allow_unknown=True)
+        self.assertEqual(sc.format_answer(step, {'sample': 'unknown'}), 'неизвестно')
+        self.assertEqual(sc.format_answer(step, {'sample': 'no'}), 'нет')
 
     def test_device_and_browser_carry_examples(self):
         """Задача #174: без образца операторы пишут «телефон» и «браузер».
@@ -684,13 +846,23 @@ class RulesAreDecidableTest(unittest.TestCase):
         self.assertIn('Google Chrome', sc.STEP_BROWSER['placeholder'])
         self.assertIn('Яндекс Браузер', sc.STEP_BROWSER['placeholder'])
 
-    def test_catalog_carries_examples_and_the_third_answer_to_the_client(self):
+    def test_catalog_carries_everything_the_wizard_draws(self):
         """Интерфейс рисует поля по каталогу — не доехало туда, значит нет его."""
         catalog = {item['key']: item for item in sc.public_catalog()}
         steps = {s['key']: s for s in catalog['sapar_sign_error']['steps']}
         self.assertTrue(steps['device'].get('placeholder'))
-        provider = {s['key']: s for s in catalog['sapar_docs_missing']['steps']}['provider_changed']
-        self.assertTrue(provider.get('allow_unknown'))
+
+        docs = catalog['sapar_docs_missing']
+        # Тематика, в которую ведёт только проверка, помечена — иначе мастер
+        # покажет её в списке выбора.
+        self.assertTrue(docs['entry_only'])
+        self.assertEqual(docs['final_outcome'], sc.ESCALATE)
+        provider = {s['key']: s for s in docs['steps']}['provider_choice']
+        self.assertIn(sc.PROVIDER_UNKNOWN, provider['options'])
+        # Консультация показывается на экране исхода — без неё он пустой.
+        consultation = next(r for r in docs['rules']
+                            if r['when'][1] == sc.PROVIDER_NOT_CHOSEN)
+        self.assertEqual(consultation['script'], sc.PROVIDER_SCRIPT)
 
     def test_iin_takes_only_plain_digits(self):
         """ИИН стал ключом поиска: «цифра» не из [0-9] сделала бы обращение ненаходимым."""

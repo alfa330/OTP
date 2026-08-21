@@ -18,7 +18,8 @@ import {
   stepIsVisible,
   toggleCheck,
   visibleSteps,
-  afterChecks, describeSnapshot, needsSaparCheck, nextStop, periodLabel, periodOptions,
+  afterCategory, afterChecks, describeSnapshot, entryCategories, entryIsComplete,
+  needsSaparCheck, nextStop, openStop, pairRows, periodLabel, periodOptions,
   previousStop, saparGroup, saparKey,
 } from '../src/components/crm/wizardRules.js';
 
@@ -192,6 +193,110 @@ test('недоступная тематика остаётся в своей г�
 test('пустая картотека не роняет раскладку', () => {
   assert.deepEqual(groupCatalog(null), []);
   assert.deepEqual(groupCatalog([]), []);
+});
+
+/* ─── Вход в тематику: проверка по ИИН раньше категории (инструкция #230) ─── */
+
+const ENTRY = {
+  queue_code: 'itaxi_sapar',
+  title: 'iTaxi Sapar',
+  is_ready: true,
+  steps: [
+    { key: 'iin', kind: 'iin' },
+    { key: 'period', kind: 'period' },
+    { key: 'park', kind: 'taxi_park', half: true },
+    { key: 'city', kind: 'city', half: true },
+  ],
+  categories: ['sapar_sign_error'],
+  no_documents: 'sapar_docs_missing',
+};
+
+const ENTRY_CATALOG = [
+  { key: 'sapar_docs_missing', queue_code: 'itaxi_sapar', queue_title: 'iTaxi Sapar',
+    is_ready: true, entry_only: true },
+  { key: 'sapar_sign_error', queue_code: 'itaxi_sapar', queue_title: 'iTaxi Sapar',
+    is_ready: true, title: 'Ошибка подписания' },
+  { key: 'parcel_location', queue_code: 'parcels', queue_title: 'Посылки', is_ready: true },
+];
+
+test('очередь со входом занимает в списке одну строку — саму тематику', () => {
+  const groups = groupCatalog(ENTRY_CATALOG, [ENTRY]);
+  const sapar = groups.find((g) => g.code === 'itaxi_sapar');
+  assert.equal(sapar.items.length, 1);
+  assert.equal(sapar.items[0].title, 'iTaxi Sapar');
+  assert.equal(sapar.items[0].entry, ENTRY);
+  // Очередь без входа показывается как раньше.
+  assert.deepEqual(groups.find((g) => g.code === 'parcels').items.map((i) => i.key),
+                   ['parcel_location']);
+});
+
+test('тематика, в которую ведёт только проверка, в списке выбора не стоит', () => {
+  const groups = groupCatalog(ENTRY_CATALOG);   // без входов
+  const sapar = groups.find((g) => g.code === 'itaxi_sapar');
+  assert.deepEqual(sapar.items.map((i) => i.key), ['sapar_sign_error']);
+});
+
+test('категории входа берутся в порядке сервера', () => {
+  assert.deepEqual(entryCategories(ENTRY, ENTRY_CATALOG).map((i) => i.key),
+                   ['sapar_sign_error']);
+});
+
+test('пока Sapar молчит, «Документы не поступили» остаётся в списке', () => {
+  assert.deepEqual(
+    entryCategories(ENTRY, ENTRY_CATALOG, { withNoDocuments: true }).map((i) => i.key),
+    ['sapar_sign_error', 'sapar_docs_missing'],
+  );
+});
+
+test('Sapar не спрашиваем, пока ИИН и период не заполнены по-настоящему', () => {
+  const filled = { iin: '123456789012', period: '2026-07', park: 'iTaxi', city: 'Алматы' };
+  assert.equal(entryIsComplete(ENTRY, filled), true);
+  assert.equal(entryIsComplete(ENTRY, { ...filled, iin: '12345' }), false);
+  assert.equal(entryIsComplete(ENTRY, { ...filled, period: '2026-13' }), false);
+  assert.equal(entryIsComplete(ENTRY, { ...filled, city: '' }), false);
+  assert.equal(entryIsComplete(null, filled), false);
+});
+
+test('парк и город на экране входа встают в одну строку', () => {
+  assert.deepEqual(pairRows(ENTRY.steps).map((row) => row.map((s) => s.key)),
+                   [['iin'], ['period'], ['park', 'city']]);
+});
+
+const ENTRY_SCENARIO = {
+  key: 'sapar_sign_error',
+  attachment: 'none',
+  checks: ['раз', 'два'],
+  steps: [
+    { key: 'iin', kind: 'iin', group: 'Водитель и период' },
+    { key: 'docs_visible', kind: 'yesno', group: 'Что происходит' },
+  ],
+  rules: [],
+};
+const ENTRY_GROUPS = ['Водитель и период', 'Что происходит'];
+
+test('после категории идёт чек-лист, а не вопросы (§2 инструкции)', () => {
+  const state = { answers: { iin: '123456789012' }, checksReady: false };
+  assert.deepEqual(afterCategory(ENTRY_SCENARIO, ENTRY_GROUPS, state), { phase: 'checks' });
+});
+
+test('заполненный на входе экран второй раз не показывается', () => {
+  const state = { answers: { iin: '123456789012' }, checksReady: true };
+  assert.deepEqual(afterCategory(ENTRY_SCENARIO, ENTRY_GROUPS, state),
+                   { phase: 'form', groupIndex: 1 });
+  assert.deepEqual(openStop(ENTRY_SCENARIO, ENTRY_GROUPS, state),
+                   { phase: 'form', groupIndex: 1 });
+});
+
+test('заполнено всё — сразу к проверке ответов, а не в пустой экран', () => {
+  const state = { answers: { iin: '123456789012', docs_visible: 'yes' }, checksReady: true };
+  assert.deepEqual(openStop(ENTRY_SCENARIO, ENTRY_GROUPS, state), { phase: 'submit' });
+});
+
+test('чек-лист входа возвращает на первый незаполненный экран, а не на второй', () => {
+  const resume = { phase: 'form', groupIndex: 1 };
+  assert.deepEqual(afterChecks(ENTRY_GROUPS, resume), resume);
+  // Без входа порядок прежний.
+  assert.deepEqual(afterChecks(ENTRY_GROUPS), { phase: 'form', groupIndex: 1 });
 });
 
 /* ─── Третий ответ «Неизвестно» (задача #172) ─────────────────────────────── */
@@ -398,12 +503,21 @@ test('снимок описывается по смыслу, а не одним 
                 { status_label: 'подписан', signed: true }],
   });
   assert.equal(found.tone, 'green');
-  assert.equal(found.title, 'Документов за период: 2');
-  // Повторяющийся статус не дублируется.
-  assert.deepEqual(found.lines, ['подписан', 'Кенжебаев Б.']);
+  // Заголовок — словами инструкции #230, теми же и на экране проверки.
+  assert.equal(found.title, 'Есть документы за отчётный период');
+  // Повторяющийся статус не дублируется, количество — рядом со статусом.
+  assert.deepEqual(found.lines, ['2 шт. · подписан', 'Кенжебаев Б.']);
+
+  const one = describeSnapshot({
+    available: true, month_ready: true,
+    documents: [{ status_label: 'ждёт подписи водителя', signed: false }],
+  });
+  // Один документ — без «1 шт.»: количество там ничего не добавляет.
+  assert.deepEqual(one.lines, ['ждёт подписи водителя']);
 
   const none = describeSnapshot({ available: true, month_ready: false, documents: [] });
   assert.equal(none.tone, 'amber');
+  assert.equal(none.title, 'Нет документов. Документы не поступили');
   assert.match(none.lines[0], /по парку/);
 
   const silent = describeSnapshot({ available: false });
