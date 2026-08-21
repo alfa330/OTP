@@ -758,10 +758,55 @@ const calibrationScoreLabel = (value) => {
 };
 
 const normalizeStatus = (status) => String(status ?? '').trim().toLowerCase();
-const isFiredStatus = (status) => {
-    const s = normalizeStatus(status);
-    return s === 'fired' || s === 'dismissal' || s === 'dismissed' || s === 'terminated' || s === 'уволен';
+
+/* ── Статусы трудоустройства ──────────────────────────────────────────────────
+   Тот же словарь, что в основном приложении. Импортировать оттуда нельзя:
+   «Журнал оценок» — отдельная сборка без Tailwind, а карты статусов в App.jsx
+   объявлены внутри компонентов. Приводим устаревшие имена (unpaid_leave — это
+   Б/С, dismissal — увольнение), иначе один и тот же человек попал бы в две
+   вкладки сразу. */
+const EMPLOYMENT_STATUS_ALIASES = {
+    unpaid_leave: 'bs',
+    dismissal: 'fired',
+    dismissed: 'fired',
+    terminated: 'fired',
+    'уволен': 'fired',
 };
+const EMPLOYMENT_STATUS_META = {
+    working: { label: 'Активные', badge: '' },
+    bs: { label: 'Б/С', badge: 'Б/С', tone: 'amber' },
+    sick_leave: { label: 'Больничный', badge: 'Больничный', tone: 'amber' },
+    annual_leave: { label: 'Ежегодный отпуск', badge: 'Отпуск', tone: 'amber' },
+    fired: { label: 'Уволенные', badge: 'Уволен', tone: 'red' },
+};
+/* Порядок вкладок фиксированный: «Активные» слева, «Уволенные» справа,
+   промежуточные состояния между ними — чтобы вкладки не переставлялись
+   от месяца к месяцу. */
+const EMPLOYMENT_STATUS_TAB_ORDER = ['working', 'bs', 'sick_leave', 'annual_leave', 'fired'];
+const EMPTY_OPERATOR_ROWS = Object.freeze([]);
+
+/* Неизвестный статус НЕ сваливаем в «Активные»: если в базе появится новый
+   код, он должен получить свою вкладку, а не тихо смешаться с работающими. */
+const normalizeEmploymentStatus = (status) => {
+    const s = normalizeStatus(status);
+    if (!s) return 'working';
+    return EMPLOYMENT_STATUS_ALIASES[s] || s;
+};
+const isFiredStatus = (status) => normalizeEmploymentStatus(status) === 'fired';
+
+/* Месяц увольнения ('YYYY-MM') из dismissal_date. null — даты нет (режим по СВ
+   или старый ответ), тогда вкладка определяется по показателям, как раньше. */
+const getDismissalMonth = (op) => {
+    const raw = String(op?.dismissal_date || '').trim();
+    return /^\d{4}-\d{2}/.test(raw) ? raw.slice(0, 7) : null;
+};
+const formatDismissalDate = (op) => {
+    const raw = String(op?.dismissal_date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return null;
+    const [y, m, d] = raw.slice(0, 10).split('-');
+    return `${d}.${m}.${y}`;
+};
+
 const hasAnyEvaluationIndicators = (operatorRow) => {
     if (!operatorRow || typeof operatorRow !== 'object') return false;
     if (operatorRow.has_evaluation_data === true || operatorRow.hasEvaluationData === true) return true;
@@ -781,6 +826,258 @@ const hasAnyEvaluationIndicators = (operatorRow) => {
     const avgScore = Number(operatorRow.avg_score);
     return Number.isFinite(avgScore) && avgScore > 0;
 };
+
+/* Раскладка состава по статусам ОДНИМ проходом: и счётчики вкладок, и состав
+   каждой из них. Раньше это были два независимых .filter() на каждый рендер,
+   и правило приходилось держать в двух местах синхронно. */
+const buildEmploymentStatusBuckets = (rows, month) => {
+    const buckets = new Map();
+    const monthKey = String(month || '');
+    for (const op of (Array.isArray(rows) ? rows : [])) {
+        let key = normalizeEmploymentStatus(op?.status);
+        if (key === 'fired') {
+            /* Уволенный остаётся среди активных только если увольнение пришлось
+               на просматриваемый месяц или позже: месяц отработан частично, и
+               его нельзя потерять. Уволенный РАНЬШЕ весь месяц уже не работал.
+               Правило и формулировка — как в «Учёте часов». */
+            const firedMonth = getDismissalMonth(op);
+            const keepInActive = firedMonth === null
+                ? hasAnyEvaluationIndicators(op)
+                : firedMonth >= monthKey;
+            if (keepInActive) key = 'working';
+        }
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(op);
+    }
+    return buckets;
+};
+
+/* ── Селектор с поиском ───────────────────────────────────────────────────────
+   Свой, а не src/components/ui/CustomSelect.jsx: тот целиком на Tailwind, а в
+   этой сборке Tailwind нет — там он был бы работающим, но полностью
+   неоформленным. Логику берём оттуда: портал в документ кнопки, закрытие по
+   клику вне и Esc, стрелки/Enter, заголовки-разделители по groupLabel.
+
+   Esc гасим stopPropagation: этот же селектор может стоять внутри модалки,
+   у которой свой обработчик Esc — иначе одно нажатие закрыло бы и список, и
+   модалку. */
+function EvalSelect({
+    value,
+    onChange,
+    options = [],
+    placeholder = 'Выбрать',
+    disabled = false,
+    searchable = true,
+    searchPlaceholder = 'Поиск…',
+    emptyText = 'Ничего не найдено',
+    ariaLabel,
+    className = '',
+    id,
+}) {
+    const [open, setOpen] = useState(false);
+    const [coords, setCoords] = useState(null);
+    const [query, setQuery] = useState('');
+    const [activeIndex, setActiveIndex] = useState(-1);
+    const btnRef = useRef(null);
+    const popRef = useRef(null);
+    const searchRef = useRef(null);
+
+    const selected = options.find((o) => String(o.value) === String(value ?? ''));
+
+    const recompute = useCallback(() => {
+        const el = btnRef.current;
+        if (!el) return;
+        const view = el.ownerDocument?.defaultView || window;
+        const r = el.getBoundingClientRect();
+        const spaceBelow = view.innerHeight - r.bottom;
+        const openUp = spaceBelow < 260 && r.top > spaceBelow;
+        setCoords({
+            left: Math.round(r.left),
+            width: Math.max(220, Math.round(r.width)),
+            top: openUp ? undefined : Math.round(r.bottom + 4),
+            bottom: openUp ? Math.round(view.innerHeight - r.top + 4) : undefined,
+            maxHeight: Math.max(180, Math.round((openUp ? r.top : spaceBelow) - 16)),
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!open) { setQuery(''); return; }
+        recompute();
+        const raf = requestAnimationFrame(() => searchRef.current?.focus());
+        return () => cancelAnimationFrame(raf);
+    }, [open, recompute]);
+
+    useEffect(() => {
+        if (!open) return;
+        const doc = btnRef.current?.ownerDocument || document;
+        const view = doc.defaultView || window;
+        const onDocDown = (e) => {
+            if (btnRef.current?.contains(e.target)) return;
+            if (popRef.current?.contains(e.target)) return;
+            setOpen(false);
+        };
+        /* capture: сам «Журнал оценок» живёт в iframe фиксированной высоты и
+           прокручивается внутри себя — без capture прокрутка внутренних блоков
+           не доходит и список «отклеивается» от кнопки. */
+        const onScroll = () => recompute();
+        doc.addEventListener('mousedown', onDocDown, true);
+        view.addEventListener('scroll', onScroll, true);
+        view.addEventListener('resize', onScroll);
+        return () => {
+            doc.removeEventListener('mousedown', onDocDown, true);
+            view.removeEventListener('scroll', onScroll, true);
+            view.removeEventListener('resize', onScroll);
+        };
+    }, [open, recompute]);
+
+    const filtered = React.useMemo(() => {
+        const q = query.trim().toLowerCase();
+        if (!q) return options;
+        return options.filter((o) => (
+            `${o.label ?? ''} ${o.hint ?? ''}`.toLowerCase().includes(q)
+        ));
+    }, [options, query]);
+
+    useEffect(() => {
+        if (!open) { setActiveIndex(-1); return; }
+        const selectedIndex = filtered.findIndex(
+            (o) => !o.disabled && String(o.value) === String(value ?? '')
+        );
+        const firstEnabled = filtered.findIndex((o) => !o.disabled);
+        setActiveIndex(selectedIndex >= 0 ? selectedIndex : firstEnabled);
+    }, [open, filtered, value]);
+
+    const moveActive = (direction) => {
+        const enabled = filtered.map((o, i) => (o.disabled ? -1 : i)).filter((i) => i >= 0);
+        if (!enabled.length) return;
+        const pos = enabled.indexOf(activeIndex);
+        const next = pos < 0
+            ? (direction > 0 ? enabled[0] : enabled[enabled.length - 1])
+            : enabled[(pos + direction + enabled.length) % enabled.length];
+        setActiveIndex(next);
+        requestAnimationFrame(() => {
+            popRef.current
+                ?.querySelector('[data-ce-active="1"]')
+                ?.scrollIntoView({ block: 'nearest' });
+        });
+    };
+
+    const pick = (o) => {
+        if (!o || o.disabled) return;
+        onChange?.(o.value);
+        setOpen(false);
+        requestAnimationFrame(() => btnRef.current?.focus());
+    };
+
+    const onKeyDown = (e) => {
+        if (disabled) return;
+        if (e.key === 'Escape') {
+            if (!open) return;
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(false);
+            return;
+        }
+        if (!open && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+            e.preventDefault();
+            setOpen(true);
+            return;
+        }
+        if (!open) return;
+        if (e.key === 'ArrowDown') { e.preventDefault(); moveActive(1); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); moveActive(-1); }
+        else if (e.key === 'Enter') { e.preventDefault(); pick(filtered[activeIndex]); }
+    };
+
+    const ownerBody = btnRef.current?.ownerDocument?.body || (typeof document !== 'undefined' ? document.body : null);
+
+    return (
+        <div className={`ce-select ${className}`.trim()} onKeyDown={onKeyDown}>
+            <button
+                type="button"
+                id={id}
+                ref={btnRef}
+                className={`ce-select-btn ${open ? 'is-open' : ''}`.trim()}
+                disabled={disabled}
+                aria-haspopup="listbox"
+                aria-expanded={open}
+                aria-label={ariaLabel}
+                onClick={() => !disabled && setOpen((v) => !v)}
+            >
+                <span
+                    className={selected ? 'ce-select-value' : 'ce-select-value is-empty'}
+                    title={selected ? selected.label : undefined}
+                >
+                    {selected ? selected.label : placeholder}
+                </span>
+                <FaIcon className="fas fa-chevron-down ce-select-caret" />
+            </button>
+
+            {open && coords && ownerBody && createPortal(
+                <div
+                    ref={popRef}
+                    className="ce-select-pop"
+                    style={{
+                        left: coords.left,
+                        width: coords.width,
+                        top: coords.top,
+                        bottom: coords.bottom,
+                        maxHeight: coords.maxHeight,
+                    }}
+                >
+                    {searchable && (
+                        <div className="ce-select-search">
+                            <FaIcon className="fas fa-search" />
+                            <input
+                                ref={searchRef}
+                                type="text"
+                                value={query}
+                                placeholder={searchPlaceholder}
+                                onChange={(e) => setQuery(e.target.value)}
+                            />
+                        </div>
+                    )}
+                    <div className="ce-select-list" role="listbox" aria-label={ariaLabel}>
+                        {filtered.length === 0 ? (
+                            <div className="ce-select-empty">{emptyText}</div>
+                        ) : filtered.map((o, index) => {
+                            const isSel = String(o.value) === String(value ?? '');
+                            const isActive = index === activeIndex;
+                            const groupLabel = o.groupLabel || '';
+                            const startsGroup = groupLabel && groupLabel !== (filtered[index - 1]?.groupLabel || '');
+                            const row = (
+                                <button
+                                    key={`opt-${String(o.value)}`}
+                                    type="button"
+                                    role="option"
+                                    aria-selected={isSel}
+                                    tabIndex={-1}
+                                    data-ce-active={isActive ? '1' : undefined}
+                                    disabled={o.disabled}
+                                    className={`ce-select-option${isSel ? ' is-selected' : ''}${isActive ? ' is-active' : ''}`}
+                                    onMouseEnter={() => setActiveIndex(index)}
+                                    onClick={() => pick(o)}
+                                >
+                                    <span className="ce-select-option-label" title={o.label}>{o.label}</span>
+                                    {o.hint && <span className="ce-select-option-hint">{o.hint}</span>}
+                                    {isSel && <FaIcon className="fas fa-check ce-select-option-check" />}
+                                </button>
+                            );
+                            if (!startsGroup) return row;
+                            return (
+                                <React.Fragment key={`grp-${groupLabel}-${String(o.value)}`}>
+                                    <div className="ce-select-group">{groupLabel}</div>
+                                    {row}
+                                </React.Fragment>
+                            );
+                        })}
+                    </div>
+                </div>,
+                ownerBody
+            )}
+        </div>
+    );
+}
 const compareByNameRu = (a, b) => String(a?.name ?? '').localeCompare(String(b?.name ?? ''), 'ru');
 const sortByFiredAndName = (list = []) => [...list].sort((a, b) => {
     const firedDiff = Number(isFiredStatus(a?.status)) - Number(isFiredStatus(b?.status));
@@ -3828,11 +4125,18 @@ const App = ({ user, initialSelection }) => {
     }, [isSupervisorRole, userId, buildCurrentSupervisorOption]);
 
     // Analytics section state
-    const [analyticsSelectedSvId, setAnalyticsSelectedSvId] = useState('');
+    /* Состав «Аналитики» выбирается ГРУППОЙ, а не супервайзером: тогда состав
+       месяца берётся по членству в группе (как в «Учёте часов»), и переведённый,
+       повышенный или уволенный не исчезает из прошлых месяцев. */
+    const [analyticsSelectedGroupId, setAnalyticsSelectedGroupId] = useState('');
+    const [analyticsGroups, setAnalyticsGroups] = useState([]);
+    const [analyticsGroupsLoading, setAnalyticsGroupsLoading] = useState(false);
     const [analyticsSelectedSvData, setAnalyticsSelectedSvData] = useState(null);
     const [analyticsMonth, setAnalyticsMonth] = useState(new Date().toISOString().slice(0, 7));
     const [analyticsLoading, setAnalyticsLoading] = useState(false);
-    const [analyticsActiveOperatorsTab, setAnalyticsActiveOperatorsTab] = useState('active');
+    /* Ключ статуса трудоустройства, а не 'active'/'fired': вкладок столько,
+       сколько статусов реально есть в составе за месяц. */
+    const [analyticsStatusTab, setAnalyticsStatusTab] = useState('working');
     const [analyticsViewSortField, setAnalyticsViewSortField] = useState('name');
     const [analyticsViewSortDir, setAnalyticsViewSortDir] = useState('asc');
     const [analyticsAiModal, setAnalyticsAiModal] = useState({ show: false, loading: false, title: '', result: null, error: '' });
@@ -4187,6 +4491,35 @@ const App = ({ user, initialSelection }) => {
         return () => { isCancelled = true; };
     }, [isAdminRole, isSupervisorRole, isDepartmentHead, userId, normalizeSupervisorList]);
 
+    /* Группы для селектора «Аналитики». include_archived=1 намеренно: у архивных
+       групп есть месяцы, когда они жили, и без них аналитика за прошлый месяц
+       была бы недостижима (в «Учёте часов» их скрывают — это скрытый дефект,
+       а не образец). Сервер уже отдаёт только доступные запрашивающему. */
+    useEffect(() => {
+        if (activeSection !== 'analytics' || !canUseAnalytics || !userId) return;
+        let isCancelled = false;
+        setAnalyticsGroupsLoading(true);
+
+        authFetch(`${API_BASE_URL}/api/groups?include_archived=1`, { headers: { 'X-User-Id': userId } })
+            .then(async (r) => {
+                const d = await readJsonSafe(r);
+                if (!r.ok || d?.status !== 'success') {
+                    throw new Error(d?.error || `Не удалось загрузить группы: ${r.status}`);
+                }
+                return Array.isArray(d.groups) ? d.groups : [];
+            })
+            .then((nextGroups) => { if (!isCancelled) setAnalyticsGroups(nextGroups); })
+            .catch((error) => {
+                if (isCancelled) return;
+                console.error(error);
+                setAnalyticsGroups([]);
+                emitCallEvaluationToast('Не удалось загрузить список групп', 'error');
+            })
+            .finally(() => { if (!isCancelled) setAnalyticsGroupsLoading(false); });
+
+        return () => { isCancelled = true; };
+    }, [activeSection, canUseAnalytics, userId]);
+
     useEffect(() => {
         if (!initialSelection) return;
         const requestedSection = String(initialSelection.section || '').trim().toLowerCase();
@@ -4212,7 +4545,10 @@ const App = ({ user, initialSelection }) => {
         if (initialSelection.supervisorId != null) {
             const nextSupervisorId = Number(initialSelection.supervisorId) || null;
             setSelectedSupervisor(nextSupervisorId);
-            if (nextSupervisorId) setAnalyticsSelectedSvId(String(nextSupervisorId));
+        }
+        if (initialSelection.groupId != null) {
+            const nextGroupId = Number(initialSelection.groupId) || null;
+            if (nextGroupId) setAnalyticsSelectedGroupId(String(nextGroupId));
         }
     }, [initialSelection, canUseAnalytics, canUseCalibration, canUseRequests]);
 
@@ -4227,16 +4563,22 @@ const App = ({ user, initialSelection }) => {
         if (fallbackSupervisorId) setSelectedSupervisor(fallbackSupervisorId);
     }, [isSupervisorRole, userId, supervisors, selectedSupervisor]);
 
+    /* Группа по умолчанию. Приоритет: группа выбранного/своего СВ (так СВ сразу
+       видит свою), иначе первая живая. Архивную по умолчанию не подставляем —
+       это всегда осознанный выбор «посмотреть прошлое». */
     useEffect(() => {
-        if (activeSection !== 'analytics' || analyticsSelectedSvId) return;
-        if (selectedSupervisor) {
-            setAnalyticsSelectedSvId(String(selectedSupervisor));
-            return;
-        }
-        if (isSupervisorRole && userId) {
-            setAnalyticsSelectedSvId(String(userId));
-        }
-    }, [activeSection, analyticsSelectedSvId, selectedSupervisor, isSupervisorRole, userId]);
+        if (activeSection !== 'analytics' || analyticsSelectedGroupId) return;
+        if (!Array.isArray(analyticsGroups) || analyticsGroups.length === 0) return;
+
+        const live = analyticsGroups.filter((g) => String(g?.status || '') !== 'archived');
+        const ledBy = (group, svId) => (group?.supervisors || []).some(
+            (sv) => String(sv?.id) === String(svId)
+        );
+        const preferredSvId = selectedSupervisor || (isSupervisorRole ? userId : null);
+        const own = preferredSvId ? live.find((g) => ledBy(g, preferredSvId)) : null;
+        const fallback = own || live[0] || null;
+        if (fallback) setAnalyticsSelectedGroupId(String(fallback.id));
+    }, [activeSection, analyticsSelectedGroupId, analyticsGroups, selectedSupervisor, isSupervisorRole, userId]);
 
     useEffect(() => {
         if (!userId) return;
@@ -4246,11 +4588,13 @@ const App = ({ user, initialSelection }) => {
                 operatorId: selectedOperator?.id || null,
                 operatorName: selectedOperator?.name || '',
                 supervisorId: selectedSupervisor || null,
+                // Без этого выбранная группа терялась при каждом уходе из раздела.
+                groupId: analyticsSelectedGroupId || null,
                 month: selectedMonth,
                 section: activeSection
             }
         });
-    }, [userId, userRole, userName, selectedOperator, selectedSupervisor, selectedMonth, activeSection]);
+    }, [userId, userRole, userName, selectedOperator, selectedSupervisor, analyticsSelectedGroupId, selectedMonth, activeSection]);
 
     useEffect(() => {
         if (operatorFromToken && operators.length > 0) {
@@ -5021,8 +5365,14 @@ const App = ({ user, initialSelection }) => {
     const orderedOperators = sortByFiredAndName(operators);
     const selectedSupervisorObj = selectedSupervisor ? supervisors.find(sv => sv.id === selectedSupervisor) : null;
     const selectedSupervisorIsFired = isFiredStatus(selectedSupervisorObj?.status);
-    const analyticsSelectedSupervisorObj = analyticsSelectedSvId ? supervisors.find(sv => Number(sv.id) === Number(analyticsSelectedSvId)) : null;
-    const analyticsSelectedSupervisorIsFired = isFiredStatus(analyticsSelectedSupervisorObj?.status);
+    const analyticsSelectedGroup = analyticsSelectedGroupId
+        ? (analyticsGroups || []).find(g => String(g.id) === String(analyticsSelectedGroupId)) || null
+        : null;
+    const analyticsSelectedGroupIsArchived = String(analyticsSelectedGroup?.status || '') === 'archived';
+    /* Выгрузка «по группе» и уведомление СВ по-прежнему адресуются супервайзеру:
+       у группы бывает несколько СВ (а у некоторых — ни одного, в проде такие
+       есть), поэтому берём первого и допускаем пустоту. */
+    const analyticsSelectedGroupSvId = Number(analyticsSelectedGroup?.supervisors?.[0]?.id) || null;
     const selectedOperatorIsFired = isFiredStatus(selectedOperator?.status);
     // «Случайный звонок»: СЗоВ (Oktell) и TEZ (Binotel) — признак считает бэкенд
     // (/api/admin/directions -> random_call_eligible + random_call_source). Прочие
@@ -5346,11 +5696,11 @@ const App = ({ user, initialSelection }) => {
     };
 
     // ─── Analytics API ───────────────────────────────────────────────────────
-    const fetchAnalyticsSvData = useCallback(async (svId, month) => {
-        if (!svId) { setAnalyticsSelectedSvData(null); return; }
+    const fetchAnalyticsGroupData = useCallback(async (groupId, month) => {
+        if (!groupId) { setAnalyticsSelectedSvData(null); return; }
         setAnalyticsLoading(true);
         try {
-            const url = `${API_BASE_URL}/api/sv/data?id=${encodeURIComponent(svId)}${month ? `&month=${encodeURIComponent(month)}` : ''}`;
+            const url = `${API_BASE_URL}/api/sv/data?group_id=${encodeURIComponent(groupId)}${month ? `&month=${encodeURIComponent(month)}` : ''}`;
             const r = await authFetch(url, { headers: { 'X-User-Id': userId } });
             const d = await readJsonSafe(r);
             if (d?.status === 'success') setAnalyticsSelectedSvData(d);
@@ -5390,12 +5740,12 @@ const App = ({ user, initialSelection }) => {
             show: true,
             format: prev.format || 'standard',
             departmentId: prev.departmentId || '',
-            supervisorId: prev.supervisorId || analyticsSelectedSvId || ''
+            supervisorId: prev.supervisorId || (analyticsSelectedGroupSvId ? String(analyticsSelectedGroupSvId) : '')
         }));
         if (isGlobalAdminRole) {
             loadAnalyticsReportDepartments();
         }
-    }, [isGlobalAdminRole, loadAnalyticsReportDepartments, analyticsSelectedSvId]);
+    }, [isGlobalAdminRole, loadAnalyticsReportDepartments, analyticsSelectedGroupSvId]);
 
     const closeAnalyticsReportModal = useCallback(() => {
         if (analyticsLoading) return;
@@ -5504,8 +5854,6 @@ const App = ({ user, initialSelection }) => {
         } catch (e) { setAnalyticsAiModal(prev => ({ ...prev, loading: false, error: e.message || 'Ошибка запроса' })); }
     }, [userId]);
 
-    const analyticsEffectiveSvId = analyticsSelectedSvId;
-
     const getAnalyticsOperatorSupervisorId = (op) => {
         const candidates = [
             op?.supervisor_id,
@@ -5523,24 +5871,115 @@ const App = ({ user, initialSelection }) => {
         return '';
     };
 
-    const getAnalyticsScopedOperators = (rows = []) => {
-        const list = Array.isArray(rows) ? rows : [];
-        const targetSvId = String(analyticsEffectiveSvId || '').trim();
-        if (!targetSvId) return list;
-        const hasSupervisorMeta = list.some((op) => !!getAnalyticsOperatorSupervisorId(op));
-        if (!hasSupervisorMeta) return list;
-        return list.filter((op) => getAnalyticsOperatorSupervisorId(op) === targetSvId);
-    };
-
     useEffect(() => {
-        if (activeSection === 'analytics' && analyticsEffectiveSvId) {
-            fetchAnalyticsSvData(analyticsEffectiveSvId, analyticsMonth);
-        } else if (activeSection === 'analytics' && !analyticsEffectiveSvId) {
+        if (activeSection === 'analytics' && analyticsSelectedGroupId) {
+            fetchAnalyticsGroupData(analyticsSelectedGroupId, analyticsMonth);
+        } else if (activeSection === 'analytics' && !analyticsSelectedGroupId) {
             setAnalyticsSelectedSvData(null);
         }
-    }, [analyticsEffectiveSvId, analyticsMonth, activeSection, fetchAnalyticsSvData]);
+    }, [analyticsSelectedGroupId, analyticsMonth, activeSection, fetchAnalyticsGroupData]);
 
-    const analyticsScopedOperators = getAnalyticsScopedOperators(analyticsSelectedSvData?.operators ?? []);
+    /* Состав уже ограничен группой на сервере — клиентский фильтр по СВ убран:
+       в группе операторы нескольких супервайзеров, и он вычищал бы таблицу.
+       EMPTY_OPERATOR_ROWS, а не литерал []: иначе при пустом ответе ссылка на
+       каждый рендер новая и раскладка по статусам пересчитывается вхолостую. */
+    const analyticsScopedOperators = analyticsSelectedSvData?.operators ?? EMPTY_OPERATOR_ROWS;
+
+    /* Одна раскладка на рендер: из неё и счётчики вкладок, и состав таблицы. */
+    const analyticsStatusBuckets = React.useMemo(
+        () => buildEmploymentStatusBuckets(analyticsScopedOperators, analyticsMonth),
+        [analyticsScopedOperators, analyticsMonth]
+    );
+    /* Вкладка есть, если в ней кто-то есть. «Активные» и «Уволенные» показываем
+       всегда — это опорная пара, и её исчезновение читалось бы как сбой.
+       Остальные статусы (Б/С, больничный, отпуск) — только когда они реально
+       встречаются в этом месяце, как и просили. */
+    const analyticsStatusTabs = React.useMemo(() => {
+        const always = new Set(['working', 'fired']);
+        const known = EMPLOYMENT_STATUS_TAB_ORDER
+            .map((key) => ({
+                key,
+                label: EMPLOYMENT_STATUS_META[key]?.label || key,
+                tone: EMPLOYMENT_STATUS_META[key]?.tone || '',
+                count: (analyticsStatusBuckets.get(key) || []).length,
+            }))
+            .filter((tab) => tab.count > 0 || always.has(tab.key));
+        /* Статус, которого нет в словаре (в базе добавили новый код), получает
+           вкладку с сырым кодом — лучше непривычная подпись, чем потерянные люди. */
+        const unknown = [...analyticsStatusBuckets.keys()]
+            .filter((key) => !EMPLOYMENT_STATUS_META[key])
+            .sort((a, b) => String(a).localeCompare(String(b), 'ru'))
+            .map((key) => ({
+                key,
+                label: key,
+                tone: 'amber',
+                count: (analyticsStatusBuckets.get(key) || []).length,
+            }));
+        // Уволенные всегда последними, новые коды — перед ними.
+        const firedTab = known.filter((tab) => tab.key === 'fired');
+        return [...known.filter((tab) => tab.key !== 'fired'), ...unknown, ...firedTab];
+    }, [analyticsStatusBuckets]);
+
+    /* Если активная вкладка опустела (сменили месяц/группу) — уводим на
+       «Активные», иначе экран выглядел бы пустым без причины. */
+    useEffect(() => {
+        if (!analyticsStatusTabs.length) return;
+        if (analyticsStatusTabs.some((tab) => tab.key === analyticsStatusTab)) return;
+        setAnalyticsStatusTab('working');
+    }, [analyticsStatusTabs, analyticsStatusTab]);
+
+    /* Отделы нужны для разделителей в селекторе групп — грузим тем же
+       загрузчиком, что и выгрузка, он сам не повторяет запрос. */
+    useEffect(() => {
+        if (activeSection !== 'analytics' || !isGlobalAdminRole) return;
+        loadAnalyticsReportDepartments();
+    }, [activeSection, isGlobalAdminRole, loadAnalyticsReportDepartments]);
+
+    const analyticsDepartmentNameById = React.useMemo(() => {
+        const map = new Map();
+        for (const dept of (analyticsReportDepartments || [])) {
+            if (dept?.id != null) map.set(String(dept.id), dept.name || '');
+        }
+        return map;
+    }, [analyticsReportDepartments]);
+
+    /* Опции селектора групп. Разделитель по отделам — только админам: у СВ и
+       главы отдела отдел один, и заголовок был бы шумом. Названия отделов живут
+       в /api/admin/departments, которое СВ и так отдаёт 403. */
+    const analyticsGroupOptions = React.useMemo(() => {
+        const showDepartments = isGlobalAdminRole;
+        const deptName = (group) => {
+            const id = group?.department_id;
+            if (id == null) return 'Без отдела';
+            return analyticsDepartmentNameById.get(String(id)) || `Отдел ${id}`;
+        };
+        const rows = (analyticsGroups || []).map((group) => {
+            const archived = String(group?.status || '') === 'archived';
+            return {
+                group,
+                archived,
+                department: deptName(group),
+                option: {
+                    value: String(group.id),
+                    label: group.name,
+                    groupLabel: showDepartments ? deptName(group) : '',
+                    // Отдельной подписью справа, а не приклеенной к названию:
+                    // у длинных имён обрезалась бы именно пометка, то есть
+                    // ровно то, что объясняет пустой состав.
+                    hint: archived ? 'архив' : '',
+                },
+            };
+        });
+        rows.sort((a, b) => {
+            if (showDepartments && a.department !== b.department) {
+                return a.department.localeCompare(b.department, 'ru');
+            }
+            // Живые выше архивных, дальше по имени.
+            if (a.archived !== b.archived) return a.archived ? 1 : -1;
+            return String(a.group.name || '').localeCompare(String(b.group.name || ''), 'ru');
+        });
+        return rows.map((row) => row.option);
+    }, [analyticsGroups, isGlobalAdminRole, analyticsDepartmentNameById]);
     const evaluationNotifyDepartments = Array.isArray(evaluationNotifySetting.departments)
         ? evaluationNotifySetting.departments.filter(Boolean)
         : [];
@@ -7361,31 +7800,28 @@ const App = ({ user, initialSelection }) => {
                     <div className="panel-header">
                         <div className="panel-title-wrap">
                             <span className="panel-title">Аналитика</span>
-                            <div className="filter-group" style={{ marginBottom: 0, minWidth: 220 }}>
-                                <label className="label">Супервайзер</label>
-                                <select
-                                    className="select"
-                                    value={analyticsSelectedSvId}
-                                    style={analyticsSelectedSupervisorIsFired ? { color:'var(--text-3)' } : undefined}
-                                    onChange={(e) => {
-                                        setAnalyticsSelectedSvId(e.target.value);
+                            <div className="filter-group" style={{ marginBottom: 0, minWidth: 280 }}>
+                                <label className="label" htmlFor="analytics-group-select">Группа</label>
+                                <EvalSelect
+                                    id="analytics-group-select"
+                                    value={analyticsSelectedGroupId}
+                                    onChange={(nextValue) => {
+                                        setAnalyticsSelectedGroupId(String(nextValue || ''));
                                         setAnalyticsSelectedSvData(null);
                                     }}
-                                    disabled={analyticsLoading}
-                                >
-                                    <option value="">Выбрать</option>
-                                    {orderedSupervisors.map(sv => (
-                                        <option
-                                            key={sv.id}
-                                            value={sv.id}
-                                            className={isFiredStatus(sv?.status) ? 'option-fired' : ''}
-                                            style={isFiredStatus(sv?.status) ? { color:'var(--text-3)' } : undefined}
-                                        >
-                                            {sv.name}
-                                        </option>
-                                    ))}
-                                </select>
+                                    options={analyticsGroupOptions}
+                                    placeholder={analyticsGroupsLoading ? 'Загрузка групп…' : 'Выбрать группу'}
+                                    searchPlaceholder="Поиск группы…"
+                                    emptyText="Группы не найдены"
+                                    ariaLabel="Группа"
+                                    disabled={analyticsLoading || analyticsGroupsLoading}
+                                />
                             </div>
+                            {analyticsSelectedGroupIsArchived && (
+                                <span className="ce-chip ce-chip-muted" title="Группа в архиве: состав виден за те месяцы, когда она работала">
+                                    <FaIcon className="fas fa-box-archive" /> архивная группа
+                                </span>
+                            )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             <select
@@ -7407,8 +7843,8 @@ const App = ({ user, initialSelection }) => {
                             </button>
                             <button
                                 className="btn btn-sm btn-primary"
-                                onClick={() => { if (!analyticsEffectiveSvId) { emitCallEvaluationToast('Выберите супервайзера', 'error'); return; } fetchAnalyticsSvData(analyticsEffectiveSvId, analyticsMonth); }}
-                                disabled={analyticsLoading || !analyticsEffectiveSvId}
+                                onClick={() => { if (!analyticsSelectedGroupId) { emitCallEvaluationToast('Выберите группу', 'error'); return; } fetchAnalyticsGroupData(analyticsSelectedGroupId, analyticsMonth); }}
+                                disabled={analyticsLoading || !analyticsSelectedGroupId}
                             >
                                 <FaIcon className="fas fa-sync-alt" /> {analyticsLoading ? 'Обновление...' : 'Обновить'}
                             </button>
@@ -7416,33 +7852,38 @@ const App = ({ user, initialSelection }) => {
                     </div>
 
                     <div style={{ padding: '16px 24px' }}>
-                        {/* Active / Fired tabs */}
+                        {/* Вкладки статусов трудоустройства за выбранный месяц */}
                         <div className="section-switch" style={{ marginBottom: 14 }}>
-                            {(() => {
-                                const all = analyticsScopedOperators;
-                                const activeCount = all.filter(op => !isFiredStatus(op.status) || hasAnyEvaluationIndicators(op)).length;
-                                const firedCount = all.filter(op => isFiredStatus(op.status) && !hasAnyEvaluationIndicators(op)).length;
+                            {analyticsStatusTabs.map((tab) => {
+                                const isActive = analyticsStatusTab === tab.key;
+                                /* Цветом выделяем только то, что несёт смысл:
+                                   уволенные — красным, промежуточные состояния —
+                                   янтарным. Нейтральное не красим. */
+                                const toneStyle = !isActive ? undefined
+                                    : tab.tone === 'red'
+                                        ? { background: 'var(--red)', color: '#fff', borderColor: 'var(--red)' }
+                                        : tab.tone === 'amber'
+                                            ? { background: 'var(--amber)', color: '#fff', borderColor: 'var(--amber)' }
+                                            : undefined;
+                                const baseClass = isActive && !toneStyle ? 'btn-primary' : (isActive ? '' : 'btn-secondary');
                                 return (
-                                    <>
-                                        <button className={`btn btn-sm ${analyticsActiveOperatorsTab === 'active' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setAnalyticsActiveOperatorsTab('active')}>
-                                            Активные ({activeCount})
-                                        </button>
-                                        <button className={`btn btn-sm ${analyticsActiveOperatorsTab === 'fired' ? '' : 'btn-secondary'}`} style={analyticsActiveOperatorsTab === 'fired' ? { background: 'var(--red)', color: '#fff', borderColor: 'var(--red)' } : {}} onClick={() => setAnalyticsActiveOperatorsTab('fired')}>
-                                            Уволенные ({firedCount})
-                                        </button>
-                                    </>
+                                    <button
+                                        key={tab.key}
+                                        className={`btn btn-sm ${baseClass}`.trim()}
+                                        style={toneStyle}
+                                        onClick={() => setAnalyticsStatusTab(tab.key)}
+                                    >
+                                        {tab.label} ({tab.count})
+                                    </button>
                                 );
-                            })()}
+                            })}
                         </div>
 
                         {/* Table */}
                         {analyticsLoading ? (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Загрузка...</p>
                         ) : analyticsScopedOperators.length > 0 ? (() => {
-                            const allOps = analyticsScopedOperators;
-                            const filteredOps = analyticsActiveOperatorsTab === 'active'
-                                ? allOps.filter(op => !isFiredStatus(op.status) || hasAnyEvaluationIndicators(op))
-                                : allOps.filter(op => isFiredStatus(op.status) && !hasAnyEvaluationIndicators(op));
+                            const filteredOps = analyticsStatusBuckets.get(analyticsStatusTab) || [];
 
                             if (filteredOps.length === 0) return <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Операторы не найдены.</p>;
 
@@ -7482,9 +7923,36 @@ const App = ({ user, initialSelection }) => {
                                                 return (
                                                     <tr key={op.id ?? index} style={{ background: index % 2 === 0 ? 'var(--surface)' : 'var(--surface-2)' }}>
                                                         <td style={tdStyle}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                                                                 <OperatorAvatar operator={op} />
                                                                 <span style={{ fontWeight: 500 }}>{op.name}</span>
+                                                                {(() => {
+                                                                    /* Бейдж статуса нужен там, где он объясняет цифры:
+                                                                       во вкладке «Активные» видно, что человек уволен
+                                                                       или в Б/С посреди месяца. Внутри одноимённой
+                                                                       вкладки он был бы дублем заголовка — не рисуем. */
+                                                                    const statusKey = normalizeEmploymentStatus(op.status);
+                                                                    if (statusKey === 'working' || statusKey === analyticsStatusTab) return null;
+                                                                    const meta = EMPLOYMENT_STATUS_META[statusKey];
+                                                                    if (!meta?.badge) return null;
+                                                                    const firedOn = formatDismissalDate(op);
+                                                                    return (
+                                                                        <span
+                                                                            className={`ce-chip ${meta.tone === 'red' ? 'ce-chip-red' : 'ce-chip-amber'}`}
+                                                                            title={statusKey === 'fired' && firedOn ? `Уволен(а) с ${firedOn}` : meta.badge}
+                                                                        >
+                                                                            {meta.badge}
+                                                                        </span>
+                                                                    );
+                                                                })()}
+                                                                {op.has_other_group_in_month && (
+                                                                    <span
+                                                                        className="ce-chip ce-chip-muted"
+                                                                        title="В этом месяце оператор был и в другой группе. Оценки и план считаются за месяц целиком, поэтому здесь они показаны полностью, а не только за дни в этой группе."
+                                                                    >
+                                                                        переведён
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                         </td>
                                                         <td style={tdStyle}>{renderAnalyticsPlanContent(op, callCount)}</td>
@@ -7507,13 +7975,13 @@ const App = ({ user, initialSelection }) => {
                                                         <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
                                                             <div className={`analytics-actions ${isAdminRole ? 'analytics-actions-admin' : 'analytics-actions-compact'}`}>
                                                                 {isAdminRole && hasIssue && (
-                                                                    <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(analyticsEffectiveSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading}>
+                                                                    <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(Number(op?.supervisor_id) || analyticsSelectedGroupSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading || !(Number(op?.supervisor_id) || analyticsSelectedGroupSvId)}>
                                                                         ⚠ Уведомить
                                                                     </button>
                                                                 )}
                                                                 {isAdminRole && !hasIssue && <span className="analytics-action-placeholder" aria-hidden="true" />}
                                                                 <button className="btn btn-sm btn-primary" onClick={() => {
-                                                                    const nextSupervisorId = Number(op?.supervisor_id ?? op?.sv_id ?? analyticsEffectiveSvId) || null;
+                                                                    const nextSupervisorId = Number(op?.supervisor_id ?? op?.sv_id) || analyticsSelectedGroupSvId;
                                                                     if (nextSupervisorId) setSelectedSupervisor(nextSupervisorId);
                                                                     setOperatorFromToken({ id: Number(op.id), name: op.name || '' });
                                                                     setSelectedMonth(analyticsMonth);
@@ -7559,10 +8027,14 @@ const App = ({ user, initialSelection }) => {
                                     </table>
                                 </div>
                             );
-                        })() : analyticsEffectiveSvId ? (
-                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Операторы не найдены для этого супервайзера.</p>
+                        })() : analyticsSelectedGroupId ? (
+                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>
+                                {analyticsSelectedGroupIsArchived
+                                    ? 'В этой группе за выбранный месяц никого не было — она уже была в архиве. Выберите месяц, когда группа работала.'
+                                    : 'В этой группе за выбранный месяц никого не было.'}
+                            </p>
                         ) : (
-                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Выберите супервайзера для просмотра аналитики.</p>
+                            <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Выберите группу для просмотра аналитики.</p>
                         )}
                     </div>
                 </div>

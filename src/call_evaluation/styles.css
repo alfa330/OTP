@@ -41,6 +41,142 @@
             -webkit-font-smoothing: antialiased;
         }
 
+        /* ── Селектор с поиском (EvalSelect) ──────────────────────────────────
+           Свой, а не общий CustomSelect: тот целиком на Tailwind, которого в
+           этой сборке нет. Внешний вид повторяет .select/.input этого файла,
+           чтобы в шапке раздела не появилось второй визуальной системы. */
+        .ce-select { position: relative; display: block; }
+        .ce-select-btn {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            font-family: var(--font);
+            font-size: 13px;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            cursor: pointer;
+            text-align: left;
+            transition: border-color var(--transition), box-shadow var(--transition);
+        }
+        .ce-select-btn:hover:not(:disabled) { border-color: var(--text-3); }
+        .ce-select-btn:disabled { background: var(--surface-2); color: var(--text-3); cursor: not-allowed; }
+        .ce-select-btn.is-open,
+        .ce-select-btn:focus-visible {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-light);
+        }
+        .ce-select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ce-select-value.is-empty { color: var(--text-3); }
+        .ce-select-caret { flex-shrink: 0; color: var(--text-2); font-size: 11px; }
+        .ce-select-btn.is-open .ce-select-caret { transform: rotate(180deg); }
+
+        /* z-index выше .modal-backdrop (100) и ниже тостов (5000): селектор
+           может стоять и внутри модалки выгрузки. */
+        .ce-select-pop {
+            position: fixed;
+            z-index: 1200;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
+        }
+        .ce-select-search {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .ce-select-search svg,
+        .ce-select-search i { color: var(--text-3); font-size: 12px; flex-shrink: 0; }
+        .ce-select-search input {
+            flex: 1;
+            min-width: 0;
+            border: none;
+            outline: none;
+            background: transparent;
+            font-family: var(--font);
+            font-size: 13px;
+            color: var(--text);
+        }
+        .ce-select-search input::placeholder { color: var(--text-3); }
+        .ce-select-list { min-height: 0; overflow-y: auto; padding: 4px 0; }
+        .ce-select-group {
+            padding: 8px 12px 4px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-3);
+        }
+        .ce-select-group + .ce-select-option { border-top: none; }
+        .ce-select-option {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border: none;
+            background: transparent;
+            font-family: var(--font);
+            font-size: 13px;
+            color: var(--text);
+            text-align: left;
+            cursor: pointer;
+        }
+        .ce-select-option.is-active { background: var(--surface-2); }
+        .ce-select-option.is-selected { background: var(--accent-light); color: var(--accent); font-weight: 500; }
+        .ce-select-option:disabled { color: var(--text-3); cursor: not-allowed; }
+        .ce-select-option-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* Подпись справа от названия — служебная пометка вроде «архив».
+           Не сжимается: она объясняет, почему состав пустой, и обрезать её
+           нельзя, в отличие от самого названия. */
+        .ce-select-option-hint {
+            flex-shrink: 0;
+            padding: 0 5px;
+            border-radius: 999px;
+            border: 1px solid var(--border-strong);
+            background: var(--surface-2);
+            font-size: 9px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-3);
+        }
+        .ce-select-option-check { flex-shrink: 0; font-size: 11px; color: var(--accent); }
+        .ce-select-empty { padding: 14px 12px; font-size: 12px; color: var(--text-3); text-align: center; }
+
+        /* ── Чипы состояния ──────────────────────────────────────────────────
+           Цвет только там, где он несёт смысл: уволен — красный, промежуточное
+           состояние — янтарный, служебная пометка — нейтральная. */
+        .ce-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 1px 6px;
+            border-radius: 999px;
+            border: 1px solid var(--border-strong);
+            background: var(--surface-2);
+            color: var(--text-2);
+            font-size: 10px;
+            font-weight: 600;
+            line-height: 1.5;
+            white-space: nowrap;
+        }
+        .ce-chip-muted { border-color: var(--border-strong); background: var(--surface-2); color: var(--text-2); }
+        .ce-chip-red { border-color: var(--red); background: var(--red-light); color: var(--red); }
+        .ce-chip-amber { border-color: var(--amber); background: var(--amber-light); color: var(--amber); }
+
         /* ── Layout ── */
         #root { min-height: 100vh; }
 
