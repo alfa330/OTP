@@ -123,6 +123,48 @@ time.tzset()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+class _SecretScrubber(logging.Filter):
+    """Затирает секреты в тексте лога.
+
+    Поставлено после инцидента 22.08.2026: httpx пишет в лог полный URL на
+    уровне INFO, а ключ Gemini передавался query-параметром — и лежал в логах
+    Render открытым текстом с 20.08. Сами вызовы переведены на заголовок
+    (wiki/ai/providers.py, ai_feed_back_service.py, voice_trainer/routes.py),
+    но одной правкой мест такую утечку не закрыть: завтра появится четвёртое.
+
+    Фильтр — последний рубеж, а не замена аккуратности: он режет то, что уже
+    собрались напечатать, и не мешает читать сам запрос.
+    """
+
+    # Шаблон и замена ходят парой: у первого нужно сохранить имя параметра,
+    # чтобы запрос остался читаемым, у остальных — вырезать находку целиком.
+    _RULES = (
+        (re.compile(r'([?&](?:key|api_key|access_token|token)=)[^&\s\'"]+'), r'\1<СКРЫТО>'),
+        (re.compile(r'\bAIza[0-9A-Za-z_\-]{10,}'), '<СКРЫТО>'),
+        (re.compile(r'\bsk-[A-Za-z0-9\-_]{10,}'), '<СКРЫТО>'),
+    )
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        scrubbed = message
+        for pattern, replacement in self._RULES:
+            scrubbed = pattern.sub(replacement, scrubbed)
+        if scrubbed != message:
+            record.msg = scrubbed
+            record.args = ()
+        return True
+
+
+# Фильтры вешаются на ОБРАБОТЧИКИ корневого логгера, а не на логгер: запись,
+# созданная дочерним логгером (httpx, urllib3), фильтры родителя не проходит —
+# она поднимается сразу к обработчикам.
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_SecretScrubber())
+
+
 def _env_bool(name, default=False):
     value = os.getenv(name)
     if value is None:

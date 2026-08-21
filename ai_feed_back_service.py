@@ -9,6 +9,9 @@ import os
 from datetime import datetime, date
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+# Ключ Gemini передаём ЗАГОЛОВКОМ: httpx пишет в лог полный URL, и
+# '?key=...' оказывался в логах Render открытым текстом (22.08.2026).
+GEMINI_HEADERS = {'x-goog-api-key': GEMINI_API_KEY or ''}
 
 MASTER_PROMPT_MONTHLY = """ТЫ — Dos, опытный и дружелюбный тренер/ментор для операторов колл-центра.
 Твоя задача — проанализировать результаты оценок за выбранный месяц и сгенерировать развёрнутую, практичную обратную связь на основе мониторинговой шкалы.
@@ -276,7 +279,7 @@ async def generate_birthday_greeting_with_ai(user_payload: dict, for_date: str) 
         f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
     )
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     payload = {
         "contents": [{"parts": [{"text": full_prompt}]}],
         "generationConfig": generation_config,
@@ -285,7 +288,7 @@ async def generate_birthday_greeting_with_ai(user_payload: dict, for_date: str) 
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(api_url, json=payload)
+            response = await client.post(api_url, json=payload, headers=GEMINI_HEADERS)
             response.raise_for_status()
             result = response.json()
             if "candidates" not in result or not result["candidates"]:
@@ -651,7 +654,7 @@ async def _gemini_generate_once(model: str, prompt: str, timeout: float, attempt
     """
     api_url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={GEMINI_API_KEY}"
+        f"{model}:generateContent"
     )
     plain_config = False
     payload = {
@@ -664,7 +667,7 @@ async def _gemini_generate_once(model: str, prompt: str, timeout: float, attempt
         attempt += 1
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(api_url, json=payload)
+                response = await client.post(api_url, json=payload, headers=GEMINI_HEADERS)
 
             # 400 на ускоренной конфигурации (схема ответа / нулевой бюджет мышления)
             # — один раз переспрашиваем ту же модель «как раньше», без этих полей.
@@ -1019,7 +1022,7 @@ async def _legacy_monthly_feedback_continuation(operator_id, month):
         f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
     )
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     payload = {
         "contents": [{"parts": [{"text": full_prompt}]}],
         "generationConfig": generation_config,
@@ -1028,7 +1031,7 @@ async def _legacy_monthly_feedback_continuation(operator_id, month):
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(api_url, json=payload)
+            response = await client.post(api_url, json=payload, headers=GEMINI_HEADERS)
             response.raise_for_status()
             result = response.json()
             if "candidates" not in result or not result["candidates"]:

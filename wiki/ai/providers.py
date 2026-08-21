@@ -136,6 +136,17 @@ def available_chain():
 
 # ── адаптеры ────────────────────────────────────────────────────────────────
 
+def _gemini_headers():
+    """Ключ Gemini — ЗАГОЛОВКОМ, а не '?key=' в адресе.
+
+    httpx логирует полный URL на уровне INFO, поэтому query-параметр с ключом
+    попадал в логи Render открытым текстом (обнаружено 22.08.2026: записи с
+    ?key=AIza... лежали там с 20.08). Заголовок в лог не пишется.
+    """
+    return {'Content-Type': 'application/json',
+            'x-goog-api-key': os.environ['GEMINI_API_KEY']}
+
+
 def _post(url, payload, headers, params=None):
     import httpx
 
@@ -254,8 +265,7 @@ def _call_gemini(model, system, user, history=(), max_tokens=None):
         if suppress_thinking:
             payload['generationConfig']['thinkingConfig'] = {'thinkingBudget': 0}
         try:
-            body, elapsed = _post(url, payload, {'Content-Type': 'application/json'},
-                                  params={'key': os.environ['GEMINI_API_KEY']})
+            body, elapsed = _post(url, payload, _gemini_headers())
         except ProviderError as error:
             last_error = error
             if error.status == 400 and suppress_thinking:
@@ -455,8 +465,7 @@ def _call_gemini_file(model, system, user, *, blob, mime, max_tokens=None):
     payload = _file_parts(system, user, blob, mime)
     payload['generationConfig'] = {'temperature': 0.1,
                                    'maxOutputTokens': max_tokens or MAX_TOKENS}
-    body, elapsed = _post(url, payload, {'Content-Type': 'application/json'},
-                          params={'key': os.environ['GEMINI_API_KEY']})
+    body, elapsed = _post(url, payload, _gemini_headers())
     return _read_gemini_body(body, elapsed)
 
 
