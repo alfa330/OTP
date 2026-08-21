@@ -2737,7 +2737,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             const displayMetrics = getSurveyDisplayMetrics(survey);
                             const completionRate = displayMetrics.completionRate || 0;
                             const repeatIteration = Number(survey?.repeat?.iteration || 1);
-                            const listTestStatus = survey?.is_test ? testStatusMeta(survey?.test?.status) : null;
+                            const listTestStatus = (survey?.is_test && !survey?.is_archived)
+                                ? testStatusMeta(survey?.test?.status)
+                                : null;
                             return (
                                 <div
                                     key={survey.id}
@@ -2875,7 +2877,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         <div className="flex flex-wrap items-center gap-2">
                                             <h3 className="text-[15px] font-bold text-slate-900">{selectedSurvey.title}</h3>
                                             {selectedSurvey?.is_test && <Badge color="blue">Тест</Badge>}
-                                            {selectedSurvey?.is_test && testStatusMeta(liveTestStatus) && (
+                                            {/* У архивного теста окно уже не считается: «Активен»
+                                                рядом с «В архиве» читался бы как противоречие. */}
+                                            {selectedSurvey?.is_test && !selectedSurvey?.is_archived && testStatusMeta(liveTestStatus) && (
                                                 <Badge color={testStatusMeta(liveTestStatus).color}>
                                                     <FaIcon className={`fas ${testStatusMeta(liveTestStatus).icon} mr-1 text-[9px]`} />
                                                     {testStatusMeta(liveTestStatus).label}
@@ -2951,12 +2955,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 {/* Окно теста: одно место, где видно расписание и правила */}
                                 {selectedSurvey?.is_test && (
                                     <div className="flex flex-wrap items-center gap-2">
-                                        <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11.5px] text-slate-500">
-                                            <FaIcon className="fas fa-hourglass-start text-[10px] text-slate-400" />
-                                            <span className="tabular-nums text-slate-700">{formatSurveyDateTime(selectedTestInfo?.starts_at)}</span>
-                                            <span className="text-slate-300">→</span>
-                                            <span className="tabular-nums text-slate-700">{formatSurveyDateTime(selectedTestInfo?.ends_at)}</span>
-                                        </div>
+                                        {(selectedTestInfo?.starts_at || selectedTestInfo?.ends_at) && (
+                                            <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11.5px] text-slate-500">
+                                                <FaIcon className="fas fa-hourglass-start text-[10px] text-slate-400" />
+                                                <span className="tabular-nums text-slate-700">{formatSurveyDateTime(selectedTestInfo?.starts_at)}</span>
+                                                <span className="text-slate-300">→</span>
+                                                <span className="tabular-nums text-slate-700">{formatSurveyDateTime(selectedTestInfo?.ends_at)}</span>
+                                            </div>
+                                        )}
                                         <div className="flex items-center gap-1.5 rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11.5px] text-slate-500">
                                             <FaIcon className="fas fa-star text-[10px] text-slate-400" />
                                             Максимум: <strong className="tabular-nums text-slate-700">{formatPoints(selectedTestInfo?.max_points)}</strong>
