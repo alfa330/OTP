@@ -129,19 +129,29 @@ export default function CustomSelect({
     };
   }, [open]);
 
-  /* Выбранное всегда приводим к массиву строк: сравнение по строкам избавляет
-     от вечной путаницы «id пришёл числом, а в опции строкой». */
+  /* Выбранное приводим к массиву строк: сравнение по строкам избавляет от
+     вечной путаницы «id пришёл числом, а в опции строкой».
+
+     В одиночном режиме сюда попадает и ПУСТАЯ строка — это законное значение
+     опции («Все отделы», «— не задан —», «Текущий состав»), и она обязана
+     подсвечиваться в списке и стоять в кнопке своей подписью. Поэтому «есть ли
+     выбор» считается отдельно (selected), а не длиной этого массива. */
   const selectedValues = useMemo(() => {
-    if (!multiple) {
-      const single = String(value ?? '');
-      return single ? [single] : [];
-    }
+    if (!multiple) return [String(value ?? '')];
     return (Array.isArray(value) ? value : []).map((item) => String(item ?? '')).filter(Boolean);
   }, [multiple, value]);
   const selectedSet = useMemo(() => new Set(selectedValues), [selectedValues]);
   const selected = options.find((o) => selectedSet.has(String(o.value)));
+  const hasSelection = multiple ? selectedValues.length > 0 : Boolean(selected);
   const limitReached = multiple && maxSelected > 0 && selectedValues.length >= maxSelected;
   const isIos = variant === 'ios';
+
+  /* Подсветку строки при ОТКРЫТИИ ставим по текущему выбору, но зависеть от
+     выбора эффект не должен: в мультирежиме каждый щелчок менял бы selectedSet и
+     утаскивал подсветку на первого выбранного — следующий Enter снимал бы не
+     того человека. Поэтому выбор читаем через ref. */
+  const selectedSetRef = useRef(selectedSet);
+  selectedSetRef.current = selectedSet;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -155,10 +165,11 @@ export default function CustomSelect({
       return;
     }
     const selectedIndex = filtered.findIndex((option) =>
-      !option.disabled && selectedSet.has(String(option.value)));
+      !option.disabled && selectedSetRef.current.has(String(option.value)));
     const firstEnabled = filtered.findIndex((option) => !option.disabled);
     setActiveIndex(selectedIndex >= 0 ? selectedIndex : firstEnabled);
-  }, [open, filtered, selectedSet]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, filtered]);
 
   const moveActive = (direction) => {
     const enabled = filtered
@@ -229,12 +240,12 @@ export default function CustomSelect({
               : 'cursor-pointer border-gray-300 hover:border-gray-400'
           } ${open ? 'border-transparent ring-2 ring-blue-500' : 'shadow-sm'}`}
       >
-        <span className={`truncate ${selectedValues.length ? '' : 'text-gray-400'}`}>
-          {!selectedValues.length
+        <span className={`truncate ${hasSelection ? '' : 'text-gray-400'}`}>
+          {!hasSelection
             ? placeholder
             : multiple
               ? (renderValue ? renderValue(selectedValues) : `Выбрано: ${selectedValues.length}`)
-              : (selected ? selected.label : placeholder)}
+              : selected.label}
         </span>
         <svg
           width="14" height="14" viewBox="0 0 20 20" fill="none"

@@ -19137,8 +19137,16 @@ def handle_tasks():
                     task_ctx = _fetch_task_notification_context(created_task_id)
                     if not task_ctx:
                         continue
-                    assignee_chat_id = task_ctx.get('assignee_telegram_id')
-                    if not assignee_chat_id:
+                    # Регламент мог быть поручен нескольким — тогда новая
+                    # итерация приходит каждому. Раньше здесь брался скаляр, и
+                    # соисполнители о ночной задаче в Telegram не узнавали.
+                    assignee_chat_ids = [
+                        person.get('telegram_id')
+                        for person in (task_ctx.get('assignees') or [])
+                        if person.get('telegram_id')
+                    ] or ([task_ctx.get('assignee_telegram_id')]
+                          if task_ctx.get('assignee_telegram_id') else [])
+                    if not assignee_chat_ids:
                         continue
                     task_link = _build_current_task_deep_link(created_task_id)
                     tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
@@ -19156,12 +19164,13 @@ def handle_tasks():
                     ]
                     if due_label:
                         lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-                    _send_telegram_text_message(
-                        assignee_chat_id,
-                        "\n".join(lines),
-                        parse_mode='HTML',
-                        reply_markup=_build_task_notification_reply_markup(task_link)
-                    )
+                    for assignee_chat_id in assignee_chat_ids:
+                        _send_telegram_text_message(
+                            assignee_chat_id,
+                            "\n".join(lines),
+                            parse_mode='HTML',
+                            reply_markup=_build_task_notification_reply_markup(task_link)
+                        )
             except Exception as materialize_error:
                 logging.warning("Failed to materialize due regulation tasks: %s", materialize_error)
 
@@ -53276,7 +53285,9 @@ def send_due_task_reminders():
                     reminder.get('kind'), reminder.get('id'), _get_telegram_error_text(response)
                 )
                 continue
-            db.mark_task_reminder_sent(reminder.get('kind'), reminder.get('id'))
+            db.mark_task_reminder_sent(
+                reminder.get('kind'), reminder.get('id'), reminder.get('recipient_id')
+            )
             sent += 1
         except Exception:
             logging.exception(

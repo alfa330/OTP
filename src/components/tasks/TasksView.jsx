@@ -3562,10 +3562,19 @@ const AssigneeField = ({
     return map;
   }, [people]);
 
+  /* Подпись одного выбранного берём ИЗ ОПЦИИ, а не из имени человека: в опции
+     рядом с именем стоит роль («Айгуль (Супервайзер)»), и одиночный селектор
+     показывал именно её — терять её при переходе на мультивыбор незачем. */
+  const labelById = useMemo(() => {
+    const map = new Map();
+    (options || []).forEach((option) => map.set(String(option.value), option.label));
+    return map;
+  }, [options]);
+
   const renderValue = useCallback((ids) => {
     const picked = ids.map((personId) => byId.get(String(personId))).filter(Boolean);
     if (!picked.length) return `Выбрано: ${ids.length}`;
-    if (picked.length === 1) return picked[0].name;
+    if (picked.length === 1) return labelById.get(String(picked[0].id)) || picked[0].name;
     return (
       <span className="tv-assignee-value">
         <span className="tv-avatar-stack">
@@ -3583,7 +3592,7 @@ const AssigneeField = ({
         </span>
       </span>
     );
-  }, [byId]);
+  }, [byId, labelById]);
 
   return (
     <CustomSelect
@@ -4478,13 +4487,22 @@ const TaskComposerForm = ({
           <button
             type="button"
             className={`tv-composer-self ${isSelfAssigned ? 'is-active' : ''}`}
-            disabled={disabled}
-            title={isSelfAssigned ? 'Убрать себя из исполнителей' : 'Добавить себя в исполнители'}
-            onClick={() => onChange({
-              assigneeIds: isSelfAssigned
-                ? assigneeIds.filter((id) => String(id) !== String(currentUserId))
-                : [...assigneeIds, String(currentUserId)],
-            })}
+            disabled={disabled || (!isSelfAssigned && assigneeIds.length >= TASK_MAX_ASSIGNEES)}
+            title={isSelfAssigned
+              ? 'Убрать себя из исполнителей'
+              : (assigneeIds.length >= TASK_MAX_ASSIGNEES
+                  ? `Больше ${TASK_MAX_ASSIGNEES} исполнителей у задачи не бывает`
+                  : 'Добавить себя в исполнители')}
+            onClick={() => {
+              if (isSelfAssigned) {
+                onChange({ assigneeIds: assigneeIds.filter((id) => String(id) !== String(currentUserId)) });
+                return;
+              }
+              // Потолок тот же, что у списка: иначе кнопка добавляла бы
+              // одиннадцатого, и сохранение падало бы ошибкой сервера.
+              if (assigneeIds.length >= TASK_MAX_ASSIGNEES) return;
+              onChange({ assigneeIds: [...assigneeIds, String(currentUserId)] });
+            }}
           >
             Себе
           </button>
@@ -5064,7 +5082,9 @@ const TaskClarificationsBlock = ({
           <div className="tv-clar-list">
             {messages.map((message) => {
               const authorId = Number(message?.author_id || 0);
-              const side = authorId && authorId === assigneeId ? 'is-assignee' : 'is-owner';
+              // Сторона реплики: исполнитель — любой из состава, поэтому
+              // сверяем автора с множеством, а не с одним человеком.
+              const side = authorId && assigneeIdSet.has(authorId) ? 'is-assignee' : 'is-owner';
               const isOpenRequest = message.kind === 'request' && !message.resolved_at;
               return (
                 <div key={message.id} className={`tv-clar-item ${side}`}>

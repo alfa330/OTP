@@ -616,9 +616,10 @@ class TasksSourceRulesTest(unittest.TestCase):
         block = self._block()
         self.assertIn("t.info_request_id IS NOT NULL", block)
         self.assertIn("r.kind <> 'info' OR r.seen_at < t.updated_at", block)
-        # Спрашивает исполнитель — ни одному из состава вопрос обратно не
-        # показываем: причина адресована стороне постановки.
-        self.assertIn("AND NOT EXISTS (SELECT 1 FROM task_assignees ta", block)
+        # Вопрос обратно не показываем именно СПРАШИВАВШЕМУ. Проверять «не
+        # исполнитель» нельзя: при нескольких исполнителях постановщик может быть
+        # одним из них, и тогда вопрос коллеги от него бы спрятался.
+        self.assertIn("SELECT m.author_id FROM task_messages m", block)
         self.assertIn("'info': 'Исполнителю не хватает информации'", self.SOURCE)
         # Бэклог у этой причины НЕ отсекается: вопрос задал живой человек, и
         # «задача ещё в очереди» ответа не отменяет.

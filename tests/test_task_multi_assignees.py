@@ -324,8 +324,11 @@ class SqlCopiesTests(unittest.TestCase):
     def test_reminders_reach_every_assignee(self):
         start = DATABASE_SOURCE.index("    def collect_due_task_reminders(")
         block = DATABASE_SOURCE[start:DATABASE_SOURCE.index("    def mark_task_reminder_sent", start)]
-        self.assertIn("JOIN task_assignees ta ON ta.task_id = t.id", block)
+        self.assertIn("JOIN task_assignees ta ON ta.task_id = d.id", block)
         self.assertIn("JOIN users u ON u.id = ta.user_id", block)
+        # Отметка «отправлено» — у пары (задача, исполнитель): успех первого не
+        # должен закрывать задачу для тех, кому сообщение не ушло.
+        self.assertIn("ta.reminder_sent_at IS NULL", block)
 
     def test_bell_wakes_the_whole_crew_and_the_removed_one(self):
         start = DATABASE_SOURCE.index("    def _init_bell_notify_schema_tx(")
@@ -341,6 +344,45 @@ class SqlCopiesTests(unittest.TestCase):
         bell = _read(BELL_PATH)
         self.assertNotIn("t.assigned_to", bell)
         self.assertIn("FROM task_assignees ta", bell)
+
+    def test_info_reason_is_addressed_by_the_asker_not_by_the_crew(self):
+        """«Просят информацию» отсекает АВТОРА вопроса, а не всех исполнителей.
+
+        Иначе постановщик, вписавший себя соисполнителем, не увидел бы вопрос
+        коллеги — а отвечать больше некому.
+        """
+        for source, path in (
+            (DATABASE_SOURCE, 'database.py'),
+            (_read(BELL_PATH), 'notifications/sources.py'),
+        ):
+            self.assertIn("SELECT m.author_id FROM task_messages m", source, path)
+        client = _read(ROOT / 'src' / 'components' / 'tasks' / 'taskActionNeeds.js')
+        self.assertIn("Number(task.info_request.author_id || 0) !== personId", client)
+        cli = _read(CLI_PATH)
+        self.assertIn("(task.get('info_request') or {}).get('author_id')", cli)
+
+    def test_reminder_limit_counts_tasks_not_crew_rows(self):
+        """Отметка «отправлено» одна на задачу, значит порция обязана быть по задачам.
+
+        Иначе у задачи на пятерых часть людей уходит за границу LIMIT, а отметка
+        уже стоит — и своего напоминания они не получат никогда.
+        """
+        start = DATABASE_SOURCE.index("    def collect_due_task_reminders(")
+        block = DATABASE_SOURCE[start:DATABASE_SOURCE.index("    def mark_task_reminder_sent", start)]
+        with_pos = block.index("WITH due AS (")
+        limit_pos = block.index("LIMIT %s", with_pos)
+        join_pos = block.index("JOIN task_assignees ta ON ta.task_id = d.id")
+        # Порядок и есть суть правила: сначала порция задач, потом разворот по людям.
+        self.assertLess(limit_pos, join_pos)
+        # Задача без единого адресата не должна занимать место в порции.
+        self.assertIn("FROM task_assignees ta_any", block)
+
+    def test_regulation_notifies_every_assignee(self):
+        bot = _read(BOT_PATH)
+        self.assertIn("for assignee_chat_id in assignee_chat_ids:", bot)
+        start = bot.index("created_regulation_task_ids[:20]")
+        block = bot[start:start + 1200]
+        self.assertIn("task_ctx.get('assignees')", block)
 
 
 class RouteContractTests(unittest.TestCase):

@@ -313,12 +313,14 @@ def tasks(cursor, viewer, limit):
                        -- Раньше дедлайна и статусов: строку привёл сюда открытый
                        -- запрос информации, а не работа зрителя — он тут не
                        -- исполнитель, и «просрочена»/«не начата» про него ложь.
-                       -- Исполнителем считается ЛЮБОЙ из состава задачи:
-                       -- поручить её могли нескольким, и «просят информацию»
-                       -- адресовано стороне постановки, а не коллеге.
+                       -- Причина адресована стороне постановки, но отсекать
+                       -- надо не «всех исполнителей», а именно СПРАШИВАВШЕГО:
+                       -- при нескольких исполнителях постановщик может сам быть
+                       -- одним из них, и тогда вопрос коллеги от него прятался.
                        WHEN t.info_request_id IS NOT NULL
-                            AND NOT EXISTS (SELECT 1 FROM task_assignees ta
-                                            WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
+                            AND COALESCE((SELECT m.author_id FROM task_messages m
+                                           WHERE m.id = t.info_request_id), 0)
+                                <> %(user_id)s
                             AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
                             THEN 'info'
                        WHEN t.due_at IS NOT NULL AND t.due_at < %(now)s THEN 'overdue'
@@ -349,8 +351,9 @@ def tasks(cursor, viewer, limit):
                 OR (t.info_request_id IS NOT NULL
                     AND t.status IN ('assigned', 'in_progress', 'returned')
                     AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
-                    AND NOT EXISTS (SELECT 1 FROM task_assignees ta
-                                    WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
+                    AND COALESCE((SELECT m.author_id FROM task_messages m
+                                   WHERE m.id = t.info_request_id), 0)
+                        <> %(user_id)s
                     AND (r.task_id IS NULL OR r.kind <> 'info' OR r.seen_at < t.updated_at))
                 OR (EXISTS (SELECT 1 FROM task_assignees ta
                             WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)

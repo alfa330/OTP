@@ -618,8 +618,10 @@ class TaskOriginTests(unittest.TestCase):
         # Кнопка «Себе» рядом с исполнителями: добавляет себя в состав, а
         # повторным нажатием убирает — исполнитель в задаче не один.
         self.assertIn('className={`tv-composer-self', src)
-        self.assertIn("assigneeIds: isSelfAssigned", src)
-        self.assertIn("[...assigneeIds, String(currentUserId)]", src)
+        self.assertIn("assigneeIds: assigneeIds.filter((id) => String(id) !== String(currentUserId))", src)
+        self.assertIn("assigneeIds: [...assigneeIds, String(currentUserId)]", src)
+        # И потолок состава кнопка обходить не должна.
+        self.assertIn("if (assigneeIds.length >= TASK_MAX_ASSIGNEES) return;", src)
 
     def test_self_task_without_origin_reads_as_initiative(self):
         src = _read(TASKS_VIEW_PATH)
@@ -1919,9 +1921,9 @@ class TaskClarificationNeedTests(unittest.TestCase):
         start = db_src.index("    def get_task_action_needs_summary(self, requester_id):")
         block = db_src[start:db_src.index("    TASK_ACTION_NEED_KINDS", start)]
         self.assertIn("t.info_request_id IS NOT NULL", block)
-        # Спрашивает исполнитель — значит ни одному из состава причина не
-        # показывается: она адресована стороне постановки.
-        self.assertIn("AND NOT {assignee_exists}", block)
+        # Причина адресована стороне постановки, но отсекается именно АВТОР
+        # вопроса: постановщик может сам быть одним из исполнителей.
+        self.assertIn("SELECT m.author_id FROM task_messages m", block)
         self.assertIn('"info": int(row[2] or 0)', block)
 
         client = _read(ROOT / "src" / "components" / "tasks" / "taskActionNeeds.js")

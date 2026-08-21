@@ -106,12 +106,15 @@ export const taskActionNeed = (task, userId, now = Date.now()) => {
 
   /* Исполнителю не хватает информации, и ответ за мной. Раньше проверок
      исполнителя: спрашивающий и отвечающий — разные люди, поэтому причина
-     живёт вне ветки «я исполнитель», и бэклог её не отменяет. */
+     живёт вне ветки «я исполнитель», и бэклог её не отменяет.
+
+     Отсекаем именно АВТОРА вопроса, а не всех исполнителей: постановщик может
+     сам быть одним из них, и тогда вопрос коллеги от него бы спрятался. */
   if (
     task?.info_request
     && ['assigned', 'in_progress', 'returned'].includes(status)
     && reviewAuthorityId(task) === personId
-    && !isAssignee
+    && Number(task.info_request.author_id || 0) !== personId
   ) {
     return { kind: 'info', dueAt };
   }

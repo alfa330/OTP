@@ -3781,6 +3781,14 @@ class Database:
                     PRIMARY KEY (task_id, user_id)
                 );
             """)
+            # Напоминание перед дедлайном отмечается ПО ЧЕЛОВЕКУ, а не по задаче.
+            # Отметка на задаче тут не годится: рассылка идёт по строке на
+            # каждого исполнителя, и успех первого закрывал бы задачу целиком —
+            # тот, кому сообщение не ушло (бот заблокирован, чат недоступен),
+            # не получил бы своё напоминание уже никогда. tasks.reminder_sent_at
+            # остаётся как «когда напомнили в первый раз» и уходит в карточку.
+            cursor.execute("ALTER TABLE task_assignees ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP;")
+
             # Фильтр «мои задачи», доска сотрудника и счётчик «ждут вас» ходят
             # через EXISTS по (user_id, task_id) — без этого индекса они уедут в
             # seq scan по всей таблице задач.
@@ -48005,25 +48013,45 @@ class Database:
 
             # По строке на каждого исполнителя с Telegram: срок один, но ждут
             # его все, и напоминание «только первому» — это молчание для
-            # остальных. Отметка reminder_sent_at остаётся на задаче: строки
-            # одной задачи уходят в одном проходе, а повторная отметка ничего
-            # не портит. Из-за размножения LIMIT — это потолок СТРОК, а не задач.
+            # остальных. Отметка reminder_sent_at остаётся на задаче, поэтому
+            # LIMIT обязан отбирать ЗАДАЧИ, а не строки состава: иначе у задачи
+            # на пятерых часть людей попадала бы за границу порции, а отметка
+            # уже стояла — и своё напоминание они не получили бы НИКОГДА.
+            # Отсюда порция задач в CTE, и только потом разворот по людям.
             cursor.execute("""
-                SELECT t.id, t.subject, t.description, t.due_at, t.priority, u.telegram_id, u.name
-                FROM tasks t
-                JOIN task_assignees ta ON ta.task_id = t.id
+                WITH due AS (
+                    SELECT t.id, t.subject, t.description, t.due_at, t.priority
+                    FROM tasks t
+                    WHERE t.due_at IS NOT NULL
+                      AND t.reminder_minutes_before IS NOT NULL
+                      AND t.is_backlog = FALSE
+                      AND t.status NOT IN ('completed', 'accepted')
+                      AND t.due_at > %s
+                      AND t.due_at - (t.reminder_minutes_before * INTERVAL '1 minute') <= %s
+                      -- Задачу без ни одного НЕОТМЕЧЕННОГО адресата в порцию не
+                      -- берём: иначе она заняла бы место и вытеснила ту, кому
+                      -- действительно есть что послать. Здесь же и «уже всем
+                      -- напомнили» — отдельного флага на задаче для этого нет.
+                      AND EXISTS (
+                          SELECT 1 FROM task_assignees ta_any
+                          JOIN users u_any ON u_any.id = ta_any.user_id
+                          WHERE ta_any.task_id = t.id
+                            AND ta_any.reminder_sent_at IS NULL
+                            AND u_any.telegram_id IS NOT NULL
+                            AND COALESCE(u_any.status, 'working') <> 'fired'
+                      )
+                    ORDER BY t.due_at ASC, t.id ASC
+                    LIMIT %s
+                )
+                SELECT d.id, d.subject, d.description, d.due_at, d.priority,
+                       u.telegram_id, u.name, u.id
+                FROM due d
+                JOIN task_assignees ta ON ta.task_id = d.id
                 JOIN users u ON u.id = ta.user_id
-                WHERE t.due_at IS NOT NULL
-                  AND t.reminder_minutes_before IS NOT NULL
-                  AND t.reminder_sent_at IS NULL
-                  AND t.is_backlog = FALSE
-                  AND t.status NOT IN ('completed', 'accepted')
+                WHERE ta.reminder_sent_at IS NULL
                   AND u.telegram_id IS NOT NULL
                   AND COALESCE(u.status, 'working') <> 'fired'
-                  AND t.due_at > %s
-                  AND t.due_at - (t.reminder_minutes_before * INTERVAL '1 minute') <= %s
-                ORDER BY t.due_at ASC, ta.position ASC, ta.user_id ASC
-                LIMIT %s
+                ORDER BY d.due_at ASC, ta.position ASC, ta.user_id ASC
             """, (now, now, int(limit)))
             for row in cursor.fetchall():
                 result.append({
@@ -48034,17 +48062,55 @@ class Database:
                     "due_at": row[3],
                     "priority": row[4] or 'normal',
                     "chat_id": row[5],
-                    "recipient_name": row[6]
+                    "recipient_name": row[6],
+                    # Кому именно — по нему отмечается отправка: у задачи
+                    # исполнителей может быть несколько.
+                    "recipient_id": row[7]
                 })
         return result
 
-    def mark_task_reminder_sent(self, kind, record_id):
-        """Отметить напоминание отправленным, чтобы не дублировать его каждые пять минут."""
-        table = 'task_notes' if str(kind) == 'note' else 'tasks'
+    def mark_task_reminder_sent(self, kind, record_id, recipient_id=None):
+        """Отметить напоминание отправленным, чтобы не дублировать его каждые пять минут.
+
+        У заметки адресат один — владелец, там отметка на самой записи. У задачи
+        исполнителей может быть несколько, и отметка ставится ПАРЕ
+        (задача, исполнитель): иначе успех первого закрыл бы задачу для всех, и
+        тот, кому сообщение не ушло, не получил бы своё напоминание никогда.
+        Поле tasks.reminder_sent_at при этом всё равно заполняем — оно уходит в
+        карточку как «когда напомнили», — но выборку оно больше не ограничивает.
+        """
+        record_id = int(record_id)
+        if str(kind) == 'note':
+            with self._get_cursor() as cursor:
+                cursor.execute(
+                    "UPDATE task_notes SET reminder_sent_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+                    " WHERE id = %s",
+                    (record_id,)
+                )
+            return True
+
         with self._get_cursor() as cursor:
+            if recipient_id is not None:
+                cursor.execute(
+                    "UPDATE task_assignees"
+                    " SET reminder_sent_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+                    " WHERE task_id = %s AND user_id = %s",
+                    (record_id, int(recipient_id))
+                )
+            else:
+                # Адресат не назван (старый вызов) — закрываем задачу целиком,
+                # иначе напоминание пошло бы по кругу.
+                cursor.execute(
+                    "UPDATE task_assignees"
+                    " SET reminder_sent_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+                    " WHERE task_id = %s AND reminder_sent_at IS NULL",
+                    (record_id,)
+                )
             cursor.execute(
-                f"UPDATE {table} SET reminder_sent_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') WHERE id = %s",
-                (int(record_id),)
+                "UPDATE tasks SET reminder_sent_at ="
+                " COALESCE(reminder_sent_at, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))"
+                " WHERE id = %s",
+                (record_id,)
             )
         return True
 
@@ -48626,6 +48692,14 @@ class Database:
             updated_at = updated_row[0] if updated_row else None
 
             self._sync_task_assignees_tx(cursor, task_id, assignee_ids_new, added_by=requester_id)
+
+            # Съехал срок или интервал — напоминание должно сработать заново у
+            # ВСЕХ исполнителей, а не только обнулиться на самой задаче.
+            if 'deadline' in changed_fields or 'reminder' in changed_fields:
+                cursor.execute(
+                    "UPDATE task_assignees SET reminder_sent_at = NULL WHERE task_id = %s",
+                    (task_id,)
+                )
 
             if has_checklist:
                 cursor.execute("DELETE FROM task_checklist_items WHERE task_id = %s", (task_id,))
@@ -49297,8 +49371,14 @@ class Database:
                 changed_fields.append("reminder")
 
             if changed_fields:
-                # Съехал срок или интервал — напоминание должно сработать заново.
+                # Съехал срок или интервал — напоминание должно сработать заново у всего
+                # состава, а не только обнулиться на самой задаче.
                 reset_sent = ('deadline' in changed_fields) or ('reminder' in changed_fields)
+                if reset_sent:
+                    cursor.execute(
+                        "UPDATE task_assignees SET reminder_sent_at = NULL WHERE task_id = %s",
+                        (task_id,)
+                    )
                 cursor.execute(f"""
                     UPDATE tasks
                     SET
@@ -49806,7 +49886,14 @@ class Database:
                         WHERE t.info_request_id IS NOT NULL
                           AND t.status IN ('assigned', 'in_progress', 'returned')
                           AND COALESCE(t.requested_by_id, t.created_by) = %s
-                          AND NOT {assignee_exists}
+                          -- Не «я не исполнитель», а «спрашивал не я». При
+                          -- нескольких исполнителях постановщик может сам быть
+                          -- одним из них, и прежнее условие прятало от него
+                          -- вопрос коллеги — отвечать было некому.
+                          AND COALESCE(
+                                  (SELECT m.author_id FROM task_messages m
+                                    WHERE m.id = t.info_request_id), 0
+                              ) <> %s
                           AND (r.task_id IS NULL OR r.kind <> 'info' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
