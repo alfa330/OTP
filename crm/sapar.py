@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from datetime import date
 
 import requests
 
@@ -62,9 +63,8 @@ SIGNED = ('Подписано', 'Signed')
 # кого их нет. Для тематики «Документы не поступили» это означало бы закрытое
 # обращение по верной жалобе — поэтому решает только список Яндекса.
 
-# Готовность документов ПО ПАРКУ за месяц одна на всех, и спрашивать её на каждое
-# обращение незачем: в начале месяца её успевают спросить десятки операторов
-# подряд, и ответ у всех будет один.
+# Ответ по ПАРКУ один на всех, и спрашивать его на каждое обращение незачем:
+# в начале месяца его успевают спросить десятки операторов подряд.
 READY_TTL = 300
 _ready_cache = {}
 _ready_lock = threading.Lock()
@@ -121,11 +121,17 @@ def _call(path, *, body=None, params=None):
     return payload.get('Response'), None
 
 
-def month_documents_ready(month, year):
-    """Сформированы ли закрывающие документы за месяц ПО ПАРКУ. None — не знаем.
+def signing_period_open(month, year):
+    """Идёт ли СЕЙЧАС подписание за этот месяц. None — не знаем.
 
-    Это первый вопрос: пока Яндекс не выгрузил документы за месяц, их нет ни у
-    кого, и разбираться с конкретным водителем рано.
+    Название важное. Ручка называется `are-docs-ready-to-sign`, и её легко
+    прочитать как «выгружены ли документы за месяц» — она отвечает не на это.
+    Замер 21.08.2026: `true` только у июля, при том что документы за июнь есть
+    у 15 500 водителей, за май у 11 185, за апрель у 6 362. То есть `false`
+    означает либо «месяц ещё не выгружен» (август, сентябрь), либо «подписание
+    за этот месяц уже закрыто» (июнь и раньше) — два противоположных случая.
+
+    Различать их приходится по календарю, см. _documents_expected.
     """
     key = (int(month), int(year))
     now = time.time()
@@ -142,6 +148,28 @@ def month_documents_ready(month, year):
     with _ready_lock:
         _ready_cache[key] = (now + READY_TTL, value)
     return value
+
+
+def _today():
+    """Отдельной функцией — чтобы тест мог задать дату, а не ждать нужный месяц."""
+    return date.today()
+
+
+def _documents_expected(month, year):
+    """Должны ли документы за этот месяц вообще существовать. None — не знаем.
+
+    False говорим только про месяц, который ещё не закончился (или не наступил):
+    там документов нет ни у кого, и это готовый ответ водителю. Про прошлый
+    закрытый месяц не утверждаем НИЧЕГО: подписание там давно закрыто, флаг
+    сервиса погашен, но документы у людей есть — заявить «не выгружены» значило
+    бы закрыть верную жалобу неправдой.
+    """
+    if signing_period_open(month, year):
+        return True
+    today = _today()
+    if (int(year), int(month)) >= (today.year, today.month):
+        return False
+    return None
 
 
 def _document(row, source):
@@ -161,7 +189,8 @@ def driver_snapshot(iin, month, year):
 
     Возвращает словарь:
         available       — удалось ли спросить (False = Sapar молчит или не настроен)
-        month_ready     — сформированы ли документы за месяц по парку (True/False/None)
+        month_ready     — выгружены ли документы за месяц по парку.
+                          False только про незакончившийся месяц, None = не знаем
         documents       — закрывающие документы Яндекса: ими и решается всё
         park_documents  — АВР парка, СПРАВОЧНО (см. заметку про SIGNED выше)
         driver_name     — ФИО из Sapar, если Sapar его знает
@@ -194,8 +223,8 @@ def driver_snapshot(iin, month, year):
     snapshot['park_documents'] = park
     snapshot['driver_name'] = next((d['driver_name'] for d in documents + park
                                     if d['driver_name']), None)
-    # Готовность по парку спрашиваем только когда водителю ничего не поступило:
-    # если документы у него есть, месяц заведомо сформирован, и второй запрос
-    # ничего не добавит.
-    snapshot['month_ready'] = True if documents else month_documents_ready(month, year)
+    # Про парк спрашиваем только когда водителю ничего не поступило: если
+    # документы у него есть, месяц заведомо выгружен, и второй запрос ничего не
+    # добавит.
+    snapshot['month_ready'] = True if documents else _documents_expected(month, year)
     return snapshot

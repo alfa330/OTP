@@ -257,15 +257,15 @@ class ClientTest(unittest.TestCase):
         self.assertIs(state['month_ready'], False)
         self.assertEqual(len(self.calls), 2)
 
-    def test_month_readiness_is_asked_once_for_everyone(self):
+    def test_park_answer_is_asked_once_for_everyone(self):
         """Ответ по парку один на всех, и в начале месяца его спрашивают
         десятки операторов подряд."""
         self.answer({'Response': {'AreDocsReadyForSign': True}, 'Code': 200})
-        self.assertTrue(sapar.month_documents_ready(7, 2026))
-        self.assertTrue(sapar.month_documents_ready(7, 2026))
+        self.assertTrue(sapar.signing_period_open(7, 2026))
+        self.assertTrue(sapar.signing_period_open(7, 2026))
         self.assertEqual(len(self.calls), 1)
         # Другой месяц — другой ответ, кэш на него не распространяется.
-        sapar.month_documents_ready(8, 2026)
+        sapar.signing_period_open(8, 2026)
         self.assertEqual(len(self.calls), 2)
 
     def test_service_error_is_not_an_empty_list(self):
@@ -292,6 +292,69 @@ class ClientTest(unittest.TestCase):
         state = sapar.driver_snapshot('880317351347', 7, 2026)
         self.assertFalse(state['available'])
         self.assertEqual(self.calls, [])
+
+
+class ClosedPeriodTest(ClientTest):
+    """Флаг `are-docs-ready-to-sign` — про ОТКРЫТОЕ подписание, а не про выгрузку.
+
+    Замер 21.08.2026: `true` только у июля, при этом документы за июнь есть у
+    15 500 водителей, за май у 11 185. Значит `false` означает два
+    противоположных случая — «месяц ещё не наступил» и «подписание закрыто», —
+    и различать их можно только по календарю. Ошибка здесь стоит закрытого
+    обращения по верной жалобе, причём закрытого неправдой.
+    """
+
+    EMPTY = {'Response': {'YandexDocuments': [], 'TaxiParkDocuments': []}, 'Code': 200}
+
+    def setUp(self):
+        super(ClosedPeriodTest, self).setUp()
+        self._real_today = sapar._today
+
+    def tearDown(self):
+        sapar._today = self._real_today
+        super(ClosedPeriodTest, self).tearDown()
+
+    def at(self, year, month, day=21):
+        import datetime
+        sapar._today = lambda: datetime.date(year, month, day)
+
+    def silent_park(self):
+        def payload(*_args):
+            path = self.calls[-1]['url'] if self.calls else ''
+            if 'are-docs-ready-to-sign' in path:
+                return {'Response': {'AreDocsReadyForSign': False}, 'Code': 200}
+            return self.EMPTY
+        self.answer(payload)
+
+    def test_month_that_has_not_finished_is_reported_as_not_issued(self):
+        self.at(2026, 8)
+        self.silent_park()
+        state = sapar.driver_snapshot('060606060606', 8, 2026)
+        self.assertIs(state['month_ready'], False)
+        self.assertEqual(sc.sapar_verdict('sapar_docs_missing', state)['outcome'], sc.CLOSE)
+
+    def test_closed_past_month_claims_nothing_about_the_park(self):
+        """Июнь: подписание закрыто, флаг погашен, а документы у людей есть."""
+        self.at(2026, 8)
+        self.silent_park()
+        state = sapar.driver_snapshot('060606060606', 6, 2026)
+        self.assertIsNone(state['month_ready'])
+        # Раз про парк сказать нечего — работаем по водителю: документов у него
+        # нет, жалоба подтвердилась, идём к проверкам.
+        self.assertEqual(sc.sapar_verdict('sapar_docs_missing', state)['outcome'], sc.PASS)
+        self.assertEqual(sc.sapar_verdict('sapar_sign_error', state)['outcome'], sc.SWITCH)
+
+    def test_open_period_is_taken_as_issued(self):
+        def payload(*_args):
+            path = self.calls[-1]['url'] if self.calls else ''
+            if 'are-docs-ready-to-sign' in path:
+                return {'Response': {'AreDocsReadyForSign': True}, 'Code': 200}
+            return self.EMPTY
+        self.at(2026, 8)
+        self.answer(payload)
+        state = sapar.driver_snapshot('060606060606', 7, 2026)
+        self.assertIs(state['month_ready'], True)
+        self.assertEqual(sc.sapar_verdict('sapar_docs_missing', state)['outcome'], sc.PASS)
 
 
 class SnapshotReachesTheGroupTest(unittest.TestCase):
