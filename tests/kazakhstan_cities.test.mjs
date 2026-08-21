@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../src/utils/kazakhstanCities.js';
+import {
+    KAZAKHSTAN_CITY_OPTIONS, OPERATING_CITIES, isKnownKazakhstanCity,
+} from '../src/utils/kazakhstanCities.js';
 
 /* Справочник написан руками, поэтому проверяем его как данные: дубль города
  * ломает CustomSelect (у опций key = value), а город без области выпадает
@@ -48,4 +50,35 @@ test('крупные города на месте, произвольная ст
     assert.equal(isKnownKazakhstanCity('Ташкент'), false);
     assert.equal(isKnownKazakhstanCity(''), false);
     assert.equal(isKnownKazakhstanCity(null), false);
+});
+
+/* Города присутствия выбирают из закрытого списка в справочнике офисов и
+ * парков, поэтому опечатка тут — это не «кривая подпись», а город, которого
+ * в разделе больше не завести. */
+
+test('города присутствия написаны как в справочнике Казахстана', () => {
+    for (const city of OPERATING_CITIES) {
+        assert.ok(isKnownKazakhstanCity(city), city);
+    }
+});
+
+test('города присутствия не дублируются и идут А–Я', () => {
+    const duplicates = OPERATING_CITIES.filter(
+        (city, index) => OPERATING_CITIES.indexOf(city) !== index,
+    );
+    assert.deepEqual(duplicates, []);
+    assert.deepEqual(
+        OPERATING_CITIES,
+        [...OPERATING_CITIES].sort((a, b) => a.localeCompare(b, 'ru')),
+    );
+});
+
+test('перечень тот, что задал владелец', () => {
+    // Список закрытый: город вне его в разделе не заведут, поэтому он
+    // проверяется целиком, а не «на месте ли Алматы».
+    assert.deepEqual([...OPERATING_CITIES].sort((a, b) => a.localeCompare(b, 'ru')), [
+        'Актау', 'Актобе', 'Алматы', 'Астана', 'Атырау', 'Жанаозен', 'Караганда',
+        'Кокшетау', 'Костанай', 'Кызылорда', 'Павлодар', 'Петропавловск', 'Семей',
+        'Талдыкорган', 'Тараз', 'Туркестан', 'Уральск', 'Шымкент', 'Экибастуз',
+    ]);
 });

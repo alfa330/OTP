@@ -4,8 +4,7 @@ import { Loader2, MapPin, MapPinOff, Phone } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
 import OfficeMap from './OfficeMap';
 import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
-import { Field } from './formField';
-import { KAZAKHSTAN_CITY_OPTIONS } from '../../utils/kazakhstanCities';
+import { Field, CitySelect } from './formField';
 
 /* Форма офиса: адрес, карта и график.
  *
@@ -187,23 +186,14 @@ export default function OfficeEditor({ draft, setDraft, base, headers, showToast
                     />
                 </Field>
                 <Field label="Город">
-                    {/* Список-подсказка, а не выбор: колонка текстовая, и города,
-                        заведённые до справочника, должны сохраняться как есть.
-                        Нужен он затем, что группы в списке офисов бьются по
-                        строке города — «Астана» и «Нур-Султан» разъехались бы
-                        в два города. */}
-                    <input
-                        className={iosInput}
-                        list="wiki-office-cities"
+                    {/* Выбор, а не строка: группы в списке офисов бьются по
+                        строке города, и «Астана» с «Нур-Султаном» разъехались
+                        бы в два города. Перечень — города присутствия, общий с
+                        карточкой парка. */}
+                    <CitySelect
                         value={draft.city}
-                        placeholder="Алматы"
-                        onChange={(e) => setDraft((prev) => ({ ...prev, city: e.target.value }))}
+                        onChange={(city) => setDraft((prev) => ({ ...prev, city }))}
                     />
-                    <datalist id="wiki-office-cities">
-                        {KAZAKHSTAN_CITY_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value} />
-                        ))}
-                    </datalist>
                 </Field>
             </div>
 

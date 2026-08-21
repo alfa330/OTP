@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronDown, MapPin, Phone, Plus, StickyNote, Trash2 } from 'lucide-react';
 import { iosInput, iosGroupLabel, IosBadge } from '../ui/ios';
-import { Field } from './formField';
+import { Field, CitySelect } from './formField';
 import {
     PHONE_DIGITS, digitsOf, emptyNumber, formatDigits, parkDraftIssue, toPhone,
 } from './parkPoints';
@@ -234,11 +234,13 @@ export default function ParkEditor({ draft, setDraft, offices }) {
                         />
                     </Field>
                     <Field label="Город">
-                        <input
-                            className={iosInput}
+                        {/* Тот же перечень, что у офиса: город парка и город
+                            его офиса читают рядом — в карточке парка и в
+                            списке офисов, — и написаны они обязаны быть
+                            одинаково. */}
+                        <CitySelect
                             value={draft.city}
-                            placeholder="Алматы"
-                            onChange={set('city')}
+                            onChange={(city) => setDraft((prev) => ({ ...prev, city }))}
                         />
                     </Field>
                 </div>
