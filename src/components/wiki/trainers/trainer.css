@@ -1594,3 +1594,292 @@
     /* Подзаголовок в шапке прогресса — то же, что и название, только длиннее. */
     .wt-side__head span { display: none; }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   ФОТОКОНТРОЛЬ: мир вокруг человека
+
+   Остальные тренажёры показывают мир НА экране телефона. Здесь наоборот:
+   человек стоит у машины, телефон держит перед собой, а обходит машину сам.
+   Поэтому центральная колонка занимает почти всё поле, а корпус телефона
+   лежит поверх сцены снизу и не двигается.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* Центру нужна ширина: машина в профиль вчетверо длиннее, чем высока, и в
+   колонке под телефон она превращалась бы в спичечный коробок. */
+.wt-root--world {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 2.3fr) minmax(0, 0.85fr);
+}
+
+.wt-stage--world {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+}
+
+.wt-world {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 320px;
+    border-radius: 22px;
+    overflow: hidden;
+    background: linear-gradient(#e8eef5, #d7dee7);
+    box-shadow: 0 24px 60px rgba(15, 23, 42, .22), 0 2px 0 rgba(255, 255, 255, .6) inset;
+}
+
+/* Курсор говорит, что сцену можно тянуть, ещё до того, как человек попробует. */
+.wt-world__canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+    touch-action: none;   /* иначе на планшете жест уводит страницу, а не машину */
+    outline: none;
+}
+.wt-world__canvas:active { cursor: grabbing; }
+.wt-world__canvas:focus-visible { box-shadow: 0 0 0 3px var(--wt-accent) inset; }
+
+.wt-world__load {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--wt-ink-soft);
+    background: rgba(232, 238, 245, .9);
+}
+.wt-world__load--fail { color: var(--wt-red); }
+
+.wt-world__hint {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    /* Не по центру: там стоит телефон, и подсказка пряталась за корпусом. */
+    margin: 0;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    color: #f8fafc;
+    background: rgba(15, 23, 42, .48);
+    backdrop-filter: blur(6px);
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+.wt-world__credit {
+    position: absolute;
+    right: 10px;
+    bottom: 8px;
+    margin: 0;
+    font-size: 10.5px;
+    color: rgba(15, 23, 42, .45);
+    pointer-events: none;
+}
+
+/* Кнопки «открыть дверь» дублируют клик по самой двери: пальцем в неё попадают
+   не всегда, а с клавиатуры в трёхмерную сцену не ткнуть вовсе. */
+.wt-world__tools {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.wt-tool {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    border: 1px solid rgba(255, 255, 255, .5);
+    border-radius: 12px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--wt-ink);
+    background: rgba(255, 255, 255, .82);
+    backdrop-filter: blur(8px);
+    cursor: pointer;
+    transition: background .16s, color .16s, transform .16s;
+}
+.wt-tool:hover { background: #fff; transform: translateX(2px); }
+.wt-tool.is-on {
+    color: #fff;
+    background: var(--wt-accent);
+    border-color: transparent;
+}
+.wt-tool__short { display: none; }
+
+/* ── Телефон в руках ─────────────────────────────────────────────────────
+   Корпус статичен: человек держит его перед собой, а ракурс меняет ногами.
+   Экран НЕ рисует ничего своего — сквозь него видно ту же сцену. */
+.wt-hands {
+    position: absolute;
+    left: 50%;
+    bottom: -18px;
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+
+.wt-hands__phone {
+    position: relative;
+    width: clamp(180px, 15vw, 232px);
+    aspect-ratio: 9 / 18.5;
+    max-height: min(56vh, 440px);
+    /* Корпус нарисован РАМКОЙ, а не заливкой: экран должен остаться окном, в
+       которое видно ту же сцену. С заливкой телефон превращается в чёрный
+       прямоугольник посреди двора и закрывает ровно то, что снимают. */
+    border: 10px solid #16191f;
+    border-radius: 32px;
+    background: transparent;
+    box-shadow:
+        0 -12px 40px rgba(15, 23, 42, .34),
+        0 0 0 1.5px rgba(255, 255, 255, .16),
+        0 0 0 1px rgba(255, 255, 255, .1) inset;
+    pointer-events: auto;
+}
+
+/* Большие пальцы по бокам корпуса. Без них телефон висит в воздухе сам по
+   себе, а нужно, чтобы читалось «я держу его в руках». */
+.wt-hands__thumb {
+    position: absolute;
+    bottom: 42px;
+    width: 46px;
+    height: 108px;
+    border-radius: 30px 30px 24px 24px;
+    background: linear-gradient(100deg, #e0b291, #c98f6b);
+    box-shadow: 0 6px 18px rgba(15, 23, 42, .3);
+}
+.wt-hands__thumb--left { left: -26px; transform: rotate(9deg); }
+.wt-hands__thumb--right { right: -26px; transform: rotate(-9deg); }
+
+/* Интерфейс камеры поверх прозрачного экрана. */
+.wt-cam {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    height: 100%;
+    border-radius: 22px;
+    overflow: hidden;
+    /* Прозрачно намеренно: экран — окно в ту же сцену, а не второй рендер. */
+    background: transparent;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .16) inset;
+}
+
+.wt-cam__top {
+    padding: 7px 10px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #f8fafc;
+    text-align: center;
+    background: linear-gradient(rgba(15, 23, 42, .62), rgba(15, 23, 42, 0));
+}
+
+/* Рамка-подсказка, как в Таксометре: она и говорит, что машина должна
+   попадать в кадр целиком. Краснеет, когда встали не на той дистанции. */
+.wt-cam__frame {
+    position: absolute;
+    inset: 16% 8% 22%;
+    pointer-events: none;
+}
+.wt-cam__frame i {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    border: 2.5px solid rgba(255, 255, 255, .92);
+    transition: border-color .18s;
+}
+.wt-cam__frame i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-radius: 6px 0 0 0; }
+.wt-cam__frame i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-radius: 0 6px 0 0; }
+.wt-cam__frame i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-radius: 0 0 0 6px; }
+.wt-cam__frame i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-radius: 0 0 6px 0; }
+.wt-cam__frame.is-warn i { border-color: #fb7185; }
+
+.wt-cam__read {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 62px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    color: #f8fafc;
+    text-shadow: 0 1px 4px rgba(15, 23, 42, .8);
+    pointer-events: none;
+}
+.wt-cam__read span { color: #fda4af; font-weight: 600; }
+
+.wt-cam__bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px 12px;
+    background: linear-gradient(rgba(15, 23, 42, 0), rgba(15, 23, 42, .66));
+}
+.wt-cam__icon {
+    display: inline-flex;
+    padding: 6px;
+    border: 0;
+    border-radius: 10px;
+    color: rgba(248, 250, 252, .72);
+    background: transparent;
+    cursor: pointer;
+    transition: color .14s, background .14s;
+}
+.wt-cam__icon:hover { color: #fff; background: rgba(248, 250, 252, .16); }
+
+/* Затвор — единственная активная кнопка на экране, поэтому он же и цель шага. */
+.wt-shutter {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 46px;
+    border: 3px solid rgba(255, 255, 255, .92);
+    border-radius: 50%;
+    color: #0f172a;
+    background: #f8fafc;
+    cursor: pointer;
+    transition: transform .12s, box-shadow .16s;
+}
+.wt-shutter:hover { transform: scale(1.05); }
+.wt-shutter:active { transform: scale(.94); }
+.wt-shutter:disabled { opacity: .5; cursor: default; }
+.wt-shutter.is-target {
+    box-shadow: 0 0 0 4px rgba(79, 70, 229, .55), 0 0 22px rgba(79, 70, 229, .5);
+}
+
+/* Вступление и финал в режиме мира — обычная карточка по центру: показывать их
+   «в телефоне» незачем, телефон здесь часть сцены, а не рамка для любого текста. */
+.wt-card {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    max-width: 460px;
+    margin: 0 auto;
+    padding: 26px;
+    border-radius: 22px;
+    background: var(--wt-surface);
+    box-shadow: 0 20px 50px rgba(15, 23, 42, .18);
+}
+.wt-card .wt-screen { height: auto; }
+
+/* Узкий экран: колонки уже сложены в столбец правилами выше, здесь остаётся
+   уменьшить телефон и убрать подписи у кнопок. */
+@media (max-width: 1023px) {
+    .wt-root--world { grid-template-columns: minmax(0, 1fr); }
+    .wt-world { min-height: 380px; }
+    .wt-hands__phone { width: clamp(150px, 34vw, 200px); }
+    .wt-hands__thumb { display: none; }
+    .wt-tool__full { display: none; }
+    .wt-tool__short { display: inline; }
+}

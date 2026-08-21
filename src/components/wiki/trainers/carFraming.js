@@ -1,0 +1,95 @@
+/* Что попало в кадр: ракурс и дальность.
+ *
+ * Модуль чистый — ни three.js, ни DOM. Причина та же, по которой чист движок
+ * сценария: «спереди» и «слишком близко» — это ПРАВИЛА фотоконтроля, и
+ * проверять их надо тестами, а не обходя трёхмерную машину мышкой по кругу.
+ * Сцена присылает сюда три числа (азимут, дистанцию, что открыто) и получает
+ * готовый ответ, который уходит в сценарий как payload затвора.
+ *
+ * Азимут отсчитывается от кормы по часовой стрелке — так же, как устроена
+ * сцена: 0° — сзади, 90° — правый борт, 180° — спереди, 270° — левый борт.
+ */
+
+/** Азимут в диапазон 0…360 — камера крутится бесконечно в обе стороны. */
+export const normalizeAzimuth = (deg) => ((Number(deg) || 0) % 360 + 360) % 360;
+
+/** Расстояние между азимутами по кратчайшей дуге. */
+export const azimuthGap = (a, b) => {
+    const diff = Math.abs(normalizeAzimuth(a) - normalizeAzimuth(b));
+    return diff > 180 ? 360 - diff : diff;
+};
+
+/* Сектора кузовных кадров.
+ *
+ * Борта уже носа и кормы намеренно: перед и зад машина «держит» в кадре с
+ * заметного разброса, а вот бок, снятый под 40°, превращается в три четверти —
+ * именно такие фото и заворачивает проверка. */
+const BODY_VIEWS = [
+    { view: 'rear', at: 0, tolerance: 26 },
+    { view: 'right', at: 90, tolerance: 22 },
+    { view: 'front', at: 180, tolerance: 26 },
+    { view: 'left', at: 270, tolerance: 22 },
+];
+
+/* Кадры «внутрь»: они возможны только там, где открыта нужная дверь, и только
+   с близкого расстояния — снять салон с шести метров нельзя, туда попадёт весь
+   борт. Стоим у левого борта: у водительской двери азимут около 290°, у задней
+   около 250°. */
+const INSIDE_VIEWS = [
+    { view: 'inside_front', at: 292, tolerance: 30, requires: 'doorFrontLeft', maxDistance: 3.4 },
+    { view: 'inside_rear', at: 250, tolerance: 30, requires: 'doorRearLeft', maxDistance: 3.4 },
+    { view: 'trunk', at: 0, tolerance: 30, requires: 'trunkOpen', maxDistance: 4.2 },
+];
+
+/** Пороги дальности для кузовных кадров, в метрах. */
+export const BODY_RANGE = { near: 3.2, far: 7.2 };
+/** Для кадров внутрь порог свой: там нужно подойти вплотную. */
+export const INSIDE_RANGE = { near: 1.1, far: 4.2 };
+
+/**
+ * Что видит камера.
+ * @param {object} camera  {azimuth, distance}
+ * @param {object} opened  флаги мира: doorFrontLeft, doorRearLeft, trunkOpen
+ * @returns {{view: string|null, framing: 'close'|'ok'|'far'}}
+ */
+export const readFrame = (camera, opened = {}) => {
+    const azimuth = normalizeAzimuth(camera.azimuth);
+    const distance = Number(camera.distance) || 0;
+
+    /* Сначала кадры «внутрь». Порядок не косметический: у открытой водительской
+       двери азимут 292° попадает и в сектор левого борта, и в сектор салона.
+       Человек, подошедший вплотную к раскрытой двери, снимает именно салон —
+       иначе на шаге «передний ряд» он получал бы замечание про борт. */
+    const inside = INSIDE_VIEWS.find((spec) => opened[spec.requires]
+        && distance <= spec.maxDistance
+        && azimuthGap(azimuth, spec.at) <= spec.tolerance);
+    if (inside) {
+        return { view: inside.view, framing: rangeOf(distance, INSIDE_RANGE) };
+    }
+
+    const body = BODY_VIEWS.find((spec) => azimuthGap(azimuth, spec.at) <= spec.tolerance);
+    return {
+        view: body ? body.view : null,
+        framing: rangeOf(distance, BODY_RANGE),
+    };
+};
+
+const rangeOf = (distance, range) => {
+    if (distance < range.near) return 'close';
+    if (distance > range.far) return 'far';
+    return 'ok';
+};
+
+/** Куда встать для нужного кадра — этим пользуется подсказка «дожми ещё». */
+export const targetAzimuth = (view) => {
+    const body = BODY_VIEWS.find((spec) => spec.view === view);
+    if (body) return body.at;
+    const inside = INSIDE_VIEWS.find((spec) => spec.view === view);
+    return inside ? inside.at : null;
+};
+
+/** Насколько человек промахнулся мимо нужного ракурса, в градусах. */
+export const azimuthError = (view, azimuth) => {
+    const at = targetAzimuth(view);
+    return at === null ? null : azimuthGap(azimuth, at);
+};

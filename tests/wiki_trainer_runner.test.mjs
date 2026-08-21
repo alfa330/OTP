@@ -36,12 +36,32 @@ const playThrough = (scenario, { random } = {}) => {
     return run;
 };
 
-test('оба тренажёра проходятся правильными нажатиями до конца', () => {
-    for (const scenario of TRAINERS) {
+/* Тренажёры на учебном телефоне: весь мир помещается в его экран, и пройти их
+   можно одними нажатиями. Фотоконтроль устроен иначе — там кадр зависит от
+   того, где стоит человек и что у машины открыто, поэтому его проход живёт в
+   wiki_trainer_photocontrol.test.mjs, где есть чем эти условия задать. */
+const PHONE_TRAINERS = TRAINERS.filter((scenario) => scenario.stage !== 'world');
+
+test('телефонные тренажёры проходятся правильными нажатиями до конца', () => {
+    assert.ok(PHONE_TRAINERS.length >= 2, 'телефонных сценариев стало меньше двух — проверь фильтр');
+    for (const scenario of PHONE_TRAINERS) {
         const run = playThrough(scenario);
         assert.equal(run.errors, 0, `${scenario.key}: правильный путь не должен давать ошибок`);
         assert.equal(progressPercent(run), 100);
         assert.equal(currentStep(run).screen, 'result');
+    }
+});
+
+test('у каждого тренажёра в каталоге есть имя, шаги и чек-лист', () => {
+    // Общая проверка на ВСЕ сценарии, включая фотоконтроль: пустая карточка в
+    // каталоге или сценарий без шагов ломает вкладку «Тренажёры» целиком.
+    for (const scenario of TRAINERS) {
+        assert.ok(scenario.key && scenario.title, 'сценарий без ключа или названия');
+        assert.ok(scenario.steps.length > 2, `${scenario.key}: шагов почти нет`);
+        assert.ok((scenario.checklist || []).length > 0, `${scenario.key}: пустой чек-лист`);
+        assert.equal(scenario.steps[scenario.steps.length - 1].screen, 'result',
+            `${scenario.key}: последний шаг обязан быть финалом`);
+        assert.equal(findTrainer(scenario.key), scenario, `${scenario.key}: не ищется по ключу`);
     }
 });
 

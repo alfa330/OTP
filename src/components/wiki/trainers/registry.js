@@ -20,13 +20,15 @@
  * приезжают отдельным чанком вместе с самим проигрывателем.
  */
 
+import photoControl from './scenarioPhotoControl.js';
 import saparSite from './scenarioSapar.js';
 import taxiPro from './scenarioTaxiPro.js';
 import { stageCount } from './runner.js';
 
-/* Порядок фиксирован: сначала основной способ подписания, потом запасной.
-   Тот же порядок в инструкции — тренажёр не должен спорить с текстом рядом. */
-export const TRAINERS = [taxiPro, saparSite];
+/* Порядок фиксирован: сначала основной способ подписания, потом запасной,
+   потом фотоконтроль. Тот же порядок в инструкции — тренажёр не должен спорить
+   с текстом рядом. */
+export const TRAINERS = [taxiPro, saparSite, photoControl];
 
 const BY_KEY = new Map(TRAINERS.map((scenario) => [scenario.key, scenario]));
 

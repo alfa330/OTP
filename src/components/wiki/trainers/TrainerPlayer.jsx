@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, useReducedMotion } from 'framer-motion';
 import { HelpCircle, RotateCcw, X } from 'lucide-react';
@@ -20,6 +20,13 @@ import {
     SaparSave, SaparSignSheet, SaparStatus,
 } from './screensSapar';
 import './trainer.css';
+
+/* Сцена с машиной приезжает отдельным чанком вместе с three.js.
+ *
+ * Обычным импортом библиотека попала бы в общий чанк тренажёров, и человек,
+ * открывший урок про подписание документов, скачивал бы трёхмерный движок,
+ * который там не нужен ни на одном шаге. */
+const CarStage = lazy(() => import('./CarStage'));
 
 /* Проигрыватель тренажёра: прогресс сверху, учебный телефон и барс рядом.
  *
@@ -47,6 +54,12 @@ const SCREENS = {
         eg_success: EgSuccess,
         tp_check: TpCheck,
         result: ResultScreen,
+    },
+    'photo-control-car': {
+        intro: IntroScreen,
+        result: ResultScreen,
+        // Экран pc_camera — не экран телефона, а трёхмерная сцена вокруг него,
+        // поэтому он живёт не здесь, а в ветке world ниже.
     },
     'sapar-site-avr': {
         intro: IntroScreen,
@@ -111,6 +124,7 @@ export function TrainerPlayer({
 }) {
     const [run, setRun] = useState(() => startRun(scenario));
     const phoneRef = useRef(null);
+    const stageRef = useRef(null);
     const stages = useMemo(() => stageCount(scenario), [scenario]);
     const reduceMotion = useReducedMotion();
     /* На узком экране барс не выглядывает и не бежит: телефон занимает почти всю
@@ -120,12 +134,22 @@ export function TrainerPlayer({
        посреди анимации не тот случай, ради которого стоит усложнять. */
     const [narrow] = useState(() => (typeof window !== 'undefined'
         && window.matchMedia('(max-width: 1023px)').matches));
-    const [phase, setPhase] = useState(
-        animateEntrance && !reduceMotion ? 'rise' : 'done');
+    /* Тренажёр фотоконтроля устроен наоборот остальных: главный объект —
+       машина, а телефон человек держит в руках. Поэтому телефон снизу не
+       выезжает (ему неоткуда), и появление начинается сразу с карточек. */
+    const worldMode = scenario.stage === 'world';
+    const [phase, setPhase] = useState(() => {
+        if (!animateEntrance || reduceMotion) return 'done';
+        return worldMode ? 'cards' : 'rise';
+    });
 
     // Выключили анимации в системе уже после открытия — доигрывать нечего.
     useEffect(() => { if (reduceMotion) setPhase('done'); }, [reduceMotion]);
 
+    /* Пробежка барса измеряется от корпуса телефона. В режиме мира корпуса на
+       его прежнем месте нет, и бежать зверю неоткуда — он просто появляется в
+       карточке, как на узком экране. */
+    const skipRunner = narrow || worldMode;
     const shown = phase !== 'rise';
     const cardsOut = phase === 'cards' || phase === 'run' || phase === 'done';
     const running = phase === 'run';
@@ -193,7 +217,7 @@ export function TrainerPlayer({
        (кнопка подсвечена), и единственный способ пройти тренажёр с клавиатуры:
        иначе после каждого шага пришлось бы «дотабиваться» до нужной кнопки. */
     useEffect(() => {
-        const node = phoneRef.current?.querySelector('.is-target:not([disabled])');
+        const node = stageRef.current?.querySelector('.is-target:not([disabled])');
         if (node) {
             const frame = requestAnimationFrame(() => node.focus({ preventScroll: true }));
             return () => cancelAnimationFrame(frame);
@@ -213,7 +237,8 @@ export function TrainerPlayer({
            низком окне она нужна по-настоящему, иначе низ карточки прогресса
            было бы не достать. */
         <div
-            className={`wt-root${settled && !leaving ? '' : ' wt-root--locked'}`}
+            className={`wt-root${settled && !leaving ? '' : ' wt-root--locked'}`
+                + `${worldMode ? ' wt-root--world' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
         >
             {/* Полупрозрачная подложка. Появляется ПОСЛЕ того, как телефон
@@ -250,7 +275,7 @@ export function TrainerPlayer({
                     ease: leaving ? EASE_LEAVE : EASE,
                 }}
                 onAnimationComplete={() => {
-                    if (!leaving) setPhase((p) => (p === 'cards' ? (narrow ? 'done' : 'run') : p));
+                    if (!leaving) setPhase((p) => (p === 'cards' ? (skipRunner ? 'done' : 'run') : p));
                 }}
             >
                 {/* Место барса в карточке. Пока он бежит, слот пуст — иначе
@@ -282,7 +307,37 @@ export function TrainerPlayer({
             {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
                 Высота считается от окна, ширина — от пропорций корпуса, поэтому
                 на большом экране телефон крупный, а на маленьком не вылезает. */}
-            <div className="wt-stage">
+            <div className={`wt-stage${worldMode ? ' wt-stage--world' : ''}`} ref={stageRef}>
+                {worldMode ? (
+                    /* Мир вокруг человека. Вступление и финал — обычные
+                       карточки: показывать их «в телефоне» незачем, телефон
+                       здесь часть сцены, а не рамка для любого текста. */
+                    step.screen === 'pc_camera' ? (
+                        <Suspense fallback={<div className="wt-world__load">Готовим машину…</div>}>
+                            <CarStage
+                                world={run.world}
+                                tap={doTap}
+                                toggle={doToggle}
+                                target={target}
+                                plate={run.world.car?.plate}
+                            />
+                        </Suspense>
+                    ) : (
+                        <div className="wt-card">
+                            {Screen && (
+                                <Screen
+                                    key={step.key}
+                                    scenario={scenario}
+                                    world={run.world}
+                                    tap={doTap}
+                                    toggle={doToggle}
+                                    target={target}
+                                    onRestart={doRestart}
+                                />
+                            )}
+                        </div>
+                    )
+                ) : (
                 <div className="wt-phone-wrap" ref={phoneWrapRef}>
                     {/* ГОЛОВА барса из-за корпуса. Окно с обрезкой, а не весь
                         зверь целиком: выглядывать половиной туловища — это не
@@ -290,7 +345,7 @@ export function TrainerPlayer({
                         так, чтобы голова оказалась там же, где барс потом сидит
                         в карточке, — тогда пробежка читается как продолжение
                         одного движения, а не как телепорт. */}
-                    {!narrow && (phase === 'peek' || phase === 'cards') && (
+                    {!skipRunner && (phase === 'peek' || phase === 'cards') && (
                         <motion.div
                             className="wt-peek"
                             aria-hidden="true"
@@ -387,6 +442,7 @@ export function TrainerPlayer({
                     </div>
                 </motion.div>
                 </div>
+                )}
             </div>
 
             {/* ── СПРАВА: прогресс ─────────────────────────────────────────
