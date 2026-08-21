@@ -18,6 +18,18 @@
 
 const SONIOX_WS = 'wss://stt-rt.soniox.com/transcribe-websocket';
 
+/**
+ * Адрес модуля захвата микрофона с учётом базы сборки.
+ *
+ * BASE_URL у Vite всегда заканчивается слэшем ('/' локально, '/OTP/' на Pages),
+ * но подстраховываемся: одна пропущенная косая превращает путь в
+ * '/OTPtrainer-worklet.js' и ошибка выглядит точно так же, как отсутствие файла.
+ */
+export const workletUrl = (base = import.meta.env?.BASE_URL || '/') => {
+    const root = base || '/';
+    return `${root.endsWith('/') ? root : `${root}/`}trainer-worklet.js`;
+};
+
 /** Среднее по массиву или null — чтобы в метриках не появлялся NaN. */
 const mean = (values) => (values.length
     ? values.reduce((sum, value) => sum + value, 0) / values.length
@@ -77,7 +89,11 @@ export class VoiceLink {
         });
         this.ctx = new AudioContext();
         await this.ctx.resume();
-        await this.ctx.audioWorklet.addModule('/trainer-worklet.js');
+        // Путь к воркеру — ОТ БАЗЫ СБОРКИ, а не от корня домена. Фронт едет на
+        // GitHub Pages в подпапку (/OTP/), и абсолютный '/trainer-worklet.js'
+        // уходил в корень домена: браузер отвечал «Unable to load a worklet's
+        // module», а локально, где база '/', всё работало.
+        await this.ctx.audioWorklet.addModule(workletUrl());
 
         await this.openStt(tokens);
         this.startedAt = performance.now();

@@ -75,3 +75,16 @@ test('статусы переведены', () => {
     assert.equal(statusLabel('finished'), 'завершён');
     assert.equal(statusLabel('active'), 'идёт');
 });
+
+test('модуль захвата микрофона грузится ОТ БАЗЫ СБОРКИ, а не от корня домена', async () => {
+    // Прод-дефект 22.08.2026: фронт живёт на GitHub Pages в подпапке /OTP/, а
+    // абсолютный '/trainer-worklet.js' уходил в корень домена. Браузер отвечал
+    // «Unable to load a worklet's module», локально при базе '/' всё работало.
+    const { workletUrl } = await import('../src/components/trainer/voice.js');
+    assert.equal(workletUrl('/'), '/trainer-worklet.js');
+    assert.equal(workletUrl('/OTP/'), '/OTP/trainer-worklet.js');
+    // Пропущенная косая склеила бы путь в '/OTPtrainer-worklet.js', и ошибка
+    // выглядела бы точно так же, как отсутствие файла.
+    assert.equal(workletUrl('/OTP'), '/OTP/trainer-worklet.js');
+    assert.equal(workletUrl(''), '/trainer-worklet.js');
+});
