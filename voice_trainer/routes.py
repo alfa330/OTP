@@ -13,9 +13,9 @@
 
 ЗВУК ЧЕРЕЗ ЭТОТ СЕРВЕР НЕ ИДЁТ. Прод работает на waitress (WSGI), где WebSocket
 невозможен, а гнать аудио через SSE значит платить лишним кругом и base64.
-Поэтому браузер соединяется с Soniox и Gemini Live НАПРЯМУЮ по коротким
-одноразовым ключам, которые выдаёт /tokens. Наш сервер держит права, роль
-собеседника и замеры — то есть ровно то, ради чего он нужен.
+Поэтому микрофон соединяется с Soniox НАПРЯМУЮ по короткому ключу из /tokens, а
+озвучку отдаёт сервер: Live API эфемерные токены в браузере не принимает. Наш
+сервер держит права, роль собеседника и замеры — ровно то, ради чего он нужен.
 
 Раздел закрыт для всех, кроме супер-админа: он тестовый, тратит платные квоты и
 выдаёт браузеру ключи к внешним сервисам.
@@ -37,15 +37,27 @@ from . import scenarios
 # вопрос «сколько стоил вон тот прогон» задаётся задним числом.
 RATES_USD = {
     'stt_per_min': 0.0020,        # Soniox stt-rt-v5: $0.12/час
-    'tts_out_per_min': 0.0180,    # Gemini Live: 25 токенов/с аудио по $12/1M
-    'llm_in_per_mtok': 0.30,      # gemini-3.5-flash класс, вход
-    'llm_out_per_mtok': 2.50,     # он же, выход
-    'note': 'ставки на 22.08.2026; проверять при смене моделей',
+    'tts_out_per_min': 0.0180,    # Gemini Live, выходное аудио: $12/1M при 25 ток/с
+    'tts_in_per_mtok': 0.75,      # текст, который отдаём на озвучку
+    'llm_in_per_mtok': 1.50,      # gemini-3.5-flash, вход
+    'llm_out_per_mtok': 9.00,     # он же, выход
+    'note': 'прайс ai.google.dev на 22.08.2026; проверять при смене моделей',
 }
 
 SONIOX_TEMP_KEY_URL = 'https://api.soniox.com/v1/auth/temporary-api-key'
-GEMINI_TOKEN_URL = 'https://generativelanguage.googleapis.com/v1alpha/auth_tokens'
 GEMINI_GENERATE = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
+GEMINI_LIVE_WS = ('wss://generativelanguage.googleapis.com/ws/'
+                  'google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent')
+
+
+def _gemini_headers(key):
+    """Ключ Gemini передаётся ЗАГОЛОВКОМ, а не '?key=' в адресе.
+
+    httpx логирует полный URL на уровне INFO, и query-параметр с ключом попадал
+    в логи Render открытым текстом (обнаружено 22.08.2026). Заголовок в лог не
+    пишется. Проверено, что и REST, и WebSocket Live принимают x-goog-api-key.
+    """
+    return {'x-goog-api-key': key}
 CLAUDE_URL = 'https://api.anthropic.com/v1/messages'
 
 MAX_TURNS = 60
@@ -159,10 +171,11 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     @trainer_route('/tokens', methods=('POST',))
     def trainer_tokens(user):
-        """Короткоживущие ключи для браузера: распознавание и озвучка.
+        """Короткоживущий ключ для браузера: только распознавание.
 
-        Постоянные ключи в браузер не попадают. Ключ Soniox живёт 5 минут и
-        годен только на распознавание; токен Gemini одноразовый.
+        Постоянные ключи в браузер не попадают: ключ Soniox живёт 10 минут и
+        годен единственно на транскрипцию. Ключ Gemini браузеру не нужен вовсе —
+        озвучивает сервер.
         """
         out, problems = {}, []
 
@@ -185,18 +198,11 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         else:
             problems.append('soniox: нет ключа в окружении')
 
-        gemini_key = env('GEMINI_API_KEY')
-        if gemini_key:
-            try:
-                response = httpx.post(GEMINI_TOKEN_URL, params={'key': gemini_key},
-                                      json={}, timeout=20)
-                if response.status_code in (200, 201):
-                    out['gemini'] = {'token': response.json().get('name')}
-                else:
-                    problems.append(f'gemini: HTTP {response.status_code}')
-            except Exception as exc:  # noqa: BLE001
-                problems.append(f'gemini: {type(exc).__name__}')
-        else:
+        # Токен Gemini браузеру НЕ выдаём: Live API эфемерные токены в
+        # браузерном соединении не принимает (сокет закрывается с 1008), а
+        # озвучку всё равно отдаёт сервер. Лишний вызов только жёг квоту — и
+        # именно он светил ключ в логах.
+        if not env('GEMINI_API_KEY'):
             problems.append('gemini: нет ключа в окружении')
 
         out['problems'] = problems
@@ -249,9 +255,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             socket = None
             try:
                 socket = websocket.create_connection(
-                    'wss://generativelanguage.googleapis.com/ws/'
-                    'google.ai.generativelanguage.v1beta.GenerativeService.'
-                    f'BidiGenerateContent?key={api_key}', timeout=60)
+                    GEMINI_LIVE_WS, header=[f'x-goog-api-key: {api_key}'], timeout=60)
                 socket.send(json.dumps({'setup': {
                     'model': f'models/{model}',
                     'generationConfig': {
@@ -736,7 +740,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         замерами. Наш вклад — голос и запись метрик.
         """
         try:
-            from wiki import queries as wiki_queries, perimeter as wiki_perimeter
+            from wiki import (queries as wiki_queries, perimeter as wiki_perimeter,
+                              access as wiki_access)
             from wiki.ai import (answer as ai_answer, embed as ai_embed,
                                  retrieve as ai_retrieve, providers as ai_providers)
         except Exception as exc:  # noqa: BLE001
@@ -749,6 +754,22 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 wctx = wiki_queries.load_access_context(cursor, user['id'])
                 if not wctx:
                     return '', {'error': 'нет доступа к вики'}
+                # Субъекты доступа контекст НЕ содержит: их досчитывает роут
+                # вики и кладёт в ctx, а периметр их требует (KeyError:
+                # 'subjects'). Считаем той же функцией, а не своим выводом —
+                # второй источник истины здесь уже ломал исходную вику.
+                wctx['subjects'] = wiki_access.collect_subjects(
+                    user_id=wctx['user_id'],
+                    otp_role=wctx['otp_role'],
+                    department_id=wctx['department_id'],
+                    headed_department_ids=wctx['headed_department_ids'],
+                    direction_id=wctx['direction_id'],
+                    group_ids=wctx['group_ids'],
+                    wiki_role_ids=[r.get('id') for r in wctx['wiki_roles']],
+                )
+                # load_capabilities не просто возвращает права, а КЛАДЁТ их в
+                # контекст — периметр читает ctx['capabilities'] напрямую.
+                wiki_queries.load_capabilities(cursor, wctx, wctx['subjects'])
                 scope = wiki_perimeter.assistant_perimeter(cursor, wctx, None)
                 if not scope.get('article_ids'):
                     return '', {'error': 'помощнику не выдан доступ ни к одной статье'}
@@ -787,7 +808,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                                  'thinkingConfig': {'thinkingBudget': 0}},
         }
         response = httpx.post(GEMINI_GENERATE.format(model=model),
-                              params={'key': env('GEMINI_API_KEY')}, json=body, timeout=45)
+                              headers=_gemini_headers(env('GEMINI_API_KEY')),
+                              json=body, timeout=45)
         if response.status_code >= 400:
             raise RuntimeError(f'HTTP {response.status_code} {response.text[:160]}')
         data = response.json()
@@ -841,7 +863,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         }
         try:
             response = httpx.post(GEMINI_GENERATE.format(model=model),
-                                  params={'key': env('GEMINI_API_KEY')},
+                                  headers=_gemini_headers(env('GEMINI_API_KEY')),
                                   json=body, timeout=120)
             if response.status_code >= 400:
                 raise RuntimeError(f'HTTP {response.status_code} {response.text[:200]}')
