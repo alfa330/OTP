@@ -754,6 +754,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             base={base}
                             headers={headers}
                             showToast={showToast}
+                            /* Помощник знает ровно ту вику, что открыта: у того,
+                               кому выдано два пространства, ответ иначе собрался
+                               бы из обоих вперемешку. */
+                            spaceId={activeSpace?.id || null}
                             onOpenArticle={(slug, highlight) => {
                                 setTab('library');
                                 setSearchTarget({ slug, highlight });

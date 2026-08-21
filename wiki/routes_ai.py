@@ -42,11 +42,30 @@ def _int_arg(name, default, low, high):
     return max(low, min(value, high))
 
 
+def _space_id():
+    """Пространство, в котором человек сейчас находится.
+
+    У GET приходит строкой запроса, у POST — телом: помощник спрашивается и
+    так, и так, а знать он обязан ровно ту вику, что открыта на экране.
+    Мусор гасим в None, а не в 400: неизвестное пространство означает «не
+    сужать», и сузить его всё равно нечем — периметр уже отсечён границей
+    отдела, и чужой вики в нём нет.
+    """
+    raw = request.args.get('space_id')
+    if raw is None:
+        raw = (request.get_json(silent=True) or {}).get('space_id')
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def register(bp, wiki_route, db, log_ip):
     @wiki_route('/ai/status')
     def wiki_ai_status(cursor, ctx):
         """Готов ли помощник и что он знает про этого человека."""
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx)
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
         payload = {
             'perimeter': {
                 'articles_for_ai': len(scope['article_ids']),
@@ -101,7 +120,7 @@ def register(bp, wiki_route, db, log_ip):
         limit = _int_arg('limit', 8, 1, 30)
         per_article = _int_arg('per_article', 3, 1, 10)
 
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx)
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
         article_ids = scope['article_ids']
 
         query_vector = None
@@ -170,7 +189,7 @@ def register(bp, wiki_route, db, log_ip):
         chat = ai_store.owned_chat(cursor, ctx['user_id'], chat_id)
         if not chat:
             return jsonify({'error': 'чат не найден'}), 404
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx)
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
         messages = ai_store.chat_messages(
             cursor, chat_id, visible_article_ids=scope['article_ids'])
         return jsonify({'chat': chat, 'messages': messages})
@@ -205,7 +224,7 @@ def register(bp, wiki_route, db, log_ip):
         if not chat:
             return jsonify({'error': 'чат не найден'}), 404
 
-        scope = wiki_perimeter.assistant_perimeter(cursor, ctx)
+        scope = wiki_perimeter.assistant_perimeter(cursor, ctx, _space_id())
         if not scope['article_ids']:
             return jsonify({'error': 'нет доступных статей',
                             'detail': 'помощнику не выдан доступ ни к одной статье'

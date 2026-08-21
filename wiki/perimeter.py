@@ -120,7 +120,7 @@ def perimeter_hash(article_ids):
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
-def assistant_perimeter(cursor, ctx):
+def assistant_perimeter(cursor, ctx, space_id=None):
     """Периметр ИИ-помощника. Мастер-ключ недоступен по построению.
 
     Возвращает словарь: article_ids (frozenset), section_ids (frozenset),
@@ -128,8 +128,15 @@ def assistant_perimeter(cursor, ctx):
     Разница read_count и len(article_ids) — это и есть цена рубильника и
     строгого режима, её показываем в /ai/status, чтобы «помощник знает меньше,
     чем я вижу» не выглядело поломкой.
+
+    space_id сужает знание помощника до ОДНОГО пространства — того, что выбрано
+    переключателем в шапке. Граница отдела и без него не пускает в чужую вику,
+    но у того, кому выдано два пространства, ответ иначе собирался бы из обоих:
+    человек спрашивает, находясь в «Тез», и получает абзац из «Таксопарков» —
+    вперемешку и без признака, что источник из другой базы знаний.
     """
-    _subjects, sections, visible = read_perimeter(cursor, ctx, master_key=False)
+    _subjects, sections, visible = read_perimeter(cursor, ctx, master_key=False,
+                                                  space_id=space_id)
     eligible = eligible_article_ids(cursor, visible)
     return {
         'article_ids': eligible,

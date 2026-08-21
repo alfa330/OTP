@@ -117,7 +117,8 @@ const SourceChip = ({ source, onOpen }) => {
     );
 };
 
-export default function WikiAssistant({ base, headers, showToast, onOpenArticle }) {
+export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
+                                        spaceId = null }) {
     const toast = useStableCallback(showToast);
     const openArticle = useStableCallback(onOpenArticle);
 
@@ -136,7 +137,7 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle 
     const { boxRef, onScroll } = useThreadAutoScroll(messages);
 
     const loadStatus = useCallback(() => {
-        axios.get(`${base}/ai/status`, { headers })
+        axios.get(`${base}/ai/status`, { headers, params: { space_id: spaceId } })
             .then((r) => setStatus(r.data))
             .catch(() => setStatus(null));
     }, [base, headers]);
@@ -155,7 +156,7 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle 
         setActiveId(chatId);
         setMessages(null);
         const request = ++threadRequest.current;
-        axios.get(`${base}/ai/chats/${chatId}`, { headers })
+        axios.get(`${base}/ai/chats/${chatId}`, { headers, params: { space_id: spaceId } })
             .then((r) => {
                 if (request !== threadRequest.current) return;
                 setMessages(r.data?.messages || []);
@@ -186,12 +187,12 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle 
         try {
             let chatId = activeId;
             if (!chatId) {
-                const created = await axios.post(`${base}/ai/chats`, {}, { headers });
+                const created = await axios.post(`${base}/ai/chats`, { space_id: spaceId }, { headers });
                 chatId = created.data?.chat?.id;
                 setActiveId(chatId);
             }
             const response = await axios.post(
-                `${base}/ai/chats/${chatId}/ask`, { question }, { headers });
+                `${base}/ai/chats/${chatId}/ask`, { question, space_id: spaceId }, { headers });
             const data = response.data || {};
             setMessages((prev) => [...(prev || []), {
                 id: data.message_id, role: 'assistant', kind: data.kind,
