@@ -25,12 +25,33 @@ class TicketMessageTest(unittest.TestCase):
         """По номеру сотрудник понимает, о чём речь, а мы находим запись."""
         self.assertIn('Обращение №42', self.build())
 
+    def test_header_opens_with_the_request_not_with_the_number(self):
+        """ТЗ задачи #206: первой строкой — чего от группы хотят.
+
+        Номер сам по себе не говорит ничего, и стоять первым ему незачем: в
+        чате, куда падают десятки сообщений, взгляд должен цепляться за просьбу.
+        """
+        message = self.build(heading='Просьба снять оплату за подписание документов')
+        first, second = message.split(chr(10))[:2]
+        self.assertEqual(first, '🎫 <b>Просьба снять оплату за подписание документов</b>')
+        self.assertIn('Обращение №42', second)
+        self.assertIn('iTaxi', second)
+
+    def test_subject_is_the_heading_when_the_topic_has_no_wording(self):
+        """Свободное обращение и тематика без своей просьбы — заголовком тема."""
+        self.assertIn('<b>Не приходит бонус</b>', self.build())
+
+    def test_topic_title_is_not_repeated_next_to_the_heading(self):
+        """Раньше в шапке стояли и «Тема: …», и она же строкой ниже — одно и то
+        же дважды на одном экране."""
+        message = self.build(heading='Просьба снять оплату за подписание документов')
+        self.assertEqual(message.count('Просьба снять оплату за подписание документов'), 1)
+
     def test_no_reply_instruction(self):
         """Владелец убрал её как лишнюю (19.08.2026).
 
         Механику реплая это не меняет: бот по-прежнему видит только ответы на
-        свои сообщения, а под сообщением остаются кнопки «Беру в работу» и
-        «Выполнено» — они работают без реплая.
+        свои сообщения.
         """
         self.assertNotIn('Ответьте на это сообщение', self.build())
 
@@ -90,10 +111,10 @@ class TicketMessageTest(unittest.TestCase):
 
     def test_client_and_due_appear_when_given(self):
         message = self.build(client_name='Асель', client_phone='+7 700 000 00 00',
-                             due_text='12.08 19:00', topic_title='Бонусы')
+                             due_text='12.08 19:00', heading='Просьба вернуть бонус')
         self.assertIn('Асель · +7 700 000 00 00', message)
         self.assertIn('Ответ нужен до', message)
-        self.assertIn('Бонусы', message)
+        self.assertIn('Просьба вернуть бонус', message)
 
     def test_message_fits_telegram_limit(self):
         """4096 — жёсткий предел Bot API: длинное описание режем, а не теряем всё."""

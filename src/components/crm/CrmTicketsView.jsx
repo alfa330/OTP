@@ -4,6 +4,7 @@ import {
     AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, CheckCircle2, ChevronRight,
     CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
+    XCircle,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -479,9 +480,21 @@ const DayChip = ({ children }) => (
 
 const CHECK_TONE = {
     green: 'text-emerald-500',
+    rose: 'text-rose-500',
     red: 'text-rose-500',
     blue: 'text-blue-500',
     amber: 'text-amber-500',
+    slate: 'text-slate-400',
+};
+
+/* Значок строки — по тону, а не по порядку: «подтвердилось» и «не
+ * подтвердилось» стоят в одном списке рядом, и различать их обязано что-то
+ * кроме цвета (цвет видят не все). */
+const CHECK_ICON = {
+    green: CheckCircle2,
+    rose: XCircle,
+    red: AlertCircle,
+    slate: Search,
 };
 
 /* Само обращение: тот текст, что ушёл в группу. Раньше он выводился одним
@@ -533,9 +546,7 @@ const TicketBody = ({ body }) => {
                             {block.rows.map((row, rowIndex) => (
                                 <div key={rowIndex} className="flex items-start gap-2 text-[12.5px]">
                                     <span className={`mt-[3px] shrink-0 ${CHECK_TONE[row.tone] || 'text-slate-400'}`}>
-                                        {row.tone === 'green' ? <CheckCircle2 size={13} />
-                                            : row.tone === 'red' ? <AlertCircle size={13} />
-                                                : <ListChecks size={13} />}
+                                        {React.createElement(CHECK_ICON[row.tone] || ListChecks, { size: 13 })}
                                     </span>
                                     <span className="min-w-0">
                                         {row.label && (

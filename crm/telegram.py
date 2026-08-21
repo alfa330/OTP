@@ -11,8 +11,7 @@
    что адресованы ему (штатный privacy mode Telegram), поэтому ответ ловится
    ТОЛЬКО реплаем — «ответ отдельным сообщением в чат» до системы не дойдёт.
    Строки-инструкции об этом в сообщении больше нет: владелец убрал её как
-   лишнюю (19.08.2026). Сотрудники групп механику уже знают, а под сообщением
-   остаются кнопки «Беру в работу» и «Выполнено» — они работают без реплая.
+   лишнюю (19.08.2026). Сотрудники групп механику уже знают.
 """
 
 import html
@@ -109,16 +108,27 @@ def format_body(text):
     return chr(10).join(result)
 
 
-def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=None,
+def build_ticket_message(*, ticket_id, subject, body, queue_title, heading=None,
                          priority='normal', client_name=None, client_phone=None,
                          due_text=None, own_wording=False):
     """Текст исходного сообщения обращения (HTML-разметка Telegram).
 
+    Шапка устроена так, как её нарисовали в ТЗ задачи #206: первой строкой —
+    ЧТО просят («Просьба снять оплату за подписание документов»), второй — чьё
+    это обращение и в какую группу оно пришло. Раньше первой строкой стоял
+    номер, а просьба — третьей: в чате, куда падают десятки сообщений, взгляд
+    цеплялся за номер, который сам по себе ничего не говорит.
+
+    heading — формулировка-просьба тематики (scenarios.group_title). Тема
+    обращения для неё не годится: там название проблемы и ИИН, потому что по
+    теме обращение ищут в iCORE, а группе нужно действие. Нет тематики (или
+    тематика пишет сообщение сама) — заголовком становится тема.
+
     own_wording — тематика сформулировала сообщение сама (у группы-получателя
-    свой заведённый формат). Тогда тема это ПРОСЬБА обычным текстом, а тело —
-    данные, и жирным выделяются они: взгляд должен падать на номер ВУ и город,
-    а не на слова «прошу проверить». В остальных тематиках наоборот: тема —
-    заголовок, тело — перечень с выделенными подписями.
+    свой заведённый формат). Тогда заголовок это ПРОСЬБА обычным текстом, а
+    тело — данные, и жирным выделяются они: взгляд должен падать на номер ВУ и
+    город, а не на слова «прошу проверить». В остальных тематиках наоборот:
+    заголовок выделен, а в теле выделены подписи.
     """
     number = ticket_number(ticket_id)
     # Номер — ссылка прямо в карточку: сотруднику из чата нужен не раздел, а это
@@ -126,11 +136,11 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=N
     link = ticket_link(ticket_id)
     title = ('<a href="%s">Обращение %s</a>' % (html.escape(link, quote=True), number)
              if link else 'Обращение %s' % number)
-    lines = ['🎫 <b>%s</b> · %s' % (title, html.escape(str(queue_title or '')))]
+    clean_heading = html.escape(_clip(heading or subject, 300))
+    lines = ['🎫 %s' % clean_heading if own_wording else '🎫 <b>%s</b>' % clean_heading]
+    lines.append('%s · %s' % (title, html.escape(str(queue_title or ''))))
 
     meta = []
-    if topic_title:
-        meta.append('🗂 <b>Тема:</b> %s' % html.escape(str(topic_title)))
     emoji = PRIORITY_EMOJI.get(priority, '')
     if emoji:
         meta.append('%s <b>Приоритет:</b> %s' % (emoji, PRIORITY_LABELS.get(priority, priority)))
@@ -140,9 +150,6 @@ def build_ticket_message(*, ticket_id, subject, body, queue_title, topic_title=N
         lines.append('')
         lines.extend(meta)
 
-    lines.append('')
-    clean_subject = html.escape(_clip(subject, 300))
-    lines.append(clean_subject if own_wording else '<b>%s</b>' % clean_subject)
     if body:
         lines.append('')
         lines.append('<b>%s</b>' % html.escape(_clip(body, 2500)) if own_wording

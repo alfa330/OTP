@@ -75,7 +75,30 @@ test('пустой текст не роняет карточку', () => {
  * проверяется: формат задаёт сервер (crm/scenarios.py::render_body), и разойтись
  * с ним нельзя молча. */
 
+/* Обращение НЫНЕШНЕГО формата (ТЗ задачи #206): данные водителя подписанными
+ * строками, проверенные пункты — поштучно со знаком. */
 const FULL = [
+  '⚠️ Возможный массовый сбой',
+  '',
+  'ИИН: 060606060606',
+  'Таксопарк: iTaxi',
+  'Город: Алматы',
+  'Отчётный период: февраль 2026',
+  '',
+  'Тип ошибки: Сайт не загружается',
+  '',
+  '🔍 Проверено оператором: 1 из 3',
+  '✅ Комиссия парка списывалась',
+  '❌ Провайдер менялся',
+  '❔ Документы в Sapar отображаются: неизвестно',
+  '',
+  '✅ Выполнено: перезашёл · сменил устройство',
+  '❗ Не выполнено: связался с парком',
+].join('\n');
+
+/* Обращения, заведённые ДО #206, лежат в базе прежним текстом и задним числом
+ * не пересобираются — карточка обязана читать и его. */
+const LEGACY = [
   '⚠️ Возможный массовый сбой',
   '',
   'iTaxi Sapar · Алматы · период февраль 2026',
@@ -90,7 +113,31 @@ const FULL = [
 
 test('блоки опознаются по содержимому, а не по номеру', () => {
   assert.deepEqual(describeBody(FULL).map((block) => block.kind),
+                   [BLOCK_WARNING, BLOCK_LIST, BLOCK_LIST, BLOCK_CHECKS, BLOCK_CHECKS]);
+});
+
+test('старый формат обращения разбирается по-прежнему', () => {
+  assert.deepEqual(describeBody(LEGACY).map((block) => block.kind),
                    [BLOCK_WARNING, BLOCK_CONTEXT, BLOCK_LIST, BLOCK_CHECKS]);
+  assert.deepEqual(describeBody(LEGACY)[1].chips,
+                   ['iTaxi Sapar', 'Алматы', 'период февраль 2026']);
+});
+
+test('данные водителя остаются подписанными строками, а не метками', () => {
+  const data = describeBody(FULL)[1];
+  assert.equal(data.kind, BLOCK_LIST);
+  assert.deepEqual(data.rows.map((row) => row.label),
+                   ['ИИН:', 'Таксопарк:', 'Город:', 'Отчётный период:']);
+});
+
+test('подтвердилось и не подтвердилось различаются не только цветом', () => {
+  const checks = describeBody(FULL)[3];
+  assert.equal(checks.rows[0].tone, 'slate');
+  assert.deepEqual(checks.rows[0].value, '1 из 3');
+  assert.deepEqual(checks.rows.slice(1).map((row) => row.tone),
+                   ['green', 'rose', 'slate']);
+  // «Неизвестно» остаётся словом: знак его не передаёт.
+  assert.equal(checks.rows[3].value, 'неизвестно');
 });
 
 test('метка сбоя отдаётся текстом без самого значка', () => {
@@ -100,29 +147,23 @@ test('метка сбоя отдаётся текстом без самого з
   }]);
 });
 
-test('контекст разбирается на метки поштучно', () => {
-  const context = describeBody(FULL)[1];
-  assert.deepEqual(context.chips, ['iTaxi Sapar', 'Алматы', 'период февраль 2026']);
-});
-
 test('перечень остаётся парами «подпись / ответ»', () => {
   const list = describeBody(FULL)[2];
   assert.deepEqual(list.rows, [
     { label: 'Тип ошибки:', value: 'Сайт не загружается' },
-    { label: 'Нет:', value: 'акт подписан · документ загружен' },
   ]);
 });
 
 test('хвост несёт тон и разбивается на элементы', () => {
-  const checks = describeBody(FULL)[3];
+  const checks = describeBody(FULL)[4];
   assert.deepEqual(checks.rows[0], {
-    tone: 'green', label: 'Проверено', value: 'перезашёл · сменил устройство',
+    tone: 'green', label: 'Выполнено', value: 'перезашёл · сменил устройство',
     items: ['перезашёл', 'сменил устройство'],
   });
   assert.equal(checks.rows[1].tone, 'red');
   assert.equal(checks.rows[1].items, null);
   // «3 из 3» на элементы НЕ дробится — это одна величина.
-  assert.deepEqual(checks.rows[2],
+  assert.deepEqual(describeBody(LEGACY)[3].rows[2],
                    { tone: 'blue', label: 'Чек-лист выполнен', value: '3 из 3', items: null });
 });
 
@@ -149,8 +190,11 @@ test('пустой текст не роняет разбор', () => {
   assert.equal(bodyDigest(''), '');
 });
 
-test('дайджест — это контекст, а без него первая строка перечня', () => {
-  assert.equal(bodyDigest(FULL), 'iTaxi Sapar · Алматы · период февраль 2026');
+test('дайджест — ответы первого перечня, у старых обращений — контекст', () => {
+  assert.equal(bodyDigest(FULL), '060606060606 · iTaxi · Алматы · февраль 2026');
+  assert.equal(bodyDigest(LEGACY), 'iTaxi Sapar · Алматы · период февраль 2026');
   assert.equal(bodyDigest('Тип ошибки: Сайт не загружается\nБраузер: Chrome'),
-               'Тип ошибки: Сайт не загружается');
+               'Сайт не загружается · Chrome');
+  // Одна строка — подпись нужна: без неё «Астана» ничего не объясняет.
+  assert.equal(bodyDigest('Город: Астана'), 'Город: Астана');
 });

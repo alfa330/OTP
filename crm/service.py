@@ -55,17 +55,21 @@ def deliver_ticket(db, ticket_id, *, attachment=None):
     if not payload['chat_id']:
         return False, 'У очереди не привязана Telegram-группа'
 
+    scenario = scenarios.get(payload['scenario_key']) or {}
     text = telegram.build_ticket_message(
         ticket_id=ticket_id,
         subject=payload['subject'],
         body=payload['body'],
         queue_title=payload['queue_title'],
-        topic_title=payload['topic_title'],
+        # Заголовок в группе — просьба тематики, а не тема обращения: по теме
+        # обращение ищут в iCORE (там название проблемы и ИИН), а группе нужно
+        # понять, что от неё хотят. Нет тематики — остаётся тема.
+        heading=scenario.get('group_title'),
         priority=payload['priority'],
         client_name=payload['client_name'],
         client_phone=payload['client_phone'],
         due_text=_due_text(payload['due_at']),
-        own_wording=bool((scenarios.get(payload['scenario_key']) or {}).get('body_template')),
+        own_wording=bool(scenario.get('body_template')),
     )
     # Фото уходит ОДНИМ сообщением вместе с текстом, а не следом за ним:
     # раньше подпись к медиа (1024 символа) текст обращения не вмещала, а после

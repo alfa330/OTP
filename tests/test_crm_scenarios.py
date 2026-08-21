@@ -451,57 +451,90 @@ class RenderTest(unittest.TestCase):
         self.assertIn('Документы не поступили', subject)
         self.assertIn('123456789012', subject)
 
-    def test_body_opens_with_where_and_when(self):
-        """Парк, город и период — одной строкой контекста, а не тремя подписями."""
-        answers = full('sapar_docs_missing', park='iTaxi', city='Алматы')
+    def test_body_opens_with_driver_data_line_by_line(self):
+        """ТЗ задачи #206: ИИН, таксопарк, город и период — подписанными
+        строками, а не склеенной строкой контекста."""
+        answers = full('sapar_docs_missing', iin='123456789012',
+                       park='iTaxi', city='Алматы')
         body = sc.render_body('sapar_docs_missing', answers)
-        self.assertEqual(body.split('\n')[0], 'iTaxi · Алматы · период июль 2026')
+        self.assertEqual(body.split(chr(10) * 2)[0].split(chr(10)), [
+            'ИИН: 123456789012',
+            'Таксопарк: iTaxi',
+            'Город: Алматы',
+            'Отчётный период: июль 2026',
+        ])
 
-    def test_iin_is_not_repeated_in_the_body(self):
-        """Он уже стоит в теме обращения, и вторым разом только занимает строку."""
+    def test_every_topic_says_what_it_asks_of_the_group(self):
+        """Заголовок сообщения в группе — просьба, а не название проблемы (#206).
+
+        Забыть её не смертельно (заголовком станет тема обращения), но тема
+        несёт ИИН, и он продублировался бы со строкой данных прямо под собой.
+        Тематика со своим шаблоном формулирует просьбу сама — ей отдельного
+        заголовка не нужно.
+        """
+        for scenario in sc.SCENARIOS:
+            if scenario.get('body_template'):
+                continue
+            heading = scenario.get('group_title')
+            self.assertTrue(heading, scenario['key'])
+            self.assertNotIn('ИИН', heading, scenario['key'])
+
+    def test_iin_stands_both_in_the_subject_and_in_the_body(self):
+        """Два места — две работы: по теме обращение ищут в iCORE, а специалист
+        в группе работает по водителю и ищет ИИН в самом сообщении (#206)."""
         answers = full('sapar_docs_missing', iin='123456789012')
         self.assertIn('123456789012', sc.render_subject('sapar_docs_missing', answers))
-        self.assertNotIn('ИИН водителя', sc.render_body('sapar_docs_missing', answers))
+        self.assertIn('ИИН: 123456789012', sc.render_body('sapar_docs_missing', answers))
 
     def test_answered_questions_are_all_there(self):
         answers = full('sapar_docs_missing', trips_in_park='yes', relogin_done='yes',
                        docs_after_relogin='no')
         body = sc.render_body('sapar_docs_missing', answers)
-        self.assertIn('Да: поездки в нашем парке', body)
-        self.assertIn('Нет: провайдер менялся · документы появились после повторного входа', body)
+        self.assertIn('✅ Поездки выполнены в нашем парке', body)
+        self.assertIn('❌ Документы появились после повторного входа', body)
 
-    def test_repeated_yes_answers_collapse_into_one_line(self):
-        """Пять строк «…: да» подряд — стена, в которой сути не видно."""
-        answers = full('sapar_payment_required')
-        body = sc.render_body('sapar_payment_required', answers)
-        self.assertIn('Да: поездки в нашем парке · комиссия парка списывалась', body)
-        # Ни одной строки вида «что-то: да» в перечне не остаётся.
-        self.assertNotIn(': да', body)
+    def test_checked_facts_go_one_per_line_under_a_counted_heading(self):
+        """ТЗ задачи #206: пункты проверки видны поштучно, каждый со знаком.
 
-    def test_single_yes_answer_stays_a_normal_line(self):
-        """«Требование оплаты отображается: да» читается лучше, чем «Да: …»."""
-        answers = full('sapar_payment_required', trips_in_park='yes',
-                       park_commission_charged='yes', corp_or_bonus='yes',
-                       payment_shown='no', payment_is_sapar_signing='yes')
-        # payment_shown='no' закрывает обращение, поэтому берём тематику с одним «нет».
-        answers = full('sapar_service_error', signing_related='no')
-        body = sc.render_body('sapar_service_error', answers)
-        self.assertIn('На этапе подписания или сохранения: нет', body)
-        self.assertNotIn('Нет: ', body)
+        Склеенные в одну строку («Да: поездки … · комиссия …»), они экономили
+        место, но читались сплошным текстом: специалисту в группе не было видно,
+        что именно подтвердилось.
+        """
+        body = sc.render_body('sapar_payment_required', full('sapar_payment_required'))
+        self.assertIn('🔍 Проверено оператором: 5 из 5', body)
+        self.assertIn('✅ Комиссия парка списывалась', body)
+        self.assertNotIn('Да: ', body)
 
-    def test_performed_checks_collapse_separately_from_facts(self):
-        """«Я это проверил» и «это так» — разные вещи, в один перечень нельзя."""
+    def test_heading_counts_exactly_the_lines_under_it(self):
+        """Заголовок, который не сходится со списком под собой, хуже, чем его
+        отсутствие: «5 из 5» над двумя крестиками читается как ошибка."""
+        answers = full('sapar_docs_missing',
+                       provider_changed={'value': 'no', 'detail': ''},
+                       docs_after_relogin='no')
+        block = next(b for b in sc.render_body('sapar_docs_missing', answers).split(chr(10) * 2)
+                     if b.startswith('🔍'))
+        lines = block.split(chr(10))
+        head, items = lines[0], lines[1:]
+        self.assertEqual(head, '🔍 Проверено оператором: %d из %d'
+                         % (sum(1 for line in items if line.startswith('✅')), len(items)))
+
+    def test_performed_actions_stay_a_single_line_apart_from_facts(self):
+        """«Я это сделал» и «это так» — разные вещи, в один список нельзя.
+
+        Действий у одной тематики до шести, и поштучно они вытеснили бы из
+        сообщения то, ради чего его читают.
+        """
         body = sc.render_body('sapar_service_error', full('sapar_service_error'))
-        self.assertIn('✅ Проверено: ожидание 5 минут', body)
-        self.assertIn('интернет-соединение', body.split('✅ Проверено:')[1])
+        self.assertIn('✅ Выполнено: ожидание 5 минут', body)
+        self.assertIn('интернет-соединение', body.split('✅ Выполнено:')[1])
 
     def test_list_items_are_separated_by_a_dot_not_a_comma(self):
         """У подписей внутри бывают запятые, и перечень через запятую читался
         неоднозначно: непонятно, где кончается один пункт."""
-        body = sc.render_body('sapar_sign_error', full('sapar_sign_error'))
-        line = next(l for l in body.split(chr(10)) if l.startswith('Да: '))
+        body = sc.render_body('sapar_service_error', full('sapar_service_error'))
+        line = next(l for l in body.split(chr(10)) if l.startswith('✅ Выполнено: '))
         self.assertIn(' · ', line)
-        self.assertEqual(len(line.split(' · ')), 3, line)
+        self.assertEqual(len(line.split(' · ')), 6, line)
 
     def test_yes_with_detail_is_readable(self):
         body = sc.render_body('sapar_docs_missing', full(
@@ -531,16 +564,21 @@ class RenderTest(unittest.TestCase):
                               full('sapar_docs_missing', relogin_done='no'))
         self.assertNotIn('Появились ли документы', body)
 
-    def test_body_reports_confirmed_checks(self):
+    def test_checklist_line_is_gone_on_purpose(self):
+        """Строка «✔️ Чек-лист выполнен: N из N» ничего не сообщала.
+
+        Другого значения у неё быть не могло: без подтверждённого чек-листа
+        обращение до отправки не доходит. То есть она занимала строку в каждом
+        сообщении и всегда говорила одно и то же — ровно тот шум, из-за которого
+        сообщение и переделывали (#206). Что проверки были, видно по блоку
+        «Проверено оператором».
+        """
         body = sc.render_body('sapar_docs_missing', full('sapar_docs_missing'))
-        self.assertIn('✔️ Чек-лист выполнен: 5 из 5', body)
+        self.assertNotIn('Чек-лист', body)
 
-    def test_checklist_line_can_only_be_true(self):
-        """Строка утверждает факт — значит текст обязан собираться только для
-        обращения, которое УЖЕ прошло проверку чек-листа.
-
-        Иначе в группу уходило бы «чек-лист выполнен» там, где его не выполняли.
-        Сторожим оба входа: и отправку, и предпросмотр.
+    def test_preview_is_built_only_for_a_ready_ticket(self):
+        """Предпросмотр не должен показывать текст, который никуда не уйдёт:
+        иначе оператор правит в голове сообщение, которого не будет.
         """
         answers = full('sapar_docs_missing')
         without = sc.evaluate('sapar_docs_missing', answers, has_attachment=True,
@@ -714,8 +752,8 @@ class RulesAreDecidableTest(unittest.TestCase):
     def test_park_and_city_reach_the_group_as_written(self):
         answers = full('sapar_docs_missing', park='Qazaq', city='Актау')
         body = sc.render_body('sapar_docs_missing', answers)
-        # Парк и город стоят в строке контекста, а не отдельными подписями.
-        self.assertEqual(body.split('\n')[0], 'Qazaq · Актау · период июль 2026')
+        self.assertIn('Таксопарк: Qazaq', body)
+        self.assertIn('Город: Актау', body)
 
     def test_templated_topics_lose_no_question(self):
         """Тематика может собирать сообщение сама — но не терять при этом ответы.
