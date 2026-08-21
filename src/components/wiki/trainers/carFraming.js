@@ -33,12 +33,15 @@ const BODY_VIEWS = [
 
 /* Кадры «внутрь»: они возможны только там, где открыта нужная дверь, и только
    с близкого расстояния — снять салон с шести метров нельзя, туда попадёт весь
-   борт. Стоим у левого борта: у водительской двери азимут около 290°, у задней
-   около 250°. */
+   борт.
+   Азимуты отсчитываются от кормы, а нос машины — на 180°, поэтому у левого
+   борта ближе к носу лежит ВОДИТЕЛЬСКАЯ дверь (около 250°), а ближе к корме —
+   задняя (около 292°). Сначала эти два значения стояли наоборот: тренажёр
+   засчитывал «передний ряд», когда человек стоял у задней двери. */
 const INSIDE_VIEWS = [
-    { view: 'inside_front', at: 292, tolerance: 30, requires: 'doorFrontLeft', maxDistance: 3.4 },
-    { view: 'inside_rear', at: 250, tolerance: 30, requires: 'doorRearLeft', maxDistance: 3.4 },
-    { view: 'trunk', at: 0, tolerance: 30, requires: 'trunkOpen', maxDistance: 4.2 },
+    { view: 'inside_front', at: 250, tolerance: 28, requires: 'doorFrontLeft', maxDistance: 3.6 },
+    { view: 'inside_rear', at: 294, tolerance: 28, requires: 'doorRearLeft', maxDistance: 3.6 },
+    { view: 'trunk', at: 0, tolerance: 30, requires: 'trunkOpen', maxDistance: 4.4 },
 ];
 
 /** Пороги дальности для кузовных кадров, в метрах. */

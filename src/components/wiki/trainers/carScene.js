@@ -35,7 +35,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 const OPENABLE = {
     doorFrontLeft: { mesh: 'door_lf_hi_ok', axis: 'yaw', edge: 'min', angle: -1.15 },
     doorRearLeft: { mesh: 'door_lr_hi_ok', axis: 'yaw', edge: 'min', angle: -1.15 },
-    trunkOpen: { mesh: 'boot_hi_ok', axis: 'pitch', edge: 'min', angle: -0.95 },
+    /* Крышка не просто поворачивается: в её меш входит и задняя панель с
+       номером, и на чистом повороте вокруг петли панель описывает дугу прямо
+       через кузов и заднее стекло. У настоящей крышки петли четырёхзвенные —
+       поднимаясь, она ОТХОДИТ назад. Это смещение и задаёт lift. */
+    trunkOpen: {
+        mesh: 'boot_hi_ok', axis: 'pitch', edge: 'min', angle: -0.8,
+        lift: { y: 0.1, z: 0.16 }, thickness: 0.03,
+    },
 };
 
 /** Мировые оси вращения: вертикаль для дверей, поперечная для крышек. */
@@ -177,13 +184,24 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             const goal = opened[key] ? spec.angle : 0;
             const now = angles[key] || 0;
             const diff = goal - now;
+            const place = (value) => {
+                const hinge = hinges[key];
+                hinge.setRotationFromAxisAngle(hinge.userData.axis, value);
+                if (spec.lift) {
+                    // Доля открытия: на закрытой крышке смещения нет вовсе.
+                    const part = spec.angle === 0 ? 0 : value / spec.angle;
+                    hinge.position.copy(hinge.userData.home);
+                    hinge.position.y += spec.lift.y * part;
+                    hinge.position.z += spec.lift.z * part;
+                }
+            };
             if (Math.abs(diff) > 0.002) {
                 angles[key] = now + diff * 0.18;
-                hinges[key].setRotationFromAxisAngle(hinges[key].userData.axis, angles[key]);
+                place(angles[key]);
                 animating = true;
             } else if (now !== goal) {
                 angles[key] = goal;
-                hinges[key].setRotationFromAxisAngle(hinges[key].userData.axis, goal);
+                place(goal);
             }
         });
 
@@ -246,6 +264,9 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
         hinge.userData.axis = WORLD_AXIS[axisName].clone()
             .applyQuaternion(parentQuaternion.clone().invert())
             .normalize();
+        // Домашняя точка: смещение при открытии считается от неё, иначе крышка
+        // уползала бы всё дальше на каждой анимации.
+        hinge.userData.home = hinge.position.clone();
         return hinge;
     }
 
@@ -254,6 +275,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
         root.add(gltf.scene);
 
         const parts = {};
+        const glassMeshes = [];
         gltf.scene.traverse((node) => {
             if (!node.isMesh) return;
             parts[node.name] = node;
@@ -277,6 +299,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
                     color: 0x1e2a3a, transparent: true, opacity: 0.36,
                     roughness: 0.06, metalness: 0,
                 });
+                glassMeshes.push(node);
             }
         });
 
@@ -301,7 +324,133 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             angles[key] = 0;
             mesh.userData.openKey = key;
             pickTargets.push(mesh);
+
+            /* Толщина. Крышка и двери в модели — одна оболочка без изнанки: с
+               ребра они выглядят листом бумаги, а изнутри салона исчезают
+               вовсе. Двусторонний материал показывает изнанку, а копия,
+               сдвинутая на пару сантиметров, даёт видимую толщину кромки. */
+            mesh.material = mesh.material.clone();
+            mesh.material.side = THREE.DoubleSide;
+            if (spec.thickness) {
+                const inner = new THREE.Mesh(mesh.geometry, mesh.material);
+                /* Смещаем вдоль МИРОВОЙ вертикали, переведённой в систему меша.
+                   По локальной «y» копия уезжала на землю: у этой модели
+                   локальные оси не вертикальны — та же грабля, что с петлями. */
+                const meshQuaternion = new THREE.Quaternion();
+                mesh.getWorldQuaternion(meshQuaternion);
+                const down = new THREE.Vector3(0, -1, 0)
+                    .applyQuaternion(meshQuaternion.invert())
+                    .normalize();
+                /* Делим на МИРОВОЙ масштаб меша, а не корня: между ними ещё
+                   один масштаб от конвертера, и по масштабу корня толщина
+                   выходила в сотни раз больше — крышка уезжала под землю. */
+                const worldScale = new THREE.Vector3();
+                mesh.getWorldScale(worldScale);
+                inner.position.copy(down)
+                    .multiplyScalar(spec.thickness / (worldScale.x || 1));
+                mesh.add(inner);
+            }
         });
+
+        /* Стёкла: разрезаем и раздаём дверям.
+         *
+         * В модели ВСЕ стёкла — один меш на всю машину (лобовое, боковые,
+         * заднее вместе). Пока он висел целиком, открытая дверь уезжала, а её
+         * стекло оставалось в воздухе на прежнем месте — первое, что бросается
+         * в глаза. Поэтому треугольники, попавшие в габарит двери, переносим в
+         * её шарнир, а остальное стекло оставляем кузову.
+         *
+         * Требуем, чтобы в габарит двери попали ВСЕ ТРИ вершины треугольника,
+         * а не его центр. По центру дверь забирала длинные треугольники, которые
+         * тянутся к соседним стёклам: при открытии такой кусок улетал вместе с
+         * дверью и оставался висеть над землёй.
+         */
+        const giveGlassToDoors = () => {
+            /* Матрицы обязаны быть свежими: двери только что переехали внутрь
+               шарниров, и Box3 без пересчёта считает их габариты по прежним
+               матрицам. Именно из-за этого в «зону двери» попадали случайные
+               треугольники и уезжали вместе с ней на другой конец двора. */
+            root.updateMatrixWorld(true);
+
+            const zones = Object.entries(OPENABLE)
+                .filter(([, spec]) => spec.axis === 'yaw')
+                .map(([key, spec]) => {
+                    const mesh = parts[spec.mesh];
+                    if (!mesh || !hinges[key]) return null;
+                    const box = new THREE.Box3().setFromObject(mesh);
+                    // Небольшой запас: стекло стоит чуть внутрь от кромки двери.
+                    box.expandByScalar(0.05);
+                    return { key, box };
+                })
+                .filter(Boolean);
+            if (!zones.length) return;
+
+            glassMeshes.forEach((glass) => {
+                const geo = glass.geometry;
+                const pos = geo.attributes.position;
+                const nor = geo.attributes.normal;
+                const uv = geo.attributes.uv;
+                const idx = geo.index;
+                const count = idx ? idx.count : pos.count;
+                const buckets = new Map();          // ключ двери → массивы атрибутов
+                const rest = { position: [], normal: [], uv: [] };
+                const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+
+                const push = (target, i0, i1, i2) => {
+                    [i0, i1, i2].forEach((i) => {
+                        target.position.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+                        if (nor) target.normal.push(nor.getX(i), nor.getY(i), nor.getZ(i));
+                        if (uv) target.uv.push(uv.getX(i), uv.getY(i));
+                    });
+                };
+
+                for (let i = 0; i < count; i += 3) {
+                    const i0 = idx ? idx.getX(i) : i;
+                    const i1 = idx ? idx.getX(i + 1) : i + 1;
+                    const i2 = idx ? idx.getX(i + 2) : i + 2;
+                    a.fromBufferAttribute(pos, i0).applyMatrix4(glass.matrixWorld);
+                    b.fromBufferAttribute(pos, i1).applyMatrix4(glass.matrixWorld);
+                    c.fromBufferAttribute(pos, i2).applyMatrix4(glass.matrixWorld);
+                    const zone = zones.find((z) => z.box.containsPoint(a)
+                        && z.box.containsPoint(b) && z.box.containsPoint(c));
+                    if (!zone) { push(rest, i0, i1, i2); continue; }
+                    if (!buckets.has(zone.key)) {
+                        buckets.set(zone.key, { position: [], normal: [], uv: [] });
+                    }
+                    push(buckets.get(zone.key), i0, i1, i2);
+                }
+
+                const build = (data) => {
+                    const out = new THREE.BufferGeometry();
+                    out.setAttribute('position',
+                        new THREE.Float32BufferAttribute(data.position, 3));
+                    if (nor && data.normal.length) {
+                        out.setAttribute('normal', new THREE.Float32BufferAttribute(data.normal, 3));
+                    }
+                    if (uv && data.uv.length) {
+                        out.setAttribute('uv', new THREE.Float32BufferAttribute(data.uv, 2));
+                    }
+                    return out;
+                };
+
+                buckets.forEach((data, key) => {
+                    const piece = new THREE.Mesh(build(data), glass.material);
+                    /* Кусок делаем РЕБЁНКОМ стекла: его вершины уже в системе
+                       координат стекла, поэтому никаких пересчётов не нужно.
+                       Попытка сдвинуть его матрицей родителя вручную кончилась
+                       тем, что матрица на этот момент ещё не пересчитана, и
+                       осколки разъезжались по двору. */
+                    glass.add(piece);
+                    // attach сохраняет мировое положение: стекло остаётся ровно
+                    // там, где было, но теперь поворачивается вместе с дверью.
+                    hinges[key].attach(piece);
+                });
+
+                glass.geometry = build(rest);
+                geo.dispose();
+            });
+        };
+        giveGlassToDoors();
 
         /* Багажный отсек. У модели под крышкой пусто, и кадр «открытый
            багажник» показывал бы сквозную дыру. Коробка вывернута наизнанку
