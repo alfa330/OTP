@@ -18,8 +18,8 @@ import {
   stepIsVisible,
   toggleCheck,
   visibleSteps,
-  afterChecks, describeSnapshot, needsSaparCheck, nextStop, previousStop,
-  saparGroup, saparKey,
+  afterChecks, describeSnapshot, needsSaparCheck, nextStop, periodLabel, periodOptions,
+  previousStop, saparGroup, saparKey,
 } from '../src/components/crm/wizardRules.js';
 
 /* Эти тесты написаны по следам реальной поломки: шаг с вложением никогда не
@@ -451,4 +451,45 @@ test('«Назад» возвращает тем же путём, каким п�
   assert.deepEqual(previousStop(NO_CHECKS, THREE, 1), { phase: 'form', groupIndex: 0 });
   // С первого экрана — к выбору тематики.
   assert.deepEqual(previousStop(WITH_CHECKS, THREE, 0), { phase: 'pick' });
+});
+
+/* ─── Отчётный период одним списком ───────────────────────────────────────── */
+
+test('список периодов начинается с ПРОШЛОГО месяца и идёт вглубь', () => {
+  const options = periodOptions(new Date(2026, 7, 21));   // 21 августа 2026
+  assert.deepEqual(options.slice(0, 3).map((o) => o.label),
+                   ['Июль 2026', 'Июнь 2026', 'Май 2026']);
+  assert.equal(options[0].value, '2026-07');
+});
+
+test('текущего месяца в списке нет', () => {
+  // Месяц не закончился — отчётным периодом он быть не может, и именно на нём
+  // операторы путали «за какой месяц» с «когда жду».
+  const options = periodOptions(new Date(2026, 7, 21));
+  assert.equal(options.some((o) => o.value === '2026-08'), false);
+});
+
+test('через новый год список переходит сам', () => {
+  const options = periodOptions(new Date(2027, 0, 5));    // 5 января 2027
+  assert.deepEqual(options.slice(0, 2).map((o) => o.label),
+                   ['Декабрь 2026', 'Ноябрь 2026']);
+  assert.equal(options[0].value, '2026-12');
+});
+
+test('значения совпадают с форматом, который ждёт сервер', () => {
+  for (const option of periodOptions(new Date(2026, 0, 15), 14)) {
+    assert.match(option.value, /^\d{4}-(0[1-9]|1[0-2])$/, option.value);
+  }
+});
+
+test('глубина списка — два года', () => {
+  assert.equal(periodOptions(new Date(2026, 7, 21)).length, 24);
+  assert.equal(periodOptions(new Date(2026, 7, 21), 3).length, 3);
+});
+
+test('период читается по-человечески, даже если он не из списка', () => {
+  assert.equal(periodLabel('2025-03'), 'Март 2025');
+  assert.equal(periodLabel('2026-12'), 'Декабрь 2026');
+  assert.equal(periodLabel('чепуха'), '');
+  assert.equal(periodLabel('2026-13'), '');
 });

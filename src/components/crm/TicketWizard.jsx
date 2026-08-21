@@ -14,8 +14,8 @@ import {
     CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterChecks, answerValue, carryOver,
     checksAreComplete, checksPayload,
     describeSnapshot, groupCatalog, groupIsComplete, groupsOf, localVerdict, missingGroup,
-    needsSaparCheck, nextStop, previousStop, referenceOptions, rowsOfGroup, saparKey,
-    stepIsComplete, toggleCheck,
+    needsSaparCheck, nextStop, periodLabel, periodOptions, previousStop, referenceOptions,
+    rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -44,9 +44,6 @@ const OUTCOME = {
     PASS: 'pass',
     INCOMPLETE: 'incomplete',
 };
-
-const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
-    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 
 const errorText = (error, fallback) => (
     error?.response?.data?.error || error?.message || fallback
@@ -125,21 +122,25 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null }) =>
             );
         }
         if (step.kind === 'period') {
-            const [year, month] = String(current || '').split('-');
-            const now = new Date();
-            const years = [now.getFullYear(), now.getFullYear() - 1, now.getFullYear() - 2];
+            /* Один список вместо «месяц + год», и начинается он с ПРОШЛОГО
+               месяца: отчётный период — это месяц, ЗА который документы, а
+               документы за июль подписывают в августе. Раньше список шёл с
+               января, и до нужного месяца приходилось листать.
+
+               Периода, которого нет в списке (старое обращение), не теряем:
+               добавляем его отдельной строкой, иначе открытие такой карточки
+               молча стирало бы ответ. */
+            const options = periodOptions();
+            const known = current && options.some((item) => item.value === current);
             return (
-                <div className="flex gap-2">
-                    <CustomSelect className="flex-1" variant="ios" value={month || ''}
-                                  onChange={(next) => onChange(`${year || now.getFullYear()}-${next}`)}
-                                  options={MONTHS.map((label, index) => ({
-                                      value: String(index + 1).padStart(2, '0'), label }))}
-                                  placeholder="Месяц" ariaLabel="Месяц отчётного периода" />
-                    <CustomSelect className="w-28" variant="ios" value={year || ''}
-                                  onChange={(next) => onChange(`${next}-${month || '01'}`)}
-                                  options={years.map((y) => ({ value: String(y), label: String(y) }))}
-                                  placeholder="Год" ariaLabel="Год отчётного периода" />
-                </div>
+                <CustomSelect variant="ios" value={current || ''}
+                              onChange={(next) => onChange(next)}
+                              options={known || !current ? options
+                                  : [{ value: current, label: periodLabel(current) || current },
+                                      ...options]}
+                              searchable={true}
+                              placeholder="Выберите месяц"
+                              ariaLabel="Отчётный период" />
             );
         }
         if (step.kind === 'longtext') {
