@@ -53370,9 +53370,9 @@ def _build_survey_archived_html(items):
             lines.append(f'• …и ещё {hidden}')
     lines.append('')
     lines.append(
-        f'Опросы старше {db.SURVEY_ARCHIVE_AFTER_DAYS} дней больше не показываются '
-        'сотрудникам и не считаются в уведомлениях раздела. Ответы сохранены — '
-        'они на вкладке «Архив».'
+        f'Опросы и закрытые тесты старше {db.SURVEY_ARCHIVE_AFTER_DAYS} дней больше '
+        'не показываются сотрудникам и не считаются в уведомлениях раздела. '
+        'Ответы сохранены — они на вкладке «Архив».'
     )
     if link:
         lines.append(f'<a href="{_escape_telegram_html(link, 500)}">Открыть раздел «Опросы»</a>')

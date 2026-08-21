@@ -271,12 +271,18 @@ class SurveyArchiveSchemaTests(unittest.TestCase):
         self.assertIn("idx_surveys_archive_page", self.src)
         self.assertIn("idx_surveys_archive_pending_notify", self.src)
 
-    def test_only_plain_surveys_are_archived(self):
+    def test_running_test_is_never_archived(self):
+        """Опрос — по возрасту, тест — только с закрытым (или пустым) окном.
+
+        Идущий тест не должен исчезать из-под людей, даже если он создан
+        месяц назад. А тест БЕЗ окна закрыть нечему — такие на проде висели
+        «активными» по 144 дня и держали назначения в бейдже.
+        """
         archive_start = self.src.index("def archive_stale_surveys(")
-        block = self.src[archive_start:archive_start + 1200]
-        self.assertIn("NOT COALESCE(is_test, FALSE)", block)
+        block = self.src[archive_start:archive_start + 2000]
         self.assertIn("archived_at IS NULL", block)
         self.assertIn("INTERVAL '1 day'", block)
+        self.assertIn("(NOT COALESCE(is_test, FALSE) OR ends_at IS NULL OR ends_at <= %s)", block)
 
     def test_notification_mark_is_set_separately(self):
         # Отметку ставим только после успешной отправки — иначе уведомление
