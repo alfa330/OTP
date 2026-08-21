@@ -3700,8 +3700,17 @@ def _events_viewer_scope(requester_id, role):
     return is_global, viewer_dept
 
 
-def _birthdays_viewer_scope(requester_id, role):
+_BIRTHDAYS_DEPT_UNSET = object()
+
+
+def _birthdays_viewer_scope(requester_id, role, known_department_id=_BIRTHDAYS_DEPT_UNSET):
     """(видит всех, id отдела зрителя) для дней рождения.
+
+    known_department_id — уже посчитанный отдел зрителя, если он есть у
+    вызывающего. Нужен колоколу: тот считает границу «Ивентов» тем же
+    _department_scope_id_for_requester, и без этого параметра сводка ходила бы
+    в базу за одним и тем же ответом дважды. Периметр от этого не меняется —
+    правило целиком остаётся здесь.
 
     Отдельная функция, а не _events_viewer_scope, из-за одного намеренного
     отличия: там тренер глобален, здесь — нет. Правило владельца сформулировано
@@ -3714,8 +3723,11 @@ def _birthdays_viewer_scope(requester_id, role):
     """
     role = _normalize_user_role(role)
     is_global = _is_global_admin_requester(role, requester_id)
-    viewer_dept = None if is_global else _department_scope_id_for_requester(requester_id)
-    return is_global, viewer_dept
+    if is_global:
+        return True, None
+    if known_department_id is not _BIRTHDAYS_DEPT_UNSET:
+        return False, known_department_id
+    return False, _department_scope_id_for_requester(requester_id)
 
 
 def _events_can_view(event_department_ids, is_global, viewer_dept):
@@ -14875,7 +14887,13 @@ def birthdays_today():
             include_user_id=requester_id,
             all_departments=is_global,
         )
-        return jsonify({"status": "success", "date": today.isoformat(), "birthdays": birthdays}), 200
+        # Наружу — только id и имя. Полная дата рождения (с годом), роль и
+        # статус занятости здесь были, пока список рисовал баннер; после
+        # переезда в колокол единственный потребитель — вопрос «сегодня ли мой
+        # день рождения», и отдавать браузеру каждого оператора личные данные
+        # коллег ради него не за чем. Сам колокол даты тоже не показывает.
+        payload = [{"id": row.get("id"), "name": row.get("name")} for row in birthdays]
+        return jsonify({"status": "success", "date": today.isoformat(), "birthdays": payload}), 200
     except Exception as e:
         logging.exception("Error in /api/birthdays/today")
         return jsonify({"error": "Internal server error"}), 500
@@ -51483,16 +51501,13 @@ def _notifications_viewer_context(requester_id, requester):
 
     # Дни рождения живут по своему периметру — см. _birthdays_viewer_scope:
     # «Ивенты» считают тренера глобальным, а личные данные сотрудников чужого
-    # отдела ему не показываются. Отдел у обоих правил считается одной и той же
-    # функцией, поэтому переспрашиваем базу только там, где ответ «Ивентов» его
-    # не содержит, — то есть у глобальных по «Ивентам», но не по дням рождения.
-    birthday_is_global = _is_global_admin_requester(role, requester_id)
-    if birthday_is_global:
-        birthday_department_id = None
-    elif is_global:
-        birthday_department_id = _department_scope_id_for_requester(requester_id)
-    else:
-        birthday_department_id = viewer_dept
+    # отдела ему не показываются. Само правило не повторяем — зовём ту же
+    # функцию, что и эндпоинт, иначе одно из двух мест однажды поедет молча.
+    # Отдел передаём готовым там, где «Ивенты» его уже посчитали: у зрителя,
+    # глобального по «Ивентам» (тренер), ответа нет, и его придётся спросить.
+    birthday_is_global, birthday_department_id = _birthdays_viewer_scope(
+        requester_id, role,
+        **({} if is_global else {'known_department_id': viewer_dept}))
 
     return {
         'user_id': int(requester_id),

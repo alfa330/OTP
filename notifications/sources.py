@@ -446,7 +446,7 @@ def birthdays(cursor, viewer, limit):
     """
     today = _almaty_now().date()
     params = {'user_id': viewer['user_id'], 'dept': viewer.get('birthday_department_id'),
-              'today': today, 'limit': limit}
+              'today': today, 'month': today.month, 'day': today.day, 'limit': limit}
     # Периметр отдела; своя строка проходит в любом случае — в том числе когда
     # отдела нет вовсе и сравнение с NULL не дало бы ни одной строки.
     scope = '' if viewer.get('birthday_is_global') else """
@@ -468,7 +468,7 @@ def birthdays(cursor, viewer, limit):
          ORDER BY is_self DESC, u.name
          LIMIT %(limit)s
         """,
-        dict(params, month=today.month, day=today.day),
+        params,
     )
     rows = cursor.fetchall()
     total = int(rows[0][4]) if rows else 0
@@ -634,8 +634,13 @@ def next_change_at(cursor, viewer):
 
     # Полночь. Единственный переход, за которым не стоит вообще никакой записи
     # в базе: с календарным днём меняется весь список именинников и истекает
-    # отметка «видел». Без него ночная смена, у которой вкладка открыта с
-    # вечера, узнала бы о сегодняшнем празднике только по возврату фокуса.
+    # отметка «видел». Триггеру тут взяться неоткуда, поэтому без этого момента
+    # ночная смена, у которой портал открыт с вечера, узнала бы о сегодняшнем
+    # празднике только по возврату фокуса.
+    #
+    # Границы честные: клиент просыпается по таймеру, только пока вкладка
+    # видима (NotificationsBell::scheduleNextChange выходит на hidden), — у
+    # свёрнутого окна переход всё равно ловится обновлением по фокусу.
     midnight = None
     if 'birthdays' not in hidden:
         midnight = datetime.combine(now.date() + timedelta(days=1), day_time.min)

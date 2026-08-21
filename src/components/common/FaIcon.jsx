@@ -176,7 +176,6 @@ const TOKEN_TO_ICON = {
     'fa-arrows-rotate': 'RefreshCw',
     'fa-asterisk': 'Asterisk',
     'fa-award': 'Award',
-    'fa-birthday-cake': 'Gift',
     'fa-cake-candles': 'Gift',
     'fa-ban': 'XCircle',
     'fa-bars': 'Menu',

@@ -1133,6 +1133,11 @@ class BirthdaysSourceTest(unittest.TestCase):
         self.assertIn('include_user_id=', block)
         self.assertNotIn("request.headers.get('X-User-Id')", block,
                          'личность зрителя берётся из токена, а не из заголовка')
+        # Наружу уходят только id и имя: полную дату рождения с годом эндпоинт
+        # раздавал, пока список рисовал баннер. Единственному потребителю —
+        # вопросу «сегодня ли мой день рождения» — хватает id.
+        self.assertIn('"id": row.get("id"), "name": row.get("name")', block)
+        self.assertNotIn('"birthdays": birthdays', block)
 
     def test_viewer_context_carries_the_birthday_perimeter(self):
         """Ключи периметра обязаны приезжать из bot_schedule2: без них источник
@@ -1141,6 +1146,11 @@ class BirthdaysSourceTest(unittest.TestCase):
         block = self.SERVER[start:self.SERVER.index('\ntry:', start)]
         self.assertIn("'birthday_is_global'", block)
         self.assertIn("'birthday_department_id'", block)
+        # И считаться они обязаны ТОЙ ЖЕ функцией, что у эндпоинта. Правило,
+        # переписанное рядом, однажды поедет в одном месте и промолчит в
+        # другом, а расхождение значений ни один тест не заметит.
+        self.assertIn('_birthdays_viewer_scope(', block)
+        self.assertNotIn('_is_global_admin_requester(role, requester_id)', block)
 
     # ── содержимое строки ────────────────────────────────────────────────────
     def test_items_shape(self):
@@ -1174,16 +1184,22 @@ class BirthdaysSourceTest(unittest.TestCase):
         self.assertNotIn('CURRENT_DATE', block)
         self.assertIn('_almaty_now().date()', block)
         cursor = self.Recorder()
+        before = sources._almaty_now().date()
         sources.birthdays(cursor, {'user_id': 1, 'birthday_is_global': True}, 5)
-        today = sources._almaty_now().date()
-        self.assertEqual(today.month, cursor.params['month'])
-        self.assertEqual(today.day, cursor.params['day'])
+        after = sources._almaty_now().date()
+        # Диапазон, а не точное равенство: прогон, попавший ровно на полночь,
+        # иначе падал бы — дату здесь берут дважды, и это разные сутки.
+        self.assertIn((cursor.params['month'], cursor.params['day']),
+                      [(d.month, d.day) for d in (before, after)])
 
     def test_mark_seen_writes_a_date_from_the_process_clock(self):
         cursor = self.Recorder()
+        before = sources._almaty_now().date()
         self.assertTrue(sources.mark_seen(cursor, 42, 'birthdays'))
+        after = sources._almaty_now().date()
         self.assertNotIn('CURRENT_DATE', cursor.sql)
-        self.assertEqual((42, sources._almaty_now().date()), cursor.params)
+        self.assertEqual(42, cursor.params[0])
+        self.assertIn(cursor.params[1], (before, after))
 
     def test_midnight_is_scheduled_without_touching_the_database(self):
         """Полночь считается в Python: запрос за ней унёс бы весь таймер.

@@ -86,6 +86,15 @@ const compactPinnedTaskForStorage = (task) => {
             id: task.assignee.id,
             name: task.assignee.name || '',
         } : null,
+        // Исполнителей у задачи может быть несколько. Без этого слепок терял
+        // соисполнителей, и закреплённая карточка после перезагрузки страницы
+        // показывала задачу как «на одного».
+        assignees: Array.isArray(task.assignees)
+            ? task.assignees.filter(Boolean).map((person) => ({
+                id: person.id,
+                name: person.name || '',
+            }))
+            : null,
     };
 };
 
@@ -35783,8 +35792,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [aiMonthlyFeedbackTitle, setAiMonthlyFeedbackTitle] = useState('');
             const [birthdaysToday, setBirthdaysToday] = useState([]);
             const [birthdaysDate, setBirthdaysDate] = useState('');
-            const [birthdaysLoading, setBirthdaysLoading] = useState(false);
-            const [birthdaysError, setBirthdaysError] = useState('');
             const [birthdayGreeting, setBirthdayGreeting] = useState('');
             const [birthdayGreetingLoading, setBirthdayGreetingLoading] = useState(false);
             const [birthdayGreetingError, setBirthdayGreetingError] = useState('');
@@ -37228,6 +37235,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 body.append('tag', String(payload.tag || 'task'));
                 body.append('priority', String(payload.priority || 'normal'));
                 body.append('assigned_to', String(payload.assigned_to || ''));
+                // Тот же формат, что у формы раздела: id через запятую.
+                body.append('assignee_ids', (Array.isArray(payload.assignee_ids) ? payload.assignee_ids : [])
+                    .map(Number).filter((id) => id > 0).join(','));
                 body.append('deadline_days', String(payload.deadline_days || '0'));
                 body.append('deadline_hours', String(payload.deadline_hours || '0'));
                 body.append('deadline_minutes', String(payload.deadline_minutes || '0'));
@@ -41610,8 +41620,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user?.id) {
                     setBirthdaysToday([]);
                     setBirthdaysDate('');
-                    setBirthdaysLoading(false);
-                    setBirthdaysError('');
                     setBirthdayGreeting('');
                     setBirthdayGreetingLoading(false);
                     setBirthdayGreetingError('');
@@ -41619,39 +41627,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 }
             }, [user?.id]);
 
+            /* Список именинников сам по себе больше нигде не показывается — он
+               уехал в колокол, и сервер собирает его там. Здесь остался ОДИН
+               вопрос: сегодня ли день рождения у самого зрителя, — от него
+               зависит персональное ИИ-поздравление ниже. Своя строка проходит
+               любой периметр (эндпоинт всегда добавляет include_user_id), а
+               ошибку показывать некому: не ответил сервер — просто не будет
+               поздравления, и портал об этом молчит. */
             useEffect(() => {
                 if (!user?.id) return;
                 let cancelled = false;
                 const requestKey = `birthdaysToday:${user.id}`;
                 runSingleFlight(requestKey, async () => {
-                    if (isMounted.current) {
-                        setBirthdaysLoading(true);
-                        setBirthdaysError('');
-                    }
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/birthdays/today`, {
                             headers: withAccessTokenHeader({ 'X-User-Id': user.id })
                         });
                         const data = response?.data || {};
                         if (!cancelled && isMounted.current) {
-                            if (data.status === 'success') {
-                                setBirthdaysToday(Array.isArray(data.birthdays) ? data.birthdays : []);
-                                setBirthdaysDate(data.date || '');
-                            } else {
-                                setBirthdaysToday([]);
-                                setBirthdaysDate(data.date || '');
-                                setBirthdaysError(data.error || 'Не удалось получить дни рождения');
-                            }
+                            setBirthdaysToday(data.status === 'success' && Array.isArray(data.birthdays)
+                                ? data.birthdays : []);
+                            setBirthdaysDate(data.date || '');
                         }
                     } catch (err) {
                         if (!cancelled && isMounted.current) {
                             setBirthdaysToday([]);
                             setBirthdaysDate('');
-                            setBirthdaysError(err.response?.data?.error || 'Не удалось получить дни рождения');
-                        }
-                    } finally {
-                        if (!cancelled && isMounted.current) {
-                            setBirthdaysLoading(false);
                         }
                     }
                 });
@@ -42601,8 +42602,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setShowOrazAitSplash(false);
                     setBirthdaysToday([]);
                     setBirthdaysDate('');
-                    setBirthdaysLoading(false);
-                    setBirthdaysError('');
                     setBirthdayGreeting('');
                     setBirthdayGreetingLoading(false);
                     setBirthdayGreetingError('');
