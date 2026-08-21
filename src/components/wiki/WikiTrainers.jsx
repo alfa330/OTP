@@ -138,8 +138,7 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                         const card = TRAINER_CARDS.find((c) => c.key === trainer.key);
                         const articles = usages?.[trainer.key] || [];
                         return (
-                            <article key={trainer.key} className={`${iosCard} flex gap-4 p-4`}>
-                              <div className="flex min-w-0 flex-1 flex-col gap-3">
+                            <article key={trainer.key} className={`${iosCard} flex flex-col gap-3 p-4`}>
                                 <header className="flex items-start gap-3">
                                     <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl
                                                     bg-indigo-50 text-indigo-600">
@@ -167,13 +166,21 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
 
                                 {/* Список шагов открытым: на этом экране он и есть содержание
                                     тренажёра — по нему решают, тот ли это тренажёр, который
-                                    нужен статье. */}
-                                <ol className="space-y-1 pl-5 text-[12.5px] leading-relaxed text-slate-500
-                                               [list-style:decimal]">
-                                    {(trainer.checklist || []).map((item, index) => (
-                                        <li key={`${index}-${item}`}>{item}</li>
-                                    ))}
-                                </ol>
+                                    нужен статье.
+
+                                    Телефон стоит В ОДНОЙ СТРОКЕ со списком, а не колонкой на всю
+                                    карточку: справа от коротких строк «1…8» и так пустует место,
+                                    а колонка ужимала бы заголовок и описание — текст важнее
+                                    картинки. */}
+                                <div className="flex items-center gap-4">
+                                    <ol className="min-w-0 flex-1 space-y-1 pl-5 text-[12.5px]
+                                                   leading-relaxed text-slate-500 [list-style:decimal]">
+                                        {(trainer.checklist || []).map((item, index) => (
+                                            <li key={`${index}-${item}`}>{item}</li>
+                                        ))}
+                                    </ol>
+                                    <TrainerShowcase icon={TRAINER_ICONS[trainer.key]} />
+                                </div>
 
                                 <div className="rounded-xl bg-slate-50 px-3 py-2.5">
                                     <div className="mb-1 flex items-center gap-1.5 text-[12px] font-medium text-slate-500">
@@ -218,9 +225,6 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                                 >
                                     <PlayCircle size={15} /> Пройти тренажёр
                                 </button>
-                              </div>
-
-                              <TrainerShowcase icon={TRAINER_ICONS[trainer.key]} />
                             </article>
                         );
                     })}
