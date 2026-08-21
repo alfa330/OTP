@@ -6,7 +6,7 @@ import {
     Search, Table2,
 } from 'lucide-react';
 import {
-    iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary,
+    iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
     IosBadge, IosModal,
 } from '../ui/ios';
 import useStableCallback from './useStableCallback';
@@ -35,6 +35,13 @@ import {
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
+
+/* «3 офиса» рядом с городом: заголовок отвечает не только «где», но и «сколько
+   искать». Число словами не заменяется — оператор ищет глазами цифру. */
+const officeCount = (count) => {
+    const tail = count % 100 >= 11 && count % 100 <= 14 ? 0 : count % 10;
+    return `${count} ${tail === 1 ? 'офис' : tail >= 2 && tail <= 4 ? 'офиса' : 'офисов'}`;
+};
 
 const emptyDraft = () => ({
     name: '', city: '', address: '', address_note: '', phone: '',
@@ -571,9 +578,13 @@ export default function WikiOffices({ base, headers, showToast }) {
 
     /* Заголовки городов остаются только там, где город и задаёт порядок:
        внутри групп сортировка по названию или статусу была бы не видна, и
-       выбранный пункт фильтра выглядел бы сломанным. */
-    const grouped = SORT_OPTIONS.find((item) => item.key === filters.sort)?.grouped
-        && view !== 'cards2';
+       выбранный пункт фильтра выглядел бы сломанным.
+
+       В два ряда заголовки тоже нужны. Без них город оставался подписью на
+       самой карточке, а карточки в два столбца читаются сверху вниз: Алматы,
+       Алматы, Астана слева и Алматы, Астана, Караганда справа — деления по
+       городам в этой раскладке не было видно вовсе. */
+    const grouped = !!SORT_OPTIONS.find((item) => item.key === filters.sort)?.grouped;
 
     const groups = useMemo(() => {
         if (!grouped) return null;
@@ -766,6 +777,8 @@ export default function WikiOffices({ base, headers, showToast }) {
             {!loading && visible.length > 0 && view === 'table' && (
                 <OfficeTable
                     offices={visible}
+                    groups={groups}
+                    officeCount={officeCount}
                     dayISO={dayISO}
                     canManage={canManage}
                     onEdit={(item) => setDraft(draftFrom(item))}
@@ -777,14 +790,30 @@ export default function WikiOffices({ base, headers, showToast }) {
 
             {!loading && visible.length > 0 && view !== 'table' && (
                 groups
-                    ? groups.map((group) => (
-                        <section key={group.city} className="space-y-1.5">
-                            <div className={iosGroupLabel}>{group.city}</div>
-                            <div className={grid}>
-                                {group.items.map(renderCard)}
-                            </div>
-                        </section>
-                    ))
+                    /* Между городами воздуха больше, чем между карточками внутри
+                       города: одинаковый отступ и делал список сплошным, а
+                       заголовок города читался как подпись к первой карточке. */
+                    ? <div className="space-y-7">
+                        {groups.map((group) => (
+                            <section key={group.city} className="space-y-2.5">
+                                <div className="flex items-baseline gap-3">
+                                    <h3 className="text-[20px] font-semibold leading-none tracking-tight text-slate-900">
+                                        {group.city}
+                                    </h3>
+                                    <span className="shrink-0 text-[12.5px] font-medium tabular-nums text-slate-400">
+                                        {officeCount(group.items.length)}
+                                    </span>
+                                    {/* Линия до правого края: карточки заполнены
+                                        только слева, и без неё граница города
+                                        читалась лишь в первой трети ширины. */}
+                                    <div className="h-px min-w-6 flex-1 bg-slate-200" />
+                                </div>
+                                <div className={grid}>
+                                    {group.items.map(renderCard)}
+                                </div>
+                            </section>
+                        ))}
+                      </div>
                     : <div className={grid}>{visible.map(renderCard)}</div>
             )}
 
