@@ -861,6 +861,49 @@ TILE_MIN_ZOOM, TILE_MAX_ZOOM = 10, 18
 # потоки стоили бы соединений из общего пула.
 _TILE_FETCH_SLOTS = None
 
+# Предохранитель. Замер 21.08.2026: tile*.maps.2gis.com НЕ отвечает нашему
+# серверу вовсе — из Франкфурта соединение висит до таймаута, любой тайл на
+# любом зуме отдаёт 204 за 24 секунды (три попытки), тогда как из Казахстана
+# те же тайлы приходят за 470 мс. Без предохранителя карта на пятнадцать
+# офисов занимала 60 стоящих нитей waitress из 96 — деградировало всё
+# приложение, а не только мозаика. Поэтому: одна попытка, короткий таймаут, а
+# после серии отказов — молчим и отвечаем сразу, пока срок не выйдет.
+_TILE_FAIL_LIMIT = 3
+_TILE_MUTE_SECONDS = 600
+_TILE_FAILS = 0
+_TILE_MUTED_UNTIL = 0.0
+_TILE_STATE_LOCK = None
+
+
+def _tile_state_lock():
+    global _TILE_STATE_LOCK
+    if _TILE_STATE_LOCK is None:
+        import threading
+        _TILE_STATE_LOCK = threading.Lock()
+    return _TILE_STATE_LOCK
+
+
+def tiles_muted():
+    """Отключён ли поход к 2ГИС за тайлами прямо сейчас."""
+    import time
+    with _tile_state_lock():
+        return _TILE_MUTED_UNTIL > time.monotonic()
+
+
+def _tile_result(ok):
+    global _TILE_FAILS, _TILE_MUTED_UNTIL
+    import time
+    with _tile_state_lock():
+        if ok:
+            _TILE_FAILS, _TILE_MUTED_UNTIL = 0, 0.0
+            return
+        _TILE_FAILS += 1
+        if _TILE_FAILS >= _TILE_FAIL_LIMIT:
+            # Счётчик обнуляем вместе с молчанием: по его истечении даём 2ГИС
+            # ровно столько же попыток, а не одну.
+            _TILE_FAILS = 0
+            _TILE_MUTED_UNTIL = time.monotonic() + _TILE_MUTE_SECONDS
+
 
 def tile_is_valid(z, x, y):
     if not TILE_MIN_ZOOM <= z <= TILE_MAX_ZOOM:
@@ -884,33 +927,42 @@ def store_tile(cursor, z, x, y, image):
     )
 
 
-def fetch_tile(z, x, y, attempts=3):
-    """Скачивает тайл у 2ГИС, перебирая хосты.
+def fetch_tile(z, x, y):
+    """Скачивает тайл у 2ГИС. None, если не вышло.
 
-    Пустой ответ (204) — не ошибка сети, а отказ обслужить: повторяем с другого
-    хоста. Возвращает None, если не получилось ни разу.
+    Одна попытка и короткий таймаут: висящее соединение держит нить waitress и
+    слот из четырёх, а картинку всё равно догрузит браузер напрямую (там
+    2ГИС отвечает). Перебирать хосты незачем — отказывает не хост, а адрес,
+    с которого мы приходим.
     """
     global _TILE_FETCH_SLOTS
+    if tiles_muted():
+        return None
     if _TILE_FETCH_SLOTS is None:
         import threading
         _TILE_FETCH_SLOTS = threading.Semaphore(4)
 
     import requests
+    url = ('https://tile%d.maps.2gis.com/tiles?x=%d&y=%d&z=%d&v=1'
+           % ((x + y) % 4, x, y, z))
     with _TILE_FETCH_SLOTS:
-        for attempt in range(attempts):
-            url = ('https://tile%d.maps.2gis.com/tiles?x=%d&y=%d&z=%d&v=1'
-                   % ((x + y + attempt) % 4, x, y, z))
-            try:
-                response = requests.get(
-                    url, timeout=8,
-                    headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                                           'AppleWebKit/537.36 (KHTML, like Gecko) '
-                                           'Chrome/126 Safari/537.36'})
-            except Exception:  # noqa: BLE001 — сеть, следующая попытка
-                continue
-            if response.status_code == 200 and response.content:
-                return response.content
-    return None
+        # Проверяем ещё раз: пока стояли в очереди за слотом, предохранитель
+        # мог сработать — и ждать своей очереди только чтобы снова повиснуть
+        # уже незачем.
+        if tiles_muted():
+            return None
+        try:
+            response = requests.get(
+                url, timeout=(3, 5),
+                headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                                       'Chrome/126 Safari/537.36'})
+        except Exception:  # noqa: BLE001 — сеть
+            _tile_result(False)
+            return None
+    ok = response.status_code == 200 and bool(response.content)
+    _tile_result(ok)
+    return response.content if ok else None
 
 
 def offices_by_park(cursor, park_ids):

@@ -6,11 +6,13 @@
 взяты из боевой статьи «Адреса офисов» — те самые пятнадцать ссылок.
 """
 
+import time
 import unittest
 from datetime import date, datetime
 
 from urllib.parse import quote
 
+from wiki import offices as wiki_offices
 from wiki.offices import (
     DAY_CODES, MAX_PHONES_PER_POINT, clean_phones, link_phones, normalize_schedule,
     parse_day, parse_map_coords, parse_page_coords, resolve_map_link,
@@ -239,6 +241,50 @@ class ResolveViaPageTest(unittest.TestCase):
 
         self.assertIn('error', resolve_map_link('https://go.2gis.com/x', fetch=fetch))
         self.assertEqual(calls, ['https://go.2gis.com/x'])
+
+
+class TileBreakerTest(unittest.TestCase):
+    """Предохранитель на тайлах.
+
+    2ГИС перестал отвечать серверу (замер 21.08.2026): каждый поход висел до
+    таймаута и держал нить waitress. Считаем не «сколько раз повторить», а
+    «когда перестать ходить вовсе».
+    """
+
+    def setUp(self):
+        wiki_offices._TILE_FAILS = 0
+        wiki_offices._TILE_MUTED_UNTIL = 0.0
+
+    tearDown = setUp
+
+    def test_series_of_failures_mutes_requests(self):
+        for _ in range(wiki_offices._TILE_FAIL_LIMIT):
+            self.assertFalse(wiki_offices.tiles_muted())
+            wiki_offices._tile_result(False)
+        self.assertTrue(wiki_offices.tiles_muted())
+
+    def test_muted_fetch_does_not_touch_the_network(self):
+        for _ in range(wiki_offices._TILE_FAIL_LIMIT):
+            wiki_offices._tile_result(False)
+        # Молчание обязано быть мгновенным: смысл ровно в том, чтобы не занять
+        # нить на таймаут.
+        started = time.monotonic()
+        self.assertIsNone(wiki_offices.fetch_tile(16, 46765, 24033))
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_success_resets_the_counter(self):
+        wiki_offices._tile_result(False)
+        wiki_offices._tile_result(False)
+        wiki_offices._tile_result(True)
+        wiki_offices._tile_result(False)
+        self.assertFalse(wiki_offices.tiles_muted())
+
+    def test_mute_expires(self):
+        for _ in range(wiki_offices._TILE_FAIL_LIMIT):
+            wiki_offices._tile_result(False)
+        self.assertTrue(wiki_offices.tiles_muted())
+        wiki_offices._TILE_MUTED_UNTIL = time.monotonic() - 1
+        self.assertFalse(wiki_offices.tiles_muted())
 
 
 class NormalizeScheduleTest(unittest.TestCase):
