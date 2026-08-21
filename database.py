@@ -47574,10 +47574,20 @@ class Database:
 
     # Участие в задаче одним предикатом на весь файл. Именно EXISTS, а не JOIN:
     # джойн размножил бы задачу по числу исполнителей, и разом поехали бы COUNT(*),
-    # FILTER-агрегаты сводки и пагинация страницы. Плейсхолдер один — id человека.
+    # FILTER-агрегаты сводки и пагинация страницы.
+    #
+    # Скалярная колонка стоит вторым основанием намеренно. В окне деплоя новый
+    # процесс уже прогнал бэкфилл и принимает запросы, а старый ещё дорабатывает
+    # и создаёт задачи прежним кодом — без строки состава. Такая задача пропала
+    # бы у своего исполнителя из «моих задач», доски и колокола до следующего
+    # перезапуска, причём молча. assigned_to заполнен всегда (NOT NULL), поэтому
+    # проверка по нему закрывает и это окно, и любой будущий путь записи, который
+    # забудет позвать _sync_task_assignees_tx.
+    #
+    # ДВА плейсхолдера, оба — id одного и того же человека.
     _TASK_ASSIGNEE_EXISTS_SQL = (
-        "EXISTS (SELECT 1 FROM task_assignees ta_f"
-        " WHERE ta_f.task_id = t.id AND ta_f.user_id = %s)"
+        "(t.assigned_to = %s OR EXISTS (SELECT 1 FROM task_assignees ta_f"
+        " WHERE ta_f.task_id = t.id AND ta_f.user_id = %s))"
     )
 
     @staticmethod
@@ -49920,12 +49930,13 @@ class Database:
                 FROM tasks t
                 LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %s
             """.format(assignee_exists=self._TASK_ASSIGNEE_EXISTS_SQL), (
-                requester_id, now,
-                requester_id, now,
+                # У предиката участия ДВА плейсхолдера — id повторяется.
+                requester_id, requester_id, now,
+                requester_id, requester_id, now,
                 requester_id, requester_id,
                 requester_id,
-                requester_id, now,
-                requester_id, requester_id,
+                requester_id, requester_id, now,
+                requester_id, requester_id, requester_id,
                 requester_id
             ))
             row = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
@@ -50051,7 +50062,7 @@ class Database:
             conditions.append(
                 f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
             )
-            params.extend([requester_id, requester_id, requester_id])
+            params.extend([requester_id, requester_id, requester_id, requester_id])
         else:
             return None
 
@@ -50067,13 +50078,13 @@ class Database:
             conditions.append(
                 f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
             )
-            params.extend([requester_id, requester_id, requester_id])
+            params.extend([requester_id, requester_id, requester_id, requester_id])
 
         if mine_norm == 'assignee':
             # Ключевой фильтр вкладки «Мои задачи»: я среди исполнителей, а не
             # «я тот единственный исполнитель».
             conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)
-            params.append(requester_id)
+            params.extend([requester_id, requester_id])
         elif mine_norm == 'creator':
             conditions.append("(t.created_by = %s OR t.requested_by_id = %s)")
             params.extend([requester_id, requester_id])
@@ -50086,7 +50097,7 @@ class Database:
             conditions.append(
                 f"(t.created_by = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
             )
-            params.extend([person_id_norm, person_id_norm])
+            params.extend([person_id_norm, person_id_norm, person_id_norm])
             person_board_id = person_id_norm
             person_id_norm = None
 
@@ -50238,19 +50249,19 @@ class Database:
             # состава, поэтому «он исполняет» — это участие, а не равенство.
             if person_scope_norm == 'incoming':
                 filtered_conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)
-                filtered_params.append(requester_id)
+                filtered_params.extend([requester_id, requester_id])
                 filtered_conditions.append("t.created_by = %s")
                 filtered_params.append(person_id_norm)
             elif person_scope_norm == 'outgoing':
                 filtered_conditions.append("t.created_by = %s")
                 filtered_params.append(requester_id)
                 filtered_conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)
-                filtered_params.append(person_id_norm)
+                filtered_params.extend([person_id_norm, person_id_norm])
             else:
                 filtered_conditions.append(
                     f"(t.created_by = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
                 )
-                filtered_params.extend([person_id_norm, person_id_norm])
+                filtered_params.extend([person_id_norm, person_id_norm, person_id_norm])
 
         base_where_sql = f"WHERE {' AND '.join(base_conditions)}" if base_conditions else ""
         filtered_where_sql = f"WHERE {' AND '.join(filtered_conditions)}" if filtered_conditions else ""
@@ -50631,13 +50642,13 @@ class Database:
             # совпадать с тем, что человек видит на экране.
             if person_scope_norm == 'incoming':
                 conditions.append(f"{self._TASK_ASSIGNEE_EXISTS_SQL} AND t.created_by = %s")
-                params.extend([int(requester_id), person_id_rest])
+                params.extend([int(requester_id), int(requester_id), person_id_rest])
             elif person_scope_norm == 'outgoing':
                 conditions.append(f"t.created_by = %s AND {self._TASK_ASSIGNEE_EXISTS_SQL}")
-                params.extend([int(requester_id), person_id_rest])
+                params.extend([int(requester_id), person_id_rest, person_id_rest])
             else:
                 conditions.append(f"(t.created_by = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})")
-                params.extend([person_id_rest, person_id_rest])
+                params.extend([person_id_rest, person_id_rest, person_id_rest])
 
         where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         with self._get_cursor() as cursor:

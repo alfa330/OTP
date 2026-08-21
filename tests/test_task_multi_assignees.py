@@ -83,6 +83,7 @@ def _module_members(names):
 
 NAMES = [
     "TASK_MAX_ASSIGNEES",
+    "_TASK_ASSIGNEE_EXISTS_SQL",
     "_task_assignee_tuples",
     "_normalize_task_assignees",
     "_sync_task_assignees_tx",
@@ -284,6 +285,23 @@ class ReviewAuthorityTests(unittest.TestCase):
 
 class SqlCopiesTests(unittest.TestCase):
     """Правило «я исполнитель» живёт в SQL — сверяем, что копии не разъехались."""
+
+    def test_participation_survives_a_task_without_crew_rows(self):
+        """Окно деплоя: задача может появиться БЕЗ строк состава.
+
+        Пока новый процесс уже принимает запросы, старый ещё дорабатывает и
+        создаёт задачи прежним кодом — без записи в task_assignees. Если бы
+        участие считалось только по связи, такая задача молча пропала бы у
+        своего исполнителя из «моих задач», доски и колокола до следующего
+        перезапуска. Скалярная колонка заполнена всегда, поэтому она и стоит
+        вторым основанием.
+        """
+        predicate = DB._TASK_ASSIGNEE_EXISTS_SQL
+        self.assertIn("t.assigned_to = %s", predicate)
+        self.assertIn("FROM task_assignees ta_f", predicate)
+        # Ровно два плейсхолдера — оба под id одного человека. Разъедется это
+        # число, и все выборки задач начнут падать на порядке параметров.
+        self.assertEqual(predicate.count("%s"), 2)
 
     def test_participation_is_exists_not_join(self):
         """JOIN на состав размножил бы задачу: поехали бы COUNT, сводка и страница."""
