@@ -6,8 +6,6 @@ import {
 
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { TRAINERS, TRAINER_CARDS, findTrainer } from './trainers/registry';
-import iconTaxiPro from './trainers/icon-taxi-pro.png';
-import iconSapar from './trainers/icon-sapar.png';
 import { PHONE_TILTED } from '../../assets/phoneTilted';
 
 const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
@@ -46,33 +44,32 @@ const STATUS_LABELS = {
     expired: 'Устарела',
 };
 
-/* Значок приложения или сайта, который отрабатывают в тренажёре.
+/* Телефон со значком приложения, которое отрабатывают в тренажёре.
  *
  * Карта лежит ЗДЕСЬ, а не в registry.js: реестр сценариев чистый (его читают
- * тесты через node), а импорт картинки node выполнить не может. Незнакомый
- * ключ — просто пустая витрина, тренажёр от этого не ломается. */
-const TRAINER_ICONS = {
-    'taxi-pro-avr': iconTaxiPro,
-    'sapar-site-avr': iconSapar,
+ * тесты через node), а импорт картинки node выполнить не может.
+ *
+ * Значок — часть рендера, а не наложенная сверху плитка: в рендере он уже стоит
+ * под углом корпуса и в нужном месте экрана. Накладывать свою плитку поверх
+ * значило бы подбирать наклон заново, и на значке со словами это сразу читается
+ * как кривизна.
+ *
+ * Для тренажёра без своей модели остаётся телефон с пустым белым экраном —
+ * карточка не ломается и не показывает чужой значок.
+ */
+const TRAINER_PHONES = {
+    'taxi-pro-avr': PHONE_TILTED.withApp['taxi-pro'],
+    'sapar-site-avr': PHONE_TILTED.withApp.sapar,
 };
 
-/* Телефон боком со значком приложения на экране.
- *
- * Место справа от списка шагов пустовало, а показать там надо ровно то, чего в
- * тексте нет: КАКОЕ приложение человек увидит внутри тренажёра.
- *
- * Корпус — общий ресурс портала (src/assets/phoneTilted.js): рендер владельца с
- * пустым белым экраном. Там же лежит геометрия экрана — центр, ширина и наклон
- * в долях картинки; CSS ниже повторяет эти же числа, и меняться они должны
- * вместе.
- */
-const TrainerShowcase = ({ icon }) => (
+/* Телефон в пустом месте справа от списка шагов: карточка отвечает им на
+   вопрос, которого в тексте нет, — КАКОЕ приложение человек увидит внутри. */
+const TrainerShowcase = ({ src }) => (
     /* Витрина декоративная: название приложения уже стоит подписью под
        заголовком, и повторять его для скринридера значит читать одно и то же
-       дважды. Поэтому aria-hidden и пустые alt. */
+       дважды. Поэтому aria-hidden и пустой alt. */
     <div className="wiki-trainer-showcase" aria-hidden="true">
-        <img className="wiki-trainer-showcase__phone" src={PHONE_TILTED.src} alt="" loading="lazy" />
-        {icon && <img className="wiki-trainer-showcase__icon" src={icon} alt="" loading="lazy" />}
+        <img className="wiki-trainer-showcase__phone" src={src} alt="" loading="lazy" />
     </div>
 );
 
@@ -177,7 +174,9 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                                             <li key={`${index}-${item}`}>{item}</li>
                                         ))}
                                     </ol>
-                                    <TrainerShowcase icon={TRAINER_ICONS[trainer.key]} />
+                                    <TrainerShowcase
+                                        src={TRAINER_PHONES[trainer.key] || PHONE_TILTED.src}
+                                    />
                                 </div>
 
                                 <div className="rounded-xl bg-slate-50 px-3 py-2.5">
