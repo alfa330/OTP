@@ -26010,6 +26010,146 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
+    def get_group_operators_for_month(self, group_id, month):
+        """Состав ГРУППЫ за месяц для «Аналитики» журнала оценок.
+
+        Историческая видимость ровно как в «Учёте часов»: состав определяется
+        ЧЛЕНСТВОМ в группе, пересекающим месяц, а не текущим users.supervisor_id.
+        Поэтому оператор не пропадает из прошлых месяцев, когда его перевели,
+        повысили до СВ или уволили. Роль здесь не фильтруется намеренно.
+
+        Отличия от get_operators_by_supervisor (роутер ждёт ту же форму строки):
+          * status — статус НА КОНЕЦ МЕСЯЦА (user_history), а не сегодняшний;
+          * dismissal_date — по ней фронт решает вкладку «Уволенные»;
+          * group_segments — сегменты членства внутри месяца: у переведённого
+            оператора метрики оценок принадлежат месяцу целиком (в calls нет
+            group_id), и фронт обязан это показать, а не молча удвоить.
+
+        DISTINCT ON (u.id): у одной пары (оператор, группа) бывает несколько
+        строк членства, пересекающих месяц (перезачисление) — без него оператор
+        появился бы в таблице дважды и удвоил итоги.
+        """
+        year, mon = map(int, str(month).split('-'))
+        last_day = calendar.monthrange(year, mon)[1]
+        start = date(year, mon, 1)
+        end = date(year, mon, last_day)
+        ref_dt = datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1)
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT ON (u.id)
+                    u.id,
+                    u.name,
+                    u.direction_id,
+                    u.supervisor_id,
+                    u.hire_date,
+                    u.hours_table_url,
+                    u.scores_table_url,
+                    s.name as supervisor_name,
+                    u.status,
+                    u.rate,
+                    u.gender,
+                    u.birth_date,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    u.avatar_updated_at,
+                    sp.status_code as status_period_status_code,
+                    sp.start_date as status_period_start_date,
+                    sp.end_date as status_period_end_date,
+                    sp.dismissal_reason as status_period_dismissal_reason,
+                    COALESCE(sp.is_blacklist, FALSE) as status_period_is_blacklist,
+                    sp.comment as status_period_comment,
+                    u.department_id,
+                    u.role
+                FROM group_operator_memberships gom
+                JOIN users u ON u.id = gom.operator_id
+                LEFT JOIN users s ON u.supervisor_id = s.id
+                LEFT JOIN LATERAL (
+                    SELECT
+                        p.status_code,
+                        p.start_date,
+                        p.end_date,
+                        p.dismissal_reason,
+                        p.is_blacklist,
+                        p.comment
+                    FROM operator_schedule_status_periods p
+                    WHERE p.operator_id = u.id
+                      AND p.status_code = (
+                          CASE
+                              WHEN u.status = 'fired' THEN 'dismissal'
+                              WHEN u.status = 'dismissal' THEN 'dismissal'
+                              WHEN u.status = 'unpaid_leave' THEN 'bs'
+                              ELSE u.status
+                          END
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN p.start_date <= CURRENT_DATE
+                             AND COALESCE(p.end_date, DATE '9999-12-31') >= CURRENT_DATE
+                            THEN 0
+                            ELSE 1
+                        END,
+                        p.start_date DESC,
+                        p.id DESC
+                    LIMIT 1
+                ) sp ON TRUE
+                WHERE gom.group_id = %s
+                  AND gom.start_date <= %s
+                  AND (gom.end_date IS NULL OR gom.end_date >= %s)
+                ORDER BY u.id, gom.start_date
+            """, (int(group_id), end, start))
+            rows = cursor.fetchall() or []
+            if not rows:
+                return []
+
+            op_ids = [int(row[0]) for row in rows]
+            status_as_of = self._resolve_user_field_as_of_tx(cursor, op_ids, 'status', ref_dt)
+            dismissal_dates = self._load_dismissal_dates_tx(cursor, op_ids)
+            segments_by_operator = self._load_segments_by_operator_tx(cursor, op_ids, start, end)
+
+            operators = []
+            for row in rows:
+                op_id = int(row[0])
+                segments = segments_by_operator.get(op_id, [])
+                other_groups = {int(seg.get('group_id') or 0) for seg in segments} - {int(group_id)}
+                operators.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'direction_id': row[2],
+                    'supervisor_id': row[3],
+                    'hire_date': row[4].strftime('%d-%m-%Y') if row[4] else None,
+                    'hours_table_url': row[5],
+                    'scores_table_url': row[6],
+                    'supervisor_name': row[7],
+                    # Статус месяца, а не сегодняшний: иначе июнь показывает «уволен»
+                    # человеку, который в июне ещё работал.
+                    'status': status_as_of.get(op_id) or row[8],
+                    'status_current': row[8],
+                    'dismissal_date': self._dismissal_date_iso(dismissal_dates, op_id),
+                    'rate': row[9],
+                    'gender': row[10],
+                    'birth_date': row[11].strftime('%d-%m-%Y') if row[11] else None,
+                    'avatar_bucket': row[12],
+                    'avatar_blob_path': row[13],
+                    'avatar_updated_at': row[14].isoformat() if row[14] else None,
+                    'status_period_status_code': row[15],
+                    'status_period_start_date': row[16].strftime('%Y-%m-%d') if row[16] else None,
+                    'status_period_end_date': row[17].strftime('%Y-%m-%d') if row[17] else None,
+                    'status_period_dismissal_reason': row[18] or '',
+                    'status_period_is_blacklist': bool(row[19]) if row[19] is not None else False,
+                    'status_period_comment': row[20] or '',
+                    'department_id': row[21],
+                    'role': row[22],
+                    'group_segments': segments,
+                    # Признак «в этом месяце оператор был не только в этой группе».
+                    # Метрики оценок месячные и группу не различают, поэтому строка
+                    # честно помечается как переведённая.
+                    'has_other_group_in_month': bool(other_groups),
+                })
+
+            operators.sort(key=lambda item: str(item.get('name') or '').lower())
+            return operators
+
     def get_all_operators_with_details(self):
         with self._get_cursor() as cursor:
             cursor.execute("""

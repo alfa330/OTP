@@ -243,6 +243,10 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         directions = _function_source(BOT_PATH, "get_directions")
         sv_data = _function_source(BOT_PATH, "get_sv_data")
         groups = _function_source(BOT_PATH, "list_groups_endpoint")
+        # Правила скоупа групп переехали в общий помощник: их теперь делят
+        # /api/groups и режим группы в /api/sv/data. Стражу важно само правило,
+        # поэтому он смотрит и на делегирование, и на тело помощника.
+        groups_scope = _function_source(BOT_PATH, "_scoped_groups_for_requester")
 
         self.assertIn("headed_dept_ids = _headed_department_ids(requester_id)", departments)
         self.assertIn("for department_id in sorted(headed_dept_ids)", departments)
@@ -255,8 +259,11 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
         self.assertIn("for department_id in sorted(headed_dept_ids)", directions)
         self.assertIn("_is_global_admin_requester(requester_role, requester_id)", sv_data)
         self.assertIn("headed_dept_id = _headed_department_id(requester_id)", groups)
-        self.assertIn("department_id=headed_dept_id", groups)
-        self.assertIn("_is_global_admin_requester(role, requester_id)", groups)
+        self.assertIn("_scoped_groups_for_requester(", groups)
+        self.assertIn("headed_dept_id,", groups)
+        self.assertIn("department_id=headed_dept_id", groups_scope)
+        self.assertIn("_is_global_admin_requester(role, requester_id)", groups_scope)
+        self.assertIn("not _is_super_admin_role(role)", groups_scope)
 
     def test_call_evaluation_admin_actions_keep_department_scope(self):
         create_request = _function_source(BOT_PATH, "_create_reevaluation_request")

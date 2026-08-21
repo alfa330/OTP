@@ -16408,6 +16408,37 @@ def _ensure_group_in_requester_scope(group_id, requester_id, role):
     return None
 
 
+def _scoped_groups_for_requester(
+    requester_id,
+    role,
+    headed_dept_id,
+    include_archived=False,
+    department_id_arg=None,
+):
+    """Группы, доступные запрашивающему. Единый источник правил для /api/groups и
+    режима группы в /api/sv/data — иначе доступ в двух местах разъедется.
+
+    Возвращает (groups, error): error — уже готовый (response, code) для 403.
+    """
+    if headed_dept_id is not None and not _is_super_admin_role(role):
+        return db.list_groups(include_archived=include_archived, department_id=headed_dept_id), None
+    if _is_global_admin_requester(role, requester_id):
+        department_id = (
+            int(department_id_arg)
+            if department_id_arg and str(department_id_arg).isdigit()
+            else None
+        )
+        return db.list_groups(include_archived=include_archived, department_id=department_id), None
+    if _is_supervisor_role(role):
+        # СВ видит группы СВОЕГО ОТДЕЛА (а не только те, что ведёт сам).
+        sv_dept = db.get_user_department_id(requester_id)
+        if sv_dept is not None:
+            return db.list_groups(include_archived=include_archived, department_id=sv_dept), None
+        my_ids = set(db.get_supervisor_group_ids(requester_id))
+        return [g for g in db.list_groups(include_archived=include_archived) if g['id'] in my_ids], None
+    return [], (jsonify({"error": "Forbidden"}), 403)
+
+
 @app.route('/api/groups', methods=['GET'])
 @require_api_key
 def list_groups_endpoint():
@@ -16419,22 +16450,16 @@ def list_groups_endpoint():
         role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
         include_archived = str(request.args.get('include_archived', '')).lower() in ('1', 'true', 'yes')
-        if headed_dept_id is not None and not _is_super_admin_role(role):
-            groups = db.list_groups(include_archived=include_archived, department_id=headed_dept_id)
-        elif _is_global_admin_requester(role, requester_id):
-            dep = request.args.get('department_id')
-            department_id = int(dep) if dep and str(dep).isdigit() else None
-            groups = db.list_groups(include_archived=include_archived, department_id=department_id)
-        elif _is_supervisor_role(role):
-            # СВ видит группы СВОЕГО ОТДЕЛА (а не только те, что ведёт сам).
-            sv_dept = db.get_user_department_id(requester_id)
-            if sv_dept is not None:
-                groups = db.list_groups(include_archived=include_archived, department_id=sv_dept)
-            else:
-                my_ids = set(db.get_supervisor_group_ids(requester_id))
-                groups = [g for g in db.list_groups(include_archived=include_archived) if g['id'] in my_ids]
-        else:
-            return jsonify({"error": "Forbidden"}), 403
+        groups, scope_error = _scoped_groups_for_requester(
+            requester_id,
+            role,
+            headed_dept_id,
+            include_archived=include_archived,
+            department_id_arg=request.args.get('department_id'),
+        )
+        if scope_error:
+            resp, code = scope_error
+            return resp, code
         return jsonify({
             "status": "success",
             "groups": groups,
@@ -16943,14 +16968,27 @@ def get_sv_operators_moderka():
 @require_api_key
 def get_sv_data():
     try:
+        # group_id — режим ГРУППЫ: состав месяца берётся по членству в группе
+        # (ровно как в «Учёте часов»), а не по текущему users.supervisor_id.
+        # Как и в /api/sv/daily_hours, при заданной группе параметр id не нужен.
+        group_id_raw = request.args.get('group_id')
+        group_id = None
+        if group_id_raw not in (None, ''):
+            try:
+                group_id = int(group_id_raw)
+            except ValueError:
+                return jsonify({"error": "Invalid group_id parameter"}), 400
+
         # id
         user_id_raw = request.args.get('id')
-        if not user_id_raw:
-            return jsonify({"error": "Missing ID parameter"}), 400
-        try:
-            user_id = int(user_id_raw)
-        except ValueError:
-            return jsonify({"error": "Invalid ID parameter"}), 400
+        user_id = None
+        if group_id is None:
+            if not user_id_raw:
+                return jsonify({"error": "Missing ID parameter"}), 400
+            try:
+                user_id = int(user_id_raw)
+            except ValueError:
+                return jsonify({"error": "Invalid ID parameter"}), 400
 
         # optional month YYYY-MM
         month = request.args.get('month')
@@ -16972,82 +17010,147 @@ def get_sv_data():
         if not (_is_admin_role(requester_role) or requester_role == 'sv' or headed_dept_id is not None):
             return jsonify({"error": "Forbidden"}), 403
 
-        # Изоляция отделов: супервайзер и глава отдела видят данные только своего отдела.
-        if not _is_global_admin_requester(requester_role, requester_id):
-            scope_dept = _department_scope_id_for_requester(requester_id)
-            target_dept = db.get_user_department_id(user_id)
-            is_department_head_self_scope = headed_dept_id is not None and user_id == requester_id
-            if scope_dept is not None and target_dept != scope_dept and not is_department_head_self_scope:
-                return jsonify({"error": "Доступ только к супервайзерам своего отдела"}), 403
+        department_head_self_scope = False
+        # id супервайзеров, чьи собственные оценки добавляются в таблицу отдельной
+        # строкой: в режиме СВ это он сам, в режиме группы — СВ этой группы за месяц.
+        supervisor_lookup_ids = []
 
-        # fetch user (accept any caller role; admin can call this endpoint)
-        user = db.get_user(id=user_id)
-        if not user:
-            return jsonify({"error": "User not found"}), 404
+        if group_id is not None:
+            # Доступ к группе — теми же правилами, что и в /api/groups.
+            # include_archived=True: у архивных групп есть месяцы, когда они жили,
+            # и без них аналитика за прошлый месяц была бы недостижима.
+            scoped_groups, scope_error = _scoped_groups_for_requester(
+                requester_id,
+                requester_role,
+                headed_dept_id,
+                include_archived=True,
+            )
+            if scope_error:
+                resp, code = scope_error
+                return resp, code
+            group_row = next(
+                (g for g in (scoped_groups or []) if int(g.get('id') or 0) == group_id),
+                None
+            )
+            if not group_row:
+                return jsonify({"error": "Группа недоступна"}), 403
 
-        # normalize user name (support tuple/list or dict)
-        if isinstance(user, dict):
-            user_name = user.get("name") or user.get("full_name") or ""
+            group_supervisors = group_row.get('supervisors') or []
+            for sv in group_supervisors:
+                try:
+                    supervisor_lookup_ids.append(int(sv.get('id')))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+            response_data = {
+                "status": "success",
+                "name": group_row.get('name') or '',
+                # Ссылка на таблицу оценок у группы своя не хранится — берём у её
+                # первого СВ; у группы без СВ (в проде такие есть) её просто нет.
+                "table": None,
+                "requested_month": month,
+                "group_id": group_id,
+                "group_name": group_row.get('name') or '',
+                "group_status": group_row.get('status') or '',
+                "group_department_id": group_row.get('department_id'),
+                "group_supervisors": group_supervisors,
+                "operators": []
+            }
+
+            try:
+                operators = db.get_group_operators_for_month(group_id, month) or []
+            except Exception:
+                logging.exception("Failed to load group roster for /api/sv/data")
+                operators = []
         else:
-            user_name = user[2] if len(user) > 2 else ""
+            # Изоляция отделов: супервайзер и глава отдела видят данные только своего отдела.
+            if not _is_global_admin_requester(requester_role, requester_id):
+                scope_dept = _department_scope_id_for_requester(requester_id)
+                target_dept = db.get_user_department_id(user_id)
+                is_department_head_self_scope = headed_dept_id is not None and user_id == requester_id
+                if scope_dept is not None and target_dept != scope_dept and not is_department_head_self_scope:
+                    return jsonify({"error": "Доступ только к супервайзерам своего отдела"}), 403
 
-        response_data = {
-            "status": "success",
-            "name": user_name,
-            "table": user[9] if (not isinstance(user, dict) and len(user) > 9) else (user.get("scores_table_url") if isinstance(user, dict) else None),
-            "requested_month": month,
-            "operators": []
-        }
+            # fetch user (accept any caller role; admin can call this endpoint)
+            user = db.get_user(id=user_id)
+            if not user:
+                return jsonify({"error": "User not found"}), 404
 
-        target_user_role = ''
-        if isinstance(user, dict):
-            target_user_role = _normalize_user_role(user.get("role"))
-        elif isinstance(user, (list, tuple)) and len(user) > 3:
-            target_user_role = _normalize_user_role(user[3])
-
-        department_head_self_scope = headed_dept_id is not None and user_id == requester_id and target_user_role not in ('sv', 'supervisor')
-        if target_user_role not in ('sv', 'supervisor') and not department_head_self_scope:
-            return jsonify({"error": "Selected user is not a supervisor"}), 400
-
-        # Return only operators that belong to the selected supervisor. Older
-        # supervisor analytics used the full operator list here; that leaked
-        # unrelated operators and made the selector ineffective.
-        try:
-            if department_head_self_scope:
-                department_member_ids = set(db.get_department_member_ids(headed_dept_id) or [])
-                operators = [
-                    op for op in (db.get_all_operators_with_details() or [])
-                    if _operator_item_id(op) in department_member_ids
-                ]
+            # normalize user name (support tuple/list or dict)
+            if isinstance(user, dict):
+                user_name = user.get("name") or user.get("full_name") or ""
             else:
-                operators = db.get_operators_by_supervisor(user_id) or []
-        except Exception:
-            operators = []
+                user_name = user[2] if len(user) > 2 else ""
+
+            response_data = {
+                "status": "success",
+                "name": user_name,
+                "table": user[9] if (not isinstance(user, dict) and len(user) > 9) else (user.get("scores_table_url") if isinstance(user, dict) else None),
+                "requested_month": month,
+                "operators": []
+            }
+
+            target_user_role = ''
+            if isinstance(user, dict):
+                target_user_role = _normalize_user_role(user.get("role"))
+            elif isinstance(user, (list, tuple)) and len(user) > 3:
+                target_user_role = _normalize_user_role(user[3])
+
+            department_head_self_scope = headed_dept_id is not None and user_id == requester_id and target_user_role not in ('sv', 'supervisor')
+            if target_user_role not in ('sv', 'supervisor') and not department_head_self_scope:
+                return jsonify({"error": "Selected user is not a supervisor"}), 400
+
+            supervisor_lookup_ids = [user_id]
+
+            # Return only operators that belong to the selected supervisor. Older
+            # supervisor analytics used the full operator list here; that leaked
+            # unrelated operators and made the selector ineffective.
+            try:
+                if department_head_self_scope:
+                    department_member_ids = set(db.get_department_member_ids(headed_dept_id) or [])
+                    operators = [
+                        op for op in (db.get_all_operators_with_details() or [])
+                        if _operator_item_id(op) in department_member_ids
+                    ]
+                else:
+                    operators = db.get_operators_by_supervisor(user_id) or []
+            except Exception:
+                operators = []
 
         supervisor_rows = []
-        try:
-            with db._get_cursor() as cursor:
-                cursor.execute("""
-                    SELECT
-                        u.id,
-                        u.name,
-                        u.direction_id,
-                        u.hire_date,
-                        u.scores_table_url,
-                        u.status,
-                        u.rate,
-                        u.gender,
-                        u.birth_date,
-                        u.avatar_bucket,
-                        u.avatar_blob_path
-                    FROM users u
-                    WHERE u.id = %s
-                      AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
-                    LIMIT 1
-                """, (user_id,))
-                supervisor_rows = cursor.fetchall()
-        except Exception:
-            supervisor_rows = []
+        if supervisor_lookup_ids:
+            try:
+                with db._get_cursor() as cursor:
+                    # ANY(%s), а не один id: у группы супервайзеров может быть
+                    # несколько (а может не быть ни одного).
+                    cursor.execute("""
+                        SELECT
+                            u.id,
+                            u.name,
+                            u.direction_id,
+                            u.hire_date,
+                            u.scores_table_url,
+                            u.status,
+                            u.rate,
+                            u.gender,
+                            u.birth_date,
+                            u.avatar_bucket,
+                            u.avatar_blob_path
+                        FROM users u
+                        WHERE u.id = ANY(%s)
+                          AND LOWER(COALESCE(u.role, '')) IN ('sv', 'supervisor')
+                        ORDER BY u.name
+                    """, (supervisor_lookup_ids,))
+                    supervisor_rows = cursor.fetchall()
+            except Exception:
+                supervisor_rows = []
+
+        if group_id is not None and supervisor_rows:
+            # Ссылка на таблицу оценок группы — у её первого СВ.
+            for sv_row in supervisor_rows:
+                if len(sv_row) > 4 and sv_row[4]:
+                    response_data["table"] = sv_row[4]
+                    break
 
         operator_ids = []
         for op in operators:
@@ -17115,6 +17218,11 @@ def get_sv_data():
                 status_period_dismissal_reason = op.get("status_period_dismissal_reason")
                 status_period_is_blacklist = op.get("status_period_is_blacklist")
                 status_period_comment = op.get("status_period_comment")
+                # Поля режима группы (в режиме СВ их в строке нет).
+                dismissal_date = op.get("dismissal_date")
+                status_current = op.get("status_current")
+                group_segments = op.get("group_segments")
+                has_other_group_in_month = op.get("has_other_group_in_month")
             else:
                 operator_id = op[0] if len(op) > 0 else None
                 operator_name = op[1] if len(op) > 1 else None
@@ -17138,6 +17246,10 @@ def get_sv_data():
                 status_period_dismissal_reason = op[18] if len(op) > 18 else ""
                 status_period_is_blacklist = bool(op[19]) if len(op) > 19 and op[19] is not None else False
                 status_period_comment = op[20] if len(op) > 20 else ""
+                dismissal_date = None
+                status_current = None
+                group_segments = None
+                has_other_group_in_month = None
 
             # skip invalid rows
             if not operator_id:
@@ -17192,7 +17304,15 @@ def get_sv_data():
                 "status_period_end_date": status_period_end_date,
                 "status_period_dismissal_reason": status_period_dismissal_reason or "",
                 "status_period_is_blacklist": bool(status_period_is_blacklist),
-                "status_period_comment": status_period_comment or ""
+                "status_period_comment": status_period_comment or "",
+                # Режим группы: статус здесь — НА КОНЕЦ МЕСЯЦА, поэтому рядом едут
+                # дата увольнения (по ней фронт делит вкладки) и сегодняшний статус.
+                # group_segments/has_other_group_in_month нужны, чтобы показать
+                # переведённого: метрики оценок месячные и группу не различают.
+                "dismissal_date": dismissal_date,
+                "status_current": status_current,
+                "group_segments": group_segments or [],
+                "has_other_group_in_month": bool(has_other_group_in_month)
             })
 
         for sv_row in supervisor_rows:
