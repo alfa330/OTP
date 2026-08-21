@@ -24606,7 +24606,11 @@ def get_trainings():
 
         role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
-        if not (_is_admin_role(role) or role in ('sv', 'operator') or headed_dept_id is not None):
+        # 'trainer' здесь был пропущен: интерфейс раздел тренеру рисовал, а
+        # данные не грузились — единственный тренер портала видел пустой экран.
+        # Тренер — ровно тот, кто тренинги и проводит, читать их он обязан.
+        if not (_is_admin_role(role) or role in ('sv', 'trainer', 'operator', 'trainee')
+                or headed_dept_id is not None):
             logging.warning(f"Unauthorized role: {role}")
             return jsonify({"error": "Unauthorized"}), 403
 
@@ -24621,7 +24625,8 @@ def get_trainings():
                 t.comment,
                 t.created_at,
                 cb.name as created_by_name,
-                t.count_in_hours
+                t.count_in_hours,
+                t.topic_id
             FROM trainings t
             JOIN users u ON t.operator_id = u.id
             LEFT JOIN users cb ON t.created_by = cb.id
@@ -24664,7 +24669,7 @@ def get_trainings():
         elif headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
             where_clauses.append("u.department_id = %s")
             params.append(headed_dept_id)
-        elif role == 'operator':
+        elif role in ('operator', 'trainee'):
             where_clauses.append("t.operator_id = %s")
             params.append(requester_id)
         else:
@@ -24675,11 +24680,31 @@ def get_trainings():
                 target_user = db.get_user(id=int(user_param))
                 if not target_user:
                     return jsonify({"error": "User not found"}), 404
+                # Границу отдела для параметра ?id= раньше не проверяли вообще:
+                # любой из супервайзеров мог подставить id коллеги-СВ или
+                # чужого оператора и прочитать их тренинги. Проверяем той же
+                # функцией, что и все адресные обращения к чужой учётке.
+                _, target_scope_error = _load_target_user_with_scope(
+                    requester,
+                    requester_id,
+                    int(target_user[0]),
+                    allow_self=True,
+                    supervisor_target_roles=('operator', 'trainee', 'sv'),
+                    not_found_message="User not found",
+                    forbidden_message="Forbidden for this user",
+                )
+                if target_scope_error:
+                    message, status_code = target_scope_error
+                    logging.warning(
+                        "Blocked trainings read: requester=%s target=%s error=%s",
+                        requester_id, target_user[0], message
+                    )
+                    return jsonify({"error": message}), status_code
                 target_role = _normalize_user_role(target_user[3])
                 if target_role == 'sv':
                     where_clauses.append("u.supervisor_id = %s")
                     params.append(int(target_user[0]))
-                elif target_role == 'operator':
+                elif target_role in ('operator', 'trainee'):
                     where_clauses.append("t.operator_id = %s")
                     params.append(int(target_user[0]))
                 else:
@@ -24687,6 +24712,16 @@ def get_trainings():
             elif _is_supervisor_role(role):
                 where_clauses.append("u.supervisor_id = %s")
                 params.append(requester_id)
+            elif role == 'trainer':
+                # Тренер видит тренинги своего отдела — тем же периметром, что
+                # и «Графики работы». Без привязки к отделу — ничего, а не всё:
+                # пустой фильтр здесь означал бы весь портал.
+                trainer_dept = db.get_user_department_id(requester_id)
+                if trainer_dept is None:
+                    where_clauses.append("FALSE")
+                else:
+                    where_clauses.append("u.department_id = %s")
+                    params.append(int(trainer_dept))
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
@@ -24705,7 +24740,10 @@ def get_trainings():
                     "comment": row[6],
                     "created_at": row[7].strftime('%Y-%m-%d %H:%M'),
                     "created_by_name": row[8] if row[8] else "System",
-                    "count_in_hours": bool(row[9])
+                    "count_in_hours": bool(row[9]),
+                    # Корпоративная тема, если тренинг проводили по ней. У
+                    # базовых тем None — там причина и есть тема.
+                    "topic_id": row[10],
                 }
                 for row in cursor.fetchall()
             ]
@@ -24715,6 +24753,68 @@ def get_trainings():
     except Exception as e:
         logging.error(f"Error fetching trainings: {e}", exc_info=True)
         return jsonify({"error": f"Internal server error"}), 500
+
+def _training_reason_catalog():
+    """Справочник базовых тем — из одного места, а не копией в каждом роуте.
+
+    До этой правки список литералов был выписан руками в четырёх местах: два
+    роута здесь (11 значений), модалка раздела (9) и планировщик смен (11).
+    Расхождение стоило реальных данных: 164 записи «Тех. сбой» и 79
+    «Мониторинг» при открытии на редактирование теряли причину, потому что
+    модалка их не знала, а `validate()` требовал выбрать другую.
+    """
+    try:
+        from trainings.schema import ARCHIVED_REASONS, DEFAULT_REASONS, active_default_reasons
+        return tuple(DEFAULT_REASONS), tuple(active_default_reasons()), tuple(ARCHIVED_REASONS)
+    except Exception:
+        # Пакет не поднялся — раздел обязан продолжать работать на прежнем
+        # наборе, иначе отвалится и создание обычного тренинга.
+        legacy = (
+            "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
+            "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
+            "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
+            "Мониторинг", "Практика в офисе таксопарка", "Другое",
+        )
+        return legacy, legacy, ()
+
+
+def _resolve_training_topic(requester, requester_id, topic_id):
+    """Проверить корпоративную тему и вернуть, что записывать в тренинг.
+
+    Возвращает (topic, error). У корпоративного тренинга `reason` — это
+    НАЗВАНИЕ темы: на reason смотрят семь мест вне раздела, включая экран
+    «Мои часы» у самого сотрудника и лист «Тренинги» в выгрузке, и подставить
+    туда служебное «Другое» означало бы показать человеку не то, что ему
+    провели.
+    """
+    if topic_id in (None, '', 'null'):
+        return None, None
+    try:
+        topic_id_int = int(topic_id)
+    except (TypeError, ValueError):
+        return None, ("Invalid topic_id", 400)
+
+    try:
+        from trainings import access as trainings_access
+        from trainings import queries as trainings_queries
+    except Exception:
+        return None, ("Раздел корпоративных тем недоступен", 503)
+
+    with db._get_cursor() as cursor:
+        topic = trainings_queries.get_topic(cursor, topic_id_int)
+    if not topic:
+        return None, ("Тема не найдена", 404)
+    if topic['is_archived']:
+        return None, ("Тема в архиве — по ней нельзя проводить новые тренинги", 409)
+
+    role = _normalize_user_role(requester[3])
+    headed_dept = _headed_department_id(requester_id)
+    if not trainings_access.is_unscoped(role, headed_dept) and topic['department_id'] is not None:
+        scope_id = headed_dept if headed_dept is not None else db.get_user_department_id(requester_id)
+        if scope_id is None or int(topic['department_id']) != int(scope_id):
+            return None, ("Тема относится к другому отделу", 403)
+    return topic, None
+
 
 def _training_time_to_minutes(value):
     try:
@@ -24777,7 +24877,13 @@ def _training_group_scope_error(requester, requester_id, group_id, operator_id, 
 
     role = _normalize_user_role(requester[3])
     headed_dept_id = _headed_department_id(requester_id)
-    if headed_dept_id is not None and not _is_admin_role(role):
+    # Здесь стояло `not _is_admin_role(role)`, и это была дыра: все главы
+    # отделов в проде имеют базовую роль admin, то есть проверка границы отдела
+    # для них не выполнялась вовсе — глава СЗоВ мог записать тренинг в группу
+    # Отдела продаж. Граница снимается только у того, кто действительно
+    # работает без границы: у супер-админа и у админа, не назначенного главой
+    # (та же семантика, что в GET-ветке этого же роута).
+    if headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
         if group.get('department_id') != headed_dept_id:
             return ("Forbidden: not your department's group", 403)
     elif _is_supervisor_role(role):
@@ -24833,15 +24939,37 @@ def add_training():
             logging.warning(f"Invalid date/time format in add_training: {data}")
             return jsonify({"error": "Invalid date or time format"}), 400
 
-        allowed_reasons = [
-            "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
-            "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
-            "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
-            "Мониторинг", "Практика в офисе таксопарка", "Другое"
-        ]
-        if data['reason'] not in allowed_reasons:
-            logging.warning(f"Invalid training reason: {data['reason']}")
-            return jsonify({"error": "Invalid training reason"}), 400
+        # Корпоративная тема: причина и флаг часов берутся у темы, а не у
+        # клиента. count_in_hours у корпоративной темы FALSE — решение
+        # владельца: это факт прохождения, а не оплачиваемая работа. Поэтому
+        # раскатка информационной темы не может тронуть зарплату даже при
+        # ошибке в клиенте.
+        topic, topic_error = _resolve_training_topic(requester, requester_id, data.get('topic_id'))
+        if topic_error:
+            message, status_code = topic_error
+            return jsonify({"error": message}), status_code
+
+        if topic:
+            training_reason = topic['title']
+            training_topic_id = topic['id']
+            training_count_in_hours = bool(topic['count_in_hours'])
+        else:
+            _, active_reasons, archived_reasons = _training_reason_catalog()
+            if data['reason'] in archived_reasons:
+                # Архивная базовая тема: старые записи открываются и правятся,
+                # но новую под ней не создать. «Тех. сбой» переехал в свой
+                # раздел — 164 записи тренингом остались историей, а не путём.
+                logging.warning("Blocked archived training reason: %s", data['reason'])
+                return jsonify({
+                    "error": "Тема «%s» больше не используется для новых тренингов" % data['reason'],
+                    "code": "TRAINING_REASON_ARCHIVED",
+                }), 400
+            if data['reason'] not in active_reasons:
+                logging.warning(f"Invalid training reason: {data['reason']}")
+                return jsonify({"error": "Invalid training reason"}), 400
+            training_reason = data['reason']
+            training_topic_id = None
+            training_count_in_hours = data.get("count_in_hours", True)
 
         if not is_batch_request:
             if group_id is not None:
@@ -24889,10 +25017,11 @@ def add_training():
                 training_date=data['date'],
                 start_time=data['start_time'],
                 end_time=data['end_time'],
-                reason=data['reason'],
+                reason=training_reason,
                 comment=data.get('comment'),
                 created_by=requester_id,
-                count_in_hours=data.get("count_in_hours", True)
+                count_in_hours=training_count_in_hours,
+                topic_id=training_topic_id
             )
             logging.info("Training added: ID %s for operator %s", training_id, operator_ids[0])
             return jsonify({"status": "success", "id": training_id}), 201
@@ -24977,10 +25106,11 @@ def add_training():
                     training_date=data['date'],
                     start_time=data['start_time'],
                     end_time=data['end_time'],
-                    reason=data['reason'],
+                    reason=training_reason,
                     comment=data.get('comment'),
                     created_by=requester_id,
-                    count_in_hours=data.get("count_in_hours", True)
+                    count_in_hours=training_count_in_hours,
+                    topic_id=training_topic_id
                 )
                 scoped_operator_ids.append(scoped_operator_id)
                 created_ids.append(training_id)
@@ -25047,7 +25177,8 @@ def update_training(training_id):
 
         with db._get_cursor() as cursor:
             cursor.execute("""
-                SELECT created_by, operator_id, training_date, start_time, end_time FROM trainings WHERE id = %s
+                SELECT created_by, operator_id, training_date, start_time, end_time, topic_id
+                  FROM trainings WHERE id = %s
             """, (training_id,))
             training = cursor.fetchone()
             if not training:
@@ -25107,16 +25238,32 @@ def update_training(training_id):
             except ValueError:
                 logging.warning(f"Invalid end_time format: {data['end_time']}")
                 return jsonify({"error": "Invalid end time format"}), 400
-        if 'reason' in data:
-            allowed_reasons = [
-                "Обратная связь", "Собрание", "Тех. сбой", "Мотивационная беседа",
-                "Дисциплинарный тренинг", "Тренинг по качеству. Разбор ошибок",
-                "Тренинг по качеству. Объяснение МШ", "Тренинг по продукту",
-                "Мониторинг", "Практика в офисе таксопарка", "Другое"
-            ]
-            if data['reason'] not in allowed_reasons:
+        # Тема правки. Если пришёл topic_id — причина берётся у темы; если
+        # пришла причина — сверяем со справочником базовых тем.
+        topic, topic_error = _resolve_training_topic(requester, requester_id, data.get('topic_id'))
+        if topic_error:
+            message, status_code = topic_error
+            return jsonify({"error": message}), status_code
+
+        effective_reason = data.get('reason')
+        effective_topic_id = training[5] if len(training) > 5 else None
+        effective_count_in_hours = data.get('count_in_hours')
+
+        if topic:
+            effective_reason = topic['title']
+            effective_topic_id = topic['id']
+            effective_count_in_hours = bool(topic['count_in_hours'])
+        elif 'reason' in data:
+            all_reasons, _active, _archived = _training_reason_catalog()
+            # В PUT архивная причина ДОПУСКАЕТСЯ: 243 записи «Тех. сбой» и
+            # «Мониторинг» нужно уметь править, не меняя им тему. Запрет на
+            # архивную стоит только в POST, где создаётся новая запись.
+            if data['reason'] not in all_reasons:
                 logging.warning(f"Invalid training reason: {data['reason']}")
                 return jsonify({"error": "Invalid training reason"}), 400
+            # Переезд с корпоративной темы на базовую снимает привязку, иначе
+            # тренинг остался бы в охвате темы, которой ему уже не проводили.
+            effective_topic_id = None
 
         effective_date = data.get('date') or training[2].strftime('%Y-%m-%d')
         effective_start = data.get('start_time') or training[3].strftime('%H:%M')
@@ -25141,9 +25288,14 @@ def update_training(training_id):
             training_date=data.get('date'),
             start_time=data.get('start_time'),
             end_time=data.get('end_time'),
-            reason=data.get('reason'),
+            reason=effective_reason,
             comment=data.get('comment'),
-            count_in_hours=data.get('count_in_hours') 
+            count_in_hours=effective_count_in_hours,
+            # Передаём всегда: переезд «корпоративная тема → базовая причина»
+            # должен снять привязку, а update_training различает «не пришло»
+            # только по None. Текущее значение подставлено выше, поэтому
+            # запрос без темы её не теряет.
+            topic_id=effective_topic_id
         )
         if not success:
             logging.warning(f"Failed to update training {training_id}")
@@ -25235,7 +25387,11 @@ def get_training_rejections():
 
         role = _normalize_user_role(requester[3])
         headed_dept_id = _headed_department_id(requester_id)
-        if not (_is_admin_role(role) or role in ('sv', 'operator') or headed_dept_id is not None):
+        # Видимость — как у /api/trainings, включая тренера: списки отклонений
+        # читаются рядом с самими тренингами, и разные наборы ролей у двух
+        # запросов одного экрана дали бы «тренинги есть, отклонений нет».
+        if not (_is_admin_role(role) or role in ('sv', 'trainer', 'operator', 'trainee')
+                or headed_dept_id is not None):
             return jsonify({"error": "Unauthorized"}), 403
 
         query = """
@@ -25288,7 +25444,7 @@ def get_training_rejections():
         elif headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
             where_clauses.append("u.department_id = %s")
             params.append(headed_dept_id)
-        elif role == 'operator':
+        elif role in ('operator', 'trainee'):
             where_clauses.append("t.operator_id = %s")
             params.append(requester_id)
         else:
@@ -25299,11 +25455,31 @@ def get_training_rejections():
                 target_user = db.get_user(id=int(user_param))
                 if not target_user:
                     return jsonify({"error": "User not found"}), 404
+                # Границу отдела для параметра ?id= раньше не проверяли вообще:
+                # любой из супервайзеров мог подставить id коллеги-СВ или
+                # чужого оператора и прочитать их тренинги. Проверяем той же
+                # функцией, что и все адресные обращения к чужой учётке.
+                _, target_scope_error = _load_target_user_with_scope(
+                    requester,
+                    requester_id,
+                    int(target_user[0]),
+                    allow_self=True,
+                    supervisor_target_roles=('operator', 'trainee', 'sv'),
+                    not_found_message="User not found",
+                    forbidden_message="Forbidden for this user",
+                )
+                if target_scope_error:
+                    message, status_code = target_scope_error
+                    logging.warning(
+                        "Blocked trainings read: requester=%s target=%s error=%s",
+                        requester_id, target_user[0], message
+                    )
+                    return jsonify({"error": message}), status_code
                 target_role = _normalize_user_role(target_user[3])
                 if target_role == 'sv':
                     where_clauses.append("u.supervisor_id = %s")
                     params.append(int(target_user[0]))
-                elif target_role == 'operator':
+                elif target_role in ('operator', 'trainee'):
                     where_clauses.append("t.operator_id = %s")
                     params.append(int(target_user[0]))
                 else:
@@ -25311,6 +25487,16 @@ def get_training_rejections():
             elif _is_supervisor_role(role):
                 where_clauses.append("u.supervisor_id = %s")
                 params.append(requester_id)
+            elif role == 'trainer':
+                # Тренер видит тренинги своего отдела — тем же периметром, что
+                # и «Графики работы». Без привязки к отделу — ничего, а не всё:
+                # пустой фильтр здесь означал бы весь портал.
+                trainer_dept = db.get_user_department_id(requester_id)
+                if trainer_dept is None:
+                    where_clauses.append("FALSE")
+                else:
+                    where_clauses.append("u.department_id = %s")
+                    params.append(int(trainer_dept))
 
         if where_clauses:
             query += " WHERE " + " AND ".join(where_clauses)
@@ -51832,6 +52018,29 @@ try:
     logging.info("Раздел «Провайдер ЭДО»: Blueprint подключён на /api/fleet_edm")
 except Exception:
     logging.exception("Раздел «Провайдер ЭДО»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Тренинги»: справочник корпоративных тем ──────────────────────────
+# Только НОВАЯ поверхность раздела. Сами записи о проведённых тренингах
+# остаются на плоских /api/trainings ниже: они вплетены в расчёт оплачиваемых
+# часов, в квоту звонков и в лист «Тренинги» выгрузки, и перенос их в Blueprint
+# был бы работой с зарплатным трактом, а не оформлением раздела.
+try:
+    from trainings.routes import build_trainings_blueprint  # noqa: E402
+
+    app.register_blueprint(build_trainings_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        # Роль и «главу отдела» раздел считает теми же функциями, что весь
+        # портал: своя копия нормализации разошлась бы с общей молча.
+        normalize_role=_normalize_user_role,
+        headed_department_id=_headed_department_id,
+    ))
+    logging.info("Раздел «Тренинги»: Blueprint подключён на /api/training_topics")
+except Exception:
+    logging.exception("Раздел «Тренинги»: Blueprint НЕ подключён")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

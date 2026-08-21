@@ -1,0 +1,351 @@
+# -*- coding: utf-8 -*-
+"""Раздел «Тренинги»: справочник корпоративных тем.
+
+Без базы: проверяется схема (порядок разворота, набор литералов CHECK), права
+и справочник базовых тем. Раздел до этой работы не был покрыт ни одним
+тестом — ни TrainingsView, ни /api/trainings, — поэтому здесь закрепляется
+ровно то, что было решено, а не то, что «и так работает».
+"""
+
+import os
+import re
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from trainings import access, queries, schema  # noqa: E402
+
+
+class ReasonCatalogTest(unittest.TestCase):
+    """Справочник базовых тем — один на сервер, клиент и планировщик.
+
+    До этой работы список был выписан руками в четырёх местах и разошёлся:
+    модалка раздела знала 9 значений, сервер и планировщик — 11. Из-за этого
+    164 записи «Тех. сбой» и 79 «Мониторинг» при открытии на редактирование
+    теряли причину, а сохранение подменяло её другой.
+    """
+
+    def test_eleven_default_reasons(self):
+        self.assertEqual(len(schema.DEFAULT_REASONS), 11)
+        self.assertEqual(len(set(schema.DEFAULT_REASONS)), 11, 'дубли в справочнике тем')
+
+    def test_monitoring_is_active(self):
+        """«Мониторинг» — живая тема, ей пользуются: 79 записей, последняя 11.08.2026."""
+        self.assertIn('Мониторинг', schema.active_default_reasons())
+
+    def test_tech_failure_is_archived(self):
+        """«Тех. сбой» виден на старых записях, но не предлагается для новых.
+
+        Раздел «Тех. сбои» появился только в марте 2026 — до этого сбои писали
+        тренингом, потому что писать их было некуда (164 записи с сентября
+        2025). Переносить нельзя: все они идут в оплачиваемые часы.
+        """
+        self.assertIn('Тех. сбой', schema.DEFAULT_REASONS)
+        self.assertIn('Тех. сбой', schema.ARCHIVED_REASONS)
+        self.assertNotIn('Тех. сбой', schema.active_default_reasons())
+
+    def test_archived_is_subset_of_default(self):
+        self.assertTrue(set(schema.ARCHIVED_REASONS) <= set(schema.DEFAULT_REASONS))
+
+    def test_call_feedback_reason_is_a_real_reason(self):
+        """Разбор звонка из «Журнала оценок» пишет тренинг под этой причиной —
+        она обязана оставаться в справочнике, иначе запись упадёт на CHECK."""
+        self.assertIn(schema.CALL_FEEDBACK_REASON, schema.DEFAULT_REASONS)
+
+
+class ReasonCheckSqlTest(unittest.TestCase):
+    """Расширение CHECK на trainings.reason.
+
+    Ключевое требование: ни одна из 1648 существующих строк не должна перестать
+    проходить констрейнт. Поэтому набор литералов обязан совпасть с боевым
+    один в один, а сам CHECK — только РАСШИРИТЬСЯ условием про topic_id.
+    """
+
+    def test_condition_allows_topic_rows(self):
+        sql = schema.reason_check_sql()
+        self.assertTrue(sql.startswith('topic_id IS NOT NULL OR reason IN ('))
+
+    def test_condition_lists_every_default_reason(self):
+        sql = schema.reason_check_sql()
+        for reason in schema.DEFAULT_REASONS:
+            self.assertIn("'%s'" % reason, sql, 'причина %r выпала из CHECK' % reason)
+
+    def test_condition_lists_nothing_else(self):
+        """Лишний литерал означал бы, что CHECK разрешает больше, чем справочник."""
+        sql = schema.reason_check_sql()
+        literals = set(re.findall(r"'([^']+)'", sql))
+        self.assertEqual(literals, set(schema.DEFAULT_REASONS))
+
+    def test_quotes_are_escaped(self):
+        """Апостроф в названии темы не должен ломать DDL."""
+        original = schema.DEFAULT_REASONS
+        try:
+            schema.DEFAULT_REASONS = ("Разбор о'кей",)
+            self.assertIn("'Разбор о''кей'", schema.reason_check_sql())
+        finally:
+            schema.DEFAULT_REASONS = original
+
+
+class SchemaOrderTest(unittest.TestCase):
+    """Порядок разворота схемы: таблицы → ALTER'ы → индексы и констрейнты.
+
+    Стоит здесь не из любви к порядку. 17.08.2026 выкат сценариев положил
+    раздел «Обращения» на проде: индекс uq_crm_queues_code выполнился РАНЬШЕ,
+    чем ALTER TABLE добавил столбец code. Внутри SAVEPOINT это откатило весь
+    разворот схемы раздела вместе с миграциями. На пустой базе (и в любом
+    тесте, который просто вызывает init) ошибка не воспроизводится — поэтому
+    проверяется именно ПОРЯДОК.
+
+    Здесь та же ловушка заряжена дважды: частичный индекс idx_trainings_topic
+    и FK trainings_topic_id_fkey оба опираются на столбец topic_id, которого на
+    боевой базе ещё нет.
+    """
+
+    class OrderCursor:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql, params=None):
+            self.statements.append(' '.join(str(sql).split()))
+
+        def fetchone(self):
+            return None
+
+        def fetchall(self):
+            return []
+
+    def _run(self):
+        cursor = self.OrderCursor()
+        schema.init_trainings_schema(cursor)
+        return cursor.statements
+
+    def test_tables_come_first(self):
+        statements = self._run()
+        last_table = max(i for i, sql in enumerate(statements) if 'CREATE TABLE' in sql.upper())
+        first_alter = min((i for i, sql in enumerate(statements) if sql.startswith('ALTER TABLE')),
+                          default=len(statements))
+        self.assertLess(last_table, first_alter,
+                        'ALTER раньше CREATE TABLE — на чистой базе это падение')
+
+    def test_columns_are_added_before_indexes_that_use_them(self):
+        statements = self._run()
+        added = {}
+        for index, sql in enumerate(statements):
+            match = re.search(r'ADD COLUMN IF NOT EXISTS (\w+)', sql)
+            if match:
+                added.setdefault(match.group(1), index)
+        self.assertIn('topic_id', added, 'миграция столбца topic_id пропала из разворота схемы')
+
+        for index, sql in enumerate(statements):
+            if 'CREATE INDEX' not in sql.upper() and 'CREATE UNIQUE INDEX' not in sql.upper():
+                continue
+            for column, added_at in added.items():
+                if re.search(r'\(\s*%s\b|,\s*%s\b' % (column, column), sql):
+                    self.assertLess(
+                        added_at, index,
+                        'индекс создаётся раньше столбца %s: %s' % (column, sql[:90]))
+
+    def test_foreign_key_comes_after_the_column(self):
+        statements = self._run()
+        column_at = next(i for i, sql in enumerate(statements)
+                         if 'ADD COLUMN IF NOT EXISTS topic_id' in sql)
+        fk_at = next(i for i, sql in enumerate(statements)
+                     if 'trainings_topic_id_fkey' in sql)
+        self.assertLess(column_at, fk_at, 'FK ставится раньше столбца topic_id')
+
+    def test_check_is_dropped_before_it_is_added(self):
+        """Иначе второй старт упал бы на «constraint already exists»."""
+        statements = self._run()
+        drop_at = next(i for i, sql in enumerate(statements)
+                       if 'DROP CONSTRAINT IF EXISTS trainings_reason_check' in sql)
+        add_at = next(i for i, sql in enumerate(statements)
+                      if 'ADD CONSTRAINT trainings_reason_check' in sql)
+        self.assertLess(drop_at, add_at)
+
+    def test_check_is_added_after_topic_id_exists(self):
+        """Условие CHECK ссылается на topic_id — столбец обязан быть раньше."""
+        statements = self._run()
+        column_at = next(i for i, sql in enumerate(statements)
+                         if 'ADD COLUMN IF NOT EXISTS topic_id' in sql)
+        add_at = next(i for i, sql in enumerate(statements)
+                      if 'ADD CONSTRAINT trainings_reason_check' in sql)
+        self.assertLess(column_at, add_at)
+
+    def test_idempotent_statements_only(self):
+        """Разворот гоняется при КАЖДОМ импорте database.py — второй прогон
+        обязан быть безобидным."""
+        for sql in self._run():
+            upper = sql.upper()
+            if upper.startswith('CREATE TABLE'):
+                self.assertIn('IF NOT EXISTS', upper, sql[:80])
+            elif upper.startswith('CREATE INDEX') or upper.startswith('CREATE UNIQUE INDEX'):
+                self.assertIn('IF NOT EXISTS', upper, sql[:80])
+            elif 'ADD COLUMN' in upper:
+                self.assertIn('IF NOT EXISTS', upper, sql[:80])
+            elif upper.startswith('ALTER TABLE') and 'ADD CONSTRAINT' in upper:
+                # ADD CONSTRAINT IF NOT EXISTS в Postgres нет: идемпотентность
+                # обеспечивается либо парным DROP ... IF EXISTS, либо DO-блоком.
+                name = re.search(r'ADD CONSTRAINT (\w+)', sql).group(1)
+                self.assertTrue(
+                    any('DROP CONSTRAINT IF EXISTS %s' % name in other for other in self._run()),
+                    'констрейнт %s ставится без парного DROP — второй старт упадёт' % name)
+
+
+class TopicKindTest(unittest.TestCase):
+    def test_only_informational_kind(self):
+        """Решение владельца: пока один тип. Второй тип без запроса — это поле
+        в форме, которое никто не заполняет осмысленно."""
+        self.assertEqual(schema.TOPIC_KINDS, ('info',))
+        self.assertEqual(schema.TOPIC_KIND_LABELS['info'], 'Информационный')
+
+    def test_kind_check_matches_the_tuple(self):
+        create = next(sql for sql in schema._STATEMENTS if 'CREATE TABLE' in sql.upper())
+        for kind in schema.TOPIC_KINDS:
+            self.assertIn("'%s'" % kind, create)
+
+
+class AccessTest(unittest.TestCase):
+    """Кто ведёт справочник тем. Решение владельца: «И СВ может создавать темы»."""
+
+    def test_read_roles(self):
+        for role in ('operator', 'trainee', 'trainer', 'sv', 'admin', 'super_admin'):
+            self.assertTrue(access.can_read(role), role)
+        self.assertFalse(access.can_read('unknown'))
+        self.assertFalse(access.can_read(None))
+
+    def test_supervisor_manages_topics(self):
+        self.assertTrue(access.can_manage_topics('sv'))
+        self.assertTrue(access.can_manage_topics('supervisor'), 'роль supervisor = sv')
+
+    def test_trainer_reads_but_does_not_manage(self):
+        """Тренер проводит тренинги по готовым темам; справочник ведёт тот, кто
+        отвечает за отдел."""
+        self.assertTrue(access.can_read('trainer'))
+        self.assertFalse(access.can_manage_topics('trainer'))
+
+    def test_operator_does_not_manage(self):
+        self.assertFalse(access.can_manage_topics('operator'))
+
+    def test_department_head_manages_even_with_a_low_base_role(self):
+        """Назначение главой отдела заменяет базовую роль."""
+        self.assertTrue(access.can_manage_topics('operator', headed_department_id=367))
+
+    def test_department_head_is_scoped_even_with_admin_base_role(self):
+        """Все главы отделов в проде имеют базовую роль admin. Если считать их
+        глобальными, глава СЗоВ заведёт тему Отделу продаж."""
+        self.assertFalse(access.is_unscoped('admin', headed_department_id=1))
+        self.assertTrue(access.is_unscoped('admin', headed_department_id=None))
+        self.assertTrue(access.is_unscoped('super_admin', headed_department_id=1))
+
+
+class WritableDepartmentTest(unittest.TestCase):
+    def test_scoped_user_gets_own_department_by_default(self):
+        dept, error = access.writable_department_id('sv', None, 367, None)
+        self.assertIsNone(error)
+        self.assertEqual(dept, 367)
+
+    def test_scoped_user_cannot_write_to_another_department(self):
+        dept, error = access.writable_department_id('sv', None, 367, 1)
+        self.assertIsNone(dept)
+        self.assertEqual(error[1], 403)
+
+    def test_scoped_user_cannot_create_a_company_wide_topic(self):
+        """Общая тема (department_id NULL) — только у того, кто без границы:
+        иначе один СВ раскатал бы тему на весь портал."""
+        dept, error = access.writable_department_id('sv', None, 367, None)
+        self.assertEqual(dept, 367, 'СВ обязан получить свой отдел, а не NULL')
+
+    def test_unscoped_admin_may_create_a_company_wide_topic(self):
+        dept, error = access.writable_department_id('admin', None, 1, None)
+        self.assertIsNone(error)
+        self.assertIsNone(dept)
+
+    def test_head_scope_wins_over_own_department(self):
+        """Глава отдела пишет в тот отдел, которым руководит, даже если сам
+        числится в другом."""
+        dept, error = access.writable_department_id('admin', 909, 1, None)
+        self.assertIsNone(error)
+        self.assertEqual(dept, 909)
+
+    def test_user_without_any_department_is_refused(self):
+        dept, error = access.writable_department_id('sv', None, None, None)
+        self.assertIsNone(dept)
+        self.assertEqual(error[1], 403)
+
+
+class ReadableDepartmentsTest(unittest.TestCase):
+    def test_unscoped_sees_everything(self):
+        self.assertIsNone(access.readable_department_ids('admin', None, 1))
+
+    def test_scoped_sees_own_department(self):
+        self.assertEqual(access.readable_department_ids('sv', None, 367), frozenset({367}))
+
+    def test_head_sees_headed_department(self):
+        self.assertEqual(access.readable_department_ids('admin', 909, 1), frozenset({909}))
+
+    def test_no_department_sees_only_shared_topics(self):
+        self.assertEqual(access.readable_department_ids('sv', None, None), frozenset())
+
+
+class AudiencePredicateTest(unittest.TestCase):
+    """Знаменатель охвата и список «кому ещё не провели» считаются одним
+    условием: два разных дали бы «осталось 16» при 18 строках в списке."""
+
+    def test_single_predicate_used_by_both_queries(self):
+        import inspect
+        source = inspect.getsource(queries)
+        # Условие должно встречаться в модуле ровно один раз — в определении
+        # AUDIENCE_PREDICATE, — а дальше только подстановкой. Руками
+        # переписанная копия и есть тот самый риск.
+        self.assertEqual(source.count("u.status = 'working'"), 1,
+                         'условие аудитории продублировано вместо подстановки')
+        # И обе выборки обязаны его подставлять.
+        for func in ('list_topics', 'topic_audience', 'department_audience_counts'):
+            body = inspect.getsource(getattr(queries, func))
+            self.assertIn('audience', body, 'выборка %s не использует AUDIENCE_PREDICATE' % func)
+
+    def test_only_working_employees_count(self):
+        """'bs' — без сохранения, человек не работает; 'fired' — уволен."""
+        self.assertIn("u.status = 'working'", queries.AUDIENCE_PREDICATE)
+
+    def test_admins_are_out_of_the_audience(self):
+        """Раскатка адресована линейным сотрудникам, СВ и тренерам. С админами
+        в знаменателе 100 % было бы недостижимо by design."""
+        for role in ('admin', 'super_admin'):
+            self.assertIn("'%s'" % role, queries.AUDIENCE_PREDICATE)
+
+
+class TopicUpdateFieldsTest(unittest.TestCase):
+    class RecordingCursor:
+        def __init__(self):
+            self.sql = None
+            self.params = None
+
+        def execute(self, sql, params=None):
+            self.sql = ' '.join(str(sql).split())
+            self.params = params
+
+        def fetchone(self):
+            return (1,)
+
+    def test_only_whitelisted_fields_are_written(self):
+        cursor = self.RecordingCursor()
+        queries.update_topic(cursor, 5, {'title': 'Новая', 'created_by': 999, 'id': 7})
+        self.assertIn('title = %s', cursor.sql)
+        self.assertNotIn('created_by', cursor.sql)
+        self.assertNotIn('id = %s,', cursor.sql)
+
+    def test_updated_at_is_always_touched(self):
+        cursor = self.RecordingCursor()
+        queries.update_topic(cursor, 5, {'title': 'Новая'})
+        self.assertIn('updated_at =', cursor.sql)
+
+    def test_nothing_to_update_returns_none(self):
+        cursor = self.RecordingCursor()
+        self.assertIsNone(queries.update_topic(cursor, 5, {'unknown': 1}))
+        self.assertIsNone(cursor.sql)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -5554,6 +5554,7 @@ class Database:
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_icore_phone_schema_tx(cursor)
+            self._init_trainings_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -6313,6 +6314,35 @@ class Database:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT fleet_edm_schema")
+
+    def _init_trainings_schema_tx(self, cursor):
+        """Схема раздела «Тренинги»: справочник корпоративных тем (training_topics)
+        и привязка проведённого тренинга к теме (trainings.topic_id).
+
+        Разворачивается ПОСЛЕ базового DDL, потому что опирается на уже
+        существующие `trainings`, `departments` и `users`, и расширяет
+        именованный констрейнт trainings_reason_check.
+
+        SAVEPOINT — как у остальных разделов: весь _init_db идёт одной
+        транзакцией, и падение здесь не должно ронять инициализацию базы.
+        Цена отката, впрочем, конкретная: без расширения CHECK корпоративную
+        тему не записать, и раздел честно сообщает об этом через
+        schema_ready=false в /api/training_topics.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT trainings_schema")
+        try:
+            from trainings.schema import init_trainings_schema
+            init_trainings_schema(cursor)
+        except Exception:
+            cursor.execute("ROLLBACK TO SAVEPOINT trainings_schema")
+            logging.exception(
+                "Схема раздела «Тренинги» не применилась — корпоративные темы будут "
+                "недоступны, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT trainings_schema")
 
     def _init_icore_phone_schema_tx(self, cursor):
         """Реестр релизов iCORE Phone — то, по чему телефоны решают, обновляться ли.
@@ -29336,14 +29366,15 @@ class Database:
 
 
 
-    def add_training(self, operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours=True):
+    def add_training(self, operator_id, training_date, start_time, end_time, reason, comment,
+                     created_by, count_in_hours=True, topic_id=None):
         with self._get_cursor() as cursor:
             cursor.execute("""
-                INSERT INTO trainings (operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trainings (operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours, topic_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (operator_id, training_date, start_time, end_time) DO NOTHING
                 RETURNING id
-            """, (operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours))
+            """, (operator_id, training_date, start_time, end_time, reason, comment, created_by, count_in_hours, topic_id))
             inserted = cursor.fetchone()
             if inserted:
                 return inserted[0]
@@ -31626,7 +31657,13 @@ class Database:
                 } for row in cursor.fetchall()
             ]
 
-    def update_training(self, training_id, training_date=None, start_time=None, end_time=None, reason=None, comment=None, count_in_hours=None):
+    # Отличает «поле не пришло» от «поле пришло пустым». Для topic_id это не
+    # придирка: снятие корпоративной темы — это запись NULL, а None здесь уже
+    # занят смыслом «не трогать».
+    _UNSET = object()
+
+    def update_training(self, training_id, training_date=None, start_time=None, end_time=None,
+                        reason=None, comment=None, count_in_hours=None, topic_id=_UNSET):
         updates = []
         params = []
         if training_date:
@@ -31641,6 +31678,8 @@ class Database:
             updates.append("comment = %s"); params.append(comment)
         if count_in_hours is not None:
             updates.append("count_in_hours = %s"); params.append(count_in_hours)
+        if topic_id is not Database._UNSET:
+            updates.append("topic_id = %s"); params.append(topic_id)
 
         if not updates:
             return False
