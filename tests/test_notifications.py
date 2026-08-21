@@ -986,7 +986,8 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
         for table in ('events', 'four_you_images', 'lms_notifications',
                       'survey_assignments', 'wiki_ack_assignments',
                       'tasks', 'task_action_reads', 'event_reads',
-                      'four_you_reads', 'crm_tickets'):
+                      'four_you_reads', 'birthday_reads',
+                      'crm_tickets'):
             self.assertIn("'%s'" % table, block)
 
     def test_watermark_updates_wake_only_the_same_user(self):

@@ -5615,6 +5615,10 @@ class Database:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.user_id];
                     END IF;
+                ELSIF TG_TABLE_NAME = 'birthday_reads' THEN
+                    -- Тот же водяной знак, но OLD.user_id тут не нужен: user_id
+                    -- первичный ключ, при перезаписи отметки он не меняется.
+                    targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'task_action_reads' THEN
                     targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'crm_tickets' THEN
@@ -5702,6 +5706,10 @@ class Database:
             ('trg_bell_task_reads', 'task_action_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_event_reads', 'event_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_four_you_reads', 'four_you_reads', 'AFTER INSERT OR UPDATE', ''),
+            # UPDATE обязателен: отметка «сегодняшних именинников видел»
+            # перезаписывается по дате, а не вставляется заново, — на одном
+            # INSERT тычок ушёл бы только в первый день жизни строки.
+            ('trg_bell_birthday_reads', 'birthday_reads', 'AFTER INSERT OR UPDATE', ''),
         ):
             # Таблицы разделов создаются выше в этой же транзакции, каждая под
             # своим SAVEPOINT. Если схема раздела не применилась, его таблицы
