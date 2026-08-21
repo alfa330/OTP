@@ -91,15 +91,92 @@ def parse_map_coords(url):
     return None
 
 
+# Промо-заглушка. С 21.08.2026 2ГИС уводит ЛЮБУЮ страницу карты на
+# /museum?return_url=<исходный адрес> — и 2gis.kz, и 2gis.ru, и цель короткой
+# ссылки после разворота. Сама заглушка отдаёт 200 без Location, поэтому обход
+# редиректов упирался в неё и терял адрес, который лежит тут же — в return_url.
+# Снимаем заглушку по параметру, а не по пути /museum: промо у 2ГИС не первое и
+# не последнее, а return_url переживёт смену названия.
+_RETURN_PARAM = 'return_url'
+
+
+def unwrap_map_link(url, max_unwraps=3):
+    """Снимает промо-заглушки 2ГИС, возвращая адрес точки.
+
+    Хост цели проверяется так же, как у самой ссылки: return_url — это чужой
+    ввод, и без проверки заглушка стала бы обходом запрета на другие хосты.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    url = (url or '').strip()
+    for _ in range(max_unwraps):
+        parsed = urlparse(url)
+        if not _host_allowed(parsed.netloc):
+            return url
+        target = (parse_qs(parsed.query).get(_RETURN_PARAM) or [''])[0].strip()
+        if not target or target == url:
+            return url
+        nested = urlparse(target)
+        if nested.scheme not in ('http', 'https') or not _host_allowed(nested.netloc):
+            return url
+        url = target
+    return url
+
+
+# Страница точки. Координаты объекта берём из ссылки «маршрут» — там пара
+# стоит вплотную к id объекта (|<lon>,<lat>;<id>), а значит, привязана именно к
+# нему. «Первая точка на странице» не годится: у страницы Wolt первой идёт
+# граница Талдыкоргана, в двухстах километрах от офиса.
+_PAGE_ID = re.compile(r'/(?:firm|geo|branches)/(\d{6,})')
+_PAGE_DIRECTIONS = re.compile(r'directions/points/([^"\'<>\s]+)')
+_PAGE_POINT = re.compile(r'\|(-?\d+\.\d+),(-?\d+\.\d+);(\d+)')
+_PAGE_SELECTION = re.compile(r'"selection"\s*:\s*"POINT\(\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*\)"')
+
+
+def parse_page_coords(html, url=''):
+    """Достаёт (lat, lon) со страницы точки 2ГИС. None, если их там нет.
+
+    Нужна там, где в самой ссылке координат нет вовсе: «Поделиться» у 2ГИС
+    отдаёт /firm/<id> и /geo/<id> без единой цифры координат, а таких ссылок в
+    справочнике половина.
+    """
+    from urllib.parse import unquote
+
+    if not html:
+        return None
+
+    ids = _PAGE_ID.findall(url or '')
+    wanted = ids[-1] if ids else None
+
+    points = []
+    for chunk in _PAGE_DIRECTIONS.findall(html):
+        found = _PAGE_POINT.search(unquote(chunk))
+        if found:
+            points.append((found.group(3), float(found.group(1)), float(found.group(2))))
+
+    for object_id, lon, lat in points:
+        if wanted and object_id == wanted:
+            return _orient(lon, lat)
+
+    # Запасной вариант: выделенный объект. У страниц-зданий ссылки «маршрут»
+    # может не быть, а выделение стоит на том, ради чего страницу открыли.
+    found = _PAGE_SELECTION.search(html)
+    if found:
+        return _orient(float(found.group(1)), float(found.group(2)))
+    if len(points) == 1:
+        return _orient(points[0][1], points[0][2])
+    return None
+
+
 def resolve_map_link(url, fetch=None, max_hops=3):
     """Разворачивает ссылку 2ГИС до координат.
 
-    fetch(url) -> (status_code, location) подменяется в тестах, чтобы сеть не
-    требовалась. Ходим только по хостам 2ГИС и не больше max_hops раз — иначе
-    поле «ссылка» превратилось бы в инструмент запросов с нашего сервера
+    fetch(url) -> (status_code, location, html) подменяется в тестах, чтобы сеть
+    не требовалась. Ходим только по хостам 2ГИС и не больше max_hops раз —
+    иначе поле «ссылка» превратилось бы в инструмент запросов с нашего сервера
     куда угодно (SSRF).
     """
-    from urllib.parse import urlparse
+    from urllib.parse import urljoin, urlparse
 
     url = (url or '').strip()
     if not url:
@@ -109,33 +186,64 @@ def resolve_map_link(url, fetch=None, max_hops=3):
     if parsed.scheme not in ('http', 'https') or not _host_allowed(parsed.netloc):
         return {'error': 'Нужна ссылка на 2ГИС'}
 
-    resolved = url
+    resolved = unwrap_map_link(url)
+    # Заглушка возвращает нас ровно на ту страницу, с которой увела, поэтому без
+    # памяти о пройденном обход ходил бы по кругу — max_hops сетевых запросов
+    # вместо одного, и всё ради того же ответа.
+    seen = {resolved}
     for _ in range(max_hops):
         coords = parse_map_coords(resolved)
         if coords:
             return {'lat': coords[0], 'lon': coords[1], 'resolved_url': resolved}
 
-        status, location = (fetch or _fetch_redirect)(resolved)
-        if not location or status not in (301, 302, 303, 307, 308):
-            break
-        target = urlparse(location)
-        if not _host_allowed(target.netloc):
-            break
-        resolved = location
+        status, location, html = (fetch or _fetch_page)(resolved)
+        if status is None:
+            return {'error': '2ГИС не ответил — попробуйте ещё раз через минуту',
+                    'upstream': True}
 
-    return {'error': 'В ссылке нет координат — откройте точку в 2ГИС и скопируйте ссылку заново',
+        if location and status in (301, 302, 303, 307, 308):
+            # 2ГИС отвечает и относительным Location: /geo/<id> уводит на
+            # /firm/<id> без схемы и хоста. Достраиваем по текущему адресу —
+            # хост при этом остаётся прежним, уже проверенным.
+            location = urljoin(resolved, location)
+            if not _host_allowed(urlparse(location).netloc):
+                break
+            location = unwrap_map_link(location)
+            if location in seen:
+                break
+            seen.add(location)
+            resolved = location
+            continue
+
+        coords = parse_page_coords(html, resolved)
+        if coords:
+            return {'lat': coords[0], 'lon': coords[1], 'resolved_url': resolved}
+        break
+
+    return {'error': 'В ссылке нет координат. Откройте точку в 2ГИС и скопируйте ссылку заново',
             'resolved_url': resolved if resolved != url else None}
 
 
-def _fetch_redirect(url):
+# Промо-заглушку 2ГИС снимает кнопка «продолжить», и та всего лишь ставит куку
+# (d-assets.2gis.ru/museum/museum.js). Ставим её сразу: без куки страница точки
+# не отдаётся вовсе, а ходить за промо-страницей и разбирать её нам незачем.
+_MUSEUM_COOKIE = {'dg5_museum_accept': 'true'}
+
+
+def _fetch_page(url):
     import requests
-    response = requests.get(
-        url, allow_redirects=False, timeout=8,
-        # Без правдоподобного User-Agent короткие ссылки отвечают 204 без Location.
-        headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                               'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'},
-    )
-    return response.status_code, response.headers.get('Location')
+    try:
+        response = requests.get(
+            url, allow_redirects=False, timeout=12, cookies=_MUSEUM_COOKIE,
+            # Без правдоподобного User-Agent короткие ссылки отвечают 204 без Location.
+            headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                                   'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36'},
+        )
+    except Exception:  # noqa: BLE001
+        # Молчать нельзя: без этого сетевой сбой у 2ГИС прилетал правившему
+        # пятисоткой, и «ошибка сервера» выглядела как поломка нашего раздела.
+        return None, None, ''
+    return response.status_code, response.headers.get('Location'), response.text
 
 
 # ─────────────────────────────────────────────────────────────────────────────

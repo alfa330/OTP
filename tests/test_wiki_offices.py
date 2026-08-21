@@ -9,10 +9,12 @@
 import unittest
 from datetime import date, datetime
 
+from urllib.parse import quote
+
 from wiki.offices import (
     DAY_CODES, MAX_PHONES_PER_POINT, clean_phones, link_phones, normalize_schedule,
-    parse_day, parse_map_coords, resolve_map_link, schedule_state_on,
-    snapshot_offices_day, tile_is_valid,
+    parse_day, parse_map_coords, parse_page_coords, resolve_map_link,
+    schedule_state_on, snapshot_offices_day, tile_is_valid, unwrap_map_link,
 )
 
 
@@ -73,7 +75,7 @@ class ResolveMapLinkTest(unittest.TestCase):
 
         def fetch(url):
             calls.append(url)
-            return 307, ASTANA_FULL
+            return 307, ASTANA_FULL, ''
 
         result = resolve_map_link('https://go.2gis.com/xrzn2', fetch=fetch)
         self.assertEqual(calls, ['https://go.2gis.com/xrzn2'])
@@ -88,7 +90,7 @@ class ResolveMapLinkTest(unittest.TestCase):
 
     def test_redirect_off_2gis_is_not_followed(self):
         result = resolve_map_link('https://go.2gis.com/xrzn2',
-                                  fetch=lambda url: (302, 'https://evil.example.com/71.4,51.1'))
+                                  fetch=lambda url: (302, 'https://evil.example.com/71.4,51.1', ''))
         self.assertIn('error', result)
 
     def test_redirect_loop_stops(self):
@@ -96,10 +98,62 @@ class ResolveMapLinkTest(unittest.TestCase):
 
         def fetch(url):
             calls.append(url)
-            return 307, 'https://go.2gis.com/loop%d' % len(calls)
+            return 307, 'https://go.2gis.com/loop%d' % len(calls), ''
 
         self.assertIn('error', resolve_map_link('https://go.2gis.com/x', fetch=fetch, max_hops=3))
         self.assertEqual(len(calls), 3)
+
+    def test_promo_interstitial_is_unwrapped(self):
+        """С 21.08.2026 2ГИС уводит любую страницу карты на /museum.
+
+        Заглушка отдаёт 200 без Location, так что обход редиректов
+        останавливался на ней, а адрес точки всё это время лежал в return_url.
+        """
+        museum = ('https://2gis.kz/museum?return_url=https%3A%2F%2F2gis.kz%2Falmaty%2Finside%2F'
+                  '9430047375127902%2Ffirm%2F70000001041528994%3Fm%3D76.911483%252C43.259332%252F17.67')
+
+        def fetch(url):
+            raise AssertionError('адрес точки уже в самой ссылке')
+
+        result = resolve_map_link(museum, fetch=fetch)
+        self.assertEqual((result['lat'], result['lon']), (43.259332, 76.911483))
+
+    def test_promo_interstitial_after_redirect_is_unwrapped(self):
+        # Короткая ссылка разворачивается в страницу, а та — в заглушку.
+        hops = ['https://2gis.kz/almaty/firm/70000001041528994?m=76.911483%2C43.259332%2F17',
+                'https://2gis.kz/museum?return_url=x']
+
+        def fetch(url):
+            return 302, ('https://2gis.kz/museum?return_url='
+                         + 'https%3A%2F%2F2gis.kz%2Falmaty%2Ffirm%2F70000001041528994'
+                           '%3Fm%3D76.911483%252C43.259332%252F17'), ''
+
+        result = resolve_map_link('https://go.2gis.com/f7Q9R', fetch=fetch)
+        self.assertEqual((result['lat'], result['lon']), (43.259332, 76.911483))
+
+    def test_interstitial_bouncing_back_stops_after_one_request(self):
+        """Заглушка возвращает на ту же страницу — второй запрос бесполезен."""
+        calls = []
+        page = 'https://2gis.kz/almaty/firm/9429940001330174'
+
+        def fetch(url):
+            calls.append(url)
+            return 302, 'https://2gis.kz/museum?return_url=' + quote(page, safe=''), ''
+
+        self.assertIn('error', resolve_map_link(page, fetch=fetch))
+        self.assertEqual(calls, [page])
+
+    def test_return_url_to_foreign_host_is_ignored(self):
+        # Иначе заглушка стала бы обходом запрета на чужие хосты.
+        self.assertEqual(
+            unwrap_map_link('https://2gis.kz/museum?return_url=https%3A%2F%2Fevil.example.com%2F1'),
+            'https://2gis.kz/museum?return_url=https%3A%2F%2Fevil.example.com%2F1')
+
+    def test_upstream_failure_is_not_blamed_on_the_link(self):
+        """Сеть отвалилась — ссылка может быть верной, и это разные ответы."""
+        result = resolve_map_link('https://go.2gis.com/xrzn2', fetch=lambda url: (None, None, ''))
+        self.assertTrue(result.get('upstream'))
+        self.assertIn('2ГИС', result['error'])
 
     def test_non_2gis_link_is_rejected_before_network(self):
         def fetch(url):
@@ -107,6 +161,84 @@ class ResolveMapLinkTest(unittest.TestCase):
 
         self.assertIn('error', resolve_map_link('https://maps.google.com/?q=1,2', fetch=fetch))
         self.assertIn('error', resolve_map_link('', fetch=fetch))
+
+
+class ParsePageCoordsTest(unittest.TestCase):
+    """Страница точки: половина ссылок 2ГИС не несёт координат вовсе.
+
+    Куски разметки взяты со страниц из справочника — «Офис Яндекса» в Алматы и
+    «Wolt» на Толе би.
+    """
+
+    WOLT = ('<a class="_1pl504b" href="/almaty/directions/points/'
+            '%7C76.960924%2C43.255707%3B70000001031695380">маршрут</a>'
+            # Первой на странице стоит граница области — двести километров мимо.
+            '{"centroid":"POINT(78.381313 45.013629)"}'
+            '{"point":{"lat":43.255707,"lon":76.960924}}')
+
+    def test_point_is_taken_from_the_route_link_of_this_object(self):
+        self.assertEqual(
+            parse_page_coords(self.WOLT, 'https://2gis.kz/almaty/firm/70000001031695380'),
+            (43.255707, 76.960924))
+
+    def test_foreign_route_link_is_not_taken_for_this_object(self):
+        """Соседний филиал в списке — не наша точка."""
+        html = ('<a href="/almaty/directions/points/%7C76.9%2C43.2%3B111111111111">n</a>'
+                '"selection":"POINT(76.946655 43.257699)"')
+        self.assertEqual(parse_page_coords(html, 'https://2gis.kz/almaty/firm/9429940001330174'),
+                         (43.257699, 76.946655))
+
+    def test_selection_is_the_fallback(self):
+        self.assertEqual(
+            parse_page_coords('"selection":"POINT(71.406514 51.172930)"',
+                              'https://2gis.kz/astana/firm/70000001026025775'),
+            (51.17293, 71.406514))
+
+    def test_page_without_a_point(self):
+        self.assertIsNone(parse_page_coords('<html>ничего</html>', 'https://2gis.kz/almaty'))
+        self.assertIsNone(parse_page_coords('', 'https://2gis.kz/almaty'))
+
+
+class ResolveViaPageTest(unittest.TestCase):
+    def test_link_without_coordinates_is_resolved_by_the_page(self):
+        """«Поделиться» у 2ГИС отдаёт /firm/<id> без единой цифры координат."""
+        page = ('<a href="/almaty/directions/points/'
+                '%7C76.960924%2C43.255707%3B70000001031695380">м</a>')
+        result = resolve_map_link('https://2gis.kz/almaty/firm/70000001031695380',
+                                  fetch=lambda url: (200, None, page))
+        self.assertEqual((result['lat'], result['lon']), (43.255707, 76.960924))
+
+    def test_relative_redirect_is_followed(self):
+        """/geo/<id> уводит на /firm/<id> заголовком без схемы и хоста."""
+        page = ('<a href="/almaty/directions/points/'
+                '%7C76.960924%2C43.255707%3B70000001031695380">м</a>')
+        hops = {'https://2gis.kz/almaty/geo/70000001031695380':
+                    (302, '/almaty/firm/70000001031695380', ''),
+                'https://2gis.kz/almaty/firm/70000001031695380': (200, None, page)}
+        result = resolve_map_link('https://2gis.kz/almaty/geo/70000001031695380',
+                                  fetch=lambda url: hops[url])
+        self.assertEqual((result['lat'], result['lon']), (43.255707, 76.960924))
+
+    def test_relative_redirect_cannot_leave_2gis(self):
+        # urljoin по протокол-относительному адресу увёл бы на чужой хост.
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return 302, '//evil.example.com/71.4,51.1', ''
+
+        self.assertIn('error', resolve_map_link('https://go.2gis.com/x', fetch=fetch))
+        self.assertEqual(calls, ['https://go.2gis.com/x'])
+
+    def test_page_of_a_foreign_host_is_never_read(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            return 302, 'https://evil.example.com/71.4,51.1', ''
+
+        self.assertIn('error', resolve_map_link('https://go.2gis.com/x', fetch=fetch))
+        self.assertEqual(calls, ['https://go.2gis.com/x'])
 
 
 class NormalizeScheduleTest(unittest.TestCase):

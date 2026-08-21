@@ -277,7 +277,10 @@ def register(bp, wiki_route, db, log_ip):
             return _forbidden()
         result = wiki_offices.resolve_map_link(_clean(_body().get('url'), 1000))
         if 'error' in result:
-            return jsonify(result), 400
+            # Сбой на стороне 2ГИС — не 400: ссылка может быть верной, и
+            # «проверьте ссылку» отправило бы правившего искать несуществующую
+            # ошибку в ней.
+            return jsonify(result), 502 if result.pop('upstream', False) else 400
         return jsonify(result)
 
     # ── Тайлы карты ──────────────────────────────────────────────────────
