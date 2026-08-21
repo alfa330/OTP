@@ -2584,6 +2584,60 @@ def _parse_task_spent_minutes(source):
     return total or None
 
 
+def _parse_task_assignee_ids(raw_value):
+    """Состав исполнителей из тела запроса.
+
+    Понимает и массив из JSON (PATCH), и строку «12,15,7» из multipart-формы
+    (POST принимает только form-data), и одиночный id — так же, как это делает
+    Database._normalize_task_assignees, чтобы правила «дубликаты свернуть,
+    порядок сохранить, потолок не превысить» жили в одном месте.
+
+    Порядок значим: первый становится tasks.assigned_to.
+    """
+    if raw_value is None:
+        raise ValueError("Выберите хотя бы одного исполнителя")
+    try:
+        return db._normalize_task_assignees(raw_value)
+    except ValueError as normalize_error:
+        code = str(normalize_error)
+        if code == 'TOO_MANY_ASSIGNEES':
+            raise ValueError(f"Исполнителей у задачи не больше {db.TASK_MAX_ASSIGNEES}")
+        if code == 'ASSIGNEE_REQUIRED':
+            raise ValueError("Выберите хотя бы одного исполнителя")
+        raise ValueError("assigned_to must be an integer")
+
+
+def _task_assignees_outside_scope(assignee_ids, requester_id, requester_role):
+    """Кому из состава поручать нельзя. Пустой список — всё в порядке.
+
+    Список разрешённых спрашиваем ОДИН раз на весь состав: раньше эта сверка
+    стояла отдельно в создании и в правке, дословно повторённая, и разъезжалась
+    при любой правке одной из двух копий.
+    """
+    allowed_recipients = db.get_task_recipients(
+        requester_id,
+        requester_role,
+        scope_department_id=getattr(g, 'task_scope_department_id', None)
+    )
+    allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
+    return [person_id for person_id in (assignee_ids or []) if int(person_id) not in allowed_ids]
+
+
+def _task_assignee_chat_ids(assignee_ids):
+    """Telegram-чаты исполнителей одним запросом (порядок — как в составе)."""
+    ids = [int(item) for item in (assignee_ids or []) if item]
+    if not ids:
+        return []
+    with db._get_cursor() as cursor:
+        cursor.execute(
+            "SELECT id, telegram_id FROM users"
+            " WHERE id = ANY(%s) AND telegram_id IS NOT NULL",
+            (ids,)
+        )
+        chat_by_id = {int(row[0]): row[1] for row in cursor.fetchall()}
+    return [chat_by_id[person_id] for person_id in ids if person_id in chat_by_id]
+
+
 def _parse_task_checklist_items(raw_value):
     if raw_value is None:
         return []
@@ -3055,6 +3109,19 @@ def _fetch_task_notification_context(task_id):
             LIMIT 1
         """, (int(task_id),))
         row = cursor.fetchone()
+        # Весь состав исполнителей: задачу могли поручить нескольким, и знать о
+        # ней должен каждый. Скалярные assignee_* ниже оставлены для мест, где
+        # человек ровно один (текст «Исполнитель: …» в сообщении).
+        assignee_rows = []
+        if row:
+            cursor.execute("""
+                SELECT u.id, u.telegram_id, u.name
+                  FROM task_assignees ta
+                  JOIN users u ON u.id = ta.user_id
+                 WHERE ta.task_id = %s
+                 ORDER BY ta.position, ta.user_id
+            """, (int(task_id),))
+            assignee_rows = cursor.fetchall()
     if not row:
         return None
     return {
@@ -3069,6 +3136,10 @@ def _fetch_task_notification_context(task_id):
         "assigned_to": row[8],
         "assignee_telegram_id": row[9],
         "assignee_name": row[10],
+        "assignees": [
+            {"id": item[0], "telegram_id": item[1], "name": item[2]}
+            for item in assignee_rows
+        ],
         # Поручитель принимает итог — он должен получать уведомления по задаче.
         "requested_by": row[11],
         "requester_telegram_id": row[12],
@@ -3092,17 +3163,32 @@ def _collect_task_notification_recipients(task_ctx, actor_user_id):
                 "name": task_ctx.get('creator_name') or 'Постановщик'
             })
 
-    assignee_chat_id = task_ctx.get('assignee_telegram_id')
-    assignee_id = task_ctx.get('assigned_to')
-    if assignee_chat_id and (assignee_id is None or int(assignee_id) != int(actor_user_id)):
+    # По строке на каждого исполнителя. Автора действия пропускаем — сообщать
+    # человеку о его же клике незачем. Если состав почему-то не приехал,
+    # откатываемся на скалярного исполнителя: молчать хуже, чем повторить.
+    assignee_people = task_ctx.get('assignees')
+    if not assignee_people:
+        assignee_people = [{
+            "id": task_ctx.get('assigned_to'),
+            "telegram_id": task_ctx.get('assignee_telegram_id'),
+            "name": task_ctx.get('assignee_name'),
+        }]
+    for person in assignee_people:
+        assignee_chat_id = person.get('telegram_id')
+        assignee_id = person.get('id')
+        if not assignee_chat_id:
+            continue
+        if assignee_id is not None and int(assignee_id) == int(actor_user_id):
+            continue
         chat_key = str(assignee_chat_id)
-        if chat_key not in seen_chat_ids:
-            seen_chat_ids.add(chat_key)
-            recipients.append({
-                "kind": "assignee",
-                "chat_id": assignee_chat_id,
-                "name": task_ctx.get('assignee_name') or 'Исполнитель'
-            })
+        if chat_key in seen_chat_ids:
+            continue
+        seen_chat_ids.add(chat_key)
+        recipients.append({
+            "kind": "assignee",
+            "chat_id": assignee_chat_id,
+            "name": person.get('name') or 'Исполнитель'
+        })
 
     # Поручитель принимает итог, поэтому обновления по задаче должны доходить и до него.
     requester_chat_id = task_ctx.get('requester_telegram_id')
@@ -3234,7 +3320,7 @@ def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fie
             'deadline': 'дедлайн',
             'recurrence': 'регламент',
             'checklist': 'чек-лист',
-            'assigned_to': 'исполнитель',
+            'assigned_to': 'состав исполнителей',
             'estimate': 'оценка',
             'planned_start': 'плановый старт',
             'is_backlog': 'бэклог',
@@ -18845,7 +18931,7 @@ TASK_EXPORT_COLUMNS = {
     'subject':     ('Тема', 52),
     'tag':         ('Тип', 14),
     'priority':    ('Срочность', 13),
-    'assignee':    ('Исполнитель', 26),
+    'assignee':    ('Исполнители', 34),
     'requester':   ('Поручил', 26),
     'created':     ('Создана', 17),
     'planned':     ('Плановый старт', 17),
@@ -19173,6 +19259,21 @@ def handle_tasks():
 
             tasks = payload.get("tasks") or []
             for task in tasks:
+                # Первый исполнитель и весь состав: у карточки на доске лицо одно,
+                # в списке — стопка. Подписанные ссылки кешируются по (бакет, путь),
+                # поэтому десять исполнителей на страницу не стоят десяти подписей.
+                assignees = task.get("assignees")
+                if isinstance(assignees, list):
+                    for person in assignees:
+                        if not isinstance(person, dict):
+                            continue
+                        person["avatar_url"] = _build_avatar_signed_url(
+                            person.get("avatar_bucket"),
+                            person.get("avatar_blob_path")
+                        )
+                        person.pop("avatar_bucket", None)
+                        person.pop("avatar_blob_path", None)
+
                 assignee = task.get("assignee")
                 if isinstance(assignee, dict):
                     assignee["avatar_url"] = _build_avatar_signed_url(
@@ -19247,6 +19348,9 @@ def handle_tasks():
         requested_by_name_raw = (request.form.get('requested_by_name') or '').strip() or None
         reminder_raw = (request.form.get('reminder_minutes_before') or '').strip() or None
         assigned_to_raw = request.form.get('assigned_to')
+        # Состав приезжает строкой «12,15,7»: multipart-поле одно, а порядок в
+        # нём значим — первый становится tasks.assigned_to.
+        assignee_ids_raw = (request.form.get('assignee_ids') or '').strip()
 
         if not subject:
             return jsonify({"error": "subject is required"}), 400
@@ -19256,21 +19360,17 @@ def handle_tasks():
             return jsonify({"error": "Invalid priority"}), 400
         if recurrence_type and recurrence_type not in TASK_ALLOWED_RECURRENCE_TYPES:
             return jsonify({"error": "Invalid recurrence_type"}), 400
-        if not assigned_to_raw:
+        if not assigned_to_raw and not assignee_ids_raw:
             return jsonify({"error": "assigned_to is required"}), 400
 
         try:
-            assigned_to = int(assigned_to_raw)
-        except Exception:
-            return jsonify({"error": "assigned_to must be an integer"}), 400
+            assignee_ids = _parse_task_assignee_ids(assignee_ids_raw or assigned_to_raw)
+        except ValueError as assignee_error:
+            return jsonify({"error": str(assignee_error)}), 400
+        assigned_to = assignee_ids[0]
 
-        allowed_recipients = db.get_task_recipients(
-            requester_id,
-            requester_role,
-            scope_department_id=getattr(g, 'task_scope_department_id', None)
-        )
-        allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
-        if assigned_to not in allowed_ids:
+        forbidden = _task_assignees_outside_scope(assignee_ids, requester_id, requester_role)
+        if forbidden:
             return jsonify({"error": "You cannot assign a task to this user"}), 403
 
         files = request.files.getlist('files')
@@ -19286,6 +19386,7 @@ def handle_tasks():
 
         try:
             created = db.create_task(
+                assignee_ids=assignee_ids,
                 subject=subject,
                 description=description,
                 tag=tag,
@@ -19320,7 +19421,10 @@ def handle_tasks():
                 "INVALID_ESTIMATE": "Invalid estimate_minutes",
                 "INVALID_PLANNED_START": "Invalid planned_start_at",
                 "INVALID_REQUESTED_BY": "Invalid requested_by_id",
-                "INVALID_REMINDER": "Напоминание можно поставить максимум за сутки до дедлайна"
+                "INVALID_REMINDER": "Напоминание можно поставить максимум за сутки до дедлайна",
+                "INVALID_ASSIGNED_TO": "Invalid assigned_to value",
+                "ASSIGNEE_REQUIRED": "Выберите хотя бы одного исполнителя",
+                "TOO_MANY_ASSIGNEES": f"Исполнителей у задачи не больше {db.TASK_MAX_ASSIGNEES}"
             }
             return jsonify({"error": error_map.get(code, code)}), 400
         except Exception:
@@ -19330,10 +19434,10 @@ def handle_tasks():
 
         telegram_warning = None
         try:
-            assignee = db.get_user(id=assigned_to)
-            assignee_chat_id = assignee[1] if assignee else None
+            # Один запрос на всех исполнителей вместо N вызовов get_user.
+            assignee_chat_ids = _task_assignee_chat_ids(created.get('assignee_ids') or assignee_ids)
             # Карточка в бэклоге ещё не обязательство исполнителя — уведомляем только при выносе на доску.
-            if assignee_chat_id and not is_backlog:
+            if assignee_chat_ids and not is_backlog:
                 task_link = _build_current_task_deep_link(created.get("id"))
                 tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
                 priority_label = TASK_PRIORITY_LABELS.get(priority, 'Обычная')
@@ -19360,16 +19464,23 @@ def handle_tasks():
                     message_lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
                 message = "\n".join(message_lines)
                 reply_markup = _build_task_notification_reply_markup(task_link)
-                tg_response = _send_telegram_text_message(
-                    assignee_chat_id,
-                    message,
-                    parse_mode='HTML',
-                    reply_markup=reply_markup
-                )
-                if tg_response.status_code != 200:
-                    error_detail = _get_telegram_error_text(tg_response)
-                    telegram_warning = f"Task created, but Telegram notification failed: {error_detail}"
-                    logging.error(f"Task Telegram API error: {error_detail}")
+                failures = []
+                for assignee_chat_id in assignee_chat_ids:
+                    tg_response = _send_telegram_text_message(
+                        assignee_chat_id,
+                        message,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                    if tg_response.status_code != 200:
+                        error_detail = _get_telegram_error_text(tg_response)
+                        failures.append(error_detail)
+                        logging.error(f"Task Telegram API error: {error_detail}")
+                if failures:
+                    telegram_warning = (
+                        "Task created, but Telegram notification failed: "
+                        + " | ".join(failures[:3])
+                    )
         except Exception as notify_error:
             telegram_warning = f"Task created, but Telegram notification failed: {str(notify_error)}"
             logging.error(f"Task Telegram notification error: {notify_error}")
@@ -19407,7 +19518,7 @@ def handle_single_task(task_id):
             has_subject = 'subject' in data
             has_description = 'description' in data
             has_tag = 'tag' in data
-            has_assigned_to = 'assigned_to' in data
+            has_assigned_to = 'assigned_to' in data or 'assignee_ids' in data
             has_priority = 'priority' in data
             has_deadline = any(key in data for key in ('deadline_days', 'deadline_hours', 'deadline_minutes'))
             has_due_at = 'due_at' in data
@@ -19453,20 +19564,17 @@ def handle_single_task(task_id):
             if has_recurrence_type and recurrence_type and recurrence_type not in TASK_ALLOWED_RECURRENCE_TYPES:
                 return jsonify({"error": "Invalid recurrence_type"}), 400
 
+            assignee_ids = None
             if has_assigned_to:
-                assigned_to_raw = data.get('assigned_to')
+                raw_assignees = data.get('assignee_ids') if 'assignee_ids' in data else data.get('assigned_to')
                 try:
-                    assigned_to = int(assigned_to_raw)
-                except Exception:
-                    return jsonify({"error": "assigned_to must be an integer"}), 400
+                    assignee_ids = _parse_task_assignee_ids(raw_assignees)
+                except ValueError as assignee_error:
+                    return jsonify({"error": str(assignee_error)}), 400
+                assigned_to = assignee_ids[0]
 
-                allowed_recipients = db.get_task_recipients(
-                    requester_id,
-                    requester_role,
-                    scope_department_id=getattr(g, 'task_scope_department_id', None)
-                )
-                allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
-                if assigned_to not in allowed_ids:
+                forbidden = _task_assignees_outside_scope(assignee_ids, requester_id, requester_role)
+                if forbidden:
                     return jsonify({"error": "You cannot assign a task to this user"}), 403
 
             try:
@@ -19479,6 +19587,8 @@ def handle_single_task(task_id):
                     "tag": tag if has_tag else None,
                     "assigned_to": assigned_to if has_assigned_to else None
                 }
+                if has_assigned_to:
+                    edit_kwargs["assignee_ids"] = assignee_ids
                 if has_priority:
                     edit_kwargs["priority"] = priority
                 if has_deadline:
@@ -19526,6 +19636,12 @@ def handle_single_task(task_id):
                     return jsonify({"error": "Invalid checklist"}), 400
                 if code == 'INVALID_ASSIGNED_TO':
                     return jsonify({"error": "Invalid assigned_to value"}), 400
+                if code == 'ASSIGNEE_REQUIRED':
+                    return jsonify({"error": "Выберите хотя бы одного исполнителя"}), 400
+                if code == 'TOO_MANY_ASSIGNEES':
+                    return jsonify({
+                        "error": f"Исполнителей у задачи не больше {db.TASK_MAX_ASSIGNEES}"
+                    }), 400
                 if code == 'INVALID_ESTIMATE':
                     return jsonify({"error": "Invalid estimate_minutes"}), 400
                 if code == 'INVALID_PLANNED_START':

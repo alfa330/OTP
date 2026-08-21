@@ -7,10 +7,17 @@
  * отдаёт не только число, но и сами задачи), плюс в CLI —
  * scripts/task_board.py → task_action_need. Меняете правило — меняйте во всех четырёх.
  *
+ * Исполнитель здесь — ЛЮБОЙ из состава: задачу могли поручить нескольким, и
+ * «просрочена» или «вернули» касается каждого из них, а не только первого.
+ *
  * Категории взаимоисключающие: у задачи ровно одна причина, самая срочная.
  * Бэклог не трогаем — это очередь планирования, работы там ещё нет. Единственное
  * исключение — `info`: вопрос задал живой человек, и очередь ответа не отменяет.
  */
+
+// Расширение '.js' обязательно: модуль гоняется через node --test, где ESM
+// не достраивает его сам.
+import { isTaskAssignee } from './taskAssignees.js';
 
 export const ACTION_NEED_KINDS = ['overdue', 'returned', 'info', 'review', 'fresh', 'accepted'];
 
@@ -90,7 +97,7 @@ export const taskActionNeed = (task, userId, now = Date.now()) => {
   if (!personId || !task) return null;
 
   const status = String(task?.status || '').toLowerCase();
-  const isAssignee = Number(task?.assignee?.id || 0) === personId;
+  const isAssignee = isTaskAssignee(task, personId);
   const dueAt = parseDueAt(task?.due_at);
 
   if (status === 'completed' && reviewAuthorityId(task) === personId) {

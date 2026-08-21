@@ -252,7 +252,7 @@ class TaskExcelExportTests(unittest.TestCase):
         self.assertNotIn('Плановый старт', backlog)
         for headers in (progress, done, backlog):
             self.assertEqual(headers[:2], ['№', 'Тема'])
-            self.assertIn('Исполнитель', headers)
+            self.assertIn('Исполнители', headers)
             self.assertIn('Поручил', headers)
 
     def test_column_empty_in_every_row_is_dropped(self):

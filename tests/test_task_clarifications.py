@@ -19,6 +19,7 @@ DATABASE_PATH = ROOT / "database.py"
 # Кто есть кто в сценариях ниже.
 OWNER = 10        # постановщик (created_by)
 ASSIGNEE = 20     # исполнитель
+CO_ASSIGNEE = 21  # второй исполнитель: права у них равные
 BOSS = 30         # поручитель (requested_by_id) — он же принимает итог
 STRANGER = 40
 
@@ -84,9 +85,14 @@ class _FakeCursor:
 
     NEW_MESSAGE_ID = 777
 
-    def __init__(self, task_row, message_row=None):
+    def __init__(self, task_row, message_row=None, assignee_ids=None):
         self.task_row = task_row
         self.message_row = message_row
+        # Состав исполнителей: по умолчанию один — тот, что в строке задачи.
+        self.assignee_ids = (
+            list(assignee_ids) if assignee_ids is not None
+            else ([task_row[2]] if task_row[2] else [])
+        )
         self.executions = []
         self._next_one = None
         self._next_all = []
@@ -94,7 +100,9 @@ class _FakeCursor:
     def execute(self, query, params=None):
         flat = " ".join(query.split())
         self.executions.append((flat, params))
-        if "FROM tasks t" in flat and "info_request_id" in flat and flat.startswith("SELECT"):
+        if "FROM task_assignees ta" in flat:
+            self._next_all = [(person_id, "operator", None) for person_id in self.assignee_ids]
+        elif "FROM tasks t" in flat and "info_request_id" in flat and flat.startswith("SELECT"):
             self._next_one = self.task_row
         elif "INSERT INTO task_messages" in flat:
             self._next_one = (self.NEW_MESSAGE_ID,)
@@ -130,6 +138,8 @@ def _build_database():
         "_task_answer_authority",
         "_serialize_task_message",
         "_task_visible_for_requester",
+        "_task_assignee_tuples",
+        "_task_assignee_scope_tx",
         "TASK_MESSAGE_KINDS",
         "_TASK_MESSAGE_SELECT",
     ]
@@ -170,9 +180,10 @@ def _make_db(cursor):
 
 def _task_row(status="in_progress", requested_by=None, info_request_id=None,
               created_by=OWNER, assigned_to=ASSIGNEE):
-    # (id, created_by, assigned_to, assignee_role, assignee_supervisor_id,
-    #  requested_by_id, status, info_request_id)
-    return (412, created_by, assigned_to, "operator", None, requested_by, status, info_request_id)
+    # (id, created_by, assigned_to, requested_by_id, status, info_request_id)
+    # Роль и СВ исполнителя больше не джойнятся сюда: состав читается отдельным
+    # запросом к task_assignees, потому что исполнителей может быть несколько.
+    return (412, created_by, assigned_to, requested_by, status, info_request_id)
 
 
 class AskForInformationTests(unittest.TestCase):

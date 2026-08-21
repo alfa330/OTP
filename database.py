@@ -3754,6 +3754,50 @@ class Database:
             cursor.execute("ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS message_id INTEGER REFERENCES task_messages(id) ON DELETE SET NULL;")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_task_attachments_message ON task_attachments(message_id) WHERE message_id IS NOT NULL;")
 
+            # ──────────────────────────────────────────────────────────────
+            # СОСТАВ ИСПОЛНИТЕЛЕЙ. У задачи их может быть несколько, и права у
+            # них равные: каждый берёт задачу в работу, отмечает пункты чеклиста,
+            # пишет отчёты и сдаёт результат.
+            #
+            # Скалярная tasks.assigned_to СОХРАНЕНА и означает «первый
+            # исполнитель». Это не дубль ради удобства, а осознанный выбор:
+            # колонка задействована почти в трёхсот местах (SQL-джойны раздела,
+            # триггер колокола, Telegram-бот, выгрузка в Excel, CLI), она NOT NULL,
+            # и снос её означал бы переписывание раздела целиком. Ровно так же
+            # устроены «ответственный + соисполнители» в готовых трекерах.
+            #
+            # Инвариант, на который опирается весь раздел: task_assignees всегда
+            # содержит и tasks.assigned_to — это строка с наименьшим position.
+            # Держится он в одном месте, _sync_task_assignees_tx.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_assignees (
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    -- Порядок показа. Прав не даёт и не отнимает: нужен только
+                    -- чтобы люди не прыгали местами между обновлениями списка.
+                    position INTEGER NOT NULL DEFAULT 0,
+                    added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    added_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (task_id, user_id)
+                );
+            """)
+            # Фильтр «мои задачи», доска сотрудника и счётчик «ждут вас» ходят
+            # через EXISTS по (user_id, task_id) — без этого индекса они уедут в
+            # seq scan по всей таблице задач.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_assignees_user
+                ON task_assignees(user_id, task_id);
+            """)
+            # Бэкфилл: у каждой существующей задачи её единственный исполнитель
+            # становится первым в составе. Идемпотентно — ON CONFLICT.
+            cursor.execute("""
+                INSERT INTO task_assignees (task_id, user_id, position, added_by, added_at)
+                SELECT t.id, t.assigned_to, 0, t.created_by, t.created_at
+                FROM tasks t
+                WHERE t.assigned_to IS NOT NULL
+                ON CONFLICT (task_id, user_id) DO NOTHING;
+            """)
+
             # Отметка «уведомление просмотрено»: гасит счётчик «ждут вас», но не задачу.
             # Ключ — пользователь+задача; kind и seen_at нужны, чтобы отметка сгорала,
             # когда причина сменилась (не начата → просрочена) или задачу тронули снова.
@@ -5551,12 +5595,15 @@ class Database:
         if cursor.fetchone() is not None:
             return
 
+        # По исполнителю на строку: у задачи их может быть несколько, и каждому
+        # иначе при первом запуске прилетела бы вся история принятых задач.
         cursor.execute("""
             INSERT INTO task_action_reads (user_id, task_id, kind, seen_at)
-            SELECT t.assigned_to, t.id, 'accepted',
+            SELECT ta.user_id, t.id, 'accepted',
                    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
               FROM tasks t
-             WHERE t.status = 'accepted' AND t.assigned_to IS NOT NULL
+              JOIN task_assignees ta ON ta.task_id = t.id
+             WHERE t.status = 'accepted'
             ON CONFLICT (user_id, task_id) DO UPDATE
                 SET kind = EXCLUDED.kind, seen_at = EXCLUDED.seen_at
         """)
@@ -5657,13 +5704,27 @@ class Database:
                         targets := targets || ARRAY[OLD.created_by];
                     END IF;
                 ELSIF TG_TABLE_NAME = 'tasks' THEN
-                    -- Исполнитель и принимающий; при UPDATE — и прежние тоже:
+                    -- Исполнители и принимающий; при UPDATE — и прежние тоже:
                     -- переназначенная задача должна погаснуть у старого владельца.
+                    -- Исполнителей может быть несколько, поэтому весь состав
+                    -- берём из связи; скалярную колонку оставляем в списке на
+                    -- случай, если строка состава почему-то не доехала.
                     targets := ARRAY[NEW.assigned_to,
-                                     COALESCE(NEW.requested_by_id, NEW.created_by)];
+                                     COALESCE(NEW.requested_by_id, NEW.created_by)]
+                               || ARRAY(SELECT user_id FROM task_assignees WHERE task_id = NEW.id);
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.assigned_to,
                                                     COALESCE(OLD.requested_by_id, OLD.created_by)];
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'task_assignees' THEN
+                    -- Состав поменялся: будим и добавленного, и снятого. Здесь
+                    -- обязательно COALESCE(NEW, OLD) — при DELETE есть только OLD,
+                    -- и обращение к NEW.user_id уронило бы функцию (а её
+                    -- EXCEPTION-обёртка сделала бы это молча).
+                    IF TG_OP = 'DELETE' THEN
+                        targets := ARRAY[OLD.user_id];
+                    ELSE
+                        targets := ARRAY[NEW.user_id];
                     END IF;
                 END IF;
                 targets := ARRAY(SELECT DISTINCT t FROM unnest(targets) AS t WHERE t IS NOT NULL);
@@ -5735,6 +5796,11 @@ class Database:
                 )""",
             ),
             ('trg_bell_tasks', 'tasks', 'AFTER INSERT OR UPDATE', ''),
+            # Смена состава исполнителей саму задачу не трогает (UPDATE tasks не
+            # происходит), поэтому trg_bell_tasks об этом не узнает — нужен свой
+            # триггер, иначе добавленный соисполнитель не увидит задачу в колоколе
+            # до следующего обновления по фокусу.
+            ('trg_bell_task_assignees', 'task_assignees', 'AFTER INSERT OR DELETE', ''),
             ('trg_bell_task_reads', 'task_action_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_event_reads', 'event_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_four_you_reads', 'four_you_reads', 'AFTER INSERT OR UPDATE', ''),
@@ -47493,24 +47559,170 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
-    def _task_visible_for_requester(self, requester_role, requester_id, created_by, assigned_to, assignee_role,
-                                    assignee_supervisor_id, requested_by=None):
+    # Потолок состава. Держится и во фронте (src/components/tasks/taskAssignees.js):
+    # задача на пятнадцать человек — это рассылка, а не задача, и такой список
+    # уже не читается ни в карточке, ни в выгрузке.
+    TASK_MAX_ASSIGNEES = 10
+
+    # Участие в задаче одним предикатом на весь файл. Именно EXISTS, а не JOIN:
+    # джойн размножил бы задачу по числу исполнителей, и разом поехали бы COUNT(*),
+    # FILTER-агрегаты сводки и пагинация страницы. Плейсхолдер один — id человека.
+    _TASK_ASSIGNEE_EXISTS_SQL = (
+        "EXISTS (SELECT 1 FROM task_assignees ta_f"
+        " WHERE ta_f.task_id = t.id AND ta_f.user_id = %s)"
+    )
+
+    @staticmethod
+    def _task_assignee_tuples(assignees):
+        """Состав исполнителей в едином виде [(user_id, role, supervisor_id), ...].
+
+        Принимает и готовый список кортежей, и просто список id, и одиночный id:
+        у части вызывающих под рукой только id, и заставлять их собирать кортежи
+        значило бы плодить одинаковые заглушки по всему файлу.
+        """
+        if assignees is None:
+            return []
+        if isinstance(assignees, (int, float, str)):
+            return [(int(assignees), None, None)]
+        rows = []
+        for item in assignees:
+            if item is None:
+                continue
+            if isinstance(item, (int, float, str)):
+                rows.append((int(item), None, None))
+                continue
+            values = list(item)
+            if not values or values[0] is None:
+                continue
+            values += [None, None]
+            rows.append((int(values[0]), values[1], values[2]))
+        return rows
+
+    def _normalize_task_assignees(self, assignees):
+        """Состав исполнителей из того, что прислал клиент.
+
+        Понимает список, кортеж, строку «12,15,7» (так состав приезжает в
+        multipart-форме создания) и одиночный id. Порядок СОХРАНЯЕТ — первый
+        становится tasks.assigned_to, — дубликаты сворачивает.
+
+        Возвращает None для _UNSET/None: это «состав не меняем», и отличать его
+        от «состав пустой» обязательно — иначе правка одной темы задачи молча
+        снимала бы с неё всех исполнителей.
+        """
+        if assignees is None or assignees is _UNSET:
+            return None
+        items = assignees
+        if isinstance(items, bytes):
+            items = items.decode('utf-8', 'ignore')
+        if isinstance(items, str):
+            items = items.split(',')
+        elif isinstance(items, (int, float)):
+            items = [items]
+        elif not isinstance(items, (list, tuple, set, frozenset)):
+            raise ValueError("INVALID_ASSIGNED_TO")
+
+        ordered = []
+        seen = set()
+        for item in items:
+            if item is None or (isinstance(item, str) and not item.strip()):
+                continue
+            try:
+                person_id = int(str(item).strip() if isinstance(item, str) else item)
+            except (TypeError, ValueError):
+                raise ValueError("INVALID_ASSIGNED_TO")
+            if person_id <= 0:
+                raise ValueError("INVALID_ASSIGNED_TO")
+            if person_id in seen:
+                continue
+            seen.add(person_id)
+            ordered.append(person_id)
+
+        if not ordered:
+            raise ValueError("ASSIGNEE_REQUIRED")
+        if len(ordered) > self.TASK_MAX_ASSIGNEES:
+            raise ValueError("TOO_MANY_ASSIGNEES")
+        return ordered
+
+    def _sync_task_assignees_tx(self, cursor, task_id, assignee_ids, added_by=None):
+        """Состав исполнителей задачи = ровно переданный список, в его порядке.
+
+        Единственное место, где держится инвариант раздела: tasks.assigned_to —
+        это строка состава с наименьшим position. И колонку, и связь пишем здесь,
+        чтобы «первый исполнитель» не мог разойтись между ними.
+
+        Уже существующие строки не пересоздаём, а только двигаем по порядку:
+        added_at/added_by у оставшегося исполнителя должны сохраниться, иначе
+        «когда его подключили» превратится в дату последней правки задачи.
+        """
+        task_id = int(task_id)
+        ordered = [int(item) for item in (assignee_ids or [])]
+        if not ordered:
+            raise ValueError("ASSIGNEE_REQUIRED")
+
+        cursor.execute(
+            "DELETE FROM task_assignees WHERE task_id = %s AND NOT (user_id = ANY(%s))",
+            (task_id, ordered),
+        )
+        # Одним запросом, а не циклом: WITH ORDINALITY даёт позицию прямо из
+        # порядка массива, и десять исполнителей стоят один поход в базу.
+        cursor.execute("""
+            INSERT INTO task_assignees (task_id, user_id, position, added_by)
+            SELECT %s, src.user_id, src.ord - 1, %s
+              FROM unnest(%s::int[]) WITH ORDINALITY AS src(user_id, ord)
+            ON CONFLICT (task_id, user_id) DO UPDATE
+                SET position = EXCLUDED.position
+        """, (task_id, added_by, ordered))
+        return ordered
+
+    def _task_assignee_ids_tx(self, cursor, task_id):
+        """Id исполнителей задачи в порядке показа."""
+        cursor.execute(
+            "SELECT user_id FROM task_assignees WHERE task_id = %s ORDER BY position, user_id",
+            (int(task_id),),
+        )
+        return [int(row[0]) for row in cursor.fetchall()]
+
+    def _task_assignee_scope_tx(self, cursor, task_id):
+        """Исполнители с ролью и СВ — всё, что нужно для проверки видимости."""
+        cursor.execute("""
+            SELECT ta.user_id, u.role, u.supervisor_id
+              FROM task_assignees ta
+              JOIN users u ON u.id = ta.user_id
+             WHERE ta.task_id = %s
+             ORDER BY ta.position, ta.user_id
+        """, (int(task_id),))
+        return [(int(row[0]), row[1], row[2]) for row in cursor.fetchall()]
+
+    def _task_visible_for_requester(self, requester_role, requester_id, created_by, assignees,
+                                    requested_by=None):
+        """Видит ли человек задачу.
+
+        `assignees` — весь состав исполнителей (см. _task_assignee_tuples):
+        задачу видит КАЖДЫЙ из них, а не только первый.
+        """
         role = normalize_role_value(requester_role)
         requester_id = int(requester_id)
+        people = self._task_assignee_tuples(assignees)
         if role_has_min(role, 'admin'):
             return True
         if created_by is not None and int(created_by) == requester_id:
             return True
-        if assigned_to is not None and int(assigned_to) == requester_id:
+        if any(person_id == requester_id for person_id, _role, _supervisor in people):
             return True
         # Поручитель принимает итог, значит должен видеть задачу — даже если карточку создал не он.
         if requested_by is not None and int(requested_by) == requester_id:
             return True
-        if role == 'sv' and assignee_role == 'operator' and assignee_supervisor_id is not None and int(assignee_supervisor_id) == requester_id:
+        # СВ видит задачу, если ХОТЯ БЫ ОДИН из исполнителей — его оператор.
+        if role == 'sv' and any(
+            person_role == 'operator' and supervisor is not None and int(supervisor) == requester_id
+            for _person_id, person_role, supervisor in people
+        ):
             return True
         return False
 
     def _task_review_authority(self, created_by, assigned_to, requested_by):
+        # assigned_to в расчёте не участвует и оставлен только ради единой формы
+        # вызова рядом с _task_can_review.
         """
         Кто принимает итог: поручитель, если он указан, иначе постановщик.
         Возвращает id или None (никого — своя инициатива без поручителя).
@@ -47521,16 +47733,20 @@ class Database:
             return int(created_by)
         return None
 
-    def _task_can_review(self, role, requester_id, created_by, assigned_to, requested_by):
+    def _task_can_review(self, role, requester_id, created_by, assignees, requested_by):
         """
         Приёмка и возврат: право у поручителя (или постановщика, если поручителя нет).
         Исполнитель не принимает свою же работу — кроме случая, когда принимать больше некому
         (своя инициатива), иначе такая задача навсегда застрянет на проверке.
         Админ и СВ могут принять за поручителя, но не свою собственную работу.
+
+        Исполнитель здесь — ЛЮБОЙ из состава: приписав себя соисполнителем,
+        приёмщик своей работы не принимает.
         """
         requester_id = int(requester_id)
-        authority = self._task_review_authority(created_by, assigned_to, requested_by)
-        is_assignee = assigned_to is not None and int(assigned_to) == requester_id
+        assignee_ids = [person_id for person_id, _role, _supervisor in self._task_assignee_tuples(assignees)]
+        authority = self._task_review_authority(created_by, assignee_ids, requested_by)
+        is_assignee = requester_id in assignee_ids
 
         if authority is not None and authority == requester_id:
             # Сам себе поручил и сам исполняет — закрыть может, это своя инициатива.
@@ -47591,8 +47807,13 @@ class Database:
         if not role_has_min(role, 'admin'):
             if role not in ('sv', 'trainer'):
                 return []
-            # Видит только тех, с кем пересекается по задачам.
-            conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            # Видит только тех, с кем пересекается по задачам. Исполнителем
+            # считается любой из состава, поэтому участие — через EXISTS.
+            conditions.append(
+                "(t.created_by = %s OR t.requested_by_id = %s"
+                " OR EXISTS (SELECT 1 FROM task_assignees ta_me"
+                " WHERE ta_me.task_id = t.id AND ta_me.user_id = %s))"
+            )
             params.extend([requester_id, requester_id, requester_id])
 
         where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -47606,9 +47827,15 @@ class Database:
                     d.name,
                     u.avatar_bucket,
                     u.avatar_blob_path,
-                    COUNT(*)::INT AS task_count
+                    -- DISTINCT обязателен: у задачи с несколькими исполнителями
+                    -- строка связи своя у каждого, и COUNT(*) считал бы одну
+                    -- задачу дважды у постановщика, который сам в исполнителях.
+                    COUNT(DISTINCT t.id)::INT AS task_count
                 FROM users u
-                JOIN tasks t ON t.assigned_to = u.id OR t.created_by = u.id
+                JOIN tasks t
+                  ON t.created_by = u.id
+                  OR EXISTS (SELECT 1 FROM task_assignees ta
+                             WHERE ta.task_id = t.id AND ta.user_id = u.id)
                 LEFT JOIN departments d ON d.id = u.department_id
                 {where_sql}
                 GROUP BY u.id, u.name, u.role, d.id, d.name, u.avatar_bucket, u.avatar_blob_path
@@ -47776,19 +48003,26 @@ class Database:
                     "recipient_name": row[6]
                 })
 
+            # По строке на каждого исполнителя с Telegram: срок один, но ждут
+            # его все, и напоминание «только первому» — это молчание для
+            # остальных. Отметка reminder_sent_at остаётся на задаче: строки
+            # одной задачи уходят в одном проходе, а повторная отметка ничего
+            # не портит. Из-за размножения LIMIT — это потолок СТРОК, а не задач.
             cursor.execute("""
                 SELECT t.id, t.subject, t.description, t.due_at, t.priority, u.telegram_id, u.name
                 FROM tasks t
-                JOIN users u ON u.id = t.assigned_to
+                JOIN task_assignees ta ON ta.task_id = t.id
+                JOIN users u ON u.id = ta.user_id
                 WHERE t.due_at IS NOT NULL
                   AND t.reminder_minutes_before IS NOT NULL
                   AND t.reminder_sent_at IS NULL
                   AND t.is_backlog = FALSE
                   AND t.status NOT IN ('completed', 'accepted')
                   AND u.telegram_id IS NOT NULL
+                  AND COALESCE(u.status, 'working') <> 'fired'
                   AND t.due_at > %s
                   AND t.due_at - (t.reminder_minutes_before * INTERVAL '1 minute') <= %s
-                ORDER BY t.due_at ASC
+                ORDER BY t.due_at ASC, ta.position ASC, ta.user_id ASC
                 LIMIT %s
             """, (now, now, int(limit)))
             for row in cursor.fetchall():
@@ -47949,12 +48183,19 @@ class Database:
             due_at=None,
             requested_by_id=None,
             requested_by_name=None,
-            reminder_minutes_before=None
+            reminder_minutes_before=None,
+            assignee_ids=None
     ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
         tag_norm = (tag or 'task').strip().lower() or 'task'
-        assigned_to_id = int(assigned_to)
+        # Исполнителей может быть несколько. assigned_to остаётся ради вызовов,
+        # которые знают только одного, но состав всегда считается одним и тем же
+        # нормализатором: первый в списке и есть tasks.assigned_to.
+        assignee_ids_norm = self._normalize_task_assignees(
+            assignee_ids if assignee_ids is not None else assigned_to
+        )
+        assigned_to_id = assignee_ids_norm[0]
         created_by_id = int(created_by) if created_by is not None else None
         attachments = attachments or []
         priority_norm = self._normalize_task_priority(priority)
@@ -48027,6 +48268,8 @@ class Database:
             ))
             task_id, created_at, updated_at = cursor.fetchone()
 
+            self._sync_task_assignees_tx(cursor, task_id, assignee_ids_norm, added_by=created_by_id)
+
             cursor.execute("""
                 INSERT INTO task_status_history (task_id, status_code, changed_by)
                 VALUES (%s, 'assigned', %s)
@@ -48065,7 +48308,9 @@ class Database:
             "planned_start_at": self._task_dt_to_iso(planned_start_at_norm),
             "requested_by_id": requested_by_id_norm,
             "requested_by_name": requested_by_name_norm,
-            "reminder_minutes_before": reminder_minutes_norm if due_at else None
+            "reminder_minutes_before": reminder_minutes_norm if due_at else None,
+            # Кого фактически записали: по этому списку роут рассылает Telegram.
+            "assignee_ids": list(assignee_ids_norm)
         }
 
     def edit_task(
@@ -48088,7 +48333,8 @@ class Database:
             planned_start_at=_UNSET,
             requested_by_id=_UNSET,
             requested_by_name=_UNSET,
-            reminder_minutes_before=_UNSET
+            reminder_minutes_before=_UNSET,
+            assignee_ids=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -48097,7 +48343,11 @@ class Database:
         has_subject = subject is not None
         has_description = description is not None
         has_tag = tag is not None
-        has_assigned_to = assigned_to is not None
+        # Состав меняют либо новым полем, либо старым одиночным assigned_to.
+        # Пустой список тут невозможен по построению: _normalize_task_assignees
+        # на нём падает ASSIGNEE_REQUIRED, а None означает «состав не меняем» —
+        # иначе правка одной темы снимала бы с задачи всех исполнителей.
+        has_assigned_to = assigned_to is not None or assignee_ids is not _UNSET
         has_priority = priority is not _UNSET
         has_deadline = deadline_minutes is not _UNSET
         has_due_at = due_at is not _UNSET
@@ -48123,13 +48373,14 @@ class Database:
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.priority,
                     t.created_by, t.assigned_to,
-                    assignee.role, assignee.supervisor_id,
                     t.deadline_duration_minutes, t.due_at,
                     t.is_regulation, t.recurrence_type, t.recurrence_interval,
                     t.recurrence_next_at, t.created_at, t.estimate_minutes, t.planned_start_at,
-                    t.requested_by_id, t.requested_by_name, t.reminder_minutes_before
+                    t.requested_by_id, t.requested_by_name, t.reminder_minutes_before,
+                    -- Автор открытого запроса информации: по нему решается,
+                    -- снимать ли запрос при смене состава исполнителей.
+                    (SELECT m.author_id FROM task_messages m WHERE m.id = t.info_request_id)
                 FROM tasks t
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
             """, (task_id,))
             row = cursor.fetchone()
@@ -48142,37 +48393,38 @@ class Database:
             current_priority = (row[4] or 'normal').strip().lower() or 'normal'
             created_by = row[5]
             current_assigned_to = row[6]
-            assignee_role = row[7]
-            assignee_supervisor_id = row[8]
-            current_deadline_minutes = row[9]
-            current_due_at = row[10]
-            current_is_regulation = bool(row[11])
-            current_recurrence_type = (row[12] or '').strip().lower() or None
-            current_recurrence_interval = row[13]
-            current_recurrence_next_at = row[14]
-            current_created_at = row[15]
-            current_estimate_minutes = row[16]
-            current_planned_start_at = row[17]
-            current_requested_by_id = row[18]
-            current_requested_by_name = row[19]
-            current_reminder = row[20]
+            current_deadline_minutes = row[7]
+            current_due_at = row[8]
+            current_is_regulation = bool(row[9])
+            current_recurrence_type = (row[10] or '').strip().lower() or None
+            current_recurrence_interval = row[11]
+            current_recurrence_next_at = row[12]
+            current_created_at = row[13]
+            current_estimate_minutes = row[14]
+            current_planned_start_at = row[15]
+            current_requested_by_id = row[16]
+            current_requested_by_name = row[17]
+            current_reminder = row[18]
+            info_request_author_id = row[19]
+            current_assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
+            current_assignee_ids = [person_id for person_id, _role, _sv in current_assignee_scope]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, current_assigned_to, assignee_role,
-                                                    assignee_supervisor_id, current_requested_by_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, current_assignee_scope,
+                                                    current_requested_by_id):
                 raise PermissionError("TASK_FORBIDDEN")
 
             if created_by is None or int(created_by) != requester_id:
                 raise PermissionError("ONLY_CREATOR_CAN_EDIT")
 
             if has_assigned_to:
-                try:
-                    assigned_to_new = int(assigned_to)
-                except Exception:
-                    raise ValueError("INVALID_ASSIGNED_TO")
-                if assigned_to_new <= 0:
-                    raise ValueError("INVALID_ASSIGNED_TO")
+                assignee_ids_new = self._normalize_task_assignees(
+                    assignee_ids if assignee_ids is not _UNSET else assigned_to
+                )
             else:
-                assigned_to_new = int(current_assigned_to) if current_assigned_to is not None else None
+                assignee_ids_new = list(current_assignee_ids)
+            if not assignee_ids_new:
+                raise ValueError("ASSIGNEE_REQUIRED")
+            assigned_to_new = assignee_ids_new[0]
 
             subject_new = current_subject if not has_subject else (str(subject or '').strip())
             if not subject_new:
@@ -48263,7 +48515,11 @@ class Database:
                 changed_fields.append("tag")
             if priority_new != current_priority:
                 changed_fields.append("priority")
-            if assigned_to_new != current_assigned_to:
+            # Сравниваем множества, а не списки: смена порядка показа — это не
+            # изменение состава, и рассылать из-за неё уведомления не за что.
+            added_assignees = [pid for pid in assignee_ids_new if pid not in set(current_assignee_ids)]
+            removed_assignees = [pid for pid in current_assignee_ids if pid not in set(assignee_ids_new)]
+            if added_assignees or removed_assignees:
                 changed_fields.append("assigned_to")
             if deadline_minutes_new != current_deadline_minutes or due_at_new != current_due_at:
                 changed_fields.append("deadline")
@@ -48293,6 +48549,10 @@ class Database:
                     "priority": current_priority,
                     "assigned_to": current_assigned_to,
                     "previous_assigned_to": current_assigned_to,
+                    "assignees": list(current_assignee_ids),
+                    "previous_assignees": list(current_assignee_ids),
+                    "added_assignees": [],
+                    "removed_assignees": [],
                     "deadline_duration_minutes": current_deadline_minutes,
                     "due_at": self._task_dt_to_iso(current_due_at),
                     "is_regulation": current_is_regulation,
@@ -48332,14 +48592,16 @@ class Database:
                     'reminder_sent_at = NULL,'
                     if ('deadline' in changed_fields or 'reminder' in changed_fields) else ''
                 ),
-                # Задачу передали другому — открытый запрос информации снимаем:
-                # иначе постановщика вечно дёргает вопрос от человека, которого
-                # на задаче уже нет, а закрыть его некому (ответить не на что).
+                # Спрашивавшего сняли с задачи — открытый запрос информации
+                # снимаем: иначе постановщика вечно дёргает вопрос от человека,
+                # которого на задаче уже нет, а закрыть его некому (ответить не
+                # на что). Правило именно про АВТОРА вопроса, а не про смену
+                # первого исполнителя: пока автор в составе, его вопрос жив,
+                # даже если рядом появились или ушли коллеги.
                 reset_info_request_sql=(
                     'info_request_id = NULL, info_request_at = NULL,'
-                    if (assigned_to_new is not None
-                        and current_assigned_to is not None
-                        and int(assigned_to_new) != int(current_assigned_to)) else ''
+                    if (info_request_author_id is not None
+                        and int(info_request_author_id) in set(removed_assignees)) else ''
                 )
             ), (
                 subject_new,
@@ -48363,6 +48625,8 @@ class Database:
             updated_row = cursor.fetchone()
             updated_at = updated_row[0] if updated_row else None
 
+            self._sync_task_assignees_tx(cursor, task_id, assignee_ids_new, added_by=requester_id)
+
             if has_checklist:
                 cursor.execute("DELETE FROM task_checklist_items WHERE task_id = %s", (task_id,))
                 self._insert_task_checklist_items(cursor, task_id, checklist_items)
@@ -48378,6 +48642,12 @@ class Database:
                 "priority": priority_new,
                 "assigned_to": assigned_to_new,
                 "previous_assigned_to": current_assigned_to,
+                # Состав целиком и его диф: роут по added рассылает «вам поручили»,
+                # по removed — «с вас сняли», иначе снятый об этом не узнает.
+                "assignees": list(assignee_ids_new),
+                "previous_assignees": list(current_assignee_ids),
+                "added_assignees": list(added_assignees),
+                "removed_assignees": list(removed_assignees),
                 "deadline_duration_minutes": deadline_minutes_new,
                 "due_at": self._task_dt_to_iso(due_at_new),
                 "is_regulation": is_regulation_new,
@@ -48432,22 +48702,20 @@ class Database:
     """
 
     def _task_report_access_tx(self, cursor, task_id, requester_id, role):
-        """Возвращает (created_by, assigned_to) или бросает, если задача недоступна."""
+        """Возвращает (created_by, assignee_ids) или бросает, если задача недоступна."""
         cursor.execute("""
-            SELECT t.id, t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id, t.requested_by_id
+            SELECT t.id, t.created_by, t.requested_by_id
             FROM tasks t
-            LEFT JOIN users assignee ON assignee.id = t.assigned_to
             WHERE t.id = %s
         """, (int(task_id),))
         row = cursor.fetchone()
         if not row:
             raise ValueError("TASK_NOT_FOUND")
-        created_by, assigned_to, assignee_role, assignee_supervisor_id = row[1], row[2], row[3], row[4]
-        requested_by = row[5]
-        if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
-                                                assignee_supervisor_id, requested_by):
+        created_by, requested_by = row[1], row[2]
+        assignee_scope = self._task_assignee_scope_tx(cursor, int(task_id))
+        if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, requested_by):
             raise PermissionError("TASK_FORBIDDEN")
-        return created_by, assigned_to
+        return created_by, [person_id for person_id, _role, _supervisor in assignee_scope]
 
     def get_task_reports(self, task_id, requester_id, requester_role):
         requester_id = int(requester_id)
@@ -48473,9 +48741,12 @@ class Database:
         spent_norm = self._normalize_task_spent_minutes(spent_minutes)
 
         with self._get_cursor() as cursor:
-            created_by, assigned_to = self._task_report_access_tx(cursor, task_id, requester_id, role)
+            created_by, assignee_ids = self._task_report_access_tx(cursor, task_id, requester_id, role)
+            # Отчёт пишет ЛЮБОЙ исполнитель: они равноправны, и работу по этапам
+            # делает каждый. Автор отчёта виден в самой записи, а сумма
+            # трудозатрат по задаче складывается из отчётов всех участников.
             is_participant = (
-                (assigned_to is not None and int(assigned_to) == requester_id)
+                requester_id in assignee_ids
                 or (created_by is not None and int(created_by) == requester_id)
                 or role_has_min(role, 'admin')
             )
@@ -48676,24 +48947,28 @@ class Database:
         один» иначе проходит дважды, если исполнитель дважды щёлкнул кнопку.
         """
         cursor.execute("""
-            SELECT t.id, t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id,
+            SELECT t.id, t.created_by, t.assigned_to,
                    t.requested_by_id, t.status, t.info_request_id
             FROM tasks t
-            LEFT JOIN users assignee ON assignee.id = t.assigned_to
             WHERE t.id = %s
         """ + (" FOR UPDATE OF t" if lock else ""), (int(task_id),))
         row = cursor.fetchone()
         if not row:
             raise ValueError("TASK_NOT_FOUND")
-        if not self._task_visible_for_requester(role, requester_id, row[1], row[2], row[3], row[4], row[5]):
+        # Состав читаем отдельным запросом: блокировка остаётся на строке задачи
+        # (правило «открытый запрос один» защищает именно задачу), а связь под
+        # FOR UPDATE тянуть незачем.
+        assignee_scope = self._task_assignee_scope_tx(cursor, int(row[0]))
+        if not self._task_visible_for_requester(role, requester_id, row[1], assignee_scope, row[3]):
             raise PermissionError("TASK_FORBIDDEN")
         return {
             "id": row[0],
             "created_by": row[1],
             "assigned_to": row[2],
-            "requested_by_id": row[5],
-            "status": row[6],
-            "info_request_id": row[7]
+            "assignee_ids": [person_id for person_id, _role, _supervisor in assignee_scope],
+            "requested_by_id": row[3],
+            "status": row[4],
+            "info_request_id": row[5]
         }
 
     @staticmethod
@@ -48741,7 +49016,7 @@ class Database:
         with self._get_cursor() as cursor:
             task_row = self._task_message_access_tx(cursor, task_id, requester_id, role, lock=True)
             created_by = int(task_row.get('created_by') or 0)
-            assigned_to = int(task_row.get('assigned_to') or 0)
+            assignee_ids = list(task_row.get('assignee_ids') or [])
             answer_authority = self._task_answer_authority(task_row)
             is_owner_side = (
                 requester_id in (created_by, int(task_row.get('requested_by_id') or 0))
@@ -48750,7 +49025,9 @@ class Database:
             open_request_id = task_row.get('info_request_id')
 
             if kind_norm == 'request':
-                if requester_id != assigned_to:
+                # Спрашивает любой из исполнителей — работу делает каждый, и
+                # не хватать данных может каждому.
+                if requester_id not in assignee_ids:
                     raise PermissionError("ONLY_ASSIGNEE_ASKS")
                 # Ровно те же статусы, по которым причина «просят информацию»
                 # попадает в бейдж и колокол. Иначе на сданной задаче ушло бы
@@ -48760,6 +49037,10 @@ class Database:
                 # Спросить некого: постановка целиком своя (задача себе без поручителя).
                 if not answer_authority or answer_authority == requester_id:
                     raise ValueError("NO_ONE_TO_ASK")
+                # Открытый запрос по-прежнему ОДИН на задачу, а не на человека:
+                # правило постановщика не менялось, ответ он пишет один и виден
+                # он всем исполнителям. Пока вопрос коллеги не закрыт, второй
+                # исполнитель дожидается того же ответа.
                 if open_request_id:
                     raise ValueError("REQUEST_ALREADY_OPEN")
             elif kind_norm == 'answer':
@@ -48918,10 +49199,8 @@ class Database:
                     t.id, t.created_by, t.assigned_to, t.status, t.created_at,
                     t.is_backlog, t.backlog_rank, t.estimate_minutes, t.planned_start_at,
                     t.due_at, t.deadline_duration_minutes, t.subject,
-                    assignee.role, assignee.supervisor_id,
                     t.reminder_minutes_before, t.requested_by_id
                 FROM tasks t
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
             """, (task_id,))
             row = cursor.fetchone()
@@ -48939,17 +49218,18 @@ class Database:
             current_due_at = row[9]
             current_deadline_minutes = row[10]
             subject = row[11]
-            assignee_role = row[12]
-            assignee_supervisor_id = row[13]
-            current_reminder = row[14]
-            requested_by = row[15]
+            current_reminder = row[12]
+            requested_by = row[13]
+            assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
+            assignee_ids = [person_id for person_id, _role, _supervisor in assignee_scope]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
-                                                    assignee_supervisor_id, requested_by):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, requested_by):
                 raise PermissionError("TASK_FORBIDDEN")
 
             is_creator = created_by is not None and int(created_by) == requester_id
-            is_assignee = assigned_to is not None and int(assigned_to) == requester_id
+            # Карточку тащит любой исполнитель: статус у задачи один, и «взял в
+            # работу» от соисполнителя — такое же законное движение.
+            is_assignee = requester_id in assignee_ids
             is_admin = role_has_min(role, 'admin')
             if not (is_creator or is_assignee or is_admin):
                 raise PermissionError("TASK_FORBIDDEN")
@@ -49071,10 +49351,8 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
-                    t.id, t.created_by, t.assigned_to,
-                    assignee.role, assignee.supervisor_id
+                    t.id, t.created_by, t.assigned_to
                 FROM tasks t
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
             """, (task_id,))
             row = cursor.fetchone()
@@ -49083,10 +49361,10 @@ class Database:
 
             created_by = row[1]
             assigned_to = row[2]
-            assignee_role = row[3]
-            assignee_supervisor_id = row[4]
+            # Сами строки состава уйдут каскадом по task_id — чистить не нужно.
+            assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role, assignee_supervisor_id):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope):
                 raise PermissionError("TASK_FORBIDDEN")
 
             cursor.execute("""
@@ -49387,6 +49665,15 @@ class Database:
                 """, (root_id,))
                 checklist_rows = cursor.fetchall()
 
+                # Состав шаблона копируется в каждую итерацию целиком. Иначе
+                # регламент, поручённый троим, каждый раз рождал бы задачу на
+                # одного — молча, без единой ошибки в логах.
+                template_assignee_ids = self._task_assignee_ids_tx(cursor, root_id)
+                if not template_assignee_ids and assigned_to is not None:
+                    # Шаблон старше состава (или бэкфилл не дошёл) — берём
+                    # скалярного исполнителя, задача без исполнителя не бывает.
+                    template_assignee_ids = [int(assigned_to)]
+
                 occurrence_count = 0
                 latest_next_at = next_at
                 while latest_next_at and latest_next_at <= now and occurrence_count < int(max_occurrences_per_template or 3):
@@ -49435,6 +49722,11 @@ class Database:
                     ))
                     created_id = cursor.fetchone()[0]
                     created_task_ids.append(created_id)
+
+                    if template_assignee_ids:
+                        self._sync_task_assignees_tx(
+                            cursor, created_id, template_assignee_ids, added_by=created_by
+                        )
 
                     cursor.execute("""
                         INSERT INTO task_status_history (task_id, status_code, changed_by)
@@ -49492,7 +49784,7 @@ class Database:
             cursor.execute("""
                 SELECT
                     COUNT(*) FILTER (
-                        WHERE t.assigned_to = %s
+                        WHERE {assignee_exists}
                           AND t.is_backlog = FALSE
                           AND t.status IN ('assigned', 'in_progress', 'returned')
                           AND t.due_at IS NOT NULL
@@ -49500,7 +49792,7 @@ class Database:
                           AND (r.task_id IS NULL OR r.kind <> 'overdue' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
-                        WHERE t.assigned_to = %s
+                        WHERE {assignee_exists}
                           AND t.is_backlog = FALSE
                           AND t.status = 'returned'
                           AND (t.due_at IS NULL OR t.due_at >= %s)
@@ -49514,7 +49806,7 @@ class Database:
                         WHERE t.info_request_id IS NOT NULL
                           AND t.status IN ('assigned', 'in_progress', 'returned')
                           AND COALESCE(t.requested_by_id, t.created_by) = %s
-                          AND t.assigned_to IS DISTINCT FROM %s
+                          AND NOT {assignee_exists}
                           AND (r.task_id IS NULL OR r.kind <> 'info' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
@@ -49523,14 +49815,14 @@ class Database:
                           AND (r.task_id IS NULL OR r.kind <> 'review' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
-                        WHERE t.assigned_to = %s
+                        WHERE {assignee_exists}
                           AND t.is_backlog = FALSE
                           AND t.status = 'assigned'
                           AND (t.due_at IS NULL OR t.due_at >= %s)
                           AND (r.task_id IS NULL OR r.kind <> 'fresh' OR r.seen_at < t.updated_at)
                     )::INT,
                     COUNT(*) FILTER (
-                        WHERE t.assigned_to = %s
+                        WHERE {assignee_exists}
                           AND t.status = 'accepted'
                           -- Сам себе принял — уведомлять не о чем.
                           AND COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %s
@@ -49540,7 +49832,7 @@ class Database:
                     )::INT
                 FROM tasks t
                 LEFT JOIN task_action_reads r ON r.task_id = t.id AND r.user_id = %s
-            """, (
+            """.format(assignee_exists=self._TASK_ASSIGNEE_EXISTS_SQL), (
                 requester_id, now,
                 requester_id, now,
                 requester_id, requester_id,
@@ -49669,7 +49961,9 @@ class Database:
             pass
         elif role in ('sv', 'trainer'):
             # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
-            conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            conditions.append(
+                f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
+            )
             params.extend([requester_id, requester_id, requester_id])
         else:
             return None
@@ -49683,11 +49977,15 @@ class Database:
             params.extend(department_params)
 
         if only_my_flag:
-            conditions.append("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)")
+            conditions.append(
+                f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
+            )
             params.extend([requester_id, requester_id, requester_id])
 
         if mine_norm == 'assignee':
-            conditions.append("t.assigned_to = %s")
+            # Ключевой фильтр вкладки «Мои задачи»: я среди исполнителей, а не
+            # «я тот единственный исполнитель».
+            conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)
             params.append(requester_id)
         elif mine_norm == 'creator':
             conditions.append("(t.created_by = %s OR t.requested_by_id = %s)")
@@ -49696,8 +49994,11 @@ class Database:
         person_board_id = None
         if person_id_norm is not None and person_scope_norm == 'any':
             # Доска сотрудника: фильтр уходит в базовые условия, чтобы summary считал
-            # именно его задачи, а не весь отдел.
-            conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+            # именно его задачи, а не весь отдел. Соисполнителю нужна своя доска
+            # ровно так же, как «основному».
+            conditions.append(
+                f"(t.created_by = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
+            )
             params.extend([person_id_norm, person_id_norm])
             person_board_id = person_id_norm
             person_id_norm = None
@@ -49809,11 +50110,17 @@ class Database:
 
         if search_text:
             like_pattern = f"%{search_text}%"
+            # Ищем по ЛЮБОМУ исполнителю, но через EXISTS: джойн на состав
+            # вернул бы задачу с тремя исполнителями трижды.
             filtered_conditions.append("""
                 (
                     t.subject ILIKE %s
                     OR COALESCE(t.description, '') ILIKE %s
-                    OR COALESCE(assignee.name, '') ILIKE %s
+                    OR EXISTS (
+                        SELECT 1 FROM task_assignees ta_s
+                        JOIN users au ON au.id = ta_s.user_id
+                        WHERE ta_s.task_id = t.id AND COALESCE(au.name, '') ILIKE %s
+                    )
                     OR COALESCE(creator.name, '') ILIKE %s
                 )
             """)
@@ -49840,18 +50147,22 @@ class Database:
             filtered_conditions.append("t.is_backlog = FALSE")
 
         if person_id_norm is not None:
+            # «Входящие/исходящие» по человеку: исполнителем считается любой из
+            # состава, поэтому «он исполняет» — это участие, а не равенство.
             if person_scope_norm == 'incoming':
-                filtered_conditions.append("t.assigned_to = %s")
+                filtered_conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)
                 filtered_params.append(requester_id)
                 filtered_conditions.append("t.created_by = %s")
                 filtered_params.append(person_id_norm)
             elif person_scope_norm == 'outgoing':
                 filtered_conditions.append("t.created_by = %s")
                 filtered_params.append(requester_id)
-                filtered_conditions.append("t.assigned_to = %s")
+                filtered_conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)
                 filtered_params.append(person_id_norm)
             else:
-                filtered_conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+                filtered_conditions.append(
+                    f"(t.created_by = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
+                )
                 filtered_params.extend([person_id_norm, person_id_norm])
 
         base_where_sql = f"WHERE {' AND '.join(base_conditions)}" if base_conditions else ""
@@ -49885,7 +50196,14 @@ class Database:
                               AND t.status NOT IN ('completed', 'accepted')
                         )::INT AS overdue_count,
                         COUNT(*) FILTER (
-                            WHERE t.created_by = %s AND t.assigned_to <> %s
+                            -- «Поручено другим»: я поставил, и среди исполнителей
+                            -- есть кто-то кроме меня. Задача «я + коллега» сюда
+                            -- попадает — коллеге я её всё-таки поручил.
+                            WHERE t.created_by = %s
+                              AND EXISTS (
+                                  SELECT 1 FROM task_assignees ta_d
+                                  WHERE ta_d.task_id = t.id AND ta_d.user_id <> %s
+                              )
                         )::INT AS delegated_count
                     FROM tasks t
                     {base_where_sql}
@@ -49902,10 +50220,10 @@ class Database:
                     "delegated": int(summary_row[7] or 0)
                 }
 
-            # JOIN'ы к users нужны только поиску по имени — в остальных случаях
-            # счёт идёт по одной таблице.
+            # JOIN к users нужен только поиску по имени постановщика — имена
+            # исполнителей ищет EXISTS внутри самого условия, поэтому строк
+            # по-прежнему столько же, сколько задач, и COUNT(*) честный.
             count_joins_sql = """
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
             """ if search_text else ""
             cursor.execute(f"""
@@ -49974,8 +50292,24 @@ class Database:
             checklist_rows = []
             report_rows = []
             message_rows = []
+            assignee_rows = []
             if task_rows:
                 task_ids = [row[0] for row in task_rows]
+
+                # Состав исполнителей — отдельным пакетным запросом, как история
+                # и чеклист. Джойном его тянуть нельзя: главный запрос обязан
+                # оставаться «одна строка = одна задача», иначе LIMIT перестанет
+                # означать «столько-то карточек».
+                cursor.execute("""
+                    SELECT
+                        ta.task_id, u.id, u.name, u.role, u.supervisor_id,
+                        u.avatar_bucket, u.avatar_blob_path
+                    FROM task_assignees ta
+                    JOIN users u ON u.id = ta.user_id
+                    WHERE ta.task_id = ANY(%s)
+                    ORDER BY ta.task_id ASC, ta.position ASC, ta.user_id ASC
+                """, (task_ids,))
+                assignee_rows = cursor.fetchall()
 
                 cursor.execute("""
                     SELECT
@@ -50071,6 +50405,17 @@ class Database:
         for row in report_rows:
             report_map[row[1]].append(self._serialize_task_report(row))
 
+        assignee_map = defaultdict(list)
+        for row in assignee_rows:
+            assignee_map[row[0]].append({
+                "id": row[1],
+                "name": row[2],
+                "role": row[3],
+                "supervisor_id": row[4],
+                "avatar_bucket": row[5],
+                "avatar_blob_path": row[6]
+            })
+
         # Уточнения: файлы к ним раскладываются из уже выбранных вложений задачи,
         # пятый запрос ради того же самого был бы лишним.
         message_map = defaultdict(list)
@@ -50115,6 +50460,8 @@ class Database:
                 "recurrence_next_at": self._task_dt_to_iso(row[17]),
                 "regulation_parent_id": row[18],
                 "regulation_iteration": row[19],
+                # Первый исполнитель отдельным ключом — на него смотрят места,
+                # где человек ровно один (аватар в списке, группировка, бот).
                 "assignee": {
                     "id": row[20],
                     "name": row[21],
@@ -50123,6 +50470,9 @@ class Database:
                     "avatar_bucket": row[24],
                     "avatar_blob_path": row[25]
                 } if row[20] else None,
+                # Полный состав по порядку показа. Права у исполнителей равные,
+                # первый в списке — просто первый.
+                "assignees": assignee_map.get(task_id, []),
                 "creator": {
                     "id": row[26],
                     "name": row[27],
@@ -50190,14 +50540,16 @@ class Database:
 
         person_scope_norm = (person_scope or '').strip().lower() or None
         if person_id_rest is not None:
+            # Тот же предикат участия, что в списке: охват выгрузки обязан
+            # совпадать с тем, что человек видит на экране.
             if person_scope_norm == 'incoming':
-                conditions.append("t.assigned_to = %s AND t.created_by = %s")
+                conditions.append(f"{self._TASK_ASSIGNEE_EXISTS_SQL} AND t.created_by = %s")
                 params.extend([int(requester_id), person_id_rest])
             elif person_scope_norm == 'outgoing':
-                conditions.append("t.created_by = %s AND t.assigned_to = %s")
+                conditions.append(f"t.created_by = %s AND {self._TASK_ASSIGNEE_EXISTS_SQL}")
                 params.extend([int(requester_id), person_id_rest])
             else:
-                conditions.append("(t.created_by = %s OR t.assigned_to = %s)")
+                conditions.append(f"(t.created_by = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})")
                 params.extend([person_id_rest, person_id_rest])
 
         where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -50208,10 +50560,16 @@ class Database:
                     t.is_backlog, t.created_at, t.planned_start_at, t.started_at,
                     t.due_at, t.completed_at, t.completion_summary,
                     t.estimate_minutes, spent.total,
-                    assignee.name, creator.name,
+                    -- Имена собираем агрегатом в подзапросе, а не джойном:
+                    -- джойн размножил бы задачу по числу исполнителей и съел
+                    -- потолок строк выгрузки.
+                    (SELECT string_agg(au.name, ', ' ORDER BY ta_x.position, ta_x.user_id)
+                       FROM task_assignees ta_x
+                       JOIN users au ON au.id = ta_x.user_id
+                      WHERE ta_x.task_id = t.id),
+                    creator.name,
                     COALESCE(origin_user.name, t.requested_by_name, creator.name)
                 FROM tasks t
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
                 LEFT JOIN LATERAL (
@@ -50267,10 +50625,8 @@ class Database:
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
-                    t.id, t.created_by, t.assigned_to, t.status,
-                    assignee.role, assignee.supervisor_id, t.requested_by_id
+                    t.id, t.created_by, t.assigned_to, t.status, t.requested_by_id
                 FROM tasks t
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE t.id = %s
             """, (task_id,))
             row = cursor.fetchone()
@@ -50280,18 +50636,21 @@ class Database:
             created_by = row[1]
             assigned_to = row[2]
             current_status = row[3]
-            assignee_role = row[4]
-            assignee_supervisor_id = row[5]
-            requested_by = row[6]
+            requested_by = row[4]
+            assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
+            assignee_ids = [person_id for person_id, _role, _supervisor in assignee_scope]
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
-                                                    assignee_supervisor_id, requested_by):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, requested_by):
                 raise PermissionError("TASK_FORBIDDEN")
 
-            is_assignee = assigned_to is not None and int(assigned_to) == requester_id
+            # Статус у задачи ОДИН, а исполнителей может быть несколько: взять в
+            # работу и сдать вправе любой из них, и первый же перевод двигает
+            # задачу целиком. Личных статусов раздел не заводит намеренно —
+            # иначе «в работе» перестало бы отвечать на вопрос «идёт или нет».
+            is_assignee = requester_id in assignee_ids
             # Приёмку итога делает поручитель (или постановщик, если поручителя нет),
             # а не исполнитель — свою работу себе не принимают.
-            is_reviewer = self._task_can_review(role, requester_id, created_by, assigned_to, requested_by)
+            is_reviewer = self._task_can_review(role, requester_id, created_by, assignee_scope, requested_by)
 
             target_status = None
             history_status = None
@@ -50449,11 +50808,10 @@ class Database:
             cursor.execute("""
                 SELECT
                     ci.id, ci.task_id, ci.title, ci.position, ci.is_required,
-                    t.created_by, t.assigned_to, assignee.role, assignee.supervisor_id,
+                    t.created_by, t.assigned_to,
                     ci.is_done, ci.result_note, t.requested_by_id
                 FROM task_checklist_items ci
                 JOIN tasks t ON t.id = ci.task_id
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE ci.id = %s AND ci.task_id = %s
             """, (checklist_item_id, task_id))
             row = cursor.fetchone()
@@ -50462,14 +50820,15 @@ class Database:
 
             created_by = row[5]
             assigned_to = row[6]
-            assignee_role = row[7]
-            assignee_supervisor_id = row[8]
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
-                                                    assignee_supervisor_id, row[11]):
+            # Пункт чеклиста — общее рабочее поле задачи: отмечает его любой, кто
+            # задачу видит. Это ровно то, о чём просили: «выполнять задачу по
+            # этапам может каждый из них». Кто отметил, видно в completed_by.
+            assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
+            if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, row[9]):
                 raise PermissionError("TASK_FORBIDDEN")
 
-            was_done = bool(row[9])
-            current_note = row[10]
+            was_done = bool(row[7])
+            current_note = row[8]
             # Determine the note value: only change it when explicitly provided.
             if update_note:
                 cleaned_note = (result_note or '').strip()
@@ -50551,11 +50910,9 @@ class Database:
                 SELECT
                     a.id, a.file_name, a.content_type, a.file_size, a.file_data, a.created_at,
                     COALESCE(a.storage_type, 'db'), a.gcs_bucket, a.gcs_blob_path,
-                    t.id, t.created_by, t.assigned_to,
-                    assignee.role, assignee.supervisor_id, t.requested_by_id
+                    t.id, t.created_by, t.assigned_to, t.requested_by_id
                 FROM task_attachments a
                 JOIN tasks t ON t.id = a.task_id
-                LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 WHERE a.id = %s
             """, (attachment_id,))
             row = cursor.fetchone()
@@ -50563,12 +50920,11 @@ class Database:
                 return None
 
             created_by = row[10]
-            assigned_to = row[11]
-            assignee_role = row[12]
-            assignee_supervisor_id = row[13]
+            # Соисполнитель видит задачу, значит видит и её файлы: иначе он
+            # получал бы 403 на вложении задачи, открытой у него на экране.
+            assignee_scope = self._task_assignee_scope_tx(cursor, int(row[9]))
 
-            if not self._task_visible_for_requester(role, requester_id, created_by, assigned_to, assignee_role,
-                                                    assignee_supervisor_id, row[14]):
+            if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, row[12]):
                 raise PermissionError("TASK_FORBIDDEN")
 
             storage_type = row[6] or 'db'

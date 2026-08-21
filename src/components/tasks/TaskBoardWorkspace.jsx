@@ -7,6 +7,7 @@ import FullscreenSheet from '../common/FullscreenSheet';
 import { ACTION_NEED_META } from './taskActionNeeds';
 import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
 import { groupTasksByDay } from './boardGrouping';
+import { taskAssignees, taskAssigneesLabel } from './taskAssignees';
 
 export { BOARD_COLUMN_QUERY, BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, boardQueryParams, normalizeBoardChunk } from './boardQuery';
 
@@ -226,10 +227,10 @@ export const resolveBoardDrop = (task, toColumn, ctx) => {
   const from = columnOfTask(task);
   if (from === toColumn) return { type: 'noop' };
 
-  const assigneeId = Number(task?.assignee?.id || 0);
   const creatorId = Number(task?.creator?.id || 0);
   const requesterId = Number(task?.requested_by?.id || 0);
-  const isAssignee = assigneeId === ctx.currentUserId;
+  // Принять в работу и сдать может любой исполнитель — они равноправны.
+  const isAssignee = taskAssignees(task).some((person) => Number(person.id) === ctx.currentUserId);
   const isCreator = creatorId === ctx.currentUserId;
   const canPlan = isCreator || ctx.isAdmin;
   // Приёмка за поручителем (или постановщиком). Свою работу себе не принимают —
@@ -341,28 +342,59 @@ const FlowArrow = () => (
   </svg>
 );
 
+/* Стопка лиц исполнителей: до трёх аватаров с наложением, дальше «+N».
+   Обводка цветом карточки нужна, чтобы наложенные лица не слипались. */
+const AssigneeFaces = ({ people, size = 20, max = 3 }) => {
+  const list = Array.isArray(people) ? people.filter(Boolean) : [];
+  if (list.length < 2) return <Avatar person={list[0]} size={size} />;
+  const shown = list.slice(0, max);
+  const rest = list.length - shown.length;
+  return (
+    <span className="flex shrink-0 items-center">
+      {shown.map((person, index) => (
+        <span key={person?.id ?? index} className={index ? '-ml-1.5 rounded-full ring-2 ring-white' : 'rounded-full ring-2 ring-white'}>
+          <Avatar person={person} size={size} />
+        </span>
+      ))}
+      {rest > 0 && (
+        <span
+          className="-ml-1.5 inline-grid shrink-0 place-items-center rounded-full bg-slate-300 font-semibold text-slate-600 ring-2 ring-white tabular-nums"
+          style={{ width: size, height: size, fontSize: Math.max(8.5, Math.round(size * 0.34 * 10) / 10) }}
+        >
+          +{rest}
+        </span>
+      )}
+    </span>
+  );
+};
+
 /**
  * Лица задачи на карточке: «кто поручил → кто исполняет».
  * На доске конкретного сотрудника его собственное лицо не повторяем в каждой карточке —
  * оно уже в шапке доски, а полезен ровно второй участник.
+ * Исполнителей может быть несколько — тогда вместо одного лица стоит их стопка.
  */
 const CardFaces = ({ task, focusPersonId = 0 }) => {
   const creator = task?.creator;
-  const assignee = task?.assignee;
+  const assignees = taskAssignees(task);
   const creatorId = Number(creator?.id || 0);
-  const assigneeId = Number(assignee?.id || 0);
   const creatorName = creator?.name || '—';
-  const assigneeName = assignee?.name || '—';
+  const assigneeName = taskAssigneesLabel(task);
+  const assigneeIds = assignees.map((person) => Number(person.id));
+  // «Своя инициатива» — только когда постановщик и есть весь состав целиком:
+  // поручив задачу ещё кому-то, он уже не единственный исполнитель.
+  const isSoloOwn = creatorId && assigneeIds.length === 1 && assigneeIds[0] === creatorId;
 
-  if (creatorId && creatorId === assigneeId) {
+  if (isSoloOwn) {
     return (
       <span className="flex shrink-0 items-center" title={`Своя инициатива: ${assigneeName}`}>
-        <Avatar person={assignee} size={20} />
+        <Avatar person={assignees[0]} size={20} />
       </span>
     );
   }
 
-  if (focusPersonId && assigneeId === focusPersonId) {
+  // Доска сотрудника: он среди исполнителей — показываем только постановщика.
+  if (focusPersonId && assigneeIds.includes(focusPersonId)) {
     return (
       <span className="flex shrink-0 items-center" title={`Поручил: ${creatorName}`}>
         <Avatar person={creator} size={20} />
@@ -374,7 +406,7 @@ const CardFaces = ({ task, focusPersonId = 0 }) => {
     return (
       <span className="flex shrink-0 items-center gap-0.5" title={`Исполнитель: ${assigneeName}`}>
         <FlowArrow />
-        <Avatar person={assignee} size={20} />
+        <AssigneeFaces people={assignees} />
       </span>
     );
   }
@@ -383,7 +415,7 @@ const CardFaces = ({ task, focusPersonId = 0 }) => {
     <span className="flex shrink-0 items-center gap-0.5" title={`${creatorName} → ${assigneeName}`}>
       <Avatar person={creator} size={20} />
       <FlowArrow />
-      <Avatar person={assignee} size={20} />
+      <AssigneeFaces people={assignees} />
     </span>
   );
 };
@@ -714,7 +746,7 @@ const BacklogRow = ({
         <span className="block truncate text-[13.5px] font-medium text-slate-800">{task?.subject}</span>
         <span className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-slate-400">
           <span className="truncate">{TAG_LABEL[task?.tag] || 'Задача'}</span>
-          {task?.assignee?.name && <span className="truncate">· {task.assignee.name}</span>}
+          {taskAssignees(task).length > 0 && <span className="truncate">· {taskAssigneesLabel(task)}</span>}
         </span>
       </span>
 
@@ -1512,7 +1544,7 @@ const TimelineView = ({ tasks, onOpen }) => {
                     <PriorityDot priority={task?.priority} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[12.5px] font-medium text-slate-800">{task.subject}</span>
-                      <span className="block truncate text-[11px] text-slate-400">{task?.assignee?.name || '—'}</span>
+                      <span className="block truncate text-[11px] text-slate-400">{taskAssigneesLabel(task)}</span>
                     </span>
                   </div>
 

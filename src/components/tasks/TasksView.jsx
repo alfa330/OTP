@@ -28,6 +28,13 @@ import CustomSelect from '../ui/CustomSelect';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 import { boardQueryParams, scopeQueryParams } from './boardQuery';
 import { planTaskFocus, shouldOpenFetchedTask } from './taskFocus';
+import {
+  TASK_MAX_ASSIGNEES,
+  isTaskAssignee,
+  taskAssigneeIds,
+  taskAssignees,
+  taskAssigneesLabel,
+} from './taskAssignees';
 import { stripTechnicalQueryParams } from '../../utils/urlHygiene';
 import {
   TASK_DEPARTMENT_ALL,
@@ -415,6 +422,9 @@ styleTag.textContent = `
     white-space: nowrap;
   }
   .tv-composer-assignee .tv-select, .tv-composer-assignee .tv-person-select { flex: 1; }
+  /* Выбранные исполнители в кнопке селектора: стопка лиц + имя первого. */
+  .tv-assignee-value { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+  .tv-assignee-value-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tv-composer-self {
     flex: 0 0 auto;
     padding: 6px 11px; border-radius: 8px;
@@ -775,6 +785,17 @@ styleTag.textContent = `
     object-fit: cover;
     display: block;
   }
+  /* Стопка аватаров: несколько исполнителей в ширину одного чипа. Обводка
+     цветом фона нужна, чтобы наложенные лица не слипались в кашу. */
+  .tv-avatar-stack { display: inline-flex; align-items: center; flex-shrink: 0; }
+  .tv-avatar-stacked { box-shadow: 0 0 0 2px var(--surface); }
+  .tv-avatar-stacked + .tv-avatar-stacked { margin-left: -6px; }
+  .tv-avatar-rest {
+    background: #dcd8d0;
+    font-size: 8.5px;
+    letter-spacing: -.2px;
+  }
+  .tv-task-row-assignee-chip.is-stack { max-width: none; }
   .tv-task-row-date {
     font-size: 11.5px;
     color: var(--ink-3);
@@ -1655,10 +1676,12 @@ styleTag.textContent = `
 
   /* ── Participants ── */
   .tv-participants {
-    display: flex; gap: 16px;
+    display: flex; gap: 16px; flex-wrap: wrap;
   }
+  /* Исполнителей может быть несколько, поэтому карточки участников переносятся,
+     а не сжимаются до нечитаемых огрызков. */
   .tv-participant {
-    display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+    display: flex; align-items: center; gap: 8px; flex: 1 1 180px; min-width: 0;
   }
   .tv-participant-avatar {
     width: 32px; height: 32px; border-radius: 50%;
@@ -2861,11 +2884,11 @@ const WORKSPACE_TABS = [
  * иначе задача навсегда осталась бы на проверке. Те же правила проверяет API.
  */
 export const canReviewTask = (task, currentUserId, currentUserRole) => {
-  const assigneeId = Number(task?.assignee?.id || 0);
   const creatorId = Number(task?.creator?.id || 0);
   const requesterId = Number(task?.requested_by?.id || 0);
   const authorityId = requesterId || creatorId;
-  const isAssignee = assigneeId === currentUserId;
+  // Свою работу не принимает НИ ОДИН из исполнителей, а не только первый.
+  const isAssignee = isTaskAssignee(task, currentUserId);
 
   if (authorityId && authorityId === currentUserId) return true;
   if (isAssignee) return false;
@@ -2873,9 +2896,9 @@ export const canReviewTask = (task, currentUserId, currentUserRole) => {
 };
 
 const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
-  const assigneeId = Number(task?.assignee?.id || 0);
   const creatorId  = Number(task?.creator?.id  || 0);
-  const isAssignee = assigneeId === currentUserId;
+  // Принять в работу и сдать может любой исполнитель — они равноправны.
+  const isAssignee = isTaskAssignee(task, currentUserId);
   const isCreator  = creatorId === currentUserId;
   const isSuperAdmin = normalizeRole(currentUserRole) === 'super_admin';
   const isAdmin    = isAdminLikeRole(normalizeRole(currentUserRole));
@@ -3180,7 +3203,7 @@ const EMPTY_TASK_FORM = {
   description: '',
   tag: 'task',
   priority: 'normal',
-  assignedTo: '',
+  assigneeIds: [],
   deadlineDays: '',
   deadlineHours: '',
   deadlineMinutes: '',
@@ -3193,6 +3216,16 @@ const EMPTY_TASK_FORM = {
   requestedById: '',
   requestedByName: '',
   reminderMinutes: '',
+};
+
+export { TASK_MAX_ASSIGNEES, isTaskAssignee, taskAssignees } from './taskAssignees';
+
+/* Список исполнителей для формы: тот же состав, но с запасным вариантом на
+   случай пустой задачи (создание «себе» из закреплённой карточки). */
+const formAssigneeIds = (task, fallbackAssignedTo = '') => {
+  const ids = taskAssigneeIds(task);
+  if (ids.length) return ids;
+  return fallbackAssignedTo ? [String(fallbackAssignedTo)] : [];
 };
 
 const buildEmptyTaskForm = (overrides = {}) => ({
@@ -3208,7 +3241,7 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     description: task?.description || '',
     tag: task?.tag || 'task',
     priority: task?.priority || 'normal',
-    assignedTo: String(task?.assignee?.id || fallbackAssignedTo || ''),
+    assigneeIds: formAssigneeIds(task, fallbackAssignedTo),
     deadlineDays: deadline.days,
     deadlineHours: deadline.hours,
     deadlineMinutes: deadline.minutes,
@@ -3236,7 +3269,9 @@ const buildTaskJsonPayload = (values) => ({
   description: String(values.description || '').trim(),
   tag: values.tag || 'task',
   priority: values.priority || 'normal',
-  assigned_to: Number(values.assignedTo || 0),
+  // Первый исполнитель уходит и отдельным полем: у сервера это tasks.assigned_to.
+  assigned_to: Number((values.assigneeIds || [])[0] || 0),
+  assignee_ids: (values.assigneeIds || []).map(Number).filter((id) => id > 0),
   deadline_days: numberFieldValue(values.deadlineDays),
   deadline_hours: numberFieldValue(values.deadlineHours),
   deadline_minutes: numberFieldValue(values.deadlineMinutes),
@@ -3261,6 +3296,7 @@ const appendTaskFormData = (body, values) => {
   body.append('tag', payload.tag);
   body.append('priority', payload.priority);
   body.append('assigned_to', String(payload.assigned_to || ''));
+  body.append('assignee_ids', payload.assignee_ids.join(','));
   body.append('deadline_days', payload.deadline_days);
   body.append('deadline_hours', payload.deadline_hours);
   body.append('deadline_minutes', payload.deadline_minutes);
@@ -3392,10 +3428,15 @@ const initials = (name = '') => {
   return (parts[0]?.[0] || '?').toUpperCase();
 };
 
-const groupTasksByPerson = (list, getPerson) => {
+/* getPeople может вернуть и одного человека, и список. Задача с несколькими
+   исполнителями попадает в группу КАЖДОГО из них: иначе соисполнитель не нашёл
+   бы её у себя, а в этом и весь смысл нескольких исполнителей. */
+const groupTasksByPerson = (list, getPeople) => {
   const groups = new Map();
   list.forEach((task) => {
-    const person = getPerson(task) || {};
+    const picked = getPeople(task);
+    const people = (Array.isArray(picked) ? picked : [picked]).filter(Boolean);
+    (people.length ? people : [{}]).forEach((person) => {
     const idNum = Number(person?.id || 0);
     const name = (person?.name || '-').trim() || '-';
     const avatarUrl = (person?.avatar_url || '').trim();
@@ -3418,6 +3459,7 @@ const groupTasksByPerson = (list, getPerson) => {
     if (DONE_STATUSES.has(task?.status)) group.done += 1;
     else if (NOT_ACCEPTED_STATUSES.has(task?.status)) group.notAccepted += 1;
     else group.active += 1;
+    });
   });
   return Array.from(groups.values()).sort((a, b) =>
     a.name.localeCompare(b.name, 'ru-RU', { sensitivity: 'base' })
@@ -3465,6 +3507,103 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
       : initials(name)}
   </span>
 );
+
+/* Исполнители на карточке. Один — как было: аватар и имя. Несколько — стопка
+   лиц без имён: три имени в строку не влезают, а обрезанные «Айгуль…, Серг…»
+   читаются хуже, чем аватары. Полный список — в подсказке и для скринридера. */
+const AssigneeStack = React.memo(({ people, max = 3 }) => {
+  const list = Array.isArray(people) ? people.filter(Boolean) : [];
+  const names = list.length ? list.map((person) => person?.name || '—').join(', ') : '—';
+  if (list.length < 2) {
+    return (
+      <span className="tv-task-row-assignee-chip" title={names}>
+        <AvatarCircle className="tv-avatar-xs" name={names} avatarUrl={list[0]?.avatar_url || ''} />
+        <span className="tv-task-row-assignee-name">{names}</span>
+      </span>
+    );
+  }
+  const shown = list.slice(0, max);
+  const rest = list.length - shown.length;
+  return (
+    <span className="tv-task-row-assignee-chip is-stack" title={names} aria-label={`Исполнители: ${names}`}>
+      <span className="tv-avatar-stack">
+        {shown.map((person, index) => (
+          <AvatarCircle
+            key={person?.id ?? index}
+            className="tv-avatar-xs tv-avatar-stacked"
+            name={person?.name || '—'}
+            avatarUrl={person?.avatar_url || ''}
+          />
+        ))}
+        {rest > 0 && <span className="tv-avatar-xs tv-avatar-stacked tv-avatar-rest">+{rest}</span>}
+      </span>
+    </span>
+  );
+});
+
+/* Поле «Исполнители». Пока выбран один человек, выглядит и ведёт себя точно как
+   прежний одиночный селектор — на экране не появляется ни одного нового
+   элемента. Со второго человека в кнопке встаёт стопка лиц и «и ещё N». */
+const AssigneeField = ({
+  id,
+  value,
+  options,
+  people = [],
+  onChange,
+  disabled = false,
+  isLoading = false,
+  ariaLabel = 'Исполнители',
+}) => {
+  const byId = useMemo(() => {
+    const map = new Map();
+    (people || []).forEach((person) => {
+      if (Number(person?.id || 0) > 0) map.set(String(person.id), person);
+    });
+    return map;
+  }, [people]);
+
+  const renderValue = useCallback((ids) => {
+    const picked = ids.map((personId) => byId.get(String(personId))).filter(Boolean);
+    if (!picked.length) return `Выбрано: ${ids.length}`;
+    if (picked.length === 1) return picked[0].name;
+    return (
+      <span className="tv-assignee-value">
+        <span className="tv-avatar-stack">
+          {picked.slice(0, 3).map((person) => (
+            <AvatarCircle
+              key={person.id}
+              className="tv-avatar-xs tv-avatar-stacked"
+              name={person.name}
+              avatarUrl={person.avatar_url || ''}
+            />
+          ))}
+        </span>
+        <span className="tv-assignee-value-text">
+          {picked[0].name} и ещё {picked.length - 1}
+        </span>
+      </span>
+    );
+  }, [byId]);
+
+  return (
+    <CustomSelect
+      id={id}
+      className="tv-person-select"
+      variant="ios"
+      ariaLabel={ariaLabel}
+      multiple
+      maxSelected={TASK_MAX_ASSIGNEES}
+      value={value}
+      options={options}
+      onChange={(next) => onChange(Array.isArray(next) ? next : [])}
+      disabled={disabled || isLoading}
+      placeholder={isLoading ? 'Загрузка...' : 'Выберите сотрудника'}
+      renderValue={renderValue}
+      searchable
+      searchPlaceholder="Поиск по имени…"
+    />
+  );
+};
 
 const TaskFileDropzone = React.memo(({
   files = [],
@@ -4272,7 +4411,8 @@ const TaskComposerForm = ({
   );
   const canAssignSelf = Number(currentUserId) > 0
     && recipients.some((person) => Number(person.id) === Number(currentUserId));
-  const isSelfAssigned = String(values.assignedTo || '') === String(currentUserId || '');
+  const assigneeIds = Array.isArray(values.assigneeIds) ? values.assigneeIds : [];
+  const isSelfAssigned = assigneeIds.some((id) => String(id) === String(currentUserId || ''));
 
   // Раскрываем то, что уже заполнено: при правке задачи форма сразу показывает суть.
   const [openIds, setOpenIds] = useState(() => new Set(
@@ -4322,27 +4462,29 @@ const TaskComposerForm = ({
       />
 
       <div className="tv-composer-assignee">
-        <label htmlFor={assigneeSelectId}>Исполнитель</label>
-        <CustomSelect
+        <label htmlFor={assigneeSelectId}>
+          {assigneeIds.length > 1 ? 'Исполнители' : 'Исполнитель'}
+        </label>
+        <AssigneeField
           id={assigneeSelectId}
-          className="tv-person-select"
-          variant="ios"
-          ariaLabel="Исполнитель"
-          value={values.assignedTo}
+          value={assigneeIds}
           options={recipientOptions}
-          onChange={(next) => onChange({ assignedTo: String(next ?? '') })}
-          disabled={disabled || isRecipientsLoading}
-          placeholder={isRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}
-          searchable
-          searchPlaceholder="Поиск по имени…"
+          people={recipients}
+          onChange={(next) => onChange({ assigneeIds: next })}
+          disabled={disabled}
+          isLoading={isRecipientsLoading}
         />
         {canAssignSelf && (
           <button
             type="button"
             className={`tv-composer-self ${isSelfAssigned ? 'is-active' : ''}`}
             disabled={disabled}
-            title="Поставить задачу себе"
-            onClick={() => onChange({ assignedTo: String(currentUserId) })}
+            title={isSelfAssigned ? 'Убрать себя из исполнителей' : 'Добавить себя в исполнители'}
+            onClick={() => onChange({
+              assigneeIds: isSelfAssigned
+                ? assigneeIds.filter((id) => String(id) !== String(currentUserId))
+                : [...assigneeIds, String(currentUserId)],
+            })}
           >
             Себе
           </button>
@@ -4614,7 +4756,10 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
   const pm = PRIORITY_META[task.priority] || PRIORITY_META.normal;
   const deadlineLabel = taskDeadlineLabel(task);
   const creatorName = task?.creator?.name || '—';
-  const assigneeName = task?.assignee?.name || '—';
+  const assigneePeople = taskAssignees(task);
+  const assigneeName = assigneePeople.length > 1
+    ? `${assigneePeople[0]?.name || '—'} и ещё ${assigneePeople.length - 1}`
+    : (assigneePeople[0]?.name || '—');
   const priorityCls = task.priority === 'critical' ? 'is-critical' : task.priority === 'urgent' ? 'is-urgent' : '';
   const indicatorColor = task.priority === 'critical' ? 'var(--rose)' : task.priority === 'urgent' ? 'var(--amber)' : sm.dot;
   return (
@@ -4636,10 +4781,7 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned }) => {
         {/* Единственное «лишнее» состояние, которое стоит показать всем: по задаче
             задали вопрос, и до ответа она не двигается. */}
         {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
-        <span className="tv-task-row-assignee-chip">
-          <AvatarCircle className="tv-avatar-xs" name={assigneeName} avatarUrl={task?.assignee?.avatar_url || ''} />
-          <span className="tv-task-row-assignee-name">{assigneeName}</span>
-        </span>
+        <AssigneeStack people={assigneePeople} />
         <span className="tv-task-row-date">{fmt(task.created_at)}</span>
         {typeof onPin === 'function' && (
           <button
@@ -4849,10 +4991,13 @@ const TaskClarificationsBlock = ({
   const [draftBody, setDraftBody] = useState('');
   const [draftFiles, setDraftFiles] = useState([]);
 
-  const assigneeId = Number(task?.assignee?.id || 0);
+  const assigneeIdSet = useMemo(
+    () => new Set(taskAssignees(task).map((person) => Number(person.id))),
+    [task]
+  );
   const creatorId = Number(task?.creator?.id || 0);
   const requestedById = Number(task?.requested_by?.id || 0);
-  const isAssignee = assigneeId === currentUserId;
+  const isAssignee = assigneeIdSet.has(currentUserId);
   // Те же права, что проверяет API: дополняет и отвечает сторона постановки.
   const isOwnerSide = currentUserId === creatorId
     || (requestedById > 0 && currentUserId === requestedById)
@@ -5047,16 +5192,20 @@ const TaskDrawer = React.memo(({
   const editBtn         = btns.find((btn) => btn.action === 'edit');
   const deleteBtn       = btns.find((btn) => btn.action === 'delete');
   const footerBtns      = btns.filter((btn) => btn.action !== 'edit' && btn.action !== 'delete');
-  const assigneeId      = Number(task?.assignee?.id || 0);
+  const assigneePeople  = taskAssignees(task);
+  const assigneeIdSet   = useMemo(
+    () => new Set(assigneePeople.map((person) => Number(person.id))),
+    [assigneePeople]
+  );
   const creatorId       = Number(task?.creator?.id || 0);
   const reports         = Array.isArray(task.reports) ? task.reports : [];
   // Задача, поставленная самому себе без указания источника, — своя инициатива.
-  const originLabel     = (assigneeId && assigneeId === creatorId && !task?.requested_by)
+  const originLabel     = (creatorId && assigneeIdSet.has(creatorId) && !task?.requested_by)
     ? 'Своя инициатива'
     : 'Постановщик';
   // Отчёт пишут участники задачи — та же проверка, что и на API.
   const canWriteReport  = typeof onSubmitReport === 'function' && (
-    assigneeId === currentUserId || creatorId === currentUserId || isAdminLikeRole(currentUserRole)
+    assigneeIdSet.has(currentUserId) || creatorId === currentUserId || isAdminLikeRole(currentUserRole)
   );
 
   // ESC key handler
@@ -5069,7 +5218,7 @@ const TaskDrawer = React.memo(({
   const resolveHistorySide = useCallback((item) => {
     const changedById = Number(item?.changed_by || 0);
     if (changedById > 0) {
-      if (changedById === assigneeId) return 'recipient';
+      if (assigneeIdSet.has(changedById)) return 'recipient';
       if (changedById === creatorId) return 'sender';
     }
 
@@ -5077,7 +5226,7 @@ const TaskDrawer = React.memo(({
     if (statusCode === 'in_progress' || statusCode === 'completed') return 'recipient';
     if (statusCode === 'assigned' || statusCode === 'accepted' || statusCode === 'returned' || statusCode === 'reopened') return 'sender';
     return 'neutral';
-  }, [assigneeId, creatorId]);
+  }, [assigneeIdSet, creatorId]);
 
   return (
     <>
@@ -5154,17 +5303,21 @@ const TaskDrawer = React.memo(({
         <div className="tv-drawer-body">
           {/* Participants */}
           <div className="tv-participants">
-            <div className="tv-participant">
-              <AvatarCircle
-                className="tv-participant-avatar"
-                name={task?.assignee?.name || '—'}
-                avatarUrl={task?.assignee?.avatar_url || ''}
-              />
-              <div className="tv-participant-info">
-                <div className="tv-participant-role">Исполнитель</div>
-                <div className="tv-participant-name">{task?.assignee?.name || '—'}</div>
+            {/* Исполнителей столько, сколько отметили. Никого не помечаем
+                «основным»: права у них равные, и такая метка была бы неправдой. */}
+            {(assigneePeople.length ? assigneePeople : [null]).map((person, index) => (
+              <div className="tv-participant" key={person?.id ?? `assignee-${index}`}>
+                <AvatarCircle
+                  className="tv-participant-avatar"
+                  name={person?.name || '—'}
+                  avatarUrl={person?.avatar_url || ''}
+                />
+                <div className="tv-participant-info">
+                  <div className="tv-participant-role">Исполнитель</div>
+                  <div className="tv-participant-name">{person?.name || '—'}</div>
+                </div>
               </div>
-            </div>
+            ))}
             <div className="tv-participant">
               <AvatarCircle
                 className="tv-participant-avatar"
@@ -5461,9 +5614,11 @@ export const PinnedTaskWidget = React.memo(({
       unique.set(id, person);
     };
     (Array.isArray(taskRecipients) ? taskRecipients : []).forEach(addRecipient);
-    addRecipient(task?.assignee);
+    // Исполнители задачи обязаны быть в списке, даже если их уже нет в
+    // получателях: иначе правка молча выкинула бы человека из состава.
+    taskAssignees(task).forEach(addRecipient);
     return Array.from(unique.values());
-  }, [taskRecipients, task?.assignee]);
+  }, [taskRecipients, task]);
   const assigneeSelectOptions = useMemo(
     () => recipientOptions.map((person) => ({
       value: String(person.id),
@@ -5487,7 +5642,7 @@ export const PinnedTaskWidget = React.memo(({
     });
   }, [availableTasks, task]);
   const incomingTaskOptions = useMemo(
-    () => taskOptions.filter((item) => Number(item?.assignee?.id || 0) === currentUserId),
+    () => taskOptions.filter((item) => isTaskAssignee(item, currentUserId)),
     [currentUserId, taskOptions]
   );
   const outgoingTaskOptions = useMemo(
@@ -5499,7 +5654,7 @@ export const PinnedTaskWidget = React.memo(({
     [incomingTaskOptions]
   );
   const outgoingMenuGroups = useMemo(
-    () => groupTasksByPerson(outgoingTaskOptions, (item) => item?.assignee),
+    () => groupTasksByPerson(outgoingTaskOptions, (item) => taskAssignees(item)),
     [outgoingTaskOptions]
   );
   const taskMenuGroups = taskMenuScope === 'outgoing' ? outgoingMenuGroups : incomingMenuGroups;
@@ -5624,7 +5779,7 @@ export const PinnedTaskWidget = React.memo(({
 
   const openQuickCreate = useCallback(() => {
     setQuickForm(buildEmptyTaskForm({
-      assignedTo: String(task?.assignee?.id || currentUserId || ''),
+      assigneeIds: formAssigneeIds(task, currentUserId),
       priority: task?.priority || 'normal',
     }));
     setQuickFormFiles([]);
@@ -5635,7 +5790,7 @@ export const PinnedTaskWidget = React.memo(({
     setNoteOpen(false);
     setPaletteOpen(false);
     setTaskMenuOpen(false);
-  }, [currentUserId, onStateChange, task?.assignee?.id, task?.priority]);
+  }, [currentUserId, onStateChange, task, task?.priority]);
 
   const openQuickEdit = useCallback(() => {
     if (!task?.id) return;
@@ -5663,7 +5818,7 @@ export const PinnedTaskWidget = React.memo(({
       setQuickFormError('Укажите тему задачи');
       return;
     }
-    if (!quickForm.assignedTo) {
+    if (!(quickForm.assigneeIds || []).length) {
       setQuickFormError('Выберите исполнителя');
       return;
     }
@@ -5719,13 +5874,17 @@ export const PinnedTaskWidget = React.memo(({
     }
     setSelectedMenuPersonKey((prev) => {
       if (prev && taskMenuGroups.some((group) => group.key === prev)) return prev;
-      const currentPersonId = taskMenuScope === 'outgoing'
-        ? Number(task?.assignee?.id || 0)
-        : Number(task?.creator?.id || 0);
-      const matchingGroup = taskMenuGroups.find((group) => Number(group?.personId || 0) === currentPersonId);
+      // В исходящих группа — это исполнитель, а их может быть несколько:
+      // подойдёт группа любого из них.
+      const currentPersonIds = taskMenuScope === 'outgoing'
+        ? taskAssignees(task).map((person) => Number(person.id))
+        : [Number(task?.creator?.id || 0)];
+      const matchingGroup = taskMenuGroups.find(
+        (group) => currentPersonIds.includes(Number(group?.personId || 0))
+      );
       return matchingGroup?.key || taskMenuGroups[0].key;
     });
-  }, [task?.assignee?.id, task?.creator?.id, taskMenuGroups, taskMenuScope]);
+  }, [task, task?.creator?.id, taskMenuGroups, taskMenuScope]);
 
   useEffect(() => {
     if (!pipWindow) return undefined;
@@ -5849,19 +6008,17 @@ export const PinnedTaskWidget = React.memo(({
         </div>
       </div>
       <div className="tv-form-field">
-        <label htmlFor={quickAssigneeSelectId}>Исполнитель *</label>
-        <CustomSelect
+        <label htmlFor={quickAssigneeSelectId}>
+          {(quickForm.assigneeIds || []).length > 1 ? 'Исполнители *' : 'Исполнитель *'}
+        </label>
+        <AssigneeField
           id={quickAssigneeSelectId}
-          className="tv-person-select"
-          variant="ios"
-          ariaLabel="Исполнитель"
-          value={quickForm.assignedTo}
+          value={quickForm.assigneeIds || []}
           options={assigneeSelectOptions}
-          onChange={(next) => updateQuickFormField('assignedTo', String(next ?? ''))}
-          disabled={quickFormLoading || isTaskRecipientsLoading}
-          placeholder={isTaskRecipientsLoading ? 'Загрузка...' : 'Выберите сотрудника'}
-          searchable
-          searchPlaceholder="Поиск по имени…"
+          people={recipientOptions}
+          onChange={(next) => updateQuickFormField('assigneeIds', next)}
+          disabled={quickFormLoading}
+          isLoading={isTaskRecipientsLoading}
         />
       </div>
       <div className="tv-form-field">
@@ -6230,8 +6387,12 @@ export const PinnedTaskWidget = React.memo(({
                 </p>
                 <div className="tv-pin-meta">
                   <div className="tv-pin-meta-item">
-                    <span className="tv-pin-meta-label">Исполнитель</span>
-                    <span className="tv-pin-meta-value">{task?.assignee?.name || '—'}</span>
+                    <span className="tv-pin-meta-label">
+                      {taskAssignees(task).length > 1 ? 'Исполнители' : 'Исполнитель'}
+                    </span>
+                    <span className="tv-pin-meta-value" title={taskAssignees(task).map((person) => person.name).join(', ')}>
+                      {taskAssigneesLabel(task)}
+                    </span>
                   </div>
                   <div className="tv-pin-meta-item">
                     <span className="tv-pin-meta-label">Постановщик</span>
@@ -6416,11 +6577,14 @@ export const PinnedTaskWidget = React.memo(({
 
 const inboxCounterpartLabel = (need) => {
   if (need?.kind === 'review') {
-    const name = need?.task?.assignee?.name;
+    /* Сдал — конкретный человек, а не «состав»: при нескольких исполнителях
+       сдаёт кто-то один, и его имя приходит в completed_by_name. Состав в
+       запасе — на старых задачах, где отметки о сдающем нет. */
+    const name = need?.task?.completed_by_name || taskAssigneesLabel(need?.task, '');
     return name ? `Сдал: ${name}` : 'Ждёт приёмки';
   }
   if (need?.kind === 'info') {
-    const name = need?.task?.info_request?.author_name || need?.task?.assignee?.name;
+    const name = need?.task?.info_request?.author_name || taskAssigneesLabel(need?.task, '');
     return name ? `Спросил: ${name}` : 'Просят информацию';
   }
   const name = need?.task?.creator?.name;
@@ -6974,8 +7138,9 @@ const TasksView = ({
     if (need && !need.seen) markActionNeedsSeen({ ...need, task: drawerTask });
   }, [drawerTask, actionNeedOf, markActionNeedsSeen]);
 
+  // «Входящие» — где я среди исполнителей, а не только где я первый в списке.
   const incomingTasks = useMemo(
-    () => tasks.filter(t => Number(t?.assignee?.id || 0) === currentUserId),
+    () => tasks.filter(t => isTaskAssignee(t, currentUserId)),
     [tasks, currentUserId]
   );
   const outgoingTasks = useMemo(
@@ -6988,7 +7153,7 @@ const TasksView = ({
     [incomingTasks]
   );
   const outgoingGroups = useMemo(
-    () => groupTasksByPerson(outgoingTasks, t => t?.assignee),
+    () => groupTasksByPerson(outgoingTasks, t => taskAssignees(t)),
     [outgoingTasks]
   );
 
@@ -7242,7 +7407,7 @@ const TasksView = ({
   const handleCreate = async (e) => {
     e.preventDefault();
     if (!form.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
-    if (!form.assignedTo)     { notify('Выберите сотрудника', 'error'); return; }
+    if (!(form.assigneeIds || []).length) { notify('Выберите сотрудника', 'error'); return; }
 
     const body = new FormData();
     appendTaskFormData(body, form);
@@ -7283,7 +7448,7 @@ const TasksView = ({
     e.preventDefault();
     if (!editModal.taskId) return;
     if (!editForm.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
-    if (!editForm.assignedTo) { notify('Выберите исполнителя', 'error'); return; }
+    if (!(editForm.assigneeIds || []).length) { notify('Выберите исполнителя', 'error'); return; }
 
     const key = `${editModal.taskId}:edit`;
     setActionLoadingKey(key);

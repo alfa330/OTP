@@ -145,7 +145,10 @@ class TaskApiTests(unittest.TestCase):
         self.assertIn("event='promoted'", block)
 
     def test_backlog_creation_does_not_notify_assignee(self):
-        self.assertIn("if assignee_chat_id and not is_backlog:", self.src)
+        # Исполнителей может быть несколько — уведомляем каждого, но по-прежнему
+        # только когда задача не в бэклоге.
+        self.assertIn("if assignee_chat_ids and not is_backlog:", self.src)
+        self.assertIn("for assignee_chat_id in assignee_chat_ids:", self.src)
 
     def test_get_accepts_backlog_filter(self):
         self.assertIn("backlog_filter = (request.args.get('backlog') or '').strip().lower() or None", self.src)
@@ -612,13 +615,17 @@ class TaskOriginTests(unittest.TestCase):
         self.assertIn("requestedById: '',", src)
         self.assertIn("requestedByName: '',", src)
         self.assertIn("requested_by_id: values.requestedById ? String(values.requestedById) : ''", src)
-        # Кнопка «Себе» рядом с исполнителем.
+        # Кнопка «Себе» рядом с исполнителями: добавляет себя в состав, а
+        # повторным нажатием убирает — исполнитель в задаче не один.
         self.assertIn('className={`tv-composer-self', src)
-        self.assertIn("onChange({ assignedTo: String(currentUserId) })", src)
+        self.assertIn("assigneeIds: isSelfAssigned", src)
+        self.assertIn("[...assigneeIds, String(currentUserId)]", src)
 
     def test_self_task_without_origin_reads_as_initiative(self):
         src = _read(TASKS_VIEW_PATH)
-        start = src.index("const originLabel     = (assigneeId && assigneeId === creatorId && !task?.requested_by)")
+        # Постановщик среди исполнителей — задача своя, сколько бы людей рядом
+        # ни стояло.
+        start = src.index("const originLabel     = (creatorId && assigneeIdSet.has(creatorId) && !task?.requested_by)")
         block = src[start:start + 200]
         self.assertIn("'Своя инициатива'", block)
         self.assertIn("'Постановщик'", block)
@@ -644,9 +651,28 @@ class TaskOriginTests(unittest.TestCase):
         class FakeClient:
             user_id = 2
         with self.assertRaises(SystemExit):
-            module._resolve_assignee(FakeClient(), args)
+            module._resolve_assignees(FakeClient(), args)
         args.self_assign = True
-        self.assertEqual(module._resolve_assignee(FakeClient(), args), 2)
+        self.assertEqual(module._resolve_assignees(FakeClient(), args), [2])
+
+    def test_cli_accepts_several_assignees(self):
+        """--assignee можно повторить: порядок сохраняется, дубликаты сворачиваются."""
+        module = _load_cli_module()
+
+        class FakeClient:
+            user_id = 2
+        args = module.build_parser().parse_args(
+            ['create', 'Тема', '--assignee', '169', '--assignee', '12']
+        )
+        self.assertEqual(module._resolve_assignees(FakeClient(), args), [169, 12])
+        # --self добавляет себя первым, повтор своего id не ломает создание.
+        args = module.build_parser().parse_args(
+            ['create', 'Тема', '--self', '--assignee', '2', '--assignee', '9']
+        )
+        self.assertEqual(module._resolve_assignees(FakeClient(), args), [2, 9])
+        fields = module._build_create_fields(None, args, [169, 12])
+        self.assertEqual(fields['assigned_to'], '169')
+        self.assertEqual(fields['assignee_ids'], '169,12')
 
     def test_log_command_walks_the_whole_flow(self):
         cli = _read(CLI_PATH)
@@ -786,17 +812,20 @@ class ReviewAuthorityTests(unittest.TestCase):
         self.assertIn("if created_by is not None:\n            return int(created_by)", block)
 
     def test_assignee_cannot_accept_own_work(self):
-        start = self.db.index("    def _task_can_review(self, role, requester_id, created_by, assigned_to, requested_by):")
+        # Исполнитель здесь — любой из состава: приписав себя соисполнителем,
+        # приёмщик своей работы не принимает.
+        start = self.db.index("    def _task_can_review(self, role, requester_id, created_by, assignees, requested_by):")
         block = self.db[start:self.db.index("\n    def ", start + 10)]
         # Своя инициатива — можно, иначе исполнителю отказ.
         self.assertIn("if authority is not None and authority == requester_id:", block)
         self.assertIn("if is_assignee:\n            return False", block)
+        self.assertIn("is_assignee = requester_id in assignee_ids", block)
         # Порядок важен: проверка «я и есть приёмщик» идёт до отказа исполнителю.
         self.assertLess(block.index("authority == requester_id"), block.index("if is_assignee:\n            return False"))
 
     def test_status_route_uses_the_new_rule(self):
         self.assertIn(
-            "is_reviewer = self._task_can_review(role, requester_id, created_by, assigned_to, requested_by)",
+            "is_reviewer = self._task_can_review(role, requester_id, created_by, assignee_scope, requested_by)",
             self.db,
         )
         # Прежняя формула, где админ мог принять свою же работу, убрана.
@@ -806,8 +835,12 @@ class ReviewAuthorityTests(unittest.TestCase):
         start = self.db.index("    def _task_visible_for_requester(")
         block = self.db[start:self.db.index("    def _task_review_authority", start)]
         self.assertIn("if requested_by is not None and int(requested_by) == requester_id:", block)
-        # И в списке задач для СВ/тренера.
-        self.assertIn("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)", self.db)
+        # И в списке задач для СВ/тренера: исполнителем считается любой из состава.
+        self.assertIn(
+            'f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"',
+            self.db,
+        )
+        self.assertIn("FROM task_assignees ta_f", self.db)
 
     def test_requester_gets_notifications_and_a_call_to_action(self):
         self.assertIn('"kind": "requester"', self.app)
@@ -1211,7 +1244,8 @@ class BoardPaginationTests(unittest.TestCase):
     def test_mine_filter_covers_board_scopes(self):
         src = _read(DATABASE_PATH)
         self.assertIn("if mine_norm == 'assignee':", src)
-        self.assertIn('conditions.append("t.assigned_to = %s")', src)
+        # «Я исполнитель» = я среди исполнителей, а не «я тот единственный».
+        self.assertIn("conditions.append(self._TASK_ASSIGNEE_EXISTS_SQL)", src)
         self.assertIn("elif mine_norm == 'creator':", src)
         self.assertIn("INVALID_TASK_MINE_FILTER", src)
         self.assertIn("INVALID_TASK_MINE_FILTER", _read(APP_PATH))
@@ -1572,7 +1606,9 @@ class BoardPeopleAndBacklogActionTests(unittest.TestCase):
         self.assertIn("COALESCE(u.status, 'working') <> 'fired'", block)
         self.assertIn("LEFT JOIN departments d ON d.id = u.department_id", block)
         # СВ и тренер видят только тех, с кем пересеклись по задачам.
-        self.assertIn("(t.created_by = %s OR t.assigned_to = %s OR t.requested_by_id = %s)", block)
+        self.assertIn("FROM task_assignees ta_me", block)
+        # Задача с несколькими исполнителями не должна считаться дважды.
+        self.assertIn("COUNT(DISTINCT t.id)::INT AS task_count", block)
         self.assertIn("@app.route('/api/tasks/board_people', methods=['GET', 'OPTIONS'])", _read(APP_PATH))
 
     def test_board_selector_groups_people_by_department(self):
@@ -1820,7 +1856,9 @@ class TaskClarificationDbTests(unittest.TestCase):
         start = self.src.index("    def edit_task(")
         block = self.src[start:self.src.index("    def _normalize_task_report_kind(", start)]
         self.assertIn("reset_info_request_sql", block)
-        self.assertIn("int(assigned_to_new) != int(current_assigned_to)", block)
+        # Правило про АВТОРА вопроса: пока он в составе, вопрос жив, даже если
+        # рядом появились или ушли коллеги.
+        self.assertIn("int(info_request_author_id) in set(removed_assignees)", block)
 
     def test_asker_can_withdraw_only_his_own_request(self):
         start = self.src.index("    def withdraw_task_info_request(")
@@ -1881,8 +1919,9 @@ class TaskClarificationNeedTests(unittest.TestCase):
         start = db_src.index("    def get_task_action_needs_summary(self, requester_id):")
         block = db_src[start:db_src.index("    TASK_ACTION_NEED_KINDS", start)]
         self.assertIn("t.info_request_id IS NOT NULL", block)
-        # Спрашивает исполнитель — значит ему самому причина не показывается.
-        self.assertIn("t.assigned_to IS DISTINCT FROM %s", block)
+        # Спрашивает исполнитель — значит ни одному из состава причина не
+        # показывается: она адресована стороне постановки.
+        self.assertIn("AND NOT {assignee_exists}", block)
         self.assertIn('"info": int(row[2] or 0)', block)
 
         client = _read(ROOT / "src" / "components" / "tasks" / "taskActionNeeds.js")

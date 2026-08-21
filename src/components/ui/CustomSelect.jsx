@@ -23,6 +23,16 @@ import { APPLE_FONT } from './ios';
  *   variant           — `default` либо более мягкий `ios`
  *   ariaLabel         — доступное имя кнопки
  *   id                — id кнопки: с ним <label htmlFor> открывает список
+ *
+ *   multiple          — выбор НЕСКОЛЬКИХ значений. Тогда `value` — массив, а
+ *                       `onChange` получает новый массив. Клик по строке
+ *                       переключает её и НЕ закрывает список: выбирают обычно
+ *                       не одного, и закрытие после каждого щелчка заставляло
+ *                       бы открывать список заново на каждого человека.
+ *   renderValue(vals) — своя отрисовка выбранного в кнопке (аватары, чипы).
+ *                       Без неё в кнопке стоит «Выбрано: N».
+ *   maxSelected       — потолок выбора; при достижении невыбранные строки
+ *                       гаснут, а не молча игнорируют клик.
  */
 export default function CustomSelect({
   value,
@@ -36,6 +46,9 @@ export default function CustomSelect({
   variant = 'default',
   ariaLabel,
   id,
+  multiple = false,
+  renderValue = null,
+  maxSelected = 0,
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState(null);
@@ -116,7 +129,18 @@ export default function CustomSelect({
     };
   }, [open]);
 
-  const selected = options.find((o) => String(o.value) === String(value ?? ''));
+  /* Выбранное всегда приводим к массиву строк: сравнение по строкам избавляет
+     от вечной путаницы «id пришёл числом, а в опции строкой». */
+  const selectedValues = useMemo(() => {
+    if (!multiple) {
+      const single = String(value ?? '');
+      return single ? [single] : [];
+    }
+    return (Array.isArray(value) ? value : []).map((item) => String(item ?? '')).filter(Boolean);
+  }, [multiple, value]);
+  const selectedSet = useMemo(() => new Set(selectedValues), [selectedValues]);
+  const selected = options.find((o) => selectedSet.has(String(o.value)));
+  const limitReached = multiple && maxSelected > 0 && selectedValues.length >= maxSelected;
   const isIos = variant === 'ios';
 
   const filtered = useMemo(() => {
@@ -131,10 +155,10 @@ export default function CustomSelect({
       return;
     }
     const selectedIndex = filtered.findIndex((option) =>
-      !option.disabled && String(option.value) === String(value ?? ''));
+      !option.disabled && selectedSet.has(String(option.value)));
     const firstEnabled = filtered.findIndex((option) => !option.disabled);
     setActiveIndex(selectedIndex >= 0 ? selectedIndex : firstEnabled);
-  }, [open, filtered, value]);
+  }, [open, filtered, selectedSet]);
 
   const moveActive = (direction) => {
     const enabled = filtered
@@ -150,6 +174,18 @@ export default function CustomSelect({
 
   const pick = (o) => {
     if (o.disabled) return;
+    if (multiple) {
+      const key = String(o.value);
+      const isSel = selectedSet.has(key);
+      if (!isSel && limitReached) return;
+      const next = isSel
+        ? selectedValues.filter((item) => item !== key)
+        /* Порядок выбора сохраняем: для исполнителей задачи он значим —
+           первый выбранный становится основным. */
+        : [...selectedValues, key];
+      onChange?.(next);
+      return;
+    }
     onChange?.(o.value);
     setOpen(false);
     requestAnimationFrame(() => btnRef.current?.focus());
@@ -193,8 +229,12 @@ export default function CustomSelect({
               : 'cursor-pointer border-gray-300 hover:border-gray-400'
           } ${open ? 'border-transparent ring-2 ring-blue-500' : 'shadow-sm'}`}
       >
-        <span className={`truncate ${selected ? '' : 'text-gray-400'}`}>
-          {selected ? selected.label : placeholder}
+        <span className={`truncate ${selectedValues.length ? '' : 'text-gray-400'}`}>
+          {!selectedValues.length
+            ? placeholder
+            : multiple
+              ? (renderValue ? renderValue(selectedValues) : `Выбрано: ${selectedValues.length}`)
+              : (selected ? selected.label : placeholder)}
         </span>
         <svg
           width="14" height="14" viewBox="0 0 20 20" fill="none"
@@ -254,6 +294,7 @@ export default function CustomSelect({
             id={listboxId}
             className="min-h-0 overflow-auto py-1"
             role="listbox"
+            aria-multiselectable={multiple || undefined}
             aria-label={ariaLabel ? `${ariaLabel}: варианты` : undefined}
           >
             {filtered.length === 0 ? (
@@ -262,8 +303,9 @@ export default function CustomSelect({
               </div>
             ) : (
               filtered.map((o, index) => {
-                const isSel = String(o.value) === String(value ?? '');
+                const isSel = selectedSet.has(String(o.value));
                 const isActive = index === activeIndex;
+                const isBlocked = o.disabled || (!isSel && limitReached);
                 const groupLabel = o.groupLabel || '';
                 const startsGroup = groupLabel && groupLabel !== (filtered[index - 1]?.groupLabel || '');
                 const option = (
@@ -271,7 +313,7 @@ export default function CustomSelect({
                     key={String(o.value)}
                     id={`${listboxId}-option-${index}`}
                     type="button"
-                    disabled={o.disabled}
+                    disabled={isBlocked}
                     role="option"
                     aria-selected={isSel}
                     tabIndex={-1}
@@ -282,12 +324,12 @@ export default function CustomSelect({
                         isSel
                           ? 'bg-blue-50 text-blue-700'
                           : isActive ? 'bg-slate-100 text-slate-800' : 'text-slate-700 hover:bg-slate-50'
-                      } ${o.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`
+                      } ${isBlocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`
                       : `flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors ${
                         isSel
                           ? 'bg-blue-50 text-blue-700'
                           : isActive ? 'bg-gray-100 text-gray-900' : 'text-gray-700 hover:bg-gray-50'
-                      } ${o.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                      } ${isBlocked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
                   >
                     <span className="truncate">{o.label}</span>
                     {isSel && (

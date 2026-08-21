@@ -600,7 +600,9 @@ class TasksSourceRulesTest(unittest.TestCase):
         """
         block = self._block()
         self.assertIn("t.status = 'accepted'", block)
-        self.assertIn("AND t.assigned_to = %(user_id)s", block)
+        # Исполнителем считается ЛЮБОЙ из состава: задачу могли поручить
+        # нескольким, и о приёмке должен узнать каждый.
+        self.assertIn("AND EXISTS (SELECT 1 FROM task_assignees ta", block)
         # Отметка ВЕЧНАЯ: сравнения с updated_at быть не должно, иначе правка
         # отчёта воскресит приёмку недельной давности и колокол зазвонит снова.
         self.assertIn("r.kind <> 'accepted'", block)
@@ -614,13 +616,14 @@ class TasksSourceRulesTest(unittest.TestCase):
         block = self._block()
         self.assertIn("t.info_request_id IS NOT NULL", block)
         self.assertIn("r.kind <> 'info' OR r.seen_at < t.updated_at", block)
-        # Спрашивает исполнитель — ему же вопрос обратно не показываем.
-        self.assertIn("AND t.assigned_to IS DISTINCT FROM %(user_id)s", block)
+        # Спрашивает исполнитель — ни одному из состава вопрос обратно не
+        # показываем: причина адресована стороне постановки.
+        self.assertIn("AND NOT EXISTS (SELECT 1 FROM task_assignees ta", block)
         self.assertIn("'info': 'Исполнителю не хватает информации'", self.SOURCE)
         # Бэклог у этой причины НЕ отсекается: вопрос задал живой человек, и
         # «задача ещё в очереди» ответа не отменяет.
         info_start = block.index("OR (t.info_request_id IS NOT NULL")
-        info_tail = block[info_start:block.index("OR (t.assigned_to = %(user_id)s", info_start)]
+        info_tail = block[info_start:block.index("OR (EXISTS (SELECT 1 FROM task_assignees ta", info_start)]
         self.assertNotIn("is_backlog", info_tail)
 
     def test_information_request_is_classified_before_the_deadline_check(self):
@@ -988,8 +991,9 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
     # бы об этом только по возвращении фокуса на вкладку.
     BELL_TRIGGER_TABLES = ('events', 'four_you_images', 'lms_notifications',
                            'surveys', 'survey_assignments', 'wiki_ack_assignments',
-                           'tasks', 'task_action_reads', 'event_reads',
-                           'four_you_reads', 'birthday_reads', 'crm_tickets')
+                           'tasks', 'task_assignees', 'task_action_reads',
+                           'event_reads', 'four_you_reads', 'birthday_reads',
+                           'crm_tickets')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""

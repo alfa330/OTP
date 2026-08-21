@@ -313,8 +313,12 @@ def tasks(cursor, viewer, limit):
                        -- Раньше дедлайна и статусов: строку привёл сюда открытый
                        -- запрос информации, а не работа зрителя — он тут не
                        -- исполнитель, и «просрочена»/«не начата» про него ложь.
+                       -- Исполнителем считается ЛЮБОЙ из состава задачи:
+                       -- поручить её могли нескольким, и «просят информацию»
+                       -- адресовано стороне постановки, а не коллеге.
                        WHEN t.info_request_id IS NOT NULL
-                            AND t.assigned_to IS DISTINCT FROM %(user_id)s
+                            AND NOT EXISTS (SELECT 1 FROM task_assignees ta
+                                            WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
                             AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
                             THEN 'info'
                        WHEN t.due_at IS NOT NULL AND t.due_at < %(now)s THEN 'overdue'
@@ -335,7 +339,8 @@ def tasks(cursor, viewer, limit):
                 --    он сам нажал «Принять» — уведомлять его о своём же клике
                 --    незачем (так же поступают «Ивенты» и «4 You» с автором).
                 OR (t.status = 'accepted'
-                    AND t.assigned_to = %(user_id)s
+                    AND EXISTS (SELECT 1 FROM task_assignees ta
+                                WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
                     AND COALESCE(t.requested_by_id, t.created_by) IS DISTINCT FROM %(user_id)s
                     AND (r.task_id IS NULL OR r.kind <> 'accepted'))
                 -- Исполнителю не хватает информации. Бэклог считается, в
@@ -344,9 +349,11 @@ def tasks(cursor, viewer, limit):
                 OR (t.info_request_id IS NOT NULL
                     AND t.status IN ('assigned', 'in_progress', 'returned')
                     AND COALESCE(t.requested_by_id, t.created_by) = %(user_id)s
-                    AND t.assigned_to IS DISTINCT FROM %(user_id)s
+                    AND NOT EXISTS (SELECT 1 FROM task_assignees ta
+                                    WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
                     AND (r.task_id IS NULL OR r.kind <> 'info' OR r.seen_at < t.updated_at))
-                OR (t.assigned_to = %(user_id)s
+                OR (EXISTS (SELECT 1 FROM task_assignees ta
+                            WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
                     AND t.is_backlog = FALSE
                     AND t.status IN ('assigned', 'in_progress', 'returned')
                     AND ((t.due_at IS NOT NULL AND t.due_at < %(now)s
@@ -624,7 +631,9 @@ def next_change_at(cursor, viewer):
         parts.append("""
             SELECT MIN(t.due_at)
               FROM tasks t
-             WHERE t.assigned_to = %(user_id)s AND t.is_backlog = FALSE
+             WHERE EXISTS (SELECT 1 FROM task_assignees ta
+                            WHERE ta.task_id = t.id AND ta.user_id = %(user_id)s)
+               AND t.is_backlog = FALSE
                AND t.status IN ('assigned', 'in_progress', 'returned')
                AND t.due_at > %(now)s""")
 

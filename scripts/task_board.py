@@ -12,6 +12,7 @@ CLI к бэклогу/канбану раздела «Задачи» — точ�
     python scripts/task_board.py backlog
     python scripts/task_board.py show 412
     python scripts/task_board.py create "Проверить выгрузку Oktell" --assignee 169 --backlog --estimate 120
+    python scripts/task_board.py create "Собрать отчёт" --assignee 169 --assignee 12   # несколько исполнителей
     python scripts/task_board.py create "Разобраться с дублями" --self --from 169
     python scripts/task_board.py log "Починил выгрузку" --report "что сделано" --spent 2h30m
     python scripts/task_board.py deadline 412 --due "2026-08-05 18:00" --remind 1d
@@ -332,7 +333,7 @@ def task_action_need(task, user_id, now=None):
         return None
     now = now or datetime.now()
     status = str(task.get('status') or '').lower()
-    is_assignee = int((task.get('assignee') or {}).get('id') or 0) == person_id
+    is_assignee = is_task_assignee(task, person_id)
     due_at = parse_iso(task.get('due_at'))
 
     if status == 'completed' and review_authority_id(task) == person_id:
@@ -515,11 +516,42 @@ def format_due(task, now=None):
     return f'{label} (через {format_minutes(delta_minutes)})'
 
 
+def task_assignees(task):
+    """Все исполнители задачи по порядку.
+
+    Ответ сервера без `assignees` читаем как список из одного человека: CLI
+    ходит по прод-API, и старый ответ (или кеш) не должен превращаться в
+    «задача без исполнителя».
+    """
+    people = [item for item in (task.get('assignees') or []) if (item or {}).get('id')]
+    if people:
+        return people
+    single = task.get('assignee') or {}
+    return [single] if single.get('id') else []
+
+
+def task_assignees_label(task, empty='—'):
+    """«Айгуль» либо «Айгуль +2»: в строку таблицы три имени не влезают."""
+    people = task_assignees(task)
+    if not people:
+        return empty
+    first = people[0].get('name') or empty
+    return f'{first} +{len(people) - 1}' if len(people) > 1 else first
+
+
+def is_task_assignee(task, person_id):
+    """Пользователь — один из исполнителей (а не «тот единственный»)."""
+    person_id = int(person_id or 0)
+    return bool(person_id) and any(
+        int(person.get('id') or 0) == person_id for person in task_assignees(task)
+    )
+
+
 def task_line(task, now=None):
     parts = [
         f'#{task["id"]:<5}',
         f'{(task.get("subject") or "")[:56]:<56}',
-        f'{(task.get("assignee") or {}).get("name", "—")[:20]:<20}',
+        f'{task_assignees_label(task)[:20]:<20}',
         f'{task.get("priority", "normal")[:8]:<8}',
         f'оц {format_minutes(task.get("estimate_minutes")):<7}',
         f'срок {format_due(task, now)}',
@@ -767,7 +799,10 @@ def cmd_board(client, args):
     payload = client.list_tasks(only_my='1' if args.mine else None)
     tasks = payload.get('tasks') or []
     if args.assignee:
-        tasks = [t for t in tasks if int((t.get('assignee') or {}).get('id') or 0) == args.assignee]
+        # Фильтр по любому из указанных исполнителей: задача общая, и искать её
+        # надо по участию, а не по «первому в списке».
+        wanted = args.assignee if isinstance(args.assignee, list) else [args.assignee]
+        tasks = [t for t in tasks if any(is_task_assignee(t, person_id) for person_id in wanted)]
     if args.json:
         print(json.dumps({'tasks': tasks, 'summary': payload.get('summary')}, ensure_ascii=False, indent=2))
         return
@@ -932,13 +967,19 @@ def cmd_show(client, args):
     print(f'  колонка       {dict(COLUMN_TITLES)[column_of(task)]} '
           f'(status={task.get("status")}, is_backlog={task.get("is_backlog")})')
     print(f'  тип           {TAG_LABELS.get(task.get("tag"), task.get("tag") or "—")}')
-    print(f'  исполнитель   {_person_label(task.get("assignee"))}')
+    people = task_assignees(task)
+    if len(people) > 1:
+        # Права у исполнителей равные, поэтому просто перечисляем — «основного»
+        # среди них нет.
+        print(f'  исполнители   {", ".join(_person_label(person) for person in people)}')
+    else:
+        print(f'  исполнитель   {_person_label(people[0] if people else None)}')
     print(f'  постановщик   {_person_label(task.get("creator"))}')
     print(f'  срочность     {PRIORITY_LABELS.get(task.get("priority"), task.get("priority") or "—")}')
     origin = task.get('requested_by') or {}
     origin_label = origin.get('name') or (
         'своя инициатива'
-        if (task.get('creator') or {}).get('id') == (task.get('assignee') or {}).get('id')
+        if is_task_assignee(task, (task.get('creator') or {}).get('id'))
         else '—'
     )
     print(f'  поручил       {origin_label}')
@@ -1290,13 +1331,17 @@ def cmd_note_del(client, args):
     print(f'Заметка #{args.note_id} удалена')
 
 
-def _build_create_fields(client, args, assignee_id):
+def _build_create_fields(client, args, assignee_ids):
+    ids = [int(item) for item in (assignee_ids or []) if item]
     fields = {
         'subject': args.subject,
         'description': getattr(args, 'description', '') or '',
         'tag': getattr(args, 'tag', 'task'),
         'priority': getattr(args, 'priority', 'normal'),
-        'assigned_to': str(assignee_id),
+        # Первый исполнитель отдельным полем (это tasks.assigned_to), весь
+        # состав — строкой через запятую, как его шлёт форма раздела.
+        'assigned_to': str(ids[0]) if ids else '',
+        'assignee_ids': ','.join(str(item) for item in ids),
         'is_backlog': '1' if getattr(args, 'backlog', False) else '0',
     }
     if getattr(args, 'estimate', None):
@@ -1317,13 +1362,26 @@ def _build_create_fields(client, args, assignee_id):
     return fields
 
 
-def _resolve_assignee(client, args):
-    """--self ставит задачу на текущего пользователя, иначе нужен --assignee."""
+def _resolve_assignees(client, args):
+    """Состав исполнителей: --assignee можно указать несколько раз, --self добавляет себя.
+
+    Порядок сохраняем в том, в каком их назвали: первый становится
+    tasks.assigned_to. Дубликаты сворачиваем — «--self --assignee <свой id>»
+    не должен ронять создание.
+    """
+    ordered = []
+    raw = getattr(args, 'assignee', None) or []
+    if not isinstance(raw, list):
+        raw = [raw]
     if getattr(args, 'self_assign', False):
-        return client.user_id
-    if getattr(args, 'assignee', None):
-        return args.assignee
-    raise SystemExit('Укажите исполнителя: --assignee <id> или --self (себе)')
+        raw = [client.user_id] + list(raw)
+    for item in raw:
+        person_id = int(item)
+        if person_id and person_id not in ordered:
+            ordered.append(person_id)
+    if not ordered:
+        raise SystemExit('Укажите исполнителя: --assignee <id> (можно несколько) или --self (себе)')
+    return ordered
 
 
 def _origin_label(args):
@@ -1335,9 +1393,9 @@ def _origin_label(args):
 
 
 def cmd_create(client, args):
-    assignee_id = _resolve_assignee(client, args)
+    assignee_ids = _resolve_assignees(client, args)
     files = upload_payload(getattr(args, 'attach', None))
-    result = client.create_task(_build_create_fields(client, args, assignee_id), files=files)
+    result = client.create_task(_build_create_fields(client, args, assignee_ids), files=files)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -1355,9 +1413,8 @@ def cmd_log(client, args):
     Записать уже сделанную работу одной командой: создать задачу на себя,
     провести её через работу и закрыть итоговым отчётом с трудозатратами.
     """
-    assignee_id = client.user_id
-    fields = _build_create_fields(client, args, assignee_id)
-    fields['assigned_to'] = str(assignee_id)
+    assignee_ids = [client.user_id]
+    fields = _build_create_fields(client, args, assignee_ids)
     fields['is_backlog'] = '0'
     if args.spent and 'estimate_minutes' not in fields:
         # Оценки не было — считаем, что она равна факту, чтобы метрика «факт к оценке» не врала.
@@ -1610,7 +1667,8 @@ def build_parser():
 
     board = sub.add_parser('board', help='канбан по колонкам')
     board.add_argument('--mine', action='store_true', help='только мои задачи')
-    board.add_argument('--assignee', type=int, help='фильтр по id исполнителя')
+    board.add_argument('--assignee', type=int, action='append',
+                       help='фильтр по id исполнителя (можно повторять)')
     board.set_defaults(func=cmd_board)
 
     backlog = sub.add_parser('backlog', help='бэклог в порядке приоритета')
@@ -1622,7 +1680,8 @@ def build_parser():
 
     create = sub.add_parser('create', help='создать задачу (по умолчанию сразу на доску)')
     create.add_argument('subject')
-    create.add_argument('--assignee', type=int, help='id исполнителя (см. recipients)')
+    create.add_argument('--assignee', type=int, action='append',
+                        help='id исполнителя (см. recipients); повторите флаг, чтобы поручить нескольким')
     create.add_argument('--self', dest='self_assign', action='store_true', help='поставить задачу себе')
     create.add_argument('--description', default='')
     create.add_argument('--tag', default='task', choices=('task', 'problem', 'suggestion'))
