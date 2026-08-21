@@ -107,6 +107,11 @@ const SUBJECT_KINDS = [
 
 const SUBJECT_KIND_LABEL = Object.fromEntries(SUBJECT_KINDS.map((k) => [k.value, k.label]));
 
+/* Субъекты БЕЗ отдела: роль в системе носят сотрудники всех отделов сразу,
+   роль вики — все, кому её назначили. Раздающему, у которого есть граница
+   отдела, они закрыты (та же пара в wiki/access.py: COMPANY_WIDE_SUBJECTS). */
+const COMPANY_WIDE_KINDS = ['otp_role', 'wiki_role'];
+
 /* Словарь портала, а не свой. Раньше здесь стояли «руководитель» и «директор»,
    которых больше нигде в системе нет: поиск по слову «админ» не находил никого,
    и выглядело это как «админов в списке нет» — хотя они были. Ровно эти же
@@ -268,6 +273,12 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
 
     const [rules, setRules] = useState([]);
     const [ceiling, setCeiling] = useState(null);
+    /* Отделы, которым этот человек вправе адресовать правило; null — без
+       границы (директор, администратор вики). Считает сервер: граница зависит
+       от должности и от возглавляемых отделов, и второй расчёт на клиенте
+       однажды разошёлся бы с первым — всегда в сторону «показали, а сервер
+       ответил 403». */
+    const [grantDepartments, setGrantDepartments] = useState(null);
     const [people, setPeople] = useState([]);
     const [catalog, setCatalog] = useState({});
     const [loading, setLoading] = useState(true);
@@ -295,6 +306,7 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                 // Потолок приезжает вместе со списком: он зависит и от должности,
                 // и от отдела раздела, поэтому считать его на клиенте нельзя.
                 setCeiling(r.data?.grant_ceiling ?? null);
+                setGrantDepartments(r.data?.grant_departments ?? null);
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить правила'), 'error'))
             .finally(() => setLoading(false));
@@ -420,6 +432,19 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
         label: [person.name, ROLE_TITLE[person.role] || person.role,
                 person.department_name].filter(Boolean).join(' · '),
     })), [people]);
+
+    /* Субъекты, которые этот человек вправе адресовать.
+       Роль в системе и роль вики действуют ПО ВСЕЙ КОМПАНИИ, мимо отдела:
+       правило otp_role='operator' без порога открывает раздел каждому
+       сотруднику. Раздающему с границей отдела сервер их отвергает
+       (access.may_grant_to_subject), поэтому и в форме их нет — предложенная
+       строка, на которую приходит отказ, читается как поломка, а не как
+       правило. Отделы, группы и направления сервер присылает уже сужёнными. */
+    const subjectKinds = useMemo(
+        () => (grantDepartments
+            ? SUBJECT_KINDS.filter((k) => !COMPANY_WIDE_KINDS.includes(k.value))
+            : SUBJECT_KINDS),
+        [grantDepartments]);
 
     const subjectOptions = useMemo(() => {
         const kind = draft?.subject_type;
@@ -636,9 +661,17 @@ export default function WikiSectionAccess({ base, headers, showToast, section, s
                                 variant="ios"
                                 value={draft.subject_type}
                                 onChange={(v) => setDraft({ ...draft, subject_type: v, subject_id: '' })}
-                                options={SUBJECT_KINDS}
+                                options={subjectKinds}
                                 ariaLabel="Тип субъекта"
                             />
+                            {grantDepartments && (
+                                <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-400">
+                                    Правило вы адресуете своему отделу: людям, группам и
+                                    направлениям внутри него. Правило на должность или роль
+                                    в вики действует во всей компании — его выписывает
+                                    директор.
+                                </p>
+                            )}
                         </div>
 
                         {/* Сотрудник выбирается поиском по имени, а не вводом id.

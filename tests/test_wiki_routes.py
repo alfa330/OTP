@@ -579,6 +579,115 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
             'min_role_level': 40, 'can_read': True})
         self.assertEqual(r.status_code, 201)
 
+    # ── Граница отдела для АДРЕСАТА правила ─────────────────────────────
+    #
+    # Раздел проверялся, адресат — нет: на СВОЁМ разделе супервайзер выписывал
+    # правило кому угодно. Ниже три двери, которые были открыты.
+
+    def _capture_upsert(self):
+        captured = {}
+        self.addCleanup(setattr, structure, 'upsert_section_rule',
+                        structure.upsert_section_rule)
+        structure.upsert_section_rule = lambda cursor, **kw: (captured.update(kw), 12)[1]
+        return captured
+
+    def test_supervisor_cannot_open_his_section_to_a_foreign_department(self):
+        """Свой раздел — чужому отделу. Порог пуст, потолок такое пропускал."""
+        self._stub_section(department_id=1)
+        client, _ = self.build(make_context('sv', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 367,
+            'can_read': True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+
+    def test_supervisor_cannot_write_a_company_wide_role_rule(self):
+        """Правило на должность отдела не знает: оно открывает раздел ВСЕМ.
+
+        Именно этот субъект форма предлагала супервайзеру наравне с остальными,
+        так что дойти до «раздел СЗоВ виден всей компании» можно было в два
+        нажатия и без всякого умысла.
+        """
+        self._stub_section(department_id=1)
+        client, _ = self.build(make_context('sv', department_id=1))
+        for subject in ({'subject_type': 'otp_role', 'subject_role': 'operator'},
+                        {'subject_type': 'wiki_role', 'subject_id': 2}):
+            r = client.post('/api/wiki/access/section-rules', json=dict(
+                subject, section_id=1, can_read=True))
+            self.assertEqual(r.status_code, 403, subject)
+            self.assertEqual(r.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE', subject)
+
+    def test_supervisor_grants_his_own_group_but_not_a_foreign_one(self):
+        """Группа и направление сверяются по СВОЕМУ department_id."""
+        self._stub_section(department_id=1)
+        captured = self._capture_upsert()
+        client, cursor = self.build(make_context('sv', department_id=1))
+
+        cursor.fetchone.return_value = (1,)          # группа своего отдела
+        ok = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'group', 'subject_id': 10,
+            'can_read': True})
+        self.assertEqual(ok.status_code, 201)
+        self.assertEqual(captured['subject_id'], 10)
+
+        cursor.fetchone.return_value = (367,)        # группа отдела продаж
+        denied = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'group', 'subject_id': 13,
+            'can_read': True})
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+
+    def test_director_still_writes_company_wide_rules(self):
+        """У директора границы нет — правило на должность остаётся его инструментом."""
+        self._stub_section(department_id=1)
+        self._capture_upsert()
+        client, _ = self.build(make_context('super_admin', department_id=1))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'otp_role', 'subject_role': 'operator',
+            'can_read': True})
+        self.assertEqual(r.status_code, 201)
+
+    def test_form_learns_the_border_from_the_server(self):
+        """Границу считает сервер и присылает её форме — оба списка от неё.
+
+        Второй расчёт на клиенте разошёлся бы с первым, и расходится он всегда
+        в сторону «показали строку, а сервер ответил 403».
+        """
+        self.addCleanup(setattr, structure, 'list_section_rules',
+                        structure.list_section_rules)
+        structure.list_section_rules = lambda cursor, section_id=None: []
+        self._stub_section(department_id=1)
+
+        client, _ = self.build(make_context('sv', department_id=1))
+        body = client.get('/api/wiki/access/section-rules?section_id=1').get_json()
+        self.assertEqual(body['grant_departments'], [1])
+        self.assertEqual(body['grant_ceiling'], 10)
+
+        client, _ = self.build(make_context('super_admin', department_id=1))
+        director = client.get('/api/wiki/access/section-rules?section_id=1').get_json()
+        self.assertIsNone(director['grant_departments'])
+
+    def test_subject_catalog_is_narrowed_to_the_department(self):
+        """Справочник субъектов сужается тем же отделом, что и проверка."""
+        seen = {}
+        self.addCleanup(setattr, structure, 'subject_catalog', structure.subject_catalog)
+        structure.subject_catalog = lambda cursor, department_ids=None: (
+            seen.update({'departments': department_ids}),
+            {'department': [], 'direction': [], 'group': [], 'wiki_role': []})[1]
+
+        client, _ = self.build(make_context('sv', department_id=1))
+        body = client.get('/api/wiki/access/subjects').get_json()
+        self.assertEqual(seen['departments'], [1])
+        # Роль в системе супервайзеру не предлагается вовсе: она действует по
+        # всей компании, и сервер такое правило отвергает.
+        self.assertEqual(body['otp_role'], [])
+        self.assertEqual(body['grant_departments'], [1])
+
+        client, _ = self.build(make_context('super_admin', department_id=1))
+        director = client.get('/api/wiki/access/subjects').get_json()
+        self.assertIsNone(seen['departments'])
+        self.assertTrue(director['otp_role'])
+
     def test_delete_checks_ladder_too(self):
         """Снять чужое правило — такое же вмешательство, как его выписать.
 
@@ -590,7 +699,10 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
                         structure.section_branch_department)
         structure.section_branch_department = lambda cursor, sid: 1
         client, cursor = self.build(make_context('sv', department_id=1))
-        cursor.fetchone.return_value = (1, 40)       # правило на уровень руководителя
+        # Раздел, потолок должности, субъект и шесть прав: обработчик забирает
+        # правило целиком, чтобы записать в журнал, У КОГО отобрали доступ.
+        cursor.fetchone.return_value = (1, 40, 'department', 1, None,
+                                        True, False, False, False, False, False)
         r = client.delete('/api/wiki/access/section-rules/5')
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_CEILING')

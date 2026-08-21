@@ -530,24 +530,71 @@ def grantable_people(cursor, *, max_role_level, department_ids=None):
             for r in cursor.fetchall()]
 
 
-def subject_catalog(cursor):
-    """Справочники для выбора субъекта правила — одним запросом на все четыре."""
+def subject_catalog(cursor, department_ids=None):
+    """Справочники для выбора субъекта правила — одним запросом на все четыре.
+
+    department_ids — граница отдела раздающего (None = без границы). С границей
+    справочник сужается до своего отдела: супервайзеру и руководителю нельзя
+    адресовать правило чужому отделу, чужой группе или чужому направлению, и
+    предлагать их в форме значит обещать то, что сервер отвергнет
+    (access.may_grant_to_subject). Роли вики в таком справочнике нет вовсе —
+    она адресует людей по всей компании, мимо любого отдела.
+
+    Полный справочник нужен не только форме правила: из него же выбирается
+    «Отдел ветки» в форме раздела. Границы у тех, кто правит структуру, нет
+    (super_admin и роль «Администратор вики» — оба без отдела в
+    _grant_departments), так что сужение до них не дотягивается.
+    """
+    bounded = department_ids is not None
     cursor.execute(
         """
-        SELECT 'department' AS kind, id, name FROM departments WHERE is_active
+        SELECT 'department' AS kind, id, name FROM departments
+         WHERE is_active AND (%(depts)s::int[] IS NULL OR id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'direction', id, name FROM directions WHERE is_active
+        SELECT 'direction', id, name FROM directions
+         WHERE is_active
+           AND (%(depts)s::int[] IS NULL OR department_id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'group', id, name FROM groups WHERE status = 'active'
+        SELECT 'group', id, name FROM groups
+         WHERE status = 'active'
+           AND (%(depts)s::int[] IS NULL OR department_id = ANY(%(depts)s::int[]))
         UNION ALL
-        SELECT 'wiki_role', id, name FROM wiki_roles
+        SELECT 'wiki_role', id, name FROM wiki_roles WHERE %(depts)s::int[] IS NULL
         ORDER BY 1, 3
-        """
+        """,
+        {'depts': list(department_ids) if bounded else None},
     )
     catalog = {'department': [], 'direction': [], 'group': [], 'wiki_role': []}
     for kind, ident, name in cursor.fetchall():
         catalog[kind].append({'id': ident, 'name': name})
     return catalog
+
+
+# Откуда достаётся отдел адресата правила. Ключ — subject_type; субъекты
+# 'department' и 'department_head' сюда не попадают: у них отдел это сам
+# subject_id, а 'otp_role' и 'wiki_role' отдела не имеют в принципе.
+_SUBJECT_DEPARTMENT_SQL = {
+    'user': 'SELECT department_id FROM users WHERE id = %s',
+    'group': 'SELECT department_id FROM groups WHERE id = %s',
+    'direction': 'SELECT department_id FROM directions WHERE id = %s',
+}
+
+
+def subject_department(cursor, subject_type, subject_id):
+    """Отдел адресата правила. None — отдела нет или адресат не найден.
+
+    Отдельная функция, а не запрос в роуте: границу отдела проверяют и выдача,
+    и удаление правила, и считать её двумя разными запросами — способ однажды
+    разойтись.
+    """
+    if subject_type in ('department', 'department_head'):
+        return int(subject_id) if subject_id else None
+    sql = _SUBJECT_DEPARTMENT_SQL.get(subject_type)
+    if not sql or not subject_id:
+        return None
+    cursor.execute(sql, (subject_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -448,6 +448,60 @@ class GrantCeilingTest(unittest.TestCase):
                                               target_role='super_admin'))
 
 
+class GrantSubjectScopeTest(unittest.TestCase):
+    """Граница отдела для АДРЕСАТА правила (решение владельца 21.08.2026).
+
+    Потолок должности отвечает «кому по чину», отдел — «чьим людям». Второй
+    вопрос задавался только правилу на конкретного человека, и супервайзер на
+    СВОЁМ разделе мог выписать правило чужому отделу, чужой группе или роли по
+    всей компании: порог у таких правил пуст, а значит весит как оператор и
+    проходит потолок насквозь.
+    """
+
+    def test_director_has_no_subject_border(self):
+        """Без границы (директор, администратор вики) проходит любой субъект."""
+        for subject in ('user', 'group', 'direction', 'department',
+                        'department_head', 'otp_role', 'wiki_role'):
+            self.assertTrue(access.may_grant_to_subject(
+                subject, grant_departments=None, subject_department=367), subject)
+
+    def test_supervisor_stays_inside_his_department(self):
+        for subject in ('user', 'group', 'direction', 'department', 'department_head'):
+            self.assertTrue(access.may_grant_to_subject(
+                subject, grant_departments=[1], subject_department=1), subject)
+            self.assertFalse(access.may_grant_to_subject(
+                subject, grant_departments=[1], subject_department=367), subject)
+
+    def test_company_wide_subjects_are_closed_to_bounded_grantor(self):
+        """Роль в системе и роль вики отдела не знают вовсе.
+
+        Правило otp_role='operator' без порога открывает раздел КАЖДОМУ
+        сотруднику компании, включая отделы, которым вики не показывают. Форма
+        предлагала этот субъект супервайзеру наравне с остальными.
+        """
+        for subject in ('otp_role', 'wiki_role'):
+            self.assertFalse(access.may_grant_to_subject(
+                subject, grant_departments=[1], subject_department=1), subject)
+            self.assertFalse(access.may_grant_to_subject(
+                subject, grant_departments=[1], subject_department=None), subject)
+
+    def test_missing_department_is_a_refusal_not_a_crash(self):
+        """Адресат без отдела — «неизвестно чей», то есть отказ.
+
+        Значение приходит из базы, где department_id вполне бывает пустым;
+        пятисотка на пустом поле выглядела бы поломкой раздела.
+        """
+        for value in (None, '', 'sv', object()):
+            self.assertFalse(access.may_grant_to_subject(
+                'user', grant_departments=[1], subject_department=value), repr(value))
+
+    def test_head_of_two_departments_covers_both(self):
+        self.assertTrue(access.may_grant_to_subject(
+            'group', grant_departments=[1, 367], subject_department=367))
+        self.assertFalse(access.may_grant_to_subject(
+            'group', grant_departments=[1, 367], subject_department=909))
+
+
 class DirectoryWriteCapabilityTest(unittest.TestCase):
     """Кто правит справочники «Парки» и «Офисы» (решение владельца 19.08.2026).
 

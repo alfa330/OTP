@@ -55,6 +55,19 @@ def _slugify(value):
 PERMISSION_FIELDS = ('can_read', 'can_create', 'can_edit',
                      'can_delete', 'can_publish', 'can_approve')
 
+# Отказ по границе отдела — своими словами на каждый субъект. Общее «адресат из
+# другого отдела» на роли звучало бы неправдой: у роли отдела нет вовсе, и
+# человек искал бы, какой именно отдел не тот.
+_SUBJECT_SCOPE_ERRORS = {
+    'user': 'Этот сотрудник из другого отдела',
+    'group': 'Эта группа из другого отдела',
+    'direction': 'Это направление из другого отдела',
+    'department': 'Это чужой отдел',
+    'department_head': 'Это глава чужого отдела',
+    'otp_role': 'Правило на должность действует во всей компании — его выписывает директор',
+    'wiki_role': 'Правило на роль в вики действует во всей компании — его выписывает директор',
+}
+
 
 def register(bp, wiki_route, db, log_ip):
     """Вешает обработчики на Blueprint. bp и wiki_route приходят из routes.py."""
@@ -546,14 +559,22 @@ def register(bp, wiki_route, db, log_ip):
                 or _grant_ceiling(ctx) is not None):
             return jsonify({"error": "Недостаточно прав для этого действия",
                             "code": "WIKI_FORBIDDEN"}), 403
-        catalog = structure.subject_catalog(cursor)
-        catalog['otp_role'] = [
+        # Справочник сужен той же границей, что и проверка на записи: свой
+        # отдел, свои группы, свои направления. Роль в системе и роль вики
+        # раздающему с границей не предлагаются вовсе — они адресуют людей по
+        # всей компании, мимо отдела (access.may_grant_to_subject).
+        departments = _grant_departments(ctx)
+        catalog = structure.subject_catalog(cursor, department_ids=departments)
+        catalog['otp_role'] = [] if departments is not None else [
             {'id': code, 'name': label} for code, label in (
                 ('super_admin', 'Супер-администратор'), ('admin', 'Администратор'),
                 ('sv', 'Супервайзер'), ('supervisor', 'Супервайзер (устар.)'),
                 ('trainer', 'Тренер'), ('operator', 'Оператор'), ('trainee', 'Стажёр'),
             )
         ]
+        # Границу отдаём вместе со справочником: по ней форма понимает, что
+        # список сужен намеренно, а не «справочник не догрузился».
+        catalog['grant_departments'] = departments
         return jsonify(catalog)
 
     # Гейт не «can_manage_access», а лестница: право раздавать доступ само
@@ -580,6 +601,10 @@ def register(bp, wiki_route, db, log_ip):
                 # Потолок едет вместе со списком: форме нужно погасить строки
                 # должностей выше него, а второй запрос ради одного числа лишний.
                 "grant_ceiling": ceiling,
+                # Отделы, внутри которых человек вправе адресовать правило
+                # (null — без границы). Форма по ним убирает субъекты, которые
+                # уводят за пределы отдела: роль в системе и роль вики.
+                "grant_departments": _grant_departments(ctx),
             })
 
         data = _body()
@@ -611,19 +636,34 @@ def register(bp, wiki_route, db, log_ip):
         # человека порог обычно пуст, и одна лишь проверка порога пропустила бы
         # «супервайзер выписывает правило на самого себя» — то есть выдачу себе
         # полного доступа к любому разделу своего отдела.
-        target_role = None
+        target_role, subject_department = None, None
         if subject_type == 'user':
-            cursor.execute('SELECT role, department_id FROM users WHERE id = %s', (subject_id,))
+            # Роль и отдел одним запросом: отдел нужен проверке ниже, и второй
+            # поход в users за тем же человеком был бы лишним.
+            cursor.execute('SELECT role, department_id FROM users WHERE id = %s',
+                           (subject_id,))
             target = cursor.fetchone()
             if not target:
                 return jsonify({"error": "Сотрудник не найден"}), 404
-            target_role = target[0]
-            departments = _grant_departments(ctx)
-            if departments is not None and target[1] not in departments:
-                return jsonify({
-                    "error": "Этот сотрудник из другого отдела",
-                    "code": "WIKI_DEPARTMENT_SCOPE",
-                }), 403
+            target_role, subject_department = target[0], target[1]
+        else:
+            subject_department = structure.subject_department(
+                cursor, subject_type, subject_id)
+
+        # ── Граница отдела для адресата ──────────────────────────────
+        # Раздел уже проверен выше (_may_grant_on_section), но раздел — это
+        # «где», а не «кому». Без этой проверки супервайзер на СВОЁМ разделе
+        # выписывал правило чужому отделу, чужой группе или роли по всей
+        # компании: потолок такое пропускает, потому что порог у них пуст и
+        # весит как оператор.
+        if not wiki_access.may_grant_to_subject(
+                subject_type, grant_departments=_grant_departments(ctx),
+                subject_department=subject_department):
+            return jsonify({
+                "error": _SUBJECT_SCOPE_ERRORS.get(
+                    subject_type, "Этот адресат из другого отдела"),
+                "code": "WIKI_DEPARTMENT_SCOPE",
+            }), 403
 
         if not wiki_access.may_grant_with_ceiling(ceiling, min_role_level, target_role):
             return jsonify({
@@ -663,25 +703,45 @@ def register(bp, wiki_route, db, log_ip):
         # Читаем правило ДО удаления: иначе проверять границу уже не по чему,
         # а снятие чужого правила — такое же вмешательство, как выдача. Без
         # этого супервайзер отобрал бы доступ у руководителя своего отдела.
+        # Заодно забираем субъект и права: журналу нужно записать, У КОГО и ЧТО
+        # отобрали, а после DELETE спрашивать уже некого. Раньше в журнал шёл
+        # только rule_id, и запись «Право отозвано» не говорила ничего.
         cursor.execute(
-            'SELECT section_id, min_role_level FROM wiki_section_access_rules WHERE id = %s',
+            'SELECT section_id, min_role_level, subject_type, subject_id,'
+            ' subject_role, ' + ', '.join(PERMISSION_FIELDS)
+            + ' FROM wiki_section_access_rules WHERE id = %s',
             (rule_id,))
         row = cursor.fetchone()
         if not row:
             return jsonify({"error": "Правило не найдено"}), 404
+        removed = {'rule_id': rule_id, 'subject_type': row[2], 'subject_id': row[3],
+                   'subject_role': row[4], 'min_role_level': row[1]}
+        removed.update(dict(zip(PERMISSION_FIELDS, row[5:])))
         if not _may_grant_on_section(cursor, ctx, row[0]):
             return jsonify({"error": "Раздел относится к другому отделу",
                             "code": "WIKI_DEPARTMENT_SCOPE"}), 403
         if not wiki_access.may_grant_with_ceiling(ceiling, row[1]):
             return jsonify({"error": "Это правило снимает только вышестоящий руководитель",
                             "code": "WIKI_GRANT_CEILING"}), 403
+        # Та же граница, что и при выдаче: правило, адресованное чужому отделу
+        # или роли по всей компании, снимает тот, кто вправе его выписать.
+        # Иначе супервайзер закрывал бы соседям доступ, который открыл директор.
+        if not wiki_access.may_grant_to_subject(
+                row[2], grant_departments=_grant_departments(ctx),
+                subject_department=structure.subject_department(cursor, row[2], row[3])):
+            return jsonify({
+                "error": "Это правило адресовано не вашему отделу",
+                "code": "WIKI_DEPARTMENT_SCOPE",
+            }), 403
 
         section_id = structure.delete_section_rule(cursor, rule_id)
         if section_id is None:
             return jsonify({"error": "Правило не найдено"}), 404
         queries.log_action(cursor, actor_id=ctx['user_id'], action='rule.delete',
                            entity_type='section', entity_id=section_id,
-                           details={'rule_id': rule_id}, ip_address=log_ip())
+                           target_user_id=(removed['subject_id']
+                                           if removed['subject_type'] == 'user' else None),
+                           details=removed, ip_address=log_ip())
         return jsonify({"status": "deleted"})
 
     @wiki_route('/access/people')
