@@ -8,36 +8,9 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { TRAINERS, TRAINER_CARDS, findTrainer } from './trainers/registry';
 import iconTaxiPro from './trainers/icon-taxi-pro.png';
 import iconSapar from './trainers/icon-sapar.png';
+import phoneTilted from './trainers/phone-tilted.png';
 
 const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
-
-/* Значок приложения или сайта, который отрабатывают в тренажёре.
- *
- * Карта лежит ЗДЕСЬ, а не в registry.js: реестр сценариев чистый (его читают
- * тесты через node), а импорт картинки node выполнить не может. Незнакомый
- * ключ — просто пустая витрина, тренажёр от этого не ломается. */
-const TRAINER_ICONS = {
-    'taxi-pro-avr': iconTaxiPro,
-    'sapar-site-avr': iconSapar,
-};
-
-/* Телефон боком со значком на экране — по образцу, который дал владелец.
- *
- * Место под него в карточке пустовало, а показать там надо ровно то, чего в
- * тексте нет: КАКОЕ приложение человек увидит внутри. Рисуем корпус, а не
- * вставляем готовый рендер: так значок ложится ровно на экран и модель живёт в
- * тех же цветах, что учебный телефон в самом тренажёре. */
-const TrainerShowcase = ({ icon, app }) => (
-    <div className="wiki-trainer-showcase" aria-hidden="true">
-        <div className="wiki-trainer-showcase__phone">
-            <div className="wiki-trainer-showcase__screen">
-                <span className="wiki-trainer-showcase__notch" />
-                {icon && <img src={icon} alt="" loading="lazy" />}
-            </div>
-        </div>
-        <span className="wiki-trainer-showcase__caption">{app}</span>
-    </div>
-);
 
 /* Третья половина вкладки «Статьи»: тренажёры.
  *
@@ -72,6 +45,38 @@ const STATUS_LABELS = {
     archived: 'В архиве',
     expired: 'Устарела',
 };
+
+/* Значок приложения или сайта, который отрабатывают в тренажёре.
+ *
+ * Карта лежит ЗДЕСЬ, а не в registry.js: реестр сценариев чистый (его читают
+ * тесты через node), а импорт картинки node выполнить не может. Незнакомый
+ * ключ — просто пустая витрина, тренажёр от этого не ломается. */
+const TRAINER_ICONS = {
+    'taxi-pro-avr': iconTaxiPro,
+    'sapar-site-avr': iconSapar,
+};
+
+/* Телефон боком со значком приложения на экране.
+ *
+ * Место справа от списка шагов пустовало, а показать там надо ровно то, чего в
+ * тексте нет: КАКОЕ приложение человек увидит внутри тренажёра.
+ *
+ * Корпус — рендер, который дал владелец, а не нарисованный мной: рисованный
+ * читался как другая модель и стоял под другим углом. Значок кладётся на экран
+ * трансформацией плоскости экрана: числа в CSS — это единичные векторы его
+ * сторон, снятые с самого рендера (верхняя кромка и левая кромка экрана), и
+ * центр экрана в долях картинки. Поэтому плитка лежит НА экране, а не поверх
+ * картинки прямоугольником.
+ */
+const TrainerShowcase = ({ icon }) => (
+    /* Витрина декоративная: название приложения уже стоит подписью под
+       заголовком, и повторять его для скринридера значит читать одно и то же
+       дважды. Поэтому aria-hidden и пустые alt. */
+    <div className="wiki-trainer-showcase" aria-hidden="true">
+        <img className="wiki-trainer-showcase__phone" src={phoneTilted} alt="" loading="lazy" />
+        {icon && <img className="wiki-trainer-showcase__icon" src={icon} alt="" loading="lazy" />}
+    </div>
+);
 
 export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
     const [usages, setUsages] = useState(null);
@@ -215,7 +220,7 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                                 </button>
                               </div>
 
-                              <TrainerShowcase icon={TRAINER_ICONS[trainer.key]} app={trainer.app} />
+                              <TrainerShowcase icon={TRAINER_ICONS[trainer.key]} />
                             </article>
                         );
                     })}
