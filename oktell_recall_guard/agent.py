@@ -175,6 +175,19 @@ def deep_update(target: dict, source: dict) -> dict:
     return target
 
 
+def expand_env(value: str) -> str:
+    """Раскрывает переменные окружения в пути из конфига.
+
+    `os.path.expandvars` понимает `%VAR%` только на Windows, а конфиг пишется
+    именно в этом синтаксисе (`%LOCALAPPDATA%\\OktellRecallGuard\\...`). На
+    Linux и macOS — то есть в тестах и на CI — такой путь возвращался
+    нераскрытым. Дораскрываем `%VAR%` сами, чтобы поведение не зависело от
+    платформы; неизвестное имя, как и на Windows, остаётся как есть.
+    """
+    expanded = os.path.expandvars(value)
+    return re.sub(r"%([^%\s]+)%", lambda m: os.environ.get(m.group(1), m.group(0)), expanded)
+
+
 def program_path() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve()
@@ -1663,7 +1676,7 @@ class ManagedBrowser:
         self.url = str(cfg.get("oktell_url") or "")
         self.origin = origin_of(self.url)
         profile_cfg = str(self.browser_cfg.get("profile_dir") or "").strip()
-        self.profile_dir = Path(os.path.expandvars(profile_cfg)) if profile_cfg else app_dir() / "chrome-profile"
+        self.profile_dir = Path(expand_env(profile_cfg)) if profile_cfg else app_dir() / "chrome-profile"
         self.process: Optional[subprocess.Popen] = None
         # Постоянное CDP-подключение к вкладке: хук ставится один раз на него.
         self._page: Optional[CdpPage] = None
@@ -1675,7 +1688,7 @@ class ManagedBrowser:
     # ---------- запуск ----------
 
     def chrome_path(self) -> Optional[Path]:
-        configured = os.path.expandvars(str(self.browser_cfg.get("chrome_path") or "").strip())
+        configured = expand_env(str(self.browser_cfg.get("chrome_path") or "").strip())
         if configured and Path(configured).exists():
             return Path(configured)
         # Chrome, а если его нет — Edge: он тоже Chromium и понимает и
