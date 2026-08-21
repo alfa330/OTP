@@ -279,8 +279,11 @@ export const IosModal = ({ open, onClose, title, subtitle, children, footer = nu
                 <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5">
                     {children}
                 </div>
+                {/* flex-wrap в подвале: там бывает не только «Отмена/Сохранить»,
+                    но и ряд действий над записью — на телефоне он не влезал в
+                    строку и выдавливал главную кнопку за край. */}
                 {footer && (
-                    <div className="flex items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-xl sm:px-5">
+                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200/70 bg-white/80 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur-xl sm:px-5">
                         {footer}
                     </div>
                 )}

@@ -1,25 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, Building2, CalendarClock, ChevronLeft, ChevronRight,
-    Clock, Coffee, Columns2, Copy, Loader2, MapPin, Pencil, Phone, Plus, Rows3,
-    Search, Table2,
+    ChevronLeft, ChevronRight, Columns2, Loader2, MapPin, Plus, Rows3, Search,
+    Table2,
 } from 'lucide-react';
 import {
     iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
     IosBadge, IosModal,
 } from '../ui/ios';
 import useStableCallback from './useStableCallback';
-import OfficeMap from './OfficeMap';
 import OfficeEditor from './OfficeEditor';
 import OfficeFilters, { DEFAULT_FILTERS, SORT_OPTIONS } from './OfficeFilters';
 import OfficeTable from './OfficeTable';
 import OfficeDayModal from './OfficeDayModal';
+import OfficeInfoModal from './OfficeInfoModal';
+import { OfficeStatusBadge } from './officeBadges';
+import { officeTodayISO } from './officeSchedule';
 import {
-    breakLines, dayHoursOn, officeStatus, officeTodayISO, scheduleLines,
-} from './officeSchedule';
-import {
-    DAY_LEGEND, DAY_STATE_EDGE, DAY_STATE_TONE, formatDay, officeDayStatus,
+    DAY_LEGEND, DAY_STATE_EDGE, formatDay, officeDayStatus,
 } from './officeDayStatus';
 
 /* Офисы: адреса, карта, график и привязка к таксопаркам.
@@ -32,6 +30,10 @@ import {
  * в панели: сегодня статус живой (до минуты), за прошлый день — отметка
  * дежурного или ночной снимок, а если за день ничего не записано, расчёт по
  * графику. Правило одно на карточку и таблицу: officeDayStatus.js.
+ *
+ * Карточка и строка таблицы показывают только адрес и статус; карта, часы,
+ * телефоны и парки открываются нажатием — OfficeInfoModal. Решение владельца:
+ * двадцать карточек «со всем сразу» превращали раздел в простыню.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -67,49 +69,7 @@ const draftFrom = (office) => ({
     partner_label: office.partner_label || '',
 });
 
-const STATUS_TONE = { open: 'green', break: 'amber', closed: 'slate' };
-
-const StatusBadge = ({ schedule, tick }) => {
-    // tick только заставляет пересчитать: время берётся из часов, а не из него.
-    const status = useMemo(() => officeStatus(schedule), [schedule, tick]);
-
-    if (status.state === 'none') return null;
-
-    return (
-        <IosBadge tone={STATUS_TONE[status.state]}>
-            {status.state === 'break' ? <Coffee size={11} /> : <Clock size={11} />}
-            {status.state === 'open' && `Открыто до ${status.until}`}
-            {status.state === 'break' && `Обед до ${status.until}`}
-            {status.state === 'closed' && (status.opensAt
-                ? `Закрыто · откроется ${status.opensDay ? `${status.opensDay} ` : ''}${status.opensAt}`
-                : 'Закрыто')}
-        </IosBadge>
-    );
-};
-
-/* Статус за выбранный день. В отличие от StatusBadge здесь нет минут: за
-   прошедший день «Открыто до 19:00» было бы выдумкой — что офис закрылся именно
-   в 19:00, никто не записывал. */
-const DayBadge = ({ status }) => (
-    <IosBadge tone={DAY_STATE_TONE[status.state]}>
-        {status.state === 'open' && <Clock size={11} />}
-        {status.label}
-        {status.state === 'open' && status.until && ` · ${status.from}–${status.until}`}
-    </IosBadge>
-);
-
-const OfficeCard = ({
-    base, office, canManage, onEdit, onArchive, onRestore, onMarkDay, onCopyAddress,
-    dayISO, isToday, showCity, tick,
-}) => {
-    const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
-    const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
-    const parkPhones = (office.parks || []).filter((link) => link.phones?.length);
-    const notes = (office.address_note || '').split('\n').map((s) => s.trim()).filter(Boolean);
-
-    const hours = useMemo(() => dayHoursOn(office.schedule, dayISO), [office.schedule, dayISO]);
-    const [weekOpen, setWeekOpen] = useState(false);
-
+const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
     const status = officeDayStatus(office, dayISO);
     const absent = status.state === 'absent';
     // Отметка человека перебивает живой расчёт и в сегодняшнем дне: она и
@@ -118,240 +78,56 @@ const OfficeCard = ({
 
     return (
         <div className={`${iosCard} relative overflow-hidden before:absolute before:inset-y-0 before:left-0 before:z-10 before:w-[3px] ${DAY_STATE_EDGE[status.state] || ''}`}>
-            <div className="flex flex-col sm:flex-row">
-                {office.lat != null && office.lon != null && (
-                    <OfficeMap
-                        base={base}
-                        lat={office.lat}
-                        lon={office.lon}
-                        url={office.map_url}
-                        height={150}
-                        className="shrink-0 rounded-none sm:w-[210px]"
-                    />
-                )}
-
-                <div className="min-w-0 flex-1 p-4">
-                    <div className="flex items-start gap-2">
-                        <div className="min-w-0 flex-1">
-                            {/* Без заголовков городов город обязан быть на самой
-                                карточке: «Навигатор» без него не адрес, а слово. */}
-                            {showCity && office.city && office.city !== office.name && (
-                                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                                    {office.city}
-                                </div>
-                            )}
-                            <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[14.5px] font-semibold text-slate-900">
-                                    {office.name}
-                                </span>
-                                {office.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
-                                {office.kind === 'partner' && (
-                                    <IosBadge tone="blue">{office.partner_label || 'Партнёрский'}</IosBadge>
-                                )}
-                                {isToday && !marked ? (
-                                    <StatusBadge schedule={office.schedule} tick={tick} />
-                                ) : (
-                                    <DayBadge status={status} />
-                                )}
-                            </div>
-
-                            {absent ? (
-                                <p className="mt-1 pl-[19px] text-[13px] italic leading-relaxed text-slate-500">
-                                    Офиса в городе нет
-                                </p>
-                            ) : office.address && (
-                                <p className="mt-1 flex items-start gap-1.5 text-[13px] leading-relaxed text-slate-600">
-                                    <MapPin size={13} className="mt-0.5 shrink-0 text-slate-400" />
-                                    {/* Адрес копируется щелчком: оператор его диктует и
-                                        пересылает, а выделять мышью текст в карточке —
-                                        лишняя работа десятки раз за смену. */}
-                                    <button
-                                        type="button"
-                                        onClick={() => onCopyAddress(office)}
-                                        title="Скопировать адрес"
-                                        className="group flex items-start gap-1.5 text-left hover:text-blue-600"
-                                    >
-                                        <span>{office.address}</span>
-                                        <Copy size={12} className="mt-0.5 shrink-0 text-slate-300 transition group-hover:text-blue-500" />
-                                    </button>
-                                </p>
-                            )}
-
-                            {/* Причина закрытия — это ответ оператора водителю,
-                                поэтому она рядом со статусом, а не в истории. */}
-                            {status.note && (
-                                <p className="mt-1 pl-[19px] text-[12.5px] leading-relaxed text-slate-500">
-                                    {status.note}
-                                    {status.recordedOn && (
-                                        <span className="text-slate-400"> · отметка на {formatDay(status.recordedOn)}</span>
-                                    )}
-                                </p>
-                            )}
-
-                            {notes.length > 0 && (
-                                <ul className="mt-1 space-y-0.5 pl-[19px] text-[12.5px] leading-relaxed text-slate-500">
-                                    {notes.map((note, index) => (
-                                        // eslint-disable-next-line react/no-array-index-key
-                                        <li key={index} className="list-disc list-inside">{note}</li>
-                                    ))}
-                                </ul>
-                            )}
+            {/* Вся карточка — одна кнопка: цель нажатия «адрес» на ощупь должна
+                быть строкой, а не подчёркнутыми буквами в ней. Кнопки правки
+                здесь больше нет намеренно — вложенная кнопка в кнопке
+                недопустима, а действия и так стоят в подвале модалки. */}
+            <button
+                type="button"
+                onClick={() => onOpen(office)}
+                aria-label={`${office.name}: подробнее`}
+                className="flex w-full items-center gap-3 py-3 pl-4 pr-3 text-left transition hover:bg-slate-50"
+            >
+                <div className="min-w-0 flex-1">
+                    {/* Без заголовков городов город обязан быть на самой
+                        карточке: «Навигатор» без него не адрес, а слово. */}
+                    {showCity && office.city && office.city !== office.name && (
+                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                            {office.city}
                         </div>
-
-                        {canManage && (
-                            <div className="flex shrink-0 items-center gap-1">
-                                {/* Отметка дня — ежедневное действие дежурного, ему
-                                    место в один щелчок, а не внутри формы офиса. */}
-                                {!absent && (
-                                    <button
-                                        type="button"
-                                        onClick={() => onMarkDay(office)}
-                                        className={`grid h-8 w-8 place-items-center rounded-full transition hover:bg-blue-50 hover:text-blue-600 ${
-                                            marked ? 'text-blue-600' : 'text-slate-400'
-                                        }`}
-                                        aria-label="Отметить статус на дату"
-                                    >
-                                        <CalendarClock size={14} />
-                                    </button>
-                                )}
-                                <button
-                                    type="button"
-                                    onClick={() => onEdit(office)}
-                                    className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
-                                    aria-label="Изменить офис"
-                                >
-                                    <Pencil size={14} />
-                                </button>
-                                {office.status === 'active' ? (
-                                    <button
-                                        type="button"
-                                        onClick={() => onArchive(office)}
-                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600"
-                                        aria-label="Убрать в архив"
-                                    >
-                                        <Archive size={14} />
-                                    </button>
-                                ) : (
-                                    // Без обратного хода архив превращается в
-                                    // одностороннюю дверь: убрать одним нажатием,
-                                    // вернуть — ничем.
-                                    <button
-                                        type="button"
-                                        onClick={() => onRestore(office)}
-                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
-                                        aria-label="Вернуть из архива"
-                                    >
-                                        <ArchiveRestore size={14} />
-                                    </button>
-                                )}
-                            </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[14.5px] font-semibold text-slate-900">
+                            {office.name}
+                        </span>
+                        {office.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
+                        {office.kind === 'partner' && (
+                            <IosBadge tone="blue">{office.partner_label || 'Партнёрский'}</IosBadge>
                         )}
                     </div>
 
-                    {/* Часы — за выбранный день, а не вся неделя: оператору отвечают
-                        «до скольки сегодня». Неделя нужна реже, поэтому она под
-                        раскрытием, и карточка перестала быть простыней из семи дней. */}
-                    {!absent && (
-                        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-slate-600">
-                            {office.phone && (
-                                <a
-                                    href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
-                                    className="flex items-center gap-1.5 font-medium tabular-nums hover:text-blue-600"
-                                >
-                                    <Phone size={12} className="text-slate-400" /> {office.phone}
-                                </a>
-                            )}
-                            {/* За сегодня часы дня не печатаем: бейдж рядом уже сказал
-                                «Открыто до 19:00» — это то же самое, только точнее.
-                                Обед показываем всегда: «когда у них перерыв» спрашивают
-                                заранее, а в бейдж он попадает только когда уже идёт. */}
-                            {hours ? (
-                                <>
-                                    {!isToday && (
-                                        <span className="flex items-center gap-1.5 tabular-nums">
-                                            <Clock size={12} className="text-slate-400" />
-                                            {formatDay(dayISO)} {hours.from}–{hours.to}
-                                        </span>
-                                    )}
-                                    {hours.breakFrom && (
-                                        <span className="flex items-center gap-1.5 tabular-nums text-slate-500">
-                                            <Coffee size={12} className="text-slate-400" />
-                                            обед {hours.breakFrom}–{hours.breakTo}
-                                        </span>
-                                    )}
-                                </>
-                            ) : !isToday && week.length > 0 && (
-                                <span className="flex items-center gap-1.5 text-slate-400">
-                                    <Clock size={12} /> {formatDay(dayISO)} выходной
-                                </span>
-                            )}
-                            {week.length > 0 && (
-                                <button
-                                    type="button"
-                                    onClick={() => setWeekOpen((v) => !v)}
-                                    className="text-[12px] font-medium text-blue-600 hover:underline"
-                                >
-                                    {weekOpen ? 'скрыть неделю' : 'вся неделя'}
-                                </button>
-                            )}
-                        </div>
-                    )}
-
-                    {weekOpen && week.length > 0 && (
-                        <div className="mt-1.5 rounded-xl bg-slate-50 px-3 py-2 text-[12.5px] text-slate-600">
-                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 tabular-nums">
-                                {week.map((line) => (
-                                    <span key={line.days} className={line.isDayOff ? 'text-slate-400' : ''}>
-                                        {line.days}&nbsp;{line.time}
-                                    </span>
-                                ))}
-                            </div>
-                            {lunch.length > 0 && (
-                                <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-slate-500">
-                                    {lunch.map((line) => (
-                                        <span key={line.days || 'all'} className="flex items-center gap-1.5">
-                                            <Coffee size={12} className="text-slate-400" />
-                                            обед {line.days ? `${line.days} ` : ''}{line.time}
-                                        </span>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {/* Список только показывает привязку; меняют её в карточке парка. */}
-                    {office.parks?.length > 0 && (
-                        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                            <Building2 size={12} className="text-slate-400" />
-                            {office.parks.map((link) => (
-                                <IosBadge key={link.park_id} tone="slate">{link.name}</IosBadge>
-                            ))}
-                        </div>
-                    )}
-
-                    {/* Номер у парка в этом офисе свой: у одного адреса их
-                        столько же, сколько парков за ним сидит. */}
-                    {parkPhones.length > 0 && (
-                        <div className="mt-2 rounded-xl bg-slate-50 px-3 py-2">
-                            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                                Телефоны парков
-                            </div>
-                            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[12.5px] text-slate-600">
-                                {parkPhones.map((link) => (
-                                    <span key={link.park_id} className="tabular-nums">
-                                        <span className="text-slate-400">{link.name}:</span>{' '}
-                                        {link.phones
-                                            .map((item) => (typeof item === 'string'
-                                                ? item
-                                                : [item.phone, item.note].filter(Boolean).join(' · ')))
-                                            .join(', ')}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
+                    <div className="mt-0.5 flex items-start gap-1.5 text-[13px] leading-relaxed text-slate-600">
+                        <MapPin size={13} className="mt-[3px] shrink-0 text-slate-400" />
+                        {absent ? (
+                            <span className="italic text-slate-500">Офиса в городе нет</span>
+                        ) : (
+                            <span className="min-w-0">{office.address || '—'}</span>
+                        )}
+                    </div>
                 </div>
-            </div>
+
+                <OfficeStatusBadge
+                    schedule={office.schedule}
+                    status={status}
+                    isToday={isToday}
+                    marked={marked}
+                    tick={tick}
+                />
+                {/* Шеврон — единственное, что отличает карточку от плашки:
+                    без него «нажми, чтобы увидеть остальное» приходится
+                    угадывать. */}
+                <ChevronRight size={16} className="shrink-0 text-slate-400" />
+            </button>
         </div>
     );
 };
@@ -377,22 +153,27 @@ const shiftDay = (dayISO, days) => {
    ничего не перебивает (побеждает порядок в CSS, а не в атрибуте), и поле
    растягивалось на всю строку панели. */
 const dateInput = 'shrink-0 rounded-xl bg-slate-100 px-3.5 py-2.5 text-[14px] tabular-nums '
-    + 'text-slate-900 border-0 transition focus:bg-white focus:outline-none '
-    + 'focus:ring-2 focus:ring-blue-500/70';
+    + 'font-medium text-slate-900 border-0 ring-1 ring-slate-200 transition '
+    + 'focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
 
 /* Вид и сортировку помним между заходами: раздел открывают каждый день, и
  * выбирать «таблицу» заново каждое утро — работа, которую делать не надо.
  * В приватном режиме Safari доступ к localStorage бросает, поэтому обе стороны
- * в try/catch: настройка второстепенна, падать из-за неё нельзя. */
+ * в try/catch: настройка второстепенна, падать из-за неё нельзя.
+ *
+ * По умолчанию — таблица: раздел заводили под вопрос «где сегодня закрыто»
+ * (критерий приёмки ТЗ №2 — при открытии виден статус всех офисов на сегодня),
+ * а карточками двадцать городов одним экраном не показать. Кто выбрал карточки,
+ * получает их и завтра: выбор человека сильнее умолчания. */
 const readPrefs = () => {
     try {
         const raw = JSON.parse(window.localStorage.getItem(PREFS_KEY) || '{}');
         return {
-            view: VIEWS.some((item) => item.key === raw.view) ? raw.view : 'cards1',
+            view: VIEWS.some((item) => item.key === raw.view) ? raw.view : 'table',
             sort: SORT_OPTIONS.some((item) => item.key === raw.sort) ? raw.sort : DEFAULT_FILTERS.sort,
         };
     } catch {
-        return { view: 'cards1', sort: DEFAULT_FILTERS.sort };
+        return { view: 'table', sort: DEFAULT_FILTERS.sort };
     }
 };
 
@@ -411,6 +192,7 @@ export default function WikiOffices({ base, headers, showToast }) {
     const [view, setView] = useState(prefs.view);
     const [dayISO, setDayISO] = useState(officeTodayISO);
     const [dayTarget, setDayTarget] = useState(null);
+    const [infoTarget, setInfoTarget] = useState(null);
     const [stateFilter, setStateFilter] = useState('');
     const [draft, setDraft] = useState(null);
     const [tick, setTick] = useState(0);
@@ -598,6 +380,26 @@ export default function WikiOffices({ base, headers, showToast }) {
         return order.map((key) => ({ city: key, items: byCity.get(key) }));
     }, [visible, grouped]);
 
+    /* Заголовок города — только там, где в городе больше одного офиса.
+       Карточка стала короткой (название, адрес, статус), и у города с
+       единственным офисом заголовок повторял её первую строку слово в слово:
+       «Актобе» над «Актобе». Города-одиночки идут подряд одной сеткой — иначе
+       в раскладке «две в ряд» каждый занимал бы целый ряд под одну карточку. */
+    const blocks = useMemo(() => {
+        if (!groups) return null;
+        const out = [];
+        groups.forEach((group) => {
+            if (group.items.length > 1) {
+                out.push({ city: group.city, items: group.items });
+                return;
+            }
+            const last = out[out.length - 1];
+            if (last && !last.city) last.items.push(group.items[0]);
+            else out.push({ city: null, items: [...group.items] });
+        });
+        return out;
+    }, [groups]);
+
     // Одна карточка в ряд или две — выбор человека, а не порог экрана: прежняя
     // сетка включала вторую колонку сама от 2xl и никого не спрашивала. На узком
     // экране колонка всё равно одна: две по 300 px нечитаемы.
@@ -605,35 +407,33 @@ export default function WikiOffices({ base, headers, showToast }) {
         ? 'grid grid-cols-1 gap-3 lg:grid-cols-2'
         : 'grid grid-cols-1 gap-3';
 
-    const renderCard = (office) => (
+    const renderCard = (office, showCity) => (
         <OfficeCard
             key={office.id}
-            base={base}
             office={office}
-            canManage={canManage}
-            onEdit={(item) => setDraft(draftFrom(item))}
-            onArchive={archive}
-            onRestore={restore}
-            onMarkDay={setDayTarget}
-            onCopyAddress={copyAddress}
+            onOpen={setInfoTarget}
             dayISO={dayISO}
             isToday={isToday}
-            showCity={!grouped}
+            showCity={showCity}
             tick={tick}
         />
     );
 
     return (
-        <div className="space-y-5">
-            <div className="flex flex-wrap items-center gap-2">
-                <div className="relative min-w-[200px] flex-1">
-                    <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                        className={`${iosInput} pl-10`}
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Город, адрес или телефон"
-                    />
+        <div className="space-y-4">
+            {/* Заголовок раздела из ТЗ. Он тут не украшение: вкладка называется
+                «Офисы» и держит ещё справочник адресов с картой, а таблица ниже
+                отвечает на другой вопрос — «работает ли офис в этот день». Пара
+                «название + подпись» и говорит, что таблицей управляет дата
+                справа, без чего календарь читается как фильтр по одному дню. */}
+            <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+                <div className="min-w-0">
+                    <h2 className="text-[19px] font-semibold leading-tight tracking-tight text-slate-900">
+                        Статус офисов по городам
+                    </h2>
+                    <p className="mt-0.5 text-[12.5px] text-slate-500">
+                        Данные показаны на выбранную дату
+                    </p>
                 </div>
 
                 {/* Дата — «на какой день смотрим». Вперёд смотреть нечего:
@@ -676,6 +476,22 @@ export default function WikiOffices({ base, headers, showToast }) {
                         </button>
                     )}
                 </div>
+            </div>
+
+            {/* Поиск, условия и вид — второй строкой. В одной с заголовком и
+                датой они складывались в семь элементов подряд, и дата, которой
+                таблица и управляется, стояла в этом ряду наравне с кнопкой
+                «Офис». */}
+            <div className="flex flex-wrap items-center gap-2">
+                <div className="relative min-w-[200px] flex-1">
+                    <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                        className={`${iosInput} pl-10`}
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="Город, адрес или телефон"
+                    />
+                </div>
 
                 <OfficeFilters
                     value={filters}
@@ -712,13 +528,16 @@ export default function WikiOffices({ base, headers, showToast }) {
                 )}
             </div>
 
-            {/* Легенда и счётчики — одной строкой, и она же фильтр. Цветовую
+            {/* Легенда и счётчики — одной полосой, и она же фильтр. Цветовую
                 кодировку новый оператор читает без обучения (п. 4.4 ТЗ), а
                 «где закрыто» находится одним нажатием вместо перебора списка.
                 Отдельная легенда и отдельные счётчики были бы двумя строками
-                про одно и то же. */}
+                про одно и то же.
+                Залитая полоса, как в макете: три подписи вразброс по белому
+                полю читались как случайные слова над таблицей, а не как ключ
+                к её цветам. */}
             {!loading && offices.length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 px-1">
+                <div className="flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
                     {DAY_LEGEND.map((item) => {
                         const count = counts[item.state] || 0;
                         const active = stateFilter === item.state;
@@ -728,20 +547,20 @@ export default function WikiOffices({ base, headers, showToast }) {
                                 type="button"
                                 disabled={!count && !active}
                                 onClick={() => setStateFilter(active ? '' : item.state)}
-                                className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] transition disabled:opacity-40 ${
+                                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12.5px] transition disabled:opacity-40 ${
                                     active
-                                        ? 'bg-slate-900 text-white'
-                                        : 'text-slate-500 hover:bg-slate-100 enabled:hover:text-slate-700'
+                                        ? 'bg-slate-900 font-medium text-white'
+                                        : 'text-slate-700 enabled:hover:bg-white'
                                 }`}
                             >
-                                <span className={`h-2 w-2 rounded-full ${item.dot}`} />
+                                <span className={`h-2 w-2 shrink-0 rounded-full ${item.dot}`} />
                                 {item.label}
-                                <span className="tabular-nums font-semibold">{count}</span>
+                                <span className="font-semibold tabular-nums">{count}</span>
                             </button>
                         );
                     })}
                     {!isToday && (
-                        <span className="ml-1 text-[12px] text-slate-400">
+                        <span className="ml-auto px-1.5 text-[12px] font-medium tabular-nums text-slate-500">
                             на {formatDay(dayISO)}
                         </span>
                     )}
@@ -777,10 +596,10 @@ export default function WikiOffices({ base, headers, showToast }) {
             {!loading && visible.length > 0 && view === 'table' && (
                 <OfficeTable
                     offices={visible}
-                    groups={groups}
-                    officeCount={officeCount}
                     dayISO={dayISO}
+                    isToday={isToday}
                     canManage={canManage}
+                    onOpen={setInfoTarget}
                     onEdit={(item) => setDraft(draftFrom(item))}
                     onArchive={archive}
                     onRestore={restore}
@@ -789,19 +608,19 @@ export default function WikiOffices({ base, headers, showToast }) {
             )}
 
             {!loading && visible.length > 0 && view !== 'table' && (
-                groups
+                blocks
                     /* Между городами воздуха больше, чем между карточками внутри
                        города: одинаковый отступ и делал список сплошным, а
                        заголовок города читался как подпись к первой карточке. */
-                    ? <div className="space-y-7">
-                        {groups.map((group) => (
-                            <section key={group.city} className="space-y-2.5">
+                    ? <div className="space-y-5">
+                        {blocks.map((block) => (block.city ? (
+                            <section key={`city:${block.city}`} className="space-y-2.5">
                                 <div className="flex items-baseline gap-3">
                                     <h3 className="text-[20px] font-semibold leading-none tracking-tight text-slate-900">
-                                        {group.city}
+                                        {block.city}
                                     </h3>
                                     <span className="shrink-0 text-[12.5px] font-medium tabular-nums text-slate-400">
-                                        {officeCount(group.items.length)}
+                                        {officeCount(block.items.length)}
                                     </span>
                                     {/* Линия до правого края: карточки заполнены
                                         только слева, и без неё граница города
@@ -809,12 +628,16 @@ export default function WikiOffices({ base, headers, showToast }) {
                                     <div className="h-px min-w-6 flex-1 bg-slate-200" />
                                 </div>
                                 <div className={grid}>
-                                    {group.items.map(renderCard)}
+                                    {block.items.map((office) => renderCard(office, false))}
                                 </div>
                             </section>
-                        ))}
+                        ) : (
+                            <div key={`plain:${block.items[0].id}`} className={grid}>
+                                {block.items.map((office) => renderCard(office, true))}
+                            </div>
+                        )))}
                       </div>
-                    : <div className={grid}>{visible.map(renderCard)}</div>
+                    : <div className={grid}>{visible.map((office) => renderCard(office, true))}</div>
             )}
 
             <IosModal
@@ -848,6 +671,27 @@ export default function WikiOffices({ base, headers, showToast }) {
                     />
                 )}
             </IosModal>
+
+            {/* Модалок две, и вложенными они не бывают: любое действие из
+                подробностей сначала закрывает их. Иначе после «в архив» на
+                экране осталась бы карточка офиса, которого в выборке уже нет —
+                список-то перезагружается. */}
+            {infoTarget && (
+                <OfficeInfoModal
+                    office={infoTarget}
+                    base={base}
+                    dayISO={dayISO}
+                    isToday={isToday}
+                    tick={tick}
+                    canManage={canManage}
+                    onClose={() => setInfoTarget(null)}
+                    onCopyAddress={copyAddress}
+                    onEdit={(item) => { setInfoTarget(null); setDraft(draftFrom(item)); }}
+                    onMarkDay={(item) => { setInfoTarget(null); setDayTarget(item); }}
+                    onArchive={(item) => { setInfoTarget(null); archive(item); }}
+                    onRestore={(item) => { setInfoTarget(null); restore(item); }}
+                />
+            )}
 
             {dayTarget && (
                 <OfficeDayModal

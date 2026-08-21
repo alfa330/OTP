@@ -1,157 +1,150 @@
 import React from 'react';
 import { Archive, ArchiveRestore, CalendarClock, Pencil } from 'lucide-react';
 import { iosCard, IosBadge } from '../ui/ios';
+import { OfficeDayPill } from './officeBadges';
 import {
-    DAY_STATE_ROW, DAY_STATE_TONE, formatDay, officeDayStatus,
+    DAY_STATE_ROW, DAY_STATE_TEXT, formatDay, officeDayStatus,
 } from './officeDayStatus';
 
-/* Плотный вид справочника: город, адрес, статус на дату и дата актуальности.
+/* Таблица ТЗ «Статус офисов по городам»: город, адрес, статус на дату и дата
+ * актуальности — двадцать городов одним экраном.
  *
- * Карточки отвечают на вопрос «как доехать» (за этим и мини-карта), таблица —
- * на вопрос «где сегодня закрыто»: двадцать городов видно одним экраном, и
- * закрытый офис находится, не листая. Поэтому это переключатель вида, а не
- * замена карточкам.
+ * Таблица отвечает на вопрос «где сегодня закрыто»: закрытый офис находится, не
+ * листая. Карточки отвечают на «как доехать», поэтому это переключатель вида, а
+ * не замена карточкам.
  *
- * Строка залита целиком (требование ТЗ): цвет должен считываться сразу, а не
- * точкой в бейдже.
+ * Строка тонируется целиком — и фон, и текст (требование ТЗ и буква макета):
+ * цвет должен считываться сразу, а не точкой в бейдже.
+ *
+ * Всё остальное про офис — карта, часы, телефоны парков — за нажатием на адрес
+ * (OfficeInfoModal). В таблицу это не влезает и влезать не должно.
  */
 
-const CELL = 'px-3 py-2.5 text-[13px] align-middle';
+const CELL = 'px-4 py-2.5 text-[13.5px] align-middle';
 
 /* Шапка липкая: в таблице на двадцать городов заголовки уезжают вверх, и
-   «19.08.2026» в четвёртой колонке перестаёт быть понятно чем. */
-const HEAD = 'sticky top-0 z-10 bg-slate-50 px-3 py-2.5 text-[11px] align-middle';
+   «19.08.2026» в последней колонке перестаёт быть понятно чем. Фон обязан быть
+   непрозрачным — под шапкой проезжают залитые строки. */
+const HEAD = 'sticky top-0 z-10 bg-slate-100 px-4 py-3 text-[11px] font-semibold '
+    + 'uppercase tracking-wider text-slate-500 align-middle';
 
-/* Полоса города. В таблице деления по городам не было вовсе: «Алматы» просто
-   повторялось в трёх строках подряд, и граница между городами читалась только
-   вчитыванием. Полоса заменяет повтор — в строках остаётся название офиса. */
-function CityBand({ city, count, span }) {
-    return (
-        <tr>
-            <td colSpan={span} className="border-t border-slate-200 bg-slate-100/70 px-3 py-2">
-                <div className="flex items-baseline gap-2.5">
-                    <span className="text-[15px] font-semibold leading-none tracking-tight text-slate-900">
-                        {city}
-                    </span>
-                    <span className="text-[11.5px] font-medium tabular-nums text-slate-500">
-                        {count}
-                    </span>
-                </div>
-            </td>
-        </tr>
-    );
-}
+/* Кнопки действий сидят в залитой строке, поэтому подсветка — белая плашка, а
+   не цветная: bg-blue-50 на зелёной строке читался бы третьим состоянием. */
+const ACTION = 'grid h-8 w-8 place-items-center rounded-full text-slate-500 transition hover:bg-white/80';
+
+/* Пунктир под адресом — единственный намёк, что за строкой есть продолжение.
+   Сплошного подчёркивания тут нельзя: адрес больше не ссылка в 2ГИС (она уехала
+   в модалку), и синей ссылкой он обещал бы уход со страницы. */
+const ADDRESS_LINK = 'text-left underline decoration-dotted decoration-1 '
+    + 'underline-offset-[3px] transition hover:decoration-solid';
 
 export default function OfficeTable({
-    offices, dayISO, canManage, onEdit, onArchive, onRestore, onMarkDay,
-    groups = null, officeCount = (n) => n,
+    offices, dayISO, isToday, canManage, onOpen, onEdit, onArchive, onRestore, onMarkDay,
 }) {
-    const span = 5 + (canManage ? 1 : 0);
-    // Плоский список остаётся плоским: при сортировке по названию или статусу
-    // полосы городов встали бы поперёк выбранного порядка.
-    const rows = groups
-        ? groups.flatMap((group) => [
-            { band: group.city, count: group.items.length },
-            ...group.items.map((office) => ({ office })),
-        ])
-        : offices.map((office) => ({ office }));
-
     return (
         <div className={`${iosCard} overflow-hidden`}>
             {/* Прокрутка внутри рамки: сжимать текст в узком окне нельзя (п. 6 ТЗ),
                 а горизонтальная прокрутка всей страницы ломала бы раздел. */}
             <div className="overflow-x-auto">
-                <table className="w-full min-w-[760px] border-collapse">
+                <table className="w-full min-w-[860px] border-collapse text-left">
                     <thead>
-                        <tr className="text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                            {/* Под полосами городов в первой колонке стоит офис, и
-                                заголовок «Город» врал бы о её содержимом. */}
-                            <th className={`${HEAD} font-semibold`}>{groups ? 'Офис' : 'Город'}</th>
-                            <th className={`${HEAD} font-semibold`}>Адрес офиса</th>
-                            <th className={`${HEAD} font-semibold`}>Телефон</th>
-                            <th className={`${HEAD} font-semibold`}>Статус на дату</th>
-                            <th className={`${HEAD} font-semibold`}>Обновлено</th>
-                            {canManage && <th className={`${HEAD} w-1`} aria-label="Действия" />}
+                        <tr>
+                            <th className={`${HEAD} w-[19%]`}>Город</th>
+                            <th className={`${HEAD} w-[36%]`}>Адрес офиса</th>
+                            <th className={`${HEAD} w-[15%]`}>Телефон</th>
+                            {/* За сегодня колонка так и называется — как в макете.
+                                На прошлом дне «Статус сегодня» было бы прямой
+                                неправдой: показан день, который уже прошёл. */}
+                            <th className={`${HEAD} w-[18%]`}>
+                                {isToday ? 'Статус сегодня' : 'Статус на дату'}
+                            </th>
+                            <th className={`${HEAD} w-[12%]`}>Обновлено</th>
+                            {canManage && <th className={`${HEAD} w-px`} aria-label="Действия" />}
                         </tr>
                     </thead>
                     <tbody>
-                        {rows.map((row) => {
-                            if (row.band) {
-                                return (
-                                    <CityBand
-                                        key={`city:${row.band}`}
-                                        city={row.band}
-                                        count={officeCount(row.count)}
-                                        span={span}
-                                    />
-                                );
-                            }
-                            const office = row.office;
+                        {offices.map((office, index) => {
                             const status = officeDayStatus(office, dayISO);
                             const absent = status.state === 'absent';
+                            const text = DAY_STATE_TEXT[status.state] || DAY_STATE_TEXT.none;
                             return (
                                 <tr
                                     key={office.id}
-                                    className={`border-t border-slate-200/70 ${DAY_STATE_ROW[status.state] || ''}`}
+                                    /* Волосок затемнением, а не серой линией: он
+                                       обязан читаться и на зелёной строке, и на
+                                       тёмно-серой. Первой строке он не нужен —
+                                       её сверху уже держит граница шапки.
+                                       Высота на строке, а не в отступах ячейки:
+                                       иначе управляющему её задавали бы кнопки
+                                       действий (32 px), и таблица у него была бы
+                                       выше, чем у оператора, — без причины. */
+                                    className={`h-[52px] ${index > 0 ? 'border-t border-slate-900/[0.06]' : ''} ${
+                                        DAY_STATE_ROW[status.state] || ''}`}
                                 >
-                                    <td className={`${CELL} font-semibold text-slate-900`}>
+                                    {/* Колонка ТЗ — город (п. 4.3), поэтому он и
+                                        стоит в ней жирным. Название офиса нужно,
+                                        когда в городе их несколько: иначе две
+                                        строки «Алматы» неразличимы. Когда запись
+                                        и есть город, второй строки нет. */}
+                                    <td className={`${CELL} font-semibold ${text.city}`}>
                                         <div className="flex flex-wrap items-center gap-1.5">
-                                            {/* Под полосой города повторять город незачем —
-                                                строку называет офис. Без полосы город
-                                                обязателен: «Навигатор» сам по себе не адрес. */}
-                                            {groups ? office.name : (office.city || 'Без города')}
+                                            {office.city || office.name || 'Без города'}
                                             {office.status === 'archived' && (
                                                 <IosBadge tone="amber">В архиве</IosBadge>
                                             )}
                                         </div>
-                                        {/* Название нужно, когда в городе несколько офисов:
-                                            иначе две строки «Алматы» неразличимы. Но у
-                                            записи о городе оно и есть город — тогда молчим. */}
-                                        {!groups && office.name !== office.city && (
-                                            <div className="text-[11.5px] font-normal text-slate-500">
+                                        {office.city && office.name !== office.city && (
+                                            <div className={`text-[11.5px] font-normal ${text.meta}`}>
                                                 {office.name}
                                             </div>
                                         )}
                                     </td>
 
-                                    <td className={`${CELL} text-slate-700`}>
+                                    {/* Адрес — вход в подробности: карта, часы,
+                                        телефоны парков и ссылка в 2ГИС. У офиса
+                                        без адреса вход всё равно нужен — за ним
+                                        график и телефон, — поэтому нажимается и
+                                        прочерк. Кроме случая «офиса нет»: там за
+                                        адресом нет ничего. */}
+                                    <td className={`${CELL} ${text.body}`}>
                                         {absent ? (
-                                            <span className="italic text-slate-500">Офиса в городе нет</span>
-                                        ) : office.map_url && office.address ? (
-                                            <a
-                                                href={office.map_url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="hover:text-blue-600 hover:underline"
-                                            >
-                                                {office.address}
-                                            </a>
+                                            <span className="italic">Офиса в городе нет</span>
                                         ) : (
-                                            office.address || <span className="text-slate-400">—</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => onOpen(office)}
+                                                title="Подробнее об офисе"
+                                                className={ADDRESS_LINK}
+                                            >
+                                                {office.address || '—'}
+                                            </button>
                                         )}
                                         {status.note && (
-                                            <div className="text-[11.5px] text-slate-500">{status.note}</div>
+                                            <div className={`text-[11.5px] ${text.meta}`}>{status.note}</div>
                                         )}
                                     </td>
 
-                                    <td className={`${CELL} tabular-nums`}>
+                                    <td className={`${CELL} whitespace-nowrap tabular-nums ${text.body}`}>
                                         {office.phone ? (
                                             <a
                                                 href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
-                                                className="font-medium text-slate-700 hover:text-blue-600"
+                                                className="font-medium underline-offset-2 hover:underline"
                                             >
                                                 {office.phone}
                                             </a>
                                         ) : (
-                                            <span className="text-slate-400">—</span>
+                                            <span className={text.meta}>—</span>
                                         )}
                                     </td>
 
                                     <td className={CELL}>
-                                        <IosBadge tone={DAY_STATE_TONE[status.state]}>{status.label}</IosBadge>
+                                        <OfficeDayPill state={status.state} label={status.label} />
                                     </td>
 
-                                    <td className={`${CELL} tabular-nums text-slate-500`}>
+                                    {/* «Обновлено» в тон строке: в макете дата у
+                                        закрытого офиса красная, и колонка работает
+                                        вторым сигналом, а не серой сноской. */}
+                                    <td className={`${CELL} whitespace-nowrap font-medium tabular-nums ${text.meta}`}>
                                         {formatDay(status.recordedOn)}
                                     </td>
 
@@ -162,7 +155,7 @@ export default function OfficeTable({
                                                     <button
                                                         type="button"
                                                         onClick={() => onMarkDay(office)}
-                                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                                                        className={`${ACTION} hover:text-blue-600`}
                                                         aria-label="Отметить статус на дату"
                                                     >
                                                         <CalendarClock size={14} />
@@ -171,7 +164,7 @@ export default function OfficeTable({
                                                 <button
                                                     type="button"
                                                     onClick={() => onEdit(office)}
-                                                    className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                                                    className={`${ACTION} hover:text-blue-600`}
                                                     aria-label="Изменить офис"
                                                 >
                                                     <Pencil size={14} />
@@ -180,7 +173,7 @@ export default function OfficeTable({
                                                     <button
                                                         type="button"
                                                         onClick={() => onArchive(office)}
-                                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-amber-50 hover:text-amber-600"
+                                                        className={`${ACTION} hover:text-amber-600`}
                                                         aria-label="Убрать в архив"
                                                     >
                                                         <Archive size={14} />
@@ -189,7 +182,7 @@ export default function OfficeTable({
                                                     <button
                                                         type="button"
                                                         onClick={() => onRestore(office)}
-                                                        className="grid h-8 w-8 place-items-center rounded-full text-slate-400 transition hover:bg-emerald-50 hover:text-emerald-600"
+                                                        className={`${ACTION} hover:text-emerald-700`}
                                                         aria-label="Вернуть из архива"
                                                     >
                                                         <ArchiveRestore size={14} />
