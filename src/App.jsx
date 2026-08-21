@@ -35789,7 +35789,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [birthdayGreetingLoading, setBirthdayGreetingLoading] = useState(false);
             const [birthdayGreetingError, setBirthdayGreetingError] = useState('');
             const [showBirthdayGreetingModal, setShowBirthdayGreetingModal] = useState(false);
-            const [birthdayBannerDismissed, setBirthdayBannerDismissed] = useState(false);
             // checked — ответ сервера уже приходил. Без него закрытый раздел мигал бы
             // замком тому, кто доступ давно подтвердил: granted стартует с false.
             const [sensitiveAccess, setSensitiveAccess] = useState({ required: false, granted: false, loading: false, checked: false });
@@ -41617,11 +41616,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setBirthdayGreetingLoading(false);
                     setBirthdayGreetingError('');
                     setShowBirthdayGreetingModal(false);
-                    setBirthdayBannerDismissed(false);
-                    return;
                 }
-
-                setBirthdayBannerDismissed(false);
             }, [user?.id]);
 
             useEffect(() => {
@@ -41667,50 +41662,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 if (!user?.id) return false;
                 return (birthdaysToday || []).some((b) => Number(b?.id) === Number(user.id));
             }, [birthdaysToday, user?.id]);
-
-            const birthdayBannerSignature = useMemo(() => {
-                const list = Array.isArray(birthdaysToday) ? birthdaysToday : [];
-                return list
-                    .map((item, index) => {
-                        const rawId = item?.id;
-                        if (rawId !== undefined && rawId !== null && rawId !== '') {
-                            return `id:${rawId}`;
-                        }
-                        const name = String(item?.name || '').trim().toLowerCase();
-                        const date = String(item?.birth_date || item?.birthday || item?.date || '').trim();
-                        return `person:${name || index}:${date}`;
-                    })
-                    .sort()
-                    .join('|');
-            }, [birthdaysToday]);
-
-            const birthdayBannerDismissStorageKey = useMemo(() => {
-                const dateKey = birthdaysDate || getLocalDateKey();
-                if (!user?.id || !dateKey || !birthdayBannerSignature) return '';
-                return `otp.birthday.banner.dismissed.${user.id}.${dateKey}.${birthdayBannerSignature}`;
-            }, [birthdayBannerSignature, birthdaysDate, getLocalDateKey, user?.id]);
-
-            useEffect(() => {
-                if (!birthdayBannerDismissStorageKey) {
-                    setBirthdayBannerDismissed(false);
-                    return;
-                }
-                try {
-                    setBirthdayBannerDismissed(localStorage.getItem(birthdayBannerDismissStorageKey) === '1');
-                } catch (e) {
-                    setBirthdayBannerDismissed(false);
-                }
-            }, [birthdayBannerDismissStorageKey]);
-
-            const dismissBirthdayBanner = useCallback(() => {
-                setBirthdayBannerDismissed(true);
-                if (!birthdayBannerDismissStorageKey) return;
-                try {
-                    localStorage.setItem(birthdayBannerDismissStorageKey, '1');
-                } catch (e) {
-                    // ignore localStorage errors
-                }
-            }, [birthdayBannerDismissStorageKey]);
 
             useEffect(() => {
                 if (!user?.id || !isUserBirthdayToday) return;
@@ -42656,7 +42607,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     setBirthdayGreetingLoading(false);
                     setBirthdayGreetingError('');
                     setShowBirthdayGreetingModal(false);
-                    setBirthdayBannerDismissed(false);
                     setUser(null);
                     setSvList([]);
                     setSystemAdmins([]);
@@ -45597,15 +45547,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const callEvaluationIframeUrl = `${APP_BASE_URL}call_evaluation.html`;
             const isCallEvaluationView = view === 'call_evaluation' && (isAdminLikeRole || isDepartmentManager);
             const canSeeCallEvaluation = isAdminLikeRole || isDepartmentManager;
-            const isBirthdayBannerSuppressedView = isCallEvaluationView || view === 'trainings';
-            const birthdayBannerVisible = !isBirthdayBannerSuppressedView && !birthdayBannerDismissed && Array.isArray(birthdaysToday) && birthdaysToday.length > 0;
-            const birthdayBannerNames = (birthdaysToday || []).map((b) => {
-                const name = String(b?.name || 'Сотрудник').trim();
-                return Number(b?.id) === Number(user?.id) ? `${name} (вы)` : name;
-            });
-            const birthdayBannerText = birthdaysToday.length === 1
-                ? `Сегодня день рождения у ${birthdayBannerNames[0]}!`
-                : `Сегодня день рождения у: ${birthdayBannerNames.join(', ')}.`;
             const manageOperatorsBirthdaysCaption = isDepartmentManager ? 'Все операторы' : 'Мои сотрудники';
 
             const renderUpcomingBirthdaysCard = (items, caption) => {
@@ -45681,38 +45622,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }`}
                         style={isCallEvaluationView ? { backgroundColor: '#f7f7f5' } : undefined}
                     >
-                        {birthdayBannerVisible && view !== 'four_you' && (
-                        <div className="relative overflow-hidden rounded-2xl border border-amber-200/70 bg-gradient-to-r from-amber-50 via-yellow-50 to-rose-50 px-4 py-4 mb-6 shadow-lg">
-                            <div
-                                className="pointer-events-none absolute inset-0 opacity-70"
-                                style={{
-                                    backgroundImage: "radial-gradient(circle at 10% 20%, rgba(251,191,36,0.35), transparent 45%), radial-gradient(circle at 90% 30%, rgba(251,113,133,0.25), transparent 45%), radial-gradient(circle at 50% 120%, rgba(251,191,36,0.25), transparent 40%)"
-                                }}
-                            />
-                            <div className="relative flex flex-col sm:flex-row sm:items-center gap-4">
-                                <div className="flex items-start gap-3">
-                                    <div className="h-12 w-12 rounded-2xl bg-white/85 border border-amber-200/70 shadow flex items-center justify-center">
-                                        <FaIcon className="fas fa-birthday-cake text-amber-500 text-2xl" />
-                                    </div>
-                                    <div>
-                                        <div className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-amber-700/80 bg-white/70 border border-amber-200/60 px-2.5 py-1 rounded-full">
-                                            <FaIcon className="fas fa-sparkles text-amber-500 text-[11px]" />
-                                            Праздник
-                                        </div>
-                                        <div className="mt-2 text-lg font-bold text-amber-900">День рождения сегодня</div>
-                                        <div className="text-sm text-amber-900/80">{birthdayBannerText}</div>
-                                    </div>
-                                </div>
-                                <button
-                                    onClick={dismissBirthdayBanner}
-                                    className="sm:ml-auto h-9 w-9 rounded-full bg-white/80 border border-amber-200/70 text-amber-700 hover:text-amber-900 hover:bg-white transition"
-                                    aria-label="Скрыть уведомление"
-                                >
-                                    <FaIcon className="fas fa-times" />
-                                </button>
-                            </div>
-                        </div>
-                        )}
                         {canAccessFourYouSection && view === 'four_you' && (
                             <Suspense fallback={<div className="h-screen flex items-center justify-center text-sm text-slate-500">Загрузка 4 You…</div>}>
                                 <FourYouView

@@ -1521,6 +1521,17 @@ class Database:
                     last_seen_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                 );
             """)
+            # Дни рождения в колоколе: отметка «сегодняшних видел». Знак —
+            # ДАТА, а не момент, в отличие от соседей выше: список именинников
+            # меняется не по мере поступления, а целиком в полночь, и отметка
+            # обязана истечь вместе с ним. Дату пишет процесс (Asia/Almaty),
+            # а не база (UTC) — см. notifications/sources.py::mark_seen.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS birthday_reads (
+                    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    last_seen_on DATE NOT NULL
+                );
+            """)
             # ──────────────────────────────────────────────────────────────
             # ГРУППЫ: историческая принадлежность операторов и СВ по датам +
             # модель расчёта на уровне группы. Это источник истины принадлежности
@@ -22848,8 +22859,22 @@ class Database:
             cursor.execute(query, params)
             return cursor.fetchone()
 
-    def get_birthdays_for_date(self, day_value):
-        """Return list of active users with birthdays matching the given date (month/day)."""
+    def get_birthdays_for_date(self, day_value, department_id=None,
+                               include_user_id=None, all_departments=False):
+        """Активные сотрудники, у которых в этот день (месяц/число) день рождения.
+
+        Периметр обязателен и по умолчанию ПУСТОЙ: дата рождения — личные
+        данные, и сотрудник чужого отдела о ней знать не должен. Кто где —
+        решает вызывающий (bot_schedule2::birthdays_today), здесь только
+        исполняется:
+
+            all_departments=True   — весь портал (глобальные админы);
+            department_id=<id>     — один отдел;
+            include_user_id=<id>   — плюс сам зритель, что бы ни было выше.
+
+        Умолчание «ничего» выбрано намеренно: новый вызов без периметра вернёт
+        пустой список, а не всех сотрудников компании.
+        """
         day = None
         if isinstance(day_value, str):
             try:
@@ -22864,6 +22889,17 @@ class Database:
         if not day:
             return []
 
+        if all_departments:
+            scope = ""
+        elif department_id is not None and include_user_id is not None:
+            scope = " AND (u.department_id = %(dept)s OR u.id = %(self_id)s)"
+        elif department_id is not None:
+            scope = " AND u.department_id = %(dept)s"
+        elif include_user_id is not None:
+            scope = " AND u.id = %(self_id)s"
+        else:
+            return []
+
         with self._get_cursor() as cursor:
             cursor.execute("""
                 SELECT
@@ -22876,10 +22912,11 @@ class Database:
                 FROM users u
                 LEFT JOIN directions d ON u.direction_id = d.id
                 WHERE u.birth_date IS NOT NULL
-                  AND EXTRACT(MONTH FROM u.birth_date) = %s
-                  AND EXTRACT(DAY FROM u.birth_date) = %s
+                  AND EXTRACT(MONTH FROM u.birth_date) = %(month)s
+                  AND EXTRACT(DAY FROM u.birth_date) = %(day)s
                   AND (u.status IS NULL OR u.status NOT IN ('fired', 'dismissal'))
-            """, (day.month, day.day))
+            """ + scope, {'month': day.month, 'day': day.day,
+                          'dept': department_id, 'self_id': include_user_id})
             rows = cursor.fetchall()
 
         return [

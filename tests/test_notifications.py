@@ -262,8 +262,13 @@ class NextChangeAtTest(unittest.TestCase):
         original = dict(sources._HANDLERS)
         sources._HANDLERS.clear()
         sources._HANDLERS.update({'lms': lambda c, v, limit: (0, [])})
+        # Дни рождения скрыты намеренно: они добавляют к моменту перехода
+        # ближайшую полночь, и после 23:00 она обогнала бы проверяемый здесь
+        # срок из базы — тест падал бы раз в сутки на пустом месте. Сама
+        # полночь проверяется отдельно, в BirthdaysSourceTest.
+        viewer = {'user_id': 1, 'hidden_sources': ('birthdays',)}
         try:
-            _, _, meta = sources.collect(Cursor(), {'user_id': 1})
+            _, _, meta = sources.collect(Cursor(), viewer)
             self.assertAlmostEqual(3600, meta['next_change_in'], delta=2)
 
             class Broken(FakeCursor):
@@ -272,7 +277,7 @@ class NextChangeAtTest(unittest.TestCase):
 
             cursor = Broken()
             with self.assertLogs(level='ERROR'):
-                _, _, meta = sources.collect(cursor, {'user_id': 1})
+                _, _, meta = sources.collect(cursor, viewer)
             self.assertIsNone(meta['next_change_in'], 'сводка важнее таймера')
             self.assertIn('ROLLBACK', cursor.commands)
             self.assertEqual(cursor.commands.count('SAVEPOINT'),
@@ -1041,6 +1046,256 @@ class FrontendAgreesWithBackendTest(unittest.TestCase):
         labelled = set(re.findall(r"^\s{4}([a-z_]+):", block.group(1), re.M))
         self.assertEqual(set(sources.SOURCES), labelled)
 
+class BirthdaysSourceTest(unittest.TestCase):
+    """Дни рождения: периметр отдела и переход через полночь.
+
+    Периметр здесь — не удобство, а требование: дата рождения сотрудника не
+    должна попадать человеку из чужого отдела. Дыра в этом источнике не падает
+    и не логируется — она просто показывает лишних людей, поэтому проверяется
+    и текстом запроса, и, где есть база, поведением на синтетических данных.
+    """
+
+    SOURCE = (ROOT / 'notifications' / 'sources.py').read_text(encoding='utf-8')
+    SERVER = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+
+    class Recorder(FakeCursor):
+        """Курсор, запоминающий сам запрос и его параметры."""
+
+        def __init__(self, rows=()):
+            super().__init__()
+            self.rows = list(rows)
+            self.sql = None
+            self.params = None
+
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, params
+            super().execute(sql, params)
+
+        def fetchall(self):
+            return self.rows
+
+    def _block(self):
+        start = self.SOURCE.index('def birthdays(cursor, viewer, limit):')
+        return self.SOURCE[start:self.SOURCE.index('_HANDLERS = {', start)]
+
+    # ── периметр ─────────────────────────────────────────────────────────────
+    def test_scoped_viewer_sees_only_own_department_and_self(self):
+        cursor = self.Recorder()
+        sources.birthdays(cursor, {'user_id': 7, 'birthday_is_global': False,
+                                   'birthday_department_id': 3}, 5)
+        self.assertIn('u.department_id = %(dept)s', cursor.sql)
+        self.assertIn('OR u.id = %(user_id)s', cursor.sql,
+                      'свой день рождения обязан проходить и без отдела')
+        self.assertEqual(3, cursor.params['dept'])
+        self.assertEqual(7, cursor.params['user_id'])
+
+    def test_viewer_without_department_sees_only_himself(self):
+        """Отдела нет — сравнение с NULL не даст ни строки, кроме своей."""
+        cursor = self.Recorder()
+        sources.birthdays(cursor, {'user_id': 7, 'birthday_is_global': False,
+                                   'birthday_department_id': None}, 5)
+        self.assertIn('u.department_id = %(dept)s', cursor.sql)
+        self.assertIsNone(cursor.params['dept'])
+
+    def test_global_admin_sees_everyone(self):
+        cursor = self.Recorder()
+        sources.birthdays(cursor, {'user_id': 7, 'birthday_is_global': True,
+                                   'birthday_department_id': None}, 5)
+        self.assertNotIn('u.department_id', cursor.sql)
+
+    def test_missing_perimeter_is_not_open_season(self):
+        """Зритель без обоих ключей — это НЕ «показать всех»."""
+        cursor = self.Recorder()
+        sources.birthdays(cursor, {'user_id': 7}, 5)
+        self.assertIn('u.department_id = %(dept)s', cursor.sql)
+
+    def test_trainer_is_not_global_here(self):
+        """У «Ивентов» тренер глобален, у дней рождения — нет.
+
+        Правило владельца сформулировано узко: «только внутри отделов, админам
+        можно показывать все». Скопировать _events_viewer_scope значило бы
+        выдать тренеру дни рождения всей компании.
+        """
+        start = self.SERVER.index('def _birthdays_viewer_scope(')
+        block = self.SERVER[start:self.SERVER.index('\ndef ', start + 1)]
+        self.assertIn('_is_global_admin_requester(role, requester_id)', block)
+        self.assertNotIn("role == 'trainer'", block)
+        # requester_id обязателен: без него _headed_department_id(None) вернёт
+        # None и любой админ-глава отдела молча станет глобальным.
+        self.assertNotIn('_is_global_admin_requester(role)', block)
+
+    def test_endpoint_uses_the_same_perimeter(self):
+        """/api/birthdays/today не должен быть обходным путём мимо колокола."""
+        start = self.SERVER.index("@app.route('/api/birthdays/today'")
+        block = self.SERVER[start:self.SERVER.index('@app.route', start + 1)]
+        self.assertIn('_birthdays_viewer_scope(', block)
+        self.assertIn('all_departments=', block)
+        self.assertIn('include_user_id=', block)
+        self.assertNotIn("request.headers.get('X-User-Id')", block,
+                         'личность зрителя берётся из токена, а не из заголовка')
+
+    def test_viewer_context_carries_the_birthday_perimeter(self):
+        """Ключи периметра обязаны приезжать из bot_schedule2: без них источник
+        решит, что периметра нет, и покажет зрителю только его самого."""
+        start = self.SERVER.index('def _notifications_viewer_context(')
+        block = self.SERVER[start:self.SERVER.index('\ntry:', start)]
+        self.assertIn("'birthday_is_global'", block)
+        self.assertIn("'birthday_department_id'", block)
+
+    # ── содержимое строки ────────────────────────────────────────────────────
+    def test_items_shape(self):
+        rows = [(7, 'Мария Иванова', 'Чаты', True, 2),
+                (9, 'Пётр Ким', None, False, 2)]
+        total, items = sources.birthdays(
+            self.Recorder(rows), {'user_id': 7, 'birthday_is_global': False,
+                                  'birthday_department_id': 3}, 5)
+        self.assertEqual(2, total, 'счётчик обязан равняться числу строк: '
+                                   'has_more до остальных иначе не доберётся')
+        self.assertEqual(['Мария Иванова (вы)', 'Пётр Ким'],
+                         [i['title'] for i in items])
+        self.assertEqual(['Чаты', ''], [i['body'] for i in items])
+        self.assertEqual([None, None], [i['at'] for i in items],
+                         'момента у праздника нет: fmtWhen округляет и после '
+                         'полудня написал бы «вчера» про сегодняшний день')
+        self.assertEqual([None, None], [i['view'] for i in items])
+        self.assertEqual(['default', 'default'], [i['tone'] for i in items],
+                         "'warning' поднял бы праздник над просрочками")
+        self.assertEqual([7, 9], [i['id'] for i in items],
+                         'id — это id сотрудника: из него собираются ключ '
+                         'строки и тег плашки на рабочем столе')
+
+    def test_own_birthday_goes_first(self):
+        self.assertIn('ORDER BY is_self DESC', self._block())
+
+    # ── время ────────────────────────────────────────────────────────────────
+    def test_day_comes_from_the_process_clock(self):
+        """База живёт в UTC: с 19:00 до полуночи её CURRENT_DATE — это вчера."""
+        block = self._block()
+        self.assertNotIn('CURRENT_DATE', block)
+        self.assertIn('_almaty_now().date()', block)
+        cursor = self.Recorder()
+        sources.birthdays(cursor, {'user_id': 1, 'birthday_is_global': True}, 5)
+        today = sources._almaty_now().date()
+        self.assertEqual(today.month, cursor.params['month'])
+        self.assertEqual(today.day, cursor.params['day'])
+
+    def test_mark_seen_writes_a_date_from_the_process_clock(self):
+        cursor = self.Recorder()
+        self.assertTrue(sources.mark_seen(cursor, 42, 'birthdays'))
+        self.assertNotIn('CURRENT_DATE', cursor.sql)
+        self.assertEqual((42, sources._almaty_now().date()), cursor.params)
+
+    def test_midnight_is_scheduled_without_touching_the_database(self):
+        """Полночь считается в Python: запрос за ней унёс бы весь таймер.
+
+        next_change_at — один сплавленный UNION ALL, и его SAVEPOINT защищает
+        сводку, а не таймер: упавший в нём кусок забрал бы с собой и окна
+        тестов, и дедлайны задач.
+        """
+        cursor = FakeCursor()
+        hidden = tuple(s for s in sources.SOURCES if s != 'birthdays')
+        moment = sources.next_change_at(cursor, {'user_id': 1, 'hidden_sources': hidden})
+        self.assertEqual([], cursor.commands, 'за полночью в базу не ходят')
+        now = sources._almaty_now()
+        self.assertEqual(now.date() + timedelta(days=1), moment.date())
+        self.assertEqual((0, 0, 0), (moment.hour, moment.minute, moment.second))
+        self.assertGreater(
+            moment, now,
+            'момент в прошлом клиент отработал бы как опрос раз в секунду')
+
+    def test_the_earlier_of_deadline_and_midnight_wins(self):
+        soon = sources._almaty_now() + timedelta(minutes=5)
+
+        class Cursor(FakeCursor):
+            def fetchone(self):
+                return (soon,)
+
+        self.assertEqual(soon, sources.next_change_at(Cursor(), {'user_id': 1}))
+
+    def test_hidden_birthdays_do_not_wake_the_tab_at_midnight(self):
+        self.assertIsNone(sources.next_change_at(
+            FakeCursor(), {'user_id': 1, 'hidden_sources': sources.SOURCES}))
+
+    # ── боевой SQL на синтетических данных ───────────────────────────────────
+    FIXTURE = """
+        WITH users(id, name, birth_date, status, department_id, direction_id) AS (
+            VALUES (1, 'Свой', DATE %(bd)s, 'working', 10, 1),
+                   (2, 'Коллега по отделу', DATE %(bd)s, 'working', 10, 1),
+                   (3, 'Чужой отдел', DATE %(bd)s, 'working', 20, 1),
+                   (4, 'Уволенный свой', DATE %(bd)s, 'fired', 10, 1),
+                   (5, 'Без отдела', DATE %(bd)s, 'working', NULL, 1),
+                   (6, 'Свой, но не сегодня', DATE %(other)s, 'working', 10, 1)
+        ), directions(id, name) AS (VALUES (1, 'Чаты')),
+           birthday_reads(user_id, last_seen_on) AS (
+            SELECT NULL::int, NULL::date WHERE FALSE
+        )
+    """
+
+    def _fixture_params(self, base):
+        today = sources._almaty_now().date()
+        born = today.replace(year=1990)
+        return dict(base, bd=born.isoformat(),
+                    other=(born + timedelta(days=1)).isoformat())
+
+    def test_other_department_is_filtered_out_on_real_postgres(self):
+        """Тот же запрос, но users/directions/birthday_reads подменены CTE.
+
+        Текстовых проверок мало: условие можно написать синтаксически верно и
+        всё равно пропустить чужой отдел (скажем, OR вместо AND). Здесь
+        выполняется РОВНО тот SQL, который уходит в прод.
+        """
+        reason = prod_db.skip_reason()
+        if reason:
+            self.skipTest(reason)
+
+        scoped = self.Recorder()
+        sources.birthdays(scoped, {'user_id': 1, 'birthday_is_global': False,
+                                   'birthday_department_id': 10}, 5)
+        wide = self.Recorder()
+        sources.birthdays(wide, {'user_id': 1, 'birthday_is_global': True}, 5)
+
+        cursor = prod_db.connection().cursor()
+        try:
+            cursor.execute(self.FIXTURE + scoped.sql, self._fixture_params(scoped.params))
+            rows = cursor.fetchall()
+            self.assertEqual(['Свой', 'Коллега по отделу'], [r[1] for r in rows],
+                             'чужой отдел, уволенный и не сегодняшний обязаны отпасть')
+            self.assertEqual(2, rows[0][4], 'счётчик считает то же, что и выдача')
+
+            cursor.execute(self.FIXTURE + wide.sql, self._fixture_params(wide.params))
+            self.assertEqual(
+                ['Свой', 'Без отдела', 'Коллега по отделу', 'Чужой отдел'],
+                [r[1] for r in cursor.fetchall()],
+                'глобальному админу периметр не сужаем')
+        finally:
+            prod_db.rollback()
+            cursor.close()
+
+    def test_dismissal_expires_at_midnight_on_real_postgres(self):
+        reason = prod_db.skip_reason()
+        if reason:
+            self.skipTest(reason)
+
+        recorder = self.Recorder()
+        sources.birthdays(recorder, {'user_id': 1, 'birthday_is_global': True}, 5)
+        today = sources._almaty_now().date()
+        cursor = prod_db.connection().cursor()
+        try:
+            for seen_on, expected in ((today, []), (today - timedelta(days=1), ['Свой'])):
+                cursor.execute("""
+                    WITH users(id, name, birth_date, status, department_id, direction_id) AS (
+                        VALUES (1, 'Свой', DATE %(bd)s, 'working', 10, 1)
+                    ), directions(id, name) AS (VALUES (1, 'Чаты')),
+                       birthday_reads(user_id, last_seen_on) AS (
+                        VALUES (1, DATE %(seen)s)
+                    )
+                """ + recorder.sql,
+                    dict(self._fixture_params(recorder.params), seen=seen_on.isoformat()))
+                self.assertEqual(expected, [r[1] for r in cursor.fetchall()],
+                                 'вчерашняя отметка не должна прятать сегодняшний праздник')
+        finally:
+            prod_db.rollback()
+            cursor.close()
 
 if __name__ == '__main__':
     unittest.main()

@@ -3700,6 +3700,24 @@ def _events_viewer_scope(requester_id, role):
     return is_global, viewer_dept
 
 
+def _birthdays_viewer_scope(requester_id, role):
+    """(видит всех, id отдела зрителя) для дней рождения.
+
+    Отдельная функция, а не _events_viewer_scope, из-за одного намеренного
+    отличия: там тренер глобален, здесь — нет. Правило владельца сформулировано
+    узко — «только внутри отделов, админам можно показывать все», — и тренер
+    под «админов» не подпадает.
+
+    «Все» — это глобальный админ. Админ, назначенный главой отдела, границу
+    отдела не теряет: назначение главой заменяет базовую роль, и периметр у
+    него ровно один отдел (_is_global_admin_requester это уже учитывает).
+    """
+    role = _normalize_user_role(role)
+    is_global = _is_global_admin_requester(role, requester_id)
+    viewer_dept = None if is_global else _department_scope_id_for_requester(requester_id)
+    return is_global, viewer_dept
+
+
 def _events_can_view(event_department_ids, is_global, viewer_dept):
     """Видимость поста: глобальным — всё; пост без отделов — всем; иначе отдел
     зрителя должен быть среди получателей. event_department_ids — список (или [])."""
@@ -14834,9 +14852,29 @@ def get_calibration_room_history(room_id):
 @app.route('/api/birthdays/today', methods=['GET'])
 @require_api_key
 def birthdays_today():
+    """Сегодняшние именинники в периметре зрителя.
+
+    Периметр тот же, что у источника «Дни рождения» в колоколе, и считается
+    одной функцией — _birthdays_viewer_scope. Раздельные правила здесь были бы
+    дырой: колокол показывал бы свой отдел, а этот эндпоинт по-прежнему отдавал
+    бы всю компанию любому, кто его позовёт.
+    """
     try:
+        requester_id, requester, auth_error = _resolve_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        is_global, viewer_dept = _birthdays_viewer_scope(
+            requester_id, requester[3] if requester else None)
+
         today = datetime.now().date()
-        birthdays = db.get_birthdays_for_date(today)
+        birthdays = db.get_birthdays_for_date(
+            today,
+            department_id=viewer_dept,
+            include_user_id=requester_id,
+            all_departments=is_global,
+        )
         return jsonify({"status": "success", "date": today.isoformat(), "birthdays": birthdays}), 200
     except Exception as e:
         logging.exception("Error in /api/birthdays/today")
@@ -51443,12 +51481,27 @@ def _notifications_viewer_context(requester_id, requester):
     can_see_tasks = (_is_admin_role(role) or role in ('sv', 'trainer')
                      or _headed_department_id(requester_id) is not None)
 
+    # Дни рождения живут по своему периметру — см. _birthdays_viewer_scope:
+    # «Ивенты» считают тренера глобальным, а личные данные сотрудников чужого
+    # отдела ему не показываются. Отдел у обоих правил считается одной и той же
+    # функцией, поэтому переспрашиваем базу только там, где ответ «Ивентов» его
+    # не содержит, — то есть у глобальных по «Ивентам», но не по дням рождения.
+    birthday_is_global = _is_global_admin_requester(role, requester_id)
+    if birthday_is_global:
+        birthday_department_id = None
+    elif is_global:
+        birthday_department_id = _department_scope_id_for_requester(requester_id)
+    else:
+        birthday_department_id = viewer_dept
+
     return {
         'user_id': int(requester_id),
         'role': role,
         'department_id': viewer_dept,
         'is_global': is_global,
         'can_see_four_you': bool(can_see_four_you),
+        'birthday_is_global': bool(birthday_is_global),
+        'birthday_department_id': birthday_department_id,
         'hidden_sources': () if can_see_tasks else ('tasks',),
     }
 

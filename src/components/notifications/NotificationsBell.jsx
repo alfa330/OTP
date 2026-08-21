@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, X } from 'lucide-react';
+import { Bell, BookLock, Cake, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, ListChecks, Loader2, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import {
@@ -37,11 +37,14 @@ const SOURCE_META = {
     surveys: { label: 'Опросы', icon: ClipboardList, tint: 'text-sky-600 bg-sky-50' },
     events: { label: 'Ивенты', icon: CalendarDays, tint: 'text-rose-600 bg-rose-50' },
     four_you: { label: '4 You', icon: Image, tint: 'text-violet-600 bg-violet-50' },
+    birthdays: { label: 'Дни рождения', icon: Cake, tint: 'text-pink-600 bg-pink-50' },
 };
 
 // Источники, которые вообще можно погасить кнопкой. Ознакомления и опросы
 // снимаются действием — см. notifications/sources.py::mark_seen.
-const CLEARABLE = ['events', 'four_you', 'lms'];
+// «Дни рождения» гасятся на календарный день: назавтра список другой, и
+// вчерашняя отметка его не прячет.
+const CLEARABLE = ['events', 'four_you', 'lms', 'birthdays'];
 
 /* Отпечаток состава сводки по источникам: {source: 'id:at,id:at'}.
    Раздел сравнивает свой отпечаток с предыдущим и перечитывает данные только

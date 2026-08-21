@@ -18,7 +18,7 @@
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, time as day_time, timedelta
 
 # Порядок здесь = порядок групп в колоколе. Сначала то, что требует действия с
 # дедлайном, потом то, что просто новое.
@@ -30,7 +30,8 @@ from datetime import datetime
 # падает, а просто расходится числами на экране, поэтому все три сверяются
 # тестами: tests/test_notifications.py::TasksSourceRulesTest и
 # tests/test_task_backlog_board.py::ActionNeedsBadgeTests.
-SOURCES = ('wiki_ack', 'tasks', 'crm', 'lms', 'surveys', 'events', 'four_you')
+SOURCES = ('wiki_ack', 'tasks', 'crm', 'lms', 'surveys', 'events', 'four_you',
+           'birthdays')
 
 # Сколько элементов тянем из одного источника в первой порции. Дальше клиент
 # добирает следующие, когда пользователь докручивает список до низа: счётчик
@@ -421,6 +422,74 @@ def _crm_queries():
     return crm_queries
 
 
+# ── Дни рождения ─────────────────────────────────────────────────────────────
+def birthdays(cursor, viewer, limit):
+    """Сегодняшние именинники — и только те, что в отделе зрителя.
+
+    Периметр здесь у́же, чем у любого другого источника, и это правило
+    владельца, а не осторожность: дата рождения — личные данные сотрудника, и
+    человек из чужого отдела о ней знать не должен. Видят всех только
+    глобальные админы, чей периметр и так весь портал; всем остальным, включая
+    тренеров и СВ, показываем свой отдел. Тем самым источник НЕ повторяет
+    границу «Ивентов»: там тренер глобален, здесь — нет.
+
+    Свой день рождения виден всегда, даже если отдела у человека нет: иначе
+    единственный, кого праздник касается лично, о нём бы и не узнал.
+
+    Момента у события нет намеренно (`at` = None): «сегодня» — это и есть весь
+    его срок, а дата, прогнанная через клиентский fmtWhen, после полудня
+    превращалась бы во «вчера».
+
+    Гасится кнопкой «отметить прочитанным», и водяной знак здесь ДАТА, а не
+    момент (см. mark_seen): список именинников целиком меняется в полночь, и
+    отметка «видел» обязана истечь вместе с ним.
+    """
+    today = _almaty_now().date()
+    params = {'user_id': viewer['user_id'], 'dept': viewer.get('birthday_department_id'),
+              'today': today, 'limit': limit}
+    # Периметр отдела; своя строка проходит в любом случае — в том числе когда
+    # отдела нет вовсе и сравнение с NULL не дало бы ни одной строки.
+    scope = '' if viewer.get('birthday_is_global') else """
+           AND (u.department_id = %(dept)s OR u.id = %(user_id)s)"""
+    cursor.execute(
+        """
+        SELECT u.id, u.name, d.name, (u.id = %(user_id)s) AS is_self,
+               COUNT(*) OVER () AS total
+          FROM users u
+          LEFT JOIN directions d ON d.id = u.direction_id
+         WHERE u.birth_date IS NOT NULL
+           AND EXTRACT(MONTH FROM u.birth_date) = %(month)s
+           AND EXTRACT(DAY FROM u.birth_date) = %(day)s
+           AND (u.status IS NULL OR u.status NOT IN ('fired', 'dismissal'))
+           AND NOT EXISTS (SELECT 1 FROM birthday_reads br
+                            WHERE br.user_id = %(user_id)s
+                              AND br.last_seen_on = %(today)s)
+        """ + scope + """
+         ORDER BY is_self DESC, u.name
+         LIMIT %(limit)s
+        """,
+        dict(params, month=today.month, day=today.day),
+    )
+    rows = cursor.fetchall()
+    total = int(rows[0][4]) if rows else 0
+    return total, [{
+        'source': 'birthdays',
+        'id': row[0],
+        # Заголовок — только имя: что это именно день рождения, уже сказано
+        # подписью источника, и повторять её в строке значило бы шуметь.
+        'title': ('%s (вы)' % row[1]) if row[3] else (row[1] or 'Сотрудник'),
+        'body': row[2] or '',
+        'at': None,
+        # Раздела за этим нет: поздравлять человек идёт не в портал. Клик по
+        # строке просто закрывает панель — onNavigate на пустой view выходит
+        # сразу (см. App.jsx::stableNotificationsNavigate).
+        'view': None,
+        'target': None,
+        # Праздник не горит: 'warning' в колоколе означает просрочку.
+        'tone': 'default',
+    } for row in rows]
+
+
 _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
@@ -429,6 +498,7 @@ _HANDLERS = {
     'surveys': surveys,
     'events': events,
     'four_you': four_you,
+    'birthdays': birthdays,
 }
 
 
@@ -562,13 +632,24 @@ def next_change_at(cursor, viewer):
                AND aa.status NOT IN ('superseded', 'cancelled') AND a.status = 'published'
                AND aa.due_at > %(now)s""")
 
+    # Полночь. Единственный переход, за которым не стоит вообще никакой записи
+    # в базе: с календарным днём меняется весь список именинников и истекает
+    # отметка «видел». Без него ночная смена, у которой вкладка открыта с
+    # вечера, узнала бы о сегодняшнем празднике только по возврату фокуса.
+    midnight = None
+    if 'birthdays' not in hidden:
+        midnight = datetime.combine(now.date() + timedelta(days=1), day_time.min)
+
     if not parts:
-        return None
+        return midnight
 
     cursor.execute('SELECT MIN(moment) FROM (%s) AS all_moments(moment)'
                    % ' UNION ALL '.join(parts), params)
     row = cursor.fetchone()
-    return row[0] if row else None
+    moment = row[0] if row else None
+    if moment is None:
+        return midnight
+    return moment if midnight is None else min(moment, midnight)
 
 
 def mark_seen(cursor, user_id, source):
@@ -608,6 +689,24 @@ def mark_seen(cursor, user_id, source):
              WHERE user_id = %s AND is_read = FALSE
             """,
             (user_id,),
+        )
+        return True
+    if source == 'birthdays':
+        # Знак ДАТЫ, а не момента: список именинников целиком меняется в
+        # полночь, и отметка «видел» обязана истечь вместе с ним. С момента
+        # (last_seen_at) вчерашнее «прочитано» пришлось бы каждый раз
+        # сравнивать с началом суток — то же самое, только окольно.
+        #
+        # Дата берётся из процесса, а не из базы: та живёт в UTC, и с 00:00 до
+        # 05:00 по Алматы CURRENT_DATE указывал бы на вчера — человек гасил бы
+        # уже прошедший день, а сегодняшние именинники оставались бы в колоколе.
+        cursor.execute(
+            """
+            INSERT INTO birthday_reads (user_id, last_seen_on)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET last_seen_on = EXCLUDED.last_seen_on
+            """,
+            (user_id, _almaty_now().date()),
         )
         return True
     return False
