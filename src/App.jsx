@@ -43948,8 +43948,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     fetchDepartments();
                 }
                 // Группы нужны в модалке (селект группы оператора) и в списках
-                // сотрудников (массовый перевод в группу).
-                if (showUserEditModal || view === 'manage_users' || view === 'employees') {
+                // сотрудников (массовый перевод в группу). У СВ карточка сотрудника
+                // тоже меняет группу, поэтому список греем при входе в его раздел —
+                // иначе селект секунду стоит пустым.
+                if (showUserEditModal || view === 'manage_users' || view === 'employees'
+                    || (view === 'manage_operators' && isDepartmentManager)) {
                     fetchUserModalGroups();
                 }
             }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager]);

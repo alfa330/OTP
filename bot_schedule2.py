@@ -10819,6 +10819,11 @@ def admin_update_user():
             return jsonify({"error": "Only super admins can update admin users"}), 403
         if field == 'department_id' and not _is_global_admin_requester(requester_role, requester_id):
             return jsonify({"error": "Only admins can reassign a user's department"}), 403
+        # Направление сотрудника обычный СВ больше не меняет (задача #228): у него
+        # есть смена ГРУППЫ, которая заодно переставляет супервайзера. Направление
+        # осталось за админом и главой отдела.
+        if field == 'direction_id' and requester_role == 'sv' and headed_dept_id is None:
+            return jsonify({"error": "Направление сотрудника меняет админ или глава отдела — супервайзер меняет группу"}), 403
         scoped_target_roles = ('operator', 'trainee', 'trainer', 'sv') if headed_dept_id is not None else ('operator', 'trainee')
         if not _is_global_admin_requester(requester_role, requester_id) and not _requester_can_access_target_user(
             requester,
@@ -10944,6 +10949,9 @@ def admin_bulk_update_users():
 
         updates = {}
         if 'direction_id' in changes_raw:
+            # То же правило, что и в точечной правке: направление — не к СВ.
+            if requester_role == 'sv' and headed_dept_id is None:
+                return jsonify({"error": "Направление сотрудника меняет админ или глава отдела — супервайзер меняет группу"}), 403
             direction_value = changes_raw.get('direction_id')
             if direction_value in [None, '']:
                 return jsonify({"error": "direction_id cannot be empty"}), 400
@@ -10954,7 +10962,8 @@ def admin_bulk_update_users():
 
         target_group = None
         if 'group_id' in changes_raw:
-            # Членством в группах управляют админы и главы отделов (как в /api/admin/groups/*).
+            # Массовый перевод — только админ и глава отдела. У СВ смена группы
+            # есть точечно, в карточке сотрудника (/api/admin/groups/<id>/operators).
             if not (_is_admin_role(requester_role) or headed_dept_id is not None):
                 return jsonify({"error": "Only admins or department heads can change groups"}), 403
             group_value = changes_raw.get('group_id')
@@ -16497,6 +16506,49 @@ def _ensure_group_manager():
     return requester_id, role, None
 
 
+def _ensure_group_operator_manager():
+    """Авторизация перевода оператора в другую группу: админ, глава отдела или СВ.
+
+    Обычному СВ смена ГРУППЫ заменила прежнюю смену НАПРАВЛЕНИЯ (задача #228):
+    группа тянет за собой супервайзера, а направление осталось за админом и
+    главой отдела. Остальные операции с группами (создание, архив, модель,
+    состав СВ) у СВ по-прежнему закрыты — они на `_ensure_group_manager`.
+    Возвращает (requester_id, requester, role, None) или (None, None, None, (resp, code)).
+    """
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        message, status_code = auth_error
+        return None, None, None, (jsonify({"error": message}), status_code)
+    role = _normalize_user_role(requester[3])
+    headed_dept = _headed_department_id(requester_id)
+    if not (_is_admin_role(role) or headed_dept is not None or _is_supervisor_role(role)):
+        return None, None, None, (
+            jsonify({"error": "Only admins, department heads or supervisors can move operators between groups"}),
+            403,
+        )
+    return requester_id, requester, role, None
+
+
+def _is_plain_supervisor_requester(requester_id, role):
+    """СВ без прав главы отдела: его скоуп — только свой отдел."""
+    return _is_supervisor_role(role) and _headed_department_id(requester_id) is None
+
+
+def _ensure_group_in_supervisor_scope(group_id, requester_id):
+    """Скоуп СВ при переводе оператора: только АКТИВНЫЕ группы своего отдела.
+    Отдел — та же граница, что была у смены направления. Возвращает (resp, code)
+    при отказе, иначе None."""
+    grp = db.get_group(group_id)
+    if not grp:
+        return jsonify({"error": "Группа не найдена"}), 404
+    if grp.get('status') != 'active':
+        return jsonify({"error": "Группа в архиве — выберите активную группу"}), 400
+    sv_dept = db.get_user_department_id(requester_id)
+    if sv_dept is None or grp.get('department_id') != sv_dept:
+        return jsonify({"error": "Группа не из вашего отдела"}), 403
+    return None
+
+
 def _ensure_group_in_requester_scope(group_id, requester_id, role):
     """Изоляция отделов: глава отдела управляет только группами своего отдела.
     Глобальный админ/супер-админ — любыми группами. Возвращает (resp, code) при
@@ -16824,11 +16876,17 @@ def revert_group_model_endpoint(group_id):
 @require_api_key
 def add_group_operator_endpoint(group_id):
     try:
-        rid, _role, guard_err = _ensure_group_manager()
+        rid, requester, _role, guard_err = _ensure_group_operator_manager()
         if guard_err:
             resp, code = guard_err
             return resp, code
-        scope_err = _ensure_group_in_requester_scope(group_id, rid, _role)
+        # СВ переводит операторов своего отдела — по своему скоупу, а не по
+        # правилам главы отдела (у него нет headed_department_id).
+        is_supervisor_move = _is_plain_supervisor_requester(rid, _role)
+        if is_supervisor_move:
+            scope_err = _ensure_group_in_supervisor_scope(group_id, rid)
+        else:
+            scope_err = _ensure_group_in_requester_scope(group_id, rid, _role)
         if scope_err:
             resp, code = scope_err
             return resp, code
@@ -16837,6 +16895,22 @@ def add_group_operator_endpoint(group_id):
         if not operator_id:
             return jsonify({"error": "operator_id is required"}), 400
         remove = bool(data.get('remove'))
+        if is_supervisor_move:
+            # СВ переводит оператора МЕЖДУ группами; оставить без группы нельзя —
+            # тогда у оператора нет ни супервайзера, ни учёта часов.
+            if remove:
+                return jsonify({"error": "Убрать оператора из группы может админ или глава отдела"}), 403
+            target_user = db.get_user(id=int(operator_id))
+            if not target_user:
+                return jsonify({"error": "Оператор не найден"}), 404
+            if not _requester_can_access_target_user(
+                requester,
+                rid,
+                target_user,
+                allow_self=False,
+                supervisor_target_roles=('operator', 'trainee')
+            ):
+                return jsonify({"error": "Оператор не из вашего отдела"}), 403
         if remove:
             db.remove_operator_from_group(group_id, int(operator_id), end_date=data.get('end_date'))
         else:

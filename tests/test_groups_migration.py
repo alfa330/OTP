@@ -643,5 +643,64 @@ class ExistingUserGroupEditTests(unittest.TestCase):
         self.assertNotIn("Выберите супервайзера", USER_MODAL)
 
 
+class SupervisorGroupChangeTests(unittest.TestCase):
+    """Задача #228: у СВ смена ГРУППЫ вместо прежней смены НАПРАВЛЕНИЯ."""
+
+    def test_group_move_endpoint_lets_supervisor_move_own_department(self):
+        ep = BOT.split("def add_group_operator_endpoint(", 1)[1].split("@app.route", 1)[0]
+        self.assertIn("_ensure_group_operator_manager()", ep)
+        # у СВ свой скоуп: активные группы своего отдела
+        self.assertIn("_is_plain_supervisor_requester(rid, _role)", ep)
+        self.assertIn("_ensure_group_in_supervisor_scope(group_id, rid)", ep)
+        # прежний путь админа и главы отдела не тронут
+        self.assertIn("_ensure_group_in_requester_scope(group_id, rid, _role)", ep)
+        # СВ переводит между группами, но не оставляет оператора без группы
+        self.assertIn("Убрать оператора из группы может админ или глава отдела", ep)
+        self.assertIn("supervisor_target_roles=('operator', 'trainee')", ep)
+
+    def test_supervisor_scope_helper_requires_active_group_of_own_department(self):
+        helper = BOT.split("def _ensure_group_in_supervisor_scope(", 1)[1].split("def ", 1)[0]
+        self.assertIn("grp.get('status') != 'active'", helper)
+        self.assertIn("grp.get('department_id') != sv_dept", helper)
+
+    def test_group_manager_guard_still_excludes_supervisors(self):
+        # остальные операции с группами (архив, модель, состав СВ) СВ по-прежнему недоступны
+        guard = BOT.split("def _ensure_group_manager():", 1)[1].split("def ", 1)[0]
+        self.assertNotIn("_is_supervisor_role", guard)
+
+    def test_direction_change_is_denied_for_plain_supervisor(self):
+        upd = BOT.split("def admin_update_user():", 1)[1].split("def admin_bulk_update_users():", 1)[0]
+        self.assertIn(
+            "if field == 'direction_id' and requester_role == 'sv' and headed_dept_id is None:",
+            upd,
+        )
+        bulk = BOT.split("def admin_bulk_update_users():", 1)[1].split("def admin_promote_to_supervisor():", 1)[0]
+        self.assertIn("if requester_role == 'sv' and headed_dept_id is None:", bulk)
+        self.assertIn(
+            "Направление сотрудника меняет админ или глава отдела — супервайзер меняет группу",
+            bulk,
+        )
+
+    def test_modal_shows_group_and_hides_direction_for_supervisor(self):
+        edit_block = USER_MODAL.split("--- Режим редактирования", 1)[1]
+        # селект группы больше не заперт на админа и главу отдела
+        self.assertNotIn(
+            "{(isAdminLikeRequester || isScopedDepartmentHeadRequester) && isOperatorDraft(editedUser) && (",
+            edit_block,
+        )
+        # направление в карточке — не для обычного СВ
+        self.assertIn("{isOperatorDraft(editedUser) && !isPureSupervisorRequester && (", edit_block)
+        # СВ не может оставить оператора без группы
+        self.assertIn("{(!isPureSupervisorRequester || !editedUser?.group_id) && (", edit_block)
+        # раздела «Группы» у СВ нет — не отправляем его туда
+        self.assertIn(
+            "{!isPureSupervisorRequester && ' Убрать оператора из группы совсем — в разделе «Группы».'}",
+            edit_block,
+        )
+
+    def test_supervisor_section_prefetches_groups(self):
+        self.assertIn("|| (view === 'manage_operators' && isDepartmentManager)) {", APP)
+
+
 if __name__ == "__main__":
     unittest.main()

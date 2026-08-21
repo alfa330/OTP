@@ -2291,7 +2291,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                             {canShowOperatorRateControls && (
                                 <div className="grid grid-cols-1 gap-4">
-                                {(isAdminLikeRequester || isScopedDepartmentHeadRequester) && isOperatorDraft(editedUser) && (
+                                {/* Группу оператора меняет и обычный СВ: у него это заменило
+                                    прежнюю смену направления (задача #228). */}
+                                {isOperatorDraft(editedUser) && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
                                     <select
@@ -2300,7 +2302,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                     disabled={isLoading}
                                     >
-                                    <option value="">Без группы</option>
+                                    {/* «Без группы» — только админу и главе отдела: СВ переводит
+                                        оператора между группами, но не оставляет без группы
+                                        (без неё нет ни супервайзера, ни учёта часов). */}
+                                    {(!isPureSupervisorRequester || !editedUser?.group_id) && (
+                                        <option value="">Без группы</option>
+                                    )}
                                     {(() => {
                                         const options = groupsForSelectedDept(effectiveDeptId);
                                         const currentInOptions = !editedUser?.group_id
@@ -2324,7 +2331,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                     })()}
                                     </select>
                                     <p className="mt-1 text-xs text-slate-500">
-                                        Супервайзер меняется автоматически вместе с группой. Убрать оператора из группы совсем — в разделе «Группы».
+                                        Супервайзер меняется автоматически вместе с группой.
+                                        {!isPureSupervisorRequester && ' Убрать оператора из группы совсем — в разделе «Группы».'}
                                     </p>
                                 </div>
                                 )}
@@ -2354,7 +2362,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 </div>
                             )}
 
-                            {isOperatorDraft(editedUser) && (
+                            {/* Направление сотрудника меняют админ и глава отдела; у СВ
+                                вместо него смена группы (задача #228). */}
+                            {isOperatorDraft(editedUser) && !isPureSupervisorRequester && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                                 <select

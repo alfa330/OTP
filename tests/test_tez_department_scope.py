@@ -355,14 +355,22 @@ class DepartmentHeadWriteScopeTests(unittest.TestCase):
 
     def test_department_head_can_select_group_when_editing_operator(self):
         # СВ напрямую не выбирается: глава отдела меняет ГРУППУ оператора,
-        # а супервайзер наследуется от группы каскадом.
+        # а супервайзер наследуется от группы каскадом. С задачи #228 тот же
+        # селект есть и у обычного СВ, поэтому условие держится только на роли
+        # сотрудника — а право показать блок даёт canShowOperatorRateControls
+        # (админ, глава отдела, СВ).
         modal = _read(USER_EDIT_MODAL_PATH)
         controls_start = modal.index("{canShowOperatorRateControls && (")
         group_label = modal.index(">Группа</label>", controls_start)
         group_controls = modal[controls_start:group_label]
 
         self.assertIn("isOperatorDraft(editedUser)", group_controls)
-        self.assertIn("isScopedDepartmentHeadRequester", group_controls)
+        rate_controls = _read(USER_EDIT_MODAL_PATH)
+        self.assertIn(
+            "const canShowOperatorRateControls = isOperatorDraft(editedUser) "
+            "&& (isAdminLikeRequester || isSupervisorRequester || isScopedDepartmentHeadRequester);",
+            rate_controls,
+        )
 
     def test_related_user_write_endpoints_use_head_aware_scope(self):
         scope_helper = _function_source(BOT_PATH, "_requester_can_access_target_user")
