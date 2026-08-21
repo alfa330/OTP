@@ -294,7 +294,13 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     useEffect(() => { loadIndex(); }, [loadIndex]);
     useEffect(() => { loadHome(); }, [loadHome]);
 
+    /* Парки нужны двум местам главной — рельсу и плитке-счётчику. Если в
+       пространстве выключено и то, и другое, запрос не делаем вовсе: справочник
+       общий на портал, и вика без парков тянула бы чужие пятнадцать штук ради
+       того, чтобы их не показать. */
+    const parksWanted = features?.parks !== false || features?.library_park_rail !== false;
     useEffect(() => {
+        if (!parksWanted) { setParks([]); setParksCanManage(false); return; }
         axios.get(`${base}/parks`, { headers })
             .then((r) => {
                 // Архивные парки сервер отдаёт управляющему справочником —
@@ -303,7 +309,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 setParksCanManage(!!r.data?.can_manage);
             })
             .catch(() => setParks([]));
-    }, [base, headers]);
+    }, [base, headers, parksWanted]);
 
     /* В дереве — только разделы своего периметра и только живые. Сервер отдаёт
        и чужие (вкладке «Структура» они нужны), помечая их accessible=false, и
@@ -543,7 +549,9 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                             isEditor={isEditor}
                             totals={catalog?.totals}
                             sectionsTotal={catalog?.sections_total}
-                            parksCount={parks.length}
+                            /* null = справочника в этом пространстве нет, и
+                               плитки быть не должно; ноль — это «есть, но пуст». */
+                            parksCount={features?.parks === false ? null : parks.length}
                             home={home}
                             onOpen={openArticle}
                             onOpenCatalog={onOpenCatalog}

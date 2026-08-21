@@ -93,8 +93,15 @@ export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
             {/* Числа — из каталога, то есть из ПЕРИМЕТРА человека, а не из всей
                 базы. Иначе счётчик обещал бы 29 статей, а список за ним отдавал
                 двенадцать — те, к которым у человека есть доступ. */}
+            {/* Плитка парков появляется, только если справочник в этом
+                пространстве есть: у вики без парков она вела бы на вкладку,
+                которой нет, и сообщала бы чужие 15 таксопарков. Сетка тогда
+                на три колонки — пустая клетка читалась бы как «не догрузилось».
+                Сравнение с null, а не с нулём: ноль парков — это «справочник
+                есть и он пуст», и такую плитку прятать нельзя. */}
             {isEditor && totals && (
-                <div className={`${iosCard} grid grid-cols-2 gap-2 p-2.5 sm:grid-cols-4`}>
+                <div className={`${iosCard} grid grid-cols-2 gap-2 p-2.5 ${
+                    parksCount == null ? 'sm:grid-cols-3' : 'sm:grid-cols-4'}`}>
                     <StatTile
                         icon={FileText}
                         value={totals.published ?? 0}
@@ -109,13 +116,15 @@ export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
                         hint="Открыть каталог: черновики и статьи на согласовании"
                         onClick={() => onOpenCatalog?.('draft')}
                     />
-                    <StatTile
-                        icon={Building2}
-                        value={parksCount}
-                        label="Парков"
-                        hint="Открыть справочник таксопарков"
-                        onClick={() => onOpenParks?.()}
-                    />
+                    {parksCount != null && (
+                        <StatTile
+                            icon={Building2}
+                            value={parksCount}
+                            label="Парков"
+                            hint="Открыть справочник таксопарков"
+                            onClick={() => onOpenParks?.()}
+                        />
+                    )}
                     <StatTile
                         icon={FolderTree}
                         value={sectionsTotal ?? 0}
