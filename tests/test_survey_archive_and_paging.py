@@ -19,6 +19,7 @@ import ast
 import unittest
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from tests import source_cache
 
@@ -73,6 +74,33 @@ def _survey_page_logic():
     if missing:
         raise AssertionError(f"Не найдены методы страницы опросов: {sorted(missing)}")
 
+    # role_has_min нужен предикатам видимости. Берём его из того же дерева, а не
+    # `from database import`: импорт исполняет монолит целиком, а он последней
+    # строкой поднимает пул к Postgres. У разработчика рядом обычно есть локальная
+    # база, и импорт молча проходит; в CI базы нет — там сбор ЭТОГО файла ронял
+    # весь прогон (Interrupted: 1 error during collection). Правило набора прежнее:
+    # монолиты не импортируем, см. tests/source_cache.py.
+    wanted_role_funcs = {"normalize_role_value", "role_has_min"}
+    wanted_role_attrs = {"ROLE_ALIASES", "ROLE_HIERARCHY"}
+    prelude = []
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted_role_funcs:
+            prelude.append(node)
+        elif isinstance(node, ast.Assign):
+            names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+            if names & wanted_role_attrs:
+                prelude.append(node)
+
+    lifted = {node.name for node in prelude if isinstance(node, ast.FunctionDef)}
+    lifted |= {
+        target.id
+        for node in prelude if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    missing_roles = (wanted_role_funcs | wanted_role_attrs) - lifted
+    if missing_roles:
+        raise AssertionError(f"Не найдена иерархия ролей: {sorted(missing_roles)}")
+
     stub = ast.ClassDef(
         name="SurveyPageLogic",
         bases=[],
@@ -81,17 +109,14 @@ def _survey_page_logic():
         decorator_list=[],
         type_params=[],
     )
-    tree = ast.Module(body=[stub], type_ignores=[])
+    tree = ast.Module(body=prelude + [stub], type_ignores=[])
     ast.fix_missing_locations(tree)
-
-    # role_has_min — настоящая функция из database.py: иерархия ролей здесь
-    # и решает, кому видно всё, а кому только свой отдел.
-    from database import role_has_min
 
     namespace = {
         "datetime": datetime,
         "logging": __import__("logging"),
-        "role_has_min": role_has_min,
+        # Аннотации поднятых функций вычисляются при exec — Optional нужен здесь.
+        "Optional": Optional,
     }
     exec(compile(tree, "<survey_page_logic>", "exec"), namespace)
     return namespace["SurveyPageLogic"]
