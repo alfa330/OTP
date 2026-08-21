@@ -888,16 +888,25 @@ class DirectoryRouteTest(_RouteHarness, unittest.TestCase):
     FULL_RULE = {'can_read': True, 'can_create': True, 'can_edit': True,
                  'can_delete': True, 'can_publish': True, 'can_approve': True}
 
-    def test_granted_rule_does_not_open_the_directories(self):
-        """Правило раздела — про содержимое РАЗДЕЛА, а справочники общие.
+    def test_granted_rule_opens_the_directories(self):
+        """Право, выписанное ПРАВИЛОМ раздела, тоже открывает справочники.
 
-        С 21.08.2026 выписанное правилом право поднимает способность
-        (queries.load_capabilities), и без отдельной оговорки персональное
-        правило на один раздел вики отдало бы оператору телефоны всех парков и
-        офисов компании. Гейт справочников намеренно остался на способностях
-        ДОЛЖНОСТИ (routes_parks._may_edit, routes_offices._may_edit).
+        Решение владельца 19.08.2026 («правит всякий, у кого есть что-то сверх
+        чтения») подтверждено 21.08.2026, когда способности стали суммой
+        должности и выписанного правилами: источник права значения не имеет.
+
+        Проверяем «не 403»: за гейтом идут запросы к подменённому курсору, и
+        осмысленного 2xx там не выйдет — важно, что отказа по правам нет.
         """
         client, _ = self.build(make_context('operator'), granted=self.FULL_RULE)
+        for method, url in self.WRITE_ROUTES:
+            r = getattr(client, method)(url, json={'name': 'Парк'})
+            self.assertNotEqual(r.status_code, 403, '%s %s' % (method, url))
+
+    def test_reader_without_any_grant_is_still_out(self):
+        """Порог не исчез: у кого нет ничего сверх чтения — тому по-прежнему нельзя."""
+        client, _ = self.build(make_context('operator'),
+                               granted={'can_read': True})
         for method, url in self.WRITE_ROUTES:
             r = getattr(client, method)(url, json={'name': 'x'})
             self.assertEqual(r.status_code, 403, '%s %s' % (method, url))
@@ -927,6 +936,17 @@ class DirectoryRouteTest(_RouteHarness, unittest.TestCase):
                 body = client.get(url).get_json()
                 self.assertEqual(body.get('can_manage'), expected,
                                  '%s %s' % (role, url))
+
+    def test_can_manage_flag_sees_the_granted_right_too(self):
+        """Кнопки «Изменить» обязаны появиться там же, где проходит гейт.
+
+        Разойдись флаг с гейтом — оператор с правилом получил бы экран без
+        кнопок при открытой двери (или наоборот, кнопки с отказом по нажатию).
+        """
+        client, cursor = self.build(make_context('operator'), granted=self.FULL_RULE)
+        cursor.fetchall.return_value = []
+        for url in ('/api/wiki/parks', '/api/wiki/offices'):
+            self.assertTrue(client.get(url).get_json().get('can_manage'), url)
 
 
 if __name__ == '__main__':
