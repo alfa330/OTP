@@ -79,6 +79,33 @@ SELECT a.id
    )
    -- запрет сильнее разрешения; администратор доступов его перекрывает
    AND (%(is_wiki_admin)s OR a.id NOT IN (SELECT article_id FROM denied))
+   -- ГРАНИЦА ПРОСТРАНСТВА действует и на саму СТАТЬЮ, а не только на её раздел.
+   --
+   -- Без этой ветки правило, выписанное на СТАТЬЮ, пробивало границу насквозь:
+   -- статья-классификатор роздана всем ролям OTP (visibility_mode='restricted',
+   -- семь grant-правил), разделы для неё игнорируются по определению режима — и
+   -- она открывалась Тез КЦ, которому вика не выдана ни одним пространством.
+   -- Через ту же щель прошли бы авторство, владение и гостевая ссылка.
+   --
+   -- Статья без разделов не принадлежит никакому пространству и границей не
+   -- закрывается: закрыть её было бы нечем, а видно её и так только тому, кому
+   -- её выдали лично.
+   AND (
+        %(is_super_admin)s
+        OR NOT EXISTS (SELECT 1 FROM wiki_article_sections xs
+                        WHERE xs.article_id = a.id)
+        OR EXISTS (
+            SELECT 1
+              FROM wiki_article_sections xs
+              JOIN wiki_sections xsec ON xsec.id = xs.section_id
+             WHERE xs.article_id = a.id
+               AND (NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+                                 WHERE sd.space_id = xsec.space_id)
+                    OR EXISTS (SELECT 1 FROM wiki_space_departments sd
+                                WHERE sd.space_id = xsec.space_id
+                                  AND sd.department_id = ANY(%(departments)s)))
+        )
+   )
    -- строгий режим: нужен явный грант, обходит только super_admin
    AND (NOT a.strict_mode
         OR %(is_super_admin)s

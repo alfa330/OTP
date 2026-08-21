@@ -14677,6 +14677,44 @@ class Database:
             row = cursor.fetchone()
             return bool(row[0]) if row else True
 
+    def department_has_wiki_space(self, department_ids):
+        """Есть ли хоть одно пространство вики, выданное этим отделам.
+
+        Тумблер departments.wiki_enabled отвечает на вопрос «раздел выдан?», а
+        это — на «есть ли в нём для отдела хоть что-нибудь». Без второй проверки
+        Тез КЦ, не указанный ни в одном пространстве, видел раздел в меню и
+        открывал пустую вику: тумблер у него включён, а содержимого нет и быть
+        не может.
+
+        Пустой список отделов у пространства = видно всем, соглашение то же, что
+        в периметре (wiki/queries.py). Нет таблицы (база до миграции) — считаем,
+        что пространство есть: молча отбирать раздел на неразвёрнутой схеме
+        нельзя.
+        """
+        wanted = sorted({int(x) for x in (department_ids or []) if x})
+        if not wanted:
+            return True
+        with self._get_cursor() as cursor:
+            try:
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM wiki_spaces sp
+                         WHERE sp.status = 'active'
+                           AND (NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+                                             WHERE sd.space_id = sp.id)
+                                OR EXISTS (SELECT 1 FROM wiki_space_departments sd
+                                            WHERE sd.space_id = sp.id
+                                              AND sd.department_id = ANY(%s)))
+                    )
+                    """,
+                    (wanted,),
+                )
+            except Exception:
+                return True
+            row = cursor.fetchone()
+            return bool(row[0]) if row else True
+
     def set_department_wiki_enabled(self, department_id, enabled):
         """Включить/выключить раздел «Вики» для отдела."""
         with self._get_cursor() as cursor:

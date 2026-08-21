@@ -1041,6 +1041,22 @@ def _get_user_payload(user):
             headed_department_ids = []
             headed_department_codes = []
             headed_department_code = None
+
+        # Раздел выдан отделу тумблером — но если отдел не включён НИ В ОДНО
+        # пространство вики, показывать пункт меню не в чем: человек откроет
+        # пустой раздел без единого раздела и статьи. Считаем после сбора
+        # возглавляемых отделов: глава отдела, которому пространство выдано,
+        # обязан попасть внутрь, даже если сам числится в другом.
+        #
+        # Супер-админа не трогаем: пространства настраивает он, и отобрать у
+        # него вход за то, что его отдел ещё никуда не включён, значит запереть
+        # дверь снаружи ключом, который лежит внутри.
+        if wiki_enabled and str(role or '').strip().lower() != 'super_admin':
+            try:
+                wiki_enabled = db.department_has_wiki_space(
+                    ([department_id] if department_id else []) + list(headed_department_ids))
+            except Exception:
+                wiki_enabled = True
     return {
         "role": role,
         "id": user_id,
