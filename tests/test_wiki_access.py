@@ -310,10 +310,12 @@ class ArticlePermissionsTest(unittest.TestCase):
 
 
 class GrantCeilingTest(unittest.TestCase):
-    """Лестница выдачи доступа (решение владельца 18.08.2026).
+    """Лестница выдачи доступа (решение владельца 18.08.2026, уточнено 21.08.2026).
 
         Коммерческий директор  → руководитель, СВ, тренер, оператор
-        Руководитель группы    → СВ, тренер, оператор
+        Руководитель группы    → руководитель, СВ, тренер, оператор — но только
+                                 внутри своего отдела (границу держит
+                                 _grant_departments в routes_structure)
         Супервайзер            → оператор
         Тренер, оператор       → не раздают вовсе
 
@@ -346,8 +348,21 @@ class GrantCeilingTest(unittest.TestCase):
                 access.may_grant_rule('super_admin', None, target_role=role),
                 'директор должен уметь адресовать правило роли %s' % role)
 
-    def test_head_grants_everyone_below(self):
-        self.assertEqual(self.granted('admin'), ['Оператор', 'Тренер', 'Супервайзер'])
+    def test_head_grants_his_whole_department(self):
+        """Руководитель настраивает свой отдел целиком, включая строку «Руководитель».
+
+        Прежний потолок 30 запирал в матрице собственный уровень, и отдел, за
+        который человек отвечает, он же не мог настроить до конца. Круг это не
+        расширяет: отдел раздающего проверяется отдельно, и правило уровня 40
+        открывает раздел руководителям ЕГО отдела, а не всей компании.
+        """
+        self.assertEqual(self.granted('admin'),
+                         ['Оператор', 'Тренер', 'Супервайзер', 'Руководитель'])
+
+    def test_head_stops_below_the_director(self):
+        """Своему уровню — да, директорскому — нет: над собой не выдают."""
+        self.assertFalse(access.may_grant_rule('admin', access.ROLE_LEVELS['super_admin']))
+        self.assertFalse(access.may_grant_rule('admin', None, target_role='super_admin'))
 
     def test_supervisor_grants_operators_only(self):
         """Тренер супервайзеру НЕ достаётся — это решение, а не недосмотр."""
@@ -359,21 +374,18 @@ class GrantCeilingTest(unittest.TestCase):
         self.assertEqual(self.granted('operator'), [])
         self.assertEqual(self.granted('trainee'), [])
 
-    def test_middle_ranks_do_not_grant_at_own_level(self):
-        """Середина лестницы не открывает раздел собственному уровню.
+    def test_supervisor_does_not_grant_at_own_level(self):
+        """Собственный уровень закрыт супервайзеру — и только ему.
 
-        Иначе супервайзер выдал бы права всем супервайзерам компании, а
-        руководитель — всем руководителям: это уже не делегирование, а
-        расширение собственного круга.
-
-        Директор — намеренное исключение: он и есть верх лестницы, и владелец
-        сформулировал его право как «любого сотрудника». Раньше этот тест
-        включал и его — и тем закреплял ограничение, которого никто не просил.
+        У супервайзера нет второй границы: правило он пишет на отдел целиком,
+        и уровень 30 открыл бы раздел всем супервайзерам отдела, включая его
+        самого. Руководитель и директор отвечают за отдел (и за компанию)
+        целиком, поэтому свой уровень им оставлен: у руководителя его держит
+        граница отдела, у директора над головой никого нет.
         """
-        for role in ('admin', 'sv'):
-            level = access.ROLE_LEVELS[role]
-            self.assertFalse(access.may_grant_rule(role, level),
-                             '%s не должен выдавать своему уровню' % role)
+        self.assertFalse(access.may_grant_rule('sv', access.ROLE_LEVELS['sv']),
+                         'супервайзер не должен выдавать своему уровню')
+        self.assertTrue(access.may_grant_rule('admin', access.ROLE_LEVELS['admin']))
         self.assertTrue(access.may_grant_rule('super_admin',
                                               access.ROLE_LEVELS['super_admin']))
 
@@ -386,9 +398,12 @@ class GrantCeilingTest(unittest.TestCase):
         self.assertTrue(access.may_grant_rule('sv', None, target_role='operator'))
         self.assertFalse(access.may_grant_rule('sv', None, target_role='sv'))
         self.assertFalse(access.may_grant_rule('sv', None, target_role='admin'))
-        # Руководителю supervisor адресуется, а другой руководитель — нет.
+        # Руководителю адресуется и супервайзер, и другой руководитель: «выдавать
+        # конкретным людям своего отдела» — это весь его отдел, а отдел адресата
+        # сверяет отдельно роут (WIKI_DEPARTMENT_SCOPE). Директор ему не по чину.
         self.assertTrue(access.may_grant_rule('admin', None, target_role='sv'))
-        self.assertFalse(access.may_grant_rule('admin', None, target_role='admin'))
+        self.assertTrue(access.may_grant_rule('admin', None, target_role='admin'))
+        self.assertFalse(access.may_grant_rule('admin', None, target_role='super_admin'))
 
     def test_unbounded_rule_weighs_as_operator(self):
         """Правило без порога открывает раздел всем от оператора — и весит так же.

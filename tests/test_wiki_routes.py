@@ -503,6 +503,67 @@ class GrantLadderRouteTest(_RouteHarness, unittest.TestCase):
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
 
+    def test_head_grants_his_own_level_inside_his_department(self):
+        """Руководитель СЗоВ выписывает правило «не ниже руководителя» у себя.
+
+        Это та самая жалоба: строка «Руководитель группы» была заперта, и глава
+        отдела не мог настроить собственную ветку до конца. Отдел при этом
+        по-прежнему сверяется — см. соседний тест.
+        """
+        self._stub_section(department_id=1)
+        captured = {}
+        self.addCleanup(setattr, structure, 'upsert_section_rule', structure.upsert_section_rule)
+        structure.upsert_section_rule = lambda cursor, **kw: (captured.update(kw), 8)[1]
+
+        client, _ = self.build(make_context('admin', department_id=1, headed=(1,)))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'min_role_level': 40, 'can_read': True})
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(captured['min_role_level'], 40)
+
+    def test_head_grants_a_colleague_in_his_department(self):
+        """«Выдавать конкретным людям своего отдела» — это весь отдел.
+
+        Раньше коллега-руководитель отсекался по потолку (403 GRANT_CEILING),
+        хотя сидит в том же отделе; теперь его отсекает только чужой отдел.
+        """
+        self._stub_section(department_id=1)
+        self.addCleanup(setattr, structure, 'upsert_section_rule', structure.upsert_section_rule)
+        structure.upsert_section_rule = lambda cursor, **kw: 11
+
+        client, cursor = self.build(make_context('admin', department_id=1, headed=(1,)))
+        cursor.fetchone.return_value = ('admin', 1)   # роль и отдел адресата
+        ok = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'user', 'subject_id': 77, 'can_read': True})
+        self.assertEqual(ok.status_code, 201)
+
+        cursor.fetchone.return_value = ('admin', 367)  # тот же ранг, чужой отдел
+        denied = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'user', 'subject_id': 78, 'can_read': True})
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(denied.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+
+    def test_head_stopped_at_foreign_department(self):
+        """Потолок вырос, граница отдела осталась: ОП чужому руководителю не отдаём."""
+        self._stub_section(department_id=367)
+        client, _ = self.build(make_context('admin', department_id=1, headed=(1,)))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 367,
+            'min_role_level': 40, 'can_read': True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_DEPARTMENT_SCOPE')
+
+    def test_head_cannot_grant_at_director_level(self):
+        """Свой уровень — да, директорский — нет."""
+        self._stub_section(department_id=1)
+        client, _ = self.build(make_context('admin', department_id=1, headed=(1,)))
+        r = client.post('/api/wiki/access/section-rules', json={
+            'section_id': 1, 'subject_type': 'department', 'subject_id': 1,
+            'min_role_level': 50, 'can_read': True})
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.get_json().get('code'), 'WIKI_GRANT_CEILING')
+
     def test_director_has_no_department_border(self):
         self._stub_section(department_id=367)
         self.addCleanup(setattr, structure, 'upsert_section_rule', structure.upsert_section_rule)
