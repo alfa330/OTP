@@ -38,7 +38,7 @@ import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
 import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, IosBadge, IosModal } from './components/ui/ios';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId } from './utils/roles';
 import { departmentAllowsView, departmentHidesColleagueSchedules, departmentHidesFrontOfficeTraining, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesSimpleEmployeeAccounting, firstAllowedView } from './utils/departmentViews';
-import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary } from './utils/salaryFormula';
+import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
@@ -143,6 +143,8 @@ const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/Sal
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
 const SalaryCalculatorOsnova = lazyWithRetry(() => import('./components/salary/SalaryCalculatorOsnova'));
 const SalaryCalculatorPotok = lazyWithRetry(() => import('./components/salary/SalaryCalculatorPotok'));
+const SalaryCalculatorVerificator = lazyWithRetry(() => import('./components/salary/SalaryCalculatorVerificator'));
+const SalaryCalculatorYandexReg = lazyWithRetry(() => import('./components/salary/SalaryCalculatorYandexReg'));
 const ResourceFteView = lazyWithRetry(() => import('./components/resources/ResourceFteView'));
 const ShiftAuctionView = lazyWithRetry(() => import('./components/resources/ShiftAuctionView'));
 const DepartmentsView = lazyWithRetry(() => import('./components/departments/DepartmentsView'));
@@ -229,6 +231,8 @@ const SALARY_CALCULATOR_CATALOG = [
         models: [
             { key: 'op_osnova', label: 'Основа' },
             { key: 'op_potok', label: 'Поток' },
+            { key: 'op_verificator', label: 'Верификатор' },
+            { key: 'op_yandex_reg', label: 'Яндекс Регистрация' },
         ],
     },
 ];
@@ -237,9 +241,10 @@ const SALARY_CALCULATOR_TYPES = new Set(
 );
 const SALARY_CALCULATOR_READY_DEPARTMENT_CODES = new Set(SALARY_CALCULATOR_CATALOG.map((entry) => entry.code));
 const TEZ_SALARY_CALCULATOR_TYPES = new Set(['tez_line', 'tez_op']);
-// Отдел продаж: расчёт есть у «Основы» и «Потока». Оператору ОП другой модели
-// (Верификатор / Яндекс Регистрация) по-прежнему показываем заглушку «скоро».
-const OP_SALARY_CALCULATOR_MODELS = new Set(['op_osnova', 'op_potok']);
+// Отдел продаж: расчёт есть у всех четырёх направлений — «Основа», «Поток»,
+// «Верификатор» и «Яндекс Регистрация». Заглушка «скоро» остаётся только для
+// оператора с моделью вне этого набора (перевод в другой отдел посреди месяца).
+const OP_SALARY_CALCULATOR_MODELS = new Set(['op_osnova', 'op_potok', 'op_verificator', 'op_yandex_reg']);
 const OP_DEFAULT_SALARY_CALCULATOR_MODEL = 'op_osnova';
 // Разделы «чистого» тренера (тренер-глава отдела ходит по правилам главы).
 // Список один на оба гарда — восстановление вида из URL и редирект при смене
@@ -48833,7 +48838,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             const isOsnovaModel = !hasMixedCalculationModels && calculationModelCode === 'op_osnova';
                                             // ОП «Поток»: часы × ставку + два потока продаж, качество не влияет.
                                             const isPotokModel = !hasMixedCalculationModels && calculationModelCode === 'op_potok';
-                                            const isOpSalesModel = isOsnovaModel || isPotokModel;
+                                            // ОП «Верификатор»: оклад × (качество% + премия за план%), качество — прямой процент.
+                                            const isVerificatorModel = !hasMixedCalculationModels && calculationModelCode === 'op_verificator';
+                                            // ОП «Яндекс Регистрация»: цена успешки от конверсии группы, удержание по личному качеству.
+                                            const isYandexRegModel = !hasMixedCalculationModels && calculationModelCode === 'op_yandex_reg';
+                                            const isOpSalesModel = isOsnovaModel || isPotokModel || isVerificatorModel || isYandexRegModel;
                                             const interactionLabel = isChatModel ? 'Чаты' : 'Звонки';
                                             const interactionPerHourLabel = isChatModel ? 'Чаты в час' : 'Звонки в час';
                                             const interactionIcon = isChatModel ? 'fas fa-comments' : 'fas fa-phone';
@@ -49091,9 +49100,35 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     fines,
                                                 })
                                                 : null;
+                                            // «Верификатор»: оклад и бонус за качество из часов есть, план продаж — нет,
+                                            // поэтому превью показывает выплату без премии за план.
+                                            const estimatedVerificatorSalary = isVerificatorModel
+                                                ? calculateVerificatorSalary({
+                                                    hoursWorked: regular,
+                                                    hoursNorm: norm,
+                                                    sales: 0,
+                                                    planTarget: 0,
+                                                    quality: salaryQuality,
+                                                    fines,
+                                                })
+                                                : null;
+                                            // «Яндекс Регистрация»: конверсия группы и личные успешки в системе не хранятся —
+                                            // в часах видна только постоянная часть.
+                                            const estimatedYandexRegSalary = isYandexRegModel
+                                                ? calculateYandexRegSalary({
+                                                    hoursWorked: regular,
+                                                    hoursNorm: norm,
+                                                    deals: 0,
+                                                    quality: salaryQuality,
+                                                    fines,
+                                                    bonuses,
+                                                })
+                                                : null;
                                             const estimatedSalary = estimatedTezSalary
                                                 || estimatedOsnovaSalary
                                                 || estimatedPotokSalary
+                                                || estimatedVerificatorSalary
+                                                || estimatedYandexRegSalary
                                                 || (isChatModel ? estimatedChatSalary : estimatedOperatorSalary);
                                             const formatEstimatedSalaryMoney = (value) => {
                                                 const n = Number(value);
@@ -49124,6 +49159,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 : isPotokModel
                                                 ? [
                                                     'план и продажи',
+                                                    safeNum(norm) <= 0 ? 'норма' : null,
+                                                ].filter(Boolean)
+                                                : isVerificatorModel
+                                                ? [
+                                                    // Продажи и план вносятся в калькуляторе — бонус за качество
+                                                    // в превью уже есть, премии за план ещё нет.
+                                                    'план и продажи',
+                                                    !hasSalaryQuality ? 'качество' : null,
+                                                    safeNum(norm) <= 0 ? 'норма' : null,
+                                                ].filter(Boolean)
+                                                : isYandexRegModel
+                                                ? [
+                                                    'конверсия группы и успешки',
+                                                    !hasSalaryQuality ? 'качество' : null,
                                                     safeNum(norm) <= 0 ? 'норма' : null,
                                                 ].filter(Boolean)
                                                 : [
@@ -49497,6 +49546,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ? `По модели «Оператор ОП Основа»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
                                                                     : isPotokModel
                                                                     ? `По модели «Оператор ОП Поток»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                                    : isVerificatorModel
+                                                                    ? `По модели «Оператор ОП Верификатор»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
+                                                                    : isYandexRegModel
+                                                                    ? `По модели «Оператор ОП Яндекс Регистрация»${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`
                                                                     : isChatModel
                                                                     ? 'Для чат-модели используется отдельный калькулятор.'
                                                                     : `По формуле калькулятора${missingSalaryInputs.length > 0 ? `, не хватает: ${missingSalaryInputs.join(', ')}` : ''}`}
@@ -49512,6 +49565,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ? 'Только постоянная часть: часы × 600 ₸, минус штрафы. Бонус за сделки — в калькуляторе.'
                                                                     : isPotokModel
                                                                     ? 'Только сумма за часы: часы × 700 ₸, минус штрафы. Бонусы за продажи — в калькуляторе.'
+                                                                    : isVerificatorModel
+                                                                    ? 'Оклад (часы × 500 ₸) и бонус за качество, минус штрафы. Премия за план — в калькуляторе.'
+                                                                    : isYandexRegModel
+                                                                    ? 'Только оклад: часы × 600 ₸, минус штрафы. Бонус за успешки — в калькуляторе.'
                                                                     : isChatModel
                                                                     ? 'Чаты, оценка и время ответа уже подтянуты в часы работы.'
                                                                     : 'Штрафы в формуле калькулятора не вычитаются.'}
@@ -49538,6 +49595,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                     ? 'Открыть калькулятор «Основа»'
                                                                     : isPotokModel
                                                                     ? 'Открыть калькулятор «Поток»'
+                                                                    : isVerificatorModel
+                                                                    ? 'Открыть калькулятор «Верификатор»'
+                                                                    : isYandexRegModel
+                                                                    ? 'Открыть калькулятор «Яндекс Регистрация»'
                                                                     : isChatModel
                                                                     ? 'Открыть чат-калькулятор'
                                                                     : 'Открыть в калькуляторе'}
@@ -50750,6 +50811,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                     <Suspense fallback={null}>
                                                         {activeSalaryModel === 'op_potok' ? (
                                                             <SalaryCalculatorPotok
+                                                                prefill={opCalculatorPrefill}
+                                                                prefillNonce={opCalculatorPrefillNonce}
+                                                                month={selectedMonth}
+                                                            />
+                                                        ) : activeSalaryModel === 'op_verificator' ? (
+                                                            <SalaryCalculatorVerificator
+                                                                prefill={opCalculatorPrefill}
+                                                                prefillNonce={opCalculatorPrefillNonce}
+                                                                month={selectedMonth}
+                                                            />
+                                                        ) : activeSalaryModel === 'op_yandex_reg' ? (
+                                                            <SalaryCalculatorYandexReg
                                                                 prefill={opCalculatorPrefill}
                                                                 prefillNonce={opCalculatorPrefillNonce}
                                                                 month={selectedMonth}

@@ -124,14 +124,16 @@ class OpSalesOperatorHoursAccessTests(unittest.TestCase):
 
 
 class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
-    """Калькуляторы ОП «Основа» и «Поток»: сами формулы проверяют
-    tests/salary_osnova.test.mjs и tests/salary_potok.test.mjs, здесь — что
+    """Калькуляторы всех четырёх направлений ОП: сами формулы проверяют
+    tests/salary_{osnova,potok,verificator,yandex_reg}.test.mjs, здесь — что
     раздел до них вообще доходит."""
 
     def setUp(self):
         self.app = _read(APP_PATH)
         self.calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorOsnova.jsx")
         self.potok_calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorPotok.jsx")
+        self.verificator_calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorVerificator.jsx")
+        self.yandex_reg_calculator = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculatorYandexReg.jsx")
         self.result_card = _read(ROOT / "src" / "components" / "salary" / "SalaryCalculationResult.jsx")
 
     def test_sales_department_has_a_calculator(self):
@@ -181,9 +183,8 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
             self.assertIn(field, effect)
 
     def test_only_supported_models_get_a_calculator(self):
-        # Верификатору и Яндекс-регистрации формулы ОП не подходят — им остаётся
-        # заглушка, а СВ и главе доступны обе вкладки.
-        self.assertIn("const OP_SALARY_CALCULATOR_MODELS = new Set(['op_osnova', 'op_potok']);", self.app)
+        # Гейт остаётся: оператор с моделью вне набора (перевод в другой отдел
+        # посреди месяца) видит заглушку, а не чужую формулу.
         self.assertIn("const showOpCalculator = isOpSalaryDept", self.app)
         self.assertIn("(isOpSalaryDept && !showOpCalculator)", self.app)
 
@@ -213,7 +214,7 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
 
     def test_hours_section_knows_potok_model(self):
         self.assertIn("const isPotokModel = !hasMixedCalculationModels && calculationModelCode === 'op_potok';", self.app)
-        self.assertIn("const isOpSalesModel = isOsnovaModel || isPotokModel;", self.app)
+        self.assertIn("const isOpSalesModel = isOsnovaModel || isPotokModel || isVerificatorModel || isYandexRegModel;", self.app)
         self.assertIn("Открыть калькулятор «Поток»", self.app)
         # Переход из часов работает для обеих моделей ОП одной веткой.
         handler = self.app[self.app.index("const openSalaryCalculatorWithHours = () => {"):]
@@ -246,6 +247,58 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
             "setFines", "setBonuses",
         ):
             self.assertIn(state, self.calculator)
+
+    def test_verificator_calculator_is_wired(self):
+        self.assertIn("import('./components/salary/SalaryCalculatorVerificator')", self.app)
+        self.assertIn("activeSalaryModel === 'op_verificator' ? (", self.app)
+        self.assertIn("salaryResult.model === 'op_verificator'", self.result_card)
+        self.assertIn("VerificatorCalculationResult", self.result_card)
+        # Продажи, качество и ОБЕ колонки штрафов из таблицы владельца.
+        for state in ("setSales", "setQuality", "setPromoFines", "setFines", "setHourlyRate", "setIsNewbie", "setNightShift"):
+            self.assertIn(state, self.verificator_calculator)
+
+    def test_yandex_reg_calculator_is_wired(self):
+        self.assertIn("import('./components/salary/SalaryCalculatorYandexReg')", self.app)
+        self.assertIn("activeSalaryModel === 'op_yandex_reg' ? (", self.app)
+        self.assertIn("salaryResult.model === 'op_yandex_reg'", self.result_card)
+        self.assertIn("YandexRegCalculationResult", self.result_card)
+        # Конверсия групповая (заявки + успешно закрытые), успешки и качество — личные.
+        for state in ("setGroupRequests", "setGroupSuccesses", "setTargetConversion", "setDeals", "setQuality", "setFines"):
+            self.assertIn(state, self.yandex_reg_calculator)
+
+    def test_hours_section_knows_the_two_new_models(self):
+        self.assertIn(
+            "const isVerificatorModel = !hasMixedCalculationModels && calculationModelCode === 'op_verificator';",
+            self.app,
+        )
+        self.assertIn(
+            "const isYandexRegModel = !hasMixedCalculationModels && calculationModelCode === 'op_yandex_reg';",
+            self.app,
+        )
+        # Кнопка перехода из часов работает по общей ветке ОП — модель обязана в неё попасть.
+        self.assertIn(
+            "const isOpSalesModel = isOsnovaModel || isPotokModel || isVerificatorModel || isYandexRegModel;",
+            self.app,
+        )
+        self.assertIn("Открыть калькулятор «Верификатор»", self.app)
+        self.assertIn("Открыть калькулятор «Яндекс Регистрация»", self.app)
+
+    def test_all_four_sales_directions_have_a_calculator(self):
+        # Заглушка «калькулятор скоро» больше не должна доставаться ни одному
+        # направлению отдела продаж.
+        self.assertIn(
+            "const OP_SALARY_CALCULATOR_MODELS = new Set(['op_osnova', 'op_potok', 'op_verificator', 'op_yandex_reg']);",
+            self.app,
+        )
+        start = self.app.index("const SALARY_CALCULATOR_CATALOG = [")
+        catalog = self.app[start:self.app.index("\n];", start)]
+        for key in ("op_osnova", "op_potok", "op_verificator", "op_yandex_reg"):
+            self.assertIn(f"key: '{key}'", catalog)
+        # Каждая модель ОП из реестра БЭКА умеет считать зарплату.
+        self.assertEqual(
+            set(OP_SALES_MODEL_CODES),
+            {"op_osnova", "op_potok", "op_verificator", "op_yandex_reg"},
+        )
 
 
 class OpSalesDirectionsEditorTests(unittest.TestCase):

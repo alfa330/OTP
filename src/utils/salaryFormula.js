@@ -775,3 +775,254 @@ export function calculatePotokSalary({
         finalSalary,
     };
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// МОДЕЛЬ ОП «ВЕРИФИКАТОР» (op_verificator).
+// Перенесена из файла владельца «Верификаторы_калькулятор_зарплаты_1.xlsx»
+// (лист «Верик») и сверена с презентацией «Мотивационная схема верификатора»:
+//   Оклад             = отработанные часы × 500 ₸/ч                 (H22 = C22×G22)
+//   План продаж       = план_1FTE ÷ норму_1FTE × часы, новичку ×0,8 (D6 / D7)
+//   % выполнения      = факт продаж ÷ план                          (F6)
+//   Бонус за качество = Оклад × % качества           (слайд «Переменная часть №1»)
+//   Бонус за план     = Оклад × % из шкалы 0/5/10/20/30 (слайд «Переменная часть №2»)
+//   Итого             = Оклад + оба бонуса − штраф за акции − штрафы (M22)
+// В таблице владельца оба бонуса свёрнуты в одну колонку «Итого баллов, %»
+// (I22 = качество + премия за план, J22 = H22×I22/100). Считаем ровно так же —
+// раздельные строки в UI это та же сумма, разложенная как в презентации.
+// Качество здесь НЕ ступень, а прямой процент бонуса: 93% качества → +93% оклада.
+// ──────────────────────────────────────────────────────────────────────────
+export const VERIFICATOR_HOURLY_RATE = 500;       // I12 «Оплата в час» + слайд «Оклад — ваша база»
+export const VERIFICATOR_NORM_HOURS_FTE = 176;    // K5 — норма 1 FTE, от неё считается план
+export const VERIFICATOR_PLAN_PER_FTE = 440;      // I5 «План на 1FTE День»
+export const VERIFICATOR_NEWBIE_COEF = 0.8;       // D7 — план новичка ×0,8
+export const VERIFICATOR_NIGHT_PLAN_COEF = 0.5;   // I6 = I5/2 «План на 1FTE Ночь»
+
+// Премия за план в ПРОЦЕНТНЫХ ПУНКТАХ к окладу (D13:E17, формула F22).
+// Границы — из массива MATCH {0;0,8;0,9;1;1,1}; подписи диапазонов совпадают.
+export function verificatorPlanBonusPercent(planRatio) {
+    const r = parseFloat(planRatio) || 0;
+    if (r < 0.8) return 0;    // 0-79,9%
+    if (r < 0.9) return 5;    // 80-89,9%
+    if (r < 1.0) return 10;   // 90-99,9%
+    if (r < 1.1) return 20;   // 100-109,9%
+    return 30;                // 110%+
+}
+
+/**
+ * Индивидуальный план продаж за месяц, модель ОП «Верификатор».
+ * Как у «Основы» и «Потока», план растёт от ФАКТИЧЕСКИ отработанных часов
+ * (D6 = $I$5/$K$5*C6), поэтому ставка сотрудника отдельно не участвует: при
+ * полной норме ставки 0,75 (132 ч) выходит 330 продаж — ровно как на слайде.
+ */
+export function calculateVerificatorMonthlyPlan({
+    planPerFte = VERIFICATOR_PLAN_PER_FTE,
+    normHoursFte = VERIFICATOR_NORM_HOURS_FTE,
+    hoursWorked = 0,
+    newbie = false,
+    nightShift = false,
+} = {}) {
+    const planFteDay = Math.max(0, parseFloat(planPerFte) || 0);
+    const normFte = parseFloat(normHoursFte) || VERIFICATOR_NORM_HOURS_FTE;
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const planFte = nightShift ? planFteDay * VERIFICATOR_NIGHT_PLAN_COEF : planFteDay;
+    const newbieCoef = newbie ? VERIFICATOR_NEWBIE_COEF : 1;
+    const plan = normFte > 0 ? (planFte / normFte) * hours * newbieCoef : 0;
+    return {
+        plan,
+        planPerFte: planFte,
+        planPerFteDay: planFteDay,
+        normHoursFte: normFte,
+        hoursWorked: hours,
+        isNewbie: Boolean(newbie),
+        nightShift: Boolean(nightShift),
+        newbieCoef,
+    };
+}
+
+/**
+ * Зарплата верификатора за месяц.
+ * quality — качество в процентах 0..100 (прямой процент бонуса к окладу).
+ * promoFines — отдельная колонка «Штраф за акции, ₸» (K21), fines — «Штрафы, ₸» (L21).
+ */
+export function calculateVerificatorSalary({
+    hoursWorked = 0,
+    hoursNorm = 0,
+    hourlyRate = VERIFICATOR_HOURLY_RATE,
+    sales = 0,
+    planTarget = null,
+    planPerFte = VERIFICATOR_PLAN_PER_FTE,
+    normHoursFte = VERIFICATOR_NORM_HOURS_FTE,
+    newbie = false,
+    nightShift = false,
+    quality = 0,
+    promoFines = 0,
+    fines = 0,
+} = {}) {
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const norm = Math.max(0, parseFloat(hoursNorm) || 0);
+    const salesV = Math.max(0, parseFloat(sales) || 0);
+    const rate = parseFloat(hourlyRate);
+    const rateV = Number.isFinite(rate) ? rate : VERIFICATOR_HOURLY_RATE;
+
+    const planInfo = calculateVerificatorMonthlyPlan({ planPerFte, normHoursFte, hoursWorked: hours, newbie, nightShift });
+    const parsedTarget = planTarget === null || planTarget === '' ? null : parseFloat(planTarget);
+    const target = Number.isFinite(parsedTarget) ? Math.max(0, parsedTarget) : planInfo.plan;
+
+    const oklad = hours * rateV;
+    const planPercent = target > 0 ? salesV / target : 0;
+    const planBonusPercent = verificatorPlanBonusPercent(planPercent);
+    const qualityPercent = Math.max(0, parseFloat(quality) || 0);
+    // «Итого баллов, %» (I22) — сумма качества и премии за план; бонус берётся от
+    // неё целиком (J22 = H22×I22/100), чтобы копейки сходились с таблицей владельца.
+    const totalBonusPercent = qualityPercent + planBonusPercent;
+    const bonusTotal = oklad * totalBonusPercent / 100;
+    const bonusQuality = oklad * qualityPercent / 100;
+    const bonusPlan = bonusTotal - bonusQuality;
+
+    const promoFinesV = parseFloat(promoFines) || 0;
+    const finesV = parseFloat(fines) || 0;
+    const finalSalary = oklad + bonusTotal - promoFinesV - finesV;
+
+    return {
+        model: 'op_verificator',
+        hourlyRate: rateV,
+        oklad,
+        sales: salesV,
+        planTarget: target,
+        planPercent,                       // доля: 1 = 100%
+        planPerFte: planInfo.planPerFte,
+        planPerFteDay: planInfo.planPerFteDay,
+        normHoursFte: planInfo.normHoursFte,
+        isNewbie: planInfo.isNewbie,
+        nightShift: planInfo.nightShift,
+        quality: qualityPercent,
+        planBonusPercent,
+        totalBonusPercent,
+        bonusQuality,
+        bonusPlan,
+        bonusTotal,
+        promoFines: promoFinesV,
+        fines: finesV,
+        hoursWorked: hours,
+        hoursNorm: norm,
+        hoursPercentage: norm > 0 ? (hours / norm) * 100 : 0,
+        finalSalary,
+    };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// МОДЕЛЬ ОП «ЯНДЕКС РЕГИСТРАЦИЯ» (op_yandex_reg).
+// Перенесена из «KPI.xlsx» (лист «ЯР») и пояснения владельца
+// «KPI_логика_и_калькулятор_ЗП.xlsx» (листы «Логика расчёта» / «Калькулятор ЗП»):
+//   Факт. конверсия = успешные заявки группы ÷ поступившие заявки группы (B11)
+//   % плана         = факт. конверсия ÷ целевую конверсию (50%)          (B13)
+//   Цена успешки    — ступень по % плана: 0/200/240/280/320/360 ₸        (B14)
+//   Удержание       — ступень по ИНДИВИДУАЛЬНОМУ качеству звонков        (B15)
+//   Бонус           = мои успешные заявки × цену успешки                 (B16)
+//   Оклад           = отработанные часы × 600 ₸/ч                        (B17)
+//   Итого           = оклад + бонус − удержание − штрафы + премии        (B18)
+// ВАЖНО: шаг 6 файла «Логика расчёта» читает «Сумму бонуса» как фиксированную
+// выплату за месяц (200 ₸ рядом со 105 600 ₸ оклада). Владелец подтвердил: это
+// ЦЕНА ЗА ОДНУ УСПЕШНУЮ ЗАЯВКУ — как «Сумма за успешку» в модели «Основа», откуда
+// шкала ЯР и скопирована, поэтому бонус умножается на успешки оператора.
+// Конверсия — ГРУППОВАЯ (общий показатель ЯР), качество — личное.
+// ──────────────────────────────────────────────────────────────────────────
+export const YANDEX_REG_HOURLY_RATE = 600;          // G3 «Оплата в час»
+export const YANDEX_REG_NORM_HOURS_FTE = 176;       // G12 «Часы»
+export const YANDEX_REG_TARGET_CONVERSION = 0.5;    // G11 «Конверсия» — целевая
+
+// Удержание с бонуса по личному качеству (A4:B9 + вспомогательная таблица A15:B20).
+// Границы берём из массива формулы: «74% и ниже» → 0,5, ступень 0,4 начинается с 75%.
+// У «Основы» тот же список ступеней, но её порог стоит на 74 — НЕ объединять
+// функции: это разные выплаты.
+export function yandexRegQualityWithholdRate(quality) {
+    const q = parseFloat(quality) || 0;
+    if (q < 75) return 0.5;   // 74% и ниже
+    if (q < 80) return 0.4;   // 75-80%
+    if (q < 86) return 0.3;   // 80-85%
+    if (q < 91) return 0.2;   // 86-90%
+    if (q < 96) return 0.1;   // 91-95%
+    return 0;                 // 96-100%
+}
+
+// Цена одной успешной заявки от % выполнения плана конверсии ГРУППОЙ (C4:D9).
+// В формуле это MATCH по возрастающему массиву с первым порогом 0,7, поэтому ниже
+// 70% ступень та же, что и на 70% — ноль.
+export function yandexRegDealPrice(planRatio) {
+    const r = parseFloat(planRatio) || 0;
+    if (r < 0.8) return 0;    // до 80% (включая «ниже 70%») бонуса нет
+    if (r < 0.9) return 200;
+    if (r < 1.0) return 240;
+    if (r < 1.1) return 280;
+    if (r < 1.2) return 320;
+    return 360;               // 120%+
+}
+
+/**
+ * Зарплата оператора ОП «Яндекс Регистрация» за месяц.
+ * Конверсия считается по группе: groupRequests/groupSuccesses — заявки ЯР целиком.
+ * Если конверсию передали готовой долей (factConversion), группа не нужна.
+ * deals — УСПЕШНЫЕ ЗАЯВКИ САМОГО ОПЕРАТОРА, на них умножается цена успешки.
+ * quality — личное качество звонков, 0..100.
+ */
+export function calculateYandexRegSalary({
+    hoursWorked = 0,
+    hoursNorm = 0,
+    hourlyRate = YANDEX_REG_HOURLY_RATE,
+    groupRequests = 0,
+    groupSuccesses = 0,
+    factConversion = null,
+    targetConversion = YANDEX_REG_TARGET_CONVERSION,
+    deals = 0,
+    quality = 0,
+    fines = 0,
+    bonuses = 0,
+} = {}) {
+    const hours = Math.max(0, parseFloat(hoursWorked) || 0);
+    const norm = Math.max(0, parseFloat(hoursNorm) || 0);
+    const rate = parseFloat(hourlyRate);
+    const rateV = Number.isFinite(rate) ? rate : YANDEX_REG_HOURLY_RATE;
+    const requests = Math.max(0, parseFloat(groupRequests) || 0);
+    const successes = Math.max(0, parseFloat(groupSuccesses) || 0);
+    const dealsV = Math.max(0, parseFloat(deals) || 0);
+
+    const parsedConversion = factConversion === null || factConversion === '' ? null : parseFloat(factConversion);
+    const conversion = Number.isFinite(parsedConversion)
+        ? Math.max(0, parsedConversion)
+        : (requests > 0 ? successes / requests : 0);
+    const parsedTarget = parseFloat(targetConversion);
+    const target = Number.isFinite(parsedTarget) && parsedTarget > 0 ? parsedTarget : 0;
+
+    const planPercent = target > 0 ? conversion / target : 0;
+    const oklad = hours * rateV;
+    const dealPrice = yandexRegDealPrice(planPercent);
+    const bonusDeals = dealsV * dealPrice;
+    const qualityWithholdRate = yandexRegQualityWithholdRate(quality);
+    const qualityWithheld = bonusDeals * qualityWithholdRate;
+    const finesV = parseFloat(fines) || 0;
+    const bonusesV = parseFloat(bonuses) || 0;
+    const finalSalary = oklad + bonusDeals - qualityWithheld - finesV + bonusesV;
+
+    return {
+        model: 'op_yandex_reg',
+        hourlyRate: rateV,
+        oklad,
+        groupRequests: requests,
+        groupSuccesses: successes,
+        factConversion: conversion,        // доля: 0,41 = 41%
+        targetConversion: target,          // доля: 0,5 = 50%
+        planPercent,                       // доля: 1 = 100%
+        deals: dealsV,
+        dealPrice,
+        bonusDeals,
+        quality: parseFloat(quality) || 0,
+        qualityWithholdRate,
+        qualityWithheld,
+        fines: finesV,
+        bonuses: bonusesV,
+        hoursWorked: hours,
+        hoursNorm: norm,
+        hoursPercentage: norm > 0 ? (hours / norm) * 100 : 0,
+        finalSalary,
+    };
+}
