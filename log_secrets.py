@@ -57,7 +57,7 @@ _RULES = (
     (re.compile(r'\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+'), HIDDEN),  # JWT
     (re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----',
                 re.S), HIDDEN),
-    # Пароль в строке подключения: postgres://user:ПАРОЛЬ@host.
+    # Пароль в строке подключения — вида postgres://user:pass@host.
     (re.compile(r'((?:[a-z][a-z0-9+.\-]*)://[^\s:/@]+:)[^\s@/]+(@)'), r'\1' + HIDDEN + r'\2'),
     # Заголовки авторизации, если их напечатали целиком.
     (re.compile(r'((?:Authorization|X-API-KEY|x-goog-api-key|api-key|X-Auth-Token)'
@@ -66,6 +66,25 @@ _RULES = (
 )
 
 _env_pattern = None
+
+
+def _looks_like_secret(value):
+    """Отсеивает значения, которые под правило попали, а секретом не являются.
+
+    На проде так попалась переменная PWD: имя содержит «PWD», а значение —
+    рабочий каталог /opt/render/project/src. В результате чистка вырезала путь
+    из КАЖДОГО traceback, и логи стали нечитаемыми. Ошибка в эту сторону тихая:
+    ничего не падает, просто лог перестаёт помогать.
+    """
+    if not value or value[0] in './~\\':
+        return False                      # путь на диске
+    if re.match(r'^[A-Za-z]:[\\/]', value):
+        return False                      # путь Windows
+    if '://' in value:
+        return False                      # адрес; пароль внутри режет своё правило
+    if any(ch.isspace() for ch in value):
+        return False                      # человекочитаемая строка, не ключ
+    return True
 
 
 def refresh_env_secrets(environ=None):
@@ -81,7 +100,7 @@ def refresh_env_secrets(environ=None):
         if not value or not _SECRET_NAME_RE.search(name):
             continue
         value = value.strip()
-        if _MIN_SECRET_LEN <= len(value) <= _MAX_SECRET_LEN:
+        if _MIN_SECRET_LEN <= len(value) <= _MAX_SECRET_LEN and _looks_like_secret(value):
             values.add(value)
     if not values:
         _env_pattern = None

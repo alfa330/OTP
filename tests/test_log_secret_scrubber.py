@@ -93,6 +93,24 @@ class ScrubTextTest(unittest.TestCase):
         finally:
             log_secrets.refresh_env_secrets(os.environ)
 
+    def test_path_like_env_values_are_not_secrets(self):
+        """Регрессия с прода: чистка вырезала путь из КАЖДОГО traceback.
+
+        Виновата переменная PWD — в её имени есть «PWD», а значение — рабочий
+        каталог. Ошибка тихая: ничего не падает, просто лог перестаёт помогать.
+        """
+        try:
+            log_secrets.refresh_env_secrets({'PWD': '/opt/render/project/src',
+                                             'HOME': '/opt/render',
+                                             'REAL_API_KEY': 'zZq7vendorvalue9911'})
+            out = log_secrets.scrub('File "/opt/render/project/src/.venv/lib/x.py", line 1')
+            self.assertIn('/opt/render/project/src/.venv', out)
+            self.assertNotIn(log_secrets.HIDDEN, out)
+            # А настоящий ключ рядом по-прежнему режется.
+            self.assertNotIn('zZq7vendor', log_secrets.scrub('ключ zZq7vendorvalue9911'))
+        finally:
+            log_secrets.refresh_env_secrets(os.environ)
+
 
 class FormatterTest(unittest.TestCase):
     """Чистка стоит ФОРМАТТЕРОМ, поэтому обязана покрывать и traceback."""
