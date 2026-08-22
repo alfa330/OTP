@@ -1314,6 +1314,77 @@ _ORG_STATEMENTS = [
 # ПУСТОЙ список отделов = пространство видно всем. Как и у публичного раздела,
 # это обратная совместимость, а не умолчание «на всякий случай».
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ПРОХОЖДЕНИЯ ТРЕНАЖЁРОВ
+#
+# Сами тренажёры сервер по-прежнему не знает: сценарии, экраны и реплики живут
+# во фронте (src/components/wiki/trainers), и таблицы у них нет — см. шапку
+# wiki/articles.py про trainer_usages. Здесь хранится ДРУГОЕ: факт, что человек
+# садился за тренажёр, и чем это кончилось.
+#
+# Почему строка заводится на СТАРТЕ, а не по завершении. Половина ценности
+# статистики — брошенные попытки: «пятеро дошли до подписи в eGov и закрыли»
+# говорит про инструкцию больше, чем «трое прошли до конца». Строка со статусом
+# started и есть такая попытка; закрытие урока её дополняет, а не создаёт.
+#
+# article_id NULL — это не потеря данных, а второй законный источник: тренажёр
+# запускают и из статьи, и из вкладки «Тренажёры». Различает их source.
+#
+# Снимки отдела, группы и роли — как в wiki_ack_assignments и по той же причине:
+# через год отчёт обязан показывать, кем человек был ТОГДА. Операторы переходят
+# между группами каждый месяц, и без снимка «кто из моей группы прошёл» врёт.
+#
+# trainer_key НЕ ссылается ни на какую таблицу: ключ сценария живёт в коде
+# (registry.js), и внешнего ключа для него не существует. Переименование ключа
+# осиротит статистику — поэтому ключи и не переименовывают (см. шапку
+# scenarioSapar.js).
+# ─────────────────────────────────────────────────────────────────────────────
+_TRAINER_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_trainer_runs (
+        id            BIGSERIAL PRIMARY KEY,
+        trainer_key   VARCHAR(64) NOT NULL,
+        user_id       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        article_id    INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL,
+        -- Название статьи снимком, как оргданные ниже: статью переименуют или
+        -- уберут в архив, а отчёт обязан показывать, откуда запускали ТОГДА.
+        article_title VARCHAR(255),
+        source        VARCHAR(16) NOT NULL DEFAULT 'article',
+        status        VARCHAR(16) NOT NULL DEFAULT 'started',
+        stages_total  SMALLINT NOT NULL DEFAULT 0,
+        stages_done   SMALLINT NOT NULL DEFAULT 0,
+        errors        SMALLINT NOT NULL DEFAULT 0,
+        hints         SMALLINT NOT NULL DEFAULT 0,
+        restarts      SMALLINT NOT NULL DEFAULT 0,
+        duration_ms   INTEGER,
+        -- department_id нужен НЕ для отчёта, а для границы видимости: без него
+        -- супервайзер СЗоВ с правом публикации видел бы поимённый состав ОП.
+        snapshot_department_id   INTEGER,
+        snapshot_department_name VARCHAR(120),
+        snapshot_group_name      VARCHAR(120),
+        snapshot_role            VARCHAR(30),
+        started_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        finished_at   TIMESTAMP,
+        CONSTRAINT wiki_trainer_runs_status_check
+            CHECK (status IN ('started', 'finished', 'abandoned')),
+        CONSTRAINT wiki_trainer_runs_source_check
+            CHECK (source IN ('article', 'catalog'))
+    );
+    """,
+    # Витрина статистики читает по ключу и по времени, выгрузка — по ключу и
+    # диапазону дат. Оба запроса ложатся на один индекс.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_trainer_runs_key "
+    "ON wiki_trainer_runs(trainer_key, started_at DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_trainer_runs_user "
+    "ON wiki_trainer_runs(user_id, started_at DESC);",
+    # «Сколько раз из этой статьи» — отдельный разрез вкладки, и без индекса он
+    # читал бы всю таблицу: попыток со временем становится кратно больше, чем
+    # статей.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_trainer_runs_article "
+    "ON wiki_trainer_runs(article_id) WHERE article_id IS NOT NULL;",
+]
+
+
 _SPACE_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS wiki_space_departments (
@@ -1595,6 +1666,11 @@ def init_wiki_schema(cursor):
             """,
             row,
         )
+
+    # Прохождения тренажёров — после базовых таблиц: строка ссылается и на
+    # users, и на wiki_articles.
+    for statement in _TRAINER_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
 
     for statement in _PARK_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))

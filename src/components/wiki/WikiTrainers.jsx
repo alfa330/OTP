@@ -1,12 +1,13 @@
 import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import {
-    FileText, Gamepad2, Layers, Loader2, PlayCircle, Smartphone,
+    BarChart3, FileText, Gamepad2, Layers, Loader2, PlayCircle, Smartphone, Users,
 } from 'lucide-react';
 
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { TRAINERS, TRAINER_CARDS, findTrainer } from './trainers/registry';
 import { PHONE_TILTED } from '../../assets/phoneTilted';
+import WikiTrainerStats from './WikiTrainerStats';
 
 const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
 
@@ -73,29 +74,60 @@ const TrainerShowcase = ({ src }) => (
     </div>
 );
 
-export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
+export default function WikiTrainers({ base, headers, onOpenArticle = null,
+                                      showToast = null }) {
     const [usages, setUsages] = useState(null);
+    const [stats, setStats] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [openKey, setOpenKey] = useState(null);
+    const [statsKey, setStatsKey] = useState(null);
 
     const load = useCallback(() => {
         setLoading(true);
-        return axios.get(`${base}/trainers`, { headers })
-            .then((r) => { setUsages(r.data?.usages || {}); setError(''); })
-            .catch((e) => {
+        /* Два запроса рядом и оба необязательные. «Где вставлен» и «сколько раз
+           проходили» — разные вопросы к разным таблицам, но на карточке они
+           стоят вместе, и ждать их по очереди значило бы показывать карточку
+           дважды дёргающейся. allSettled, а не all: статистика у читателя
+           закрыта по правам, и её 403 не должен гасить список статей. */
+        return Promise.allSettled([
+            axios.get(`${base}/trainers`, { headers }),
+            axios.get(`${base}/trainers/stats`, { headers }),
+        ]).then(([where, counts]) => {
+            if (where.status === 'fulfilled') {
+                setUsages(where.value.data?.usages || {});
+                setError('');
+            } else {
                 // Список тренажёров живёт в коде и от сервера не зависит: даже
                 // если запрос упал, запустить тренажёр можно. Поэтому ошибка
                 // здесь — строка над списком, а не пустой экран.
                 setUsages({});
-                setError(errText(e, 'Не удалось узнать, в каких статьях стоят тренажёры'));
-            })
-            .finally(() => setLoading(false));
+                setError(errText(where.reason,
+                                 'Не удалось узнать, в каких статьях стоят тренажёры'));
+            }
+            setStats(counts.status === 'fulfilled' ? (counts.value.data?.stats || {}) : {});
+        }).finally(() => setLoading(false));
     }, [base, headers]);
 
     useEffect(() => { load(); }, [load]);
 
     const scenario = openKey ? findTrainer(openKey) : null;
+    const statsFor = statsKey ? findTrainer(statsKey) : null;
+
+    /* Статистика открывается ВМЕСТО списка, а не под ним: у неё четыре таблицы,
+       и рядом с карточками они превратили бы вкладку в ленту на три экрана. */
+    if (statsFor) {
+        return (
+            <WikiTrainerStats
+                base={base}
+                headers={headers}
+                trainer={statsFor}
+                onBack={() => { setStatsKey(null); load(); }}
+                onOpenArticle={onOpenArticle}
+                showToast={showToast}
+            />
+        );
+    }
 
     return (
         <div className="space-y-3">
@@ -132,6 +164,7 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                     {TRAINERS.map((trainer) => {
                         const card = TRAINER_CARDS.find((c) => c.key === trainer.key);
                         const articles = usages?.[trainer.key] || [];
+                        const stat = stats?.[trainer.key];
                         return (
                             <article key={trainer.key} className={`${iosCard} flex flex-col gap-3 p-4`}>
                                 <header className="flex items-start gap-3">
@@ -179,6 +212,28 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                                     />
                                 </div>
 
+                                {/* Три числа, а не таблица: на карточке нужен ответ
+                                    «пользуются ли им вообще», подробности — за
+                                    кнопкой «Статистика». */}
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        ['Запусков', stat?.runs ?? 0, null],
+                                        ['Прошли', stat?.finished ?? 0, PlayCircle],
+                                        ['Человек', stat?.people ?? 0, Users],
+                                    ].map(([label, value, Icon]) => (
+                                        <div key={label} className="rounded-xl bg-slate-50 px-3 py-2">
+                                            <div className="flex items-center gap-1 text-[11px]
+                                                            font-medium uppercase tracking-wide text-slate-400">
+                                                {Icon && <Icon size={11} />}{label}
+                                            </div>
+                                            <div className="mt-0.5 text-[17px] font-semibold
+                                                            leading-none text-slate-900">
+                                                {loading ? '—' : value}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
                                 <div className="rounded-xl bg-slate-50 px-3 py-2.5">
                                     <div className="mb-1 flex items-center gap-1.5 text-[12px] font-medium text-slate-500">
                                         <FileText size={13} /> Где вставлен
@@ -215,13 +270,22 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                                     )}
                                 </div>
 
-                                <button
-                                    type="button"
-                                    className={`${iosBtnSecondary} justify-center`}
-                                    onClick={() => setOpenKey(trainer.key)}
-                                >
-                                    <PlayCircle size={15} /> Пройти тренажёр
-                                </button>
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        className={`${iosBtnSecondary} flex-1 justify-center`}
+                                        onClick={() => setOpenKey(trainer.key)}
+                                    >
+                                        <PlayCircle size={15} /> Пройти тренажёр
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`${iosBtnSecondary} flex-1 justify-center`}
+                                        onClick={() => setStatsKey(trainer.key)}
+                                    >
+                                        <BarChart3 size={15} /> Статистика
+                                    </button>
+                                </div>
                             </article>
                         );
                     })}
@@ -236,7 +300,14 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null }) {
                         <span className="text-[13px]">Готовим тренажёр…</span>
                     </div>
                 )}>
-                    <TrainerModal scenario={scenario} onClose={() => setOpenKey(null)} />
+                    <TrainerModal
+                        scenario={scenario}
+                        onClose={() => { setOpenKey(null); load(); }}
+                        /* Учитываем и запуск из вкладки: без source статистика
+                           показывала бы, что тренажёр открывают только из
+                           статей, а половина попыток приходит отсюда. */
+                        record={{ base, headers, articleId: null, source: 'catalog' }}
+                    />
                 </Suspense>
             )}
         </div>

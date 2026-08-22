@@ -823,6 +823,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                         setTab('library');
                                         setSearchTarget({ slug });
                                     }}
+                                    showToast={showToast}
                                 />
                             ) : catalogMode === 'catalog' ? (
                                 <WikiCatalog

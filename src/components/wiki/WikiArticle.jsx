@@ -740,7 +740,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         <span className="text-[13px]">Готовим тренажёр…</span>
                     </div>
                 )}>
-                    <TrainerModal scenario={trainer} onClose={() => setTrainer(null)} />
+                    <TrainerModal
+                        scenario={trainer}
+                        onClose={() => setTrainer(null)}
+                        /* Учёт попытки. Статью передаём id'шником: тренажёр
+                           один, а статей с ним несколько, и «в какой статье
+                           сколько раз» без этого не посчитать. */
+                        record={{
+                            base, headers, articleId: article?.id, source: 'article',
+                        }}
+                    />
                 </Suspense>
             )}
         </div>

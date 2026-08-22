@@ -5,6 +5,7 @@ import { HelpCircle, RotateCcw, X } from 'lucide-react';
 
 import { APPLE_FONT } from '../../ui/ios';
 import SnowLeopard from './SnowLeopard';
+import useTrainerRun from './useTrainerRun';
 import { StatusIcons, StatusTime } from './PhoneChrome';
 import {
     currentStep, expectedTap, isFinished, progressPercent, restart, speech, stageCount,
@@ -121,6 +122,7 @@ const HOURS = () => {
  * следить и появление читается как мигание. */
 export function TrainerPlayer({
     scenario, onClose = null, animateEntrance = true, leaving = false, onExited = null,
+    record = null,
 }) {
     const [run, setRun] = useState(() => startRun(scenario));
     const phoneRef = useRef(null);
@@ -210,6 +212,19 @@ export function TrainerPlayer({
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
     useEffect(() => { setRun(startRun(scenario)); }, [scenario]);
 
+    /* Учёт попытки. Хук зовётся всегда (правило хуков), а молчит по флагу:
+       без record проигрыватель работает ровно как раньше — так его открывает
+       стенд и так он открылся бы, если раздел не отдал адрес и токен. */
+    const runLog = useTrainerRun({
+        base: record?.base,
+        headers: record?.headers,
+        trainerKey: scenario.key,
+        stagesTotal: stages,
+        articleId: record?.articleId ?? null,
+        source: record?.source || 'article',
+        enabled: !!record?.base,
+    });
+
     const step = currentStep(run);
     const target = expectedTap(run);
     const finished = isFinished(run);
@@ -227,7 +242,10 @@ export function TrainerPlayer({
 
     const doToggle = useCallback((key) => setRun((prev) => toggle(prev, key)), []);
     const doHint = useCallback(() => setRun((prev) => takeHint(prev)), []);
-    const doRestart = useCallback(() => setRun((prev) => restart(prev)), []);
+    const doRestart = useCallback(() => {
+        runLog.restart();
+        setRun((prev) => restart(prev));
+    }, [runLog]);
 
     /* Фокус переезжает на кнопку, которую ждут. Это и подсказка для мыши
        (кнопка подсвечена), и единственный способ пройти тренажёр с клавиатуры:
@@ -240,6 +258,28 @@ export function TrainerPlayer({
         }
         return undefined;
     }, [run.index, run.world]);
+
+    /* Докуда дошли — в учёт, на каждом шаге. Это присваивание в ref, а не
+       запрос: отправка одна, при закрытии урока. Эффект, а не вызов в doTap,
+       потому что счётчики меняет ещё и «Подсказка», и restart. */
+    useEffect(() => {
+        runLog.track({
+            done: Math.max(0, Number(step.stage) || 0),
+            total: stages,
+            errors: run.errors,
+            hints: run.hints,
+        });
+    }, [runLog, step.stage, stages, run.errors, run.hints]);
+
+    /* Дошёл до финального шага — попытка засчитана сразу, не дожидаясь, пока
+       человек закроет окно. Иначе прошедший и закрывший вкладку не отличался бы
+       от бросившего на середине. */
+    useEffect(() => {
+        if (finished) runLog.close('finished');
+    }, [finished, runLog]);
+
+    // Закрытие проигрывателя: то, что не досчиталось, уходит как брошенное.
+    useEffect(() => () => runLog.close('abandoned'), [runLog]);
 
     const Screen = SCREENS[scenario.key]?.[step.screen];
     const purpose = scenario.egovPurpose ? scenario.egovPurpose(step.key) : 'docs';
@@ -580,7 +620,7 @@ export function TrainerPlayer({
  * статьи, а внутри .wiki-prose у текста своя типографика, которая тут же начала
  * бы красить учебные экраны.
  */
-export default function TrainerModal({ scenario, onClose }) {
+export default function TrainerModal({ scenario, onClose, record = null }) {
     const reduceMotion = useReducedMotion();
     /* Закрытие тоже анимируется — тем же движением, что и открытие, только в
        обратную сторону: экран, который выехал снизу, обязан туда же и уехать.
@@ -626,6 +666,7 @@ export default function TrainerModal({ scenario, onClose }) {
                 onClose={requestClose}
                 leaving={leaving}
                 onExited={() => onClose?.()}
+                record={record}
             />
         </div>,
         document.body,
