@@ -11,11 +11,18 @@
 разрешено читать), тот же гибридный поиск, тот же генератор. Второй RAG рядом с
 существующим означал бы вторую точку правды и второй набор прав.
 
-ЗВУК ЧЕРЕЗ ЭТОТ СЕРВЕР НЕ ИДЁТ. Прод работает на waitress (WSGI), где WebSocket
-невозможен, а гнать аудио через SSE значит платить лишним кругом и base64.
-Поэтому микрофон соединяется с Soniox НАПРЯМУЮ по короткому ключу из /tokens, а
-озвучку отдаёт сервер: Live API эфемерные токены в браузере не принимает. Наш
-сервер держит права, роль собеседника и замеры — ровно то, ради чего он нужен.
+МИКРОФОН ЧЕРЕЗ ЭТОТ СЕРВЕР НЕ ИДЁТ. Прод работает на waitress (WSGI), где
+WebSocket невозможен, а гнать непрерывный поток через SSE значит платить лишним
+кругом и base64. Поэтому микрофон соединяется с Soniox НАПРЯМУЮ по короткому
+ключу из /tokens, а озвучку отдаёт сервер: у неё круг один на реплику, зато
+права, роль собеседника и замеры остаются здесь.
+
+ВСЁ, ЧТО ЗДЕСЬ ЗОВЁТ GEMINI, ХОДИТ ЧЕРЕЗ VERTEX. Ключ AI Studio раздел пережил
+ровно сутки: 22.08.2026 он ответил «Your prepayment credits are depleted» — и
+разом умерли все три звена, которые на нём висели (роль водителя, разбор и
+озвучка). Vertex считает обычным счётом Google Cloud, а не предоплаченными
+кредитами, и постоянного ключа не требует вовсе. Ключ AI Studio остался вторым
+номером в цепочке: вернутся кредиты — вернётся и он, без правки кода.
 
 Раздел закрыт для всех, кроме супер-админа: он тестовый, тратит платные квоты и
 выдаёт браузеру ключи к внешним сервисам.
@@ -24,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from functools import wraps
 
@@ -48,6 +56,27 @@ SONIOX_TEMP_KEY_URL = 'https://api.soniox.com/v1/auth/temporary-api-key'
 GEMINI_GENERATE = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'
 GEMINI_LIVE_WS = ('wss://generativelanguage.googleapis.com/ws/'
                   'google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent')
+
+# Цепочки провайдеров по умолчанию. Vertex первым не из предпочтения, а потому
+# что по ключу AI Studio в этом проекте денег нет: держать его первым значит
+# дарить каждой реплике лишний круг до отказа. Переопределяются переменными
+# TRAINER_LLM_CHAIN / TRAINER_TTS_CHAIN, код при смене порядка не трогается.
+DEFAULT_LLM_CHAIN = ('vertex', 'gemini', 'claude')
+DEFAULT_TTS_CHAIN = ('vertex', 'live')
+
+# Формат аудио у обоих провайдеров озвучки: PCM 16 бит, моно. Частоту НЕ
+# зашиваем — Vertex объявляет её в mimeType ('audio/l16; rate=24000'), и браузер
+# получает её первым же событием потока.
+DEFAULT_TTS_RATE = 24000
+_RATE_IN_MIME = re.compile(r'rate=(\d+)')
+
+
+def _vertex_url(project, region, model, method):
+    """Адрес publisher-модели Vertex. region='global' живёт на голом хосте."""
+    host = ('aiplatform.googleapis.com' if region == 'global'
+            else f'{region}-aiplatform.googleapis.com')
+    return (f'https://{host}/v1/projects/{project}/locations/{region}'
+            f'/publishers/google/models/{model}:{method}')
 
 
 def _gemini_headers(key):
@@ -124,6 +153,89 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
     def _body():
         return request.get_json(silent=True) or {}
 
+    # ── внешние провайдеры: доступ и порядок ─────────────────────────────────
+
+    _vertex_cache = {}
+
+    def _vertex_auth():
+        """Короткий OAuth-токен сервисного аккаунта GCP и его проект.
+
+        Кредентиалы кешируются, а не токен: google-auth обновляет его сам, и
+        отдельного расписания для этого заводить не нужно.
+
+        Сервис-аккаунт берётся из окружения тем же env, что и остальные секреты:
+        решать, откуда они приходят, раздел не должен. Значение многострочное —
+        построчный парсер .env его рвёт, поэтому здесь читается ровно первый
+        JSON-объект, а не строка.
+        """
+        creds = _vertex_cache.get('creds')
+        if creds is None:
+            raw = (env('GOOGLE_APPLICATION_CREDENTIALS_CONTENT') or '').lstrip()
+            if not raw:
+                raise RuntimeError('нет GOOGLE_APPLICATION_CREDENTIALS_CONTENT')
+            if raw[:1] in ('"', "'"):
+                raw = raw[1:]
+            info = json.JSONDecoder().raw_decode(raw[raw.find('{'):])[0]
+            from google.oauth2 import service_account
+
+            creds = service_account.Credentials.from_service_account_info(
+                info, scopes=['https://www.googleapis.com/auth/cloud-platform'])
+            _vertex_cache['creds'] = creds
+        if not creds.valid:
+            import google.auth.transport.requests as gtr
+
+            creds.refresh(gtr.Request())
+        return creds.token, creds.project_id
+
+    def _vertex_region():
+        return env('TRAINER_VERTEX_REGION', 'global')
+
+    def _chain(variable, fallback, default):
+        """Порядок провайдеров звена: переменная окружения или значение по умолчанию.
+
+        fallback — прежний одиночный переключатель (TRAINER_LLM). Он остаётся
+        рабочим: тот, кого им назвали, просто встаёт в цепочке первым, а не
+        отменяет её. Раньше «первый» значил «единственный плюс жёсткий резерв»,
+        и когда у AI Studio кончились деньги, менять было нечего.
+        """
+        raw = (env(variable) or '').strip()
+        if raw:
+            picked = [item.strip().lower() for item in raw.split(',') if item.strip()]
+            if picked:
+                return picked
+        first = (env(fallback) or '').strip().lower() if fallback else ''
+        if first in default:
+            return [first] + [name for name in default if name != first]
+        return list(default)
+
+    def _llm_chain():
+        return _chain('TRAINER_LLM_CHAIN', 'TRAINER_LLM', DEFAULT_LLM_CHAIN)
+
+    def _tts_chain():
+        return _chain('TRAINER_TTS_CHAIN', None, DEFAULT_TTS_CHAIN)
+
+    def _tts_model(name):
+        return (env('TRAINER_VERTEX_TTS_MODEL', 'gemini-3.1-flash-tts-preview')
+                if name == 'vertex'
+                else env('TRAINER_LIVE_MODEL', 'gemini-3.1-flash-live-preview'))
+
+    def _provider_ready(name):
+        """Есть ли чем ходить к провайдеру. Про деньги на счету это не говорит."""
+        if name == 'vertex':
+            return bool(env('GOOGLE_APPLICATION_CREDENTIALS_CONTENT'))
+        if name in ('gemini', 'live'):
+            return bool(env('GEMINI_API_KEY'))
+        if name == 'claude':
+            return bool(env('CLAUDE_API_KEY') or env('ANTHROPIC_API_KEY'))
+        if name == 'soniox':
+            return bool(env('SONIOX_API_KEY'))
+        return False
+
+    def _link_state(chain):
+        return {'chain': list(chain),
+                'ready': [name for name in chain if _provider_ready(name)],
+                'missing': [name for name in chain if not _provider_ready(name)]}
+
     def _log_event(cursor, session_id, user_id, level, code, message=None, payload=None):
         cursor.execute(
             """
@@ -137,10 +249,13 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     @trainer_route('/ping')
     def trainer_ping(user):
-        """Готовность раздела: есть ли схема и все ли ключи на месте.
+        """Готовность раздела: есть ли схема и чем выполнять каждое звено.
 
-        Раздел зависит от трёх внешних сервисов, и молчаливый отказ одного из
-        них выглядит как «оно не работает». Пусть будет видно, чего именно нет.
+        Отвечаем не списком ключей, а звеньями. Ключ в окружении и рабочий ключ
+        — разные вещи: 22.08.2026 GEMINI_API_KEY был на месте, а звук пропал,
+        потому что кредиты кончились. Поэтому здесь видно ЦЕПОЧКУ каждого звена
+        и кто в ней вообще способен выйти на связь, а живой отказ провайдера
+        приходит текстом ошибки прямо в разговор.
         """
         schema_ready = True
         try:
@@ -148,11 +263,17 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 cursor.execute('SELECT 1 FROM trainer_sessions LIMIT 1')
         except Exception:
             schema_ready = False
+        links = {'stt': _link_state(['soniox']),
+                 'llm': _link_state(_llm_chain()),
+                 'tts': _link_state(_tts_chain())}
         return jsonify({
             'ok': True,
             'schema_ready': schema_ready,
+            'links': links,
+            'dead_links': [name for name, state in links.items() if not state['ready']],
             'keys': {
                 'soniox': bool(env('SONIOX_API_KEY')),
+                'vertex': bool(env('GOOGLE_APPLICATION_CREDENTIALS_CONTENT')),
                 'gemini': bool(env('GEMINI_API_KEY')),
                 'claude': bool(env('CLAUDE_API_KEY') or env('ANTHROPIC_API_KEY')),
             },
@@ -198,30 +319,157 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         else:
             problems.append('soniox: нет ключа в окружении')
 
-        # Токен Gemini браузеру НЕ выдаём: Live API эфемерные токены в
-        # браузерном соединении не принимает (сокет закрывается с 1008), а
-        # озвучку всё равно отдаёт сервер. Лишний вызов только жёг квоту — и
-        # именно он светил ключ в логах.
-        if not env('GEMINI_API_KEY'):
-            problems.append('gemini: нет ключа в окружении')
+        # Ключей озвучки браузеру НЕ выдаём вовсе: озвучивает сервер. Раньше
+        # здесь выписывался ещё и токен Gemini — он жёг квоту и светил ключ в
+        # логах, а Live API его всё равно не принимал.
+        tts = _link_state(_tts_chain())
+        if not tts['ready']:
+            problems.append('озвучка: ни одного провайдера — '
+                            + ', '.join(tts['missing']))
 
         out['problems'] = problems
         out['stt'] = {'model': 'stt-rt-v5',
                       'url': 'wss://stt-rt.soniox.com/transcribe-websocket',
                       'endpoint_ms': int(env('TRAINER_ENDPOINT_MS', '600'))}
-        out['tts'] = {'model': env('TRAINER_LIVE_MODEL', 'gemini-3.1-flash-live-preview'),
-                      'rate': 24000}
+        # Частота — только подсказка на случай, если провайдер её не объявит:
+        # настоящую браузер получает событием 'start' в потоке озвучки.
+        out['tts'] = {'chain': tts['chain'],
+                      'model': _tts_model((tts['ready'] or tts['chain'] or ['vertex'])[0]),
+                      'rate': DEFAULT_TTS_RATE}
         return jsonify(out)
+
+    # ── внутреннее: озвучка ──────────────────────────────────────────────────
+    #
+    # Провайдер — генератор (текст, голос) → куски (base64, частота). Кусками, а
+    # не файлом: реплика начинает звучать, пока она ещё синтезируется, и человек
+    # ждёт первый звук, а не весь ответ.
+
+    def _tts_vertex(text, voice):
+        """Vertex, streamGenerateContent. Основной путь озвучки.
+
+        Долго считалось, что обычный TTS для диалога не годится: generateContent
+        отдаёт готовый файл целиком за 5-6 секунд. Это правда — но ровно про
+        generateContent. streamGenerateContent на Vertex отдаёт то же аудио
+        кусками, и первый кусок приходит не позже, чем у Live API. Замер
+        22.08.2026 на реплике водителя: 177 кусков, первый через 1338 мс, весь
+        ответ за 3519 мс; Live на той же длине давал первый звук за 1300-1500 мс.
+        То есть переезд на Vertex ничего не стоит по задержке.
+
+        Казахский проверен обратным прогоном через Soniox: WER 0 %, все токены
+        размечены как kk. Голоса те же самые (Charon, Achird, Algenib, Gacrux,
+        Iapetus) — подбор персонажей по основному тону переносить не пришлось.
+        """
+        model = env('TRAINER_VERTEX_TTS_MODEL', 'gemini-3.1-flash-tts-preview')
+        token, project = _vertex_auth()
+        url = _vertex_url(project, _vertex_region(), model,
+                          'streamGenerateContent') + '?alt=sse'
+        body = {
+            'contents': [{'role': 'user',
+                          'parts': [{'text': scenarios.SAY_EXACTLY + text}]}],
+            'generationConfig': {
+                'responseModalities': ['AUDIO'],
+                'speechConfig': {'voiceConfig': {
+                    'prebuiltVoiceConfig': {'voiceName': voice}}},
+            },
+        }
+        headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+        with httpx.stream('POST', url, headers=headers, json=body, timeout=90) as response:
+            if response.status_code >= 400:
+                detail = response.read().decode('utf-8', 'ignore')
+                raise RuntimeError(f'HTTP {response.status_code} {detail[:160]}')
+            for line in response.iter_lines():
+                if not line.startswith('data:'):
+                    continue
+                try:
+                    message = json.loads(line[5:].strip())
+                except ValueError:
+                    continue
+                candidate = (message.get('candidates') or [{}])[0]
+                for part in ((candidate.get('content') or {}).get('parts') or []):
+                    inline = part.get('inlineData') or {}
+                    chunk = inline.get('data')
+                    if not chunk:
+                        continue
+                    found = _RATE_IN_MIME.search(inline.get('mimeType') or '')
+                    yield chunk, int(found.group(1)) if found else DEFAULT_TTS_RATE
+
+    def _tts_live(text, voice):
+        """Gemini Live API по ключу AI Studio. Резерв.
+
+        Остаётся в цепочке ради дня, когда кредиты пополнят. Отказ читается ИЗ
+        КАДРА ЗАКРЫТИЯ, а не из исключения: сокет здесь не рвётся, он
+        закрывается вежливо, с кодом и текстом причины. Пока это не читалось,
+        «кончились деньги» доходило до человека как полная тишина без единого
+        сообщения — сутки раздел молчал именно поэтому.
+        """
+        import struct
+        import websocket                     # локальный импорт: нужен только тут
+        from websocket import ABNF
+
+        model = env('TRAINER_LIVE_MODEL', 'gemini-3.1-flash-live-preview')
+        api_key = env('GEMINI_API_KEY')
+        if not api_key:
+            raise RuntimeError('нет GEMINI_API_KEY')
+        socket = websocket.create_connection(
+            GEMINI_LIVE_WS, header=[f'x-goog-api-key: {api_key}'], timeout=60)
+        try:
+            socket.send(json.dumps({'setup': {
+                'model': f'models/{model}',
+                'generationConfig': {
+                    'responseModalities': ['AUDIO'],
+                    'speechConfig': {'voiceConfig': {
+                        'prebuiltVoiceConfig': {'voiceName': voice}}},
+                }}}))
+            socket.send(json.dumps({'clientContent': {
+                'turns': [{'role': 'user',
+                           'parts': [{'text': scenarios.SAY_EXACTLY + text}]}],
+                'turnComplete': True}}))
+            while True:
+                # recv_data_frame, а не recv: сам отвечает на ping и, главное,
+                # отдаёт кадр закрытия вместо пустой строки.
+                opcode, frame = socket.recv_data_frame()
+                if opcode == ABNF.OPCODE_CLOSE:
+                    data = frame.data or b''
+                    code = struct.unpack('!H', data[:2])[0] if len(data) >= 2 else None
+                    reason = data[2:].decode('utf-8', 'ignore')
+                    raise RuntimeError(f'сокет закрыт ({code}) {reason[:200]}')
+                raw = frame.data
+                if isinstance(raw, bytes):
+                    raw = raw.decode('utf-8', 'ignore')
+                if not raw:
+                    break
+                message = json.loads(raw)
+                if 'setupComplete' in message:
+                    continue
+                content = message.get('serverContent') or {}
+                for part in ((content.get('modelTurn') or {}).get('parts') or []):
+                    chunk = (part.get('inlineData') or {}).get('data')
+                    if chunk:
+                        yield chunk, DEFAULT_TTS_RATE
+                if content.get('turnComplete') or content.get('generationComplete'):
+                    break
+        finally:
+            try:
+                socket.close()
+            except Exception:
+                pass
+
+    _TTS_PROVIDERS = {'vertex': _tts_vertex, 'live': _tts_live}
 
     @trainer_route('/speak', methods=('POST',))
     def trainer_speak(user):
-        """Озвучка ответа: сервер держит сокет к Live API, браузер слушает SSE.
+        """Озвучка ответа: сервер синтезирует, браузер слушает SSE.
 
-        Почему не напрямую из браузера, как распознавание: эфемерные токены Live
-        соединение не принимают (проверено 22.08.2026 — сокет закрывается с 1008
-        на всех вариантах), а постоянному ключу в браузере не место. Цена
+        Почему не напрямую из браузера, как распознавание: постоянному ключу и
+        сервисному аккаунту в браузере не место, а Live API эфемерные токены не
+        принимает (проверено 22.08.2026 — сокет закрывается с 1008). Цена
         решения — один лишний сетевой круг на реплику; звук при этом всё равно
         течёт кусками, а не ждёт полной генерации.
+
+        Провайдеры идут цепочкой. Переключаемся ТОЛЬКО пока не прозвучало ни
+        одного куска: если звук уже пошёл, второй провайдер начал бы читать ту
+        же реплику с начала поверх первой. После первого куска отказ — это конец
+        реплики, а не повод пробовать снова.
 
         Тайминги считает сервер и он же кладёт их в реплику: браузеру остаётся
         досказать своё — когда звук реально зазвучал в колонках.
@@ -233,8 +481,6 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         if not text:
             return jsonify({'error': 'нечего произносить'}), 400
 
-        model = env('TRAINER_LIVE_MODEL', 'gemini-3.1-flash-live-preview')
-        api_key = env('GEMINI_API_KEY')
         # Голос берём из сессии, а не из тела запроса: иначе его можно было бы
         # подменить из браузера. Проверка по списку — там только мужские голоса,
         # отобранные замером основного тона.
@@ -247,57 +493,71 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             if row and row[0] in scenarios.MALE_VOICES:
                 voice = row[0]
 
-        def generate():
-            import websocket  # локальный импорт: нужен только этой ручке
+        def sse(event):
+            return 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
 
+        def generate():
             started = time.perf_counter()
             first_ms, total_bytes = None, 0
-            socket = None
-            try:
-                socket = websocket.create_connection(
-                    GEMINI_LIVE_WS, header=[f'x-goog-api-key: {api_key}'], timeout=60)
-                socket.send(json.dumps({'setup': {
-                    'model': f'models/{model}',
-                    'generationConfig': {
-                        'responseModalities': ['AUDIO'],
-                        'speechConfig': {'voiceConfig': {
-                            'prebuiltVoiceConfig': {'voiceName': voice}}},
-                    }}}))
-                socket.send(json.dumps({'clientContent': {
-                    'turns': [{'role': 'user',
-                               'parts': [{'text': scenarios.SAY_EXACTLY + text}]}],
-                    'turnComplete': True}}))
-                while True:
-                    raw = socket.recv()
-                    if isinstance(raw, bytes):
-                        raw = raw.decode('utf-8', 'ignore')
-                    if not raw:
-                        break
-                    message = json.loads(raw)
-                    if 'setupComplete' in message:
-                        continue
-                    content = message.get('serverContent') or {}
-                    for part in ((content.get('modelTurn') or {}).get('parts') or []):
-                        chunk = (part.get('inlineData') or {}).get('data')
-                        if not chunk:
-                            continue
-                        if first_ms is None:
-                            first_ms = int((time.perf_counter() - started) * 1000)
-                        total_bytes += len(chunk) * 3 // 4
-                        yield f'data: {json.dumps({"t": "audio", "b64": chunk})}\n\n'
-                    if content.get('turnComplete') or content.get('generationComplete'):
-                        break
-            except Exception as exc:  # noqa: BLE001
-                yield f'data: {json.dumps({"t": "error", "message": str(exc)[:200]})}\n\n'
-            finally:
-                if socket is not None:
-                    try:
-                        socket.close()
-                    except Exception:
-                        pass
+            used, used_model, rate = None, None, DEFAULT_TTS_RATE
+            fails = []
 
-            audio_ms = int(total_bytes / 2 / 24000 * 1000)
-            if turn_id:
+            for name in _tts_chain():
+                producer = _TTS_PROVIDERS.get(name)
+                if producer is None:
+                    fails.append(f'{name} — такого провайдера озвучки нет')
+                    continue
+                model = _tts_model(name)
+                got = 0
+                try:
+                    for chunk, chunk_rate in producer(text, voice):
+                        if not got:
+                            rate = chunk_rate or rate
+                            yield sse({'t': 'start', 'provider': name,
+                                       'model': model, 'rate': rate})
+                        if first_ms is None:
+                            # Отсчёт от начала запроса, а не от начала удачной
+                            # попытки: провалившийся провайдер человек тоже ждал.
+                            first_ms = int((time.perf_counter() - started) * 1000)
+                        got += len(chunk) * 3 // 4
+                        yield sse({'t': 'audio', 'b64': chunk})
+                except Exception as exc:  # noqa: BLE001
+                    fails.append(f'{name} — {str(exc)[:200]}')
+                    if got:
+                        # Звук уже пошёл. Реплика обрывается на полуслове, но
+                        # прозвучавшее засчитывается: иначе замеры этой реплики
+                        # оказались бы пустыми при том, что человек её слышал.
+                        used, used_model, total_bytes = name, model, got
+                        break
+                    continue
+                if got:
+                    used, used_model, total_bytes = name, model, got
+                    break
+                fails.append(f'{name} — ответил без звука')
+
+            # Раньше отказ не сообщался ВООБЩЕ: провайдер закрывал соединение, а
+            # раздел досылал 'done' с нулём байт. Человек видел текст реплики и
+            # слышал тишину — ни строки о причине ни на экране, ни в журнале.
+            problem, level, code = None, None, None
+            if not total_bytes:
+                problem = '; '.join(fails) or 'озвучка не дала звука'
+                level, code = 'error', 'tts_failed'
+            elif fails:
+                problem = 'реплика оборвалась на полуслове: ' + '; '.join(fails)
+                level, code = 'warn', 'tts_cut'
+            if problem:
+                yield sse({'t': 'error', 'message': problem[:400]})
+                if session_id:
+                    try:
+                        with db._get_cursor() as cursor:
+                            _log_event(cursor, session_id, user['id'], level, code,
+                                       problem, {'chain': _tts_chain()})
+                    except Exception:
+                        logging.exception('trainer: не записалось событие отказа озвучки')
+
+            audio_ms = int(total_bytes / 2 / rate * 1000) if rate else 0
+            label = f'{used}:{used_model}' if used else None
+            if turn_id and total_bytes:
                 try:
                     with db._get_cursor() as cursor:
                         cursor.execute(
@@ -305,18 +565,20 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                             UPDATE trainer_turns SET tts_model = %s, tts_ttfb_ms = %s,
                                    tts_audio_ms = %s, tts_bytes = %s
                              WHERE id = %s
-                            """, (model, first_ms, audio_ms, total_bytes, turn_id))
+                            """, (label, first_ms, audio_ms, total_bytes, turn_id))
                         cursor.execute(
                             """
-                            UPDATE trainer_sessions s SET audio_out_ms = s.audio_out_ms + %s
+                            UPDATE trainer_sessions s SET audio_out_ms = s.audio_out_ms + %s,
+                                   tts_model = %s
                               FROM trainer_turns t
                              WHERE t.id = %s AND t.session_id = s.id
-                            """, (audio_ms, turn_id))
+                            """, (audio_ms, label, turn_id))
                 except Exception:
                     logging.exception('trainer: не удалось записать замеры озвучки')
-            yield ('data: ' + json.dumps({'t': 'done', 'ttfb_ms': first_ms,
-                                          'audio_ms': audio_ms, 'bytes': total_bytes,
-                                          'rate': 24000, 'model': model}) + '\n\n')
+
+            yield sse({'t': 'done', 'ttfb_ms': first_ms, 'audio_ms': audio_ms,
+                       'bytes': total_bytes, 'rate': rate, 'model': label,
+                       'provider': used, 'error': problem})
 
         from flask import Response, stream_with_context
         response = Response(stream_with_context(generate()), mimetype='text/event-stream')
@@ -698,33 +960,42 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     # ── внутреннее: собеседники ──────────────────────────────────────────────
 
+    def _llm_model(name):
+        if name == 'vertex':
+            return env('TRAINER_VERTEX_MODEL', 'gemini-3-flash-preview')
+        if name == 'gemini':
+            return env('TRAINER_GEMINI_MODEL', 'gemini-3.5-flash')
+        return env('TRAINER_CLAUDE_MODEL', 'claude-sonnet-5')
+
     def _driver_provider():
-        return env('TRAINER_LLM', 'gemini')
+        return _llm_chain()[0]
 
     def _driver_model():
-        return (env('TRAINER_GEMINI_MODEL', 'gemini-3.5-flash')
-                if _driver_provider() == 'gemini'
-                else env('TRAINER_CLAUDE_MODEL', 'claude-sonnet-5'))
+        return _llm_model(_driver_provider())
 
     def _driver_reply(session, history, text):
         """Роль водителя. Порядок провайдеров — по факту доступности денег.
 
-        Gemini стоит первым НЕ из предпочтения: пока у Anthropic нет баланса,
-        попытка Claude — это гарантированный лишний круг к серверу на каждой
-        реплике, то есть подаренная задержка.
+        Vertex стоит первым НЕ из предпочтения: по ключу AI Studio в этом
+        проекте кредитов нет, а у Anthropic нет баланса. Держать их впереди
+        значило бы дарить каждой реплике по кругу до отказа. Порядок меняется
+        переменной TRAINER_LLM_CHAIN, без правки кода.
         """
         system = scenarios.system_prompt(session['scenario_key'] or scenarios.DEFAULT)
         turns = [{'role': 'assistant' if h['role'] == 'driver' else 'user',
                   'content': h['text']} for h in history]
         turns.append({'role': 'user', 'content': text})
 
-        first = _driver_provider()
-        order = [first] + [p for p in ('gemini', 'claude') if p != first]
+        order = _llm_chain()
+        first = order[0]
         fails = []
         for name in order:
+            caller = _LLM_PROVIDERS.get(name)
+            if caller is None:
+                fails.append(f'{name} — такого провайдера нет')
+                continue
             try:
-                reply, meta = (_gemini_chat(system, turns) if name == 'gemini'
-                               else _claude_chat(system, turns))
+                reply, meta = caller(system, turns)
                 if name != first:
                     meta['switched'] = f'{first} не ответил, ушли на {name}'
                 return reply, meta
@@ -798,6 +1069,49 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         for s in (result.get('sources') or [])],
         }
 
+    def _vertex_generate(model, body, timeout):
+        """Один вызов Vertex. Гашение «мышления» снимается, если модель его не берёт.
+
+        Мышление тарифицируется как выход и добавляет секунды к паузе перед
+        ответом — водителю на линии оно не нужно вовсе. Но параметр принимают не
+        все модели, а менять модель переменной окружения раздел разрешает,
+        поэтому отказ с 400 не должен ронять реплику.
+        """
+        token, project = _vertex_auth()
+        url = _vertex_url(project, _vertex_region(), model, 'generateContent')
+        headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+        response = httpx.post(url, headers=headers, json=body, timeout=timeout)
+        if response.status_code == 400 and 'thinkingConfig' in json.dumps(body):
+            body['generationConfig'].pop('thinkingConfig', None)
+            response = httpx.post(url, headers=headers, json=body, timeout=timeout)
+        if response.status_code >= 400:
+            raise RuntimeError(f'HTTP {response.status_code} {response.text[:160]}')
+        return response.json()
+
+    def _vertex_chat(system, turns):
+        """Роль водителя через Vertex — основной путь.
+
+        Замер 22.08.2026 на боевом промпте сценария: gemini-3-flash-preview
+        отвечает за 1,97 с (вход 701 токен), gemini-3.5-flash — за 2,94 с.
+        Взята первая: пауза до ответа здесь и так слабое место раздела.
+        """
+        model = _llm_model('vertex')
+        data = _vertex_generate(model, {
+            'system_instruction': {'parts': [{'text': system}]},
+            'contents': [{'role': 'model' if t['role'] == 'assistant' else 'user',
+                          'parts': [{'text': t['content']}]} for t in turns],
+            'generationConfig': {'maxOutputTokens': 300, 'temperature': 0.9,
+                                 'thinkingConfig': {'thinkingBudget': 0}},
+        }, 45)
+        parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
+        usage = data.get('usageMetadata') or {}
+        return ''.join(p.get('text', '') for p in parts).strip(), {
+            'provider': 'vertex', 'model': model,
+            'input_tokens': usage.get('promptTokenCount'),
+            'output_tokens': usage.get('candidatesTokenCount'),
+            'cached_tokens': usage.get('cachedContentTokenCount'),
+        }
+
     def _gemini_chat(system, turns):
         model = env('TRAINER_GEMINI_MODEL', 'gemini-3.5-flash')
         body = {
@@ -846,6 +1160,9 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             'cached_tokens': usage.get('cache_read_input_tokens'),
         }
 
+    _LLM_PROVIDERS = {'vertex': _vertex_chat, 'gemini': _gemini_chat,
+                      'claude': _claude_chat}
+
     def _review(session, history):
         """Разбор работы стажёра вторым ИИ по стенограмме."""
         transcript = '\n'.join(
@@ -853,29 +1170,43 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             for h in history)
         prompt = scenarios.review_prompt(session['scenario_key'] or scenarios.DEFAULT)
         started = time.perf_counter()
-        model = env('TRAINER_REVIEW_MODEL', 'gemini-3.5-flash')
-        body = {
-            'contents': [{'role': 'user', 'parts': [{'text': f'СТЕНОГРАММА:\n{transcript}'}]}],
-            'systemInstruction': {'parts': [{'text': prompt}]},
-            'generationConfig': {'maxOutputTokens': 4000,
-                                 'responseMimeType': 'application/json',
-                                 'responseSchema': _gemini_schema(scenarios.REVIEW_SCHEMA)},
-        }
-        try:
-            response = httpx.post(GEMINI_GENERATE.format(model=model),
-                                  headers=_gemini_headers(env('GEMINI_API_KEY')),
-                                  json=body, timeout=120)
-            if response.status_code >= 400:
-                raise RuntimeError(f'HTTP {response.status_code} {response.text[:200]}')
-            parts = ((response.json().get('candidates') or [{}])[0]
-                     .get('content') or {}).get('parts') or []
-            blob = ''.join(p.get('text', '') for p in parts)
-            return json.loads(blob), {
-                'provider': 'gemini', 'model': model,
-                'elapsed_ms': int((time.perf_counter() - started) * 1000)}
-        except Exception as exc:  # noqa: BLE001
-            return None, {'error': f'{type(exc).__name__}: {str(exc)[:200]}',
-                          'elapsed_ms': int((time.perf_counter() - started) * 1000)}
+        generation = {'maxOutputTokens': 4000,
+                      'responseMimeType': 'application/json',
+                      'responseSchema': _gemini_schema(scenarios.REVIEW_SCHEMA)}
+        content = [{'role': 'user', 'parts': [{'text': f'СТЕНОГРАММА:\n{transcript}'}]}]
+
+        # Разбор ходит той же цепочкой, что и собеседник, за вычетом Claude:
+        # схема ответа здесь задана в терминах Gemini. Раньше он висел на одном
+        # ключе AI Studio — и когда тот умер, сессия закрывалась со статусом
+        # «error» даже после удачного разговора.
+        fails = []
+        for name in [n for n in _llm_chain() if n in ('vertex', 'gemini')]:
+            model = (env('TRAINER_REVIEW_VERTEX_MODEL', 'gemini-3-flash-preview')
+                     if name == 'vertex'
+                     else env('TRAINER_REVIEW_MODEL', 'gemini-3.5-flash'))
+            try:
+                if name == 'vertex':
+                    data = _vertex_generate(model, {
+                        'system_instruction': {'parts': [{'text': prompt}]},
+                        'contents': content, 'generationConfig': generation}, 180)
+                else:
+                    response = httpx.post(GEMINI_GENERATE.format(model=model),
+                                          headers=_gemini_headers(env('GEMINI_API_KEY')),
+                                          json={'contents': content,
+                                                'systemInstruction': {'parts': [{'text': prompt}]},
+                                                'generationConfig': generation},
+                                          timeout=120)
+                    if response.status_code >= 400:
+                        raise RuntimeError(f'HTTP {response.status_code} {response.text[:200]}')
+                    data = response.json()
+                parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
+                return json.loads(''.join(p.get('text', '') for p in parts)), {
+                    'provider': name, 'model': model,
+                    'elapsed_ms': int((time.perf_counter() - started) * 1000)}
+            except Exception as exc:  # noqa: BLE001
+                fails.append(f'{name} — {type(exc).__name__}: {str(exc)[:160]}')
+        return None, {'error': '; '.join(fails) or 'разбор некому сделать',
+                      'elapsed_ms': int((time.perf_counter() - started) * 1000)}
 
     return bp
 

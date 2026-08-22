@@ -103,6 +103,9 @@ const Bubble = ({ turn }) => {
     );
 };
 
+/** Человеческие названия звеньев из /ping. */
+const LINK_NAMES = { stt: 'распознавание', llm: 'собеседник', tts: 'озвучка' };
+
 const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => {
     const [tab, setTab] = useState('talk');
     const [mode, setMode] = useState('driver');
@@ -186,7 +189,12 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                 }).catch(() => {});
             }
         } catch (error) {
+            // И тост, и строка в «Что пошло не так»: тост уезжает через
+            // несколько секунд, а причина молчания нужна на экране до конца
+            // разговора — иначе раздел снова выглядит просто сломанным.
             toastRef.current?.(`Озвучка: ${error.message}`, 'error');
+            setProblems((prev) => (prev.includes(error.message)
+                ? prev : [...prev, `озвучка: ${error.message}`]));
         } finally {
             setPhase('listening');
         }
@@ -306,8 +314,19 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
         label: `${item.title} · ${item.difficulty}/10 · ${item.lang}`,
     })), [scenarios]);
 
-    const keysMissing = health && Object.entries(health.keys || {})
-        .filter(([, present]) => !present).map(([name]) => name);
+    // Плашка говорит о ЗВЕНЬЯХ, а не о ключах. «Ключ на месте» и «ключ рабочий»
+    // — разные вещи: 22.08.2026 GEMINI_API_KEY был на месте, а звук пропал,
+    // потому что кончились кредиты. Здесь видно только то, что видно снаружи:
+    // осталось ли у звена хоть чем выполниться. Живой отказ провайдера
+    // приходит текстом в «Что пошло не так».
+    const linkTrouble = useMemo(() => {
+        const links = health?.links;
+        if (!links) return [];
+        return Object.entries(links)
+            .filter(([, state]) => !state.ready?.length)
+            .map(([name, state]) => `${LINK_NAMES[name] || name} — нечем: `
+                + `${(state.missing || []).join(', ') || 'цепочка пуста'}`);
+    }, [health]);
 
     return (
         <div className="mx-auto w-full max-w-5xl space-y-5" style={{ fontFamily: APPLE_FONT }}>
@@ -321,10 +340,10 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                 <IosSegmented value={tab} options={TAB_OPTIONS} onChange={setTab} ariaLabel="Раздел тренажёра" />
             </header>
 
-            {!!keysMissing?.length && (
+            {!!linkTrouble.length && (
                 <div className="flex items-start gap-2.5 rounded-2xl bg-amber-50 px-4 py-3 text-[13px] text-amber-900 ring-1 ring-amber-200">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                    <span>Нет ключей: {keysMissing.join(', ')}. Раздел будет отказывать на этих звеньях.</span>
+                    <span>{linkTrouble.join('; ')}. Раздел будет отказывать на этих звеньях.</span>
                 </div>
             )}
 

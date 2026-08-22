@@ -9,6 +9,11 @@
  *   микрофон → ПРЯМО в Soniox по временному ключу (звук мимо нашего сервера);
  *   ответ    → наш /api/trainer/speak, оттуда SSE с кусками звука.
  *
+ * Поток озвучки: 'start' (провайдер, модель, частота) → 'audio'… → 'done'.
+ * Событие 'error' означает, что звука не будет вовсе, и его обязан увидеть
+ * человек: ровно этого не хватало 22.08.2026, когда у провайдера кончились
+ * кредиты и раздел сутки молчал, не сказав ни слова о причине.
+ *
  * Почему по-разному. Микрофон стримит непрерывно, и гонять этот поток через
  * Render значило бы платить лишним кругом на каждом кадре. Ответ звучит раз в
  * реплику, а Live API эфемерные токены в браузере не принимает — проверено
@@ -56,6 +61,10 @@ export class VoiceLink {
         this.sources = [];
         this.playAt = 0;
         this.speaking = false;
+        // Частота приходит от сервера событием 'start': у провайдеров озвучки
+        // она своя, и угадывать её на клиенте значит играть речь не с той
+        // скоростью. 24 000 — только значение до первого события.
+        this.rate = 24000;
 
         this.pending = '';        // подтверждённый текст текущей реплики
         this.partial = '';        // неподтверждённый — ПЕРЕПИСЫВАЕТСЯ целиком
@@ -223,6 +232,11 @@ export class VoiceLink {
         this.speaking = false;
     }
 
+    /** Частота текущего потока озвучки — её объявляет сервер событием 'start'. */
+    get playbackRate() {
+        return this.rate;
+    }
+
     playChunk(base64, rate) {
         const binary = atob(base64);
         const bytes = new Uint8Array(binary.length);
@@ -251,8 +265,11 @@ export class VoiceLink {
     async speak(text, { turnId = null, since = 0, sessionId = null } = {}) {
         this.speaking = true;
         this.playAt = 0;
+        this.rate = 24000;
         let firstAudibleMs = null;
         let done = {};
+        let chunks = 0;
+        let failure = null;
 
         const response = await fetch(`${this.apiBaseUrl}/api/trainer/speak`, {
             method: 'POST',
@@ -267,7 +284,8 @@ export class VoiceLink {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        while (true) {
+        let stopped = false;
+        while (!stopped) {
             const { value, done: finished } = await reader.read();
             if (finished) break;
             buffer += decoder.decode(value, { stream: true });
@@ -278,20 +296,34 @@ export class VoiceLink {
                 if (!line.startsWith('data:')) continue;
                 let payload;
                 try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                if (payload.t === 'audio') {
-                    if (!this.speaking) break;              // перебили
+                if (payload.t === 'start') {
+                    this.rate = payload.rate || this.rate;
+                } else if (payload.t === 'audio') {
+                    // Перебили — дочитывать поток незачем: остаток реплики уже
+                    // не прозвучит. Раньше здесь был break из внутреннего цикла,
+                    // и чтение продолжалось до конца синтеза впустую.
+                    if (!this.speaking) { stopped = true; break; }
                     if (firstAudibleMs === null && since) {
                         firstAudibleMs = Math.round(performance.now() - since);
                     }
-                    this.playChunk(payload.b64, done.rate || 24000);
+                    chunks += 1;
+                    this.playChunk(payload.b64, this.rate);
                 } else if (payload.t === 'done') {
                     done = payload;
                 } else if (payload.t === 'error') {
+                    failure = payload.message;
                     this.emit('error', { where: 'tts', message: payload.message });
                 }
             }
         }
+        if (stopped) { try { await reader.cancel(); } catch { /* поток уже закрыт */ } }
         this.speaking = false;
+        // Молчание — это отказ, а не успех. Сервер закрывал соединение с нулём
+        // байт, раздел досылал 'done', и человек видел текст реплики при полной
+        // тишине. Теперь тишина доходит наверх ошибкой с причиной.
+        if (!chunks && !stopped) {
+            throw new Error(failure || done.error || 'провайдер не дал ни одного куска звука');
+        }
         return { ...done, voice_to_voice_ms: firstAudibleMs };
     }
 
