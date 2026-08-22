@@ -196,8 +196,9 @@ class MentorSpeedTest(unittest.TestCase):
         self.assertTrue(system.startswith('СИСТЕМНЫЙ ПРОМПТ ВИКИ'))
         self.assertIn(scenarios.MENTOR_VOICE_RULES, system)
         self.assertIn('НИКАКОЙ РАЗМЕТКИ', system)
-        # Краткость не должна покупаться честностью — правило про «этого нет».
-        self.assertIn('если во фрагментах ответа нет', system)
+        # Краткость не должна покупаться ни честностью, ни готовностью помочь.
+        self.assertIn('если ответа во фрагментах', system)
+        self.assertIn('отказ вместо имеющегося ответа', system)
         self.assertEqual([400], spy.max_tokens)
 
     def test_mentor_asks_for_a_faster_model_than_the_text_assistant(self):

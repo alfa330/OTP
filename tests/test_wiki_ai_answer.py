@@ -257,6 +257,26 @@ class PromptTest(unittest.TestCase):
         self.assertIn('Только номера', ai_answer.SYSTEM_PROMPT)
         self.assertNotIn('дословная цитата', ai_answer.SYSTEM_PROMPT)
 
+    def test_prompt_puts_helping_first(self):
+        """Требование владельца 22.08.2026: помощники обязаны СТАРАТЬСЯ помочь.
+
+        Раньше правило звучало «если во фрагментах ответа нет — ответь одной
+        фразой и не пытайся ответить приблизительно», и модель отказывала при
+        первой заминке. Отказ вместо ответа, который во фрагментах есть, стоит
+        доверия ко всему помощнику.
+        """
+        self.assertIn('ТВОЯ ЗАДАЧА — ПОМОЧЬ', ai_answer.SYSTEM_PROMPT)
+        self.assertIn('ПРОЧИТАЙ ФРАГМЕНТЫ ЦЕЛИКОМ', ai_answer.SYSTEM_PROMPT)
+        self.assertIn('дай то, что есть', ai_answer.SYSTEM_PROMPT)
+        # …но не ценой выдумки: запрет и дословность чисел остаются.
+        self.assertIn('Ничего не додумывай', ai_answer.SYSTEM_PROMPT)
+        self.assertIn('ДОСЛОВНО', ai_answer.SYSTEM_PROMPT)
+
+    def test_prompt_warns_about_spelling_of_names(self):
+        """Из-за расхождения написания помощник отказывал: в вике «7 Қазына»,
+        спрашивают «Жетіқазына» или «Семь казына»."""
+        self.assertIn('НАЗВАНИЕ В ВОПРОСЕ МОЖЕТ ОТЛИЧАТЬСЯ', ai_answer.SYSTEM_PROMPT)
+
     def test_language_rule_permits_translating_context(self):
         """Без явного разрешения перевода модель отвечала по-русски на казахский."""
         self.assertIn('переводи их содержание', ai_answer.SYSTEM_PROMPT)
@@ -362,6 +382,30 @@ class ComposeTest(unittest.TestCase):
         result = ai_answer.compose('сколько отпускных', [chunk()], fake)
         self.assertEqual('no_answer', result['kind'])
         self.assertIn('Спросите у СВ', result['text'])
+
+    def test_partial_answer_is_not_demoted_to_a_refusal(self):
+        """Ответ вида «точного нет, но есть вот это» — это ОТВЕТ.
+
+        Признаком отказа служило одно вхождение фразы «в доступных вам статьях
+        этого нет» где угодно в тексте. Полезный ответ из-за этого объявлялся
+        отказом и ЛИШАЛСЯ ИСТОЧНИКОВ — помощник наказывал себя ровно за то
+        поведение, которого от него и хотят.
+        """
+        def fake(system, user, history=()):
+            return ('В доступных статьях нет общей инструкции на этот случай. '
+                    'Известно, что минимальный срок аренды — 14 дней.\nИСТОЧНИКИ: [1]'), {}
+
+        result = ai_answer.compose('что делать с арендой', [chunk()], fake)
+        self.assertEqual('answer', result['kind'])
+        self.assertTrue(result['sources'], 'у ответа с оговоркой источники остаются')
+
+    def test_refusal_is_recognised_in_paraphrase(self):
+        """Модели перефразируют отказ: «в доступных мне материалах нет…»."""
+        for text in ('В доступных статьях нет информации о сумме выплат. '
+                     'Обратитесь к руководителю отдела.',
+                     'В доступных мне материалах нет прогноза погоды. Я могу подсказать '
+                     'только данные из базы знаний таксопарка про офисы и аренду.'):
+            self.assertTrue(ai_answer.is_refusal(text), text[:50])
 
     def test_refusal_carries_no_sources(self):
         """Список статей под фразой «этого нет» читается как противоречие."""
