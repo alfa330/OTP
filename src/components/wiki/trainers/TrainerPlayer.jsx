@@ -20,6 +20,9 @@ import {
     ChromeAddress, ChromeBlank, PhoneHome, SaparDocuments, SaparGuest, SaparProfile,
     SaparSave, SaparSignSheet, SaparStatus,
 } from './screensSapar';
+import {
+    YpConsent, YpEdo, YpLegal, YpNews, YpProfile, YpProviders, YpSheet,
+} from './screensYandexPro';
 import './trainer.css';
 
 /* Сцена с машиной приезжает отдельным чанком вместе с three.js.
@@ -44,6 +47,19 @@ const CarStage = lazy(() => import('./CarStage'));
 /* Экраны по сценарию. Ключи совпадают со step.screen — расхождение здесь
    означало бы пустой телефон посреди урока, поэтому карта одна и рядом. */
 const SCREENS = {
+    'yandex-pro-edo-provider': {
+        intro: IntroScreen,
+        yp_news: YpNews,
+        yp_profile: YpProfile,
+        yp_legal: YpLegal,
+        // Экран ЭДО один и тот же до смены и после: разница — строка активного
+        // провайдера, по ней и проверяют результат.
+        yp_edo: YpEdo,
+        yp_providers: YpProviders,
+        yp_sheet: YpSheet,
+        yp_consent: YpConsent,
+        result: ResultScreen,
+    },
     'taxi-pro-avr': {
         intro: IntroScreen,
         tp_home: TpHome,

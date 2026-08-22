@@ -65,6 +65,19 @@
     --tp-green: #6ea166;
     --tp-red: #e5342b;
 
+    /* Яндекс Про — жёлтый один: он же у кнопки, он же у галочки активного
+       провайдера. Карточки двух уровней: #f4f4f0 на iOS, #ececec на Android. */
+    --yp-canvas: #ffffff;
+    --yp-card: #f4f4f0;
+    --yp-card-strong: #ececec;
+    --yp-ink: #111111;
+    --yp-mute: #90908c;
+    --yp-line: #ededea;
+    --yp-yellow: #fce000;
+    --yp-green: #30d058;
+    --yp-red: #fc502c;
+    --yp-link: #309ce4;
+
     /* eGov Mobile */
     --eg-canvas: #f3f4f8;
     --eg-blue: #2b6bcc;
@@ -1508,6 +1521,524 @@
     background: #111827;
     border-radius: 999px;
     opacity: 0.8;
+}
+
+/* ── Яндекс Про ───────────────────────────────────────────────────────────
+   Палитра снята пипеткой с настоящих кадров 22.06–22.08.2026: белый фон,
+   светло-серые карточки (#f4f4f0 на iOS, #ececec на Android), жёлтая кнопка
+   #fce000 с чёрной надписью, серый второстепенный текст #90908c.
+
+   Жёлтый в Про ОДИН — и кнопка, и галочка активного провайдера. Это важно для
+   урока: смена считается выполненной, когда жёлтая галочка оказалась у Sapar,
+   и цвет здесь несёт смысл, а не оформление. */
+
+.wt-yp {
+    gap: 9px;
+    padding: 10px 10px 0;
+    color: var(--yp-ink);
+    background: var(--yp-canvas);
+}
+
+/* Шапка раздела: стрелка слева, заголовок по центру. Заголовок длинный
+   («Электронный документооборот») — переносить его нельзя, поэтому кегль
+   уменьшается, как в приложении. */
+/* Сверху оставлено место под плашку «Учебный экран»: она висит в правом
+   верхнем углу экрана, а заголовки в Про длинные («Электронный
+   документооборот») и налезали бы на неё. */
+.wt-yp__head {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 6px;
+    align-items: center;
+    padding: 20px 0 4px;
+}
+
+.wt-yp__head b {
+    flex: 1 1 auto;
+    padding-right: 26px;
+    font-size: 14.5px;
+    font-weight: 650;
+    line-height: 1.15;
+    text-align: center;
+}
+
+.wt-yp--news .wt-yp__head b { padding-right: 0; }
+
+.wt-yp__back {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    color: var(--yp-ink);
+}
+
+.wt-yp__back svg { width: 20px; height: 20px; }
+
+.wt-yp__news-badge {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    color: #fff;
+    background: var(--yp-green);
+    border-radius: 999px;
+}
+
+.wt-yp__news-badge svg { width: 17px; height: 17px; }
+
+/* ── Строки и карточки ──────────────────────────────────────────────────── */
+
+.wt-yp__group {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--yp-card);
+    border-radius: 16px;
+}
+
+/* На Android серые карточки заметно темнее белых — в профиле это два разных
+   уровня, и без разницы экран выглядит одной простыней. */
+.wt-yp__group.is-grey { background: var(--yp-card-strong); }
+
+.wt-yp__row {
+    position: relative;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 12px 12px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--yp-ink);
+    text-align: left;
+}
+
+/* Разделитель не доходит до левого края — так он нарисован в приложении. */
+.wt-yp__row + .wt-yp__row::before {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 52px;
+    height: 1px;
+    background: var(--yp-line);
+    content: '';
+}
+
+.wt-yp__group:not(.is-grey) .wt-yp__row + .wt-yp__row::before { left: 52px; }
+.wt-yp__group.is-grey .wt-yp__row + .wt-yp__row::before { left: 12px; }
+
+.wt-yp__row > span { flex: 1 1 auto; }
+.wt-yp__row u { font-weight: 600; text-decoration: none; }
+.wt-yp__row.is-strong > span { font-weight: 700; }
+
+.wt-yp__row-ico {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    color: #2b2b2b;
+    background: var(--yp-card-strong);
+    border-radius: 999px;
+}
+
+.wt-yp__group.is-grey .wt-yp__row-ico { background: #e2e2e0; }
+.wt-yp__row-ico svg { width: 17px; height: 17px; }
+.wt-yp__row-ico.is-star { color: #f5b400; background: transparent; }
+.wt-yp__row-ico.is-star svg { width: 24px; height: 24px; fill: #ffcb00; stroke: none; }
+
+.wt-yp__row.is-rating > span { display: flex; flex-direction: column; }
+.wt-yp__row.is-rating b { font-size: 14px; font-weight: 700; }
+.wt-yp__row.is-rating small { font-size: 11.5px; color: var(--yp-ink); }
+
+.wt-yp__chev { flex: 0 0 auto; width: 15px; height: 15px; color: #b6b6b3; }
+
+.wt-yp__badge {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    font-size: 11px;
+    font-style: normal;
+    font-weight: 700;
+    line-height: 18px;
+    color: #fff;
+    background: var(--yp-red);
+    border-radius: 999px;
+    text-align: center;
+}
+
+/* Карточка водителя сверху профиля. */
+.wt-yp__me {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 11px;
+    align-items: center;
+    padding: 4px 4px 2px;
+    text-align: left;
+}
+
+.wt-yp__ava { flex: 0 0 auto; width: 42px; height: 42px; }
+.wt-yp__ava svg { display: block; width: 100%; height: 100%; }
+.wt-yp__me b { display: block; font-size: 18px; font-weight: 750; }
+.wt-yp__me b i { font-style: normal; }
+.wt-yp__me small { font-size: 11.5px; color: var(--yp-mute); }
+
+/* ── Строка активного провайдера ─────────────────────────────────────────
+   Выглядит как заголовок карточки, а это кнопка — именно на этом водитель и
+   застревает, поэтому в тренажёре она подсвечивается как цель. */
+.wt-yp__active {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 12px;
+    align-items: center;
+    padding: 13px 13px;
+    background: var(--yp-card);
+    border-radius: 16px;
+    text-align: left;
+}
+
+.wt-yp__active > i { display: block; flex: 0 0 auto; width: 30px; height: 30px; }
+.wt-yp__active > i svg { display: block; width: 100%; height: 100%; }
+.wt-yp__active > span { display: flex; flex: 1 1 auto; flex-direction: column; }
+.wt-yp__active b { font-size: 14.5px; font-weight: 650; }
+.wt-yp__active small { font-size: 12px; color: var(--yp-mute); }
+
+.wt-yp__check {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    background: var(--yp-yellow);
+    border-radius: 999px;
+}
+
+.wt-yp__check svg { width: 16px; height: 16px; }
+
+.wt-yp__section {
+    display: block;
+    flex: 0 0 auto;
+    width: 100%;
+    margin: 6px 2px 0;
+    font-size: 16.5px;
+    font-weight: 700;
+    /* Заголовок раздела — нажимаемый (по нему объясняют, чем «Документы в
+       месяце» отличаются от выбора провайдера), поэтому это кнопка. У кнопки
+       текст по центру, а в приложении он слева. */
+    text-align: left;
+}
+
+.wt-yp__empty {
+    flex: 0 0 auto;
+    padding: 12px 13px;
+    font-size: 12.5px;
+    color: var(--yp-mute);
+    background: var(--yp-card);
+    border-radius: 14px;
+    text-align: left;
+}
+
+.wt-yp__notice {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 10px;
+    align-items: center;
+    padding: 11px 13px;
+    font-size: 13.5px;
+    font-weight: 600;
+    background: var(--yp-card);
+    border-radius: 16px;
+    text-align: left;
+}
+
+.wt-yp__notice span { flex: 1 1 auto; }
+
+.wt-yp__notice em {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 25px;
+    height: 25px;
+    font-size: 14px;
+    font-style: normal;
+    font-weight: 700;
+    color: #fff;
+    background: #111;
+    border-radius: 999px;
+}
+
+.wt-yp__done {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 9px;
+    margin-top: 4px;
+    padding: 13px;
+    background: var(--yp-card);
+    border-radius: 16px;
+}
+
+.wt-yp__done b { font-size: 13.5px; font-weight: 700; }
+
+.wt-yp__primary {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 13px;
+    font-size: 14.5px;
+    font-weight: 700;
+    color: #111;
+    background: var(--yp-yellow);
+    border-radius: 16px;
+}
+
+/* ── Сообщение «Новости Про» ──────────────────────────────────────────────
+   Пузырь с картинкой и кнопкой-ссылкой внизу: с него водитель узнаёт, что
+   провайдер не выбран, и это единственный экран урока, где текст читают, а не
+   ищут кнопку. */
+
+.wt-yp__pic { flex: 0 0 auto; overflow: hidden; border-radius: 14px; }
+.wt-yp__pic svg { display: block; width: 100%; height: auto; }
+
+.wt-yp__bubble {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 7px;
+    padding: 13px;
+    background: var(--yp-card);
+    border-radius: 16px 16px 16px 4px;
+}
+
+.wt-yp__bubble b { font-size: 14.5px; font-weight: 700; line-height: 1.25; }
+.wt-yp__bubble p { margin: 0; font-size: 12.5px; line-height: 1.35; color: var(--yp-ink); }
+
+.wt-yp__bubble-cta {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+    margin-top: 3px;
+    padding-top: 10px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--yp-ink);
+    border-top: 1px solid var(--yp-line);
+}
+
+.wt-yp__bubble-cta svg { width: 15px; height: 15px; color: #9b9b98; }
+
+.wt-yp__reactions { display: flex; flex: 0 0 auto; gap: 8px; justify-content: flex-end; }
+
+.wt-yp__reactions button {
+    padding: 6px 14px;
+    font-size: 15px;
+    background: #e9f1f7;
+    border-radius: 12px;
+}
+
+/* ── Нижняя панель ───────────────────────────────────────────────────────── */
+
+.wt-yp__nav {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    display: grid;
+    flex: 0 0 auto;
+    grid-template-columns: repeat(5, 1fr);
+    margin: auto -10px 0;
+    padding: 8px 2px 10px;
+    background: var(--yp-canvas);
+    border-top: 1px solid var(--yp-line);
+}
+
+.wt-yp__nav button {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: center;
+    font-size: 10px;
+    color: #b9b9b7;
+}
+
+.wt-yp__nav i { display: block; width: 21px; height: 21px; }
+.wt-yp__nav svg { width: 100%; height: 100%; }
+.wt-yp__nav button.is-active { font-weight: 600; color: #252525; }
+
+/* ── Шторка провайдера и экран согласия ──────────────────────────────────
+   Шторка лежит НАД списком, список сквозь неё виден и приглушён — так в
+   приложении, и так видно, что шторка это ещё не новый экран, а значит и не
+   конец пути. */
+
+.wt-yp__stage {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--yp-canvas);
+}
+
+.wt-yp__stage > .wt-yp.is-behind {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    /* Приложение притемняет весь экран под шторкой — без этого шторка читается
+       как новый экран, а она лишь всплывает поверх списка. */
+    filter: brightness(0.9);
+}
+.wt-yp__providers.is-dim { opacity: 0.5; }
+
+/* Каждый провайдер — ОТДЕЛЬНАЯ карточка с зазором, а не строка общего списка:
+   так в приложении, и так по ним попадают пальцем, не задевая соседа. */
+.wt-yp__plist { display: flex; flex-direction: column; gap: 9px; }
+
+.wt-yp__prow {
+    display: flex;
+    gap: 11px;
+    align-items: center;
+    padding: 10px 12px;
+    font-size: 14.5px;
+    font-weight: 650;
+    color: var(--yp-ink);
+    background: var(--yp-card);
+    border-radius: 16px;
+    text-align: left;
+}
+
+.wt-yp__prow > span { flex: 1 1 auto; }
+
+/* Марка провайдера сидит в БЕЛОМ кружке — на светло-серой карточке это
+   единственное, что отличает Sapar от соседей на скорости. */
+.wt-yp__mark {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    background: #fff;
+    border-radius: 999px;
+}
+
+.wt-yp__mark svg { display: block; width: 23px; height: 23px; }
+
+.wt-yp__providers {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 9px;
+}
+
+/* Обёртка нужна крестику: он висит НАД шторкой, а сама шторка прокручивается. */
+.wt-yp__sheet-hold { position: relative; flex: 0 0 auto; max-height: 74%; display: flex; }
+.wt-yp__sheet-hold.is-full { max-height: 88%; }
+
+.wt-yp__sheet {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px 13px 12px;
+    background: #fff;
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.18);
+    scrollbar-width: thin;
+}
+
+.wt-yp__sheet p { margin: 0; font-size: 12.5px; line-height: 1.35; color: var(--yp-ink); }
+.wt-yp__sheet ul { margin: 0; padding-left: 16px; font-size: 12.5px; line-height: 1.35; }
+.wt-yp__sheet li { margin-bottom: 3px; }
+
+.wt-yp__sheet-head { display: flex; gap: 10px; align-items: center; }
+.wt-yp__sheet-head i { display: block; width: 26px; height: 26px; }
+.wt-yp__sheet-head i svg { display: block; width: 100%; height: 100%; }
+.wt-yp__sheet-head b { font-size: 17px; font-weight: 700; }
+
+.wt-yp__sheet-close,
+.wt-yp__sheet-back {
+    position: absolute;
+    top: -52px;
+    z-index: 3;
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    color: var(--yp-ink);
+    background: #fff;
+    border-radius: 999px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+.wt-yp__sheet-close { right: 10px; }
+.wt-yp__sheet-close svg { width: 18px; height: 18px; }
+.wt-yp__sheet-back { left: 10px; }
+.wt-yp__sheet-back svg { width: 20px; height: 20px; }
+
+.wt-yp__terms {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 2px;
+    padding: 11px 12px;
+    font-size: 13.5px;
+    font-weight: 600;
+    background: var(--yp-card);
+    border-radius: 14px;
+    text-align: left;
+}
+
+.wt-yp__terms em {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    font-size: 12px;
+    font-style: normal;
+    font-weight: 700;
+    color: #6f6f6f;
+    border: 1.5px solid #c9c9c6;
+    border-radius: 999px;
+}
+
+.wt-yp__terms .wt-yp__chev { margin-left: auto; }
+
+/* Экран согласия: текст прокручивается, кнопка приклеена к низу — иначе на
+   низком окне «Подтвердить» уезжает за край, и шаг выглядит тупиком. */
+.wt-yp__sheet.is-full { gap: 0; padding: 16px 14px 0; }
+.wt-yp__consent { flex: 1 1 auto; min-height: 0; }
+.wt-yp__consent h2 { margin: 0 0 8px; font-size: 19px; font-weight: 700; }
+.wt-yp__consent p { margin: 0 0 8px; font-size: 12.5px; line-height: 1.4; }
+.wt-yp__consent ul { margin: 0 0 8px; padding-left: 15px; }
+.wt-yp__consent li { margin-bottom: 5px; font-size: 12.5px; line-height: 1.4; }
+
+.wt-yp__link {
+    display: inline;
+    padding: 0;
+    font: inherit;
+    color: var(--yp-link);
+    background: none;
+}
+
+.wt-yp__consent-foot {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 0 12px;
+    background: #fff;
+}
+
+.wt-yp__consent-foot small {
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--yp-mute);
+    text-align: center;
 }
 
 /* ── Домашний экран телефона ─────────────────────────────────────────────

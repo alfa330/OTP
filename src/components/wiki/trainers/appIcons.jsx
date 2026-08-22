@@ -302,6 +302,183 @@ export const TpIcon = ({ name, className = '' }) => (
     </svg>
 );
 
+/* ── Яндекс Про ───────────────────────────────────────────────────────────
+   Значки нижней панели и строк профиля нарисованы по кадрам приложения:
+   тонкая обводка, скругления, ничего залитого. Отдельно — марки провайдеров
+   ЭДО: они ЦВЕТНЫЕ и залитые, потому что в списке водитель находит Sapar
+   именно по чёрному ромбовому орнаменту, а не по подписи. */
+
+const YP_NAV_ICONS = {
+    orders: <path d="M20.4 4.2 4.2 10.8l6.2 2.6 2.6 6.2Z" />,
+    intercity: (
+        <>
+            <path d="M4 17.4h16" />
+            <path d="M6.4 17.4V9.6l5.6-3.8 5.6 3.8v7.8" />
+            <path d="M10.2 17.4v-4.2h3.6v4.2" />
+        </>
+    ),
+    money: (
+        <>
+            <rect x="3.4" y="6.6" width="17.2" height="11.2" rx="2.6" />
+            <path d="M16.2 12.2h2.2" />
+        </>
+    ),
+    chats: <path d="M5 4.6h14a1.8 1.8 0 0 1 1.8 1.8v8.4a1.8 1.8 0 0 1-1.8 1.8H9.6L5.4 20v-3.4H5a1.8 1.8 0 0 1-1.8-1.8V6.4A1.8 1.8 0 0 1 5 4.6Z" />,
+    profile: (
+        <>
+            <circle cx="12" cy="8.4" r="3.6" />
+            <path d="M5.2 20a6.8 6.8 0 0 1 13.6 0" />
+        </>
+    ),
+};
+
+/** Значок нижней панели Яндекс Про. */
+export const YpNavIcon = ({ name }) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {YP_NAV_ICONS[name]}
+    </svg>
+);
+
+/* Значки строк профиля и разделов. Приложение рисует их в серых кружках —
+   кружок делает CSS, здесь только сам знак. */
+const YP_ROW_ICONS = {
+    legal: (
+        <>
+            <rect x="3.4" y="5.6" width="17.2" height="13" rx="2.6" />
+            <path d="M3.4 11.4h5.2a1 1 0 0 1 1 1v.4a2.4 2.4 0 0 0 4.8 0v-.4a1 1 0 0 1 1-1h5.2" />
+        </>
+    ),
+    /* Шестерёнка, а не «солнце»: восемь отдельных лучиков вокруг кружка
+       читались именно солнцем — зубцы обязаны примыкать к ободу. */
+    settings: (
+        <>
+            <circle cx="12" cy="12" r="2.9" />
+            <path d="M19.1 14.6a1.5 1.5 0 0 0 .3 1.65l.05.05a1.8 1.8 0 0 1-2.55 2.55l-.05-.05a1.5 1.5 0 0 0-1.65-.3 1.5 1.5 0 0 0-.9 1.37v.13a1.8 1.8 0 0 1-3.6 0v-.07a1.5 1.5 0 0 0-.98-1.37 1.5 1.5 0 0 0-1.65.3l-.05.05A1.8 1.8 0 0 1 4.9 16.4l.05-.05a1.5 1.5 0 0 0 .3-1.65 1.5 1.5 0 0 0-1.37-.9H3.7a1.8 1.8 0 0 1 0-3.6h.13a1.5 1.5 0 0 0 1.37-.98 1.5 1.5 0 0 0-.3-1.65L4.85 7.5A1.8 1.8 0 0 1 7.4 4.95l.05.05a1.5 1.5 0 0 0 1.65.3h.07a1.5 1.5 0 0 0 .9-1.37V3.8a1.8 1.8 0 0 1 3.6 0v.13a1.5 1.5 0 0 0 .9 1.37 1.5 1.5 0 0 0 1.65-.3l.05-.05A1.8 1.8 0 0 1 18.82 7.5l-.05.05a1.5 1.5 0 0 0-.3 1.65v.07a1.5 1.5 0 0 0 1.37.9h.13a1.8 1.8 0 0 1 0 3.6h-.13a1.5 1.5 0 0 0-1.37.9Z" />
+        </>
+    ),
+    diagnostics: (
+        <>
+            <path d="M4.2 8.4V5.6a1.4 1.4 0 0 1 1.4-1.4h2.8M15.6 4.2h2.8a1.4 1.4 0 0 1 1.4 1.4v2.8M19.8 15.6v2.8a1.4 1.4 0 0 1-1.4 1.4h-2.8M8.4 19.8H5.6a1.4 1.4 0 0 1-1.4-1.4v-2.8" />
+            <circle cx="12" cy="12" r="3" />
+        </>
+    ),
+    camera: (
+        <>
+            <path d="M4 8.6h3l1.4-2h7.2l1.4 2h3v9.8H4Z" />
+            <circle cx="12" cy="13.4" r="3.2" />
+        </>
+    ),
+    fuel: (
+        <>
+            <path d="M6 20.4V5.6A1.4 1.4 0 0 1 7.4 4.2h5.2A1.4 1.4 0 0 1 14 5.6v14.8" />
+            <path d="M4.4 20.4h11.2M7.6 8.2h4.8" />
+            <path d="M14 10.6h2.6a1.6 1.6 0 0 1 1.6 1.6v4a1.4 1.4 0 0 0 2.8 0V9.4l-2.2-2.6" />
+        </>
+    ),
+    gift: (
+        <>
+            <rect x="3.6" y="8.4" width="16.8" height="4" rx="1.2" />
+            <path d="M5.2 12.4v6.4a1.4 1.4 0 0 0 1.4 1.4h10.8a1.4 1.4 0 0 0 1.4-1.4v-6.4M12 8.4v11.8" />
+            <path d="M12 8.4S10.6 4.2 8.2 4.2a2.1 2.1 0 0 0 0 4.2M12 8.4s1.4-4.2 3.8-4.2a2.1 2.1 0 0 1 0 4.2" />
+        </>
+    ),
+    star: <path d="m12 4.4 2.5 5.1 5.6.8-4 4 .9 5.6-5-2.7-5 2.7.9-5.6-4-4 5.6-.8Z" />,
+    doc: (
+        <>
+            <path d="M7 3.8h6.6l4.4 4.4v12H7Z" />
+            <path d="M13.4 3.8v4.6H18M9.8 12.6h6M9.8 16h4.2" />
+        </>
+    ),
+    info: (
+        <>
+            <circle cx="12" cy="12" r="8.4" />
+            <path d="M12 11v5.4M12 8.1v.9" />
+        </>
+    ),
+};
+
+/** Значок строки в Яндекс Про. */
+export const YpIcon = ({ name, className = '' }) => (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {YP_ROW_ICONS[name]}
+    </svg>
+);
+
+/* Орнамент Sapar — девять ромбов: большой в центре, четыре по сторонам и
+   четыре маленьких по диагоналям. Рисуем генератором, иначе в файле лежала бы
+   стена одинаковых path. */
+const diamond = (cx, cy, r) => `M${cx} ${cy - r}L${cx + r} ${cy}L${cx} ${cy + r}L${cx - r} ${cy}Z`;
+const SAPAR_ORNAMENT = [
+    [16, 16, 4.6],
+    [16, 7.4, 3.4], [16, 24.6, 3.4], [7.4, 16, 3.4], [24.6, 16, 3.4],
+    [9.6, 9.6, 2.2], [22.4, 9.6, 2.2], [9.6, 22.4, 2.2], [22.4, 22.4, 2.2],
+].map(([x, y, r]) => diamond(x, y, r)).join('');
+
+/** Марка провайдера ЭДО в списке. Цвета сняты пипеткой с настоящих кадров:
+ *  ЦНТ #0bbd5f, Payda #2f7ddf, Sapar чёрный, Partners Pay #8c58e8,
+ *  Vezunchik.Pro #f8d000. По ним провайдера и узнают. */
+export const ProviderMark = ({ mark }) => {
+    if (mark === 'cnt') {
+        return (
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M5 7.4h15.6v13.2H5Z" fill="#0bbd5f" />
+                <path d="M7.8 11h9.4M7.8 14h9.4M7.8 17h5.6" stroke="#fff" strokeWidth="1.5"
+                    strokeLinecap="round" />
+                <circle cx="21.6" cy="20.4" r="6.2" fill="#0bbd5f" stroke="#fff" strokeWidth="1.6" />
+                <circle cx="21.6" cy="20.4" r="1.9" fill="#fff" />
+                <path d="M16.2 20.4h1.6M25.4 20.4H27" stroke="#fff" strokeWidth="1.5"
+                    strokeLinecap="round" />
+            </svg>
+        );
+    }
+    if (mark === 'payda') {
+        return (
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M11 5.4h9.2l4.4 5.2-4.4 5.2H11Z" fill="#2f7ddf" />
+                <path d="M11 5.4v21.2l5.6-5.6V5.4Z" fill="#1d55c6" />
+                <path d="M11 15.8h6.4l-6.4 6.4Z" fill="#4a97f0" />
+            </svg>
+        );
+    }
+    if (mark === 'sapar') {
+        return (
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d={SAPAR_ORNAMENT} fill="#000000" />
+            </svg>
+        );
+    }
+    if (mark === 'partners') {
+        return (
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+                <path d="M10.6 26.4V8.2a2.8 2.8 0 0 1 2.8-2.8h4.2a7.2 7.2 0 0 1 0 14.4h-7"
+                    fill="none" stroke="#8c58e8" strokeWidth="4.6" strokeLinecap="round" />
+                <circle cx="17.4" cy="12.6" r="1.5" fill="#c6f24a" />
+            </svg>
+        );
+    }
+    if (mark === 'vezunchik') {
+        return (
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+                <rect x="4" y="4" width="24" height="24" rx="5" fill="#f8d000" />
+                <path d="M20.4 26V17c0-4.4-2.4-7-6.4-7.6l-1.2-2.2 2.6.5 1.6-1.3.9 2.3c3.9 1.2 6.3 4.4 6.3 8.6V26Z"
+                    fill="#151515" />
+                <path d="M7.6 24.8h3v-2.6h-3ZM10.6 22.2h3v-2.6h-3ZM7.6 19.6h3V17h-3ZM13.6 19.6h2.8V17h-2.8Z"
+                    fill="#151515" />
+            </svg>
+        );
+    }
+    /* Бумажный документооборот — не бренд, а отказ от ЭДО: серый лист. */
+    return (
+        <svg viewBox="0 0 32 32" fill="none" stroke="#6f6f6f" strokeWidth="2"
+            strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9 5h9l5 5v17H9Z" />
+            <path d="M18 5v5h5" />
+        </svg>
+    );
+};
+
 /* ── Браузер ─────────────────────────────────────────────────────────────── */
 
 const BROWSER_ICONS = {
