@@ -163,9 +163,13 @@ def _http():
                                             max_connections=16))
 
 
-def _post(url, payload, headers, params=None):
+def _post(url, payload, headers, params=None, timeout=None):
+    """timeout=None — общий срок (WIKI_AI_TIMEOUT). Значение переопределяют там,
+    где ждать долго нельзя: голосовому наставнику минута ожидания бессмысленна,
+    ему лучше через несколько секунд уйти на следующую модель в цепочке."""
     started = time.time()
-    response = _http().post(url, json=payload, headers=headers, params=params)
+    response = _http().post(url, json=payload, headers=headers, params=params,
+                            timeout=timeout or TIMEOUT)
     elapsed = time.time() - started
     if response.status_code != 200:
         detail = response.text[:300]
@@ -186,13 +190,13 @@ def _messages(system, user, history):
 
 
 def _openai_shape(url, key, model, system, user, extra_headers=None, history=(),
-                  max_tokens=None):
+                  max_tokens=None, timeout=None):
     payload = {'model': model, 'temperature': 0.1,
                'max_tokens': max_tokens or MAX_TOKENS,
                'messages': _messages(system, user, history)}
     headers = {'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'}
     headers.update(extra_headers or {})
-    body, elapsed = _post(url, payload, headers)
+    body, elapsed = _post(url, payload, headers, timeout=timeout)
     choices = body.get('choices') or []
     if not choices:
         raise ProviderError('пустой ответ без choices')
@@ -202,20 +206,20 @@ def _openai_shape(url, key, model, system, user, extra_headers=None, history=(),
             'usage': body.get('usage') or {}, 'elapsed': elapsed}
 
 
-def _call_groq(model, system, user, history=(), max_tokens=None):
+def _call_groq(model, system, user, history=(), max_tokens=None, timeout=None):
     return _openai_shape('https://api.groq.com/openai/v1/chat/completions',
                          os.environ['GROQ_API_KEY'], model, system, user,
-                         history=history, max_tokens=max_tokens)
+                         history=history, max_tokens=max_tokens, timeout=timeout)
 
 
-def _call_openrouter(model, system, user, history=(), max_tokens=None):
+def _call_openrouter(model, system, user, history=(), max_tokens=None, timeout=None):
     return _openai_shape('https://openrouter.ai/api/v1/chat/completions',
                          os.environ['OPEN_ROUTER_API_KEY'], model, system, user,
                          extra_headers={'X-Title': 'OTP wiki assistant'},
-                         history=history, max_tokens=max_tokens)
+                         history=history, max_tokens=max_tokens, timeout=timeout)
 
 
-def _call_cloudflare(model, system, user, history=(), max_tokens=None):
+def _call_cloudflare(model, system, user, history=(), max_tokens=None, timeout=None):
     """Cloudflare отдаёт ТРИ формы ответа — знать надо все.
 
     Парсер на одну форму даёт ложный «пустой ответ»: на этом я уже ошибся и
@@ -228,7 +232,7 @@ def _call_cloudflare(model, system, user, history=(), max_tokens=None):
     headers = {'Authorization': 'Bearer '
                                 + os.environ['CLOUDFLARE_WORKER_AI_KEY'].strip(),
                'Content-Type': 'application/json'}
-    body, elapsed = _post(url, payload, headers)
+    body, elapsed = _post(url, payload, headers, timeout=timeout)
     result = body.get('result') or {}
 
     text, finish = '', None
@@ -249,7 +253,7 @@ def _call_cloudflare(model, system, user, history=(), max_tokens=None):
             'usage': result.get('usage') or {}, 'elapsed': elapsed}
 
 
-def _call_gemini(model, system, user, history=(), max_tokens=None):
+def _call_gemini(model, system, user, history=(), max_tokens=None, timeout=None):
     """Gemini с гашением «мышления» и обязательным откатом на 400.
 
     На моделях 3.x параметр thinkingConfig отдаёт 400 (он изменился), поэтому
@@ -339,7 +343,7 @@ def _vertex_token():
     return _vertex_credentials.token, _vertex_credentials.project_id
 
 
-def _call_vertex(model, system, user, history=(), max_tokens=None):
+def _call_vertex(model, system, user, history=(), max_tokens=None, timeout=None):
     token, project = _vertex_token()
     region = VERTEX_REGION
     host = ('aiplatform.googleapis.com' if region == 'global'
@@ -371,12 +375,12 @@ def _call_vertex(model, system, user, history=(), max_tokens=None):
     }
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     try:
-        body, elapsed = _post(url, payload, headers)
+        body, elapsed = _post(url, payload, headers, timeout=timeout)
     except ProviderError as error:
         if error.status != 400:
             raise
         payload['generationConfig'].pop('thinkingConfig', None)
-        body, elapsed = _post(url, payload, headers)
+        body, elapsed = _post(url, payload, headers, timeout=timeout)
 
     candidates = body.get('candidates') or []
     text, finish = '', None
@@ -449,7 +453,7 @@ def _read_gemini_body(body, elapsed):
                       'thoughts_tokens': usage.get('thoughtsTokenCount')}}
 
 
-def _call_vertex_file(model, system, user, *, blob, mime, max_tokens=None):
+def _call_vertex_file(model, system, user, *, blob, mime, max_tokens=None, timeout=None):
     token, project = _vertex_token()
     region = VERTEX_REGION
     host = ('aiplatform.googleapis.com' if region == 'global'
@@ -463,16 +467,16 @@ def _call_vertex_file(model, system, user, *, blob, mime, max_tokens=None):
     }
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     try:
-        body, elapsed = _post(url, payload, headers)
+        body, elapsed = _post(url, payload, headers, timeout=timeout)
     except ProviderError as error:
         if error.status != 400:
             raise
         payload['generationConfig'].pop('thinkingConfig', None)
-        body, elapsed = _post(url, payload, headers)
+        body, elapsed = _post(url, payload, headers, timeout=timeout)
     return _read_gemini_body(body, elapsed)
 
 
-def _call_gemini_file(model, system, user, *, blob, mime, max_tokens=None):
+def _call_gemini_file(model, system, user, *, blob, mime, max_tokens=None, timeout=None):
     url = ('https://generativelanguage.googleapis.com/v1beta/models/'
            + model + ':generateContent')
     payload = _file_parts(system, user, blob, mime)
@@ -529,7 +533,7 @@ def generate_document(system, user, *, blob, mime, chain=None, max_tokens=None):
                         + json.dumps(attempts, ensure_ascii=False)[:500])
 
 
-def generate(system, user, *, chain=None, history=(), max_tokens=None):
+def generate(system, user, *, chain=None, history=(), max_tokens=None, timeout=None):
     """Пройти цепочку до первого содержательного ответа.
 
     Возвращает (текст, метаданные). Пустой ответ — это ОШИБКА провайдера, а не
@@ -550,8 +554,12 @@ def generate(system, user, *, chain=None, history=(), max_tokens=None):
                              'error': 'неизвестный провайдер'})
             continue
         try:
+            # timeout передаём ТОЛЬКО когда он задан: адаптер — это функция с
+            # известной сигнатурой, и добавлять ей аргумент без нужды значит
+            # ломать всякую свою реализацию, которой этот аргумент не нужен.
+            extra = {'timeout': timeout} if timeout else {}
             result = adapter(model, system, user, history,
-                             max_tokens=max_tokens)
+                             max_tokens=max_tokens, **extra)
         except Exception as error:                    # noqa: BLE001
             attempts.append({'provider': provider, 'model': model,
                              'error': str(error)[:200]})

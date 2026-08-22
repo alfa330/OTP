@@ -1165,9 +1165,14 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 return None            # деградация до лексики, не отказ
 
         def generate(system, prompt, *, history=()):
+            # Свой срок ожидания, короткий. Обычный ответ приходит за 1-1,5 с,
+            # общий потолок вики — минута, и 22.08.2026 один ответ шёл 15,5 с:
+            # человек в голосовом разговоре столько не ждёт. По истечении срока
+            # цепочка сама уходит на следующую модель, а не сидит до конца.
             return ai_providers.generate(
                 system + scenarios.MENTOR_VOICE_RULES, prompt, history=history,
                 chain=_mentor_chain(),
+                timeout=float(env('TRAINER_MENTOR_TIMEOUT', '12')),
                 max_tokens=int(env('TRAINER_MENTOR_MAX_TOKENS', '400')))
 
         # Вектор считается ПАРАЛЛЕЛЬНО с запросами в базу: это два разных конца

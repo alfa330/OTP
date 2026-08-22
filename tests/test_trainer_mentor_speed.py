@@ -72,6 +72,7 @@ class Spy:
         self.systems = []
         self.max_tokens = []
         self.chains = []
+        self.timeouts = []
         self.histories = []
         self.allow_clarify = []
         self.enriched = False
@@ -124,10 +125,12 @@ class Spy:
         return {'kind': self.kind, 'text': text, 'sources': [],
                 'meta': dict(meta, provider='vertex', model='gemini-3-flash-preview')}
 
-    def generate(self, system, _prompt, *, history=(), max_tokens=None, chain=None):
+    def generate(self, system, _prompt, *, history=(), max_tokens=None, chain=None,
+                 timeout=None):
         self.systems.append(system)
         self.max_tokens.append(max_tokens)
         self.chains.append(chain)
+        self.timeouts.append(timeout)
         return 'Коротко и по делу.', {'usage': {'prompt_tokens': 10, 'completion_tokens': 5}}
 
 
@@ -218,6 +221,24 @@ class MentorSpeedTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, fake_wiki(spy)):
             ask(client)
         self.assertEqual([None], spy.chains)
+
+    def test_mentor_will_not_wait_a_minute_for_a_model(self):
+        """Общий потолок вики — минута; в голосовом разговоре столько не ждут.
+
+        22.08.2026 один ответ шёл 15,5 секунды. По истечении своего срока
+        цепочка уходит на следующую модель, а не сидит до общего потолка.
+        """
+        spy = Spy()
+        client, _ = build()
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client)
+        self.assertEqual([12.0], spy.timeouts)
+
+        spy = Spy()
+        client, _ = build({'TRAINER_MENTOR_TIMEOUT': '5'})
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client)
+        self.assertEqual([5.0], spy.timeouts)
 
     def test_max_tokens_is_a_knob(self):
         spy = Spy()
