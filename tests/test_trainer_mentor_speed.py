@@ -28,6 +28,7 @@ class Cursor:
         self.executed = []
         self._last = ''
         self.turn_id = 100
+        self.history = []          # (role, text, kind) — разговор до текущей реплики
 
     def execute(self, sql, params=None):
         self._last = ' '.join(str(sql).split())
@@ -46,6 +47,8 @@ class Cursor:
         return None
 
     def fetchall(self):
+        if 'FROM trainer_turns WHERE session_id' in self._last and 'role, text, kind' in self._last:
+            return self.history
         return []
 
 
@@ -69,6 +72,10 @@ class Spy:
         self.systems = []
         self.max_tokens = []
         self.chains = []
+        self.histories = []
+        self.allow_clarify = []
+        self.enriched = False
+        self.kind = 'answer'
         self.embed_ms = embed_ms
         self.embed_started = None
         self.search_started = None
@@ -91,8 +98,11 @@ class Spy:
         return {'article_ids': frozenset({1, 2, 3})}
 
     # --- wiki.ai ---
-    def enrich_query(self, question, _history):
-        return question
+    def enrich_query(self, question, history):
+        self.enrich_seen = list(history)
+        # Обогащение имитируем: движок делает это, когда в истории есть реплики
+        # человека, а вопрос короткий.
+        return f'{history[-1]["text"]} {question}' if (self.enriched and history) else question
 
     def embed_query(self, _text):
         with self.lock:
@@ -108,8 +118,10 @@ class Spy:
                 'branches': {'lexical': 1, 'dense': 1}, 'degraded': False}
 
     def compose(self, _question, _chunks, generate_fn, *, history=(), allow_clarify=True):
+        self.histories.append(list(history))
+        self.allow_clarify.append(allow_clarify)
         text, meta = generate_fn('СИСТЕМНЫЙ ПРОМПТ ВИКИ', 'вопрос', history=history)
-        return {'kind': 'answer', 'text': text, 'sources': [],
+        return {'kind': self.kind, 'text': text, 'sources': [],
                 'meta': dict(meta, provider='vertex', model='gemini-3-flash-preview')}
 
     def generate(self, system, _prompt, *, history=(), max_tokens=None, chain=None):
@@ -259,6 +271,73 @@ class MentorSpeedTest(unittest.TestCase):
         blob = next(str(v) for v in raw if 'stages' in str(v))
         for stage in ('scope', 'embed_wait', 'search', 'generate'):
             self.assertIn(stage, blob, f'нет замера шага {stage}')
+
+
+class MentorMemoryTest(unittest.TestCase):
+    """Наставник обязан помнить разговор — и в том виде, в каком движок вики его
+    понимает.
+
+    До 22.08.2026 история собиралась с одним ключом kind, без role. Движок этого
+    не узнавал: enrich_query ищет реплики с role='user' и не находил ни одной,
+    то есть короткое уточнение искалось БЕЗ темы; а сборка сообщений для модели
+    считала ответы самого наставника репликами человека. На проде это выглядело
+    так: на «Жеті қазына» после вопроса про ту же акцию наставник дважды
+    переспросил «уточните вопрос» и так и не ответил.
+    """
+
+    def test_history_reaches_the_engine_with_roles(self):
+        spy = Spy()
+        client, db = build()
+        db.cursor.history = [('asker', 'Расскажи про акцию 7 Қазына', None),
+                             ('mentor', 'Акция для курьеров.', 'answer')]
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client, 'А кому она положена?')
+        self.assertEqual(
+            [{'role': 'user', 'kind': 'question', 'text': 'Расскажи про акцию 7 Қазына'},
+             {'role': 'assistant', 'kind': 'answer', 'text': 'Акция для курьеров.'}],
+            spy.histories[0])
+        # Тот же список уходит и в поиск: иначе короткая реплика ищется без темы.
+        self.assertEqual(spy.histories[0], spy.enrich_seen)
+
+    def test_no_clarify_twice_in_a_row(self):
+        """Иначе разговор ходит по кругу — на проде наставник переспросил дважды."""
+        spy = Spy()
+        client, db = build()
+        db.cursor.history = [('asker', 'Жетіқазына', None),
+                             ('mentor', 'Уточните вопрос…', 'clarify')]
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client, 'Жеті қазына')
+        self.assertEqual([False], spy.allow_clarify)
+
+    def test_no_clarify_when_the_query_was_enriched_by_the_conversation(self):
+        """Короткий вопрос — не значит двусмысленный, если тему задали раньше."""
+        spy = Spy()
+        spy.enriched = True
+        client, db = build()
+        db.cursor.history = [('asker', 'Расскажи про акцию 7 Қазына', None),
+                             ('mentor', 'Акция для курьеров.', 'answer')]
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client, 'Жеті қазына')
+        self.assertEqual([False], spy.allow_clarify)
+
+    def test_clarify_stays_allowed_for_a_cold_question(self):
+        spy = Spy()
+        client, _ = build()
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client, 'Жеті қазына')
+        self.assertEqual([True], spy.allow_clarify)
+
+    def test_kind_of_the_reply_is_stored(self):
+        """Без вида реплики в базе нельзя ни объяснить уточнение в журнале, ни
+        запретить второе подряд."""
+        spy = Spy()
+        spy.kind = 'clarify'
+        client, db = build()
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client)
+        insert = next(params for sql, params in db.cursor.executed
+                      if 'INSERT INTO trainer_turns' in sql and 'kind' in sql)
+        self.assertIn('clarify', [str(v) for v in insert])
 
 
 if __name__ == '__main__':

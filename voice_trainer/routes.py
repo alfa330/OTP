@@ -348,7 +348,13 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         out['problems'] = problems
         out['stt'] = {'model': 'stt-rt-v5',
                       'url': 'wss://stt-rt.soniox.com/transcribe-websocket',
-                      'endpoint_ms': int(env('TRAINER_ENDPOINT_MS', '600'))}
+                      'endpoint_ms': int(env('TRAINER_ENDPOINT_MS', '600')),
+                      # Выдержка браузера после того, как распознавание поставило
+                      # точку: короткая у законченной фразы, длинная у оборванной.
+                      # Отсюда, а не из кода фронта, — чтобы подбирать её
+                      # переменной окружения, без пересборки и выкатки Pages.
+                      'hold': {'short': int(env('TRAINER_HOLD_SHORT_MS', '300')),
+                               'long': int(env('TRAINER_HOLD_LONG_MS', '1200'))}}
         # Частота — только подсказка на случай, если провайдер её не объявит:
         # настоящую браузер получает событием 'start' в потоке озвучки.
         out['tts'] = {'chain': tts['chain'],
@@ -689,6 +695,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 'stt_tokens': payload.get('stt_tokens'),
                 'stt_audio_ms': payload.get('stt_audio_ms'),
                 'endpoint_delay_ms': payload.get('endpoint_delay_ms'),
+                'hold_ms': payload.get('hold_ms'),
                 'barge_in': bool(payload.get('barge_in')),
             })
 
@@ -709,6 +716,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                            meta['switched'], meta)
             reply_role = 'driver' if session['mode'] == 'driver' else 'mentor'
             turn_id = _save_turn(cursor, session_id, idx + 1, reply_role, reply, {
+                'kind': meta.get('kind'),
                 'llm_provider': meta.get('provider'),
                 'llm_model': meta.get('model'),
                 'llm_total_ms': elapsed_ms,
@@ -958,10 +966,12 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         return {'id': row[0], 'mode': row[1], 'scenario_key': row[2], 'status': row[3]}
 
     def _load_history(cursor, session_id):
+        """Разговор целиком. kind нужен наставнику: правило вики запрещает
+        переспрашивать, если предыдущая реплика сама была уточнением."""
         cursor.execute(
-            'SELECT role, text FROM trainer_turns WHERE session_id = %s ORDER BY idx',
+            'SELECT role, text, kind FROM trainer_turns WHERE session_id = %s ORDER BY idx',
             (session_id,))
-        return [{'role': r[0], 'text': r[1]} for r in cursor.fetchall()]
+        return [{'role': r[0], 'text': r[1], 'kind': r[2]} for r in cursor.fetchall()]
 
     def _save_turn(cursor, session_id, idx, role, text, extra):
         columns = ['session_id', 'idx', 'role', 'text']
@@ -1128,9 +1138,25 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             stages[name] = int((now - clock) * 1000)
             clock = now
 
-        prior = [{'kind': 'question' if h['role'] == 'asker' else 'answer',
+        # ФОРМАТ ИСТОРИИ — как у чат-помощника вики (wiki/ai/store.recent_turns):
+        # role + kind + text. Раньше здесь клался только kind, и движок не
+        # узнавал в этом разговор: enrich_query ищет реплики с role='user' и не
+        # находил ни одной (то есть короткие уточнения искались БЕЗ темы), а
+        # сборка сообщений для модели считала ответы самого наставника репликами
+        # человека. Обнаружено 22.08.2026 на «Жеті қазына» — наставник трижды
+        # переспросил и так и не ответил, хотя акция в вике есть.
+        prior = [{'role': 'user' if h['role'] == 'asker' else 'assistant',
+                  'kind': ('question' if h['role'] == 'asker'
+                           else (h.get('kind') or 'answer')),
                   'text': h['text']} for h in history][-6:]
         search_query = ai_answer.enrich_query(question, prior)
+        # Переспрашивать можно только у ХОЛОДНОГО короткого вопроса — то же
+        # правило, что в вике. Два случая, когда нельзя: предыдущая реплика сама
+        # была уточнением (иначе разговор ходит по кругу — на проде наставник
+        # переспросил дважды в одном разговоре), и вопрос короткий, но это
+        # продолжение темы: запрос обогатился предыдущими репликами.
+        after_clarify = bool(prior) and prior[-1].get('kind') == 'clarify'
+        allow_clarify = not after_clarify and search_query == question
 
         def embed():
             try:
@@ -1165,7 +1191,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         query_vector=vector, limit=8, per_article=3)
                     mark('search')
                 result = ai_answer.compose(question, found['rows'], generate,
-                                           history=prior, allow_clarify=True)
+                                           history=prior, allow_clarify=allow_clarify)
                 mark('generate')
             except Exception as exc:  # noqa: BLE001
                 return '', {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
@@ -1180,8 +1206,17 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             'input_tokens': usage.get('prompt_tokens'),
             'output_tokens': usage.get('completion_tokens'),
             'kind': result.get('kind'),
+            # raw — единственное место, где потом видно, ПОЧЕМУ реплика вышла
+            # такой. attempts и elapsed приходят от цепочки провайдеров: без них
+            # 15-секундный ответ (был на проде 22.08) не отличить от медленной
+            # модели, отказа первого провайдера и повтора из-за языка.
             'raw': {'stages': stages, 'articles': len(article_ids),
-                    'branches': found.get('branches'), 'chars': len(text)},
+                    'branches': found.get('branches'), 'chars': len(text),
+                    'degraded': bool(found.get('degraded')),
+                    'clarify_allowed': allow_clarify,
+                    'enriched': search_query != question,
+                    'provider_ms': int((meta.get('elapsed') or 0) * 1000) or None,
+                    'attempts': meta.get('attempts') or None},
             'sources': [{'title': s.get('title'), 'slug': s.get('slug'),
                          'quote': s.get('quote'), 'article_id': s.get('article_id')}
                         for s in (result.get('sources') or [])],

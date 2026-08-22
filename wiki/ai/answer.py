@@ -109,7 +109,35 @@ _KZ_MARKERS = ('керек', 'қалай', 'қанша', 'қандай', 'бол
                'бар ', 'жоқ', 'ма?', 'ме?', 'не істеу')
 
 
-def detect_language(question):
+_ANY_WORD = re.compile(r'[^\W\d_]+', re.UNICODE)
+
+
+def _language_of(text):
+    """Язык одной строки по её собственным признакам.
+
+    Казахские буквы считаются ПО СЛОВАМ, а не по всей строке. Раньше хватало
+    одной буквы где угодно — и русский вопрос «Расскажи всё про акцию
+    «Жетіқазына»» объявлялся казахским из-за названия акции. Помощник честно
+    отвечал по-казахски человеку, который спросил по-русски (замер на проде
+    22.08.2026, сессия 19). Название на другом языке — это ИМЯ, а не язык
+    вопроса: одно такое слово среди трёх и более ничего не решает.
+
+    Два казахских слова — уже язык. Одно, если слов всего одно-два, — тоже:
+    «Сәлеметсіз бе» это приветствие, а не имя собственное.
+    """
+    lowered = str(text or '').lower()
+    words = _ANY_WORD.findall(lowered)
+    kazakh = [word for word in words if _KZ_LETTERS & set(word)]
+    if len(kazakh) >= 2 or (kazakh and len(words) <= 2):
+        return 'kk'
+    # Маркеры ловят казахский БЕЗ специфических букв: «бонус бар ма» пишется
+    # одними общими кириллическими буквами.
+    if any(marker in lowered for marker in _KZ_MARKERS):
+        return 'kk'
+    return 'ru'
+
+
+def detect_language(question, history=()):
     """Язык вопроса: 'kk' или 'ru'. Русский — язык по умолчанию.
 
     Определяется КОДОМ, а не оставляется на усмотрение модели. Причина замерена:
@@ -117,13 +145,20 @@ def detect_language(question):
     в промпте («если язык определить нельзя — отвечай по-русски») модель
     gemini-3.5-flash-lite игнорировала. Ровно как с уточняющим вопросом: то, что
     обязано соблюдаться, задаётся кодом, а промпт лишь дублирует.
+
+    Реплика из одного-двух слов языка не показывает — она показывает НАЗВАНИЕ.
+    «Жеті қазына» посреди русского разговора это уточнение про акцию, а не
+    переход на казахский, и отвечать на него по-казахски неправильно. Поэтому у
+    короткой реплики язык берётся из последней реплики человека. Это заметно в
+    голосовом режиме, где короткие реплики — норма, а не исключение.
     """
-    text = str(question or '').lower()
-    if _KZ_LETTERS & set(text):
-        return 'kk'
-    if any(marker in text for marker in _KZ_MARKERS):
-        return 'kk'
-    return 'ru'
+    words = _ANY_WORD.findall(str(question or '').lower())
+    if len(words) > 2 or not history:
+        return _language_of(question)
+    for turn in reversed(list(history)):
+        if turn.get('role') == 'user' and str(turn.get('text') or '').strip():
+            return _language_of(turn['text'])
+    return _language_of(question)
 
 
 _LANGUAGE_DIRECTIVE = {
@@ -442,7 +477,9 @@ def compose(question, chunks, generate_fn, *, history=(), allow_clarify=True):
                 'sources': [], 'notes': [],
                 'meta': {'reason': reason}}
 
-    wanted = detect_language(question)
+    # Язык считается ПО РАЗГОВОРУ, а не по одной реплике: короткое уточнение
+    # своего языка не имеет (см. detect_language).
+    wanted = detect_language(question, history)
     text, meta = generate_fn(SYSTEM_PROMPT, build_user_prompt(question, usable),
                              history=history)
     # Один повтор при несовпадении языка. Содержание модель находит верно, а язык

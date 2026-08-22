@@ -35,6 +35,46 @@ export const workletUrl = (base = import.meta.env?.BASE_URL || '/') => {
     return `${root.endsWith('/') ? root : `${root}/`}trainer-worklet.js`;
 };
 
+/* Слова, после которых фраза почти наверняка продолжится: союзы, предлоги и
+ * казахские послелоги. Список не теоретический — здесь ровно те хвосты, на
+ * которых прод обрывал живых людей 22.08.2026: «Ты уверен, что.», «Нужно делать
+ * всего лишь.», «Вижу то, что заказ был полностью на.», «Акциясы бойынша.». */
+const DANGLING = new Set([
+    'и', 'а', 'но', 'или', 'что', 'чтобы', 'если', 'когда', 'как', 'где', 'куда',
+    'кто', 'потому', 'поэтому', 'значит', 'который', 'которая', 'которое',
+    'для', 'про', 'с', 'со', 'к', 'ко', 'на', 'в', 'во', 'о', 'об', 'от', 'до',
+    'по', 'за', 'из', 'у', 'при', 'без', 'через', 'между', 'над', 'под', 'перед',
+    'только', 'всего', 'лишь', 'ещё', 'еще', 'уже', 'вот', 'это', 'этот', 'эта',
+    'мой', 'моя', 'наш', 'ваш', 'его', 'её', 'их', 'то', 'та', 'тот', 'же',
+    // казахский
+    'бойынша', 'туралы', 'үшін', 'және', 'немесе', 'мен', 'бен', 'пен',
+    'кейін', 'дейін', 'қандай', 'қалай', 'сол', 'бұл', 'осы', 'мына',
+]);
+
+const WORDS = /[\p{L}\d]+/gu;
+
+/**
+ * Сколько ждать продолжения фразы после того, как распознавание поставило точку.
+ *
+ * Soniox ставит её по паузе в 600 мс, и этого мало: человек думает посреди
+ * предложения дольше. На проде из-за этого обрывали на полуслове — реплики
+ * уходили в модель кусками, а собеседник отвечал на обрывок.
+ *
+ * Выдержка адаптивная, потому что платить ею за КАЖДУЮ реплику незачем:
+ * законченная фраза ждёт чуть-чуть, оборванная — заметно дольше. Признак
+ * незаконченности простой и проверяемый: мало слов или хвост-связка.
+ */
+export const utteranceHold = (text, { short = 300, long = 1200 } = {}) => {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return short;
+    // Тире или запятая в конце — фразу точно не закончили.
+    if (/[,:;–—-]$/.test(trimmed)) return long;
+    const words = trimmed.toLowerCase().match(WORDS) || [];
+    if (words.length < 3) return long;
+    if (DANGLING.has(words[words.length - 1])) return long;
+    return short;
+};
+
 /** Среднее по массиву или null — чтобы в метриках не появлялся NaN. */
 const mean = (values) => (values.length
     ? values.reduce((sum, value) => sum + value, 0) / values.length
@@ -47,10 +87,13 @@ export class VoiceLink {
      * @param {function} config.headers  () => объект заголовков авторизации
      * @param {function} config.onEvent  (type, payload) — единственный выход наружу
      */
-    constructor({ apiBaseUrl, headers, onEvent }) {
+    constructor({ apiBaseUrl, headers, onEvent, hold }) {
         this.apiBaseUrl = apiBaseUrl;
         this.headers = headers;
         this.emit = onEvent || (() => {});
+        // Выдержка против перебивания. Значения приходят с сервера в /tokens,
+        // чтобы подбирать их переменной окружения, а не пересборкой фронта.
+        this.hold = { short: 300, long: 1200, ...(hold || {}) };
 
         this.ctx = null;
         this.stream = null;
@@ -69,6 +112,10 @@ export class VoiceLink {
         this.pending = '';        // подтверждённый текст текущей реплики
         this.partial = '';        // неподтверждённый — ПЕРЕПИСЫВАЕТСЯ целиком
         this.lastVoiceAt = 0;     // когда человек в последний раз звучал
+        this.holdTimer = null;    // выдержка: ждём, не продолжит ли человек
+        this.heldText = '';       // текст, на котором выдержка уже заведена
+        this.holdMs = 0;          // сколько прождали — уходит в замеры реплики
+        this.endedAt = 0;         // когда распознавание поставило точку
         this.confidences = [];
         this.langs = {};
         this.tokens = 0;
@@ -121,6 +168,7 @@ export class VoiceLink {
         this.node.connect(mute);
         mute.connect(this.ctx.destination);
 
+        if (tokens.stt?.hold) this.hold = { ...this.hold, ...tokens.stt.hold };
         this.emit('ready', { sampleRate: this.ctx.sampleRate, tts: tokens.tts });
         return { sampleRate: this.ctx.sampleRate };
     }
@@ -168,6 +216,9 @@ export class VoiceLink {
             return;
         }
 
+        // Запоминаем ДО обновления: иначе выдержка распознавания всегда выходит
+        // нулём — текст и метка конца приходят одним сообщением.
+        const previousVoiceAt = this.lastVoiceAt;
         let fresh = '';
         let ended = false;
         let voiced = false;
@@ -193,6 +244,11 @@ export class VoiceLink {
 
         if (voiced) {
             this.lastVoiceAt = performance.now();
+            // Человек продолжил — отменяем отправку. Накопленное НЕ сбрасываем:
+            // продолжение приклеится к нему само, потому что pending копится до
+            // самой отправки.
+            clearTimeout(this.holdTimer);
+            this.holdTimer = null;
             if (this.speaking) {
                 this.stopPlayback();
                 this.emit('barge', {});
@@ -203,24 +259,51 @@ export class VoiceLink {
         if (live) this.emit('live', { text: live });
 
         if (ended) {
-            const text = live;
-            const metrics = {
-                stt_confidence: mean(this.confidences),
-                stt_tokens: this.tokens,
-                stt_langs: this.langs,
-                stt_lang: Object.entries(this.langs).sort((a, b) => b[1] - a[1])[0]?.[0] || null,
-                // Задержка выдержки тишины: сколько распознавание думало после
-                // того, как человек замолчал. Отдельная цифра от паузы до ответа.
-                endpoint_delay_ms: this.lastVoiceAt
-                    ? Math.round(performance.now() - this.lastVoiceAt) : null,
-            };
-            this.pending = '';
-            this.partial = '';
-            this.confidences = [];
-            this.langs = {};
-            this.tokens = 0;
-            if (text) this.emit('utterance', { text, metrics, at: this.lastVoiceAt });
+            // НЕ отправляем сразу. Распознавание ставит точку по паузе в 600 мс,
+            // а человек посреди предложения думает дольше — на проде из-за этого
+            // собеседник отвечал на обрывок фразы. Ждём выдержку; если человек
+            // продолжит, таймер отменится выше, а накопленный текст останется.
+            this.endedAt = performance.now();
+            this.endpointMs = previousVoiceAt
+                ? Math.round(this.endedAt - previousVoiceAt) : null;
+            this.scheduleUtterance();
         }
+    }
+
+    /** Отправить реплику, если человек не продолжит в течение выдержки. */
+    scheduleUtterance() {
+        const text = (this.pending + this.partial).trim();
+        if (!text) return;
+        // Повторная точка на том же тексте таймер НЕ перезапускает: иначе
+        // распознавание, прислав её дважды, отодвигало бы отправку без конца.
+        if (this.holdTimer && text === this.heldText) return;
+        clearTimeout(this.holdTimer);
+        this.heldText = text;
+        const wait = utteranceHold(text, this.hold);
+        this.holdMs = wait;
+        this.holdTimer = setTimeout(() => this.flushUtterance(), wait);
+    }
+
+    flushUtterance() {
+        this.holdTimer = null;
+        this.heldText = '';
+        const text = (this.pending + this.partial).trim();
+        const metrics = {
+            stt_confidence: mean(this.confidences),
+            stt_tokens: this.tokens,
+            stt_langs: this.langs,
+            stt_lang: Object.entries(this.langs).sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+            // Сколько распознавание думало после того, как человек замолчал…
+            endpoint_delay_ms: this.endpointMs ?? null,
+            // …и сколько ждали мы сами, чтобы не перебить.
+            hold_ms: this.holdMs || null,
+        };
+        this.pending = '';
+        this.partial = '';
+        this.confidences = [];
+        this.langs = {};
+        this.tokens = 0;
+        if (text) this.emit('utterance', { text, metrics, at: this.lastVoiceAt });
     }
 
     // ── воспроизведение ──────────────────────────────────────────────────────
@@ -331,6 +414,7 @@ export class VoiceLink {
 
     stop() {
         clearInterval(this.keepalive);
+        clearTimeout(this.holdTimer);
         this.stopPlayback();
         if (this.node) this.node.port.onmessage = null;
         if (this.stt && this.stt.readyState === WebSocket.OPEN) {

@@ -234,6 +234,49 @@ class PromptTest(unittest.TestCase):
         self.assertIn('ДОСЛОВНО', ai_answer.SYSTEM_PROMPT)
 
 
+class DetectLanguageTest(unittest.TestCase):
+    """Язык вопроса определяет КОД, поэтому ошибка здесь стоит целого ответа.
+
+    Раньше хватало одной казахской буквы где угодно в строке. Русский вопрос
+    «Расскажи всё про акцию «Жетіқазына»» из-за названия акции объявлялся
+    казахским, и помощник честно отвечал по-казахски человеку, спросившему
+    по-русски (замер на проде 22.08.2026). Название на другом языке — это ИМЯ,
+    а не язык вопроса.
+    """
+
+    def test_kazakh_name_does_not_make_a_russian_question_kazakh(self):
+        for question in ('Расскажи всё про акцию «Жетіқазына».',
+                         'Что за акция 7 Қазына?',
+                         'Расскажи про Қазына',
+                         'Какие документы нужны водителю?'):
+            self.assertEqual('ru', ai_answer.detect_language(question), question)
+
+    def test_kazakh_question_is_still_kazakh(self):
+        for question in ('Сәлеметсіз бе, жүргізушіге тіркелу үшін қандай құжаттар керек?',
+                         'Сәлеметсіз бе',
+                         'Мен қалай тіркелемін?',
+                         'Тіркелу үшін не керек?',
+                         # без специфических букв — ловят маркеры
+                         'Бонус бар ма?'):
+            self.assertEqual('kk', ai_answer.detect_language(question), question)
+
+    def test_short_reply_takes_the_language_of_the_conversation(self):
+        """«Жеті қазына» посреди русского разговора — уточнение про акцию, а не
+        переход на казахский. В голосовом режиме такие реплики — норма."""
+        russian = [{'role': 'user', 'text': 'Расскажи всё про акцию Жетіқазына'}]
+        kazakh = [{'role': 'user', 'text': 'Сәлеметсіз бе, қандай құжаттар керек?'}]
+        self.assertEqual('ru', ai_answer.detect_language('Жеті қазына.', russian))
+        self.assertEqual('kk', ai_answer.detect_language('Жеті қазына.', kazakh))
+        # Без разговора судим по самой реплике.
+        self.assertEqual('kk', ai_answer.detect_language('Жеті қазына.'))
+
+    def test_long_question_ignores_the_conversation(self):
+        """Развёрнутый вопрос свой язык показывает сам — историю не спрашиваем."""
+        kazakh = [{'role': 'user', 'text': 'Сәлеметсіз бе, қандай құжаттар керек?'}]
+        self.assertEqual(
+            'ru', ai_answer.detect_language('Какие документы нужны водителю?', kazakh))
+
+
 class ComposeTest(unittest.TestCase):
     def test_no_chunks_means_refusal_without_calling_model(self):
         def explode(*args, **kwargs):
