@@ -123,46 +123,12 @@ time.tzset()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-class _SecretScrubber(logging.Filter):
-    """Затирает секреты в тексте лога.
+# Чистка секретов в логах вынесена в отдельный модуль: её должны ставить и
+# другие точки входа (скрипты, воркеры), а не только монолит. Подробности и
+# причины — в log_secrets.py.
+import log_secrets
 
-    Поставлено после инцидента 22.08.2026: httpx пишет в лог полный URL на
-    уровне INFO, а ключ Gemini передавался query-параметром — и лежал в логах
-    Render открытым текстом с 20.08. Сами вызовы переведены на заголовок
-    (wiki/ai/providers.py, ai_feed_back_service.py, voice_trainer/routes.py),
-    но одной правкой мест такую утечку не закрыть: завтра появится четвёртое.
-
-    Фильтр — последний рубеж, а не замена аккуратности: он режет то, что уже
-    собрались напечатать, и не мешает читать сам запрос.
-    """
-
-    # Шаблон и замена ходят парой: у первого нужно сохранить имя параметра,
-    # чтобы запрос остался читаемым, у остальных — вырезать находку целиком.
-    _RULES = (
-        (re.compile(r'([?&](?:key|api_key|access_token|token)=)[^&\s\'"]+'), r'\1<СКРЫТО>'),
-        (re.compile(r'\bAIza[0-9A-Za-z_\-]{10,}'), '<СКРЫТО>'),
-        (re.compile(r'\bsk-[A-Za-z0-9\-_]{10,}'), '<СКРЫТО>'),
-    )
-
-    def filter(self, record):
-        try:
-            message = record.getMessage()
-        except Exception:
-            return True
-        scrubbed = message
-        for pattern, replacement in self._RULES:
-            scrubbed = pattern.sub(replacement, scrubbed)
-        if scrubbed != message:
-            record.msg = scrubbed
-            record.args = ()
-        return True
-
-
-# Фильтры вешаются на ОБРАБОТЧИКИ корневого логгера, а не на логгер: запись,
-# созданная дочерним логгером (httpx, urllib3), фильтры родителя не проходит —
-# она поднимается сразу к обработчикам.
-for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_SecretScrubber())
+log_secrets.install()
 
 
 def _env_bool(name, default=False):
@@ -2847,6 +2813,20 @@ def _get_telegram_error_text(response):
     return f"HTTP {response.status_code}"
 
 
+def _telegram_exception_text(exc):
+    """Текст ошибки Telegram — без токена, но по-прежнему по делу.
+
+    Токен по контракту Bot API лежит в ПУТИ адреса, а requests кладёт полный
+    путь в текст исключения при ЛЮБОМ отказе соединения: «Max retries exceeded
+    with url: /bot<ТОКЕН>/sendMessage». Отсюда текст уходит в JSON ответа
+    разделов «IT-заявки», «Задачи» и «Обращения» — то есть прямо в браузер
+    сотрудника, — и оседает в базе (crm_tickets.delivery_error). Ни фильтр
+    логов, ни что-либо ещё туда не достаёт, поэтому чистим у источника, тем же
+    модулем, что и логи.
+    """
+    return log_secrets.scrub(f'{type(exc).__name__}: {exc}')
+
+
 def _send_telegram_text_message(chat_id, text, parse_mode='HTML', reply_markup=None):
     telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
     message_text = str(text or '')
@@ -3580,7 +3560,7 @@ def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachm
             if response.status_code != 200:
                 warnings.append(f"Не удалось отправить файл '{file_name}': {_get_telegram_error_text(response)}")
         except Exception as attachment_error:
-            warnings.append(f"Не удалось отправить файл '{attachment.get('file_name') or idx}': {attachment_error}")
+            warnings.append(f"Не удалось отправить файл '{attachment.get('file_name') or idx}': {_telegram_exception_text(attachment_error)}")
 
     return warnings
 
@@ -19624,7 +19604,7 @@ def handle_tasks():
                     )
         except Exception as notify_error:
             telegram_warning = f"Task created, but Telegram notification failed: {str(notify_error)}"
-            logging.error(f"Task Telegram notification error: {notify_error}")
+            logging.error(f"Task Telegram notification error: {_telegram_exception_text(notify_error)}")
 
         response_payload = {
             "status": "success",
@@ -19829,7 +19809,7 @@ def handle_single_task(task_id):
                                     f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
                                 )
             except Exception as notify_error:
-                telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+                telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
             response_payload = {
                 "status": "success",
@@ -19890,7 +19870,7 @@ def handle_single_task(task_id):
                             f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
                         )
         except Exception as notify_error:
-            warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+            warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
         response_payload = {
             "status": "success",
@@ -20016,7 +19996,7 @@ def handle_tasks_board():
                             f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
                         )
             except Exception as notify_error:
-                warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+                warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
         response_payload = {
             "status": "success",
@@ -20128,7 +20108,7 @@ def handle_task_reports(task_id):
                             f"{_get_telegram_error_text(response)}"
                         )
         except Exception as notify_error:
-            warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+            warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
         payload = {"status": "success", "message": "Отчёт добавлен", "report": report}
         if warnings:
@@ -20209,7 +20189,7 @@ def _notify_task_message(task_id, requester, requester_id, message):
                     f"{_get_telegram_error_text(response)}"
                 )
     except Exception as notify_error:
-        warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+        warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
     return warnings
 
 
@@ -20447,7 +20427,7 @@ def update_task_status(task_id):
                                 )
                             )
         except Exception as notify_error:
-            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
         action_messages = {
             'in_progress': 'Task moved to in progress',
@@ -20539,7 +20519,7 @@ def update_task_checklist_item(task_id, item_id):
                             f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
                         )
         except Exception as notify_error:
-            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {notify_error}")
+            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
 
         response_payload = {
             "status": "success",
@@ -26217,7 +26197,7 @@ def _tg_get_chat(chat_id):
             return None, data.get("description") or f"HTTP {resp.status_code}"
         return data.get("result") or {}, None
     except Exception as e:
-        return None, str(e)
+        return None, _telegram_exception_text(e)
 
 
 def _tg_send_message(chat_id, text, parse_mode='HTML'):
@@ -26235,7 +26215,7 @@ def _tg_send_message(chat_id, text, parse_mode='HTML'):
             return None, data.get("description") or f"HTTP {resp.status_code}"
         return data.get("result") or {}, None
     except Exception as e:
-        return None, str(e)
+        return None, _telegram_exception_text(e)
 
 
 ICORE_TICKET_IMAGE_EXT = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
@@ -26275,7 +26255,7 @@ def _tg_send_attachment(chat_id, file_storage, reply_to_message_id=None, caption
             return None, payload.get("description") or f"HTTP {resp.status_code}"
         return payload.get("result") or {}, None
     except Exception as e:
-        return None, str(e)
+        return None, _telegram_exception_text(e)
 
 
 def _it_channel_public(channel, is_admin=False):

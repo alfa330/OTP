@@ -16,10 +16,23 @@ import os
 
 import requests
 
+import log_secrets
+
 API_ROOT = 'https://api.telegram.org'
 DEFAULT_TIMEOUT = 15
 # Файл из переписки может быть крупным; на скачивание даём больше времени.
 FILE_TIMEOUT = 60
+
+
+def _error_text(error):
+    """Текст ошибки без токена бота.
+
+    Токен по контракту Bot API лежит в ПУТИ адреса, а requests кладёт полный
+    путь в текст исключения при любом отказе соединения. Отсюда текст уходит в
+    crm_tickets.delivery_error и в JSON карточки обращения, то есть в браузер
+    сотрудника. Чистим тем же модулем, что и логи (log_secrets).
+    """
+    return log_secrets.scrub('%s: %s' % (type(error).__name__, error))
 
 
 def _token():
@@ -42,7 +55,7 @@ def _call(method, *, json_payload=None, params=None, timeout=DEFAULT_TIMEOUT):
         return data.get('result') or {}, None
     except Exception as error:  # noqa: BLE001 — наружу отдаём текст, не исключение
         logging.warning('crm: Telegram %s не отработал: %s', method, error)
-        return None, str(error)
+        return None, _error_text(error)
 
 
 def send_message(chat_id, text, *, reply_to_message_id=None, parse_mode='HTML'):
@@ -112,7 +125,7 @@ def send_attachment(chat_id, *, file_name, stream, mimetype=None,
         return payload.get('result') or {}, None
     except Exception as error:  # noqa: BLE001
         logging.warning('crm: вложение не ушло: %s', error)
-        return None, str(error)
+        return None, _error_text(error)
 
 
 def fetch_file(file_id):
@@ -138,4 +151,4 @@ def fetch_file(file_id):
         return response.content, None
     except Exception as error:  # noqa: BLE001
         logging.warning('crm: файл не скачался: %s', error)
-        return None, str(error)
+        return None, _error_text(error)
