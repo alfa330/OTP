@@ -133,10 +133,31 @@ class VertexEmbeddings(EmbeddingProvider):
             self._creds.refresh(self._authreq)
         return self._creds.token
 
+    def _http(self):
+        """Постоянный клиент: соединение к Vertex переживает запрос.
+
+        Каждый вызов открывал своё TLS-соединение, а рукопожатие стоит двух
+        лишних обходов до региона. Замер 22.08.2026 на одном запросе: по новому
+        соединению 626 мс, по готовому 155 мс. Для индексации это было незаметно
+        (батчи редкие), но поиск помощника делает такой запрос НА КАЖДЫЙ вопрос,
+        и рукопожатие сидело прямо в паузе перед ответом.
+
+        httpx.Client потокобезопасен, поэтому один на провайдера, а провайдер
+        закеширован lru_cache — то есть один на процесс.
+        """
+        client = getattr(self, "_client", None)
+        if client is None:
+            import httpx
+
+            client = httpx.Client(timeout=60.0,
+                                  limits=httpx.Limits(max_keepalive_connections=4,
+                                                      max_connections=8))
+            self._client = client
+        return client
+
     def _request(self, texts: list[str], *, task_type: str) -> list[list[float]]:
         if not texts:
             return []
-        import httpx
 
         url = (f"https://{self._region}-aiplatform.googleapis.com/v1/projects/{self._project}"
                f"/locations/{self._region}/publishers/google/models/{self.model_name}:predict")
@@ -144,8 +165,8 @@ class VertexEmbeddings(EmbeddingProvider):
             "instances": [{"content": text, "task_type": task_type} for text in texts],
             "parameters": {"autoTruncate": False, "outputDimensionality": self.dim},
         }
-        response = httpx.post(
-            url, json=body, timeout=60.0,
+        response = self._http().post(
+            url, json=body,
             headers={"Authorization": f"Bearer {self._token()}",
                      "Content-Type": "application/json"},
         )

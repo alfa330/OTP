@@ -20,11 +20,27 @@ config при импорте только читает окружение. Им�
     model и dim, поэтому рядом спокойно лежат векторы двух контрактов.
 """
 
+import functools
+import os
 import time
 
 _BATCH = 10          # Vertex отдаёт 429 на плотных батчах: замерено на 80-м и
 _PAUSE = 1.2         # 90-м куске из 132 при батче 25 без паузы
 _RETRIES = 6
+
+# РЕГИОН СВОЙ, не общий с call_qa. Прод стоит во Франкфурте, а call_qa по
+# умолчанию считает векторы в asia-southeast1 — каждый вопрос помощника летал в
+# Сингапур и обратно. Общую переменную VERTEX_REGION трогать НЕЛЬЗЯ: она входит
+# в config_hash контракта, а на этот хеш ключуется база знаний разбора звонков
+# (call_qa/rag) — смена региона там означала бы «векторов нет, считай заново».
+#
+# Здесь она безопасна по двум причинам, обе проверены 22.08.2026:
+#   * контракт вики (provider_contract ниже) состоит из provider/model/dim и
+#     региона НЕ содержит — ключ хранения не меняется;
+#   * europe-west3 отдаёт БИТ-В-БИТ те же векторы, что asia-southeast1: косинус
+#     к уже посчитанному индексу 1,00000000 на русском и на казахском. То есть
+#     старые векторы и новые сравнимы, пересчитывать ничего не надо.
+_QUERY_REGION = os.getenv('WIKI_EMBED_REGION', 'europe-west3')
 
 
 def provider_contract():
@@ -40,10 +56,27 @@ def provider_contract():
     }
 
 
+@functools.lru_cache(maxsize=1)
 def _provider():
-    from call_qa.embeddings.provider import get_provider
+    """Провайдер векторов для вики — с регионом поближе к серверу (см. шапку).
 
-    return get_provider()
+    Кеш обязателен: без него на каждый вопрос заново читался бы сервисный
+    аккаунт и заново открывалось соединение, то есть ровно то, ради чего эта
+    правка и делалась.
+    """
+    from call_qa import config as qa_config
+    from call_qa.embeddings.provider import VertexEmbeddings, get_provider
+
+    if (qa_config.EMBEDDINGS_PROVIDER != 'vertex'
+            or not _QUERY_REGION
+            or _QUERY_REGION == qa_config.VERTEX_REGION):
+        return get_provider()
+    provider = VertexEmbeddings(region=_QUERY_REGION)
+    if int(provider.dim) != int(qa_config.EMBED_DIM):
+        # Та же проверка, что у общего провайдера: размерность обязана совпасть
+        # с индексом, иначе поиск молча сравнивает несравнимое.
+        raise RuntimeError('размерность вектора не совпала с индексом')
+    return provider
 
 
 def _with_backoff(call, texts):

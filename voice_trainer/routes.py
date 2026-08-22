@@ -33,6 +33,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 
 import httpx
@@ -623,6 +624,10 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             session_id = row[0]
             _log_event(cursor, session_id, user['id'], 'info', 'session_start',
                        f'режим {mode}', {'scenario': key})
+        # Новый разговор — заново читаем права: внутри разговора периметр
+        # наставника берётся из кеша, и без этого сброса выданный доступ ждал бы
+        # истечения срока жизни кеша.
+        _scope_cache.pop(user['id'], None)
 
         opening = scenario['opening'] if scenario else None
         if opening:
@@ -1003,12 +1008,59 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 fails.append(f'{name} — {str(exc)[:160]}')
         return '', {'error': '; '.join(fails)}
 
+    # Периметр помощника — статьи, которые человеку разрешено услышать. Считать
+    # его на каждую реплику незачем: за разговор права не меняются, а стоит он
+    # трёх запросов в базу и полного пересчёта субъектов доступа. Держим на
+    # пользователя со сроком жизни и СБРАСЫВАЕМ при создании сессии: смена прав
+    # доходит к следующему разговору, а не к следующей фразе.
+    _scope_cache = {}
+
+    def _mentor_scope(cursor, user, wiki_queries, wiki_access, wiki_perimeter):
+        """(article_ids, взято_из_кеша) или (None, False), если доступа нет."""
+        cached = _scope_cache.get(user['id'])
+        if cached and cached[0] > time.monotonic():
+            return cached[1], True
+
+        wctx = wiki_queries.load_access_context(cursor, user['id'])
+        if not wctx:
+            return None, False
+        # Субъекты доступа контекст НЕ содержит: их досчитывает роут вики и
+        # кладёт в ctx, а периметр их требует (KeyError: 'subjects'). Считаем
+        # той же функцией, а не своим выводом — второй источник истины здесь
+        # уже ломал исходную вику.
+        wctx['subjects'] = wiki_access.collect_subjects(
+            user_id=wctx['user_id'],
+            otp_role=wctx['otp_role'],
+            department_id=wctx['department_id'],
+            headed_department_ids=wctx['headed_department_ids'],
+            direction_id=wctx['direction_id'],
+            group_ids=wctx['group_ids'],
+            wiki_role_ids=[r.get('id') for r in wctx['wiki_roles']],
+        )
+        # load_capabilities не просто возвращает права, а КЛАДЁТ их в контекст —
+        # периметр читает ctx['capabilities'] напрямую.
+        wiki_queries.load_capabilities(cursor, wctx, wctx['subjects'])
+        article_ids = wiki_perimeter.assistant_perimeter(cursor, wctx, None).get('article_ids')
+        if not article_ids:
+            return None, False
+        ttl = float(env('TRAINER_SCOPE_TTL', '900'))
+        _scope_cache[user['id']] = (time.monotonic() + ttl, article_ids)
+        return article_ids, False
+
     def _mentor_reply(user, history, question):
         """Роль опытного оператора: ответ строится движком чат-помощника вики.
 
-        Здесь намеренно нет ни своего поиска, ни своего промпта: и периметр
-        статей, и правила «не выдумывать» уже реализованы там и покрыты
-        замерами. Наш вклад — голос и запись метрик.
+        Здесь намеренно нет ни своего поиска, ни своих правил «не выдумывать»:
+        и периметр статей, и защита от выдумки уже реализованы там и покрыты
+        замерами. Наш вклад — голос, скорость и запись метрик.
+
+        СВОЁ здесь ровно одно — форма ответа (scenarios.MENTOR_VOICE_RULES).
+        Помощник вики пишет для чтения, наставника слушают; почему это не
+        мелочь — в комментарии у самого правила.
+
+        Замеры каждого шага уходят в реплику (raw.stages): пауза перед голосом —
+        главная претензия к разделу, и складывается она из четырёх разных
+        источников, которые иначе не различить.
         """
         try:
             from wiki import (queries as wiki_queries, perimeter as wiki_perimeter,
@@ -1018,52 +1070,67 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         except Exception as exc:  # noqa: BLE001
             return '', {'error': f'помощник вики недоступен: {exc}'}
 
+        stages, clock = {}, time.perf_counter()
+
+        def mark(name):
+            nonlocal clock
+            now = time.perf_counter()
+            stages[name] = int((now - clock) * 1000)
+            clock = now
+
         prior = [{'kind': 'question' if h['role'] == 'asker' else 'answer',
                   'text': h['text']} for h in history][-6:]
+        search_query = ai_answer.enrich_query(question, prior)
+
+        def embed():
+            try:
+                return ai_embed.embed_query(search_query)
+            except Exception:
+                return None            # деградация до лексики, не отказ
+
+        def generate(system, prompt, *, history=()):
+            return ai_providers.generate(
+                system + scenarios.MENTOR_VOICE_RULES, prompt, history=history,
+                max_tokens=int(env('TRAINER_MENTOR_MAX_TOKENS', '400')))
+
+        # Вектор считается ПАРАЛЛЕЛЬНО с запросами в базу: это два разных конца
+        # света (Vertex и Postgres), и ждать их по очереди нечего. Свой пул на
+        # запрос, а не общий: общий на четыре места — это готовая очередь, в
+        # которой один медленный вызов держит всех (наступали в боте).
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='trainer-embed')
         try:
-            with db._get_cursor() as cursor:
-                wctx = wiki_queries.load_access_context(cursor, user['id'])
-                if not wctx:
-                    return '', {'error': 'нет доступа к вики'}
-                # Субъекты доступа контекст НЕ содержит: их досчитывает роут
-                # вики и кладёт в ctx, а периметр их требует (KeyError:
-                # 'subjects'). Считаем той же функцией, а не своим выводом —
-                # второй источник истины здесь уже ломал исходную вику.
-                wctx['subjects'] = wiki_access.collect_subjects(
-                    user_id=wctx['user_id'],
-                    otp_role=wctx['otp_role'],
-                    department_id=wctx['department_id'],
-                    headed_department_ids=wctx['headed_department_ids'],
-                    direction_id=wctx['direction_id'],
-                    group_ids=wctx['group_ids'],
-                    wiki_role_ids=[r.get('id') for r in wctx['wiki_roles']],
-                )
-                # load_capabilities не просто возвращает права, а КЛАДЁТ их в
-                # контекст — периметр читает ctx['capabilities'] напрямую.
-                wiki_queries.load_capabilities(cursor, wctx, wctx['subjects'])
-                scope = wiki_perimeter.assistant_perimeter(cursor, wctx, None)
-                if not scope.get('article_ids'):
-                    return '', {'error': 'помощнику не выдан доступ ни к одной статье'}
-                search_query = ai_answer.enrich_query(question, prior)
-                try:
-                    vector = ai_embed.embed_query(search_query)
-                except Exception:
-                    vector = None          # деградация до лексики, не отказ
-                found = ai_retrieve.search_hybrid(
-                    cursor, article_ids=scope['article_ids'], query=search_query,
-                    query_vector=vector, limit=8, per_article=3)
-            result = ai_answer.compose(question, found['rows'], ai_providers.generate,
-                                       history=prior, allow_clarify=True)
-        except Exception as exc:  # noqa: BLE001
-            return '', {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
+            vector_task = pool.submit(embed)
+            try:
+                with db._get_cursor() as cursor:
+                    article_ids, from_cache = _mentor_scope(
+                        cursor, user, wiki_queries, wiki_access, wiki_perimeter)
+                    mark('scope_cached' if from_cache else 'scope')
+                    if not article_ids:
+                        return '', {'error': 'помощнику не выдан доступ ни к одной статье'}
+                    vector = vector_task.result()
+                    mark('embed_wait')
+                    found = ai_retrieve.search_hybrid(
+                        cursor, article_ids=article_ids, query=search_query,
+                        query_vector=vector, limit=8, per_article=3)
+                    mark('search')
+                result = ai_answer.compose(question, found['rows'], generate,
+                                           history=prior, allow_clarify=True)
+                mark('generate')
+            except Exception as exc:  # noqa: BLE001
+                return '', {'error': f'{type(exc).__name__}: {str(exc)[:200]}'}
+        finally:
+            pool.shutdown(wait=False)
 
         meta = result.get('meta') or {}
         usage = meta.get('usage') or {}
-        return result.get('text') or '', {
+        text = result.get('text') or ''
+        return text, {
             'provider': meta.get('provider'), 'model': meta.get('model'),
             'input_tokens': usage.get('prompt_tokens'),
             'output_tokens': usage.get('completion_tokens'),
             'kind': result.get('kind'),
+            'raw': {'stages': stages, 'articles': len(article_ids),
+                    'branches': found.get('branches'), 'chars': len(text)},
             'sources': [{'title': s.get('title'), 'slug': s.get('slug'),
                          'quote': s.get('quote'), 'article_id': s.get('article_id')}
                         for s in (result.get('sources') or [])],

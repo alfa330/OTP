@@ -38,6 +38,7 @@ OpenRouter доступен, но по умолчанию ВЫКЛЮЧЕН: ед
 переменной WIKI_AI_CHAIN.
 """
 
+import functools
 import json
 import os
 import re
@@ -147,12 +148,24 @@ def _gemini_headers():
             'x-goog-api-key': os.environ['GEMINI_API_KEY']}
 
 
-def _post(url, payload, headers, params=None):
+@functools.lru_cache(maxsize=1)
+def _http():
+    """Один клиент на процесс: TLS-рукопожатие не оплачивается каждым вопросом.
+
+    Замер 22.08.2026: до Vertex по новому соединению 626 мс, по готовому 155 мс.
+    Помощник делает такой запрос на каждый вопрос, и рукопожатие сидело прямо в
+    паузе перед ответом. httpx.Client потокобезопасен.
+    """
     import httpx
 
+    return httpx.Client(timeout=TIMEOUT,
+                        limits=httpx.Limits(max_keepalive_connections=8,
+                                            max_connections=16))
+
+
+def _post(url, payload, headers, params=None):
     started = time.time()
-    response = httpx.post(url, json=payload, headers=headers, params=params,
-                          timeout=TIMEOUT)
+    response = _http().post(url, json=payload, headers=headers, params=params)
     elapsed = time.time() - started
     if response.status_code != 200:
         detail = response.text[:300]
