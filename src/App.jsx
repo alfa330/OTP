@@ -1966,6 +1966,30 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             }
 
+            // В ошибке axios лежит ВЕСЬ исходный запрос: config.headers с живым
+            // токеном (его подмешивает интерцептор выше) и config.data с телом —
+            // а в теле входа и смены пароля лежит сам пароль. Любой из ~108
+            // console.error(..., err) печатает это в консоль браузера, откуда
+            // пароль уезжает в скриншот и в демонстрацию экрана. Токен и так
+            // лежит в хранилище, а пароль не истекает никогда.
+            //
+            // Чистим только на ПОСЛЕДНЕМ отказе: раньше нельзя — этот же config
+            // переигрывает повтор запроса после обновления токена.
+            const redactAuthFromError = (error) => {
+                const config = error?.config;
+                if (!config) return error;
+                try {
+                    if (config.headers) {
+                        delete config.headers.Authorization;
+                        delete config.headers.authorization;
+                    }
+                    if (config.data) config.data = '<скрыто>';
+                } catch (_) {
+                    // Объект мог быть заморожен: обработку ошибки не роняем.
+                }
+                return error;
+            };
+
             if (!window.__otpAxiosAuthInterceptorInstalled) {
                 window.__otpAxiosAuthInterceptorInstalled = true;
                 window.__otpRefreshPromise = null;
@@ -2065,7 +2089,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 if (shouldReloadAfterFailedRefresh) {
                                     return forceReloadAfterFailedAuthRefresh();
                                 }
-                                return Promise.reject(error);
+                                return Promise.reject(redactAuthFromError(error));
                             }
                             // Strip stale auth headers so the request interceptor
                             // re-injects fresh tokens on retry.
@@ -2076,7 +2100,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             return axios(originalRequest);
                         }
 
-                        return Promise.reject(error);
+                        return Promise.reject(redactAuthFromError(error));
                     }
                 );
             }
