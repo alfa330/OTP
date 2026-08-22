@@ -14,17 +14,27 @@ import { TRAINERS, findTrainer, TRAINER_CARDS } from '../src/components/wiki/tra
  * прощёлкивая четырнадцать экранов руками после каждой правки текста реплики.
  */
 
+/* Нажатия, у которых есть ВВОД. Правильное значение знает мир попытки, а не
+   тест: коды eGov случайны на каждый заход, телефон приходит из легенды звонка.
+   Держим таблицу здесь, а не в сценариях: подсказка «что ввести, чтобы прошло»
+   в рабочем коде — это ответ к упражнению, лежащий рядом с упражнением. */
+const INPUT = {
+    submit_code: (run) => ({
+        code: currentStep(run).key === 'code_docs' ? run.world.codes.docs : run.world.codes.auth,
+    }),
+    phone_done: (run) => ({ value: run.world.call.phone }),
+    comment_done: () => ({
+        value: 'Водитель спросил, за что таксопарк удержал комиссию — объяснил условия.',
+    }),
+};
+
 /** Прогон сценария правильными нажатиями. Возвращает финальную попытку. */
 const playThrough = (scenario, { random } = {}) => {
     let run = startRun(scenario, { random });
     let guard = 0;
     while (!isFinished(run) && guard < 60) {
         const id = expectedTap(run);
-        // Единственное нажатие с вводом — учебный код eGov. Какой именно код
-        // нужен, знает шаг, а не тест: у входа и документов они разные.
-        const payload = id === 'submit_code'
-            ? { code: currentStep(run).key === 'code_docs' ? run.world.codes.docs : run.world.codes.auth }
-            : {};
+        const payload = INPUT[id] ? INPUT[id](run) : {};
         const result = tap(run, id, payload);
         assert.equal(result.ok, true,
             `шаг «${currentStep(run).key}»: правильное нажатие «${id}» не прошло — `
@@ -36,20 +46,34 @@ const playThrough = (scenario, { random } = {}) => {
     return run;
 };
 
-/* Тренажёры на учебном телефоне: весь мир помещается в его экран, и пройти их
-   можно одними нажатиями. Фотоконтроль устроен иначе — там кадр зависит от
-   того, где стоит человек и что у машины открыто, поэтому его проход живёт в
-   wiki_trainer_photocontrol.test.mjs, где есть чем эти условия задать. */
-const PHONE_TRAINERS = TRAINERS.filter((scenario) => scenario.stage !== 'world');
+/* Тренажёры, которые проходятся одними нажатиями: учебный телефон и рабочее
+   место оператора — весь мир помещается в экран. Фотоконтроль устроен иначе:
+   там кадр зависит от того, где стоит человек и что у машины открыто, поэтому
+   его проход живёт в wiki_trainer_photocontrol.test.mjs, где есть чем эти
+   условия задать. */
+const TAPPABLE = TRAINERS.filter((scenario) => scenario.stage !== 'world');
 
-test('телефонные тренажёры проходятся правильными нажатиями до конца', () => {
-    assert.ok(PHONE_TRAINERS.length >= 2, 'телефонных сценариев стало меньше двух — проверь фильтр');
-    for (const scenario of PHONE_TRAINERS) {
+test('тренажёры проходятся правильными нажатиями до конца', () => {
+    assert.ok(TAPPABLE.length >= 2, 'проходимых нажатиями сценариев стало меньше двух — проверь фильтр');
+    for (const scenario of TAPPABLE) {
         const run = playThrough(scenario);
         assert.equal(run.errors, 0, `${scenario.key}: правильный путь не должен давать ошибок`);
         assert.equal(progressPercent(run), 100);
         assert.equal(currentStep(run).screen, 'result');
     }
+});
+
+/* Финальный экран один на все сценарии, а итог у каждого свой. Пока текст был
+   зашит в экран, тренажёр смены провайдера заканчивался словами «Документы
+   подписаны», хотя ничего не подписывал. Проверяем, что своя строка есть у
+   всех — общая заглушка не должна всплыть снова. */
+test('у каждого сценария свой текст итога', () => {
+    for (const scenario of TRAINERS) {
+        assert.ok(scenario.resultNote && scenario.resultNote.length > 12,
+            `${scenario.key}: нет своего resultNote — финал покажет общую фразу`);
+    }
+    const notes = TRAINERS.map((s) => s.resultNote);
+    assert.equal(new Set(notes).size, notes.length, 'два сценария заканчиваются одинаково');
 });
 
 test('у каждого тренажёра в каталоге есть имя, шаги и чек-лист', () => {
@@ -280,6 +304,13 @@ test('ключи сценариев уникальны и совпадают с�
     for (const key of keys) assert.ok(findTrainer(key));
     assert.equal(findTrainer('нет-такого'), null);
     assert.deepEqual(TRAINER_CARDS.map((c) => c.key), keys);
+    /* Витрина рисует рядом с карточкой телефон и решает по stage, уместен ли он:
+       у тренажёра за компьютером телефона быть не должно. Без поля в карточке
+       она молча вернулась бы к телефону для всех. */
+    for (const card of TRAINER_CARDS) {
+        assert.ok(card.stage, `${card.key}: карточка витрины без stage`);
+    }
+    assert.equal(TRAINER_CARDS.find((c) => c.key === 'crm-ticket-create').stage, 'desktop');
     // Число шагов инструкции показывается человеку — оно не должно быть нулём.
     assert.equal(stageCount(taxiPro), 8);
     assert.equal(stageCount(saparSite), 6);

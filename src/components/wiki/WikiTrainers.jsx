@@ -207,9 +207,15 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null,
                                             <li key={`${index}-${item}`}>{item}</li>
                                         ))}
                                     </ol>
-                                    <TrainerShowcase
-                                        src={TRAINER_PHONES[trainer.key] || PHONE_TILTED.src}
-                                    />
+                                    {/* Тренажёр за компьютером телефоном не
+                                        показывают: витрина отвечает на «где я это
+                                        увижу», и телефон рядом с уроком про CRM
+                                        отвечал бы неправдой. Место отдаём шагам. */}
+                                    {card?.stage === 'desktop' ? null : (
+                                        <TrainerShowcase
+                                            src={TRAINER_PHONES[trainer.key] || PHONE_TILTED.src}
+                                        />
+                                    )}
                                 </div>
 
                                 {/* Три числа, а не таблица: на карточке нужен ответ

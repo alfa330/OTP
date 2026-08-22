@@ -12,6 +12,7 @@ import {
     startRun, stepGoal, takeHint, tap, toggle,
 } from './runner';
 import { IntroScreen, ResultScreen } from './screenKit';
+import { CallCard, CrmForm } from './screensCrm';
 import { EgCode, EgSign, EgSuccess } from './screensEgov';
 import {
     SpAd, SpProfile, SpSignAll, TpCheck, TpDocuments, TpHome,
@@ -47,6 +48,14 @@ const CarStage = lazy(() => import('./CarStage'));
 /* Экраны по сценарию. Ключи совпадают со step.screen — расхождение здесь
    означало бы пустой телефон посреди урока, поэтому карта одна и рядом. */
 const SCREENS = {
+    /* Единственный тренажёр не на телефоне, а за компьютером: оператор заводит
+       обращение в браузере. Экран формы один на все шаги — меняется не он, а
+       состав полей, и приходят они из мира (см. scenarioCrmTicket). */
+    'crm-ticket-create': {
+        intro: IntroScreen,
+        crm_form: CrmForm,
+        result: ResultScreen,
+    },
     'yandex-pro-edo-provider': {
         intro: IntroScreen,
         yp_news: YpNews,
@@ -156,9 +165,14 @@ export function TrainerPlayer({
        машина, а телефон человек держит в руках. Поэтому телефон снизу не
        выезжает (ему неоткуда), и появление начинается сразу с карточек. */
     const worldMode = scenario.stage === 'world';
+    /* Рабочее место оператора: вместо телефона окно браузера на компьютере.
+       Оно широкое и стоит на месте, поэтому снизу тоже не выезжает — выезд из-за
+       края экрана читается как жест телефона, а окно на компьютере так себя не
+       ведёт. */
+    const deskMode = scenario.stage === 'desktop';
     const [phase, setPhase] = useState(() => {
         if (!animateEntrance || reduceMotion) return 'done';
-        return worldMode ? 'cards' : 'rise';
+        return worldMode || deskMode ? 'cards' : 'rise';
     });
 
     // Выключили анимации в системе уже после открытия — доигрывать нечего.
@@ -167,7 +181,7 @@ export function TrainerPlayer({
     /* Пробежка барса измеряется от корпуса телефона. В режиме мира корпуса на
        его прежнем месте нет, и бежать зверю неоткуда — он просто появляется в
        карточке, как на узком экране. */
-    const skipRunner = narrow || worldMode;
+    const skipRunner = narrow || worldMode || deskMode;
     const shown = phase !== 'rise';
     const cardsOut = phase === 'cards' || phase === 'run' || phase === 'done';
     const running = phase === 'run';
@@ -310,7 +324,8 @@ export function TrainerPlayer({
            было бы не достать. */
         <div
             className={`wt-root${settled && !leaving ? '' : ' wt-root--locked'}`
-                + `${worldMode ? ' wt-root--world' : ''}`}
+                + `${worldMode ? ' wt-root--world' : ''}`
+                + `${deskMode ? ' wt-root--desk' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
         >
             {/* Полупрозрачная подложка. Появляется ПОСЛЕ того, как телефон
@@ -416,11 +431,13 @@ export function TrainerPlayer({
             {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
                 Высота считается от окна, ширина — от пропорций корпуса, поэтому
                 на большом экране телефон крупный, а на маленьком не вылезает. */}
-            <div className={`wt-stage${worldMode ? ' wt-stage--world' : ''}`} ref={stageRef}>
-                {worldMode ? (
-                    /* Мир вокруг человека. Вступление и финал — обычные
-                       карточки: показывать их «в телефоне» незачем, телефон
-                       здесь часть сцены, а не рамка для любого текста. */
+            <div className={`wt-stage${worldMode ? ' wt-stage--world' : ''}`
+                + `${deskMode ? ' wt-stage--desk' : ''}`} ref={stageRef}>
+                {worldMode || deskMode ? (
+                    /* Мир вокруг человека и рабочее место оператора. Вступление
+                       и финал в обоих режимах — обычные карточки: показывать их
+                       «в телефоне» незачем, телефон здесь часть сцены (или его
+                       нет вовсе), а не рамка для любого текста. */
                     step.screen === 'pc_camera' ? (
                         <Suspense fallback={<div className="wt-world__load">Готовим машину…</div>}>
                             <CarStage
@@ -431,6 +448,28 @@ export function TrainerPlayer({
                                 plate={run.world.car?.plate}
                             />
                         </Suspense>
+                    ) : deskMode && step.screen === 'crm_form' ? (
+                        /* Рабочий стол оператора: софтфон с карточкой звонка и
+                           окно браузера с CRM. Карточка звонка обязана стоять
+                           РЯДОМ с формой, а не в реплике помощника: на смене
+                           оператор смотрит на неё, пока заполняет поля, и
+                           тренажёр повторяет это движение глаз. */
+                        <div className="wt-desk">
+                            <CallCard call={run.world.call} />
+                            <div className="wt-desk__window">
+                                {Screen && (
+                                    <Screen
+                                        key={step.key}
+                                        scenario={scenario}
+                                        world={run.world}
+                                        tap={doTap}
+                                        toggle={doToggle}
+                                        target={target}
+                                        onRestart={doRestart}
+                                    />
+                                )}
+                            </div>
+                        </div>
                     ) : (
                         <div className="wt-card">
                             {Screen && (

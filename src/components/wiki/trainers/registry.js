@@ -20,17 +20,21 @@
  * приезжают отдельным чанком вместе с самим проигрывателем.
  */
 
+import crmTicket from './scenarioCrmTicket.js';
 import photoControl from './scenarioPhotoControl.js';
 import saparSite from './scenarioSapar.js';
 import taxiPro from './scenarioTaxiPro.js';
 import yandexPro from './scenarioYandexPro.js';
 import { stageCount } from './runner.js';
 
-/* Порядок фиксирован и повторяет порядок дел водителя: сначала выбрать
-   провайдера ЭДО (без него подписывать нечего), потом основной способ
-   подписания, потом запасной, потом фотоконтроль. Тот же порядок в инструкции —
-   тренажёр не должен спорить с текстом рядом. */
-export const TRAINERS = [yandexPro, taxiPro, saparSite, photoControl];
+/* Порядок фиксирован и читается по адресату.
+   Первым — рабочее место САМОГО оператора: обращение в CRM он заводит на каждом
+   звонке, и это первое, чему учат новичка на линии.
+   Дальше — приложения ВОДИТЕЛЯ в порядке его дел: сначала выбрать провайдера
+   ЭДО (без него подписывать нечего), потом основной способ подписания, потом
+   запасной, потом фотоконтроль. Тот же порядок в инструкции — тренажёр не
+   должен спорить с текстом рядом. */
+export const TRAINERS = [crmTicket, yandexPro, taxiPro, saparSite, photoControl];
 
 const BY_KEY = new Map(TRAINERS.map((scenario) => [scenario.key, scenario]));
 
@@ -47,6 +51,10 @@ export const trainerCard = (scenario) => ({
     description: scenario.description,
     stages: stageCount(scenario),
     checklist: scenario.checklist || [],
+    /* Среда урока нужна витрине: она рисует рядом с карточкой телефон, а
+       тренажёр за компьютером телефоном не показать — это отвечало бы на
+       «где я это увижу» неправдой. */
+    stage: scenario.stage || 'phone',
 });
 
 export const TRAINER_CARDS = TRAINERS.map(trainerCard);

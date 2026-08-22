@@ -3064,3 +3064,495 @@
     .wt-tool__full { display: none; }
     .wt-tool__short { display: inline; }
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   РАБОЧЕЕ МЕСТО ОПЕРАТОРА: окно браузера с CRM
+   ─────────────────────────────────────────────────────────────────────────
+   Единственный тренажёр не на телефоне. Оператор заводит обращение за
+   компьютером, и узнавание здесь держится на другом: полоса вкладок, адресная
+   строка, кнопки окна Windows справа и тёмно-синий сайдбар CRM.
+
+   Цвета CRM сняты пипеткой со скриншотов рабочей системы 23.08.2026 — как и у
+   остальных тренажёров, «примерно синий» вместо #4273fa делает экран чужим.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.wt-root--desk {
+    /* Центру нужна ширина: форма CRM — это подпись слева и поле справа, и в
+       колонке под телефон подписи ломались бы на три строки каждая. */
+    grid-template-columns: minmax(0, 0.72fr) minmax(0, 2.7fr) minmax(0, 0.8fr);
+}
+
+.wt-stage--desk {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+}
+
+/* Подсветка цели — та же, что в телефоне, но своим правилом: исходное
+   привязано к .wt-phone, а корпуса-телефона здесь нет. */
+.wt-desk .is-target {
+    outline: 3px solid var(--wt-red);
+    outline-offset: 2px;
+    border-radius: 8px;
+    animation: wt-target 1.6s ease-in-out infinite;
+}
+
+.wt-desk {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+}
+
+/* ── Софтфон: карточка входящего звонка ──────────────────────────────────
+   Стоит НАД окном браузера и всегда видна: на смене оператор смотрит на неё,
+   пока заполняет форму, и прятать её в реплику помощника значило бы заставить
+   держать номер и парк в голове. */
+.wt-call {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: linear-gradient(96deg, #12203f, #24356a);
+    color: #eaf0ff;
+    box-shadow: 0 10px 26px rgba(15, 23, 42, .22);
+}
+
+.wt-call__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #9db4ff;
+}
+
+/* Зелёная точка «линия занята» — она же есть в софтфоне на смене. */
+.wt-call__live {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #16dd6e;
+    box-shadow: 0 0 0 0 rgba(22, 221, 110, .6);
+    animation: wt-call-live 1.8s ease-out infinite;
+}
+
+@keyframes wt-call-live {
+    0% { box-shadow: 0 0 0 0 rgba(22, 221, 110, .55); }
+    70%, 100% { box-shadow: 0 0 0 7px rgba(22, 221, 110, 0); }
+}
+
+.wt-call__facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 22px;
+    margin: 7px 0 0;
+}
+
+.wt-call__facts div { display: flex; align-items: baseline; gap: 7px; }
+.wt-call__facts dt { font-size: 11px; color: #8ea3d8; }
+.wt-call__facts dd { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+
+.wt-call__said {
+    margin: 8px 0 0;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: #d7e2ff;
+}
+
+.wt-call__said span { color: #8ea3d8; margin-right: 4px; }
+
+/* ── Окно браузера ───────────────────────────────────────────────────────
+   Windows, а не macOS: кнопки окна прямоугольные и справа, вкладка с уголками
+   сверху. Оператор сидит на Windows, и «светофор» слева читался бы чужим. */
+.wt-desk__window {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+}
+
+.wt-win {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    min-height: 0;
+    overflow: hidden;
+    border-radius: 12px;
+    background: #dee1e6;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, .26);
+}
+
+.wt-win__tabs {
+    display: flex;
+    align-items: flex-end;
+    flex: 0 0 auto;
+    gap: 4px;
+    height: 38px;
+    padding-left: 8px;
+}
+
+.wt-win__tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 250px;
+    height: 31px;
+    padding: 0 8px 0 12px;
+    border-radius: 9px 9px 0 0;
+    background: #f5f8ff;
+}
+
+.wt-win__tab-name {
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 550;
+    color: #33373d;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wt-win__tab-x,
+.wt-win__tab-add {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    color: #5f6368;
+}
+
+.wt-win__tab-x:hover,
+.wt-win__tab-add:hover { background: rgba(0, 0, 0, .1); }
+.wt-win__tab-add { margin-bottom: 5px; }
+
+.wt-win__controls {
+    display: flex;
+    align-self: stretch;
+    margin-left: auto;
+}
+
+.wt-win__controls button {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    color: #33373d;
+}
+
+.wt-win__controls button:hover { background: rgba(0, 0, 0, .09); }
+.wt-win__controls .is-close:hover { background: #e81123; color: #fff; }
+
+.wt-win__bar {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 5px;
+    height: 42px;
+    padding: 0 10px;
+    background: #f5f8ff;
+    border-bottom: 1px solid #e2e8f4;
+}
+
+.wt-win__nav {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    color: #4a5568;
+}
+
+.wt-win__nav:hover { background: rgba(15, 23, 42, .07); }
+.wt-win__nav.is-off { color: #c2cad8; }
+
+/* Адресная строка — цель для промаха: по ней уходят «поискать в интернете»
+   посреди заполнения, и форма очищается. */
+.wt-win__omni {
+    display: flex;
+    align-items: center;
+    flex: 1 1 auto;
+    gap: 8px;
+    min-width: 0;
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 14px;
+    background: #eaeff8;
+    text-align: left;
+}
+
+.wt-win__lock { display: flex; flex: 0 0 auto; color: #5f6368; }
+
+.wt-win__url {
+    overflow: hidden;
+    font-size: 12.5px;
+    color: #33373d;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wt-win__avatar {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 25px;
+    height: 25px;
+    border-radius: 50%;
+    background: #4273fa;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+}
+
+/* Содержимое вкладки. Прокрутка ЗДЕСЬ, а не у страницы: форма длиннее окна,
+   и прокручиваться должна вкладка, как в настоящем браузере. */
+.wt-win__page {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    background: #f5f8ff;
+    overscroll-behavior: contain;
+}
+
+/* ── Страница CRM ────────────────────────────────────────────────────────── */
+
+.wt-crm {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    min-height: 100%;
+    font-size: 13px;
+    color: #1e2a44;
+}
+
+.wt-crm .wt-mark { position: absolute; top: 8px; right: 10px; z-index: 4; }
+
+.wt-crm__side {
+    display: flex;
+    flex: 0 0 176px;
+    flex-direction: column;
+    background: #485779;
+    color: #fff;
+}
+
+.wt-crm__brand {
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #9dc0ff;
+}
+
+.wt-crm__side nav { display: flex; flex-direction: column; }
+
+.wt-crm__nav {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 16px;
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, .84);
+    text-align: left;
+}
+
+.wt-crm__nav:hover { background: rgba(255, 255, 255, .08); }
+.wt-crm__nav.is-current { background: #4273fa; color: #fff; font-weight: 600; }
+
+.wt-crm__main { flex: 1 1 auto; min-width: 0; padding: 12px 18px 20px; }
+
+.wt-crm__crumbs { margin-bottom: 10px; font-size: 12px; color: #8794ad; }
+.wt-crm__crumbs i { margin: 0 6px; font-style: normal; color: #c3cbdb; }
+.wt-crm__crumbs b { font-weight: 600; color: #4a5568; }
+
+.wt-crm__card {
+    border: 1px solid #e6ecf7;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+}
+
+.wt-crm__card-head {
+    padding: 11px 16px;
+    border-bottom: 1px solid #eef2f9;
+    font-size: 13.5px;
+    font-weight: 700;
+    color: #4273fa;
+}
+
+.wt-crm__form { padding: 14px 16px 16px; }
+
+/* Подпись слева, поле справа — раскладка CRM. Ширина подписи фиксированная:
+   поля обязаны начинаться на одной вертикали, иначе форма «шатается». */
+.wt-crm__row {
+    display: grid;
+    grid-template-columns: 132px minmax(0, 1fr);
+    align-items: start;
+    gap: 12px;
+    margin-bottom: 9px;
+}
+
+.wt-crm__label {
+    padding-top: 8px;
+    font-size: 12.5px;
+    color: #9aa6bd;
+    text-align: right;
+}
+
+.wt-crm__control { min-width: 0; }
+
+.wt-crm__box {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 34px;
+    padding: 0 10px;
+    border: 1px solid #dfe6f2;
+    border-radius: 6px;
+    background: #fff;
+    font-size: 13px;
+    color: #1e2a44;
+    text-align: left;
+}
+
+.wt-crm__box span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wt-crm__box .is-placeholder { color: #b9c3d6; }
+.wt-crm__box:hover { border-color: #c3d2ea; }
+.wt-crm__ok { flex: 0 0 auto; }
+.wt-crm__caret { display: flex; flex: 0 0 auto; color: #97a3b8; }
+
+.wt-crm__picker { position: relative; }
+
+/* Раскрытый список. max-height НЕ ограничивает до трёх строк: у «Категории 4»
+   тридцать один пункт, и урок ровно в том, чтобы найти нужный среди них —
+   но и на весь экран список пускать нельзя, он перекрыл бы форму целиком. */
+.wt-crm__list {
+    position: absolute;
+    z-index: 6;
+    top: calc(100% + 3px);
+    right: 0;
+    left: 0;
+    max-height: 268px;
+    margin: 0;
+    padding: 4px;
+    overflow: auto;
+    list-style: none;
+    border: 1px solid #dfe6f2;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, .16);
+    overscroll-behavior: contain;
+}
+
+.wt-crm__option {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 5px;
+    font-size: 12.5px;
+    color: #1e2a44;
+    text-align: left;
+}
+
+.wt-crm__option:hover { background: #eef4ff; }
+
+/* Правильный пункт подсвечен зелёным, как строка под курсором в самой CRM:
+   красная обводка на пункте внутри списка сливалась бы с рамкой списка. */
+.wt-crm__option.is-target {
+    background: #16dd6e;
+    color: #fff;
+    font-weight: 600;
+    outline: none;
+    animation: none;
+}
+
+.wt-crm__input-wrap { position: relative; display: flex; align-items: flex-start; gap: 8px; }
+
+.wt-crm__input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 34px;
+    padding: 7px 10px;
+    border: 1px solid #4273fa;
+    border-radius: 6px;
+    background: #fff;
+    font: inherit;
+    font-size: 13px;
+    color: #1e2a44;
+}
+
+.wt-crm__input--area { min-height: 66px; resize: none; line-height: 1.45; }
+.wt-crm__input:focus { outline: none; box-shadow: 0 0 0 3px rgba(66, 115, 250, .18); }
+
+.wt-crm__enter {
+    flex: 0 0 auto;
+    height: 34px;
+    padding: 0 12px;
+    border-radius: 6px;
+    background: #4273fa;
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.wt-crm__hint {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    padding-top: 3px;
+    font-size: 11px;
+    color: #9aa6bd;
+}
+
+.wt-crm__dup { margin: 16px 0 0 144px; }
+
+.wt-crm__check {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 13px;
+    color: #1e2a44;
+}
+
+.wt-crm__check i {
+    width: 18px;
+    height: 18px;
+    border: 1px solid #dfe6f2;
+    border-radius: 4px;
+    background: #fff;
+}
+
+.wt-crm__actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid #eef2f9; }
+
+.wt-crm__save {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    background: #4273fa;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.wt-crm__save:hover { background: #3667f0; }
+
+/* Узкое окно: софтфон и сайдбар CRM съедают ширину, которой и так нет. */
+@media (max-width: 1023px) {
+    .wt-root--desk { grid-template-columns: minmax(0, 1fr); }
+    .wt-desk { min-height: 460px; }
+    .wt-crm__side { flex-basis: 54px; }
+    .wt-crm__brand { padding: 12px 0; text-align: center; font-size: 11px; }
+    .wt-crm__nav { justify-content: center; padding: 10px 0; }
+    .wt-crm__nav span,
+    .wt-crm__nav { font-size: 0; gap: 0; }
+    .wt-crm__nav svg { width: 17px; height: 17px; }
+    .wt-crm__row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .wt-crm__label { padding-top: 0; text-align: left; }
+    .wt-crm__dup { margin-left: 0; }
+    .wt-call__facts { gap: 4px 14px; }
+}
