@@ -104,8 +104,13 @@ export class VoiceLink {
      * @param {function} config.headers  () => объект заголовков авторизации
      * @param {function} config.onEvent  (type, payload) — единственный выход наружу
      */
-    constructor({ apiBaseUrl, headers, onEvent, hold, barge, telephone = true }) {
+    constructor({ apiBaseUrl, headers, onEvent, hold, barge, mode = 'driver',
+                  telephone = null }) {
         this.apiBaseUrl = apiBaseUrl;
+        // Режим нужен здесь ровно за одним: телефонный тракт включается только
+        // там, где собеседник ЗВОНИТ. Наставник не звонит из машины — он
+        // объясняет регламент, и узкая полоса делает его речь просто хуже.
+        this.mode = mode;
         this.headers = headers;
         this.emit = onEvent || (() => {});
         // Выдержка против перебивания. Значения приходят с сервера в /tokens,
@@ -117,6 +122,7 @@ export class VoiceLink {
             min_confidence: 0.7, echo_ratio: 0.6, backoff_ms: 800,
             ...(barge || {}),
         };
+        // null — «решает сервер по режиму»; true/false — принудительно (тесты).
         this.telephone = telephone;
 
         this.ctx = null;
@@ -173,6 +179,9 @@ export class VoiceLink {
         // вызов молча затирал замеры первого.
         this.speakId = 0;
         this.voiceGain = null;       // общий кран: им гасим звук без щелчка
+        this.finalWaitMs = 0;        // сколько уже ждём окончательных токенов
+        this.sentText = '';          // что ушло прошлой репликой
+        this.sentAt = 0;             // и когда — чтобы отличить хвост от повтора
         this.closingOnPurpose = false;   // мы сами закрываем сокет, это не отказ
         this.pendingBarge = false;   // перебил ли человек текущую реплику
         this.lastSpoken = null;      // что услышано из прошлой реплики
@@ -208,7 +217,11 @@ export class VoiceLink {
         await this.ctx.audioWorklet.addModule(workletUrl());
         // Тракт собирается ОДИН раз на контекст: у биквадов есть состояние, и
         // новая цепочка на каждый кусок рвала бы речь щелчками на стыках.
-        if (this.telephone) {
+        const phoneModes = tokens.tts?.telephone_modes;
+        const wantPhone = this.telephone === null
+            ? (Array.isArray(phoneModes) ? phoneModes.includes(this.mode) : this.mode === 'driver')
+            : this.telephone;
+        if (wantPhone) {
             try { this.phone = connectTelephone(this.ctx); } catch { this.phone = null; }
         }
 
@@ -402,6 +415,21 @@ export class VoiceLink {
             this.holdTimer = setTimeout(() => this.flushUtterance(), 250);
             return;
         }
+        // ЖДЁМ ОКОНЧАТЕЛЬНЫХ ТОКЕНОВ. Распознавание сначала присылает черновую
+        // догадку, и только потом те же слова — окончательными. Если отправить
+        // черновик и очистить буфер, окончательные придут ПОСЛЕ отправки и
+        // лягут в уже пустой буфер — следующая реплика уйдёт с тем же началом.
+        // Ровно это и случилось на проде 22.08.2026 (сессия 25): «Хорошо, я
+        // сейчас написал обращение…» ушло трижды, с каждым разом длиннее, а у
+        // первой отправки stt_tokens пуст — то есть окончательным не был НИ
+        // ОДИН токен. Ждём их не дольше полусекунды: дальше важнее ответить.
+        if (this.partial.trim() && this.finalWaitMs < 600) {
+            this.finalWaitMs += 120;
+            this.heldText = text;
+            this.holdTimer = setTimeout(() => this.flushUtterance(), 120);
+            return;
+        }
+        this.finalWaitMs = 0;
         const metrics = {
             stt_confidence: mean(this.confidences),
             stt_tokens: this.tokens,
@@ -431,7 +459,54 @@ export class VoiceLink {
         this.uttMs = 0;
         this.pendingBarge = false;
         this.lastSpoken = null;
-        if (text) this.emit('utterance', { text, metrics, at: this.lastVoiceAt });
+
+        // Второй рубеж от повтора: если окончательные токены всё-таки пришли
+        // после отправки, накопленное начинается с уже сказанного. Отрезаем
+        // этот кусок, а не шлём его снова. Окно короткое: через три секунды
+        // это уже не «догнавший хвост», а человек, повторивший фразу.
+        const fresh = this.withoutAlreadySent(text);
+        if (fresh) {
+            this.sentText = text;
+            this.sentAt = performance.now();
+            this.emit('utterance', { text: fresh, metrics, at: this.lastVoiceAt });
+        }
+    }
+
+    /**
+     * Хвост реплики без той части, которую уже отправляли.
+     *
+     * Сравниваем по словам без регистра и знаков: окончательный токен приходит
+     * с иной пунктуацией, чем черновой, и посимвольное сравнение промахнулось
+     * бы ровно там, где нужнее всего.
+     */
+    withoutAlreadySent(text) {
+        const stale = performance.now() - this.sentAt > 3000;
+        if (!text || !this.sentText || stale) return text;
+        const words = (raw) => (String(raw).toLowerCase().match(WORDS) || []);
+        const sent = words(this.sentText);
+        const now = words(text);
+        if (!sent.length || now.length < sent.length) {
+            // Пришло меньше, чем отправляли, — это тот же кусок, только короче.
+            return sent.slice(0, now.length).join(' ') === now.join(' ') ? '' : text;
+        }
+        if (sent.join(' ') !== now.slice(0, sent.length).join(' ')) return text;
+        // Отрезаем по границе слова в ИСХОДНОМ тексте, чтобы сохранить
+        // пунктуацию и регистр того, что человек сказал дальше.
+        let seen = 0;
+        const boundary = /[\p{L}\d]+/gu;
+        let match = boundary.exec(text);
+        while (match) {
+            seen += 1;
+            if (seen === sent.length) {
+                // Срез приходится сразу за словом, а дальше идёт точка прошлой
+                // фразы — её надо снять вместе с пробелами, иначе новая реплика
+                // начнётся со знака препинания.
+                return text.slice(match.index + match[0].length)
+                    .replace(/^[\s.,;:!?…—–-]+/, '');
+            }
+            match = boundary.exec(text);
+        }
+        return '';
     }
 
     // ── воспроизведение ──────────────────────────────────────────────────────

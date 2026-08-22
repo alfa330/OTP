@@ -324,6 +324,9 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
             const link = new VoiceLink({
                 apiBaseUrl,
                 headers,
+                // Телефонный тракт нужен только водителю: он звонит. У
+                // наставника от узкой полосы речь просто хуже.
+                mode,
                 onEvent: (type, payload) => {
                     if (type === 'live') setLive(payload.text);
                     else if (type === 'utterance') handleUtteranceRef.current(payload);

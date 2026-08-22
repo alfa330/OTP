@@ -33,6 +33,7 @@ class Cursor:
         # Сценарий сессии: от него зависит МАНЕРА речи, которая подставляется в
         # промпт озвучки. Берётся из базы, а не из тела запроса.
         self.scenario_key = None
+        self.mode = 'driver'
 
     def execute(self, sql, params=None):
         self._last = ' '.join(str(sql).split())
@@ -42,7 +43,7 @@ class Cursor:
         if 'FROM users' in self._last:
             return (7, 'Тест', 'super_admin')
         if 'tts_voice' in self._last:
-            return ('Charon', self.scenario_key)
+            return ('Charon', self.scenario_key, self.mode)
         return None
 
     def fetchall(self):
@@ -346,6 +347,46 @@ class VoiceChainTest(unittest.TestCase):
             events = events_of(speak(client))
         self.assertEqual(['start', 'audio', 'done'], [e['t'] for e in events])
         self.assertEqual({'t', 'provider', 'model', 'rate'}, set(events[0]))
+
+    def test_only_the_caller_gets_the_telephone_channel(self):
+        """Телефонный тракт — только тому, кто ЗВОНИТ.
+
+        Наставник не звонит из машины, он объясняет регламент: узкая полоса
+        300-3400 Гц делает его речь просто хуже. Жалоба владельца 22.08.2026 —
+        «голос наставника стал низкокачественным» — была ровно про это.
+        """
+        client, _ = build()
+        tts = client.post('/api/trainer/tokens', json={}).get_json()['tts']
+        self.assertEqual(['driver'], tts['telephone_modes'])
+
+        loud, _ = build({'TRAINER_PHONE_MODES': 'driver,mentor'})
+        self.assertEqual(['driver', 'mentor'],
+                         loud.post('/api/trainer/tokens', json={}).get_json()['tts']['telephone_modes'])
+
+    def test_mentor_gets_his_own_speaking_manner(self):
+        """У наставника своя манера, и она про ТЕМП.
+
+        Замер 22.08.2026 на живом Vertex: русская фраза 1,90 против 2,54 слов/с,
+        казахская 1,65 против 2,08, WER при этом не изменился. До правки манеры
+        у него не было вовсе, и он читал медленно.
+        """
+        from voice_trainer import scenarios
+
+        seen = {}
+
+        def catching(*_args, **kwargs):
+            seen['prompt'] = kwargs['json']['contents'][0]['parts'][0]['text']
+            return FakeStream(chunks=[AUDIO])
+
+        client, db = build()
+        db.cursor.mode = 'mentor'
+        db.cursor.scenario_key = None          # у наставника сценария нет
+        with vertex_signed_in(), mock.patch('httpx.Client.stream', catching):
+            speak(client, {'session_id': 1})
+        self.assertIn(scenarios.MENTOR_STYLE[:40], seen['prompt'])
+        # И манера водителя ему не достаётся.
+        for style in scenarios.TTS_STYLE.values():
+            self.assertNotIn(style[:40], seen['prompt'])
 
     def test_scenario_style_reaches_the_synthesizer(self):
         """Манера персонажа доезжает до промпта озвучки.

@@ -231,7 +231,10 @@ class VoiceTest(unittest.TestCase):
             # Команда «произнеси ровно» обязана быть ПОСЛЕДНЕЙ строкой перед
             # текстом, иначе модель зачитывает вслух сам стиль.
             self.assertTrue(head.rstrip().endswith(scenarios.SAY_EXACTLY.strip()))
-        # У наставника манеры нет: его озвучка не должна поменяться заодно.
+        # У наставника своя манера — она нужна ему ради ТЕМПА: по жалобе
+        # владельца он говорил слишком медленно.
+        self.assertIn(scenarios.MENTOR_STYLE, scenarios.say_exactly(None, 'mentor'))
+        # А без режима и сценария — ровно то, что было: голая команда.
         self.assertEqual(scenarios.SAY_EXACTLY, scenarios.say_exactly(None))
 
     def test_personas_contain_nothing_the_prompt_forbids(self):

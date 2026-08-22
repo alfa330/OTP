@@ -403,7 +403,13 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         out['tts'] = {'chain': tts['chain'],
                       'model': _tts_model((tts['ready'] or tts['chain'] or ['vertex'])[0]),
                       'rate': DEFAULT_TTS_RATE,
-                      'chars_per_sec': float(env('TRAINER_CHARS_PER_SEC', '13.3'))}
+                      'chars_per_sec': float(env('TRAINER_CHARS_PER_SEC', '13.3')),
+                      # Телефонный тракт — только там, где собеседник ЗВОНИТ.
+                      # Наставник не звонит из машины, он объясняет регламент, и
+                      # узкая полоса делает его речь просто хуже.
+                      'telephone_modes': [m.strip() for m
+                                          in env('TRAINER_PHONE_MODES', 'driver').split(',')
+                                          if m.strip()]}
         return jsonify(out)
 
     # ── внутреннее: озвучка ──────────────────────────────────────────────────
@@ -644,20 +650,20 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         # Голос и манеру берём из сессии, а не из тела запроса: иначе их можно
         # было бы подменить из браузера. Проверка по списку — там только мужские
         # голоса, отобранные замером основного тона.
-        voice, scenario_key = scenarios.MENTOR_VOICE, None
+        voice, scenario_key, mode = scenarios.MENTOR_VOICE, None, None
         if session_id:
             with db._get_cursor() as cursor:
                 cursor.execute(
-                    'SELECT tts_voice, scenario_key FROM trainer_sessions '
+                    'SELECT tts_voice, scenario_key, mode FROM trainer_sessions '
                     ' WHERE id = %s AND user_id = %s', (session_id, user['id']))
                 row = cursor.fetchone()
             if row and row[0] in scenarios.MALE_VOICES:
                 voice = row[0]
             if row:
-                scenario_key = row[1]
-        # Манера речи персонажа. Замер 22.08.2026: она исполняется моделью
+                scenario_key, mode = row[1], row[2]
+        # Манера речи говорящего. Замер 22.08.2026: она исполняется моделью
         # (темп 1,60 против 2,62 слов/с) и ничего не стоит по задержке.
-        head = scenarios.say_exactly(scenario_key)
+        head = scenarios.say_exactly(scenario_key, mode)
 
         def sse(event):
             return 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
