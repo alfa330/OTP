@@ -30,6 +30,9 @@ class Cursor:
     def __init__(self):
         self.executed = []
         self._last = ''
+        # Сценарий сессии: от него зависит МАНЕРА речи, которая подставляется в
+        # промпт озвучки. Берётся из базы, а не из тела запроса.
+        self.scenario_key = None
 
     def execute(self, sql, params=None):
         self._last = ' '.join(str(sql).split())
@@ -39,7 +42,7 @@ class Cursor:
         if 'FROM users' in self._last:
             return (7, 'Тест', 'super_admin')
         if 'tts_voice' in self._last:
-            return ('Charon',)
+            return ('Charon', self.scenario_key)
         return None
 
     def fetchall(self):
@@ -76,6 +79,16 @@ def build(env_map=None):
         env=lambda key, default=None: base.get(key, default),
     ))
     return app.test_client(), db
+
+
+def events_from(raw):
+    """События из одного куска потока."""
+    out = []
+    for part in raw.decode('utf-8').split('\n\n'):
+        part = part.strip()
+        if part.startswith('data:'):
+            out.append(json.loads(part[5:].strip()))
+    return out
 
 
 def events_of(response):
@@ -292,6 +305,73 @@ class VoiceChainTest(unittest.TestCase):
         client, _ = build({'TRAINER_LLM': 'claude'})
         chain = client.get('/api/trainer/ping').get_json()['links']['llm']['chain']
         self.assertEqual(['claude', 'vertex', 'gemini'], chain)
+
+    def test_metrics_are_written_even_when_the_browser_drops_the_stream(self):
+        """Браузер перебил реплику и закрыл поток — замеры всё равно в базе.
+
+        Это главный дефект, найденный на проде 22.08.2026: UPDATE стоял ПОСЛЕ
+        цикла yield, а при закрытии генератор получает GeneratorExit — это
+        BaseException, обычный except его не ловит, и хвост просто не
+        выполнялся. В итоге из 59 реплик собеседника 24 не имели ни одного
+        замера озвучки — ровно все оборванные.
+        """
+        client, db = build()
+        with vertex_signed_in(), mock.patch(
+                'httpx.Client.stream', vertex_returning(chunks=[AUDIO, AUDIO, AUDIO])):
+            response = speak(client, {'turn_id': 42, 'session_id': 1})
+            stream = iter(response.response)
+            # Читаем до первого куска ЗВУКА и бросаем поток, как делает браузер
+            # при перебивании. До первого куска записывать нечего — там и
+            # прозвучать ещё ничего не успело.
+            heard = False
+            while not heard:
+                for event in events_from(next(stream)):
+                    heard = heard or event['t'] == 'audio'
+            response.response.close()
+
+        written = [sql for sql, _ in db.cursor.executed if 'tts_ttfb_ms' in sql]
+        self.assertTrue(written, 'замеры озвучки не записались при обрыве потока')
+
+    def test_speak_stream_format_did_not_change(self):
+        """Формат SSE обязан остаться прежним.
+
+        Фронт едет на GitHub Pages отдельным деплоем, который срывается по
+        таймауту и оставляет старый бандл. Старый бандл обязан продолжать
+        работать с новым сервером, поэтому в поток озвучки не добавлено ни
+        одного поля.
+        """
+        client, _ = build()
+        with vertex_signed_in(), mock.patch(
+                'httpx.Client.stream', vertex_returning(chunks=[AUDIO])):
+            events = events_of(speak(client))
+        self.assertEqual(['start', 'audio', 'done'], [e['t'] for e in events])
+        self.assertEqual({'t', 'provider', 'model', 'rate'}, set(events[0]))
+
+    def test_scenario_style_reaches_the_synthesizer(self):
+        """Манера персонажа доезжает до промпта озвучки.
+
+        Замер 22.08.2026: указание стиля исполняется моделью (темп 1,60 против
+        2,62 слов/с) и ничего не стоит по задержке. Но подставляется оно из
+        СЕССИИ, а не из тела запроса: иначе манеру можно было бы подменить из
+        браузера.
+        """
+        from voice_trainer import scenarios
+
+        seen = {}
+
+        def catching(*_args, **kwargs):
+            seen['prompt'] = kwargs['json']['contents'][0]['parts'][0]['text']
+            return FakeStream(chunks=[AUDIO])
+
+        client, db = build()
+        db.cursor.scenario_key = 'payout_angry'
+        with vertex_signed_in(), mock.patch('httpx.Client.stream', catching):
+            speak(client, {'session_id': 1})
+        self.assertIn(scenarios.TTS_STYLE['payout_angry'][:40], seen['prompt'])
+        # Команда «произнеси ровно» обязана стоять ПОСЛЕДНЕЙ строкой перед
+        # текстом, иначе модель зачитывает вслух сам стиль.
+        self.assertLess(seen['prompt'].index(scenarios.SAY_EXACTLY.strip()[:20]),
+                        seen['prompt'].index('Алло, слушаю вас.'))
 
 
 if __name__ == '__main__':

@@ -8,8 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    fmtCost, fmtDuration, fmtLangs, fmtMs, paceTone, roleLabel, roleSide,
-    statusLabel, summarize,
+    applySpeech, fmtCost, fmtDuration, fmtLangs, fmtMs, mergeMetrics, paceTone,
+    roleLabel, roleSide, statusLabel, summarize,
 } from '../src/components/trainer/trainerFormat.js';
 
 test('пауза красится только когда требует внимания', () => {
@@ -87,4 +87,71 @@ test('модуль захвата микрофона грузится ОТ БА�
     // выглядела бы точно так же, как отсутствие файла.
     assert.equal(workletUrl('/OTP'), '/OTP/trainer-worklet.js');
     assert.equal(workletUrl(''), '/trainer-worklet.js');
+});
+
+/* ── Текст открывается под речь ──────────────────────────────────────────────
+ *
+ * Владелец просил, чтобы на экране это выглядело как стриминг. Но показывать
+ * надо не «что сгенерировала модель», а «что человек УСЛЫШАЛ»: до правки
+ * 22.08.2026 текст реплики появлялся целиком в тот момент, когда звука ещё не
+ * было вовсе — и в пятой части случаев так и не появлялось.
+ */
+test('текст открывается по мере речи, а на перебивании обрывается там же, где звук', () => {
+    const text = 'Заказ был сегодня, отменил его сам клиент.';
+    let turns = [{ id: 7, role: 'driver', text }];
+
+    // До первого сэмпла на экране пусто, а не весь текст.
+    turns = applySpeech(turns, 'speech_start', { turn_id: 7 });
+    assert.equal(turns[0].shown, '');
+
+    turns = applySpeech(turns, 'said', { turn_id: 7, chars: 17, text: text.slice(0, 17) });
+    assert.equal(turns[0].shown, 'Заказ был сегодня');
+
+    turns = applySpeech(turns, 'barge', {
+        turn_id: 7, spoken_ms: 1180, spoken_chars: 17, rule: 'speech' });
+    assert.equal(turns[0].barge_in, true);
+    assert.equal(turns[0].spoken.cut, true);
+    // Текст остаётся оборванным ровно там, где оборвался звук.
+    assert.equal(turns[0].shown, 'Заказ был сегодня');
+});
+
+test('дослушанная реплика показывается целиком', () => {
+    const text = 'Жақсы.';
+    let turns = [{ id: 8, role: 'driver', text, shown: '' }];
+    turns = applySpeech(turns, 'speech_end', {
+        turn_id: 8, spoken_ms: 900, spoken_chars: text.length, total_ms: 900, cut: false });
+    assert.equal(turns[0].shown, null, 'shown === null значит «показать целиком»');
+    assert.equal(turns[0].spoken.cut, false);
+});
+
+test('доля дослушанного считается по репликам, где известны обе цифры', () => {
+    const heard = summarize([
+        { id: 1, spoken: { ms: 1000 }, total_ms: 2000 },
+        { id: 2, spoken: { ms: 3000 }, total_ms: 3000 },
+        { id: 3 },                                        // без замеров — не в счёт
+    ]).heard;
+    assert.equal(heard, 75);
+    assert.equal(summarize([]).heard, null);
+});
+
+test('событие чужой реплики ленту не трогает', () => {
+    const turns = [{ id: 7, text: 'а', shown: 'а' }];
+    assert.deepEqual(applySpeech(turns, 'said', { turn_id: 99, text: 'б' }), turns);
+    assert.deepEqual(applySpeech(turns, 'said', {}), turns);
+});
+
+test('склейка двух реплик подряд не теряет замеры первой', () => {
+    // Просто перекрыть первую второй нельзя: пропадёт длительность звука (она
+    // идёт в стоимость распознавания) и отметка перебивания — тогда
+    // подтверждённое перебивание не попадёт ни в реплику, ни в счёт сессии.
+    const merged = mergeMetrics(
+        { stt_audio_ms: 1200, stt_tokens: 4, barge_in: true, hold_ms: 1200,
+          prev: { turn_id: 9 }, stt_lang: 'ru' },
+        { stt_audio_ms: 800, stt_tokens: 3, barge_in: false, hold_ms: 300, stt_lang: 'kk' });
+    assert.equal(merged.stt_audio_ms, 2000);
+    assert.equal(merged.stt_tokens, 7);
+    assert.equal(merged.barge_in, true, 'перебивание первой реплики потеряно');
+    assert.equal(merged.hold_ms, 300);
+    assert.deepEqual(merged.prev, { turn_id: 9 }, 'услышанное прошлой реплики потеряно');
+    assert.equal(merged.stt_lang, 'kk');
 });

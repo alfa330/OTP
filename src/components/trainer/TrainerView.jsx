@@ -10,8 +10,8 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { VoiceLink } from './voice';
 import {
-    fmtCost, fmtDuration, fmtLangs, fmtMs, paceTone, roleLabel, roleSide,
-    statusLabel, summarize,
+    applySpeech, fmtCost, fmtDuration, fmtLangs, fmtMs, mergeMetrics, paceTone,
+    roleLabel, roleSide, statusLabel, summarize,
 } from './trainerFormat';
 
 /* Раздел «Тренажёр» — голосовой разговор с ИИ и разбор после него.
@@ -80,7 +80,22 @@ const Bubble = ({ turn }) => {
                 <div className={`rounded-2xl px-3.5 py-2.5 text-[14px] leading-relaxed ${
                     human ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-900'
                 }`}>
-                    {turn.text}
+                    {/* Показываем ПРОЗВУЧАВШЕЕ, а не сгенерированное: текст
+                        открывается под речь, а на перебивании обрывается там же,
+                        где оборвался звук. Непрозвучавший хвост не прячем —
+                        раздел живёт ради замеров, и «сколько не договорил» надо
+                        видеть. shown === null значит «показать целиком»: так
+                        ведёт себя реплика, у которой озвучка отказала. */}
+                    {turn.shown == null ? turn.text : (
+                        <>
+                            {turn.shown}
+                            {turn.spoken?.cut && turn.shown.length < turn.text.length && (
+                                <span className="text-slate-400 line-through">
+                                    {turn.text.slice(turn.shown.length)}
+                                </span>
+                            )}
+                        </>
+                    )}
                 </div>
                 {!!(turn.sources || []).length && (
                     <div className="flex flex-wrap gap-1.5 px-1 pt-0.5">
@@ -128,6 +143,9 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
     const linkRef = useRef(null);
     const sessionRef = useRef(null);
     const busyRef = useRef(false);
+    // Реплика человека, сказанная, пока модель ещё думала над прошлой. Копим,
+    // а не выбрасываем: выброшенная реплика выглядит как «бот меня не слышит».
+    const pendingRef = useRef(null);
     // showToast пересоздаётся на каждом рендере App — в зависимостях эффекта он
     // заставлял бы раздел перезагружаться от любого чиха. Держим в ref.
     const toastRef = useRef(showToast);
@@ -175,17 +193,30 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
     const pushTurn = useCallback((turn) => setTurns((prev) => [...prev, turn]), []);
 
     const speak = useCallback(async (text, turnId, since) => {
+        const link = linkRef.current;
+        if (!link || !sessionRef.current) return;   // разговор уже завершили
         setPhase('speaking');
         try {
-            const result = await linkRef.current.speak(text, {
+            const result = await link.speak(text, {
                 turnId, since, sessionId: sessionRef.current,
             });
-            if (result?.voice_to_voice_ms && turnId) {
-                setTurns((prev) => prev.map((t) => (t.id === turnId
-                    ? { ...t, pace_ms: result.voice_to_voice_ms } : t)));
+            if (turnId && (result?.voice_to_voice_ms || result?.spoken)) {
+                if (result.voice_to_voice_ms) {
+                    setTurns((prev) => prev.map((t) => (t.id === turnId
+                        ? { ...t, pace_ms: result.voice_to_voice_ms } : t)));
+                }
+                // Услышанное шлём и сюда тоже: это путь для НОРМАЛЬНОГО конца
+                // реплики, когда следующей может не быть вовсе. tts_audio_ms
+                // НЕ шлём — его уже прибавил поток озвучки, второй раз удвоило
+                // бы сессионный итог.
                 api(`/turns/${turnId}`, {
                     method: 'PATCH',
-                    body: JSON.stringify({ voice_to_voice_ms: result.voice_to_voice_ms }),
+                    body: JSON.stringify({
+                        voice_to_voice_ms: result.voice_to_voice_ms ?? undefined,
+                        spoken_ms: result.spoken?.spoken_ms,
+                        spoken_chars: result.spoken?.spoken_chars,
+                        speech_cut: result.spoken?.cut,
+                    }),
                 }).catch(() => {});
             }
         } catch (error) {
@@ -195,31 +226,69 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
             toastRef.current?.(`Озвучка: ${error.message}`, 'error');
             setProblems((prev) => (prev.includes(error.message)
                 ? prev : [...prev, `озвучка: ${error.message}`]));
+            // Звука не будет — значит текст обязан быть виден целиком, иначе
+            // человек не узнает даже того, что собеседник хотел сказать.
+            if (turnId) {
+                setTurns((prev) => prev.map((t) => (t.id === turnId ? { ...t, shown: null } : t)));
+            }
         } finally {
-            setPhase('listening');
+            // Только если разговор ещё идёт: «Завершить» могли нажать прямо
+            // во время речи, и тогда раздел уже в 'idle' — возврат в
+            // 'listening' воскрешал бы его с закрытым микрофоном.
+            if (sessionRef.current) setPhase('listening');
         }
     }, [api]);
 
     const handleUtterance = useCallback(async ({ text, metrics, at }) => {
-        if (busyRef.current || !sessionRef.current) return;
+        if (!sessionRef.current) return;
+        // Занято — значит модель ЕЩЁ ДУМАЕТ над прошлой репликой. Реплику не
+        // выбрасываем: копим и склеим со следующей. Раньше busyRef держался до
+        // конца ОЗВУЧКИ, и всё сказанное человеком поверх речи собеседника
+        // пропадало молча — то есть настоящее перебивание было невозможно.
+        if (busyRef.current) {
+            pendingRef.current = pendingRef.current
+                ? { text: `${pendingRef.current.text} ${text}`.trim(), at,
+                    metrics: mergeMetrics(pendingRef.current.metrics, metrics) }
+                : { text, at, metrics };
+            return;
+        }
+        // Склеиваем то, что человек успел сказать, пока модель думала: иначе
+        // порядок реплик разъедется, если следующая придёт раньше разбора.
+        const carried = pendingRef.current;
+        pendingRef.current = null;
+        const said = carried ? `${carried.text} ${text}`.trim() : text;
+        const sent = carried ? mergeMetrics(carried.metrics, metrics) : metrics;
+
         busyRef.current = true;
         setLive('');
         setPhase('thinking');
-        pushTurn({ id: `human-${Date.now()}`, role: mode === 'driver' ? 'trainee' : 'asker', text });
+        pushTurn({ id: `human-${Date.now()}`, role: mode === 'driver' ? 'trainee' : 'asker',
+                   text: said });
+        let answer = null;
         try {
-            const answer = await api(`/sessions/${sessionRef.current}/turn`, {
-                method: 'POST', body: JSON.stringify({ text, ...metrics }),
+            answer = await api(`/sessions/${sessionRef.current}/turn`, {
+                method: 'POST', body: JSON.stringify({ text: said, ...sent }),
             });
             pushTurn({
                 id: answer.turn_id, role: answer.role, text: answer.text,
-                sources: answer.sources, pace_ms: null,
+                sources: answer.sources, pace_ms: null, shown: '',
             });
-            await speak(answer.text, answer.turn_id, at);
         } catch (error) {
             toastRef.current?.(`Собеседник не ответил: ${error.message}`, 'error');
             setPhase('listening');
         } finally {
+            // Освобождаем СРАЗУ после ответа модели, а не после озвучки: пока
+            // собеседник говорит, человек имеет право заговорить — в этом и
+            // состоит перебивание.
             busyRef.current = false;
+        }
+        if (answer) await speak(answer.text, answer.turn_id, at);
+        // Если человек говорил, пока собеседник отвечал, и больше ничего не
+        // сказал, — его реплику всё равно надо отдать, а не потерять.
+        const waiting = pendingRef.current;
+        if (waiting) {
+            pendingRef.current = null;
+            handleUtteranceRef.current(waiting);
         }
     }, [api, mode, pushTurn, speak]);
 
@@ -228,6 +297,11 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
 
     const start = useCallback(async () => {
         setPhase('starting');
+        // Хвосты прошлого разговора не должны приклеиваться к новому: реплика,
+        // застрявшая в очереди, унесла бы с собой prev с чужим turn_id, а
+        // залипший busyRef заставил бы новый разговор молчать.
+        pendingRef.current = null;
+        busyRef.current = false;
         setTurns([]);
         setReview(null);
         setCost(null);
@@ -253,10 +327,26 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                 onEvent: (type, payload) => {
                     if (type === 'live') setLive(payload.text);
                     else if (type === 'utterance') handleUtteranceRef.current(payload);
-                    else if (type === 'barge') {
+                    else if (type === 'speech_start') {
+                        setPhase('speaking');
+                        setTurns((prev) => applySpeech(prev, type, payload));
+                    } else if (type === 'said' || type === 'speech_end') {
+                        setTurns((prev) => applySpeech(prev, type, payload));
+                        if (type === 'speech_end') setPhase('listening');
+                    } else if (type === 'barge') {
+                        setTurns((prev) => applySpeech(prev, type, payload));
+                        // Событие с ПОЛНЫМ описанием: какое правило сработало,
+                        // на каких словах, сколько успело прозвучать. На проде
+                        // все десять таких событий лежали с пустым payload, и по
+                        // ним нельзя было ни привязать перебивание к реплике, ни
+                        // подобрать пороги.
                         api(`/sessions/${sessionRef.current}/event`, {
                             method: 'POST',
-                            body: JSON.stringify({ level: 'info', code: 'barge_in' }),
+                            body: JSON.stringify({
+                                level: 'info', code: 'barge_in',
+                                message: `правило ${payload.rule}`,
+                                payload,
+                            }),
                         }).catch(() => {});
                     } else if (type === 'error') {
                         setProblems((prev) => [...prev, `${payload.where}: ${payload.message}`]);
@@ -268,10 +358,26 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
             setPhase('listening');
 
             if (created.opening) {
-                pushTurn({ id: `open-${Date.now()}`, role: 'driver', text: created.opening });
-                await speak(created.opening, null, 0);
+                // id приветствия берём с сервера: с turn_id = null его замеры
+                // не пишутся вовсе, и на проде все десять приветствий остались
+                // без единой цифры.
+                const openingId = created.opening_turn_id ?? `open-${Date.now()}`;
+                // shown = '' ставим ТОЛЬКО когда id настоящий: события речи
+                // ходят по turn_id, и со старым сервером (он opening_turn_id не
+                // отдаёт) они бы не нашли пузырь, а текст остался бы пустым
+                // навсегда. Асимметрия деплоя здесь штатная: Pages и Render
+                // едут порознь.
+                pushTurn({ id: openingId, role: 'driver', text: created.opening,
+                           shown: created.opening_turn_id ? '' : null });
+                await speak(created.opening, created.opening_turn_id ?? null, 0);
             }
         } catch (error) {
+            // Канал мог успеть взять микрофон и открыть контекст до отказа —
+            // без остановки они остаются висеть, и каждая повторная попытка
+            // добавляет ещё один живой микрофон.
+            try { linkRef.current?.stop(); } catch { /* уже остановлен */ }
+            linkRef.current = null;
+            sessionRef.current = null;
             setPhase('idle');
             setProblems((prev) => [...prev, error.message]);
             toastRef.current?.(`Не удалось начать: ${error.message}`, 'error');
@@ -401,6 +507,14 @@ const TrainerView = ({ apiBaseUrl, withAccessTokenHeader, showToast, user }) => 
                                 <Stat label="Модель" value={fmtMs(summary.llm)} />
                                 <Stat label="Озвучка" value={fmtMs(summary.tts)} />
                                 <Stat label="Реплик" value={summary.turns} />
+                                {/* Синтезировано ≠ услышано. До 22.08.2026 пятая
+                                    часть реплик собеседника не звучала вовсе, и
+                                    заметить это было нечем. */}
+                                {summary.heard != null && (
+                                    <Stat label="Дослушано" value={`${summary.heard}%`}
+                                          tone={summary.heard >= 95 ? 'text-slate-900'
+                                              : summary.heard >= 75 ? 'text-amber-600' : 'text-rose-600'} />
+                                )}
                                 {summary.barge > 0 && <Stat label="Перебиваний" value={summary.barge} />}
                             </div>
                             <div className="max-h-[46vh] space-y-3 overflow-y-auto px-4 py-4">
@@ -561,7 +675,11 @@ const LogTab = ({ sessions, loading, detail, onOpen, onBack, onReload }) => {
                                             {fmtMs(turn.tts?.ttfb_ms)}
                                             {turn.tts?.audio_ms != null && (
                                                 <div className="text-[11px] text-slate-400">
-                                                    речи {fmtMs(turn.tts.audio_ms)}
+                                                    {/* Не «сколько наговорил синтез», а сколько
+                                                        человек УСЛЫШАЛ: это и есть цена перебиваний. */}
+                                                    {turn.spoken?.ms != null
+                                                        ? `прозвучало ${fmtMs(turn.spoken.ms)} из ${fmtMs(turn.tts.audio_ms)}`
+                                                        : `речи ${fmtMs(turn.tts.audio_ms)}`}
                                                 </div>
                                             )}
                                         </td>

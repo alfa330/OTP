@@ -254,6 +254,42 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 'ready': [name for name in chain if _provider_ready(name)],
                 'missing': [name for name in chain if not _provider_ready(name)]}
 
+    def _barge_rules():
+        """Когда речь человека обрывает собеседника, а когда — нет.
+
+        До 22.08.2026 правила не было вовсе: перебиванием считался ЛЮБОЙ
+        непустой токен распознавания. На проде это убило 20 % реплик — девять
+        из сорока пяти не прозвучали ни одним байтом, потому что хвост фразы
+        самого человека («…чем могу вам помочь?» → отдельным сообщением
+        «Помочь?») приходил ровно в те полсекунды, пока синтез ещё не начал
+        звучать. Отставание события перебивания от реплики: 176-2461 мс при
+        первом звуке не раньше 700 мс.
+
+        Отсюда и пороги: главный из них — «пока не прозвучало ни сэмпла,
+        перебивать нечего», остальные отсекают поддакивание и шум.
+        """
+        return {
+            # Аварийный выключатель: 0 возвращает поведение до правки, без
+            # пересборки фронта.
+            'enabled': env('TRAINER_BARGE_ENABLED', '1') not in ('0', 'false', ''),
+            # Скос двух часов: выходная задержка звуковой подсистемы плюс запас
+            # 80 мс, который браузер кладёт перед первым куском. Это устройство
+            # тракта, а не подобранное число.
+            'grace_ms': int(env('TRAINER_BARGE_GRACE_MS', '250')),
+            # «Ага», «иә», «мхм» длятся 250-400 мс. Оценка, не замер: длительностей
+            # токенов на проде пока нет — они появятся в payload события barge_in.
+            'min_ms': int(env('TRAINER_BARGE_MIN_MS', '350')),
+            'min_words': int(env('TRAINER_BARGE_MIN_WORDS', '2')),
+            # Пол против явного шума. По проду известна только уверенность по
+            # реплике целиком: p10 0,864, медиана 0,970.
+            'min_confidence': float(env('TRAINER_BARGE_MIN_CONF', '0.7')),
+            # Доля слов, совпавших с тем, что собеседник произносит прямо сейчас.
+            'echo_ratio': float(env('TRAINER_BARGE_ECHO_RATIO', '0.6')),
+            # После подтверждённого перебивания следующая реплика не начинает
+            # звучать раньше — иначе хвост той же речи убьёт и её.
+            'backoff_ms': int(env('TRAINER_BARGE_BACKOFF_MS', '800')),
+        }
+
     def _log_event(cursor, session_id, user_id, level, code, message=None, payload=None):
         cursor.execute(
             """
@@ -354,12 +390,20 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                       # Отсюда, а не из кода фронта, — чтобы подбирать её
                       # переменной окружения, без пересборки и выкатки Pages.
                       'hold': {'short': int(env('TRAINER_HOLD_SHORT_MS', '300')),
-                               'long': int(env('TRAINER_HOLD_LONG_MS', '1200'))}}
+                               'long': int(env('TRAINER_HOLD_LONG_MS', '1200'))},
+                      # Пороги «что считать перебиванием». Тоже с сервера и по
+                      # той же причине: фронт едет на GitHub Pages, его сборка
+                      # стоит десяти минут и может тихо не доехать. Подбирать
+                      # пороги пересборкой фронта — не вариант.
+                      'barge': _barge_rules()}
         # Частота — только подсказка на случай, если провайдер её не объявит:
         # настоящую браузер получает событием 'start' в потоке озвучки.
+        # chars_per_sec нужен, чтобы браузер перевёл «прозвучало N миллисекунд»
+        # в «прозвучало N знаков»: пословных меток синтез не отдаёт.
         out['tts'] = {'chain': tts['chain'],
                       'model': _tts_model((tts['ready'] or tts['chain'] or ['vertex'])[0]),
-                      'rate': DEFAULT_TTS_RATE}
+                      'rate': DEFAULT_TTS_RATE,
+                      'chars_per_sec': float(env('TRAINER_CHARS_PER_SEC', '13.3'))}
         return jsonify(out)
 
     # ── внутреннее: озвучка ──────────────────────────────────────────────────
@@ -368,8 +412,12 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
     # не файлом: реплика начинает звучать, пока она ещё синтезируется, и человек
     # ждёт первый звук, а не весь ответ.
 
-    def _tts_vertex(text, voice):
+    def _tts_vertex(text, voice, head):
         """Vertex, streamGenerateContent. Основной путь озвучки.
+
+        head — заголовок промпта: манера персонажа плюс команда «произнеси
+        ровно» (scenarios.say_exactly). Манера стоит перед командой не случайно:
+        если команда не последняя строка, модель зачитывает стиль вслух.
 
         Долго считалось, что обычный TTS для диалога не годится: generateContent
         отдаёт готовый файл целиком за 5-6 секунд. Это правда — но ровно про
@@ -389,7 +437,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                           'streamGenerateContent') + '?alt=sse'
         body = {
             'contents': [{'role': 'user',
-                          'parts': [{'text': scenarios.SAY_EXACTLY + text}]}],
+                          'parts': [{'text': head + text}]}],
             'generationConfig': {
                 'responseModalities': ['AUDIO'],
                 'speechConfig': {'voiceConfig': {
@@ -417,7 +465,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                     found = _RATE_IN_MIME.search(inline.get('mimeType') or '')
                     yield chunk, int(found.group(1)) if found else DEFAULT_TTS_RATE
 
-    def _tts_live(text, voice):
+    def _tts_live(text, voice, head):
         """Gemini Live API по ключу AI Studio. Резерв.
 
         Остаётся в цепочке ради дня, когда кредиты пополнят. Отказ читается ИЗ
@@ -446,7 +494,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 }}}))
             socket.send(json.dumps({'clientContent': {
                 'turns': [{'role': 'user',
-                           'parts': [{'text': scenarios.SAY_EXACTLY + text}]}],
+                           'parts': [{'text': head + text}]}],
                 'turnComplete': True}}))
             while True:
                 # recv_data_frame, а не recv: сам отвечает на ping и, главное,
@@ -480,6 +528,94 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     _TTS_PROVIDERS = {'vertex': _tts_vertex, 'live': _tts_live}
 
+    def _audio_ms(total_bytes, rate):
+        """Длительность речи из числа байтов: PCM 16 бит, моно."""
+        return int(total_bytes / 2 / rate * 1000) if rate else 0
+
+    def _write_tts_metrics(*, turn_id, first_ms, total_bytes, rate, label):
+        """Замеры синтеза в реплику. Зовётся ровно из одного места — из finally.
+
+        Своя функция нужна, чтобы запись гарантированно случилась и при обычном
+        конце потока, и при обрыве, и чтобы её нельзя было случайно обойти новой
+        веткой выхода из генератора.
+        """
+        if not turn_id or not total_bytes:
+            return
+        audio_ms = _audio_ms(total_bytes, rate)
+        try:
+            with db._get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE trainer_turns SET tts_model = %s, tts_ttfb_ms = %s,
+                           tts_audio_ms = %s, tts_bytes = %s
+                     WHERE id = %s
+                    """, (label, first_ms, audio_ms, total_bytes, turn_id))
+                cursor.execute(
+                    """
+                    UPDATE trainer_sessions s SET audio_out_ms = s.audio_out_ms + %s,
+                           tts_model = COALESCE(%s, s.tts_model)
+                      FROM trainer_turns t
+                     WHERE t.id = %s AND t.session_id = s.id
+                    """, (audio_ms, label, turn_id))
+        except Exception:
+            logging.exception('trainer: не удалось записать замеры озвучки')
+
+    def _apply_spoken(cursor, spoken, session_id=None):
+        """«Сколько из реплики реально дошло до уха» — из браузера в базу.
+
+        Знает это только браузер: сервер видит, что клиент закрыл поток, но не
+        видит, что успело прозвучать в колонках. Из этих двух чисел потом
+        режется история для модели — поэтому применять их надо ДО того, как
+        история прочитана.
+
+        Идемпотентно: в audio_heard_ms прибавляется РАЗНИЦА с прежним значением,
+        а не само значение. Один и тот же факт может прийти дважды — и потоком
+        PATCH, и полем prev следующей реплики.
+        """
+        if not isinstance(spoken, dict):
+            return
+        # Значения приходят из браузера, и это НЕОБЯЗАТЕЛЬНЫЙ замер. Разбирать
+        # их голым int() внутри той же транзакции, что рождает ответ
+        # собеседника, нельзя: одна кривая цифра откатила бы весь ход — реплика
+        # человека не сохранилась бы, а ответ пропал.
+        try:
+            turn_id = int(spoken.get('turn_id') or 0)
+            ms = max(0, min(int(spoken.get('spoken_ms') or 0), 24 * 3600 * 1000))
+            raw_chars = spoken.get('spoken_chars')
+            chars = None if raw_chars is None else max(0, min(int(raw_chars), MAX_TEXT))
+        except (TypeError, ValueError):
+            logging.warning('trainer: непригодный замер услышанного, пропускаем')
+            return
+        cut = bool(spoken.get('cut'))
+        if not turn_id:
+            return
+        # Реплика обязана принадлежать этой сессии: залипший prev от прошлого
+        # разговора иначе испортил бы чужие замеры.
+        if session_id:
+            cursor.execute(
+                'SELECT COALESCE(spoken_ms, 0) FROM trainer_turns '
+                ' WHERE id = %s AND session_id = %s', (turn_id, session_id))
+        else:
+            cursor.execute('SELECT COALESCE(spoken_ms, 0) FROM trainer_turns WHERE id = %s',
+                           (turn_id,))
+        row = cursor.fetchone()
+        if not row:
+            return
+        cursor.execute(
+            """
+            UPDATE trainer_turns
+               SET spoken_ms = %s, spoken_chars = %s, speech_cut = %s
+             WHERE id = %s
+            """, (ms, chars, cut, turn_id))
+        delta = ms - int(row[0] or 0)
+        if delta:
+            cursor.execute(
+                """
+                UPDATE trainer_sessions s SET audio_heard_ms = GREATEST(0, s.audio_heard_ms + %s)
+                  FROM trainer_turns t
+                 WHERE t.id = %s AND t.session_id = s.id
+                """, (delta, turn_id))
+
     @trainer_route('/speak', methods=('POST',))
     def trainer_speak(user):
         """Озвучка ответа: сервер синтезирует, браузер слушает SSE.
@@ -505,17 +641,23 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         if not text:
             return jsonify({'error': 'нечего произносить'}), 400
 
-        # Голос берём из сессии, а не из тела запроса: иначе его можно было бы
-        # подменить из браузера. Проверка по списку — там только мужские голоса,
-        # отобранные замером основного тона.
-        voice = scenarios.MENTOR_VOICE
+        # Голос и манеру берём из сессии, а не из тела запроса: иначе их можно
+        # было бы подменить из браузера. Проверка по списку — там только мужские
+        # голоса, отобранные замером основного тона.
+        voice, scenario_key = scenarios.MENTOR_VOICE, None
         if session_id:
             with db._get_cursor() as cursor:
-                cursor.execute('SELECT tts_voice FROM trainer_sessions WHERE id = %s AND user_id = %s',
-                               (session_id, user['id']))
+                cursor.execute(
+                    'SELECT tts_voice, scenario_key FROM trainer_sessions '
+                    ' WHERE id = %s AND user_id = %s', (session_id, user['id']))
                 row = cursor.fetchone()
             if row and row[0] in scenarios.MALE_VOICES:
                 voice = row[0]
+            if row:
+                scenario_key = row[1]
+        # Манера речи персонажа. Замер 22.08.2026: она исполняется моделью
+        # (темп 1,60 против 2,62 слов/с) и ничего не стоит по задержке.
+        head = scenarios.say_exactly(scenario_key)
 
         def sse(event):
             return 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
@@ -525,84 +667,97 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             first_ms, total_bytes = None, 0
             used, used_model, rate = None, None, DEFAULT_TTS_RATE
             fails = []
+            finished = False
 
-            for name in _tts_chain():
-                producer = _TTS_PROVIDERS.get(name)
-                if producer is None:
-                    fails.append(f'{name} — такого провайдера озвучки нет')
-                    continue
-                model = _tts_model(name)
-                got = 0
-                try:
-                    for chunk, chunk_rate in producer(text, voice):
-                        if not got:
-                            rate = chunk_rate or rate
-                            yield sse({'t': 'start', 'provider': name,
-                                       'model': model, 'rate': rate})
-                        if first_ms is None:
-                            # Отсчёт от начала запроса, а не от начала удачной
-                            # попытки: провалившийся провайдер человек тоже ждал.
-                            first_ms = int((time.perf_counter() - started) * 1000)
-                        got += len(chunk) * 3 // 4
-                        yield sse({'t': 'audio', 'b64': chunk})
-                except Exception as exc:  # noqa: BLE001
-                    fails.append(f'{name} — {str(exc)[:200]}')
+            # Всё тело — под try/finally, и замеры пишутся в finally. Иначе их
+            # не пишут ВООБЩЕ в самом частом случае: браузер, перебив реплику,
+            # закрывает поток, генератор получает GeneratorExit (это
+            # BaseException, обычный except его не ловит), и весь хвост после
+            # цикла просто не выполняется. На проде так осталось без замеров
+            # 24 реплики из 59 — то есть каждая оборванная.
+            try:
+                for name in _tts_chain():
+                    producer = _TTS_PROVIDERS.get(name)
+                    if producer is None:
+                        fails.append(f'{name} — такого провайдера озвучки нет')
+                        continue
+                    model = _tts_model(name)
+                    got = 0
+                    try:
+                        for chunk, chunk_rate in producer(text, voice, head):
+                            if not got:
+                                rate = chunk_rate or rate
+                                yield sse({'t': 'start', 'provider': name,
+                                           'model': model, 'rate': rate})
+                            if first_ms is None:
+                                # Отсчёт от начала запроса, а не от начала удачной
+                                # попытки: провалившийся провайдер человек тоже ждал.
+                                first_ms = int((time.perf_counter() - started) * 1000)
+                            got += len(chunk) * 3 // 4
+                            total_bytes = got
+                            used, used_model = name, model
+                            yield sse({'t': 'audio', 'b64': chunk})
+                    except Exception as exc:  # noqa: BLE001
+                        fails.append(f'{name} — {str(exc)[:200]}')
+                        if got:
+                            # Звук уже пошёл. Реплика обрывается на полуслове, но
+                            # прозвучавшее засчитывается: иначе замеры этой реплики
+                            # оказались бы пустыми при том, что человек её слышал.
+                            break
+                        continue
                     if got:
-                        # Звук уже пошёл. Реплика обрывается на полуслове, но
-                        # прозвучавшее засчитывается: иначе замеры этой реплики
-                        # оказались бы пустыми при том, что человек её слышал.
-                        used, used_model, total_bytes = name, model, got
                         break
-                    continue
-                if got:
-                    used, used_model, total_bytes = name, model, got
-                    break
-                fails.append(f'{name} — ответил без звука')
+                    fails.append(f'{name} — ответил без звука')
 
-            # Раньше отказ не сообщался ВООБЩЕ: провайдер закрывал соединение, а
-            # раздел досылал 'done' с нулём байт. Человек видел текст реплики и
-            # слышал тишину — ни строки о причине ни на экране, ни в журнале.
-            problem, level, code = None, None, None
-            if not total_bytes:
-                problem = '; '.join(fails) or 'озвучка не дала звука'
-                level, code = 'error', 'tts_failed'
-            elif fails:
-                problem = 'реплика оборвалась на полуслове: ' + '; '.join(fails)
-                level, code = 'warn', 'tts_cut'
-            if problem:
-                yield sse({'t': 'error', 'message': problem[:400]})
-                if session_id:
+                # Раньше отказ не сообщался ВООБЩЕ: провайдер закрывал соединение, а
+                # раздел досылал 'done' с нулём байт. Человек видел текст реплики и
+                # слышал тишину — ни строки о причине ни на экране, ни в журнале.
+                problem, level, code = None, None, None
+                if not total_bytes:
+                    problem = '; '.join(fails) or 'озвучка не дала звука'
+                    level, code = 'error', 'tts_failed'
+                elif fails:
+                    problem = 'реплика оборвалась на полуслове: ' + '; '.join(fails)
+                    level, code = 'warn', 'tts_cut'
+                if problem:
+                    yield sse({'t': 'error', 'message': problem[:400]})
+                    if session_id:
+                        try:
+                            with db._get_cursor() as cursor:
+                                _log_event(cursor, session_id, user['id'], level, code,
+                                           problem, {'chain': _tts_chain()})
+                        except Exception:
+                            logging.exception('trainer: не записалось событие отказа озвучки')
+
+                finished = True
+                yield sse({'t': 'done',
+                           'ttfb_ms': first_ms,
+                           'audio_ms': _audio_ms(total_bytes, rate),
+                           'bytes': total_bytes, 'rate': rate,
+                           'model': f'{used}:{used_model}' if used else None,
+                           'provider': used, 'error': problem})
+            finally:
+                # Здесь НЕЛЬЗЯ делать yield: генератор уже закрывают, и попытка
+                # выдать ещё одно событие превратится в RuntimeError в логах на
+                # каждом перебивании.
+                _write_tts_metrics(turn_id=turn_id, first_ms=first_ms,
+                                   total_bytes=total_bytes, rate=rate,
+                                   label=f'{used}:{used_model}' if used else None)
+                if not finished and session_id:
+                    # Пишем и когда байтов НОЛЬ: «поток закрылся, не отдав ни
+                    # куска» — это и есть силуэт реплики, которая не прозвучала
+                    # вовсе. Без этой строки его не отличить от «не звонили».
                     try:
                         with db._get_cursor() as cursor:
-                            _log_event(cursor, session_id, user['id'], level, code,
-                                       problem, {'chain': _tts_chain()})
+                            _log_event(cursor, session_id, user['id'],
+                                       'info' if total_bytes else 'warn',
+                                       'tts_aborted',
+                                       'браузер закрыл поток озвучки'
+                                       + ('' if total_bytes else ' до первого звука'),
+                                       {'bytes': total_bytes, 'turn_id': turn_id,
+                                        'audio_ms': _audio_ms(total_bytes, rate)})
                     except Exception:
-                        logging.exception('trainer: не записалось событие отказа озвучки')
-
-            audio_ms = int(total_bytes / 2 / rate * 1000) if rate else 0
-            label = f'{used}:{used_model}' if used else None
-            if turn_id and total_bytes:
-                try:
-                    with db._get_cursor() as cursor:
-                        cursor.execute(
-                            """
-                            UPDATE trainer_turns SET tts_model = %s, tts_ttfb_ms = %s,
-                                   tts_audio_ms = %s, tts_bytes = %s
-                             WHERE id = %s
-                            """, (label, first_ms, audio_ms, total_bytes, turn_id))
-                        cursor.execute(
-                            """
-                            UPDATE trainer_sessions s SET audio_out_ms = s.audio_out_ms + %s,
-                                   tts_model = %s
-                              FROM trainer_turns t
-                             WHERE t.id = %s AND t.session_id = s.id
-                            """, (audio_ms, label, turn_id))
-                except Exception:
-                    logging.exception('trainer: не удалось записать замеры озвучки')
-
-            yield sse({'t': 'done', 'ttfb_ms': first_ms, 'audio_ms': audio_ms,
-                       'bytes': total_bytes, 'rate': rate, 'model': label,
-                       'provider': used, 'error': problem})
+                        logging.exception('trainer: не записалось событие обрыва озвучки')
 
         from flask import Response, stream_with_context
         response = Response(stream_with_context(generate()), mimetype='text/event-stream')
@@ -653,9 +808,13 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         _scope_cache.pop(user['id'], None)
 
         opening = scenario['opening'] if scenario else None
+        opening_turn_id = None
         if opening:
             with db._get_cursor() as cursor:
-                _save_turn(cursor, session_id, 0, 'driver', opening, {})
+                # id приветствия ОТДАЁМ браузеру: без него озвучка первой реплики
+                # идёт с turn_id = null, и её замеры не пишутся никогда. На проде
+                # так остались без единой цифры все 10 приветствий.
+                opening_turn_id = _save_turn(cursor, session_id, 0, 'driver', opening, {})
                 cursor.execute('UPDATE trainer_sessions SET turns_count = 1 WHERE id = %s',
                                (session_id,))
         return jsonify({
@@ -663,6 +822,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             'mode': mode,
             'started_at': row[1].isoformat() if row[1] else None,
             'opening': opening,
+            'opening_turn_id': opening_turn_id,
             'title': scenario['title'] if scenario else 'Наставник по базе знаний',
             'difficulty': scenario['difficulty'] if scenario else None,
         })
@@ -681,6 +841,12 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 return jsonify({'error': 'сессия не найдена'}), 404
             if session['status'] != 'active':
                 return jsonify({'error': 'сессия уже закрыта'}), 409
+            # СТРОГО ДО чтения истории: prev говорит, сколько из прошлой реплики
+            # собеседника человек реально услышал, а история для модели режется
+            # именно по этому числу. Прийти этот факт мог бы и отдельным PATCH,
+            # но тот уходит «выстрелил и забыл», и этот запрос его обгоняет —
+            # история собралась бы из несказанного.
+            _apply_spoken(cursor, payload.get('prev'), session_id)
             history = _load_history(cursor, session_id)
             if len(history) >= MAX_TURNS:
                 return jsonify({'error': 'слишком длинный разговор'}), 409
@@ -759,6 +925,16 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
         Сервер не знает, когда у стажёра в колонках появился звук, — измерить
         это можно лишь на стороне, где он играет.
+
+        tts_audio_ms браузер НЕ шлёт и слать не должен: audio_out_ms уже
+        прибавляет поток озвучки, и второе прибавление удвоило бы сессионный
+        итог. Обработка здесь оставлена только ради совместимости со старым
+        бандлом на Pages, который мог доехать позже сервера.
+
+        Сколько из реплики РЕАЛЬНО прозвучало (spoken_*) идёт не общим списком
+        полей, а через _apply_spoken: там прибавляется разница, и повторное
+        применение того же факта ничего не портит. Этот же факт приезжает вторым
+        путём — полем prev у следующей реплики, и оба пути обязаны сходиться.
         """
         payload = _body()
         fields = {
@@ -768,10 +944,27 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             'tts_model': payload.get('tts_model'),
             'voice_to_voice_ms': payload.get('voice_to_voice_ms'),
         }
+        spoken = None
+        if payload.get('spoken_ms') is not None or payload.get('spoken_chars') is not None:
+            spoken = {'turn_id': turn_id,
+                      'spoken_ms': payload.get('spoken_ms'),
+                      'spoken_chars': payload.get('spoken_chars'),
+                      'cut': payload.get('speech_cut')}
         sets = [f'{name} = %s' for name, value in fields.items() if value is not None]
         values = [value for value in fields.values() if value is not None]
-        if not sets:
+        if not sets and not spoken:
             return jsonify({'ok': True, 'updated': 0})
+        if not sets:
+            with db._get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT t.id FROM trainer_turns t JOIN trainer_sessions s ON s.id = t.session_id
+                     WHERE t.id = %s AND s.user_id = %s
+                    """, (turn_id, user['id']))
+                if not cursor.fetchone():
+                    return jsonify({'ok': True, 'updated': 0})
+                _apply_spoken(cursor, spoken)
+            return jsonify({'ok': True, 'updated': 1})
         with db._get_cursor() as cursor:
             cursor.execute(
                 f"""
@@ -786,6 +979,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 cursor.execute(
                     'UPDATE trainer_sessions SET audio_out_ms = audio_out_ms + %s WHERE id = %s',
                     (int(payload['tts_audio_ms']), row[0]))
+            if row and spoken:
+                _apply_spoken(cursor, spoken)
         return jsonify({'ok': True, 'updated': 1 if row else 0})
 
     @trainer_route('/sessions/<int:session_id>/event', methods=('POST',))
@@ -904,7 +1099,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                        started_at, finished_at, duration_ms, turns_count, barge_ins,
                        audio_in_ms, audio_out_ms, voice_to_voice_p50, voice_to_voice_max,
                        score, review, cost_usd, cost_breakdown, rates, client,
-                       llm_provider, llm_model, tts_model, error
+                       llm_provider, llm_model, tts_model, error, audio_heard_ms
                   FROM trainer_sessions WHERE id = %s
                 """, (session_id,))
             s = cursor.fetchone()
@@ -916,7 +1111,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                        stt_confidence, stt_tokens, stt_audio_ms, endpoint_delay_ms,
                        llm_provider, llm_model, llm_first_token_ms, llm_total_ms,
                        llm_input_tokens, llm_output_tokens, tts_model, tts_ttfb_ms,
-                       tts_audio_ms, tts_bytes, voice_to_voice_ms, barge_in, sources
+                       tts_audio_ms, tts_bytes, voice_to_voice_ms, barge_in, sources,
+                       kind, hold_ms, spoken_ms, spoken_chars, COALESCE(speech_cut, FALSE)
                   FROM trainer_turns WHERE session_id = %s ORDER BY idx
                 """, (session_id,))
             turns = cursor.fetchall()
@@ -939,6 +1135,9 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 'cost_usd': float(s[18]) if s[18] is not None else None,
                 'cost_breakdown': s[19], 'rates': s[20], 'client': s[21],
                 'provider': s[22], 'model': s[23], 'tts_model': s[24], 'error': s[25],
+                # Синтезировано ≠ услышано: audio_out_ms — это цена, а
+                # audio_heard_ms — качество. Их отношение и есть цена перебиваний.
+                'audio_heard_ms': s[26],
             },
             'turns': [{
                 'id': t[0], 'idx': t[1], 'role': t[2], 'text': t[3],
@@ -949,6 +1148,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         'total_ms': t[14], 'in': t[15], 'out': t[16]},
                 'tts': {'model': t[17], 'ttfb_ms': t[18], 'audio_ms': t[19], 'bytes': t[20]},
                 'pace_ms': t[21], 'barge_in': t[22], 'sources': t[23],
+                'kind': t[24], 'hold_ms': t[25],
+                'spoken': {'ms': t[26], 'chars': t[27], 'cut': t[28]},
             } for t in turns],
             'events': [{'at': e[0].isoformat() if e[0] else None, 'level': e[1],
                         'code': e[2], 'message': e[3], 'payload': e[4]} for e in events],
@@ -967,11 +1168,42 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
 
     def _load_history(cursor, session_id):
         """Разговор целиком. kind нужен наставнику: правило вики запрещает
-        переспрашивать, если предыдущая реплика сама была уточнением."""
+        переспрашивать, если предыдущая реплика сама была уточнением.
+
+        Рядом с текстом лежит то, что человек РЕАЛЬНО услышал: реплику могли
+        оборвать на полуслове, и для модели это разные вещи. Реплики, записанные
+        до появления spoken_chars, приходят с cut = False и ведут себя как
+        прежде — услышано ровно то, что сгенерировано.
+        """
         cursor.execute(
-            'SELECT role, text, kind FROM trainer_turns WHERE session_id = %s ORDER BY idx',
-            (session_id,))
-        return [{'role': r[0], 'text': r[1], 'kind': r[2]} for r in cursor.fetchall()]
+            """
+            SELECT role, text, kind, COALESCE(speech_cut, FALSE), spoken_chars
+              FROM trainer_turns WHERE session_id = %s ORDER BY idx
+            """, (session_id,))
+        out = []
+        for role, text, kind, cut, chars in cursor.fetchall():
+            text = text or ''
+            cut = bool(cut) and chars is not None and 0 <= chars < len(text)
+            out.append({'role': role, 'text': text, 'kind': kind, 'cut': cut,
+                        'heard': text[:chars] if cut else text,
+                        'unsaid': text[chars:].strip() if cut else ''})
+        return out
+
+    def _heard(turn):
+        """Текст реплики для модели: услышанное плюс пометка о непрозвучавшем.
+
+        Молча обрезать нельзя — модель придумает окончание заново, и у водителя
+        меняются фамилия и сумма (этот класс ошибок раздел уже ловил). Отдать
+        текст целиком тоже нельзя — модель считает, что человек всё слышал.
+        """
+        if not turn.get('cut') or not turn.get('unsaid'):
+            return turn.get('text') or ''
+        if not turn['heard'].strip():
+            # Не прозвучало ни слова — говорить «часть не прозвучала» было бы
+            # неправдой, а реплика вышла бы из одной служебной строки.
+            return scenarios.UNHEARD_MARK.format(unsaid=turn['unsaid'][:400])
+        return (turn['heard']
+                + scenarios.CUT_MARK.format(unsaid=turn['unsaid'][:400]))
 
     def _save_turn(cursor, session_id, idx, role, text, extra):
         columns = ['session_id', 'idx', 'role', 'text']
@@ -1015,7 +1247,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         """
         system = scenarios.system_prompt(session['scenario_key'] or scenarios.DEFAULT)
         turns = [{'role': 'assistant' if h['role'] == 'driver' else 'user',
-                  'content': h['text']} for h in history]
+                  'content': _heard(h)} for h in history]
         turns.append({'role': 'user', 'content': text})
 
         order = _llm_chain()
@@ -1148,7 +1380,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         prior = [{'role': 'user' if h['role'] == 'asker' else 'assistant',
                   'kind': ('question' if h['role'] == 'asker'
                            else (h.get('kind') or 'answer')),
-                  'text': h['text']} for h in history][-6:]
+                  'text': _heard(h)} for h in history][-6:]
         search_query = ai_answer.enrich_query(question, prior)
         # Переспрашивать можно только у ХОЛОДНОГО короткого вопроса — то же
         # правило, что в вике. Два случая, когда нельзя: предыдущая реплика сама
@@ -1227,6 +1459,29 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         for s in (result.get('sources') or [])],
         }
 
+    def _model_text(parts):
+        """Текст ответа модели без служебных кусков и без разметки.
+
+        Две разные беды, и обе доходят до синтеза вслух.
+
+        Первая: Vertex помечает куски «мышления» флагом thought, и склейка всех
+        кусков подряд подмешивает их в реплику. Гашение мышления
+        (thinkingBudget: 0) принимают не все модели, поэтому полагаться на него
+        нельзя.
+
+        Вторая: модель иногда пишет служебный префикс «thought:» прямо текстом.
+        Поймано 22.08.2026 на приёмке казахского сценария — пять реплик из
+        тринадцати начинались с него, и синтез прочитал бы это вслух латиницей.
+
+        Разметку снимаем здесь же: правила персонажа её запрещают, но запрет в
+        промпте — просьба, а звёздочки синтез читает как звёздочки.
+        """
+        text = ''.join(part.get('text', '') for part in parts
+                       if not part.get('thought')).strip()
+        text = re.sub(r'^\s*(?:thought|thinking|мысли)\s*:\s*', '', text, flags=re.I)
+        text = re.sub(r'[*_`#]+', '', text)
+        return ' '.join(text.split())
+
     def _vertex_generate(model, body, timeout):
         """Один вызов Vertex. Гашение «мышления» снимается, если модель его не берёт.
 
@@ -1263,7 +1518,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         }, 45)
         parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
         usage = data.get('usageMetadata') or {}
-        return ''.join(p.get('text', '') for p in parts).strip(), {
+        return _model_text(parts), {
             'provider': 'vertex', 'model': model,
             'input_tokens': usage.get('promptTokenCount'),
             'output_tokens': usage.get('candidatesTokenCount'),
@@ -1287,7 +1542,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         data = response.json()
         parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
         usage = data.get('usageMetadata') or {}
-        return ''.join(p.get('text', '') for p in parts).strip(), {
+        return _model_text(parts), {
             'provider': 'gemini', 'model': model,
             'input_tokens': usage.get('promptTokenCount'),
             'output_tokens': usage.get('candidatesTokenCount'),
@@ -1324,7 +1579,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
     def _review(session, history):
         """Разбор работы стажёра вторым ИИ по стенограмме."""
         transcript = '\n'.join(
-            f"{'Стажёр' if h['role'] == 'trainee' else 'Водитель'}: {h['text']}"
+            f"{'Стажёр' if h['role'] == 'trainee' else 'Водитель'}: {_heard(h)}"
             for h in history)
         prompt = scenarios.review_prompt(session['scenario_key'] or scenarios.DEFAULT)
         started = time.perf_counter()
@@ -1358,7 +1613,8 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                         raise RuntimeError(f'HTTP {response.status_code} {response.text[:200]}')
                     data = response.json()
                 parts = ((data.get('candidates') or [{}])[0].get('content') or {}).get('parts') or []
-                return json.loads(''.join(p.get('text', '') for p in parts)), {
+                return json.loads(''.join(p.get('text', '') for p in parts
+                                          if not p.get('thought'))), {
                     'provider': name, 'model': model,
                     'elapsed_ms': int((time.perf_counter() - started) * 1000)}
             except Exception as exc:  # noqa: BLE001

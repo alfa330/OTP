@@ -19,7 +19,20 @@
  * реплику, а Live API эфемерные токены в браузере не принимает — проверено
  * 22.08.2026, сокет закрывается с 1008. Постоянному ключу в браузере не место,
  * поэтому озвучку отдаёт сервер.
+ *
+ * ДВА ЧАСА, КОТОРЫЕ ЗДЕСЬ СВЕРЯЮТСЯ. Речь человека размечена по шкале
+ * микрофона (Soniox отдаёт start_ms/end_ms от начала потока), а речь
+ * собеседника — по шкале звуковой подсистемы (ctx.currentTime). Пока эти шкалы
+ * не были сведены, «человек заговорил» и «собеседник заговорил» нельзя было
+ * упорядочить, и хвост фразы самого человека считался перебиванием. Место
+ * сведения одно: playChunk, где первый кусок реплики ставится в расписание.
  */
+
+/* Расширение '.js' в импортах обязательно: эти модули проверяются через
+ * `node --test` без сборщика, а Node не достраивает расширение сам. Vite
+ * принимает оба вида, поэтому ошибка вылезает только в тестах. */
+import { bargeVerdict, spokenChars, weighText } from './speechClock.js';
+import { connectTelephone } from './telephone.js';
 
 const SONIOX_WS = 'wss://stt-rt.soniox.com/transcribe-websocket';
 
@@ -80,6 +93,10 @@ const mean = (values) => (values.length
     ? values.reduce((sum, value) => sum + value, 0) / values.length
     : null);
 
+/* Как часто перерисовывать текст под речь. 80 мс — заметно чаще, чем человек
+ * различает рывки, и заметно реже, чем приходит кусок звука. */
+const PAINT_MS = 80;
+
 export class VoiceLink {
     /**
      * @param {object} config
@@ -87,27 +104,36 @@ export class VoiceLink {
      * @param {function} config.headers  () => объект заголовков авторизации
      * @param {function} config.onEvent  (type, payload) — единственный выход наружу
      */
-    constructor({ apiBaseUrl, headers, onEvent, hold }) {
+    constructor({ apiBaseUrl, headers, onEvent, hold, barge, telephone = true }) {
         this.apiBaseUrl = apiBaseUrl;
         this.headers = headers;
         this.emit = onEvent || (() => {});
         // Выдержка против перебивания. Значения приходят с сервера в /tokens,
         // чтобы подбирать их переменной окружения, а не пересборкой фронта.
         this.hold = { short: 300, long: 1200, ...(hold || {}) };
+        // Пороги «что считать перебиванием» — оттуда же и по той же причине.
+        this.barge = {
+            enabled: true, grace_ms: 250, min_words: 2, min_ms: 350,
+            min_confidence: 0.7, echo_ratio: 0.6, backoff_ms: 800,
+            ...(barge || {}),
+        };
+        this.telephone = telephone;
 
         this.ctx = null;
         this.stream = null;
         this.node = null;
         this.stt = null;
         this.keepalive = null;
+        this.phone = null;        // телефонный тракт, собирается один раз
 
         this.sources = [];
         this.playAt = 0;
-        this.speaking = false;
+        this.streaming = false;   // жив поток SSE (это НЕ «звучит речь»)
         // Частота приходит от сервера событием 'start': у провайдеров озвучки
         // она своя, и угадывать её на клиенте значит играть речь не с той
         // скоростью. 24 000 — только значение до первого события.
         this.rate = 24000;
+        this.charsPerSec = 13.3;  // замер по проду; приходит с сервера
 
         this.pending = '';        // подтверждённый текст текущей реплики
         this.partial = '';        // неподтверждённый — ПЕРЕПИСЫВАЕТСЯ целиком
@@ -120,6 +146,36 @@ export class VoiceLink {
         this.langs = {};
         this.tokens = 0;
         this.startedAt = 0;
+
+        // ── часы микрофона: та же шкала, в которой Soniox размечает токены ──
+        this.micMs = 0;           // сколько звука реально ушло в сокет
+        this.uttMs = 0;           // сколько его пришлось на текущую реплику
+
+        // ── речь собеседника ──
+        this.speechText = '';     // что произносится прямо сейчас
+        this.speechTurnId = null;
+        this.speechWeight = 0;    // вес текста в «буквенном эквиваленте»
+        this.expectedMs = 0;      // ожидаемая длительность (до конца потока)
+        this.totalMs = 0;         // фактическая, когда поток закончился
+        this.startAt = null;      // ctx.currentTime первого запланированного сэмпла
+        this.audibleFromMicMs = null;  // тот же момент по часам микрофона
+        this.scheduledMs = 0;     // сколько звука поставлено в расписание
+        this.gapMs = 0;           // дыры в расписании: это тишина, не речь
+        this.paintedChars = -1;
+        this.painter = null;
+        this.backoffUntil = 0;
+
+        this.quietTimer = null;
+        this.quietDone = null;       // чем разбудить ожидание конца речи
+        // Номер реплики. Асинхронный хвост завершающегося speak() не должен
+        // дописывать свой итог в состояние, которое уже принадлежит следующей
+        // реплике: поля здесь общие на объект, и без этого счётчика второй
+        // вызов молча затирал замеры первого.
+        this.speakId = 0;
+        this.voiceGain = null;       // общий кран: им гасим звук без щелчка
+        this.closingOnPurpose = false;   // мы сами закрываем сокет, это не отказ
+        this.pendingBarge = false;   // перебил ли человек текущую реплику
+        this.lastSpoken = null;      // что услышано из прошлой реплики
     }
 
     // ── запуск ───────────────────────────────────────────────────────────────
@@ -150,6 +206,11 @@ export class VoiceLink {
         // уходил в корень домена: браузер отвечал «Unable to load a worklet's
         // module», а локально, где база '/', всё работало.
         await this.ctx.audioWorklet.addModule(workletUrl());
+        // Тракт собирается ОДИН раз на контекст: у биквадов есть состояние, и
+        // новая цепочка на каждый кусок рвала бы речь щелчками на стыках.
+        if (this.telephone) {
+            try { this.phone = connectTelephone(this.ctx); } catch { this.phone = null; }
+        }
 
         await this.openStt(tokens);
         this.startedAt = performance.now();
@@ -158,6 +219,12 @@ export class VoiceLink {
         this.node = new AudioWorkletNode(this.ctx, 'trainer-capture');
         this.node.port.onmessage = (event) => {
             if (this.stt && this.stt.readyState === WebSocket.OPEN) {
+                // Часы двигаем ТОЛЬКО на реально отправленный звук: иначе они
+                // разойдутся с разметкой Soniox, и сверка «кто заговорил
+                // раньше» начнёт врать в обе стороны.
+                const ms = (event.data.byteLength / 2) / this.ctx.sampleRate * 1000;
+                this.micMs += ms;
+                this.uttMs += ms;
                 this.stt.send(event.data);
             }
         };
@@ -169,6 +236,8 @@ export class VoiceLink {
         mute.connect(this.ctx.destination);
 
         if (tokens.stt?.hold) this.hold = { ...this.hold, ...tokens.stt.hold };
+        if (tokens.stt?.barge) this.barge = { ...this.barge, ...tokens.stt.barge };
+        if (tokens.tts?.chars_per_sec) this.charsPerSec = tokens.tts.chars_per_sec;
         this.emit('ready', { sampleRate: this.ctx.sampleRate, tts: tokens.tts });
         return { sampleRate: this.ctx.sampleRate };
     }
@@ -203,7 +272,20 @@ export class VoiceLink {
                 resolve();
             };
             socket.onerror = () => reject(new Error('распознавание не подключилось'));
-            socket.onclose = () => { clearInterval(this.keepalive); };
+            socket.onclose = (event) => {
+                clearInterval(this.keepalive);
+                // Молчащий обрыв выглядит как «бот перестал меня слышать»:
+                // фаза остаётся «слушаю вас», кадры микрофона тихо уходят в
+                // никуда, а часы микрофона замирают — вместе с ними врёт и
+                // сверка «кто заговорил раньше». Отказ обязан быть виден.
+                if (this.stt === socket && !this.closingOnPurpose) {
+                    this.emit('error', {
+                        where: 'stt',
+                        message: `распознавание отключилось (${event?.code ?? '—'})`
+                                 + ' — начните разговор заново',
+                    });
+                }
+            };
             socket.onmessage = (event) => this.onSttMessage(event);
         });
     }
@@ -219,6 +301,7 @@ export class VoiceLink {
         // Запоминаем ДО обновления: иначе выдержка распознавания всегда выходит
         // нулём — текст и метка конца приходят одним сообщением.
         const previousVoiceAt = this.lastVoiceAt;
+        const incoming = [];
         let fresh = '';
         let ended = false;
         let voiced = false;
@@ -238,20 +321,41 @@ export class VoiceLink {
             } else {
                 fresh += text;
             }
-            if (text.trim()) voiced = true;
+            if (text.trim()) {
+                voiced = true;
+                incoming.push(token);
+            }
         }
         this.partial = fresh;
 
         if (voiced) {
             this.lastVoiceAt = performance.now();
-            // Человек продолжил — отменяем отправку. Накопленное НЕ сбрасываем:
-            // продолжение приклеится к нему само, потому что pending копится до
-            // самой отправки.
-            clearTimeout(this.holdTimer);
-            this.holdTimer = null;
-            if (this.speaking) {
-                this.stopPlayback();
-                this.emit('barge', {});
+            // Человек говорит — отправку откладываем. Раньше здесь стоял голый
+            // clearTimeout БЕЗ перезавода: один шумовой токен гасил выдержку
+            // насмерть, и реплика не уходила вовсе, пока человек не заговорит
+            // снова. Перезаводим.
+            this.scheduleUtterance();
+
+            // Перебивание это или нет — решает speechClock, а не факт звука.
+            // Пока не прозвучало ни одного сэмпла речи собеседника, перебивать
+            // нечего: это и есть тот случай, который на проде убивал каждую
+            // пятую реплику.
+            const verdict = bargeVerdict(incoming, {
+                audibleFromMicMs: this.audibleFromMicMs,
+                atMs: this.micMs,
+                saying: this.speechText,
+                saidChars: this.paintedChars < 0 ? 0 : this.paintedChars,
+                enabled: this.barge.enabled,
+                graceMs: this.barge.grace_ms,
+                minWords: this.barge.min_words,
+                minMs: this.barge.min_ms,
+                minConfidence: this.barge.min_confidence,
+                echoRatio: this.barge.echo_ratio,
+            });
+            if (verdict.barge) this.bargeIn(verdict);
+            else if (this.audible && verdict.rule !== 'quiet') {
+                // Не перебивание, но и не тишина: пригодится при подборе порогов.
+                this.emit('heard', { rule: verdict.rule, words: verdict.words });
             }
         }
 
@@ -288,6 +392,16 @@ export class VoiceLink {
         this.holdTimer = null;
         this.heldText = '';
         const text = (this.pending + this.partial).trim();
+        // Собеседник ГОВОРИТ, а сказанное человеком перебиванием не признано:
+        // это поддакивание, эхо или шум. Отправлять такое отдельным ходом
+        // нельзя — модель ответит на «ага», а озвучка второй реплики оборвёт
+        // первую на полуслове. Придерживаем до конца речи: накопленное никуда
+        // не денется, а уйдёт следующей репликой.
+        if (text && this.audible && !this.pendingBarge) {
+            this.heldText = text;
+            this.holdTimer = setTimeout(() => this.flushUtterance(), 250);
+            return;
+        }
         const metrics = {
             stt_confidence: mean(this.confidences),
             stt_tokens: this.tokens,
@@ -297,22 +411,112 @@ export class VoiceLink {
             endpoint_delay_ms: this.endpointMs ?? null,
             // …и сколько ждали мы сами, чтобы не перебить.
             hold_ms: this.holdMs || null,
+            // Сколько звука пришлось на эту реплику. Не «регрессия»: этого поля
+            // фронт не слал НИКОГДА с первого коммита раздела, и на проде оно
+            // пусто у 41 реплики из 68 — вместе с ним занижена и стоимость.
+            stt_audio_ms: Math.round(this.uttMs) || null,
+            // Перебил ли человек собеседника. Колонка есть с первого дня и до
+            // 22.08.2026 не была заполнена НИ РАЗУ: браузер её не отправлял.
+            barge_in: this.pendingBarge,
+            // Что человек реально услышал из прошлой реплики собеседника.
+            // Едет здесь, а не отдельным PATCH: PATCH уходит «выстрелил и
+            // забыл», а сервер режет историю для модели именно по этим числам.
+            prev: this.lastSpoken,
         };
         this.pending = '';
         this.partial = '';
         this.confidences = [];
         this.langs = {};
         this.tokens = 0;
+        this.uttMs = 0;
+        this.pendingBarge = false;
+        this.lastSpoken = null;
         if (text) this.emit('utterance', { text, metrics, at: this.lastVoiceAt });
     }
 
     // ── воспроизведение ──────────────────────────────────────────────────────
 
+    /** Звучит ли речь собеседника прямо сейчас (а не «жив ли поток»). */
+    get audible() {
+        return this.audibleFromMicMs !== null;
+    }
+
+    /** Сколько миллисекунд речи РЕАЛЬНО дошло до уха. */
+    playedMs() {
+        if (this.startAt === null || !this.ctx) return 0;
+        const late = this.ctx.outputLatency || this.ctx.baseLatency || 0;
+        const played = (this.ctx.currentTime - late - this.startAt) * 1000 - this.gapMs;
+        return Math.max(0, Math.min(played, this.scheduledMs));
+    }
+
+    /** Что услышано из текущей реплики — то, что уйдёт на сервер. */
+    spokenNow() {
+        if (!this.speechText) return null;
+        const ms = Math.round(this.playedMs());
+        const total = this.totalMs || this.expectedMs;
+        const chars = spokenChars(this.speechText, ms, total);
+        return {
+            turn_id: this.speechTurnId,
+            spoken_ms: ms,
+            spoken_chars: chars,
+            cut: chars < this.speechText.length,
+        };
+    }
+
+    /** Общий кран для всех источников речи: через него звук и гасится. */
+    voiceOut() {
+        if (!this.voiceGain && this.ctx) {
+            this.voiceGain = this.ctx.createGain();
+            this.voiceGain.connect(this.phone ? this.phone.input : this.ctx.destination);
+        }
+        return this.voiceGain || this.ctx.destination;
+    }
+
     stopPlayback() {
+        const spoken = this.spokenNow();
+        // Гасим коротким спадом, а не обрывом волны: раньше источник шёл прямо
+        // в выход и обрыв был просто щелчком, а теперь ступенька попадает во
+        // вход телефонного тракта и раскачивает биквады звоном на 300 Гц.
+        if (this.voiceGain && this.ctx) {
+            const now = this.ctx.currentTime;
+            try {
+                this.voiceGain.gain.cancelScheduledValues(now);
+                this.voiceGain.gain.setValueAtTime(this.voiceGain.gain.value, now);
+                this.voiceGain.gain.linearRampToValueAtTime(0, now + 0.012);
+            } catch { /* поддельный контекст в тестах */ }
+        }
         this.sources.forEach((source) => { try { source.stop(); } catch { /* уже остановлен */ } });
         this.sources = [];
         this.playAt = 0;
-        this.speaking = false;
+        this.startAt = null;
+        this.audibleFromMicMs = null;
+        this.scheduledMs = 0;
+        this.gapMs = 0;
+        return spoken;
+    }
+
+    /** Человек действительно перебил: гасим звук и запоминаем услышанное. */
+    bargeIn(verdict) {
+        // С выключенным гейтом (TRAINER_BARGE_ENABLED=0) перебиваем и до
+        // первого звука: прежнее поведение опиралось на флаг, который
+        // поднимался ДО запроса к /speak, и аварийный откат обязан возвращать
+        // его ЦЕЛИКОМ, а не наполовину.
+        if (!this.audible && this.barge.enabled) return;
+        if (!this.audible) { this.streaming = false; this.pendingBarge = true; return; }
+        const spoken = this.stopPlayback();
+        this.streaming = false;
+        this.pendingBarge = true;
+        this.lastSpoken = spoken;
+        this.backoffUntil = performance.now() + this.barge.backoff_ms;
+        this.emit('barge', {
+            turn_id: spoken?.turn_id ?? null,
+            spoken_ms: spoken?.spoken_ms ?? 0,
+            spoken_chars: spoken?.spoken_chars ?? 0,
+            total_chars: this.speechText.length,
+            rule: verdict.rule,
+            words: verdict.words,
+            voice_ms: verdict.voiceMs,
+        });
     }
 
     /** Частота текущего потока озвучки — её объявляет сервер событием 'start'. */
@@ -331,91 +535,307 @@ export class VoiceLink {
 
         const source = this.ctx.createBufferSource();
         source.buffer = buffer;
-        source.connect(this.ctx.destination);
+        source.connect(this.voiceOut());
         // Небольшой запас перед первым куском: иначе на медленной сети следующий
         // не успевает приехать и речь рвётся щелчками.
-        this.playAt = Math.max(this.ctx.currentTime + 0.08, this.playAt);
-        source.start(this.playAt);
-        this.playAt += buffer.duration;
+        const at = Math.max(this.ctx.currentTime + 0.08, this.playAt);
+        if (this.startAt !== null) {
+            // Расписание разорвалось — кусок не успел приехать. Эта дыра
+            // ТИШИНА, и засчитывать её как прозвучавшую речь нельзя.
+            this.gapMs += Math.max(0, (at - this.playAt) * 1000);
+        } else {
+            this.startAt = at;
+            // Слышимая пауза считается ОТСЮДА, а не от прихода куска: между
+            // ними лежат запас расписания и задержка вывода, 100-400 мс при
+            // типовых двух секундах. Сервер и обещает «когда звук реально
+            // зазвучал в колонках».
+            if (this.paceFrom) {
+                this.paceMs = Math.round(performance.now() - this.paceFrom
+                                         + (at - this.ctx.currentTime) * 1000);
+                this.paceFrom = 0;
+            }
+            // Тот же момент по часам микрофона. Обе поправки (запас в
+            // расписании и задержка вывода) смещают отметку ВПЕРЁД, то есть в
+            // безопасную сторону: лишнее поглощается grace_ms.
+            const late = this.ctx.outputLatency || this.ctx.baseLatency || 0;
+            this.audibleFromMicMs = this.micMs + (at - this.ctx.currentTime) * 1000 + late * 1000;
+            this.emit('speech_start', { turn_id: this.speechTurnId });
+        }
+        source.start(at);
+        this.playAt = at + buffer.duration;
+        this.scheduledMs += buffer.duration * 1000;
         this.sources.push(source);
         source.onended = () => { this.sources = this.sources.filter((s) => s !== source); };
     }
 
+    /** Открывать текст под речь: то, что уже прозвучало, — то и на экране. */
+    paint() {
+        // Молчим, когда речи нет: после перебивания часы сброшены, и очередной
+        // тик посчитал бы ноль знаков — экран стирал бы уже показанный текст.
+        if (!this.speechText || !this.audible) return;
+        const total = this.totalMs || this.expectedMs;
+        const chars = spokenChars(this.speechText, this.playedMs(), total);
+        if (chars === this.paintedChars) return;
+        this.paintedChars = chars;
+        this.emit('said', {
+            turn_id: this.speechTurnId,
+            chars,
+            text: this.speechText.slice(0, chars),
+        });
+    }
+
+    /** Ждём, пока звук РЕАЛЬНО доиграет, а не пока закроется поток.
+     *
+     * Разница не теоретическая: поток озвучки закрывается за 3,3-3,8 с, а речь
+     * при этом звучит 8,8-9,4 с (замер 22.08.2026). Пока фаза «собеседник
+     * говорит» снималась по концу потока, раздел объявлял себя слушающим за
+     * пять секунд до того, как собеседник замолчал.
+     *
+     * Ожидание ОБЯЗАНО просыпаться при уходе с раздела: иначе stop() гасит
+     * таймер, обещание не исполняется никогда, и «Завершить» повисает.
+     */
+    untilQuiet() {
+        return new Promise((resolve) => {
+            const finish = () => {
+                clearInterval(this.quietTimer);
+                this.quietTimer = null;
+                this.quietDone = null;
+                resolve();
+            };
+            this.quietDone = finish;
+            const tick = () => {
+                if (!this.audible || this.playedMs() >= this.scheduledMs - 20) finish();
+            };
+            // Потолок обязателен: если вкладку свернули и AudioContext ушёл в
+            // suspended, ctx.currentTime замирает, playedMs перестаёт расти —
+            // и обещание не исполнилось бы никогда, а раздел навсегда остался
+            // бы в фазе «собеседник говорит».
+            const deadline = performance.now() + this.scheduledMs + 2000;
+            this.quietTimer = setInterval(() => {
+                if (performance.now() > deadline) { finish(); return; }
+                tick();
+            }, 60);
+            tick();
+        });
+    }
+
     /**
      * Произносит текст: читает SSE от нашего сервера и играет куски по мере
-     * прихода. Возвращает замеры, включая слышимую паузу.
+     * прихода. Возвращает замеры, включая слышимую паузу и то, сколько из
+     * реплики реально дошло до уха.
      */
     async speak(text, { turnId = null, since = 0, sessionId = null } = {}) {
-        this.speaking = true;
-        this.playAt = 0;
+        // Номер этой реплики. Всё, что пишется в общее состояние ПОСЛЕ любого
+        // await, обязано сверяться с ним: пока мы ждём, человек мог заговорить,
+        // и следующая реплика уже началась.
+        const id = ++this.speakId;
+        const mine = () => id === this.speakId;
+
+        // Первой строкой, а не «где-нибудь»: раньше speak обнулял playAt, НЕ
+        // остановив прежние источники, и вторая реплика ложилась поверх первой.
+        this.stopPlayback();
+        // Кран после гашения закрыт — открываем заново, иначе новая реплика
+        // будет синтезирована, отправлена и не услышана.
+        if (this.voiceGain && this.ctx) {
+            try {
+                this.voiceGain.gain.cancelScheduledValues(this.ctx.currentTime);
+                this.voiceGain.gain.setValueAtTime(1, this.ctx.currentTime);
+            } catch { /* поддельный контекст в тестах */ }
+        }
+        // После подтверждённого перебивания выдерживаем паузу: иначе хвост той
+        // же речи человека убьёт и следующую реплику.
+        const wait = this.backoffUntil - performance.now();
+        if (wait > 0) {
+            await new Promise((done) => {
+                // Ручку храним: без неё «Завершить», нажатое в эти 800 мс,
+                // не гасило таймер, и добуженный speak уходил запросом уже
+                // закрытой сессии и падал на закрытом контексте.
+                this.backoffTimer = setTimeout(done, wait);
+            });
+        }
+        if (!mine() || !this.ctx) return { superseded: true };
+
+        this.streaming = true;
         this.rate = 24000;
-        let firstAudibleMs = null;
+        this.speechText = String(text || '');
+        this.speechTurnId = turnId;
+        this.speechWeight = weighText(this.speechText).total;
+        // Пока поток не кончился, полной длительности мы не знаем. Берём оценку
+        // по замеренному темпу речи (13,3 ЗНАКА в секунду на проде) — она нужна
+        // только для плавности показа; окончательный разрез считается по
+        // фактической длительности.
+        //
+        // Делим именно ДЛИНУ, а не вес: вес — это «буквенный эквивалент», где
+        // точка стоит 6,5, а цифра 3,5, и его отношение к длине на живых
+        // репликах 1,06-2,10. Поделив вес на темп в знаках, мы завышали
+        // длительность вдвое на коротких репликах — то есть ровно на тех, ради
+        // которых переписан промпт. Вес продолжает распределять позицию ВНУТРИ
+        // этой длительности, и это верно: пауза на точке звучит дольше буквы.
+        this.expectedMs = Math.max(1, (this.speechText.length / this.charsPerSec) * 1000);
+        this.totalMs = 0;
+        this.paintedChars = -1;
+        this.paceFrom = since;      // от какого мига считать слышимую паузу
+        this.paceMs = null;
         let done = {};
         let chunks = 0;
         let failure = null;
+        let interrupted = false;
 
         const response = await fetch(`${this.apiBaseUrl}/api/trainer/speak`, {
             method: 'POST',
             headers: { ...this.headers(), 'Content-Type': 'application/json' },
             body: JSON.stringify({ text, turn_id: turnId, session_id: sessionId }),
         });
+        if (!mine()) { try { response.body?.cancel(); } catch { /* уже закрыт */ } 
+                       return { superseded: true }; }
         if (!response.ok || !response.body) {
-            this.speaking = false;
+            this.streaming = false;
+            this.speechText = '';
             throw new Error(`озвучка недоступна: HTTP ${response.status}`);
         }
 
+        this.painter = setInterval(() => this.paint(), PAINT_MS);
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
         let stopped = false;
-        while (!stopped) {
-            const { value, done: finished } = await reader.read();
-            if (finished) break;
-            buffer += decoder.decode(value, { stream: true });
-            const parts = buffer.split('\n\n');
-            buffer = parts.pop() || '';
-            for (const part of parts) {
-                const line = part.trim();
-                if (!line.startsWith('data:')) continue;
-                let payload;
-                try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                if (payload.t === 'start') {
-                    this.rate = payload.rate || this.rate;
-                } else if (payload.t === 'audio') {
-                    // Перебили — дочитывать поток незачем: остаток реплики уже
-                    // не прозвучит. Раньше здесь был break из внутреннего цикла,
-                    // и чтение продолжалось до конца синтеза впустую.
-                    if (!this.speaking) { stopped = true; break; }
-                    if (firstAudibleMs === null && since) {
-                        firstAudibleMs = Math.round(performance.now() - since);
+        try {
+            while (!stopped) {
+                const { value, done: finished } = await reader.read();
+                if (finished) break;
+                buffer += decoder.decode(value, { stream: true });
+                const parts = buffer.split('\n\n');
+                buffer = parts.pop() || '';
+                for (const part of parts) {
+                    const line = part.trim();
+                    if (!line.startsWith('data:')) continue;
+                    let payload;
+                    try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                    if (payload.t === 'start') {
+                        this.rate = payload.rate || this.rate;
+                    } else if (payload.t === 'audio') {
+                        // Перебили — дочитывать поток незачем: остаток реплики уже
+                        // не прозвучит. Раньше здесь был break из внутреннего цикла,
+                        // и чтение продолжалось до конца синтеза впустую.
+                        if (!this.streaming) { stopped = true; break; }
+                        chunks += 1;
+                        try {
+                            this.playChunk(payload.b64, this.rate);
+                        } catch (error) {
+                            // Нечётная длина куска или ноль отсчётов роняли весь
+                            // цикл, и объект оставался «говорящим» навсегда.
+                            failure = `кусок звука не воспроизвёлся: ${error.message}`;
+                            this.emit('error', { where: 'tts', message: failure });
+                            stopped = true;
+                            break;
+                        }
+                    } else if (payload.t === 'done') {
+                        done = payload;
+                    } else if (payload.t === 'error') {
+                        failure = payload.message;
+                        this.emit('error', { where: 'tts', message: payload.message });
                     }
-                    chunks += 1;
-                    this.playChunk(payload.b64, this.rate);
-                } else if (payload.t === 'done') {
-                    done = payload;
-                } else if (payload.t === 'error') {
-                    failure = payload.message;
-                    this.emit('error', { where: 'tts', message: payload.message });
                 }
             }
+            if (stopped) { try { await reader.cancel(); } catch { /* поток уже закрыт */ } }
+
+            // ПЕРЕБИЛИ ЛИ — узнаём по флагу потока, который гасит bargeIn, а НЕ
+            // по `stopped`. Разница не теоретическая: все куски звука успевают
+            // приехать за первые полсекунды, а перебивают на второй, и тогда
+            // ни одного события 'audio' после перебивания уже не приходит —
+            // `stopped` так и остаётся ложью. Прогон в Chrome показал, чем это
+            // кончается: реплика отчитывалась как «прозвучало 0 из 81 знака»,
+            // текст на экране обнулялся, и модель считала, что не сказала
+            // ничего, — то есть договаривать было бы нечего.
+            if (this.streaming) {
+                // Поток кончился — длительность известна точно, и разрез
+                // считается по ней, а не по оценке темпа.
+                this.totalMs = this.scheduledMs || done.audio_ms || this.expectedMs;
+                if (chunks) await this.untilQuiet();
+            } else if (!this.totalMs) {
+                // Перебили ДО конца потока: полной длительности синтеза мы уже
+                // не узнаем, но оставлять ноль нельзя — по нулю реплика
+                // выпадает из показателя «Дослушано», и он считается только по
+                // недоперебитым, то есть систематически завышен.
+                this.totalMs = done.audio_ms || this.expectedMs;
+            }
+            // Проверять ПОСЛЕ ожидания, а не до: поток озвучки закрывается за
+            // полсекунды, а речь звучит три, и перебивают как раз в эти три.
+            // Прогон в Chrome ловил ровно это — проверка стояла раньше
+            // ожидания, флаг оставался ложью, и реплика отчитывалась как
+            // «прозвучало 0 из 81 знака».
+            interrupted = !this.streaming;
+        } finally {
+            clearInterval(this.painter);
+            this.painter = null;
         }
-        if (stopped) { try { await reader.cancel(); } catch { /* поток уже закрыт */ } }
-        this.speaking = false;
+
+        if (!mine()) return { superseded: true };
+        this.streaming = false;
         // Молчание — это отказ, а не успех. Сервер закрывал соединение с нулём
         // байт, раздел досылал 'done', и человек видел текст реплики при полной
         // тишине. Теперь тишина доходит наверх ошибкой с причиной.
-        if (!chunks && !stopped) {
+        if (!chunks && !interrupted) {
+            this.speechText = '';
             throw new Error(failure || done.error || 'провайдер не дал ни одного куска звука');
         }
-        return { ...done, voice_to_voice_ms: firstAudibleMs };
+
+        // Перебили — услышанное уже посчитано в момент обрыва, пересчитывать
+        // его нельзя: часы к этому моменту сброшены и дадут ноль.
+        //
+        // Не перебили — значит прозвучало ВСЁ, и считать тут тоже нечего.
+        // Пересчёт здесь врал: ожидание конца речи выходит с допуском в 20 мс,
+        // а разрез по знакам требует строгого равенства, и дозвучавшая реплика
+        // получала «длина минус один знак» и отметку «оборвана».
+        // Отказ провайдера посреди речи — это тоже обрыв, хотя поток закрылся
+        // штатно: синтез не договорил, и человек этого не слышал.
+        const cutByProvider = !!failure && chunks > 0;
+        const spoken = interrupted ? this.lastSpoken : {
+            turn_id: turnId,
+            spoken_ms: Math.round(this.scheduledMs),
+            spoken_chars: cutByProvider
+                ? spokenChars(this.speechText, this.playedMs(), this.expectedMs)
+                : this.speechText.length,
+            cut: cutByProvider,
+        };
+        if (!interrupted) {
+            this.paint();
+            this.lastSpoken = spoken;
+            this.stopPlayback();
+        }
+        this.emit('speech_end', {
+            turn_id: turnId,
+            spoken_ms: spoken?.spoken_ms ?? 0,
+            spoken_chars: spoken?.spoken_chars ?? this.speechText.length,
+            total_ms: this.totalMs,
+            cut: !!spoken?.cut,
+        });
+        this.speechText = '';
+        return { ...done, voice_to_voice_ms: this.paceMs, spoken };
     }
 
     // ── остановка ────────────────────────────────────────────────────────────
 
     stop() {
+        this.closingOnPurpose = true;
+        this.speakId += 1;            // хвосты незавершённых реплик обесцениваем
+        clearTimeout(this.backoffTimer);
         clearInterval(this.keepalive);
+        clearInterval(this.painter);
+        this.painter = null;
+        // Будим ожидание конца речи, а не просто гасим его таймер: иначе
+        // обещание в speak() не исполнится никогда и «Завершить» повиснет.
+        if (this.quietDone) this.quietDone();
+        clearInterval(this.quietTimer);
+        this.quietTimer = null;
         clearTimeout(this.holdTimer);
+        this.streaming = false;
         this.stopPlayback();
+        if (this.voiceGain) {
+            try { this.voiceGain.disconnect(); } catch { /* контекст уже закрыт */ }
+            this.voiceGain = null;
+        }
+        if (this.phone) { this.phone.dispose(); this.phone = null; }
         if (this.node) this.node.port.onmessage = null;
         if (this.stt && this.stt.readyState === WebSocket.OPEN) {
             try { this.stt.send(''); } catch { /* уже закрыт */ }

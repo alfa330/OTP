@@ -163,6 +163,20 @@ _MIGRATIONS: list[str] = [
     # от endpoint_delay_ms: там задержка распознавания, здесь наша собственная
     # выдержка против того, чтобы перебить человека на середине предложения.
     "ALTER TABLE trainer_turns ADD COLUMN IF NOT EXISTS hold_ms INTEGER",
+    # Сколько миллисекунд реплики собеседника РЕАЛЬНО дошло до уха и на каком
+    # символе она оборвалась. Меряет только браузер: сервер знает, что клиент
+    # закрыл поток, но не знает, что успело прозвучать в колонках. Без этих двух
+    # чисел нельзя ни договорить остаток, ни отдать модели услышанное — а до
+    # 22.08.2026 на проде 20 % реплик собеседника не звучали ВООБЩЕ, и отличить
+    # их от прозвучавших было нечем.
+    "ALTER TABLE trainer_turns ADD COLUMN IF NOT EXISTS spoken_ms INTEGER",
+    "ALTER TABLE trainer_turns ADD COLUMN IF NOT EXISTS spoken_chars INTEGER",
+    # NULL/FALSE = прозвучала целиком. Так лежат все реплики, записанные до этой
+    # миграции, и поведение для них не меняется.
+    "ALTER TABLE trainer_turns ADD COLUMN IF NOT EXISTS speech_cut BOOLEAN NOT NULL DEFAULT FALSE",
+    # Синтезировано ≠ услышано. audio_out_ms остаётся ЦЕНОЙ (за синтез платим в
+    # любом случае), а это — качеством: их отношение и есть цена перебиваний.
+    "ALTER TABLE trainer_sessions ADD COLUMN IF NOT EXISTS audio_heard_ms INTEGER NOT NULL DEFAULT 0",
 ]
 
 

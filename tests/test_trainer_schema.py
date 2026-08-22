@@ -93,12 +93,26 @@ def test_schema_is_idempotent_by_construction():
 
 
 def _columns_of(table):
+    """Колонки таблицы: и из CREATE TABLE, и из более поздних ALTER.
+
+    Читать только CREATE TABLE нельзя: колонки, добавленные после первого
+    выката, живут в _MIGRATIONS — там и только там, потому что на уже
+    развёрнутой базе CREATE TABLE IF NOT EXISTS ничего не меняет.
+    """
+    found = None
     for sql in statements():
         created = re.search(rf'CREATE TABLE IF NOT EXISTS {table} \((.*)\)',
                             sql, re.IGNORECASE | re.DOTALL)
         if created:
-            return {c.lower() for c in re.findall(r'(?:^|,)\s*(\w+)\s+[A-Z]', created.group(1))}
-    raise AssertionError(f'таблица {table} не создаётся')
+            found = {c.lower() for c in re.findall(r'(?:^|,)\s*(\w+)\s+[A-Z]', created.group(1))}
+            continue
+        added = re.search(rf'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS (\w+)',
+                          sql, re.IGNORECASE)
+        if added and found is not None:
+            found.add(added.group(1).lower())
+    if found is None:
+        raise AssertionError(f'таблица {table} не создаётся')
+    return found
 
 
 def test_turn_keeps_every_measurement():
@@ -114,6 +128,11 @@ def test_turn_keeps_every_measurement():
         'llm_input_tokens', 'llm_output_tokens',
         'tts_model', 'tts_ttfb_ms', 'tts_audio_ms', 'tts_bytes',
         'voice_to_voice_ms', 'barge_in', 'sources',
+        'kind', 'hold_ms',
+        # Сколько реплики собеседника РЕАЛЬНО дошло до уха. Без этих трёх
+        # колонок «синтезировано» и «услышано» неразличимы, а на проде
+        # 22.08.2026 пятая часть реплик не звучала вовсе.
+        'spoken_ms', 'spoken_chars', 'speech_cut',
     ):
         assert name in columns, f'в trainer_turns потерян замер {name}'
 
@@ -122,6 +141,8 @@ def test_session_keeps_cost_with_its_rates():
     """Стоимость хранится вместе со ставками, по которым посчитана: тарифы
     меняются, а вопрос «сколько стоил вон тот прогон» задаётся задним числом."""
     columns = _columns_of('trainer_sessions')
+    # audio_heard_ms рядом с audio_out_ms: первое — качество, второе — цена.
+    assert 'audio_heard_ms' in columns, 'потеряно «сколько человек услышал»'
     for name in ('cost_usd', 'cost_breakdown', 'rates', 'mode',
                  'voice_to_voice_p50', 'voice_to_voice_max'):
         assert name in columns, f'в trainer_sessions потеряна колонка {name}'

@@ -28,7 +28,10 @@ class Cursor:
         self.executed = []
         self._last = ''
         self.turn_id = 100
-        self.history = []          # (role, text, kind) — разговор до текущей реплики
+        # (role, text, kind, speech_cut, spoken_chars) — ровно то, что отдаёт
+        # _load_history. Две последние колонки говорят, сколько реплики
+        # собеседника человек реально услышал.
+        self.history = []
 
     def execute(self, sql, params=None):
         self._last = ' '.join(str(sql).split())
@@ -310,8 +313,8 @@ class MentorMemoryTest(unittest.TestCase):
     def test_history_reaches_the_engine_with_roles(self):
         spy = Spy()
         client, db = build()
-        db.cursor.history = [('asker', 'Расскажи про акцию 7 Қазына', None),
-                             ('mentor', 'Акция для курьеров.', 'answer')]
+        db.cursor.history = [('asker', 'Расскажи про акцию 7 Қазына', None, False, None),
+                             ('mentor', 'Акция для курьеров.', 'answer', False, None)]
         with mock.patch.dict(sys.modules, fake_wiki(spy)):
             ask(client, 'А кому она положена?')
         self.assertEqual(
@@ -325,8 +328,8 @@ class MentorMemoryTest(unittest.TestCase):
         """Иначе разговор ходит по кругу — на проде наставник переспросил дважды."""
         spy = Spy()
         client, db = build()
-        db.cursor.history = [('asker', 'Жетіқазына', None),
-                             ('mentor', 'Уточните вопрос…', 'clarify')]
+        db.cursor.history = [('asker', 'Жетіқазына', None, False, None),
+                             ('mentor', 'Уточните вопрос…', 'clarify', False, None)]
         with mock.patch.dict(sys.modules, fake_wiki(spy)):
             ask(client, 'Жеті қазына')
         self.assertEqual([False], spy.allow_clarify)
@@ -336,8 +339,8 @@ class MentorMemoryTest(unittest.TestCase):
         spy = Spy()
         spy.enriched = True
         client, db = build()
-        db.cursor.history = [('asker', 'Расскажи про акцию 7 Қазына', None),
-                             ('mentor', 'Акция для курьеров.', 'answer')]
+        db.cursor.history = [('asker', 'Расскажи про акцию 7 Қазына', None, False, None),
+                             ('mentor', 'Акция для курьеров.', 'answer', False, None)]
         with mock.patch.dict(sys.modules, fake_wiki(spy)):
             ask(client, 'Жеті қазына')
         self.assertEqual([False], spy.allow_clarify)

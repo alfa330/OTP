@@ -171,7 +171,14 @@ class ScenarioTest(unittest.TestCase):
     def test_common_rules_forbid_helping(self):
         from voice_trainer import scenarios
 
-        self.assertIn('НИКОГДА не помогаешь', scenarios.COMMON)
+        # Роль водителя — ЕДИНСТВЕННАЯ в системе, которой помогать запрещено:
+        # решение владельца от 22.08.2026, когда мастер-промпт всех остальных
+        # помощников, наоборот, обязали стараться помочь. Проверяем без оглядки
+        # на регистр: заголовки правил пишутся прописными.
+        self.assertIn('никогда не помогаешь оператору', scenarios.COMMON.lower())
+        # И правило обязано доезжать до модели, а не просто лежать в файле.
+        self.assertIn('никогда не помогаешь оператору',
+                      scenarios.system_prompt('cancel_calm').lower())
 
 
 
@@ -202,8 +209,49 @@ class VoiceTest(unittest.TestCase):
         тест обязан упасть, а не молча пропустить его в набор."""
         from voice_trainer import scenarios
 
+        # Порог теперь не «мужской диапазон вообще», а замеренный по НАШИМ
+        # водителям: 220 боевых записей Oktell дали медиану 131 Гц и p90 163.
+        # Голос выше этого в трубке звучит не как водитель.
         for voice, f0 in scenarios.MALE_VOICES.items():
-            self.assertLess(f0, 160, f'{voice}: {f0} Гц — это не мужской диапазон')
+            self.assertLess(f0, 163, f'{voice}: {f0} Гц — выше p90 живых водителей')
+
+    def test_every_driver_scenario_has_a_speaking_manner(self):
+        """У каждого персонажа своя манера речи, и она доезжает до синтеза.
+
+        Замер 22.08.2026: указание стиля исполняется моделью (темп 1,60 против
+        2,62 слов/с) и опускает основной тон со 134-178 Гц до 113-131 — то есть
+        в коридор живых водителей. Без стиля голос сам по себе туда не попадает.
+        """
+        from voice_trainer import scenarios
+
+        for key in scenarios.SCENARIOS:
+            self.assertIn(key, scenarios.TTS_STYLE, f'у сценария {key} нет манеры речи')
+            head = scenarios.say_exactly(key)
+            self.assertIn(scenarios.TTS_STYLE[key], head)
+            # Команда «произнеси ровно» обязана быть ПОСЛЕДНЕЙ строкой перед
+            # текстом, иначе модель зачитывает вслух сам стиль.
+            self.assertTrue(head.rstrip().endswith(scenarios.SAY_EXACTLY.strip()))
+        # У наставника манеры нет: его озвучка не должна поменяться заодно.
+        self.assertEqual(scenarios.SAY_EXACTLY, scenarios.say_exactly(None))
+
+    def test_personas_contain_nothing_the_prompt_forbids(self):
+        """Факты персонажа произносят ВСЛУХ — значит в них нельзя ни латиницы,
+        ни цифр знаками.
+
+        Пункт 19 промпта это запрещает, но сами персонажи содержали ровно то,
+        что он запрещает: «машина Kia Rio, госномер 847 KZA 02», «карта Kaspi»,
+        «сумма 84 500 тенге». Это не фон, а список фактов, которые стажёр по
+        заданию обязан выяснить, — то есть они звучат в каждом прогоне.
+        """
+        import re
+
+        from voice_trainer import scenarios
+
+        for key, scenario in scenarios.SCENARIOS.items():
+            for field in ('persona', 'opening'):
+                found = re.findall(r'[A-Za-z]{2,}|\d', scenario[field])
+                self.assertEqual([], found,
+                                 f'{key}.{field}: синтез прочтёт это кашей — {found}')
 
     def test_scenarios_use_distinct_voices(self):
         """Персонажи должны различаться на слух, иначе сценарии сливаются."""
