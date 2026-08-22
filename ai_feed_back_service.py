@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import sys
 import httpx
 from loguru import logger
 from database import db, IT_TICKET_CATALOG
@@ -8,10 +9,75 @@ from collections import defaultdict
 import os
 from datetime import datetime, date
 
+# loguru пишет СВОИМ стоком, мимо stdlib logging, поэтому фильтр секретов
+# монолита (_SecretScrubber в bot_schedule2.py) его записи не видит вовсе.
+# А у стока по умолчанию diagnose=True: при исключении loguru печатает
+# ЗНАЧЕНИЯ переменных из кадров стека — то есть заголовки с ключом целиком.
+# Проверено на loguru 0.7.3: ключ выходил в stderr открытым текстом.
+logger.remove()
+logger.add(sys.stderr, level=os.getenv('LOGURU_LEVEL', 'INFO'),
+           backtrace=True, diagnose=False)
+
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-# Ключ Gemini передаём ЗАГОЛОВКОМ: httpx пишет в лог полный URL, и
-# '?key=...' оказывался в логах Render открытым текстом (22.08.2026).
-GEMINI_HEADERS = {'x-goog-api-key': GEMINI_API_KEY or ''}
+
+# По умолчанию ходим в Gemini через VERTEX AI, а не по ключу AI Studio.
+#
+# Дело не только в биллинге (Vertex платит с общего счёта проекта, а ключ
+# AI Studio живёт на предоплаченных кредитах и отдаёт 429, когда те кончились;
+# gemini-2.5-flash и 2.5-flash-lite новым проектам он вообще не выдаёт — 404).
+# Дело и в безопасности: у Vertex постоянного ключа НЕТ. Авторизация — короткий
+# OAuth-токен сервисного аккаунта, всегда в заголовке, так что утечь в адресе
+# там нечему. Ключ AI Studio 22.08.2026 утёк именно через адрес. Тем же путём
+# давно ходит помощник вики — см. wiki/ai/providers.py.
+VERTEX_REGION = os.getenv('GEMINI_VERTEX_REGION', 'global')
+
+_vertex_credentials = None
+
+
+def _vertex_token():
+    """Токен сервисного аккаунта. Кредентиалы кешируем: они обновляются сами."""
+    global _vertex_credentials
+
+    if _vertex_credentials is None:
+        from google.oauth2 import service_account
+
+        from call_qa import config as qa_config
+
+        info = qa_config.google_sa_info()
+        if not info:
+            return None, None
+        _vertex_credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/cloud-platform'])
+    if not _vertex_credentials.valid:
+        import google.auth.transport.requests as gtr
+
+        _vertex_credentials.refresh(gtr.Request())
+    return _vertex_credentials.token, _vertex_credentials.project_id
+
+
+def gemini_endpoint(model: str):
+    """Адрес и заголовки для одной модели: сначала Vertex, потом ключ AI Studio.
+
+    Ключ остаётся запасным путём — на случай окружения без сервисного аккаунта.
+    Секрет в обоих случаях уходит ЗАГОЛОВКОМ и никогда не попадает в адрес:
+    httpx пишет в лог полный URL на уровне INFO.
+    """
+    if os.getenv('GOOGLE_APPLICATION_CREDENTIALS_CONTENT'):
+        try:
+            token, project = _vertex_token()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f'Vertex недоступен ({type(exc).__name__}), '
+                           f'идём по ключу AI Studio')
+            token = None
+        if token:
+            host = ('aiplatform.googleapis.com' if VERTEX_REGION == 'global'
+                    else f'{VERTEX_REGION}-aiplatform.googleapis.com')
+            return (f'https://{host}/v1/projects/{project}/locations/{VERTEX_REGION}'
+                    f'/publishers/google/models/{model}:generateContent',
+                    {'Authorization': f'Bearer {token}'})
+    return (f'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'{model}:generateContent',
+            {'x-goog-api-key': GEMINI_API_KEY or ''})
 
 MASTER_PROMPT_MONTHLY = """ТЫ — Dos, опытный и дружелюбный тренер/ментор для операторов колл-центра.
 Твоя задача — проанализировать результаты оценок за выбранный месяц и сгенерировать развёрнутую, практичную обратную связь на основе мониторинговой шкалы.
@@ -279,16 +345,16 @@ async def generate_birthday_greeting_with_ai(user_payload: dict, for_date: str) 
         f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
     )
 
-    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    api_url, api_headers = gemini_endpoint("gemini-2.5-flash")
     payload = {
-        "contents": [{"parts": [{"text": full_prompt}]}],
+        "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
         "generationConfig": generation_config,
         "safetySettings": safety_settings,
     }
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(api_url, json=payload, headers=GEMINI_HEADERS)
+            response = await client.post(api_url, json=payload, headers=api_headers)
             response.raise_for_status()
             result = response.json()
             if "candidates" not in result or not result["candidates"]:
@@ -545,7 +611,11 @@ GEMINI_FALLBACK_STATUS = GEMINI_RETRYABLE_STATUS | {404}
 # Порядок — по скорости, а не по «крутизне»: задача (разобрать описание и собрать JSON)
 # простая, и самая лёгкая модель решает её не хуже, но заметно быстрее. У flash-lite ещё и
 # выше лимит бесплатных запросов, поэтому она первая.
-DEFAULT_GEMINI_MODEL_CHAIN = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"]
+# gemini-2.0-flash убрана 22.08.2026: Google её отключил совсем, на любой запрос
+# 404 «no longer available». Третьей ступенью взята gemini-3.5-flash-lite —
+# проверена на Vertex тем же промптом тикета.
+DEFAULT_GEMINI_MODEL_CHAIN = ["gemini-2.5-flash-lite", "gemini-2.5-flash",
+                              "gemini-3.5-flash-lite"]
 
 # Модели, у которых «мышление» (reasoning) можно выключить нулевым бюджетом. Для этой задачи
 # оно не нужно, а стоит нескольких секунд и токенов на каждый запрос.
@@ -652,13 +722,10 @@ async def _gemini_generate_once(model: str, prompt: str, timeout: float, attempt
     try_next=True → имеет смысл попробовать следующую модель цепочки (перегрузка/таймаут/404).
     result: распарсенный dict при успехе; {'error': <code>} или None при ошибке.
     """
-    api_url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent"
-    )
+    api_url, api_headers = gemini_endpoint(model)
     plain_config = False
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": _gemini_generation_config(model),
         "safetySettings": safety_settings,
     }
@@ -667,7 +734,7 @@ async def _gemini_generate_once(model: str, prompt: str, timeout: float, attempt
         attempt += 1
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(api_url, json=payload, headers=GEMINI_HEADERS)
+                response = await client.post(api_url, json=payload, headers=api_headers)
 
             # 400 на ускоренной конфигурации (схема ответа / нулевой бюджет мышления)
             # — один раз переспрашиваем ту же модель «как раньше», без этих полей.
@@ -1022,16 +1089,16 @@ async def _legacy_monthly_feedback_continuation(operator_id, month):
         f"ВЕРНИТЕ JSON ПО ШАБЛОНУ."
     )
 
-    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    api_url, api_headers = gemini_endpoint("gemini-2.5-flash")
     payload = {
-        "contents": [{"parts": [{"text": full_prompt}]}],
+        "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
         "generationConfig": generation_config,
         "safetySettings": safety_settings,
     }
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(api_url, json=payload, headers=GEMINI_HEADERS)
+            response = await client.post(api_url, json=payload, headers=api_headers)
             response.raise_for_status()
             result = response.json()
             if "candidates" not in result or not result["candidates"]:
