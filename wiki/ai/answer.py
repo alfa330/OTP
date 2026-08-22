@@ -229,6 +229,17 @@ def should_clarify(question, chunks):
     # человек уже назвал вещь своим именем.
     if any(chunk.get('strict_hit') for chunk in chunks):
         return False, None
+    # …но strict_hit требует, чтобы в куске нашлись ВСЕ слова вопроса разом, и
+    # этого хватает не всегда. «Что за акция 7 Казына?»: слово «казына» лежит
+    # ровно в одном куске на всю вику, а слова «акция» в этом куске нет — он
+    # табличная строка, — и строгое совпадение не срабатывает. Гейт переспрашивал
+    # про вещь, названную своим именем (проверено на проде 22.08.2026).
+    #
+    # Поэтому второй признак того же самого: слово из вопроса встречается в
+    # найденном тексте и принадлежит РОВНО ОДНОЙ статье. Тогда спрашивать не о
+    # чем — переспросить хуже, чем ответить.
+    if named_term(question, chunks):
+        return False, None
     top = max((chunk.get('similarity') or 0) for chunk in chunks)
     if top >= CLARIFY_SIMILARITY:
         return False, None
@@ -237,6 +248,30 @@ def should_clarify(question, chunks):
         return False, None
     return True, (f'коротко ({len(words)} сл.), лучшая близость {top:.3f} < '
                   f'{CLARIFY_SIMILARITY}, попадания в {len(articles)} разных статей')
+
+
+def named_term(question, chunks):
+    """Назвал ли человек вещь своим именем: слово из вопроса живёт в одной статье.
+
+    Сверяем СВЁРНУТЫЕ формы: в вике «7 Қазына», а спрашивают «7 Казына» —
+    казахские буквы должны перестать различаться, ровно как в поиске.
+
+    Слова короче четырёх букв не берём: «все», «как», «что» встречаются где
+    угодно, и одна статья у них случайна.
+    """
+    from ..text import fold_kazakh
+
+    words = [fold_kazakh(word) for word in meaningful_words(question) if len(word) >= 4]
+    if not words:
+        return False
+    folded = [(chunk.get('article_id'),
+               fold_kazakh(f"{chunk.get('heading_path') or ''} {chunk.get('text') or ''}".lower()))
+              for chunk in chunks]
+    for word in words:
+        owners = {article_id for article_id, text in folded if word in text}
+        if len(owners) == 1:
+            return True
+    return False
 
 
 def usable_chunks(chunks, floor=STRICT_FLOOR):

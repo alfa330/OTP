@@ -26,6 +26,7 @@ from wiki.text import (
     fix_keyboard_layout,
     normalize_text,
     query_variants,
+    split_glued_numeral,
     search_aliases_for_article,
     transliterate_cyrillic_to_latin,
     transliterate_latin_to_cyrillic,
@@ -550,3 +551,36 @@ class PrefixTsqueryTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class GluedNumeralTest(unittest.TestCase):
+    """Слипшееся числительное в названии.
+
+    Акция записана в вике как «7 Қазына», а называют её слитно — распознавание
+    речи так и отдаёт: «Жетіқазына». Слитный токен не совпадает ни с чем: в куске
+    лежат «7» и «казына», и редкая лексема «казын», по которой этот кусок только
+    и находится, в запрос не попадает вовсе. Проверено на проде 22.08.2026 —
+    помощник вики отвечал «в доступных вам статьях этого нет», хотя акция есть.
+    """
+
+    def test_splits_a_kazakh_numeral_prefix(self):
+        self.assertEqual('жеті қазына', split_glued_numeral('Жетіқазына'))
+        self.assertIn('жеті қазына',
+                      split_glued_numeral('Расскажи всё про акцию «Жетіқазына».'))
+
+    def test_variant_reaches_the_search(self):
+        variants = query_variants('Расскажи всё про акцию «Жетіқазына».')
+        self.assertTrue(any('жеті қазына' in v for v in variants),
+                        'разрезанный вариант не попал в поиск')
+        self.assertTrue(any('жети казына' in v for v in variants),
+                        'свёрнутый разрезанный вариант тоже нужен')
+
+    def test_russian_words_are_never_split(self):
+        """Русские числительные — начало обычных слов, резать по ним нельзя."""
+        for word in ('онлайн', 'одинаковый', 'двигатель', 'семья', 'третий'):
+            self.assertEqual('', split_glued_numeral(word), word)
+
+    def test_short_remainder_is_not_a_name(self):
+        """«бесік» — колыбель, а не «бес» + «ік»."""
+        for word in ('бесік', 'бірлік', 'екеу'):
+            self.assertEqual('', split_glued_numeral(word), word)

@@ -72,6 +72,37 @@ class ClarifyGateTest(unittest.TestCase):
         need, _ = ai_answer.should_clarify('что за акция Лимонопад', rows)
         self.assertFalse(need)
 
+    def test_named_thing_in_one_article_never_clarifies(self):
+        """Тот же смысл, что у strict_hit, но там, где strict_hit не срабатывает.
+
+        strict_hit требует, чтобы в куске нашлись ВСЕ слова вопроса разом.
+        «Что за акция 7 Казына?»: слово «казына» лежит ровно в одном куске на всю
+        вику, а слова «акция» в этом куске НЕТ — он табличная строка. Гейт
+        переспрашивал про вещь, названную своим именем (замер на проде
+        22.08.2026, тот же вопрос в помощнике вики и в наставнике).
+        """
+        rows = [chunk(article_id=33, similarity=0.68,
+                      text='№: 6; Город: Все города; Название: 7 Қазына;',
+                      heading='Розыгрыши Такси.Про 2026'),
+                chunk(chunk_id=2, article_id=11, similarity=0.67,
+                      text='Акция «Байга»: условия участия.', heading='Акции')]
+        need, _ = ai_answer.should_clarify('Что за акция 7 Казына?', rows)
+        self.assertFalse(need)
+
+    def test_named_thing_matches_across_kazakh_spelling(self):
+        """В вике «Қазына», спрашивают «казына» — буквы различаться не должны."""
+        rows = [chunk(article_id=33, similarity=0.68,
+                      text='Название: 7 Қазына; Даты: 01.07.2026'),
+                chunk(chunk_id=2, article_id=11, similarity=0.67, text='Другая акция.')]
+        self.assertTrue(ai_answer.named_term('Акция «Семь казына».', rows))
+
+    def test_common_word_is_not_a_name(self):
+        """Слово, встречающееся в одной статье случайно, именем не является:
+        короткие и частые слова не должны отключать гейт."""
+        rows = [chunk(article_id=10, text='Минимальный срок аренды — 14 дней.'),
+                chunk(chunk_id=2, article_id=11, text='Стоимость аренды в Алматы.')]
+        self.assertFalse(ai_answer.named_term('что с машиной', rows))
+
     def test_short_low_similarity_across_articles_clarifies(self):
         rows = [chunk(similarity=0.72, article_id=10),
                 chunk(chunk_id=2, similarity=0.71, article_id=11)]
