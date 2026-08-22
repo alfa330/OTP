@@ -68,6 +68,7 @@ class Spy:
         self.embed_calls = 0
         self.systems = []
         self.max_tokens = []
+        self.chains = []
         self.embed_ms = embed_ms
         self.embed_started = None
         self.search_started = None
@@ -114,6 +115,7 @@ class Spy:
     def generate(self, system, _prompt, *, history=(), max_tokens=None, chain=None):
         self.systems.append(system)
         self.max_tokens.append(max_tokens)
+        self.chains.append(chain)
         return 'Коротко и по делу.', {'usage': {'prompt_tokens': 10, 'completion_tokens': 5}}
 
 
@@ -182,6 +184,28 @@ class MentorSpeedTest(unittest.TestCase):
         # Краткость не должна покупаться честностью — правило про «этого нет».
         self.assertIn('если во фрагментах ответа нет', system)
         self.assertEqual([400], spy.max_tokens)
+
+    def test_mentor_asks_for_a_faster_model_than_the_text_assistant(self):
+        """У наставника своя цепочка: слушателю секунда паузы весит иначе.
+
+        Замер 22.08.2026 на пяти случаях: gemini-3.5-flash — 1174 мс медиана
+        против 2071 мс у gemini-3-flash-preview, при той же честности и тех же
+        числах. Резерв остаётся моделью помощника вики.
+        """
+        spy = Spy()
+        client, _ = build()
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client)
+        self.assertEqual([(('vertex', 'gemini-3.5-flash'),
+                           ('vertex', 'gemini-3-flash-preview'))], spy.chains)
+
+    def test_empty_chain_returns_the_mentor_to_the_wiki_chain(self):
+        """Пустая переменная — возврат к цепочке помощника вики без правки кода."""
+        spy = Spy()
+        client, _ = build({'TRAINER_MENTOR_CHAIN': ''})
+        with mock.patch.dict(sys.modules, fake_wiki(spy)):
+            ask(client)
+        self.assertEqual([None], spy.chains)
 
     def test_max_tokens_is_a_knob(self):
         spy = Spy()

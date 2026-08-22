@@ -34,7 +34,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import wraps
+from functools import lru_cache, wraps
 
 import httpx
 from flask import Blueprint, jsonify, request
@@ -78,6 +78,23 @@ def _vertex_url(project, region, model, method):
             else f'{region}-aiplatform.googleapis.com')
     return (f'https://{host}/v1/projects/{project}/locations/{region}'
             f'/publishers/google/models/{model}:{method}')
+
+
+@lru_cache(maxsize=1)
+def _http():
+    """Один клиент на процесс: TLS-рукопожатие не оплачивается каждой репликой.
+
+    Раздел ходит к Vertex дважды за реплику — за текстом и за озвучкой, — и
+    каждый раз открывал своё соединение. Рукопожатие стоит двух лишних обходов
+    и сидит ровно в паузе перед голосом. Замер 22.08.2026 на одном запросе к
+    Vertex: по новому соединению 626 мс, по готовому 155 мс.
+
+    httpx.Client потокобезопасен, а waitress держит несколько потоков — отсюда
+    запас соединений в пуле.
+    """
+    return httpx.Client(timeout=90,
+                        limits=httpx.Limits(max_keepalive_connections=8,
+                                            max_connections=16))
 
 
 def _gemini_headers(key):
@@ -374,7 +391,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
             },
         }
         headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
-        with httpx.stream('POST', url, headers=headers, json=body, timeout=90) as response:
+        with _http().stream('POST', url, headers=headers, json=body) as response:
             if response.status_code >= 400:
                 detail = response.read().decode('utf-8', 'ignore')
                 raise RuntimeError(f'HTTP {response.status_code} {detail[:160]}')
@@ -1008,6 +1025,39 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
                 fails.append(f'{name} — {str(exc)[:160]}')
         return '', {'error': '; '.join(fails)}
 
+    def _mentor_chain():
+        """Цепочка моделей наставника — своя, и это единственное расхождение с
+        чат-помощником вики по существу.
+
+        У помощника первым стоит gemini-3-flash-preview: его выбрали по КАЧЕСТВУ
+        ответа, задержка там не решала. Наставника слушают, и секунда паузы
+        весит иначе. Замер 22.08.2026 на пяти случаях (есть ответ / ответа нет /
+        конкретное число / нет инструкции / казахский), по два прогона на модель:
+
+            gemini-3-flash-preview   медиана 2071 мс
+            gemini-3.5-flash         медиана 1174 мс   ← берём
+            gemini-3.5-flash-lite    медиана  929 мс
+
+        flash-lite не взят, хотя он быстрее всех: он ужимает ответ до отказа. На
+        «что делать, если не прошёл фотоконтроль» он говорит только «в статьях
+        этого нет, обратитесь к супервайзеру» и теряет то, что рядом ИЗВЕСТНО
+        (из-за чего доступ ограничивают) — а наставник затем и нужен, чтобы это
+        рассказать. По честности и по числам все три одинаковы: и «этого нет»
+        говорят, и 11,20% называют верно, и на казахский отвечают по-казахски.
+
+        Возврат к цепочке вики — пустая TRAINER_MENTOR_CHAIN.
+        """
+        raw = (env('TRAINER_MENTOR_CHAIN',
+                   'vertex:gemini-3.5-flash,vertex:gemini-3-flash-preview') or '').strip()
+        if not raw:
+            return None                # None → generate возьмёт цепочку вики
+        out = []
+        for item in raw.split(','):
+            provider, _, model = item.strip().partition(':')
+            if provider and model:
+                out.append((provider.strip().lower(), model.strip()))
+        return tuple(out) or None
+
     # Периметр помощника — статьи, которые человеку разрешено услышать. Считать
     # его на каждую реплику незачем: за разговор права не меняются, а стоит он
     # трёх запросов в базу и полного пересчёта субъектов доступа. Держим на
@@ -1091,6 +1141,7 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         def generate(system, prompt, *, history=()):
             return ai_providers.generate(
                 system + scenarios.MENTOR_VOICE_RULES, prompt, history=history,
+                chain=_mentor_chain(),
                 max_tokens=int(env('TRAINER_MENTOR_MAX_TOKENS', '400')))
 
         # Вектор считается ПАРАЛЛЕЛЬНО с запросами в базу: это два разных конца
@@ -1147,10 +1198,10 @@ def build_trainer_blueprint(*, db, require_api_key, build_cors_preflight_respons
         token, project = _vertex_auth()
         url = _vertex_url(project, _vertex_region(), model, 'generateContent')
         headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
-        response = httpx.post(url, headers=headers, json=body, timeout=timeout)
+        response = _http().post(url, headers=headers, json=body, timeout=timeout)
         if response.status_code == 400 and 'thinkingConfig' in json.dumps(body):
             body['generationConfig'].pop('thinkingConfig', None)
-            response = httpx.post(url, headers=headers, json=body, timeout=timeout)
+            response = _http().post(url, headers=headers, json=body, timeout=timeout)
         if response.status_code >= 400:
             raise RuntimeError(f'HTTP {response.status_code} {response.text[:160]}')
         return response.json()

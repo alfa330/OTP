@@ -121,6 +121,7 @@ class FakeStream:
 
 
 def vertex_returning(*args, **kwargs):
+    """Подмена httpx.Client.stream — раздел ходит к Vertex через постоянный клиент."""
     stream = FakeStream(*args, **kwargs)
     return lambda *a, **k: stream
 
@@ -199,7 +200,7 @@ class VoiceChainTest(unittest.TestCase):
         """Частота берётся из mimeType провайдера, а не зашита в браузер."""
         client, _ = build()
         with vertex_signed_in(), \
-                mock.patch('httpx.stream', vertex_returning(chunks=[AUDIO, AUDIO], rate=16000)):
+                mock.patch('httpx.Client.stream', vertex_returning(chunks=[AUDIO, AUDIO], rate=16000)):
             events = events_of(speak(client))
         kinds = [e['t'] for e in events]
         self.assertEqual(['start', 'audio', 'audio', 'done'], kinds)
@@ -234,7 +235,7 @@ class VoiceChainTest(unittest.TestCase):
     def test_second_provider_picks_up_while_nothing_has_sounded(self):
         client, _ = build()
         with vertex_signed_in(), \
-                mock.patch('httpx.stream', vertex_returning(status=500)), \
+                mock.patch('httpx.Client.stream', vertex_returning(status=500)), \
                 mock.patch('websocket.create_connection', live_frames(*LIVE_SPEAKS)):
             events = events_of(speak(client))
         starts = [e for e in events if e['t'] == 'start']
@@ -250,7 +251,7 @@ class VoiceChainTest(unittest.TestCase):
         """
         client, _ = build()
         with vertex_signed_in(), \
-                mock.patch('httpx.stream', vertex_returning(chunks=[AUDIO, AUDIO], boom_after=1)), \
+                mock.patch('httpx.Client.stream', vertex_returning(chunks=[AUDIO, AUDIO], boom_after=1)), \
                 mock.patch('websocket.create_connection', live_frames(*LIVE_SPEAKS)):
             events = events_of(speak(client))
         self.assertEqual(1, len([e for e in events if e['t'] == 'start']))
