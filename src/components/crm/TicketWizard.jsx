@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronRight, Copy, Loader2,
-    Paperclip, Send, ShieldCheck, UserCheck, X,
+    AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, ChevronRight, Copy,
+    CornerDownRight, Loader2, Paperclip, Send, ShieldCheck, UserCheck, X,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -12,10 +12,11 @@ import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import {
     CHECKS_AFTER_GROUP, MISSING_ATTACHMENT, afterCategory, afterChecks, answerValue,
-    carryOver, checksAreComplete, checksPayload, describeSnapshot, entryCategories,
-    entryIsComplete, groupCatalog, groupIsComplete, groupsOf, hasChecks, localVerdict,
-    missingGroup, needsSaparCheck, nextStop, openStop, pairRows, periodLabel, periodOptions,
-    previousStop, referenceOptions, rowsOfGroup, saparKey, stepIsComplete, toggleCheck,
+    blockedLabel, carryOver, checksAreComplete, checksPayload, describeSnapshot,
+    entryCategories, entryIsComplete, groupCatalog, groupIsComplete, groupsOf, hasChecks,
+    localVerdict, missingGroup, needsSaparCheck, nextStop, openStop, pairRows, periodLabel,
+    periodOptions, previousStop, referenceOptions, routeNote, rowsOfGroup, saparKey,
+    stepIsComplete, toggleCheck,
 } from './wizardRules';
 
 /* Мастер обращения по сценарию (ТЗ задачи #160).
@@ -207,6 +208,24 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null }) =>
 };
 
 /* ─── Полоса исхода: не заканчивает сценарий, значит не занимает экран ────── */
+
+/* Адрес уведённой темы — строкой под её названием.
+ *
+ * Оператору это не настройка, а предупреждение: обращение по этой теме уйдёт
+ * не тем людям, чьё название стоит заголовком раздела. Молчать нельзя — он
+ * выбирает тему, глядя на заголовок, — но и в бейдж выносить незачем: адрес
+ * читают один раз, а бейджи тянут взгляд постоянно.
+ */
+const TopicRoute = ({ item }) => {
+    const target = routeNote(item);
+    if (!target) return null;
+    return (
+        <span className="mt-0.5 flex items-center gap-1 text-[11.5px] text-slate-500">
+            <CornerDownRight size={11} className="shrink-0 text-slate-400" />
+            <span className="truncate">Уйдёт в группу «{target}»</span>
+        </span>
+    );
+};
 
 const OutcomeBar = ({ verdict, onDismiss, onSwitch }) => {
     const switching = verdict.outcome === OUTCOME.SWITCH;
@@ -908,15 +927,22 @@ export default function TicketWizard({
                                                         ? 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
                                                         : 'cursor-not-allowed bg-slate-50/60 opacity-60'
                                                 }`}>
-                                            <span className="min-w-0 flex-1 text-[14px] font-medium text-slate-900">
-                                                {item.title}
+                                            <span className="min-w-0 flex-1">
+                                                <span className="block truncate text-[14px] font-medium text-slate-900">
+                                                    {item.title}
+                                                </span>
+                                                {/* Адрес пишем ТОЛЬКО у уведённой темы:
+                                                    у остальных он и есть заголовок раздела,
+                                                    а повторённый в каждой строке заголовок
+                                                    перестают читать. */}
+                                                <TopicRoute item={item} />
                                             </span>
                                             {/* «Когда используется» — под «i»: в списке
                                                 тематик столько же абзацев мешают выбирать. */}
                                             <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
                                             {item.is_ready
                                                 ? <ChevronRight size={15} className="shrink-0 text-slate-400" />
-                                                : <IosBadge tone="amber">Нет группы</IosBadge>}
+                                                : <IosBadge tone="amber">{blockedLabel(item)}</IosBadge>}
                                         </button>
                                     ))}
                                 </div>
@@ -974,14 +1000,26 @@ export default function TicketWizard({
                         )}
                         <div className="space-y-1.5">
                             {categories.map((item) => (
-                                <button key={item.key} type="button"
+                                /* Категория с неготовым адресом не нажимается по той же
+                                   причине, что и тематика в картотеке: пройти интервью и
+                                   упереться в «отправлять некуда» хуже, чем не начать. */
+                                <button key={item.key} type="button" disabled={item.is_ready === false}
                                         onClick={() => pickCategory(item.key)}
-                                        className="flex w-full items-center gap-2 rounded-2xl bg-slate-50 px-4 py-3 text-left transition-all hover:bg-slate-100 active:scale-[0.99]">
-                                    <span className="min-w-0 flex-1 text-[14px] font-medium text-slate-900">
-                                        {item.title}
+                                        className={`flex w-full items-center gap-2 rounded-2xl px-4 py-3 text-left transition-all ${
+                                            item.is_ready === false
+                                                ? 'cursor-not-allowed bg-slate-50/60 opacity-60'
+                                                : 'bg-slate-50 hover:bg-slate-100 active:scale-[0.99]'
+                                        }`}>
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block truncate text-[14px] font-medium text-slate-900">
+                                            {item.title}
+                                        </span>
+                                        <TopicRoute item={item} />
                                     </span>
                                     <InfoHint title={item.title}>{item.when_to_use}</InfoHint>
-                                    <ChevronRight size={15} className="shrink-0 text-slate-400" />
+                                    {item.is_ready === false
+                                        ? <IosBadge tone="amber">{blockedLabel(item)}</IosBadge>
+                                        : <ChevronRight size={15} className="shrink-0 text-slate-400" />}
                                 </button>
                             ))}
                         </div>

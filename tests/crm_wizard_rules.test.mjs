@@ -20,7 +20,7 @@ import {
   visibleSteps,
   afterCategory, afterChecks, describeSnapshot, entryCategories, entryIsComplete,
   needsSaparCheck, nextStop, openStop, pairRows, periodLabel, periodOptions,
-  previousStop, saparGroup, saparKey,
+  blockedLabel, previousStop, routeNote, saparGroup, saparKey,
 } from '../src/components/crm/wizardRules.js';
 
 /* Эти тесты написаны по следам реальной поломки: шаг с вложением никогда не
@@ -193,6 +193,57 @@ test('недоступная тематика остаётся в своей г�
 test('пустая картотека не роняет раскладку', () => {
   assert.deepEqual(groupCatalog(null), []);
   assert.deepEqual(groupCatalog([]), []);
+});
+
+/* ─── Адрес темы: тему из тематики можно увести в чужую группу ────────────── */
+
+/* Тема остаётся в своей тематике (там её ищет оператор), а уходит в другую
+ * группу. Раскладка обязана показывать обе вещи сразу — иначе оператор либо не
+ * найдёт тему на привычном месте, либо не узнает, кого побеспокоил. */
+
+const ROUTED_CATALOG = [
+  { key: 'sapar_service_error', queue_code: 'itaxi_sapar', home_queue_title: 'iTaxi Sapar',
+    queue_title: 'Техподдержка', routed: true, is_ready: true },
+  { key: 'sapar_sign_error', queue_code: 'itaxi_sapar', home_queue_title: 'iTaxi Sapar',
+    queue_title: 'iTaxi Sapar', routed: false, is_ready: true },
+  { key: 'parcel_location', queue_code: 'parcels', home_queue_title: 'Посылки',
+    queue_title: 'Посылки', routed: false, is_ready: true },
+];
+
+test('уведённая тема остаётся в своей тематике, а не переезжает к адресату', () => {
+  const groups = groupCatalog(ROUTED_CATALOG);
+  assert.deepEqual(groups.map((g) => g.code), ['itaxi_sapar', 'parcels']);
+  assert.deepEqual(groups[0].items.map((i) => i.key),
+                   ['sapar_service_error', 'sapar_sign_error']);
+});
+
+test('заголовок раздела — группа тематики, даже если первая тема уведена', () => {
+  // Возьми раскладка queue_title, и раздел «iTaxi Sapar» назывался бы
+  // «Техподдержка» — по адресу одной-единственной темы в нём.
+  assert.equal(groupCatalog(ROUTED_CATALOG)[0].title, 'iTaxi Sapar');
+});
+
+test('без адресов раскладка работает как раньше', () => {
+  // Каталог старого образца (без home_queue_title) приходит с сервера, пока
+  // страница не перезагружена после выката.
+  assert.equal(groupCatalog(CATALOG)[0].title, 'iTaxi Sapar');
+});
+
+test('у темы с выключенным адресом бейдж не спорит с подписью', () => {
+  // «Нет группы» рядом со строкой «Уйдёт в группу «Техподдержка»» читалось бы
+  // как противоречие: то ли группы нет, то ли она есть и названа.
+  assert.equal(blockedLabel({ routed: true, queue_title: 'Техподдержка' }),
+               'Группа недоступна');
+  assert.equal(blockedLabel({ routed: false }), 'Нет группы');
+  assert.equal(blockedLabel(null), 'Нет группы');
+});
+
+test('адрес подписывается только у уведённой темы', () => {
+  assert.equal(routeNote(ROUTED_CATALOG[0]), 'Техподдержка');
+  assert.equal(routeNote(ROUTED_CATALOG[1]), null);
+  assert.equal(routeNote(null), null);
+  // Маршрут есть, а очередь исчезла — подписывать нечего.
+  assert.equal(routeNote({ routed: true, queue_title: null }), null);
 });
 
 /* ─── Вход в тематику: проверка по ИИН раньше категории (инструкция #230) ─── */

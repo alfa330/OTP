@@ -262,6 +262,103 @@ def delete_topic(cursor, topic_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# МАРШРУТЫ ТЕМ: куда уходит конкретная тема
+#
+# По умолчанию тема уходит в группу своей тематики — очередь с кодом
+# scenario['queue_code']. Маршрут перебивает этот адрес у одной темы.
+#
+# Считается это в ДВА шага и нарочно: сначала одним запросом берётся весь
+# расклад (routing_context), потом адрес каждой темы выводится чистой функцией
+# (resolve_route). Тем семь, каталог запрашивается при каждом открытии раздела,
+# и поход в базу на каждую тему стоил бы ровно столько же, сколько один поход
+# за всеми, — только семь раз. А чистая функция ещё и проверяется тестом без
+# базы: правило «выключенная группа НЕ подменяется родной» — именно то, что
+# нельзя проверить глазами.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def routing_context(cursor):
+    """Очереди и маршруты тем — всё, из чего считается адрес любой темы.
+
+    Очереди берём ВСЕ, включая выключенные: выключенная очередь не адрес, но
+    её название нужно, чтобы объяснить настройщику, куда указывает маршрут.
+    """
+    cursor.execute(
+        'SELECT %s FROM crm_queues q ORDER BY q.sort_order, q.title, q.id' % _QUEUE_COLUMNS)
+    queues = [_queue_row(row, expose_chat_id=True) for row in cursor.fetchall()]
+    cursor.execute(
+        """
+        SELECT scenario_key, queue_id, updated_by_name, updated_at
+          FROM crm_topic_routes
+        """
+    )
+    routes = {row[0]: {'queue_id': row[1], 'updated_by_name': row[2],
+                       'updated_at': _iso(row[3])}
+              for row in cursor.fetchall()}
+    return {
+        'queues': queues,
+        'by_id': {q['id']: q for q in queues},
+        # Код у очереди может быть пустым (её завели руками) — такая очередь
+        # не бывает домом ни для одной темы, но быть адресом маршрута может.
+        'by_code': {q['code']: q for q in queues if q['code']},
+        'routes': routes,
+    }
+
+
+def queue_is_usable(queue):
+    """Может ли очередь принять обращение прямо сейчас."""
+    return bool(queue and queue.get('is_active') and queue.get('is_ready'))
+
+
+def resolve_route(context, scenario_key, queue_code):
+    """Адрес темы: {'home', 'queue', 'routed', 'is_ready', 'route'}.
+
+    home  — группа тематики (нужна для подписи, даже если она выключена).
+    queue — куда уйдёт обращение на самом деле; None, если адреса нет.
+
+    Ключевое решение: маршрут, указывающий на выключенную или неготовую
+    очередь, НЕ подменяется родной группой. Тему уводили как раз для того,
+    чтобы её перестали получать в родной; молча вернуть её туда — отправить
+    обращение не тем людям. Поэтому тема просто становится недоступной, а
+    настройщик видит у неё предупреждение.
+    """
+    home = context['by_code'].get(queue_code)
+    route = context['routes'].get(scenario_key)
+    queue = context['by_id'].get(route['queue_id']) if route else home
+    return {
+        'home': home,
+        'queue': queue,
+        'routed': bool(route),
+        'is_ready': queue_is_usable(queue),
+        'route': route,
+    }
+
+
+def set_topic_route(cursor, *, scenario_key, queue_id, actor_user_id=None, actor_name=None):
+    """Назначает теме группу. queue_id=None — вернуть в группу своей тематики.
+
+    Возврат «в свою» стирает строку, а не пишет маршрут на родную очередь:
+    иначе переименование или пересоздание очереди оставило бы маршрут,
+    который смотрит в никуда и при этом выглядит настроенным.
+    """
+    if queue_id is None:
+        cursor.execute('DELETE FROM crm_topic_routes WHERE scenario_key = %s',
+                       (str(scenario_key),))
+        return
+    cursor.execute(
+        """
+        INSERT INTO crm_topic_routes (scenario_key, queue_id, updated_by, updated_by_name)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (scenario_key) DO UPDATE
+           SET queue_id = EXCLUDED.queue_id,
+               updated_by = EXCLUDED.updated_by,
+               updated_by_name = EXCLUDED.updated_by_name,
+               updated_at = {now}
+        """.format(now=_NOW),
+        (str(scenario_key), int(queue_id), actor_user_id, actor_name),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Обращения
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -546,16 +643,6 @@ def create_ticket(cursor, *, queue_id, topic_id, subject, body, priority, source
          json.dumps(list(flags or []), ensure_ascii=False)),
     )
     return cursor.fetchone()[0]
-
-
-def queue_by_code(cursor, code):
-    """Очередь сценария. None, если её ещё не завели или выключили."""
-    cursor.execute(
-        'SELECT %s FROM crm_queues q WHERE q.code = %%s AND q.is_active' % _QUEUE_COLUMNS,
-        (str(code),),
-    )
-    row = cursor.fetchone()
-    return _queue_row(row, expose_chat_id=True) if row else None
 
 
 def scenario_breakdown(cursor, ctx, days=30):

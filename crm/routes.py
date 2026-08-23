@@ -133,6 +133,28 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             'mimetype': item.mimetype,
         }, None
 
+    def _decorate_route(item, context, manage=False):
+        """Проставляет теме её адрес: куда уйдёт обращение и откуда тема родом.
+
+        Два адреса, а не один, потому что в интерфейсе у них разные роли:
+        home_queue_* — тематика, по которой тема стоит в картотеке оператора,
+        queue_* — группа, в которую обращение уйдёт на самом деле. Совпадают
+        они у всех тем, кроме уведённых.
+        """
+        route = queries.resolve_route(context, item['key'], item['queue_code'])
+        home, queue = route['home'], route['queue']
+        item['home_queue_id'] = (home or {}).get('id')
+        item['home_queue_title'] = (home or {}).get('title')
+        item['queue_id'] = (queue or {}).get('id')
+        item['queue_title'] = (queue or {}).get('title')
+        item['is_ready'] = route['is_ready']
+        item['routed'] = route['routed']
+        if manage and route['route']:
+            # Кто и когда увёл тему — вопрос настройщика, а не оператора.
+            item['routed_by'] = route['route'].get('updated_by_name')
+            item['routed_at'] = route['route'].get('updated_at')
+        return route
+
     # ── Диагностика и сводка ─────────────────────────────────────────────
     @crm_route('/ping')
     def crm_ping(ctx):
@@ -266,6 +288,56 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.update_topic(cursor, topic_id, changes)
         return jsonify({"status": "ok"})
 
+    @crm_route('/routes/<key>', methods=('PUT',), manage=True)
+    def crm_topic_route_set(key, ctx):
+        """Куда уходит одна тема. queue_id=null — обратно в группу тематики.
+
+        PUT, а не POST: у темы ровно один адрес, и запрос задаёт его целиком.
+        Повтор того же запроса ничего не меняет — это важнее, чем кажется:
+        настройщик тыкает в выпадающий список, и второй клик по тому же
+        значению не должен заводить второй маршрут.
+        """
+        scenario = scenarios.get(key)
+        if not scenario:
+            return jsonify({"error": "Тема не найдена"}), 404
+        if scenario.get('final_outcome'):
+            # Тема, из которой в группу ничего не уходит, адреса не имеет.
+            # Молча принять для неё маршрут значило бы показать настройку,
+            # которая ни на что не влияет.
+            return jsonify({
+                "error": "Тема «%s» не отправляется в группу — адрес ей не нужен"
+                         % scenario['title'],
+                "code": "CRM_TOPIC_NOT_ROUTABLE",
+            }), 400
+
+        data = _payload()
+        queue_id = _int_or_none(data.get('queue_id'))
+        with db._get_cursor() as cursor:
+            context = queries.routing_context(cursor)
+            home = context['by_code'].get(scenario['queue_code'])
+            if queue_id is not None:
+                target = context['by_id'].get(queue_id)
+                if not target:
+                    return jsonify({"error": "Очередь не найдена"}), 404
+                if not queries.queue_is_usable(target):
+                    return jsonify({
+                        "error": "Очередь «%s» выключена или к ней не привязана "
+                                 "Telegram-группа" % target['title'],
+                    }), 400
+                # Выбрали родную группу — это возврат к умолчанию, а не маршрут.
+                # Иначе в базе осталась бы строка, которая ничего не меняет, но
+                # переживёт переименование очереди и однажды начнёт менять.
+                if home and target['id'] == home['id']:
+                    queue_id = None
+            queries.set_topic_route(cursor, scenario_key=scenario['key'], queue_id=queue_id,
+                                    actor_user_id=ctx['user_id'], actor_name=ctx['name'])
+            context = queries.routing_context(cursor)
+
+        item = {'key': scenario['key'], 'title': scenario['title'],
+                'queue_code': scenario['queue_code']}
+        _decorate_route(item, context, manage=True)
+        return jsonify({"item": item})
+
     @crm_route('/chats', manage=True)
     def crm_chats(ctx):
         """Группы, куда добавлен бот, — для привязки очереди."""
@@ -324,22 +396,25 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         """
         catalog = scenarios.public_catalog()
         entries = scenarios.public_entries()
+        manage = access.can_manage_queues(ctx)
         with db._get_cursor() as cursor:
-            ready = {}
-            for item in catalog:
-                queue = queries.queue_by_code(cursor, item['queue_code'])
-                ready[item['queue_code']] = {
-                    'queue_id': (queue or {}).get('id'),
-                    'queue_title': (queue or {}).get('title'),
-                    'is_ready': bool(queue and queue.get('is_ready')),
-                }
+            context = queries.routing_context(cursor)
             parks = queries.taxi_parks(cursor)
         for item in catalog:
-            item.update(ready.get(item['queue_code'], {'is_ready': False}))
-        # Вход берёт готовность у своей очереди: у него нет своей — он и есть
-        # очередь, только со стороны оператора.
-        for item in entries:
-            item.update(ready.get(item['queue_code'], {'is_ready': False}))
+            _decorate_route(item, context, manage=manage)
+
+        # Вход в тематику сам в группу ничего не отправляет — обращение уходит
+        # из выбранной КАТЕГОРИИ. Поэтому готовность входа считается по
+        # категориям, а не по его очереди: тему могли увести в чужую группу, и
+        # тогда вход рабочий даже при неготовой родной очереди. И наоборот —
+        # уведи все категории в выключенную группу, и вход честно закроется.
+        ready_keys = {item['key'] for item in catalog if item['is_ready']}
+        for entry in entries:
+            home = context['by_code'].get(entry['queue_code'])
+            entry['queue_id'] = (home or {}).get('id')
+            entry['queue_title'] = (home or {}).get('title')
+            entry['home_queue_title'] = (home or {}).get('title')
+            entry['is_ready'] = any(key in ready_keys for key in entry['categories'])
         return jsonify({"items": catalog, "entries": entries,
                         "reference": {"taxi_parks": parks}})
 
@@ -506,15 +581,24 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             }), 409
 
         with db._get_cursor() as cursor:
-            queue = queries.queue_by_code(cursor, scenario['queue_code'])
+            # Адрес темы, а не её тематики: тему могли увести в другую группу.
+            route = queries.resolve_route(queries.routing_context(cursor),
+                                          scenario_key, scenario['queue_code'])
+            queue = route['queue']
             if not queue:
                 return jsonify({
-                    "error": "Очередь «%s» не настроена — обратитесь к администратору"
-                             % scenario['queue_code'],
+                    "error": ("Тема «%s» направлена в очередь, которой больше нет — "
+                              "обратитесь к администратору" % scenario['title'])
+                    if route['routed'] else
+                    ("Очередь «%s» не настроена — обратитесь к администратору"
+                     % scenario['queue_code']),
                 }), 400
-            if not queue['is_ready']:
+            if not route['is_ready']:
+                # Выключенную очередь маршрута НЕ подменяем родной группой:
+                # тему уводили ровно для того, чтобы её там больше не получали.
                 return jsonify({
-                    "error": "У очереди «%s» не привязана Telegram-группа" % queue['title'],
+                    "error": "Очередь «%s» выключена или к ней не привязана "
+                             "Telegram-группа" % queue['title'],
                 }), 400
             flags = verdict.get('flags', [])
             ticket_id = queries.create_ticket(
@@ -533,7 +617,12 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             queries.add_event(cursor, ticket_id=ticket_id, kind='created',
                               actor_user_id=ctx['user_id'], actor_name=ctx['name'],
                               payload={'queue': queue['title'], 'scenario': scenario['title'],
-                                       'flags': flags})
+                                       'flags': flags,
+                                       # Куда тема ушла бы без маршрута — чтобы
+                                       # через месяц было видно, что адрес
+                                       # выбирали, а не он «всегда был такой».
+                                       'routed_from': (route['home'] or {}).get('title')
+                                       if route['routed'] else None})
 
         # Отправка — уже вне транзакции: сеть не должна держать соединение пула.
         # Обращение существует в любом случае, отказ Telegram лишь помечает

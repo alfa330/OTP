@@ -2,7 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import axios from 'axios';
 import {
     AlertCircle, AlertTriangle, ArrowDown, ArrowLeft, CheckCircle2, ChevronRight,
-    CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
+    CornerDownRight, CornerUpLeft, FileText, Inbox, ListChecks, Loader2,
     History, MessageSquare, Paperclip, Plus, RefreshCw, Search, Send, Settings2, Trash2, Users, X,
     XCircle,
 } from 'lucide-react';
@@ -1176,12 +1176,139 @@ const TicketCard = ({
     );
 };
 
+/* ─── Куда уходят темы очереди ────────────────────────────────────────────── */
+
+/* Тема уходит в группу своей тематики — это адрес по умолчанию. Здесь его
+ * можно перебить у ОДНОЙ темы, не трогая соседние: «Ошибку в работе Sapar»
+ * увести к техподдержке, оставив всё остальное в группе Sapar.
+ *
+ * Список тем берётся из каталога сценариев, а не из crm_topics. Темы объявлены
+ * в crm/scenarios.py — у них есть вопросы, проверки и правила, и адресовать
+ * надо именно их. Свободный список названий в crm_topics со сценариями никогда
+ * связан не был (на проде он пуст, topic_id у всех обращений NULL), и два
+ * списка с одинаковой подписью в одной карточке заставляли бы настройщика
+ * гадать, какой из них настоящий.
+ *
+ * Карточка отвечает на два вопроса сразу: «куда уходят МОИ темы» — список с
+ * выбором, и «что ещё приходит СЮДА» — строка внизу. Без второго уведённая
+ * тема оставалась бы невидимой для той группы, которая её получает.
+ */
+const TopicRouting = ({ queue, queues, scenarios, onRoute, pending }) => {
+    // Тема без адреса (из неё в группу ничего не уходит) в маршрутах не стоит:
+    // настройка, которая ни на что не влияет, — обещание, которого нет.
+    const own = useMemo(
+        () => scenarios.filter((item) => item.sends_to_group && item.queue_code === queue.code),
+        [scenarios, queue.code],
+    );
+    const incoming = useMemo(
+        () => scenarios.filter((item) => item.sends_to_group && item.routed
+            && item.queue_id === queue.id && item.queue_code !== queue.code),
+        [scenarios, queue.id, queue.code],
+    );
+    // Адресом может быть любая рабочая очередь, кроме этой же: «увести туда,
+    // где тема и так стоит» — это возврат к умолчанию, и он уже первой строкой.
+    const targets = useMemo(
+        () => queues.filter((q) => q.id !== queue.id && q.is_active && q.is_ready),
+        [queues, queue.id],
+    );
+
+    /* В КНОПКЕ списка стоит просто название группы — и у своей, и у чужой.
+       Так строка отвечает ровно на тот вопрос, который задают («куда уйдёт»), и
+       не повторяет в каждой теме заголовок карточки. Что «своя» — это своя,
+       объясняют заголовки-разделители внутри списка: они видны там, где выбор и
+       делается, и не занимают место всё остальное время. Отличить умолчание от
+       маршрута можно по бейджу, и другого отличия нет: выбрать родную группу —
+       и есть возврат к умолчанию (сервер стирает маршрут). */
+    const optionsFor = (item) => {
+        const list = [
+            { value: '', label: queue.title, groupLabel: 'Группа тематики' },
+            ...targets.map((q) => ({ value: String(q.id), label: q.title,
+                                     groupLabel: 'Другие группы' })),
+        ];
+        // Очередь маршрута могли выключить. Не показав её, выпадающий список
+        // соврал бы «своя группа» там, где адрес совсем другой.
+        if (item.routed && item.queue_id
+            && !list.some((option) => option.value === String(item.queue_id))) {
+            list.push({
+                value: String(item.queue_id),
+                label: `${item.queue_title || 'Очередь'} — недоступна`,
+                groupLabel: 'Другие группы',
+            });
+        }
+        return list;
+    };
+
+    return (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+            <div className="flex items-center justify-between gap-2">
+                <div className={iosGroupLabel}>Темы и их адрес</div>
+                {!!incoming.length && (
+                    <span className="text-[11.5px] text-slate-400">
+                        + {incoming.length} из других тематик
+                    </span>
+                )}
+            </div>
+
+            {!own.length && (
+                <div className="mt-1.5 text-[11.5px] leading-snug text-slate-500">
+                    Своих тем у этой очереди нет — она может служить адресом для тем
+                    из других тематик.
+                </div>
+            )}
+
+            {!!own.length && (
+                <div className="mt-1.5 divide-y divide-slate-100">
+                    {own.map((item) => (
+                        <div key={item.key}
+                             className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-2">
+                            <div className="min-w-0 flex-1">
+                                <div className="truncate text-[13px] text-slate-800">{item.title}</div>
+                                {item.routed && !item.is_ready && (
+                                    <div className="mt-0.5 text-[11.5px] text-amber-600">
+                                        Очередь недоступна — тема не предлагается оператору
+                                    </div>
+                                )}
+                            </div>
+                            {item.routed && <IosBadge tone="blue">Другая группа</IosBadge>}
+                            <CustomSelect
+                                className="w-full sm:w-[230px]"
+                                variant="ios"
+                                value={item.routed && item.queue_id ? String(item.queue_id) : ''}
+                                onChange={(value) => onRoute(item, value)}
+                                options={optionsFor(item)}
+                                disabled={pending === item.key}
+                                ariaLabel={`Куда уходит тема «${item.title}»`}
+                            />
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {!!incoming.length && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11.5px] text-slate-500">
+                    <CornerDownRight size={12} className="shrink-0 text-slate-400" />
+                    <span>Сюда также приходят:</span>
+                    {incoming.map((item) => (
+                        <span key={item.key}
+                              className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">
+                            {item.title}
+                            <span className="text-slate-400"> · из «{item.home_queue_title}»</span>
+                        </span>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
 /* ─── Настройка очередей (админ) ──────────────────────────────────────────── */
 
-const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, onReload }) => {
+const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, scenarios, onReload }) => {
     const [chats, setChats] = useState([]);
     const [editing, setEditing] = useState(null);
-    const [topicDraft, setTopicDraft] = useState({});
+    // Ключ темы, у которой сейчас меняется адрес: пока сервер отвечает, её
+    // список заблокирован — второй выбор поверх первого дал бы гонку ответов.
+    const [routing, setRouting] = useState(null);
 
     useEffect(() => {
         let cancelled = false;
@@ -1217,25 +1344,24 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, onReload }) => {
         }
     };
 
-    const addTopic = async (queue) => {
-        const title = (topicDraft[queue.id] || '').trim();
-        if (!title) return;
+    /* Адрес темы. Пустое значение — вернуть в группу своей тематики; так же
+       это понимает и сервер, поэтому «по умолчанию» не отдельная кнопка, а
+       первая строка того же списка: выбор один, и делается он в одном месте. */
+    const setRoute = async (item, value) => {
+        const queueId = value ? Number(value) : null;
+        setRouting(item.key);
         try {
-            await axios.post(`${apiBaseUrl}/api/crm/queues/${queue.id}/topics`, { title },
-                { headers: headers() });
-            setTopicDraft((prev) => ({ ...prev, [queue.id]: '' }));
-            onReload();
+            await axios.put(`${apiBaseUrl}/api/crm/routes/${item.key}`,
+                { queue_id: queueId }, { headers: headers() });
+            await onReload();
+            const target = queues.find((q) => q.id === queueId);
+            showToast?.(queueId
+                ? `«${item.title}» уходит в группу «${target?.title || '—'}»`
+                : `«${item.title}» уходит в группу своей тематики`, 'success');
         } catch (err) {
-            showToast?.(errorText(err, 'Не удалось добавить тематику'), 'error');
-        }
-    };
-
-    const removeTopic = async (topic) => {
-        try {
-            await axios.delete(`${apiBaseUrl}/api/crm/topics/${topic.id}`, { headers: headers() });
-            onReload();
-        } catch (err) {
-            showToast?.(errorText(err, 'Не удалось убрать тематику'), 'error');
+            showToast?.(errorText(err, 'Не удалось изменить адрес темы'), 'error');
+        } finally {
+            setRouting(null);
         }
     };
 
@@ -1244,7 +1370,9 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, onReload }) => {
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="max-w-[640px] text-[12px] leading-snug text-slate-500">
                     Очередь — это адрес обращения: одна рабочая Telegram-группа. Чтобы группа
-                    появилась в списке, добавьте в неё бота — он запомнит чат сам.
+                    появилась в списке, добавьте в неё бота — он запомнит чат сам. Темы
+                    тематики по умолчанию уходят в её группу; любую из них можно направить
+                    в другую, не трогая соседние.
                 </p>
                 <button type="button" className={iosBtnPrimary}
                         onClick={() => setEditing({ title: '', description: '', chat_id: '', sla_minutes: '' })}>
@@ -1291,28 +1419,8 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, onReload }) => {
                         </div>
                     </div>
 
-                    <div className="mt-3 border-t border-slate-100 pt-3">
-                        <div className={iosGroupLabel}>Тематики</div>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            {(queue.topics || []).map((topic) => (
-                                <span key={topic.id}
-                                      className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-[11.5px] text-slate-600">
-                                    {topic.title}
-                                    <button type="button" onClick={() => removeTopic(topic)}
-                                            className="text-slate-400 transition hover:text-rose-500">
-                                        <X size={11} />
-                                    </button>
-                                </span>
-                            ))}
-                            <input
-                                value={topicDraft[queue.id] || ''}
-                                onChange={(e) => setTopicDraft((prev) => ({ ...prev, [queue.id]: e.target.value }))}
-                                onKeyDown={(e) => { if (e.key === 'Enter') addTopic(queue); }}
-                                placeholder="+ тематика"
-                                className="w-36 rounded-full bg-slate-100 px-3 py-1 text-[11.5px] text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/60"
-                            />
-                        </div>
-                    </div>
+                    <TopicRouting queue={queue} queues={queues} scenarios={scenarios}
+                                  onRoute={setRoute} pending={routing} />
                 </div>
             ))}
 
@@ -1585,6 +1693,15 @@ export default function CrmTicketsView({
         loadTickets(0, true);
     }, [loadTickets]);
 
+    /* Настройка очередей и каталог тем перезагружаются ВМЕСТЕ: адрес темы
+       живёт в каталоге (/scenarios), а список очередей — в /queues, и любая
+       правка на вкладке настройки меняет обе стороны. Перезагрузив одну,
+       вкладка показала бы новый адрес рядом со старым списком очередей. */
+    const reloadSetup = useCallback(
+        () => Promise.all([loadQueues(), loadScenarios()]),
+        [loadQueues, loadScenarios],
+    );
+
     /* Карточка сообщает, что сервер погасил «непрочитано», — и лента гасит
        пузырёк у этой строки, не перезапрашиваясь.
        Функция ОБЯЗАНА быть стабильной: она уходит в зависимости load() внутри
@@ -1637,7 +1754,8 @@ export default function CrmTicketsView({
 
             {tab === 'queues' && canManage && (
                 <QueuesTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                           queues={queues} onReload={loadQueues} />
+                           queues={queues} scenarios={scenarioCatalog}
+                           onReload={reloadSetup} />
             )}
 
             {tab === 'tickets' && (
