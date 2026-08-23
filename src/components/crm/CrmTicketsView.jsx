@@ -874,6 +874,16 @@ const TicketCard = ({
                             реплики, а обе стоят в панели обращения рядом. */}
                         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-slate-500">
                             <span>{ticket.queue_title}</span>
+                            {/* В какой чат обращение ушло НА САМОМ ДЕЛЕ. У темы
+                                может быть свой чат, и по названию тематики это
+                                уже не угадать; у обращений, заведённых до
+                                маршрутов, поля нет — строки тоже. */}
+                            {ticket.tg_chat_title && (
+                                <span className="inline-flex items-center gap-2">
+                                    <span className="text-slate-300">·</span>
+                                    <span className="truncate">{ticket.tg_chat_title}</span>
+                                </span>
+                            )}
                             {ticket.topic_title && (
                                 <span className="hidden items-center gap-2 sm:inline-flex">
                                     <span className="text-slate-300">·</span>
@@ -1176,63 +1186,68 @@ const TicketCard = ({
     );
 };
 
-/* ─── Куда уходят темы очереди ────────────────────────────────────────────── */
+/* ─── Куда уходят темы тематики ───────────────────────────────────────────── */
 
-/* Тема уходит в группу своей тематики — это адрес по умолчанию. Здесь его
- * можно перебить у ОДНОЙ темы, не трогая соседние: «Ошибку в работе Sapar»
- * увести к техподдержке, оставив всё остальное в группе Sapar.
+/* Тема уходит в чат своей тематики — это адрес по умолчанию. Здесь его можно
+ * перебить у ОДНОЙ темы: «Отображается оплата» отправить в чат «Sapar/Kaspi —
+ * отмена», оставив остальные темы Sapar на месте.
  *
- * Список тем берётся из каталога сценариев, а не из crm_topics. Темы объявлены
- * в crm/scenarios.py — у них есть вопросы, проверки и правила, и адресовать
- * надо именно их. Свободный список названий в crm_topics со сценариями никогда
- * связан не был (на проде он пуст, topic_id у всех обращений NULL), и два
- * списка с одинаковой подписью в одной карточке заставляли бы настройщика
- * гадать, какой из них настоящий.
+ * Выбирают ЧАТ, а не соседнюю тематику. Через тематики адресом могли бы стать
+ * только они же, и ради одного рабочего чата пришлось бы заводить тематику,
+ * которой ни одна тема не принадлежит, — сущность ради адреса. Бот и так знает
+ * все группы, где состоит, и список берётся оттуда же, откуда его берёт
+ * привязка тематики.
+ *
+ * Список тем — из каталога сценариев, а не из crm_topics. Темы объявлены в
+ * crm/scenarios.py: у них есть вопросы, проверки и правила, и адресовать надо
+ * именно их. Свободный список названий в crm_topics со сценариями связан не был
+ * (на проде он пуст, topic_id у всех обращений NULL), и два списка с одинаковой
+ * подписью в одной карточке заставляли бы гадать, какой из них настоящий.
  *
  * Карточка отвечает на два вопроса сразу: «куда уходят МОИ темы» — список с
- * выбором, и «что ещё приходит СЮДА» — строка внизу. Без второго уведённая
- * тема оставалась бы невидимой для той группы, которая её получает.
+ * выбором, и «что ещё приходит в ЭТОТ чат» — строка внизу. Без второго
+ * уведённая тема оставалась бы невидимой для той группы, которая её получает.
  */
-const TopicRouting = ({ queue, queues, scenarios, onRoute, pending }) => {
+const TopicRouting = ({ queue, chats, scenarios, onRoute, pending }) => {
     // Тема без адреса (из неё в группу ничего не уходит) в маршрутах не стоит:
     // настройка, которая ни на что не влияет, — обещание, которого нет.
     const own = useMemo(
         () => scenarios.filter((item) => item.sends_to_group && item.queue_code === queue.code),
         [scenarios, queue.code],
     );
+    /* Темы ЧУЖИХ тематик, уведённые в этот же чат. Сравниваем по chat_id, а не
+       по тематике: чат — единственное, что у них общего с этой карточкой. */
     const incoming = useMemo(
         () => scenarios.filter((item) => item.sends_to_group && item.routed
-            && item.queue_id === queue.id && item.queue_code !== queue.code),
-        [scenarios, queue.id, queue.code],
-    );
-    // Адресом может быть любая рабочая очередь, кроме этой же: «увести туда,
-    // где тема и так стоит» — это возврат к умолчанию, и он уже первой строкой.
-    const targets = useMemo(
-        () => queues.filter((q) => q.id !== queue.id && q.is_active && q.is_ready),
-        [queues, queue.id],
+            && queue.chat_id && String(item.chat_id) === String(queue.chat_id)
+            && item.queue_code !== queue.code),
+        [scenarios, queue.chat_id, queue.code],
     );
 
-    /* В КНОПКЕ списка стоит просто название группы — и у своей, и у чужой.
-       Так строка отвечает ровно на тот вопрос, который задают («куда уйдёт»), и
-       не повторяет в каждой теме заголовок карточки. Что «своя» — это своя,
+    /* В КНОПКЕ списка стоит просто название группы — и у своей, и у чужой. Так
+       строка отвечает ровно на тот вопрос, который задают («куда уйдёт»), и не
+       повторяет в каждой теме заголовок карточки. Что «своя» — это своя,
        объясняют заголовки-разделители внутри списка: они видны там, где выбор и
        делается, и не занимают место всё остальное время. Отличить умолчание от
-       маршрута можно по бейджу, и другого отличия нет: выбрать родную группу —
+       маршрута можно по бейджу, и другого отличия нет: выбрать чат тематики —
        и есть возврат к умолчанию (сервер стирает маршрут). */
     const optionsFor = (item) => {
         const list = [
-            { value: '', label: queue.title, groupLabel: 'Группа тематики' },
-            ...targets.map((q) => ({ value: String(q.id), label: q.title,
-                                     groupLabel: 'Другие группы' })),
+            { value: '', label: queue.chat_title || 'Группа не выбрана',
+              groupLabel: 'Чат тематики' },
+            ...chats
+                .filter((chat) => String(chat.chat_id) !== String(queue.chat_id))
+                .map((chat) => ({ value: String(chat.chat_id), label: chat.title,
+                                  groupLabel: 'Другие группы бота' })),
         ];
-        // Очередь маршрута могли выключить. Не показав её, выпадающий список
-        // соврал бы «своя группа» там, где адрес совсем другой.
-        if (item.routed && item.queue_id
-            && !list.some((option) => option.value === String(item.queue_id))) {
+        // Из группы могли выгнать бота. Не показав её, выпадающий список соврал
+        // бы «чат тематики» там, где адрес совсем другой.
+        if (item.routed && item.chat_id
+            && !list.some((option) => option.value === String(item.chat_id))) {
             list.push({
-                value: String(item.queue_id),
-                label: `${item.queue_title || 'Очередь'} — недоступна`,
-                groupLabel: 'Другие группы',
+                value: String(item.chat_id),
+                label: `${item.chat_title || 'Группа'} — бот не в ней`,
+                groupLabel: 'Другие группы бота',
             });
         }
         return list;
@@ -1241,7 +1256,7 @@ const TopicRouting = ({ queue, queues, scenarios, onRoute, pending }) => {
     return (
         <div className="mt-3 border-t border-slate-100 pt-3">
             <div className="flex items-center justify-between gap-2">
-                <div className={iosGroupLabel}>Темы и их адрес</div>
+                <div className={iosGroupLabel}>Темы и их группа</div>
                 {!!incoming.length && (
                     <span className="text-[11.5px] text-slate-400">
                         + {incoming.length} из других тематик
@@ -1251,8 +1266,7 @@ const TopicRouting = ({ queue, queues, scenarios, onRoute, pending }) => {
 
             {!own.length && (
                 <div className="mt-1.5 text-[11.5px] leading-snug text-slate-500">
-                    Своих тем у этой очереди нет — она может служить адресом для тем
-                    из других тематик.
+                    Своих тем у этой тематики нет.
                 </div>
             )}
 
@@ -1263,20 +1277,21 @@ const TopicRouting = ({ queue, queues, scenarios, onRoute, pending }) => {
                              className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-2">
                             <div className="min-w-0 flex-1">
                                 <div className="truncate text-[13px] text-slate-800">{item.title}</div>
-                                {item.routed && !item.is_ready && (
+                                {item.routed && !item.chat_known && (
                                     <div className="mt-0.5 text-[11.5px] text-amber-600">
-                                        Очередь недоступна — тема не предлагается оператору
+                                        Бот не состоит в этой группе — тема не предлагается оператору
                                     </div>
                                 )}
                             </div>
                             {item.routed && <IosBadge tone="blue">Другая группа</IosBadge>}
                             <CustomSelect
-                                className="w-full sm:w-[230px]"
+                                className="w-full sm:w-[250px]"
                                 variant="ios"
-                                value={item.routed && item.queue_id ? String(item.queue_id) : ''}
+                                value={item.routed && item.chat_id ? String(item.chat_id) : ''}
                                 onChange={(value) => onRoute(item, value)}
                                 options={optionsFor(item)}
                                 disabled={pending === item.key}
+                                searchable
                                 ariaLabel={`Куда уходит тема «${item.title}»`}
                             />
                         </div>
@@ -1287,7 +1302,7 @@ const TopicRouting = ({ queue, queues, scenarios, onRoute, pending }) => {
             {!!incoming.length && (
                 <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11.5px] text-slate-500">
                     <CornerDownRight size={12} className="shrink-0 text-slate-400" />
-                    <span>Сюда также приходят:</span>
+                    <span>В этот же чат приходят:</span>
                     {incoming.map((item) => (
                         <span key={item.key}
                               className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">
@@ -1344,22 +1359,22 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, scenarios, onReload
         }
     };
 
-    /* Адрес темы. Пустое значение — вернуть в группу своей тематики; так же
-       это понимает и сервер, поэтому «по умолчанию» не отдельная кнопка, а
-       первая строка того же списка: выбор один, и делается он в одном месте. */
+    /* Группа темы. Пустое значение — вернуть в чат своей тематики; так же это
+       понимает и сервер, поэтому «по умолчанию» не отдельная кнопка, а первая
+       строка того же списка: выбор один, и делается он в одном месте. */
     const setRoute = async (item, value) => {
-        const queueId = value ? Number(value) : null;
+        const chatId = value ? Number(value) : null;
         setRouting(item.key);
         try {
             await axios.put(`${apiBaseUrl}/api/crm/routes/${item.key}`,
-                { queue_id: queueId }, { headers: headers() });
+                { chat_id: chatId }, { headers: headers() });
             await onReload();
-            const target = queues.find((q) => q.id === queueId);
-            showToast?.(queueId
-                ? `«${item.title}» уходит в группу «${target?.title || '—'}»`
-                : `«${item.title}» уходит в группу своей тематики`, 'success');
+            const target = chats.find((chat) => String(chat.chat_id) === String(chatId));
+            showToast?.(chatId
+                ? `«${item.title}» уходит в «${target?.title || 'выбранную группу'}»`
+                : `«${item.title}» уходит в чат своей тематики`, 'success');
         } catch (err) {
-            showToast?.(errorText(err, 'Не удалось изменить адрес темы'), 'error');
+            showToast?.(errorText(err, 'Не удалось изменить группу темы'), 'error');
         } finally {
             setRouting(null);
         }
@@ -1369,10 +1384,10 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, scenarios, onReload
         <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="max-w-[640px] text-[12px] leading-snug text-slate-500">
-                    Очередь — это адрес обращения: одна рабочая Telegram-группа. Чтобы группа
-                    появилась в списке, добавьте в неё бота — он запомнит чат сам. Темы
-                    тематики по умолчанию уходят в её группу; любую из них можно направить
-                    в другую, не трогая соседние.
+                    Очередь — это тематика обращений и её рабочая Telegram-группа. Чтобы
+                    группа появилась в списке, добавьте в неё бота — он запомнит чат сам.
+                    Темы по умолчанию уходят в группу своей тематики; любую из них можно
+                    отправить в другую группу бота, не трогая соседние.
                 </p>
                 <button type="button" className={iosBtnPrimary}
                         onClick={() => setEditing({ title: '', description: '', chat_id: '', sla_minutes: '' })}>
@@ -1419,7 +1434,7 @@ const QueuesTab = ({ apiBaseUrl, headers, showToast, queues, scenarios, onReload
                         </div>
                     </div>
 
-                    <TopicRouting queue={queue} queues={queues} scenarios={scenarios}
+                    <TopicRouting queue={queue} chats={chats} scenarios={scenarios}
                                   onRoute={setRoute} pending={routing} />
                 </div>
             ))}

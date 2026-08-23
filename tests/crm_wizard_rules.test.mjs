@@ -195,31 +195,34 @@ test('пустая картотека не роняет раскладку', () 
   assert.deepEqual(groupCatalog([]), []);
 });
 
-/* ─── Адрес темы: тему из тематики можно увести в чужую группу ────────────── */
+/* ─── Адрес темы: тему из тематики можно увести в другой Telegram-чат ─────── */
 
 /* Тема остаётся в своей тематике (там её ищет оператор), а уходит в другую
  * группу. Раскладка обязана показывать обе вещи сразу — иначе оператор либо не
  * найдёт тему на привычном месте, либо не узнает, кого побеспокоил. */
 
 const ROUTED_CATALOG = [
-  { key: 'sapar_service_error', queue_code: 'itaxi_sapar', home_queue_title: 'iTaxi Sapar',
-    queue_title: 'Техподдержка', routed: true, is_ready: true },
+  { key: 'sapar_payment_required', queue_code: 'itaxi_sapar', home_queue_title: 'iTaxi Sapar',
+    queue_title: 'iTaxi Sapar', chat_title: 'Sapar/Kaspi - отмена',
+    routed: true, chat_known: true, is_ready: true },
   { key: 'sapar_sign_error', queue_code: 'itaxi_sapar', home_queue_title: 'iTaxi Sapar',
-    queue_title: 'iTaxi Sapar', routed: false, is_ready: true },
+    queue_title: 'iTaxi Sapar', chat_title: 'Тест ТиТаксиSapar',
+    routed: false, chat_known: true, is_ready: true },
   { key: 'parcel_location', queue_code: 'parcels', home_queue_title: 'Посылки',
-    queue_title: 'Посылки', routed: false, is_ready: true },
+    queue_title: 'Посылки', chat_title: 'Тест iCore красный',
+    routed: false, chat_known: true, is_ready: true },
 ];
 
 test('уведённая тема остаётся в своей тематике, а не переезжает к адресату', () => {
   const groups = groupCatalog(ROUTED_CATALOG);
   assert.deepEqual(groups.map((g) => g.code), ['itaxi_sapar', 'parcels']);
   assert.deepEqual(groups[0].items.map((i) => i.key),
-                   ['sapar_service_error', 'sapar_sign_error']);
+                   ['sapar_payment_required', 'sapar_sign_error']);
 });
 
-test('заголовок раздела — группа тематики, даже если первая тема уведена', () => {
-  // Возьми раскладка queue_title, и раздел «iTaxi Sapar» назывался бы
-  // «Техподдержка» — по адресу одной-единственной темы в нём.
+test('заголовок раздела — тематика, даже если первая тема уведена в чужой чат', () => {
+  // Раскладка обязана держаться тематики: возьми она адрес, раздел «iTaxi
+  // Sapar» назывался бы по чату одной-единственной темы в нём.
   assert.equal(groupCatalog(ROUTED_CATALOG)[0].title, 'iTaxi Sapar');
 });
 
@@ -229,21 +232,23 @@ test('без адресов раскладка работает как рань�
   assert.equal(groupCatalog(CATALOG)[0].title, 'iTaxi Sapar');
 });
 
-test('у темы с выключенным адресом бейдж не спорит с подписью', () => {
-  // «Нет группы» рядом со строкой «Уйдёт в группу «Техподдержка»» читалось бы
+test('у темы с недоступным чатом бейдж не спорит с подписью', () => {
+  // «Нет группы» рядом со строкой «Уйдёт в группу «Sapar/Kaspi»» читалось бы
   // как противоречие: то ли группы нет, то ли она есть и названа.
-  assert.equal(blockedLabel({ routed: true, queue_title: 'Техподдержка' }),
-               'Группа недоступна');
+  assert.equal(blockedLabel({ routed: true, chat_title: 'Sapar/Kaspi - отмена' }),
+               'Бот не в группе');
   assert.equal(blockedLabel({ routed: false }), 'Нет группы');
   assert.equal(blockedLabel(null), 'Нет группы');
 });
 
-test('адрес подписывается только у уведённой темы', () => {
-  assert.equal(routeNote(ROUTED_CATALOG[0]), 'Техподдержка');
+test('чат подписывается только у уведённой темы', () => {
+  // У остальных чат один на весь раздел картотеки, и повторять его в каждой
+  // строке — значит перестать его читать.
+  assert.equal(routeNote(ROUTED_CATALOG[0]), 'Sapar/Kaspi - отмена');
   assert.equal(routeNote(ROUTED_CATALOG[1]), null);
   assert.equal(routeNote(null), null);
-  // Маршрут есть, а очередь исчезла — подписывать нечего.
-  assert.equal(routeNote({ routed: true, queue_title: null }), null);
+  // Маршрут есть, а названия чата нет — подписывать нечего.
+  assert.equal(routeNote({ routed: true, chat_title: null }), null);
 });
 
 /* ─── Вход в тематику: проверка по ИИН раньше категории (инструкция #230) ─── */

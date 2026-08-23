@@ -134,25 +134,35 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         }, None
 
     def _decorate_route(item, context, manage=False):
-        """Проставляет теме её адрес: куда уйдёт обращение и откуда тема родом.
+        """Проставляет теме её адрес: в какой чат уйдёт и из какой она тематики.
 
-        Два адреса, а не один, потому что в интерфейсе у них разные роли:
-        home_queue_* — тематика, по которой тема стоит в картотеке оператора,
-        queue_* — группа, в которую обращение уйдёт на самом деле. Совпадают
-        они у всех тем, кроме уведённых.
+        Две разные вещи, и в интерфейсе у них разные роли: home_queue_* —
+        тематика, по которой тема стоит в картотеке оператора, chat_* — группа
+        в Telegram, куда обращение уйдёт на самом деле. У неуведённой темы
+        чат — это чат её тематики.
+
+        chat_id отдаётся только настройщику: обычному сотруднику служебный
+        номер чужого чата ни к чему (то же правило, что у очередей), а
+        название нужно всем — оператор обязан видеть, кого побеспокоит.
         """
         route = queries.resolve_route(context, item['key'], item['queue_code'])
-        home, queue = route['home'], route['queue']
+        home = route['home']
         item['home_queue_id'] = (home or {}).get('id')
         item['home_queue_title'] = (home or {}).get('title')
-        item['queue_id'] = (queue or {}).get('id')
-        item['queue_title'] = (queue or {}).get('title')
+        # Тематика у обращения остаётся прежней, чем бы ни кончился маршрут:
+        # очередь — это «о чём вопрос», чат — «кому он уходит».
+        item['queue_id'] = (home or {}).get('id')
+        item['queue_title'] = (home or {}).get('title')
+        item['chat_title'] = route['chat_title']
         item['is_ready'] = route['is_ready']
         item['routed'] = route['routed']
-        if manage and route['route']:
-            # Кто и когда увёл тему — вопрос настройщика, а не оператора.
-            item['routed_by'] = route['route'].get('updated_by_name')
-            item['routed_at'] = route['route'].get('updated_at')
+        item['chat_known'] = route['chat_known']
+        if manage:
+            item['chat_id'] = route['chat_id']
+            if route['route']:
+                # Кто и когда увёл тему — вопрос настройщика, а не оператора.
+                item['routed_by'] = route['route'].get('updated_by_name')
+                item['routed_at'] = route['route'].get('updated_at')
         return route
 
     # ── Диагностика и сводка ─────────────────────────────────────────────
@@ -290,7 +300,7 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     @crm_route('/routes/<key>', methods=('PUT',), manage=True)
     def crm_topic_route_set(key, ctx):
-        """Куда уходит одна тема. queue_id=null — обратно в группу тематики.
+        """В какой Telegram-чат уходит одна тема. chat_id=null — в чат тематики.
 
         PUT, а не POST: у темы ровно один адрес, и запрос задаёт его целиком.
         Повтор того же запроса ничего не меняет — это важнее, чем кажется:
@@ -311,25 +321,29 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             }), 400
 
         data = _payload()
-        queue_id = _int_or_none(data.get('queue_id'))
+        chat_id = _int_or_none(data.get('chat_id'))
         with db._get_cursor() as cursor:
             context = queries.routing_context(cursor)
             home = context['by_code'].get(scenario['queue_code'])
-            if queue_id is not None:
-                target = context['by_id'].get(queue_id)
-                if not target:
-                    return jsonify({"error": "Очередь не найдена"}), 404
-                if not queries.queue_is_usable(target):
+            chat_title = None
+            if chat_id is not None:
+                chat = context['chats'].get(chat_id)
+                if not chat:
+                    # Выбрать можно только из групп, где бот УЖЕ состоит: в
+                    # чужой чат он всё равно не напишет, и обращение легло бы
+                    # с ошибкой доставки вместо внятного отказа сейчас.
                     return jsonify({
-                        "error": "Очередь «%s» выключена или к ней не привязана "
-                                 "Telegram-группа" % target['title'],
+                        "error": "Бот не состоит в этой группе",
+                        "code": "CRM_CHAT_UNKNOWN",
                     }), 400
-                # Выбрали родную группу — это возврат к умолчанию, а не маршрут.
-                # Иначе в базе осталась бы строка, которая ничего не меняет, но
-                # переживёт переименование очереди и однажды начнёт менять.
-                if home and target['id'] == home['id']:
-                    queue_id = None
-            queries.set_topic_route(cursor, scenario_key=scenario['key'], queue_id=queue_id,
+                chat_title = chat['title']
+                # Выбрали чат своей тематики — это возврат к умолчанию, а не
+                # маршрут. Иначе в базе осталась бы строка, которая ничего не
+                # меняет, но переживёт смену чата у тематики и начнёт менять.
+                if home and home.get('chat_id') == chat_id:
+                    chat_id, chat_title = None, None
+            queries.set_topic_route(cursor, scenario_key=scenario['key'],
+                                    chat_id=chat_id, chat_title=chat_title,
                                     actor_user_id=ctx['user_id'], actor_name=ctx['name'])
             context = queries.routing_context(cursor)
 
@@ -581,29 +595,32 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
             }), 409
 
         with db._get_cursor() as cursor:
-            # Адрес темы, а не её тематики: тему могли увести в другую группу.
+            # Адрес берём у ТЕМЫ, а не у тематики: её могли увести в другой чат.
             route = queries.resolve_route(queries.routing_context(cursor),
                                           scenario_key, scenario['queue_code'])
-            queue = route['queue']
+            queue = route['home']
             if not queue:
                 return jsonify({
-                    "error": ("Тема «%s» направлена в очередь, которой больше нет — "
-                              "обратитесь к администратору" % scenario['title'])
-                    if route['routed'] else
-                    ("Очередь «%s» не настроена — обратитесь к администратору"
-                     % scenario['queue_code']),
+                    "error": "Тематика «%s» не настроена — обратитесь к администратору"
+                             % scenario['queue_code'],
                 }), 400
             if not route['is_ready']:
-                # Выключенную очередь маршрута НЕ подменяем родной группой:
-                # тему уводили ровно для того, чтобы её там больше не получали.
+                # Недоступный чат маршрута НЕ подменяем чатом тематики: тему
+                # уводили ровно для того, чтобы её там больше не получали.
                 return jsonify({
-                    "error": "Очередь «%s» выключена или к ней не привязана "
-                             "Telegram-группа" % queue['title'],
+                    "error": ("Тема «%s» отправляется в группу «%s», но бот в ней "
+                              "больше не состоит — обратитесь к администратору"
+                              % (scenario['title'], route['chat_title'] or '—'))
+                    if route['routed'] else
+                    ("К тематике «%s» не привязана Telegram-группа" % queue['title']),
                 }), 400
             flags = verdict.get('flags', [])
             ticket_id = queries.create_ticket(
                 cursor,
                 queue_id=queue['id'], topic_id=None,
+                # Адрес фиксируется в обращении: маршрут потом поменяют, а нить
+                # этого обращения останется в том чате, куда ушла.
+                tg_chat_id=route['chat_id'], tg_chat_title=route['chat_title'],
                 subject=scenarios.render_subject(scenario_key, answers)[:300],
                 body=scenarios.render_body(scenario_key, answers, flags=flags),
                 priority='normal', source='manual',
@@ -618,11 +635,12 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
                               actor_user_id=ctx['user_id'], actor_name=ctx['name'],
                               payload={'queue': queue['title'], 'scenario': scenario['title'],
                                        'flags': flags,
-                                       # Куда тема ушла бы без маршрута — чтобы
-                                       # через месяц было видно, что адрес
-                                       # выбирали, а не он «всегда был такой».
-                                       'routed_from': (route['home'] or {}).get('title')
-                                       if route['routed'] else None})
+                                       # Чат пишем в историю всегда: через месяц
+                                       # по одному названию тематики уже не
+                                       # понять, куда обращение на самом деле
+                                       # ушло и почему ответ пришёл оттуда.
+                                       'chat': route['chat_title'],
+                                       'routed': route['routed']})
 
         # Отправка — уже вне транзакции: сеть не должна держать соединение пула.
         # Обращение существует в любом случае, отказ Telegram лишь помечает

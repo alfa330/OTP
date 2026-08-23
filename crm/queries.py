@@ -262,99 +262,136 @@ def delete_topic(cursor, topic_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# МАРШРУТЫ ТЕМ: куда уходит конкретная тема
+# МАРШРУТЫ ТЕМ: в какой Telegram-чат уходит конкретная тема
 #
-# По умолчанию тема уходит в группу своей тематики — очередь с кодом
-# scenario['queue_code']. Маршрут перебивает этот адрес у одной темы.
+# По умолчанию тема уходит в чат своей тематики — очереди с кодом
+# scenario['queue_code']. Маршрут перебивает этот адрес у одной темы, и адрес
+# он несёт ЧАТОМ, а не очередью: выбирают из групп, где состоит бот, а не из
+# соседних тематик. Иначе, чтобы отправить «Отображается оплата» в чат
+# «Sapar/Kaspi — отмена», пришлось бы сначала завести на этот чат тематику.
 #
-# Считается это в ДВА шага и нарочно: сначала одним запросом берётся весь
+# Считается это в ДВА шага и нарочно: сначала одним походом берётся весь
 # расклад (routing_context), потом адрес каждой темы выводится чистой функцией
 # (resolve_route). Тем семь, каталог запрашивается при каждом открытии раздела,
 # и поход в базу на каждую тему стоил бы ровно столько же, сколько один поход
 # за всеми, — только семь раз. А чистая функция ещё и проверяется тестом без
-# базы: правило «выключенная группа НЕ подменяется родной» — именно то, что
-# нельзя проверить глазами.
+# базы: правило «выключенный адрес НЕ подменяется чатом тематики» — именно то,
+# что нельзя проверить глазами.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def routing_context(cursor):
-    """Очереди и маршруты тем — всё, из чего считается адрес любой темы.
+    """Очереди, маршруты и чаты бота — всё, из чего считается адрес темы.
 
     Очереди берём ВСЕ, включая выключенные: выключенная очередь не адрес, но
-    её название нужно, чтобы объяснить настройщику, куда указывает маршрут.
+    её название нужно, чтобы объяснить настройщику, что происходит.
+
+    Реестр чатов здесь не для красоты: маршрут ссылается на чат без внешнего
+    ключа (бота могли выгнать из группы), и живость адреса проверяется только
+    так — по тому же списку, из которого адрес и выбирали.
     """
     cursor.execute(
         'SELECT %s FROM crm_queues q ORDER BY q.sort_order, q.title, q.id' % _QUEUE_COLUMNS)
     queues = [_queue_row(row, expose_chat_id=True) for row in cursor.fetchall()]
     cursor.execute(
         """
-        SELECT scenario_key, queue_id, updated_by_name, updated_at
+        SELECT scenario_key, chat_id, chat_title, updated_by_name, updated_at
           FROM crm_topic_routes
         """
     )
-    routes = {row[0]: {'queue_id': row[1], 'updated_by_name': row[2],
-                       'updated_at': _iso(row[3])}
+    routes = {row[0]: {'chat_id': row[1], 'chat_title': row[2],
+                       'updated_by_name': row[3], 'updated_at': _iso(row[4])}
               for row in cursor.fetchall()}
     return {
         'queues': queues,
         'by_id': {q['id']: q for q in queues},
         # Код у очереди может быть пустым (её завели руками) — такая очередь
-        # не бывает домом ни для одной темы, но быть адресом маршрута может.
+        # не бывает домом ни для одной темы.
         'by_code': {q['code']: q for q in queues if q['code']},
         'routes': routes,
+        'chats': {c['chat_id']: c for c in bot_chats(cursor)},
     }
-
-
-def queue_is_usable(queue):
-    """Может ли очередь принять обращение прямо сейчас."""
-    return bool(queue and queue.get('is_active') and queue.get('is_ready'))
 
 
 def resolve_route(context, scenario_key, queue_code):
-    """Адрес темы: {'home', 'queue', 'routed', 'is_ready', 'route'}.
+    """Адрес темы: {'home', 'routed', 'chat_id', 'chat_title', 'chat_known',
+    'is_ready', 'route'}.
 
-    home  — группа тематики (нужна для подписи, даже если она выключена).
-    queue — куда уйдёт обращение на самом деле; None, если адреса нет.
+    home    — тематика темы (её очередь). Нужна и для подписи, и потому что
+              обращение всё равно числится за ней: тематика — это про «о чём
+              вопрос», а чат — про «кому он уходит».
+    chat_id — куда сообщение уйдёт на самом деле.
 
-    Ключевое решение: маршрут, указывающий на выключенную или неготовую
-    очередь, НЕ подменяется родной группой. Тему уводили как раз для того,
-    чтобы её перестали получать в родной; молча вернуть её туда — отправить
-    обращение не тем людям. Поэтому тема просто становится недоступной, а
-    настройщик видит у неё предупреждение.
+    Ключевое решение: маршрут, указывающий на чат, из которого бота выгнали,
+    НЕ подменяется чатом тематики. Тему уводили как раз для того, чтобы её
+    перестали получать в родном чате; молча вернуть её туда — отправить
+    обращение не тем людям. Поэтому тема становится недоступной, а настройщик
+    видит у неё предупреждение.
     """
     home = context['by_code'].get(queue_code)
+    home_ok = bool(home and home.get('is_active'))
     route = context['routes'].get(scenario_key)
-    queue = context['by_id'].get(route['queue_id']) if route else home
+
+    if route:
+        chat_id = route['chat_id']
+        known = context['chats'].get(chat_id)
+        return {
+            'home': home,
+            'routed': True,
+            'chat_id': chat_id,
+            # Живое название важнее снимка: группу могли переименовать. Снимок
+            # остаётся ответом на вопрос «что это был за чат», когда бота из
+            # него выгнали и живого названия взять негде.
+            'chat_title': (known or {}).get('title') or route.get('chat_title'),
+            'chat_known': bool(known),
+            'is_ready': bool(home_ok and known),
+            'route': route,
+        }
+
+    chat_id = home['chat_id'] if home_ok else None
     return {
         'home': home,
-        'queue': queue,
-        'routed': bool(route),
-        'is_ready': queue_is_usable(queue),
-        'route': route,
+        'routed': False,
+        'chat_id': chat_id,
+        # Имя чата берём из реестра и здесь: у очереди лежит снимок, сделанный
+        # при привязке, и после переименования группы он врёт. Иначе одна и та
+        # же группа называлась бы в двух строках подряд по-разному — снимком у
+        # своей темы и живым именем у уведённой.
+        'chat_title': ((context['chats'].get(chat_id) or {}).get('title')
+                       or (home['chat_title'] if home_ok else None)),
+        # А вот ГОТОВНОСТЬ чата тематики по реестру не сверяем: очередь так себя
+        # не вела и до маршрутов, а стоит реестру отстать — и закрылся бы весь
+        # раздел, а не одна тема.
+        'chat_known': True,
+        'is_ready': bool(home_ok and chat_id),
+        'route': None,
     }
 
 
-def set_topic_route(cursor, *, scenario_key, queue_id, actor_user_id=None, actor_name=None):
-    """Назначает теме группу. queue_id=None — вернуть в группу своей тематики.
+def set_topic_route(cursor, *, scenario_key, chat_id, chat_title=None,
+                    actor_user_id=None, actor_name=None):
+    """Назначает теме чат. chat_id=None — вернуть в чат своей тематики.
 
-    Возврат «в свою» стирает строку, а не пишет маршрут на родную очередь:
-    иначе переименование или пересоздание очереди оставило бы маршрут,
-    который смотрит в никуда и при этом выглядит настроенным.
+    Возврат «в свой» стирает строку, а не пишет маршрут на тот же чат: иначе
+    смена чата у тематики оставила бы маршрут, который смотрит в прежнюю
+    группу и при этом выглядит как «по умолчанию».
     """
-    if queue_id is None:
+    if chat_id is None:
         cursor.execute('DELETE FROM crm_topic_routes WHERE scenario_key = %s',
                        (str(scenario_key),))
         return
     cursor.execute(
         """
-        INSERT INTO crm_topic_routes (scenario_key, queue_id, updated_by, updated_by_name)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO crm_topic_routes (scenario_key, chat_id, chat_title,
+                                      updated_by, updated_by_name)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (scenario_key) DO UPDATE
-           SET queue_id = EXCLUDED.queue_id,
+           SET chat_id = EXCLUDED.chat_id,
+               chat_title = EXCLUDED.chat_title,
                updated_by = EXCLUDED.updated_by,
                updated_by_name = EXCLUDED.updated_by_name,
                updated_at = {now}
         """.format(now=_NOW),
-        (str(scenario_key), int(queue_id), actor_user_id, actor_name),
+        (str(scenario_key), int(chat_id), chat_title, actor_user_id, actor_name),
     )
 
 
@@ -372,7 +409,8 @@ _TICKET_COLUMNS = """
     t.author_unread_at, t.author_unread_kind,
     t.resolved_at, t.resolved_by_name,
     t.created_at, t.updated_at, q.department_id,
-    t.scenario_key, t.answers, t.flags, t.author_unread_count
+    t.scenario_key, t.answers, t.flags, t.author_unread_count,
+    t.tg_chat_title
 """
 
 
@@ -423,6 +461,9 @@ def _ticket_row(row, viewer_id=None):
         'scenario_key': row[30],
         'answers': row[31] or {},
         'flags': row[32] or [],
+        # Куда обращение ушло на самом деле. У обращений по уведённой теме это
+        # не чат тематики, и в списке надо показывать именно его.
+        'tg_chat_title': row[34],
     }
 
 
@@ -625,22 +666,31 @@ def get_ticket(cursor, ticket_id, viewer_id=None):
 
 def create_ticket(cursor, *, queue_id, topic_id, subject, body, priority, source,
                   client_name, client_phone, created_by, created_by_name,
-                  department_id, due_at=None, scenario_key=None, answers=None, flags=None):
+                  department_id, due_at=None, scenario_key=None, answers=None, flags=None,
+                  tg_chat_id=None, tg_chat_title=None):
+    """Заводит обращение. tg_chat_id — адрес, посчитанный при создании.
+
+    Адрес пишется В САМО ОБРАЩЕНИЕ, а не вычисляется при отправке: маршрут темы
+    завтра поменяют, а нить этого обращения останется в том чате, куда ушла.
+    Вычисляй мы адрес каждый раз заново, «Отправить ещё раз» после смены
+    маршрута отправило бы продолжение разговора в другую группу.
+    """
     cursor.execute(
         """
         INSERT INTO crm_tickets (queue_id, topic_id, subject, body, priority, source,
                                  client_name, client_phone, created_by, created_by_name,
                                  department_id, due_at, last_message_at,
-                                 scenario_key, answers, flags)
+                                 scenario_key, answers, flags, tg_chat_id, tg_chat_title)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, {now},
-                %s, %s::jsonb, %s::jsonb)
+                %s, %s::jsonb, %s::jsonb, %s, %s)
         RETURNING id
         """.format(now=_NOW),
         (int(queue_id), topic_id, subject, body, priority, source,
          client_name, client_phone, created_by, created_by_name, department_id, due_at,
          scenario_key,
          json.dumps(answers or {}, ensure_ascii=False),
-         json.dumps(list(flags or []), ensure_ascii=False)),
+         json.dumps(list(flags or []), ensure_ascii=False),
+         tg_chat_id, tg_chat_title),
     )
     return cursor.fetchone()[0]
 
@@ -1015,8 +1065,12 @@ def delivery_payload(cursor, ticket_id):
     """Всё, что нужно, чтобы собрать сообщение для Telegram, одним запросом.
 
     Отдельно от get_ticket: отправке не нужны ни группы автора, ни история, а
-    нужны две вещи, которых нет в карточке, — chat_id очереди и название отдела
+    нужны две вещи, которых нет в карточке, — адрес чата и название отдела
     для подписи.
+
+    Адрес — COALESCE(обращение, очередь): у обращения он свой с момента
+    создания (тема могла быть уведена в другой чат), а очередь остаётся
+    ответом для тех обращений, что заведены до маршрутов.
     """
     cursor.execute(
         """
@@ -1024,7 +1078,7 @@ def delivery_payload(cursor, ticket_id):
                t.client_name, t.client_phone,
                t.created_by, t.created_by_name,
                t.delivery_status, t.tg_message_id,
-               q.chat_id, q.title, tp.title, d.name,
+               COALESCE(t.tg_chat_id, q.chat_id), q.title, tp.title, d.name,
                t.answers ->> 'iin', t.scenario_key, t.answers, t.flags
           FROM crm_tickets t
           JOIN crm_queues q ON q.id = t.queue_id

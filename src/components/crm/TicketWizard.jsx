@@ -209,11 +209,11 @@ const Field = ({ step, value, onChange, autoFocus, problem, options = null }) =>
 
 /* ─── Полоса исхода: не заканчивает сценарий, значит не занимает экран ────── */
 
-/* Адрес уведённой темы — строкой под её названием.
+/* Telegram-группа уведённой темы — строкой под её названием.
  *
  * Оператору это не настройка, а предупреждение: обращение по этой теме уйдёт
- * не тем людям, чьё название стоит заголовком раздела. Молчать нельзя — он
- * выбирает тему, глядя на заголовок, — но и в бейдж выносить незачем: адрес
+ * не тем людям, что остальные из этой тематики. Молчать нельзя — он выбирает
+ * тему, глядя на заголовок раздела, — но и в бейдж выносить незачем: адрес
  * читают один раз, а бейджи тянут взгляд постоянно.
  */
 const TopicRoute = ({ item }) => {
@@ -790,7 +790,8 @@ export default function TicketWizard({
                 { headers: headers() });
             const created = response.data;
             showToast?.(created.delivered
-                ? `Обращение №${created.item.id} отправлено в «${created.item.queue_title}»`
+                ? `Обращение №${created.item.id} отправлено в «${
+                    created.item.tg_chat_title || created.item.queue_title}»`
                 : `Обращение №${created.item.id} сохранено, но не ушло в Telegram: ${created.delivery_error}`,
             created.delivered ? 'success' : 'error');
             onCreated?.(created.item.id);
