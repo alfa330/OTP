@@ -39,6 +39,9 @@
       "citizenship": "ЕАЭС",
       "edo": "Sapar",
       "thermobox": "Нет",
+      "diagnostics": "Всё в порядке",
+      "diagnostics_details": [],
+      "priority": "Выдающийся приоритет, 30 балл",
       "panel_only": false
     },
     "car": {
@@ -417,22 +420,26 @@
       {
         "id": "11844218",
         "at": "2026-08-22T19:40",
-        "from": "улица Абая, 150",
-        "to": "микрорайон Аксай-3",
-        "price": "3 100 ₸",
-        "status": "Завершён",
-        "cancelled_by": null,
-        "waiting_min": 2
+        "finished_at": "2026-08-22T19:58",
+        "status": "Выполнен",
+        "cancel_reason": null,
+        "address": "улица Абая, 150",
+        "category": "Эконом",
+        "distance_km": "11,20",
+        "price": "3 100,00",
+        "promo_compensation": "0,00"
       },
       {
         "id": "11842903",
         "at": "2026-08-20T08:12",
-        "from": "проспект Сатпаева, 22",
-        "to": "аэропорт Алматы",
-        "price": "4 200 ₸",
-        "status": "Завершён",
-        "cancelled_by": null,
-        "waiting_min": 1
+        "finished_at": "2026-08-20T08:38",
+        "status": "Выполнен",
+        "cancel_reason": null,
+        "address": "проспект Сатпаева, 22",
+        "category": "Комфорт",
+        "distance_km": "16,90",
+        "price": "4 200,00",
+        "promo_compensation": "0,00"
       }
     ],
     "gps_tiles": [
@@ -510,26 +517,7 @@
         "author": "Сотрудник парка"
       }
     ],
-    "documents": [
-      {
-        "kind": "Водительское удостоверение",
-        "number": "AN000218",
-        "valid_to": "2029-06-13",
-        "status": "Действует"
-      },
-      {
-        "kind": "Техосмотр",
-        "number": "—",
-        "valid_to": "2027-02-11",
-        "status": "Действует"
-      },
-      {
-        "kind": "Договор ЭДО (Sapar)",
-        "number": "—",
-        "valid_to": null,
-        "status": "Подписан"
-      }
-    ],
+    "documents": [],
     "support": [
       [
         "Вопрос по заказам и бонусам · Вопрос по оплате заказа",
