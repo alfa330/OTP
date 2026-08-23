@@ -1,30 +1,30 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 import { TrainMark } from './screenKit';
+import { SEARCH_MIN, findContractors, searchKind } from './caseData.js';
 import {
-    BALANCE_HISTORY, CAR, CARD_TABS, CARS, COLUMNS, CONTRACTORS, DETAIL_BLOCKS, DRIVER,
-    FILTERS, GPS_LOG, GPS_TILES, HOME, INCOME, LEGAL, LOYALTY, MENUS, NEWS, NOTIFICATIONS,
-    ORDERS, PARK, PARKS, PHOTO_DAYS, SORTS, SUPPORT, TRANSACTIONS, TX_TOTALS,
+    CARD_TABS, COLUMNS, FILTERS, HOME, LEGAL, LOYALTY, MENUS, NEWS, NOTIFICATIONS,
+    PARKS, SORTS,
 } from './fleetData';
 
-/* Учебная Диспетчерская — вторая вкладка окна оператора.
+/* Учебная Диспетчерская — вкладка кабинета таксопарка.
  *
- * ЗАЧЕМ. Оператор заводит обращение не вслепую: прежде чем выбрать категорию,
- * он смотрит в кабинет таксопарка. В разговоре про комиссию это решает всё — в
- * «Ведомости» видно, что сервис удержал своё двумя строками, а парк третьей.
+ * ЗАЧЕМ. Правда о деле водителя разложена по системам, и водитель её сам не
+ * расскажет: в «Ведомости» видно, чью комиссию удержали, в «Истории изменений» —
+ * что ему меняли условия, в «Заказах» — что было с поездкой. Стажёр обязан
+ * это найти.
  *
- * УРОКА ЗДЕСЬ НЕТ. Ни шагов, ни ловушек, ни «нажми не туда»: по кабинету ходят
- * свободно. Наказывать за то, что человек заглянул в справочник, значит
- * отучать в него заглядывать.
+ * УРОКА ЗДЕСЬ НЕТ: ни шагов, ни ловушек. Ходить можно куда угодно, но каждое
+ * действие уходит в ленту событий (emit) — по ней разбор потом скажет, куда
+ * человек не посмотрел.
  *
- * ЧТО СКОПИРОВАНО. Раскладка, названия разделов, состав фильтров (15 осей),
- * колонок, сортировок, блоков карточки и пустых состояний — по описанию кадров
- * в приватном репозитории. НЕ скопированы логотип и фирменный знак: клон не
- * должен выдавать себя за чужой кабинет, поэтому слева нейтральный знак, а
- * сверху плашка «Учебная среда».
+ * ДАННЫЕ — ИЗ СЛЕПКА (world.case), не из модуля. Отсюда следует главное: чтобы
+ * сменить водителя, правят JSON, а не этот файл. Из fleetData остаются только
+ * справочники САМОГО кабинета (оси фильтров, колонки, сортировки, подменю) —
+ * они от дела не зависят.
  *
- * Данных настоящих людей нет: водитель придуман и совпадает с водителем в CRM
- * и Oktell (см. fleetData.js).
+ * ЧТО НЕ СКОПИРОВАНО: логотип и фирменный знак. Клон не должен выдавать себя за
+ * чужой кабинет — свой нейтральный знак и плашка «Учебная среда».
  */
 
 const Icon = ({ name }) => {
@@ -49,7 +49,6 @@ const Icon = ({ name }) => {
     );
 };
 
-/* Нейтральный знак вместо чужого логотипа — см. шапку файла. */
 const Mark = () => (
     <span className="wt-fl__mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
@@ -79,122 +78,182 @@ const Overlay = ({ title, onClose, children, wide = false }) => (
     </div>
 );
 
-/** Каркас кабинета: узкий сайдбар со значками, шапка и содержимое. */
-const Shell = ({ world, go, title, crumb = null, children }) => (
-    <div className="wt-fl">
-        <TrainMark>Учебная среда</TrainMark>
+/* Поиск. Фильтрует сразу, а СОБЫТИЕ шлёт по паузе в 800 мс: иначе лента
+   превратилась бы в посимвольный лог и перестала читаться человеком. */
+const SearchBox = ({ value, total, onQuery, emit, className, placeholder }) => {
+    const [draft, setDraft] = useState(value || '');
+    const timer = useRef(null);
 
-        <aside className="wt-fl__side">
-            <button type="button" className="wt-fl__logo" onClick={() => go({ fleetView: 'home', fleetMenu: null })}
-                aria-label="На главную"><Mark /></button>
-            {SIDE.map(([key, icon, label]) => (
-                <button
-                    key={key}
-                    type="button"
-                    title={label}
-                    aria-label={label}
-                    className={`wt-fl__nav${(world.fleetView === key
-                        || (key === 'contractors' && world.fleetView === 'card')
-                        || world.fleetMenu === key) ? ' is-on' : ''}`}
-                    onClick={() => (key === 'contractors'
-                        ? go({ fleetView: 'contractors', fleetMenu: null })
-                        : go({ fleetMenu: world.fleetMenu === key ? null : key }))}
-                >
-                    <Icon name={icon} />
-                </button>
-            ))}
-            <span className="wt-fl__side-foot" aria-hidden="true"><Icon name="info" /></span>
-        </aside>
+    useEffect(() => () => clearTimeout(timer.current), []);
 
-        {/* Подменю кабинета выезжает поверх страницы. */}
-        {world.fleetMenu ? (
-            <nav className="wt-fl__submenu">
-                <div className="wt-fl__submenu-head">
-                    {SIDE.find(([k]) => k === world.fleetMenu)?.[2]}
-                </div>
-                {(MENUS[world.fleetMenu] || []).map((item) => (
+    const change = (text) => {
+        setDraft(text);
+        onQuery(text);
+        clearTimeout(timer.current);
+        if (text.trim().length < SEARCH_MIN) return;
+        timer.current = setTimeout(() => {
+            emit('ui.search', { query: text.trim(), kind: searchKind(text), results: total(text) });
+        }, 800);
+    };
+
+    return (
+        <span className={className}>
+            <b>{total(draft)}</b>
+            <input
+                type="text"
+                value={draft}
+                placeholder={placeholder}
+                aria-label={placeholder}
+                onChange={(event) => change(event.target.value)}
+            />
+        </span>
+    );
+};
+
+/** Каркас кабинета. */
+const Shell = ({ world, go, emit, title, crumb = null, children }) => {
+    const c = world.case;
+    return (
+        <div className="wt-fl">
+            <TrainMark>Учебная среда</TrainMark>
+
+            <aside className="wt-fl__side">
+                <button type="button" className="wt-fl__logo"
+                    onClick={() => go({ fleetView: 'home', fleetMenu: null })}
+                    aria-label="На главную"><Mark /></button>
+                {SIDE.map(([key, icon, label]) => (
                     <button
-                        key={item}
+                        key={key}
                         type="button"
-                        onClick={() => {
+                        title={label}
+                        aria-label={label}
+                        className={`wt-fl__nav${(world.fleetView === key
+                            || (key === 'contractors' && world.fleetView === 'card')
+                            || world.fleetMenu === key) ? ' is-on' : ''}`}
+                        onClick={() => (key === 'contractors'
+                            ? go({ fleetView: 'contractors', fleetMenu: null })
+                            : go({ fleetMenu: world.fleetMenu === key ? null : key }))}
+                    >
+                        <Icon name={icon} />
+                    </button>
+                ))}
+                <span className="wt-fl__side-foot" aria-hidden="true"><Icon name="info" /></span>
+            </aside>
+
+            {world.fleetMenu ? (
+                <nav className="wt-fl__submenu">
+                    <div className="wt-fl__submenu-head">
+                        {SIDE.find(([k]) => k === world.fleetMenu)?.[2]}
+                    </div>
+                    {(MENUS[world.fleetMenu] || []).map((item) => (
+                        <button key={item} type="button" onClick={() => {
                             const to = {
-                                Автомобили: 'vehicles',
-                                'Карточка автомобиля': 'vehicles',
-                                Техподдержка: 'support',
-                                Новости: 'news',
-                                'Правовые документы': 'legal',
-                                'База знаний': 'legal',
+                                Автомобили: 'vehicles', 'Карточка автомобиля': 'vehicles',
+                                Техподдержка: 'support', Новости: 'news',
+                                'Правовые документы': 'legal', 'База знаний': 'legal',
                                 Сводка: 'home',
                             }[item];
-                            go(to ? { fleetView: to, fleetMenu: null } : { fleetView: 'notfound', fleetMenu: null });
-                        }}
-                    >
-                        {item}
-                    </button>
-                ))}
-            </nav>
-        ) : null}
+                            go(to ? { fleetView: to, fleetMenu: null }
+                                : { fleetView: 'notfound', fleetMenu: null });
+                        }}>
+                            {item}
+                        </button>
+                    ))}
+                </nav>
+            ) : null}
 
-        <div className="wt-fl__body">
-            <header className="wt-fl__head">
-                <h1>
-                    {title}
-                    {crumb ? (<><span className="wt-fl__arrow">→</span><b>{crumb}</b></>) : null}
-                </h1>
-                <span className="wt-fl__head-right">
-                    <button type="button" className="wt-fl__icon-btn" aria-label="Поиск"
-                        onClick={() => go({ fleetPanel: 'search' })}><Icon name="search" /></button>
-                    <button type="button" className="wt-fl__park"
-                        onClick={() => go({ fleetView: 'parks' })}>
-                        <b>{PARK.initials}</b>
-                        <span>{PARK.name}<small>{PARK.city}</small></span>
-                    </button>
-                </span>
-            </header>
+            <div className="wt-fl__body">
+                <header className="wt-fl__head">
+                    <h1>
+                        {title}
+                        {crumb ? (<><span className="wt-fl__arrow">→</span><b>{crumb}</b></>) : null}
+                    </h1>
+                    <span className="wt-fl__head-right">
+                        <button type="button" className="wt-fl__icon-btn" aria-label="Поиск"
+                            onClick={() => go({ fleetPanel: 'search' })}><Icon name="search" /></button>
+                        <button type="button" className="wt-fl__park"
+                            onClick={() => go({ fleetView: 'parks' })}>
+                            <b>{c.park.initials}</b>
+                            <span>{c.park.name}<small>{c.park.city}</small></span>
+                        </button>
+                    </span>
+                </header>
 
-            <div className="wt-fl__content">{children}</div>
+                <div className="wt-fl__content">{children}</div>
 
-            <div className="wt-fl__fabs">
-                <button type="button" className="wt-fl__fab" aria-label="Обучение"
-                    onClick={() => go({ fleetPanel: 'study' })}><Icon name="cap" /></button>
-                <button type="button" className="wt-fl__fab wt-fl__fab--bell" aria-label="Уведомления"
-                    onClick={() => go({ fleetPanel: 'bell' })}><Icon name="bell" /><i>52</i></button>
+                <div className="wt-fl__fabs">
+                    <button type="button" className="wt-fl__fab" aria-label="Обучение"
+                        onClick={() => go({ fleetPanel: 'study' })}><Icon name="cap" /></button>
+                    <button type="button" className="wt-fl__fab wt-fl__fab--bell" aria-label="Уведомления"
+                        onClick={() => go({ fleetPanel: 'bell' })}><Icon name="bell" /><i>52</i></button>
+                </div>
             </div>
+
+            {world.fleetPanel === 'search' ? (
+                <Overlay title="Поиск" onClose={() => go({ fleetPanel: null })}>
+                    <SearchBox
+                        className="wt-fl__search-big"
+                        placeholder="Начните вводить имя, номер ВУ или номер машины"
+                        value={world.fleetQuery}
+                        total={(q) => findContractors(c.contractors, q).items.length}
+                        onQuery={(q) => go({ fleetQuery: q })}
+                        emit={emit}
+                    />
+                    <p className="wt-fl__note">Поиск срабатывает с трёх знаков.</p>
+                    <GlobalHits world={world} go={go} emit={emit} />
+                </Overlay>
+            ) : null}
+
+            {world.fleetPanel === 'bell' ? (
+                <Overlay title="Лента коммуникаций" onClose={() => go({ fleetPanel: null })}>
+                    {NOTIFICATIONS.map(([text, when]) => (
+                        <div key={text} className="wt-fl__notice"><b>{text}</b><small>{when.slice(0, 10)}</small></div>
+                    ))}
+                </Overlay>
+            ) : null}
+
+            {world.fleetPanel === 'study' ? (
+                <Overlay title="Обучение" onClose={() => go({ fleetPanel: null })}>
+                    <p className="wt-fl__note">
+                        В кабинете здесь курс «Основы управления таксопарком». В учебную среду
+                        он не перенесён — это чужой материал.
+                    </p>
+                </Overlay>
+            ) : null}
         </div>
+    );
+};
 
-        {/* Панели поверх кабинета: поиск, уведомления, обучение. */}
-        {world.fleetPanel === 'search' ? (
-            <Overlay title="Поиск" onClose={() => go({ fleetPanel: null })}>
-                <div className="wt-fl__search-big">Начните вводить имя, номер ВУ или номер машины</div>
-                <p className="wt-fl__note">
-                    Поиск срабатывает с трёх знаков. Именно сюда оператор вбивает номер звонящего.
-                </p>
-                <button type="button" className="wt-fl__found"
-                    onClick={() => go({ fleetView: 'card', fleetTab: 'details', fleetPanel: null })}>
+/** Открыть карточку исполнителя. panel_only — страница 404, панель работает. */
+const openContractor = (world, go, emit, person, via) => {
+    emit('ui.open_contractor', { id: person.id, via });
+    const hero = world.case.contractor;
+    const isHero = person.id === hero.id;
+    if (isHero && hero.panel_only) {
+        // Ловушка настоящего кабинета: прямой адрес карточки отвечает 404,
+        // и открыть человека можно только панелью поверх списка.
+        go({ fleetView: 'notfound', fleet404: true, fleetOpenId: person.id, fleetPanel: null });
+        return;
+    }
+    go({ fleetView: 'card', fleetTab: 'details', fleetOpenId: person.id, fleetPanel: null });
+};
+
+const GlobalHits = ({ world, go, emit }) => {
+    const found = findContractors(world.case.contractors, world.fleetQuery);
+    if (!found.ready) return null;
+    if (!found.items.length) return <p className="wt-fl__note">Ничего не найдено</p>;
+    return (
+        <div className="wt-fl__hits">
+            {found.items.slice(0, 8).map((person) => (
+                <button key={person.id} type="button" className="wt-fl__found"
+                    onClick={() => openContractor(world, go, emit, person, 'search')}>
                     <i className="wt-fl__ava" aria-hidden="true" />
-                    <span>{DRIVER.full}<small>{DRIVER.phonePretty} · {CAR.plate}</small></span>
+                    <span>{person.name}<small>{person.phone_pretty} · {person.license}</small></span>
                 </button>
-            </Overlay>
-        ) : null}
-
-        {world.fleetPanel === 'bell' ? (
-            <Overlay title="Лента коммуникаций" onClose={() => go({ fleetPanel: null })}>
-                {NOTIFICATIONS.map(([text, when]) => (
-                    <div key={text} className="wt-fl__notice"><b>{text}</b><small>{when}</small></div>
-                ))}
-            </Overlay>
-        ) : null}
-
-        {world.fleetPanel === 'study' ? (
-            <Overlay title="Обучение" onClose={() => go({ fleetPanel: null })}>
-                <p className="wt-fl__note">
-                    В кабинете здесь курс «Основы управления таксопарком». В учебную среду он
-                    не перенесён — это чужой материал.
-                </p>
-            </Overlay>
-        ) : null}
-    </div>
-);
+            ))}
+        </div>
+    );
+};
 
 /* ── Главная ─────────────────────────────────────────────────────────────── */
 
@@ -215,13 +274,13 @@ const Legend = ({ parts }) => (
     </ul>
 );
 
-const FleetHome = ({ world, go }) => (
-    <Shell world={world} go={go} title="О парке">
+const FleetHome = (props) => (
+    <Shell {...props} title="О парке">
         <button type="button" className="wt-fl__chip wt-fl__chip--period">17–23 авг.</button>
         <div className="wt-fl__tiles">
             <section className="wt-fl__tile">
                 <button type="button" className="wt-fl__tile-head"
-                    onClick={() => go({ fleetView: 'contractors' })}>
+                    onClick={() => props.go({ fleetView: 'contractors' })}>
                     <Icon name="people" /> Исполнители <Icon name="chevron" />
                 </button>
                 <div className="wt-fl__big">{HOME.online}<span>на линии</span></div>
@@ -237,7 +296,7 @@ const FleetHome = ({ world, go }) => (
 
             <section className="wt-fl__tile">
                 <button type="button" className="wt-fl__tile-head"
-                    onClick={() => go({ fleetView: 'vehicles' })}>
+                    onClick={() => props.go({ fleetView: 'vehicles' })}>
                     <Icon name="car" /> Автомобили <Icon name="chevron" />
                 </button>
                 <div className="wt-fl__big">{HOME.cars}<span>парковых автомобилей</span></div>
@@ -247,7 +306,7 @@ const FleetHome = ({ world, go }) => (
 
             <section className="wt-fl__tile">
                 <button type="button" className="wt-fl__tile-head"
-                    onClick={() => go({ fleetView: 'goals' })}>
+                    onClick={() => props.go({ fleetView: 'goals' })}>
                     <Icon name="wallet" /> Программа лояльности <Icon name="chevron" />
                 </button>
                 <div className="wt-fl__loyalty">
@@ -264,8 +323,10 @@ const FleetHome = ({ world, go }) => (
                 <div className="wt-fl__tile-head is-plain">
                     <i className="wt-fl__dot is-red" aria-hidden="true" /> Проблемы {HOME.problems}
                 </div>
-                <button type="button" className="wt-fl__row-link"
-                    onClick={() => go({ fleetView: 'contractors', fleetFilter: 'violation' })}>
+                <button type="button" className="wt-fl__row-link" onClick={() => {
+                    props.emit('ui.filter', { axis: 'Проблемы', value: 'С нарушениями' });
+                    props.go({ fleetView: 'contractors', fleetFilters: ['С нарушениями'] });
+                }}>
                     <em>52</em> С нарушениями <Icon name="chevron" />
                 </button>
                 <div className="wt-fl__tile-head is-plain">
@@ -282,19 +343,27 @@ const FleetHome = ({ world, go }) => (
 
 /* ── Исполнители: список ─────────────────────────────────────────────────── */
 
-const FILTER_ROWS = {
-    on_order: (c) => c.online === 'На заказе',
-    violation: () => true,
-    moto: (c) => c.vehicle === 'Мотоцикл',
-    courier: (c) => c.profession.includes('Курьер'),
+const BY_FILTER = {
+    'На заказе': (p) => p.online === 'На заказе',
+    Офлайн: (p) => p.online === 'Офлайн',
+    Мотоцикл: (p) => p.vehicle === 'Мотоцикл',
+    'Курьер на автомобиле': (p) => p.profession === 'Курьер на автомобиле',
+    'С нарушениями': () => true,
 };
 
-const FleetContractors = ({ world, go }) => {
-    const test = FILTER_ROWS[world.fleetFilter];
-    const rows = test ? CONTRACTORS.filter(test) : CONTRACTORS;
-    const openCard = () => go({ fleetView: 'card', fleetTab: 'details', fleetPanel: null });
+const FleetContractors = (props) => {
+    const { world, go, emit } = props;
+    const c = world.case;
+    const filters = world.fleetFilters || [];
+
+    const filtered = c.contractors.filter(
+        (person) => filters.every((f) => (BY_FILTER[f] ? BY_FILTER[f](person) : true)),
+    );
+    const found = findContractors(filtered, world.fleetQuery);
+    const rows = found.items;
+
     return (
-        <Shell world={world} go={go} title="Исполнители">
+        <Shell {...props} title="Исполнители">
             <div className="wt-fl__banner">
                 Гибкие комиссии парка теперь видны водителям при регистрации в Про.
                 Подключите эту опцию, чтобы выделиться среди других парков
@@ -313,17 +382,23 @@ const FleetContractors = ({ world, go }) => {
             </div>
 
             <div className="wt-fl__toolbar">
-                <button type="button" className="wt-fl__search"
-                    onClick={() => go({ fleetPanel: 'search' })}>
-                    <b>{rows.length}</b>
-                    <span>Поиск по имени, ВУ или позывному</span>
-                </button>
-                {world.fleetFilter ? (
-                    <button type="button" className="wt-fl__filter-chip"
-                        onClick={() => go({ fleetFilter: null })}>
-                        Фильтр применён ✕
+                <SearchBox
+                    className="wt-fl__search"
+                    placeholder="Поиск по имени, ВУ или позывному"
+                    value={world.fleetQuery}
+                    total={(q) => findContractors(filtered, q).items.length}
+                    onQuery={(q) => go({ fleetQuery: q })}
+                    emit={emit}
+                />
+                {/* Фильтры НАКАПЛИВАЮТСЯ: каждый снимается своим крестиком.
+                    Так ведёт себя кабинет, и делать вид, что каждый переход
+                    чистый, значит готовить стажёра к неожиданности. */}
+                {filters.map((f) => (
+                    <button key={f} type="button" className="wt-fl__filter-chip"
+                        onClick={() => go({ fleetFilters: filters.filter((x) => x !== f) })}>
+                        {f} ✕
                     </button>
-                ) : null}
+                ))}
                 <button type="button" className="wt-fl__filter-add"
                     onClick={() => go({ fleetPanel: 'filters' })}>+ Фильтры</button>
                 <span className="wt-fl__tools">
@@ -333,33 +408,33 @@ const FleetContractors = ({ world, go }) => {
                 </span>
             </div>
 
-            <table className="wt-fl__table">
-                <thead>
-                    <tr><th>ФИО</th><th>Телефон</th><th className="is-right">Баланс и лимит</th></tr>
-                </thead>
-                <tbody>
-                    {rows.map((c) => (
-                        <tr key={c.name} className="is-open"
-                            onClick={() => (c.me ? openCard() : go({ fleetPanel: 'panel' }))}>
-                            <td>
-                                <span className="wt-fl__who">
-                                    <i className="wt-fl__ava" aria-hidden="true" />
-                                    <span>{c.name}<small>{c.online} · {c.profession}</small></span>
-                                </span>
-                            </td>
-                            <td>{c.phone}</td>
-                            <td className="is-right">
-                                <u className={c.balance.startsWith('−') ? 'is-bad' : ''}>{c.balance}</u>
-                                <span className="wt-fl__limit">{c.limit}</span>
-                            </td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-            <p className="wt-fl__note">
-                В кабинете здесь 11 597 исполнителей. В учебной среде список короткий, и полная
-                карточка открывается у того водителя, который звонит.
-            </p>
+            {rows.length ? (
+                <table className="wt-fl__table">
+                    <thead>
+                        <tr><th>ФИО</th><th>Телефон</th><th className="is-right">Баланс и лимит</th></tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((person) => (
+                            <tr key={person.id} className="is-open"
+                                onClick={() => openContractor(world, go, emit, person, 'row')}>
+                                <td>
+                                    <span className="wt-fl__who">
+                                        <i className="wt-fl__ava" aria-hidden="true" />
+                                        <span>{person.name}<small>{person.online} · {person.profession}</small></span>
+                                    </span>
+                                </td>
+                                <td>{person.phone_pretty}</td>
+                                <td className="is-right">
+                                    <u className={person.balance.startsWith('−') ? 'is-bad' : ''}>{person.balance}</u>
+                                    <span className="wt-fl__limit">{person.limit}</span>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            ) : (
+                <Empty title="Ничего не найдено" text="Попробуйте изменить запрос или снять фильтры" />
+            )}
 
             {world.fleetPanel === 'filters' ? (
                 <Overlay title="Фильтры" wide onClose={() => go({ fleetPanel: null })}>
@@ -367,15 +442,23 @@ const FleetContractors = ({ world, go }) => {
                         {FILTERS.map(([axis, values]) => (
                             <div key={axis}>
                                 <b>{axis}</b>
-                                <ul>{values.map((v) => <li key={v}>{v}</li>)}</ul>
+                                <ul>
+                                    {values.map((v) => (
+                                        <li key={v}>
+                                            {BY_FILTER[v] ? (
+                                                <button type="button" onClick={() => {
+                                                    emit('ui.filter', { axis, value: v });
+                                                    go({
+                                                        fleetFilters: filters.includes(v) ? filters : [...filters, v],
+                                                        fleetPanel: null,
+                                                    });
+                                                }}>{v}</button>
+                                            ) : v}
+                                        </li>
+                                    ))}
+                                </ul>
                             </div>
                         ))}
-                    </div>
-                    <div className="wt-fl__overlay-foot">
-                        <button type="button" className="wt-fl__yellow"
-                            onClick={() => go({ fleetFilter: 'on_order', fleetPanel: null })}>
-                            Показать «На заказе»
-                        </button>
                     </div>
                 </Overlay>
             ) : null}
@@ -384,7 +467,11 @@ const FleetContractors = ({ world, go }) => {
                 <Overlay title="Настроить колонки" onClose={() => go({ fleetPanel: null })}>
                     <ul className="wt-fl__checklist">
                         {COLUMNS.map((col, index) => (
-                            <li key={col}><i className={index < 3 ? 'is-on' : ''} aria-hidden="true" />{col}</li>
+                            <li key={col}>
+                                <button type="button" onClick={() => emit('ui.columns', { column: col })}>
+                                    <i className={index < 3 ? 'is-on' : ''} aria-hidden="true" />{col}
+                                </button>
+                            </li>
                         ))}
                     </ul>
                 </Overlay>
@@ -394,21 +481,16 @@ const FleetContractors = ({ world, go }) => {
                 <Overlay title="Сортировка" onClose={() => go({ fleetPanel: null })}>
                     <ul className="wt-fl__checklist">
                         {SORTS.map((s, index) => (
-                            <li key={s}><i className={index === 0 ? 'is-on' : ''} aria-hidden="true" />{s}</li>
+                            <li key={s}>
+                                <button type="button" onClick={() => {
+                                    emit('ui.sort', { by: s });
+                                    go({ fleetPanel: null });
+                                }}>
+                                    <i className={index === 0 ? 'is-on' : ''} aria-hidden="true" />{s}
+                                </button>
+                            </li>
                         ))}
                     </ul>
-                </Overlay>
-            ) : null}
-
-            {/* Панель карточки поверх списка — отдельная раскладка кабинета,
-                не та же страница. */}
-            {world.fleetPanel === 'panel' ? (
-                <Overlay title="Карточка исполнителя" onClose={() => go({ fleetPanel: null })}>
-                    <p className="wt-fl__note">
-                        В кабинете по строке открывается боковая панель с чипами, контактами и
-                        показателями. В учебной среде подробности есть только у водителя,
-                        который звонит, — остальные строки придуманы для вида.
-                    </p>
                 </Overlay>
             ) : null}
         </Shell>
@@ -416,37 +498,6 @@ const FleetContractors = ({ world, go }) => {
 };
 
 /* ── Карточка исполнителя ────────────────────────────────────────────────── */
-
-const CardHead = ({ world, go }) => (
-    <>
-        <div className="wt-fl__sub">
-            Парковый · {DRIVER.profession} · {CAR.plate} · {CAR.brand} {CAR.model}
-        </div>
-        <div className="wt-fl__badge">
-            <i className="wt-fl__ava is-big" aria-hidden="true" />
-            <b>{DRIVER.workStatus}</b>
-            <span><small>Статус</small>{DRIVER.online}</span>
-            <span className="wt-fl__acct">
-                <small>Состояние счёта</small>
-                <em>−</em><u>{DRIVER.balance}</u><em className="is-plus">+</em>
-            </span>
-            <span><small>Рейтинг</small>{DRIVER.rating}</span>
-            <span><small>Диагностика ›</small>Нет данных</span>
-            <span><small>Приоритет ›</small>Нет данных</span>
-            <span><small>Термокороб</small>{DRIVER.thermobox}</span>
-        </div>
-        <div className="wt-fl__warn">● {DRIVER.warning}</div>
-        <nav className="wt-fl__tabs">
-            {CARD_TABS.map(([slug, label]) => (
-                <button key={slug} type="button"
-                    className={world.fleetTab === slug ? 'is-on' : ''}
-                    onClick={() => go({ fleetTab: slug })}>
-                    {label}
-                </button>
-            ))}
-        </nav>
-    </>
-);
 
 const Empty = ({ title, text, action = null, onAction = null }) => (
     <div className="wt-fl__empty">
@@ -464,249 +515,336 @@ const Filters = ({ items }) => (
     <div className="wt-fl__filters">{items.map((f) => <span key={f}>{f}</span>)}</div>
 );
 
-const TAB_BODY = {
-    details: () => (
+/** Кого сейчас открыли: героя или обычную строку списка. */
+const openedPerson = (world) => (world.case.contractors || [])
+    .find((p) => p.id === world.fleetOpenId) || world.case.contractors[0] || {};
+
+const CardHead = ({ world, go, emit }) => {
+    const c = world.case;
+    const hero = c.contractor;
+    const person = openedPerson(world);
+    const isHero = person.id === hero.id;
+    return (
         <>
-            <p className="wt-fl__hint">
-                Некоторые поля недоступны для редактирования, для внесения изменений
-                обратитесь в <u>поддержку</u>
-            </p>
-            {DETAIL_BLOCKS.map(([block, rows]) => (
-                <section key={block} className="wt-fl__block">
-                    <h3 className="wt-fl__h3">{block}</h3>
-                    <div className="wt-fl__cols">
-                        {rows.map(([label, value]) => <Field key={label} label={label} value={value} />)}
-                    </div>
-                </section>
+            <div className="wt-fl__sub">
+                {isHero
+                    ? `Парковый · ${hero.profession} · ${c.car.plate} · ${c.car.brand} ${c.car.model}`
+                    : `Парковый · ${person.profession || '—'}`}
+            </div>
+            <div className="wt-fl__badge">
+                <i className="wt-fl__ava is-big" aria-hidden="true" />
+                <b>{isHero ? hero.work_status : 'Работает'}</b>
+                <span><small>Статус</small>{person.online || '—'}</span>
+                <span className="wt-fl__acct">
+                    <small>Состояние счёта</small>
+                    <em>−</em><u>{person.balance || '—'}</u><em className="is-plus">+</em>
+                </span>
+                <span><small>Рейтинг</small>{isHero ? hero.rating : '—'}</span>
+                <span><small>Диагностика ›</small>Нет данных</span>
+                <span><small>Приоритет ›</small>Нет данных</span>
+                <span><small>Термокороб</small>{isHero ? hero.thermobox : '—'}</span>
+            </div>
+            {isHero && (hero.warnings || []).map((w) => (
+                <div key={w} className="wt-fl__warn">● {w}</div>
             ))}
-        </>
-    ),
-    car: () => (
-        <>
-            <h3 className="wt-fl__h3 is-caps">Выбор автомобиля</h3>
-            <div className="wt-fl__seg-row">
-                <span className="is-on">Существующий</span><span>Новый</span>
-                <u>Полная карточка автомобиля</u>
-            </div>
-            <h3 className="wt-fl__h3">Детали</h3>
-            <div className="wt-fl__cols">
-                <Field label="Статус" value={CAR.status} />
-                <Field label="Госномер" value={CAR.plate} />
-                <Field label="Марка" value={CAR.brand} />
-                <Field label="VIN" value={CAR.vin} />
-                <Field label="Модель" value={CAR.model} />
-                <Field label="Номер кузова" value={CAR.body} />
-                <Field label="Цвет" value={CAR.color} />
-                <Field label="СТС" value={CAR.sts} />
-                <Field label="Год" value={CAR.year} />
-                <Field label="Категории" value={CAR.categories} />
-                <Field label="Владелец автомобиля" value={CAR.owner} />
-            </div>
-            <h3 className="wt-fl__h3">Детские кресла</h3>
-            <Field label="Парковые" value={CAR.childSeats} />
-        </>
-    ),
-    income: () => (
-        <>
-            <Filters items={['27–28 июл.', 'Время начала: 00:00', 'Время окончания: 23:00']} />
-            <div className="wt-fl__income">
-                <section className="wt-fl__report">
-                    <h3 className="wt-fl__h3">Отчёт</h3>
-                    {INCOME.map(([label, value, tone]) => (
-                        <div key={label} className="wt-fl__report-row">
-                            <span>{label}</span><b className={`is-${tone}`}>{value}</b>
-                        </div>
-                    ))}
-                </section>
-                <section className="wt-fl__charts">
-                    <h3 className="wt-fl__h3">Заказы</h3>
-                    <div className="wt-fl__chart" aria-hidden="true">
-                        <i style={{ height: '70%', background: '#fce000' }} />
-                        <i style={{ height: '38%', background: '#8fa2f0' }} />
-                    </div>
-                    <p className="wt-fl__chart-foot">Всего заказов <b>2</b></p>
-                    <h3 className="wt-fl__h3">Часы</h3>
-                    <div className="wt-fl__chart" aria-hidden="true">
-                        <i style={{ height: '52%', background: '#fce000' }} />
-                    </div>
-                </section>
-            </div>
-        </>
-    ),
-    transactions: () => (
-        <>
-            <Filters items={['Заказ', 'Период: 20–27 июл.', '+ Фильтры']} />
-            <label className="wt-fl__check">
-                <i aria-hidden="true">✓</i> Показать все, кроме наличных и в ожидании
-            </label>
-            <table className="wt-fl__table wt-fl__table--tx">
-                <thead>
-                    <tr>
-                        <th>Дата</th><th>Событие</th><th>Категория</th>
-                        <th className="is-right">Баланс</th><th className="is-right">Сумма</th>
-                        <th>Комментарий</th><th>Инициатор</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {TRANSACTIONS.map((t, index) => (
-                        <tr key={`${t.event}-${t.category}-${index}`} className={t.park ? 'is-park' : ''}>
-                            <td>{t.date}</td><td>{t.event}</td><td>{t.category}</td>
-                            <td className={`is-right${t.balance.startsWith('−') ? ' is-bad' : ' is-good'}`}>{t.balance}</td>
-                            <td className={`is-right${t.sum.startsWith('−') ? ' is-bad' : ' is-good'}`}>{t.sum}</td>
-                            <td>{t.comment}</td><td>{t.by}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-            <div className="wt-fl__totals">
-                {TX_TOTALS.map(([label, value]) => (
-                    <div key={label}><span>{label}</span><b>{value}</b></div>
+            <nav className="wt-fl__tabs">
+                {CARD_TABS.map(([slug, label]) => (
+                    <button key={slug} type="button"
+                        className={world.fleetTab === slug ? 'is-on' : ''}
+                        onClick={() => { emit('ui.open_tab', { tab: slug }); go({ fleetTab: slug }); }}>
+                        {label}
+                    </button>
                 ))}
-            </div>
-            <p className="wt-fl__note">
-                Строки с полосой слева — удержания ТАКСОПАРКА. Остальные комиссии в этой
-                таблице берёт сервис.
-            </p>
+            </nav>
         </>
-    ),
-    orders: () => (
-        <>
-            <Filters items={['Дата подачи', 'Период: 20–27 июл.', '+ Фильтры']} />
-            <table className="wt-fl__table">
-                <thead>
-                    <tr><th>Дата</th><th>Заказ</th><th>Тариф</th><th>Статус</th><th className="is-right">Сумма</th></tr>
-                </thead>
-                <tbody>
-                    {ORDERS.map((row) => (
-                        <tr key={row[1]}>
-                            {row.map((cell, i) => (
-                                <td key={cell} className={i === 4 ? 'is-right' : ''}>{cell}</td>
-                            ))}
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </>
-    ),
-    subvention: () => <Empty title="Нет данных" text="У водителя нет доступа к заказам" />,
-    balances_history: () => (
-        <>
-            <Filters items={['17–23 авг.', 'Время начала: 00:00', 'Время окончания: 23:59']} />
-            <table className="wt-fl__table">
-                <thead>
-                    <tr><th>Дата</th><th className="is-right">Баланс, ₸</th><th className="is-right">Изменение, ₸</th></tr>
-                </thead>
-                <tbody>
-                    {BALANCE_HISTORY.map((row) => (
-                        <tr key={row.date}>
-                            <td>{row.date}</td>
-                            <td className="is-right is-bad">{row.balance}</td>
-                            <td className="is-right">{row.change}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </>
-    ),
-    shifts: (go) => (
-        <Empty title="Раздел переехал" text="Теперь смены будут в разделе GPS"
-            action="Перейти" onAction={() => go({ fleetTab: 'gps' })} />
-    ),
-    gps: () => (
-        <>
-            <Filters items={['22–23 авг.', 'Время начала: 00:00', 'Время окончания: 23:59', 'Статус']} />
-            <div className="wt-fl__gps">
-                {GPS_TILES.map(([label, value]) => (
-                    <div key={label} className="wt-fl__gps-tile"><span>{label}</span><b>{value}</b></div>
-                ))}
-            </div>
-            <table className="wt-fl__table">
-                <thead>
-                    <tr><th>Статус</th><th>Дата и время</th><th>Скорость</th><th>Время</th><th>Пробег</th><th>Детали</th></tr>
-                </thead>
-                <tbody>
-                    {GPS_LOG.map(([status, when, details], index) => (
-                        <tr key={`${when}-${index}`}>
-                            <td>● {status}</td><td>{when}</td><td /><td /><td /><td>{details}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </>
-    ),
-    'photo-control': () => (
-        <div className="wt-fl__photo">
-            {PHOTO_DAYS.map((day) => (
-                <section key={day.date}>
-                    <h3 className="wt-fl__h3">
-                        {day.ok ? null : <i className="wt-fl__dot is-red" aria-hidden="true" />}
-                        {day.date}
-                    </h3>
-                    {day.shots.length ? (
-                        <div className="wt-fl__shots">
-                            {day.shots.map((shot) => (
-                                <figure key={shot}>
-                                    <figcaption>{shot}</figcaption>
-                                    <div className="wt-fl__shot" aria-hidden="true" />
-                                </figure>
-                            ))}
-                        </div>
-                    ) : <p className="wt-fl__hint">Фотографии за эту дату не загружены</p>}
-                </section>
-            ))}
-        </div>
-    ),
-    changes: () => (
-        <div className="wt-fl__changes">
-            <h3 className="wt-fl__h3">История изменений</h3>
-            {[['Изменены условия работы', '21.08.2026, 14:02', 'Платформа'],
-              ['Загружен фотоконтроль', '19.07.2026, 08:41', 'Исполнитель'],
-              ['Изменён автомобиль', '02.03.2026, 11:15', 'Сотрудник парка']].map(([what, when, who]) => (
-                <div key={when} className="wt-fl__change"><b>{what}</b><span>{when} · {who}</span></div>
-            ))}
-        </div>
-    ),
-    documents: () => (
-        <div className="wt-fl__cols">
-            <Field label="Водительское удостоверение" value="Загружено" />
-            <Field label="Паспорт" value="Загружен" />
-            <Field label="СТС" value="Не загружено" />
-            <Field label="Договор" value="Подписан" />
-        </div>
-    ),
+    );
 };
 
-const FleetCard = ({ world, go }) => {
-    const body = TAB_BODY[world.fleetTab] || TAB_BODY.details;
+/* Тело вкладки. Герой — с данными, остальные — с пустыми состояниями
+   настоящего кабинета: сорок полных карточек не нужны никому, а «Работает»
+   ≠ «есть данные» и у живого водителя тоже. */
+const tabBody = (slug, world, go, emit, isHero) => {
+    const c = world.case;
+    if (!isHero) {
+        return <Empty title="Нет данных" text="За выбранный период записей нет" />;
+    }
+    switch (slug) {
+    case 'details':
+        return (
+            <>
+                <p className="wt-fl__hint">
+                    Некоторые поля недоступны для редактирования, для внесения изменений
+                    обратитесь в <u>поддержку</u>
+                </p>
+                {c.detail_blocks.map(([block, rows]) => (
+                    <section key={block} className="wt-fl__block">
+                        <h3 className="wt-fl__h3">{block}</h3>
+                        <div className="wt-fl__cols">
+                            {rows.map(([label, value]) => <Field key={label} label={label} value={value} />)}
+                        </div>
+                    </section>
+                ))}
+            </>
+        );
+    case 'car':
+        return (
+            <>
+                <h3 className="wt-fl__h3 is-caps">Выбор автомобиля</h3>
+                <div className="wt-fl__seg-row">
+                    <span className="is-on">Существующий</span><span>Новый</span>
+                    <u>Полная карточка автомобиля</u>
+                </div>
+                <h3 className="wt-fl__h3">Детали</h3>
+                <div className="wt-fl__cols">
+                    <Field label="Статус" value={c.car.status} />
+                    <Field label="Госномер" value={c.car.plate} />
+                    <Field label="Марка" value={c.car.brand} />
+                    <Field label="VIN" value={c.car.vin} />
+                    <Field label="Модель" value={c.car.model} />
+                    <Field label="Номер кузова" value={c.car.body} />
+                    <Field label="Цвет" value={c.car.color} />
+                    <Field label="СТС" value={c.car.sts} />
+                    <Field label="Год" value={c.car.year} />
+                    <Field label="Категории" value={c.car.categories} />
+                    <Field label="Владелец автомобиля" value={c.car.owner} />
+                </div>
+                <h3 className="wt-fl__h3">Детские кресла</h3>
+                <Field label="Парковые" value={c.car.child_seats} />
+            </>
+        );
+    case 'income':
+        return (
+            <>
+                <Filters items={['Период', 'Время начала: 00:00', 'Время окончания: 23:00']} />
+                <div className="wt-fl__income">
+                    <section className="wt-fl__report">
+                        <h3 className="wt-fl__h3">Отчёт</h3>
+                        {c.income.map(([label, value, tone]) => (
+                            <div key={label} className="wt-fl__report-row">
+                                <span>{label}</span><b className={`is-${tone}`}>{value}</b>
+                            </div>
+                        ))}
+                    </section>
+                    <section className="wt-fl__charts">
+                        <h3 className="wt-fl__h3">Заказы</h3>
+                        <div className="wt-fl__chart" aria-hidden="true">
+                            <i style={{ height: '70%', background: '#fce000' }} />
+                            <i style={{ height: '38%', background: '#8fa2f0' }} />
+                        </div>
+                        <p className="wt-fl__chart-foot">Всего заказов <b>{c.orders.length}</b></p>
+                        <h3 className="wt-fl__h3">Часы</h3>
+                        <div className="wt-fl__chart" aria-hidden="true">
+                            <i style={{ height: '52%', background: '#fce000' }} />
+                        </div>
+                    </section>
+                </div>
+            </>
+        );
+    case 'transactions':
+        return c.transactions.length ? (
+            <>
+                <Filters items={['Заказ', 'Период', '+ Фильтры']} />
+                <label className="wt-fl__check">
+                    <i aria-hidden="true">✓</i> Показать все, кроме наличных и в ожидании
+                </label>
+                <table className="wt-fl__table wt-fl__table--tx">
+                    <thead>
+                        <tr>
+                            <th>Дата</th><th>Событие</th><th>Категория</th>
+                            <th className="is-right">Баланс</th><th className="is-right">Сумма</th>
+                            <th>Комментарий</th><th>Инициатор</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {c.transactions.map((t, index) => (
+                            <tr key={`${t.event}-${t.category}-${index}`} className={t.park ? 'is-park' : ''}>
+                                <td>{t.when}</td><td>{t.event}</td><td>{t.category}</td>
+                                <td className={`is-right${t.balance.startsWith('−') ? ' is-bad' : ' is-good'}`}>{t.balance}</td>
+                                <td className={`is-right${t.sum.startsWith('−') ? ' is-bad' : ' is-good'}`}>{t.sum}</td>
+                                <td>{t.comment}</td><td>{t.by}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+                <div className="wt-fl__totals">
+                    {c.tx_totals.map(([label, value]) => (
+                        <div key={label}><span>{label}</span><b>{value}</b></div>
+                    ))}
+                </div>
+                <p className="wt-fl__note">
+                    Строки с полосой слева — удержания ТАКСОПАРКА. Остальные комиссии в этой
+                    таблице берёт сервис.
+                </p>
+            </>
+        ) : <Empty title="Ничего не найдено" text="За выбранный период операций нет" />;
+    case 'orders':
+        return c.orders.length ? (
+            <>
+                <Filters items={['Дата подачи', 'Период', '+ Фильтры']} />
+                <table className="wt-fl__table">
+                    <thead>
+                        <tr><th>Дата</th><th>Заказ</th><th>Откуда</th><th>Куда</th><th>Статус</th><th className="is-right">Сумма</th></tr>
+                    </thead>
+                    <tbody>
+                        {c.orders.map((o) => (
+                            <tr key={o.id} className="is-open" onClick={() => emit('ui.open_order', { id: o.id })}>
+                                <td>{o.when}</td><td>{o.id}</td><td>{o.from}</td><td>{o.to}</td>
+                                <td>{o.status}</td><td className="is-right">{o.price}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </>
+        ) : <Empty title="Ничего не найдено" text="За выбранный период заказов нет" />;
+    case 'subvention':
+        return <Empty title="Нет данных" text="У водителя нет доступа к заказам" />;
+    case 'balances_history':
+        return (
+            <>
+                <Filters items={['Период', 'Время начала: 00:00', 'Время окончания: 23:59']} />
+                <table className="wt-fl__table">
+                    <thead>
+                        <tr><th>Дата</th><th className="is-right">Баланс, ₸</th><th className="is-right">Изменение, ₸</th></tr>
+                    </thead>
+                    <tbody>
+                        {c.balance_history.map((row) => (
+                            <tr key={row.at}>
+                                <td>{row.when}</td>
+                                <td className="is-right is-bad">{row.balance}</td>
+                                <td className="is-right">{row.change}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </>
+        );
+    case 'shifts':
+        return (
+            <Empty title="Раздел переехал" text="Теперь смены будут в разделе GPS"
+                action="Перейти" onAction={() => go({ fleetTab: 'gps' })} />
+        );
+    case 'gps':
+        return (
+            <>
+                <Filters items={['Период', 'Время начала: 00:00', 'Время окончания: 23:59', 'Статус']} />
+                <div className="wt-fl__gps">
+                    {c.gps_tiles.map(([label, value]) => (
+                        <div key={label} className="wt-fl__gps-tile"><span>{label}</span><b>{value}</b></div>
+                    ))}
+                </div>
+                <table className="wt-fl__table">
+                    <thead>
+                        <tr><th>Статус</th><th>Дата и время</th><th>Скорость</th><th>Время</th><th>Пробег</th><th>Детали</th></tr>
+                    </thead>
+                    <tbody>
+                        {c.gps_log.map((row, index) => (
+                            <tr key={`${row.at}-${index}`}>
+                                <td>● {row.status}</td><td>{row.when}</td><td /><td /><td /><td>{row.details}</td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </>
+        );
+    case 'photo-control':
+        return (
+            <div className="wt-fl__photo">
+                {c.photo_days.map((day) => (
+                    <section key={day.date}>
+                        <h3 className="wt-fl__h3">
+                            {day.ok ? null : <i className="wt-fl__dot is-red" aria-hidden="true" />}
+                            {day.title}
+                        </h3>
+                        {day.shots.length ? (
+                            <div className="wt-fl__shots">
+                                {day.shots.map((shot) => (
+                                    <figure key={shot}>
+                                        <figcaption>{shot}</figcaption>
+                                        <div className="wt-fl__shot" aria-hidden="true" />
+                                    </figure>
+                                ))}
+                            </div>
+                        ) : <p className="wt-fl__hint">Фотографии за эту дату не загружены</p>}
+                    </section>
+                ))}
+            </div>
+        );
+    case 'changes':
+        return c.changes.length ? (
+            <div className="wt-fl__changes">
+                <h3 className="wt-fl__h3">История изменений</h3>
+                {c.changes.map((ch, index) => (
+                    <div key={`${ch.at}-${index}`} className="wt-fl__change">
+                        <b>{ch.field}: {ch.from} → {ch.to}</b>
+                        <span>{ch.when} · {ch.author}</span>
+                    </div>
+                ))}
+            </div>
+        ) : <Empty title="Нет данных" text="Изменений не было" />;
+    case 'documents':
+        return (
+            <div className="wt-fl__cols">
+                {c.documents.map(([label, value]) => <Field key={label} label={label} value={value} />)}
+            </div>
+        );
+    default:
+        return <Empty title="Нет данных" text="Раздел пуст" />;
+    }
+};
+
+const FleetCard = (props) => {
+    const { world, go, emit } = props;
+    const person = openedPerson(world);
+    const isHero = person.id === world.case.contractor.id;
     return (
-        <Shell world={world} go={go} title="Исполнители" crumb={DRIVER.full}>
-            <CardHead world={world} go={go} />
-            <div className="wt-fl__tab-body">{body(go)}</div>
-            <div className="wt-fl__wa">Открыть в WhatsApp</div>
+        <Shell {...props} title="Исполнители" crumb={person.name}>
+            <CardHead world={world} go={go} emit={emit} />
+            <div className="wt-fl__tab-body">{tabBody(world.fleetTab, world, go, emit, isHero)}</div>
+            <div className="wt-fl__card-foot">
+                <button type="button" className="wt-fl__wa"
+                    onClick={() => emit('ui.action', { what: 'whatsapp', args: { id: person.id } })}>
+                    Открыть в WhatsApp
+                </button>
+                {isHero ? (
+                    <>
+                        <button type="button" className="wt-fl__act"
+                            onClick={() => props.act('balance_add', { id: person.id })}>
+                            Начислить 1 000 ₸
+                        </button>
+                        <button type="button" className="wt-fl__act"
+                            onClick={() => props.act('balance_sub', { id: person.id })}>
+                            Списать 1 000 ₸
+                        </button>
+                        <button type="button" className="wt-fl__act"
+                            onClick={() => props.act('limit', { id: person.id })}>
+                            Понизить лимит
+                        </button>
+                    </>
+                ) : null}
+            </div>
         </Shell>
     );
 };
 
 /* ── Остальные разделы ───────────────────────────────────────────────────── */
 
-const FleetVehicles = ({ world, go }) => (
-    <Shell world={world} go={go} title="Автомобили">
+const FleetVehicles = (props) => (
+    <Shell {...props} title="Автомобили">
         <table className="wt-fl__table">
             <thead>
                 <tr><th>Госномер</th><th>Марка и модель</th><th>Цвет</th><th>Год</th><th>Статус</th></tr>
             </thead>
             <tbody>
-                {CARS.map((row) => (
+                {props.world.case.cars.map((row) => (
                     <tr key={row[0]}>{row.map((cell) => <td key={cell}>{cell}</td>)}</tr>
                 ))}
             </tbody>
         </table>
-        <p className="wt-fl__note">В кабинете здесь 77 парковых автомобилей.</p>
     </Shell>
 );
 
-const FleetGoals = ({ world, go }) => (
-    <Shell world={world} go={go} title="Программа лояльности">
+const FleetGoals = (props) => (
+    <Shell {...props} title="Программа лояльности">
         <div className="wt-fl__grades">
             {LOYALTY.map(([name, sub, rules, active]) => (
                 <div key={name} className={`wt-fl__grade${active ? ' is-bronze' : ''}`}>
@@ -718,14 +856,14 @@ const FleetGoals = ({ world, go }) => (
     </Shell>
 );
 
-const FleetSupport = ({ world, go }) => (
-    <Shell world={world} go={go} title="Мои обращения">
+const FleetSupport = (props) => (
+    <Shell {...props} title="Мои обращения">
         <div className="wt-fl__toolbar">
             <button type="button" className="wt-fl__filter-add"
-                onClick={() => go({ fleetPanel: 'sfilters' })}>+ Фильтры</button>
+                onClick={() => props.go({ fleetPanel: 'sfilters' })}>+ Фильтры</button>
             <span className="wt-fl__tools">
                 <button type="button" className="wt-fl__yellow"
-                    onClick={() => go({ fleetView: 'support_new' })}>Новое обращение</button>
+                    onClick={() => props.go({ fleetView: 'support_new' })}>Новое обращение</button>
             </span>
         </div>
         <table className="wt-fl__table">
@@ -733,7 +871,7 @@ const FleetSupport = ({ world, go }) => (
                 <tr><th>Вопрос</th><th>Статус</th><th>Обновлено</th><th>Создано</th></tr>
             </thead>
             <tbody>
-                {SUPPORT.map(([q, status, updated, created]) => (
+                {props.world.case.support.map(([q, status, updated, created]) => (
                     <tr key={q}>
                         <td>{q}</td>
                         <td><span className={`wt-fl__status is-${status === 'Выполнен' ? 'ok'
@@ -747,8 +885,8 @@ const FleetSupport = ({ world, go }) => (
             Это обращения ПАРКА в поддержку сервиса — не то же самое, что обращение водителя
             в CRM на соседней вкладке.
         </p>
-        {world.fleetPanel === 'sfilters' ? (
-            <Overlay title="Фильтры обращений" onClose={() => go({ fleetPanel: null })}>
+        {props.world.fleetPanel === 'sfilters' ? (
+            <Overlay title="Фильтры обращений" onClose={() => props.go({ fleetPanel: null })}>
                 <ul className="wt-fl__checklist">
                     {['Выполнен', 'Закрыт', 'Требуется информация', 'В работе'].map((s) => (
                         <li key={s}><i aria-hidden="true" />{s}</li>
@@ -759,8 +897,8 @@ const FleetSupport = ({ world, go }) => (
     </Shell>
 );
 
-const FleetSupportNew = ({ world, go }) => (
-    <Shell world={world} go={go} title="Новое обращение">
+const FleetSupportNew = (props) => (
+    <Shell {...props} title="Новое обращение">
         <div className="wt-fl__form">
             <Field label="Доступ" value="Мне и моей роли" />
             <Field label="Email" value="park@example.kz" />
@@ -768,33 +906,30 @@ const FleetSupportNew = ({ world, go }) => (
             <div className="wt-fl__field"><span>Сообщение</span><b>—</b></div>
             <div className="wt-fl__overlay-foot">
                 <button type="button" className="wt-fl__yellow"
-                    onClick={() => go({ fleetView: 'support' })}>Отправить</button>
-                <span className="wt-fl__note">
-                    Учебная форма: ничего не отправляется.
-                </span>
+                    onClick={() => props.act('support_new', {})}>Отправить</button>
+                <span className="wt-fl__note">Учебная форма: ничего не отправляется.</span>
             </div>
         </div>
     </Shell>
 );
 
-const FleetNews = ({ world, go }) => (
-    <Shell world={world} go={go} title="Новости">
+const FleetNews = (props) => (
+    <Shell {...props} title="Новости">
         {NEWS.map(([title, when]) => (
             <div key={title} className="wt-fl__notice"><b>{title}</b><small>{when}</small></div>
         ))}
     </Shell>
 );
 
-const FleetLegal = ({ world, go }) => (
-    <Shell world={world} go={go} title="Правовые документы">
+const FleetLegal = (props) => (
+    <Shell {...props} title="Правовые документы">
         <ul className="wt-fl__checklist">
             {LEGAL.map((doc) => <li key={doc}><i aria-hidden="true" />{doc}</li>)}
         </ul>
-        <p className="wt-fl__note">Тексты документов в учебную среду не перенесены.</p>
     </Shell>
 );
 
-const FleetParks = ({ world, go }) => (
+const FleetParks = ({ world, go, act }) => (
     <div className="wt-fl wt-fl--picker">
         <TrainMark>Учебная среда</TrainMark>
         <div className="wt-fl__picker">
@@ -803,8 +938,11 @@ const FleetParks = ({ world, go }) => (
                 <span className="wt-fl__picker-search">Поиск</span>
                 {PARKS.map((park) => (
                     <button key={`${park.name}-${park.city}`} type="button"
-                        className={park.name === PARK.name ? 'is-on' : ''}
-                        onClick={() => go({ fleetView: 'home' })}>
+                        className={park.name === world.case.park.name ? 'is-on' : ''}
+                        onClick={() => {
+                            act('switch_park', { to: park.name });
+                            go({ fleetView: 'home' });
+                        }}>
                         <b>{park.initials}</b>
                         <span>{park.name}<small>{park.city}</small></span>
                     </button>
@@ -814,10 +952,15 @@ const FleetParks = ({ world, go }) => (
     </div>
 );
 
-const Fleet404 = ({ world, go }) => (
-    <Shell world={world} go={go} title="Исполнители">
-        <Empty title="Ничего не найдено" text="Такой страницы не существует"
-            action="Вернуться в начало" onAction={() => go({ fleetView: 'home' })} />
+const Fleet404 = (props) => (
+    <Shell {...props} title="Исполнители">
+        <Empty
+            title="Ничего не найдено"
+            text={props.world.fleet404
+                ? 'Страница карточки этого исполнителя недоступна — открывается только панель поверх списка'
+                : 'Такой страницы не существует'}
+            action="Вернуться к списку"
+            onAction={() => props.go({ fleetView: 'contractors', fleet404: false })} />
     </Shell>
 );
 
@@ -839,17 +982,18 @@ const VIEWS = {
 export const fleetUrl = (world) => {
     const base = 'fleet.example-park.kz';
     const v = world.fleetView;
-    if (v === 'card') return `${base}/contractors/${DRIVER.id.slice(0, 8)}…/${world.fleetTab}`;
+    if (v === 'card') return `${base}/contractors/${String(world.fleetOpenId || '').slice(0, 8)}…/${world.fleetTab}`;
     if (v === 'contractors') {
-        return world.fleetFilter ? `${base}/contractors?filter=${world.fleetFilter}` : `${base}/contractors`;
+        const filters = world.fleetFilters || [];
+        return filters.length ? `${base}/contractors?filters=${filters.length}` : `${base}/contractors`;
     }
     if (v === 'support_new') return `${base}/support/new`;
-    if (v === 'notfound') return `${base}/unknown`;
+    if (v === 'notfound') return `${base}/404`;
     return `${base}/${v || 'home'}`;
 };
 
-/** Кабинет целиком. go — свободный переход, не шаг урока (см. runner.browse). */
-export default function FleetApp({ world, go }) {
+/** Кабинет целиком. go — свободный переход, emit — лента, act — правка данных. */
+export default function FleetApp({ world, go, emit, act }) {
     const View = VIEWS[world.fleetView] || FleetHome;
-    return <View world={world} go={go} />;
+    return <View world={world} go={go} emit={emit} act={act} />;
 }

@@ -82,8 +82,13 @@ const stepAt = (scenario, index) => scenario.steps[Math.max(0, Math.min(index, s
 export const stageCount = (scenario) => scenario.steps
     .reduce((max, step) => Math.max(max, Number(step.stage) || 0), 0);
 
-/** Новая попытка. options.random — только для тестов (детерминированные коды). */
-export const startRun = (scenario, { now, random } = {}) => {
+/** Новая попытка.
+ *
+ * options.random — только для тестов (детерминированные коды).
+ * options.caseData — слепок дела для сред, которые читают данные снаружи
+ * (рабочее место оператора). Не приехал — сценарий берёт свой запасной.
+ */
+export const startRun = (scenario, { now, random, caseData } = {}) => {
     const today = almatyToday(now);
     return {
         scenario,
@@ -94,7 +99,7 @@ export const startRun = (scenario, { now, random } = {}) => {
         // и реплика-объяснение выглядят по-разному, иначе неверное нажатие
         // проходит незамеченным.
         speech: { text: stepAt(scenario, 0).msg, tone: 'idle' },
-        world: scenario.createWorld({ today, code: () => trainingCode(random) }),
+        world: scenario.createWorld({ today, code: () => trainingCode(random), caseData }),
     };
 };
 

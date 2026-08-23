@@ -52,7 +52,7 @@ const SIDE = [
 
 /* Справочник коллег. ВЫМЫШЛЕН целиком: на кадре он замазан по белому списку,
    и восстанавливать чужие имена с внутренними номерами нельзя и незачем. */
-const DIRECTORY = [
+export const DIRECTORY = [
     ['СЗоВ', [
         ['Алиев Дамир', '1042', 'online'],
         ['Ким Ольга', '1043', 'busy'],
@@ -104,7 +104,7 @@ const JOURNAL = [
 const Dot = ({ tone }) => <i className={`wt-ok__dot is-${tone}`} aria-hidden="true" />;
 
 /** Каркас клиента: тёмная панель слева, содержимое справа, виджет телефона внизу. */
-const Shell = ({ world, go, children }) => (
+const Shell = ({ world, go, emit, children }) => (
     <div className="wt-ok">
         <TrainMark>Учебная среда</TrainMark>
 
@@ -165,7 +165,7 @@ const Shell = ({ world, go, children }) => (
 
 /* ── Экраны ──────────────────────────────────────────────────────────────── */
 
-const Login = ({ go }) => (
+const Login = ({ go, emit }) => (
     <div className="wt-ok wt-ok--login">
         <TrainMark>Учебная среда</TrainMark>
         <form
@@ -174,6 +174,7 @@ const Login = ({ go }) => (
                 event.preventDefault();
                 /* Пускаем с любыми данными: пароль здесь ничему не учит, а
                    заставлять угадывать учебный логин — терять время урока. */
+                emit('okt.login');
                 go({ oktLogged: true, oktView: 'cabinet' });
             }}
         >
@@ -192,8 +193,8 @@ const Login = ({ go }) => (
     </div>
 );
 
-const Cabinet = ({ world, go }) => (
-    <Shell world={world} go={go}>
+const Cabinet = ({ world, go, emit }) => (
+    <Shell world={world} go={go} emit={emit}>
         <div className="wt-ok__cols">
             <section className="wt-ok__main">
                 <header className="wt-ok__head">
@@ -206,12 +207,12 @@ const Cabinet = ({ world, go }) => (
                     <b>{world.oktIn ? '0:00:40' : '0:00:00'}</b>
                     {world.oktIn ? (
                         <button type="button" className="wt-ok__leave"
-                            onClick={() => go({ oktIn: false, oktStatus: null })}>
+                            onClick={() => { emit('okt.callcenter_out'); go({ oktIn: false, oktStatus: null }); }}>
                             Выйти из call-центра
                         </button>
                     ) : (
                         <button type="button" className="wt-ok__enter"
-                            onClick={() => go({ oktIn: true })}>
+                            onClick={() => { emit('okt.callcenter_in'); go({ oktIn: true }); }}>
                             Войти в call-центр
                         </button>
                     )}
@@ -236,7 +237,11 @@ const Cabinet = ({ world, go }) => (
                                 key={name}
                                 type="button"
                                 className={world.oktStatus === name ? 'is-on' : ''}
-                                onClick={() => go({ oktStatus: world.oktStatus === name ? null : name })}
+                                onClick={() => {
+                                    const next = world.oktStatus === name ? null : name;
+                                    emit('okt.status', { reason: next });
+                                    go({ oktStatus: next });
+                                }}
                             >
                                 {name}
                             </button>
@@ -259,8 +264,8 @@ const Cabinet = ({ world, go }) => (
     </Shell>
 );
 
-const Phone = ({ world, go }) => (
-    <Shell world={world} go={go}>
+const Phone = ({ world, go, emit }) => (
+    <Shell world={world} go={go} emit={emit}>
         <div className="wt-ok__cols">
             <section className="wt-ok__dir">
                 <div className="wt-ok__search">введите имя или номер</div>
@@ -290,8 +295,8 @@ const Phone = ({ world, go }) => (
     </Shell>
 );
 
-const Messages = ({ world, go }) => (
-    <Shell world={world} go={go}>
+const Messages = ({ world, go, emit }) => (
+    <Shell world={world} go={go} emit={emit}>
         <div className="wt-ok__main">
             <header className="wt-ok__head"><h2>Сообщения</h2></header>
             <div className="wt-ok__empty">Новых сообщений нет</div>
@@ -307,8 +312,8 @@ const CAL = [
     [24, 25, 26, 27, 28, 29, 30],
 ];
 
-const Journal = ({ world, go }) => (
-    <Shell world={world} go={go}>
+const Journal = ({ world, go, emit }) => (
+    <Shell world={world} go={go} emit={emit}>
         <div className="wt-ok__journal">
             <aside className="wt-ok__jside">
                 <h2>Журнал</h2>
@@ -369,8 +374,8 @@ export const oktellUrl = (world) => (world.oktLogged
     : 'oktell_srv/#/login');
 
 /** Клиент целиком. go — свободное перемещение, не шаг урока. */
-export default function OktellApp({ world, go }) {
-    if (!world.oktLogged) return <Login go={go} />;
+export default function OktellApp({ world, go, emit }) {
+    if (!world.oktLogged) return <Login go={go} emit={emit} />;
     const View = VIEWS[world.oktView] || Cabinet;
-    return <View world={world} go={go} />;
+    return <View world={world} go={go} emit={emit} />;
 }

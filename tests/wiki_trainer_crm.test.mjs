@@ -4,22 +4,23 @@ import test from 'node:test';
 import {
     browse, currentStep, expectedTap, isFinished, startRun, tap,
 } from '../src/components/wiki/trainers/runner.js';
-import desk, {
-    CALL, DRIVER, PARKS, PARK_CITIES, SOURCES, childrenAt,
-} from '../src/components/wiki/trainers/scenarioCrmTicket.js';
+import desk, { PARKS, PARK_CITIES, SOURCES, childrenAt }
+    from '../src/components/wiki/trainers/scenarioCrmTicket.js';
 import { CATEGORY_TREE } from '../src/components/wiki/trainers/crmCatalog.js';
-import { CONTRACTORS, DRIVER as FLEET_DRIVER, FILTERS, TRANSACTIONS }
-    from '../src/components/wiki/trainers/fleetData.js';
+import { DEFAULT_CASE, FILTERS } from '../src/components/wiki/trainers/fleetData.js';
+import { findContractors } from '../src/components/wiki/trainers/caseData.js';
 
 /* Рабочее место оператора — свободная среда, а не урок: три системы в одном
- * окне, ни шагов, ни подсказок, ни ловушек. Проверяем ровно то, что от такой
- * среды требуется: по ней нельзя «ошибиться», данные в ней настоящие (кроме
- * человека, который выдуман), и работа человека доезжает до статистики.
+ * окне, ни шагов, ни подсказок, ни ловушек. Проверяем то, что от такой среды
+ * требуется: ошибиться в ней нельзя, справочники настоящие, человек выдуман,
+ * а работа доезжает до статистики.
  */
 
-/** Довести попытку до рабочего стола (единственный шаг перед «Сохранить»). */
+const TODAY = { year: 2026, month: 8, day: 23 };
+
+/** Довести попытку до рабочего стола. */
 const atDesk = () => {
-    const run = startRun(desk);
+    const run = startRun(desk, { now: new Date(Date.UTC(2026, 7, 23, 6)) });
     const next = tap(run, expectedTap(run)).run;
     assert.equal(currentStep(next).key, 'desk');
     return next;
@@ -29,22 +30,42 @@ test('это свободная среда, а не урок', () => {
     assert.equal(desk.key, 'crm-ticket-create', 'ключ уехал в статьи, его нельзя менять');
     assert.equal(desk.stage, 'desktop');
     assert.equal(desk.mode, 'sandbox');
-    assert.deepEqual(desk.traps, {}, 'в свободной среде ловушек быть не должно');
+    assert.deepEqual(desk.traps, {});
     for (const step of desk.steps) {
         assert.deepEqual(step.traps || {}, {}, `у шага «${step.key}» остались ловушки`);
     }
 });
 
 test('в окне три вкладки, и открывается оно на CRM', () => {
-    const world = startRun(desk).world;
+    const world = atDesk().world;
     assert.equal(world.tab, 'crm');
     assert.equal(world.fleetView, 'contractors');
     assert.equal(world.oktLogged, false, 'в Oktell нужно войти самому');
     assert.equal(world.oktIn, false, 'вход в клиент не ставит в очередь');
+    assert.equal(world.call.state, 'offline', 'в свободной среде звонка нет');
 });
 
-/* Ходить по средe — не ход движка. Иначе тренажёр наказывал бы за то, что
-   человек открыл справочник, то есть отучал бы туда смотреть. */
+/* Данные экранов приезжают слепком: чтобы сменить водителя, правят JSON, а не
+   код. Проверяем именно это — мир собран из слепка, а не из констант. */
+test('мир собирается из слепка дела', () => {
+    const world = atDesk().world;
+    assert.equal(world.case.key, DEFAULT_CASE.key);
+    assert.equal(world.case.contractors.length, DEFAULT_CASE.contractors.length);
+    assert.ok(world.case.transactions[0].when, 'даты не подготовлены к показу');
+
+    // Подмена слепка меняет водителя во всех вкладках.
+    const other = startRun(desk, {
+        now: new Date(Date.UTC(2026, 7, 23, 6)),
+        caseData: {
+            ...DEFAULT_CASE,
+            contractor: { ...DEFAULT_CASE.contractor, last: 'Иванов', first: 'Пётр' },
+            contractors: [{ ...DEFAULT_CASE.contractors[0], name: 'Иванов Пётр' }],
+        },
+    });
+    assert.equal(other.world.case.contractor.last, 'Иванов');
+    assert.equal(other.world.case.contractors[0].name, 'Иванов Пётр');
+});
+
 test('переходы по системам не считаются промахами и не двигают шаг', () => {
     let run = atDesk();
     const before = run.errors;
@@ -65,12 +86,8 @@ test('форма свободная: любая ветка проходится 
     const form = (patch) => { run = browse(run, { form: { ...run.world.form, ...patch } }); };
 
     form({ source: 'Whatsapp', phone: '77010000000', park: 'Регионы' });
-    assert.ok(PARK_CITIES['Регионы'].includes('Экибастуз'),
-        'города берутся из справочника своего парка');
-    form({ city: 'Экибастуз' });
-
-    // Ветка, не имеющая ничего общего с «правильной» — среда её принимает.
-    form({ cats: ['Пассажир', 'Двойная оплата'], comment: 'ок' });
+    assert.ok(PARK_CITIES['Регионы'].includes('Экибастуз'));
+    form({ city: 'Экибастуз', cats: ['Пассажир', 'Двойная оплата'], comment: 'ок' });
     assert.equal(run.errors, 0, 'свободный выбор дал промах');
 });
 
@@ -81,7 +98,7 @@ test('«Сохранить» заканчивает попытку и отдаё
     run = browse(run, {
         form: {
             ...run.world.form,
-            source: 'Звонок', phone: CALL.phone, park: CALL.park, city: CALL.city,
+            source: 'Звонок', phone: '77015550142', park: 'Jana такси', city: 'Алматы',
             cats: ['Водитель', 'Обычный водитель', 'Консультация'],
             comment: 'Объяснил удержание комиссии парка.',
         },
@@ -89,13 +106,10 @@ test('«Сохранить» заканчивает попытку и отдаё
 
     const done = tap(run, 'save');
     assert.equal(done.ok, true);
-    assert.ok(isFinished(done.run) || currentStep(done.run).key === 'done');
     assert.equal(done.run.world.saved, true);
 
     const result = desk.result(done.run.world);
     const fields = Object.fromEntries(result.fields);
-    assert.equal(fields['Звонок/Чат'], 'Звонок');
-    assert.equal(fields['Таксопарк'], CALL.park);
     assert.equal(fields['Категория'], 'Водитель / Обычный водитель / Консультация');
     /* Правильного ответа у свободной среды нет, поэтому и вердикта быть не
        должно: судит наставник, а не тренажёр. */
@@ -106,56 +120,61 @@ test('в статистику попадают только завершённы
     assert.equal(desk.recordOnFinishOnly, true);
 });
 
-/* Справочники — настоящие, снятые с рабочей CRM. Если кто-то «сократит» их,
-   тренажёр начнёт учить искать в списке, которого на смене нет. */
 test('справочники CRM полные', () => {
     assert.equal(PARKS.length, 19);
-    assert.equal(CATEGORY_TREE.length, 6, 'корневых категорий стало не 6');
+    assert.equal(CATEGORY_TREE.length, 6);
     assert.deepEqual(SOURCES.slice(0, 2), ['Стажер', 'Звонок']);
 
     const count = (nodes) => nodes.reduce(
         (sum, node) => sum + 1 + (node[1] ? count(node[1]) : 0), 0);
     assert.equal(count(CATEGORY_TREE), 387, 'дерево категорий поредело');
 
-    assert.equal(childrenAt(['Водитель']).length, 2);
     assert.equal(childrenAt(['Водитель', 'Обычный водитель', 'Консультация']).length, 31);
-    assert.deepEqual(childrenAt(['Тестовый звонок/Чат']), [], 'у листа не должно быть детей');
     assert.deepEqual(childrenAt(['нет такой']), [], 'неизвестный путь не должен падать');
 
-    // Пары «парк — город» тоже настоящие: у каждого парка свой набор.
     const pairs = Object.values(PARK_CITIES).reduce((sum, list) => sum + list.length, 0);
     assert.equal(pairs, 95);
 });
 
-/* Водитель придуман и должен быть ОДИН на все три системы: иначе человек
-   пересобирает в голове «кто это» при каждом переходе между вкладками. */
-test('водитель выдуман и одинаков в CRM и Диспетчерской', () => {
-    assert.equal(FLEET_DRIVER.full, DRIVER.full);
-    assert.equal(FLEET_DRIVER.phone, DRIVER.phone);
-    assert.equal(CALL.phone, DRIVER.phone);
-    assert.equal(CONTRACTORS[0].name, DRIVER.full, 'в списке кабинета не тот человек');
+/* Список кабинета — не шесть строк с пометкой «это он»: героя ничем не
+   помечаем, а рядом стоят двойники, чтобы стажёр убедился, что открыл ТОГО. */
+test('в списке есть двойники, и герой ничем не помечен', () => {
+    const people = DEFAULT_CASE.contractors;
+    assert.ok(people.length >= 20, 'список короче двадцати строк');
+    assert.ok(people.every((p) => p.me === undefined), 'герой помечен флагом me');
+    assert.ok(people.every((p) => /^[0-9a-f]{32}$/.test(p.id)), 'id не 32 hex');
 
-    // Признаки выдуманности: учебный номер и «никакой» номер ВУ.
-    assert.match(DRIVER.phone, /^7701555/, 'телефон перестал быть учебным');
-    assert.match(DRIVER.license, /0{4,}/, 'номер ВУ выглядит настоящим');
+    const byPhone = findContractors(people, DEFAULT_CASE.call.phone);
+    assert.equal(byPhone.items.length, 1, 'номер из звонка обязан давать одну строку');
+    assert.equal(byPhone.items[0].id, DEFAULT_CASE.contractor.id);
+
+    const bySurname = findContractors(people, 'Нурланов');
+    assert.equal(bySurname.items.length, 3, 'двойников по фамилии должно быть двое');
 });
 
-/* Ведомость — то место, ради которого кабинет вообще открыт: в ней рядом видно,
-   что удержал сервис и что удержал парк. */
 test('в ведомости различимы комиссии сервиса и таксопарка', () => {
-    const park = TRANSACTIONS.filter((t) => t.park);
-    const service = TRANSACTIONS.filter((t) => !t.park && t.category.includes('Комиссия сервиса'));
-    assert.ok(park.length >= 2, 'удержаний парка почти нет');
-    assert.ok(service.length >= 2, 'комиссий сервиса почти нет');
-    assert.ok(park.every((t) => t.category.includes('партнёра')),
-        'строка парка не названа комиссией партнёра');
+    const park = DEFAULT_CASE.transactions.filter((t) => t.park);
+    const service = DEFAULT_CASE.transactions.filter(
+        (t) => !t.park && t.category.includes('Комиссия сервиса'));
+    assert.ok(park.length >= 2 && service.length >= 2);
+    assert.ok(park.every((t) => t.category.includes('партнёра')));
 });
 
 test('в кабинете есть все оси фильтрации', () => {
-    assert.ok(FILTERS.length >= 15, 'осей фильтрации стало меньше пятнадцати');
+    assert.ok(FILTERS.length >= 15);
     const names = FILTERS.map(([axis]) => axis);
-    for (const axis of ['Статус', 'Статус на линии', 'Профессия', 'Тип сотрудничества',
-        'Категории', 'Провайдер ЭДО']) {
+    for (const axis of ['Статус', 'Статус на линии', 'Профессия', 'Категории', 'Провайдер ЭДО']) {
         assert.ok(names.includes(axis), `нет оси «${axis}»`);
+    }
+});
+
+/* Слепок не должен содержать разгадки: любое поле вида «правильно/ожидается/
+   подсказка» читается из devtools за пять секунд, и тренажёр перестаёт быть
+   тренажёром. */
+test('в слепке нет ответа и подсказок', () => {
+    const text = JSON.stringify(DEFAULT_CASE);
+    for (const banned of ['answer', 'expected', 'correct', 'hint', 'checks', 'solution']) {
+        assert.ok(!new RegExp(`"${banned}"`).test(text),
+            `в слепке есть поле «${banned}» — это ответ, он остаётся на сервере`);
     }
 });

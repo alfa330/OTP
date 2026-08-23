@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 
-import { Tap, TrainMark } from './screenKit';
+import { TrainMark } from './screenKit';
 import BrowserChrome from './BrowserChrome';
 import FleetApp, { fleetUrl } from './screensFleet';
-import OktellApp, { oktellUrl } from './screensOktell';
+import OktellApp, { DIRECTORY, oktellUrl } from './screensOktell';
+import CallPanel from './CallPanel';
 import { PARKS, PARK_CITIES, SOURCES, childrenAt } from './crmCatalog.js';
 
 /* Экран CRM: тот же интерфейс, в котором оператор заводит обращение на смене.
@@ -149,26 +150,8 @@ const TextField = ({ value, placeholder, onChange, multiline = false }) => {
     );
 };
 
-/* Карточка входящего звонка — окно софтфона поверх рабочего стола.
-   В самой CRM её нет: это отдельная программа, в которой видно, кто звонит. */
-export const CallCard = ({ call }) => (
-    <div className="wt-call">
-        <div className="wt-call__head">
-            <span className="wt-call__live" aria-hidden="true" />
-            Входящий звонок
-        </div>
-        <dl className="wt-call__facts">
-            <div><dt>Номер</dt><dd>{call.phone}</dd></div>
-            <div><dt>Таксопарк</dt><dd>{call.park}</dd></div>
-            <div><dt>Город</dt><dd>{call.city}</dd></div>
-            <div><dt>Статус</dt><dd>{call.status}</dd></div>
-        </dl>
-        <p className="wt-call__said"><span>Водитель:</span> «{call.said}»</p>
-    </div>
-);
-
 /** Страница CRM «Создать обращение». */
-const CrmPage = ({ world, tap, target, browse }) => {
+const CrmPage = ({ world, browse, onSave }) => {
     const form = world.form;
     const [open, setOpen] = useState(null);
 
@@ -289,14 +272,17 @@ const CrmPage = ({ world, tap, target, browse }) => {
                         {/* Единственное действие движка на всю среду: оно
                             заканчивает попытку и отдаёт итог в статистику. */}
                         <div className="wt-crm__actions">
-                            <Tap id="save" target={target} tap={tap} className="wt-crm__save">
+                            {/* Сохранение — не ход движка: в режиме смены после
+                                него идёт постобработка, и попытку закрывает
+                                стажёр. Подробности в TrainerPlayer.doSave. */}
+                            <button type="button" className="wt-crm__save" onClick={onSave}>
                                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
                                     stroke="currentColor" strokeWidth="2" strokeLinecap="round"
                                     strokeLinejoin="round" aria-hidden="true">
                                     <path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 20h16" />
                                 </svg>
                                 Сохранить
-                            </Tap>
+                            </button>
                         </div>
                     </div>
                 </section>
@@ -305,24 +291,50 @@ const CrmPage = ({ world, tap, target, browse }) => {
     );
 };
 
-/** Экран рабочего места: окно браузера с тремя вкладками. */
-export const DeskScreen = ({ world, tap, target, browse }) => {
+/** Экран рабочего места: окно браузера с тремя вкладками и плашкой звонка.
+ *
+ * Плашка стоит ПОВЕРХ окна, а не внутри вкладки: во время разговора оператор
+ * сидит в Диспетчерской, и кнопки «Удержание» и «Перевод» обязаны ехать за ним.
+ */
+export const DeskScreen = ({
+    world, tap, target, browse, emit, act, onSave, onCall, voice, aiSpeaking,
+    micLevel, micError, onRing, devMode,
+}) => {
     const tab = world.tab || 'crm';
     const url = tab === 'fleet' ? fleetUrl(world)
         : tab === 'oktell' ? oktellUrl(world)
             : CRM_URL;
     return (
-        <BrowserChrome
-            tap={tap}
-            target={target}
-            tabs={TABS}
-            active={tab}
-            onSwitch={(id) => browse({ tab: id })}
-            url={url}
-        >
-            {tab === 'fleet' ? <FleetApp world={world} go={browse} /> : null}
-            {tab === 'oktell' ? <OktellApp world={world} go={browse} /> : null}
-            {tab === 'crm' ? <CrmPage world={world} tap={tap} target={target} browse={browse} /> : null}
-        </BrowserChrome>
+        <div className="wt-desk__inner">
+            <BrowserChrome
+                tap={tap}
+                target={target}
+                tabs={TABS}
+                active={tab}
+                onSwitch={(id) => { emit('ui.tab', { tab: id }); browse({ tab: id }); }}
+                url={url}
+            >
+                {tab === 'fleet'
+                    ? <FleetApp world={world} go={browse} emit={emit} act={act} /> : null}
+                {tab === 'oktell'
+                    ? <OktellApp world={world} go={browse} emit={emit} /> : null}
+                {tab === 'crm'
+                    ? <CrmPage world={world} browse={browse} onSave={onSave} /> : null}
+            </BrowserChrome>
+
+            {onCall ? (
+                <CallPanel
+                    call={world.call}
+                    onCall={onCall}
+                    directory={DIRECTORY}
+                    voice={voice}
+                    aiSpeaking={aiSpeaking}
+                    micLevel={micLevel}
+                    micError={micError}
+                    onRing={onRing}
+                    devMode={devMode}
+                />
+            ) : null}
+        </div>
     );
 };

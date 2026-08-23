@@ -4711,3 +4711,224 @@
     animation: none;
     box-shadow: none;
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   ПАНЕЛЬ ЗВОНКА
+   ─────────────────────────────────────────────────────────────────────────
+   Стоит ПОВЕРХ окна браузера, а не внутри вкладки: во время разговора оператор
+   сидит в Диспетчерской, и кнопки «Удержание» и «Перевод» обязаны ехать за ним.
+   Цитаты водителя здесь нет — стажёр слушает, а не читает.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.wt-desk__inner { position: relative; display: flex; width: 100%; min-height: 0; flex: 1 1 auto; }
+.wt-desk__inner > .wt-win { flex: 1 1 auto; }
+
+.wt-cp {
+    position: absolute;
+    top: -6px;
+    right: 12px;
+    left: 12px;
+    z-index: 20;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 16px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: linear-gradient(96deg, #12203f, #24356a);
+    color: #eaf0ff;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, .3);
+}
+
+/* Входящий заметен без звука: полоса пульсирует, пока трубку не сняли. */
+.wt-cp.is-ringing { animation: wt-cp-ring 1.4s ease-in-out infinite; }
+@keyframes wt-cp-ring {
+    0%, 100% { box-shadow: 0 14px 34px rgba(15, 23, 42, .3); }
+    50% { box-shadow: 0 14px 34px rgba(15, 23, 42, .3), 0 0 0 4px rgba(252, 82, 48, .35); }
+}
+
+.wt-cp.is-wrapup { background: linear-gradient(96deg, #1c2a1e, #2c4a33); }
+.wt-cp.is-ended,
+.wt-cp.is-offline { background: linear-gradient(96deg, #23262d, #363b45); }
+
+.wt-cp__left { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+
+.wt-cp__mark {
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: #fce000;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: #21201f;
+}
+
+.wt-cp__state { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: #9db4ff; }
+.wt-cp__phone { font-size: 15px; font-weight: 650; letter-spacing: .01em; }
+.wt-cp__queue,
+.wt-cp__waited { font-size: 11.5px; color: #a9bbe8; }
+.wt-cp__timer { font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+
+/* Маркировка ИИ — по закону РК, всё время разговора. */
+.wt-cp__ai { display: flex; align-items: center; gap: 10px; }
+.wt-cp__ai-badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, .16);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .04em;
+}
+.wt-cp__who { font-size: 11.5px; color: #a9bbe8; }
+.wt-cp__who.is-them { color: #ffd66e; font-weight: 600; }
+
+.wt-cp__mic { position: relative; display: flex; align-items: center; gap: 6px; width: 76px; color: #a9bbe8; }
+.wt-cp__mic i {
+    display: block;
+    height: 4px;
+    border-radius: 2px;
+    background: #16dd6e;
+    transition: width .12s linear;
+}
+.wt-cp__manual { font-size: 10.5px; color: #ffd66e; }
+
+.wt-cp__buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+
+.wt-cp__btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 13px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, .14);
+    font-size: 12.5px;
+    color: #fff;
+}
+.wt-cp__btn:hover { background: rgba(255, 255, 255, .22); }
+.wt-cp__btn.is-answer { background: #16a34a; }
+.wt-cp__btn.is-answer:hover { background: #13903f; }
+.wt-cp__btn.is-reject { background: #e5342b; }
+.wt-cp__btn.is-reject:hover { background: #cc2b23; }
+.wt-cp__btn.is-dev { background: rgba(255, 255, 255, .1); font-size: 11.5px; color: #ffd66e; }
+
+.wt-cp__transfer { position: relative; }
+.wt-cp__dir {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 5;
+    width: 250px;
+    max-height: 260px;
+    overflow: auto;
+    padding: 6px;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, .26);
+    color: #21201f;
+}
+.wt-cp__dir-head {
+    padding: 6px 8px 4px;
+    font-size: 10px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: #8f8c87;
+}
+.wt-cp__dir button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    text-align: left;
+}
+.wt-cp__dir button:hover { background: #f0eeea; }
+.wt-cp__dir b { font-weight: 500; color: #6d6b68; }
+
+.wt-cp__wrap { font-size: 12.5px; color: #cfe6d4; }
+.wt-cp__micerr { flex-basis: 100%; font-size: 11.5px; color: #ffd66e; }
+
+/* Кнопка «Завершить попытку» — заметная, но не главная. */
+.wt-side__btn--finish { background: var(--wt-accent); color: #fff; }
+.wt-side__btn--finish:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Поиск в кабинете — настоящее поле ввода. */
+.wt-fl__search input,
+.wt-fl__search-big input {
+    min-width: 0;
+    flex: 1 1 auto;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 11.5px;
+    color: #21201f;
+    outline: none;
+}
+.wt-fl__search-big {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border: 1px solid #dfdcd6;
+    border-radius: 8px;
+}
+.wt-fl__search-big b {
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: #f0eeea;
+    font-size: 11px;
+    color: #4b4945;
+}
+.wt-fl__search-big input { font-size: 12.5px; }
+.wt-fl__hits { margin-top: 8px; }
+
+.wt-fl__filters-grid li button { font: inherit; color: #4060e3; text-align: left; }
+.wt-fl__checklist li button { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; }
+
+.wt-fl__card-foot { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.wt-fl__act {
+    padding: 8px 14px;
+    border: 1px solid #dfdcd6;
+    border-radius: 9px;
+    background: #fff;
+    font-size: 12px;
+    color: #4b4945;
+}
+.wt-fl__act:hover { border-color: #c3c0b9; }
+
+/* Отладочная лента событий — только в dev-сборке. */
+.wt-devlog {
+    position: fixed;
+    right: 10px;
+    bottom: 10px;
+    z-index: 120;
+    width: 300px;
+    max-height: 42vh;
+    display: flex;
+    flex-direction: column;
+    border-radius: 12px;
+    background: rgba(17, 24, 39, .94);
+    color: #e5e7eb;
+    font-size: 11px;
+}
+.wt-devlog header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, .12);
+    font-weight: 600;
+}
+.wt-devlog header button { margin-left: auto; color: #9ca3af; }
+.wt-devlog ol { margin: 0; padding: 6px 10px 10px; overflow: auto; list-style: none; }
+.wt-devlog li { display: flex; gap: 8px; padding: 3px 0; }
+.wt-devlog code { color: #93c5fd; }
+.wt-devlog small { color: #9ca3af; }
+
+@media (max-width: 1023px) {
+    .wt-cp { position: static; margin-bottom: 8px; }
+    .wt-cp__buttons { margin-left: 0; }
+    .wt-devlog { display: none; }
+}

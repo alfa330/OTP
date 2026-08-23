@@ -12,7 +12,10 @@ import {
     stageCount, startRun, stepGoal, takeHint, tap, toggle,
 } from './runner';
 import { IntroScreen, ResultScreen } from './screenKit';
-import { CallCard, DeskScreen } from './screensCrm';
+import { DeskScreen } from './screensCrm';
+import { callNext, emptyCall, syncReady, talkMs } from './callMachine';
+import { EVENT_TITLES, createEventLog } from './trainerEvents';
+import { applyEdit } from './caseData';
 import { EgCode, EgSign, EgSuccess } from './screensEgov';
 import {
     SpAd, SpProfile, SpSignAll, TpCheck, TpDocuments, TpHome,
@@ -52,6 +55,12 @@ const SCREENS = {
        обращение в браузере. Экран формы один на все шаги — меняется не он, а
        состав полей, и приходят они из мира (см. scenarioCrmTicket). */
     'crm-ticket-create': {
+        intro: IntroScreen,
+        desk: DeskScreen,
+        result: ResultScreen,
+    },
+    /* Та же среда, но со звонком: экраны общие, разный только режим. */
+    'operator-call': {
         intro: IntroScreen,
         desk: DeskScreen,
         result: ResultScreen,
@@ -109,6 +118,41 @@ const SCREENS = {
    иначе неверное нажатие проходит незамеченным: текст сменился, а картинка нет. */
 const MOOD = { idle: 'speak', error: 'error', hint: 'hint' };
 
+/* Подпись состояния звонка в карточке прогресса. */
+const CALL_TEXT = {
+    offline: 'не на линии',
+    ready: 'на линии, ждём',
+    ringing: 'входящий',
+    talking: 'разговор',
+    held: 'на удержании',
+    wrapup: 'постобработка',
+    ended: 'завершён',
+};
+
+/* Закрыть попытку можно, только когда звонок уже позади: посреди разговора
+   «Завершить» означало бы бросить водителя на линии. */
+const CAN_FINISH = new Set(['wrapup', 'ended']);
+
+/* Сколько шагов ленты кладём в итог попытки.
+ *
+ * Колонка result в базе режется по объёму, и слишком длинный итог там НЕ
+ * обрезается, а отбрасывается целиком (wiki/trainers.py, _result_json) — то
+ * есть карточка обращения потерялась бы вместе с лентой. Поэтому в итог едут
+ * только коды, и не больше шестидесяти: полная лента живёт в памяти попытки и
+ * уедет на сервер отдельной ручкой, когда та появится. */
+const RESULT_EVENTS = 60;
+
+const withEvents = (result, log) => {
+    if (!result || !log) return result;
+    const all = log.all();
+    if (!all.length) return result;
+    return {
+        ...result,
+        events_total: all.length,
+        events: all.slice(-RESULT_EVENTS).map((item) => item.code),
+    };
+};
+
 /* Учебный код в реплике барса — красным и жирным.
  *
  * Его переписывают на клавиатуру телефона, и в сплошном тексте четыре цифры
@@ -148,8 +192,20 @@ const HOURS = () => {
 export function TrainerPlayer({
     scenario, onClose = null, animateEntrance = true, leaving = false, onExited = null,
     record = null,
+    /* Слепок дела. Не приехал — сценарий берёт запасной DEFAULT_CASE: тренажёр
+       обязан открываться и без сервера. */
+    caseData = null,
+    /* Голос. null — панель звонка работает вручную, и тренажёр проходится
+       целиком: это рабочий режим, а не заглушка. */
+    voice = null,
+    /* Наружу отдаём контроллер звонка: сюда сядет ИИ. Пропсом, не глобальной
+       переменной. */
+    onCallApi = null,
+    /* Наружу — что сделал стажёр со звонком (answer | reject | hold | unhold |
+       transfer | end). */
+    onCall = null,
 }) {
-    const [run, setRun] = useState(() => startRun(scenario));
+    const [run, setRun] = useState(() => startRun(scenario, { caseData }));
     const phoneRef = useRef(null);
     const stageRef = useRef(null);
     const stages = useMemo(() => stageCount(scenario), [scenario]);
@@ -174,6 +230,17 @@ export function TrainerPlayer({
        подсказок. Показывать «шаг 1 из 1» и кнопку «Подсказка», за которой
        ничего не стоит, — обещать урок, которого не будет. */
     const sandbox = scenario.mode === 'sandbox';
+    /* Режим смены: та же среда, но приходит звонок и попытка живёт до
+       «Завершить попытку», а не до «Сохранить». */
+    const callMode = scenario.mode === 'call';
+    /* Отладочная кнопка «Позвонить» — только в dev-сборке: пока ИИ нет, звонок
+       надо чем-то запускать, но в проде такой кнопки быть не должно. */
+    const devMode = typeof import.meta !== 'undefined' && import.meta.env
+        ? Boolean(import.meta.env.DEV) : false;
+    /* Ни свободная среда, ни смена уроком не являются: шагов, целей и подсказок
+       в них нет. Прогресс «50 %» и «шаг 1 из 1» там означали бы урок, которого
+       не будет, поэтому на их месте — карта систем. */
+    const noLesson = sandbox || callMode;
     const [phase, setPhase] = useState(() => {
         if (!animateEntrance || reduceMotion) return 'done';
         return worldMode || deskMode ? 'cards' : 'rise';
@@ -244,7 +311,11 @@ export function TrainerPlayer({
     const SWAP_EASE = [0.32, 0.72, 0.28, 1];
 
     // Сценарий сменился (в списке тренажёров их два) — попытка начинается заново.
-    useEffect(() => { setRun(startRun(scenario)); }, [scenario]);
+    /* Смена сценария начинает попытку заново. Слепок сюда обязателен: без него
+       эффект отрабатывал на МОНТИРОВАНИИ и молча заменял переданное дело
+       запасным — экраны показывали не того водителя, а тесты этого не видели,
+       потому что зовут startRun напрямую. */
+    useEffect(() => { setRun(startRun(scenario, { caseData })); }, [scenario, caseData]);
 
     /* Учёт попытки. Хук зовётся всегда (правило хуков), а молчит по флагу:
        без record проигрыватель работает ровно как раньше — так его открывает
@@ -281,11 +352,169 @@ export function TrainerPlayer({
     /* Свободное перемещение по учебной среде: вкладка браузера, раздел соседнего
        кабинета. Не ход и не промах — см. runner.browse. */
     const doBrowse = useCallback((patch) => setRun((prev) => browse(prev, patch)), []);
+
+    /* ── Лента событий интерфейса ─────────────────────────────────────────
+       Разбор говорит стажёру «ты не посмотрел Ведомость, а ответ лежал там» —
+       без ленты такой фразы не получится. Сессии пока нет: лента копится в
+       памяти и уезжает вместе с итогом попытки. */
+    const logRef = useRef(null);
+    if (!logRef.current) logRef.current = createEventLog();
+    /* Счётчик нужен ТОЛЬКО отладочной панели: без него она не перерисуется.
+       В проде панели нет, и лишних рендеров тоже. */
+    const [logTick, setLogTick] = useState(0);
+    const doEmit = useCallback((code, payload) => {
+        const added = logRef.current.emit(code, payload);
+        if (added && devMode) setLogTick((n) => n + 1);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [devMode]);
+
+    /* ── Действия, меняющие данные ────────────────────────────────────────
+       Половина ошибок новичка — не «не нашёл», а «полез менять то, что менять
+       нельзя». Поэтому такие кнопки в среде есть, но правят они ТОЛЬКО копию
+       слепка внутри попытки и всегда оставляют след в ленте. Наружу как данные
+       не уходят никогда. */
+    const doAct = useCallback((what, args = {}) => {
+        doEmit('ui.action', { what, args });
+        setRun((prev) => browse(prev, {
+            // Правка ложится на КОПИЮ слепка: экран сразу показывает новый
+            // баланс, а исходное дело остаётся нетронутым.
+            case: applyEdit(prev.world.case, what, args),
+            edits: [...(prev.world.edits || []), { what, args }],
+        }));
+    }, [doEmit]);
+
+    /* ── Звонок ───────────────────────────────────────────────────────────
+       Автомат живёт в callMachine (чистый и покрыт тестами), здесь только
+       проводка: применить переход, разложить его события в ленту и сообщить
+       наружу — туда, где будет ИИ. */
+    const applyCall = useCallback((action, payload = {}) => {
+        setRun((prev) => {
+            const result = callNext(prev.world.call || emptyCall(), action, payload);
+            result.events.forEach(([code, data]) => logRef.current.emit(code, data));
+            return browse(prev, { call: result.call });
+        });
+    }, []);
+
+    /* Сохранение обращения — НЕ шаг движка.
+     *
+     * В свободной среде «Сохранить» заодно заканчивает попытку, а в режиме
+     * смены после звонка идёт постобработка, и попытку закрывает стажёр. Пока
+     * сохранение было ходом, в режиме смены оно засчитывалось промахом:
+     * ожидалось «Завершить попытку», а пришло «save» — карточка не
+     * записывалась, а счётчик ошибок рос на ровном месте.
+     *
+     * Поэтому: пишем карточку и событие всегда, а шаг двигаем только там, где
+     * сохранение действительно является шагом. */
+    const doSave = useCallback(() => {
+        const form = runRef.current?.world?.form || {};
+        doEmit('crm.save', { form });
+        setRun((prev) => browse(prev, { saved: true }));
+        if (expectedTap(runRef.current) === 'save') doTap('save');
+    }, [doEmit, doTap]);
+
+    const handleCall = useCallback((type, payload = {}) => {
+        applyCall(type, payload);
+        if (onCall) onCall(type, payload);
+    }, [applyCall, onCall]);
+
+    /* Линия гаснет и загорается вслед за Okapp: не вошёл в call-центр —
+       звонков нет, поставил перерыв — звонков нет. Надпись об этом на экране
+       клиента была и раньше; теперь это правда. */
+    useEffect(() => {
+        if (!callMode) return;
+        setRun((prev) => {
+            const next = syncReady(prev.world.call || emptyCall(), prev.world);
+            return next === prev.world.call ? prev : browse(prev, { call: next });
+        });
+    }, [callMode, run.world.oktLogged, run.world.oktIn, run.world.oktStatus]);
+
+    /* Входящий приходит сам через 5–20 секунд после того, как стажёр встал на
+       линию. Разброс намеренный: с фиксированной паузой человек начинает ждать
+       секундомер, а не работу. */
+    const callState = run.world.call?.state;
+    useEffect(() => {
+        if (!callMode || callState !== 'ready') return undefined;
+        const wait = 5000 + Math.floor(Math.random() * 15000);
+        const id = setTimeout(() => {
+            const call = run.world.case.call || {};
+            applyCall('ring', {
+                phone: call.phone_pretty || call.phone || '',
+                queue: call.queue || '',
+                waitedSec: call.waited_sec || 0,
+            });
+        }, wait);
+        return () => clearTimeout(id);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [callMode, callState]);
+
+    /* Контроллер наружу — место, куда сядет ИИ. Отдаём один раз: пересоздание
+       объекта заставило бы ту сторону переподписываться на каждый рендер. */
+    const runRef = useRef(run);
+    runRef.current = run;
+
+    const callApiRef = useRef(null);
+    if (!callApiRef.current) {
+        callApiRef.current = {
+            ring: (caller = {}) => applyCall('ring', caller),
+            answered: () => applyCall('answer'),
+            hangup: (reason = 'driver') => applyCall('end', { by: reason }),
+            state: () => (runRef.current?.world?.call?.state || 'offline'),
+        };
+    }
+    useEffect(() => {
+        if (onCallApi) onCallApi(callApiRef.current);
+    }, [onCallApi]);
+
+    /* ── Голос ────────────────────────────────────────────────────────────
+       Своего голосового слоя здесь нет и не будет: он уже написан и живёт
+       отдельно. Наша часть — оставить ему место и не мешать. */
+    const [aiSpeaking, setAiSpeaking] = useState(false);
+    const [micLevel, setMicLevel] = useState(0);
+    const [micError, setMicError] = useState('');
+
+    useEffect(() => {
+        if (!voice) return undefined;
+        const handler = (type, payload) => {
+            if (type === 'speech') setAiSpeaking(Boolean(payload?.text));
+            if (type === 'speech_end') setAiSpeaking(false);
+            if (type === 'level') setMicLevel(Number(payload?.level) || 0);
+        };
+        if (typeof voice.subscribe === 'function') return voice.subscribe(handler);
+        // eslint-disable-next-line no-param-reassign
+        voice.onEvent = handler;
+        return () => { /* отписка не требуется */ };
+    }, [voice]);
+
+    /* Разрешение на микрофон спрашиваем ДО звонка, а не в момент «Ответить»:
+       окно браузера поверх плашки вызова — верный способ пропустить звонок.
+       Без голоса микрофон не нужен вовсе. */
+    useEffect(() => {
+        if (!callMode || !voice || callState !== 'ready') return;
+        if (typeof navigator === 'undefined' || !navigator.mediaDevices) return;
+        navigator.mediaDevices.getUserMedia({ audio: true })
+            .then((stream) => { stream.getTracks().forEach((t) => t.stop()); setMicError(''); })
+            .catch(() => setMicError(
+                'Микрофон недоступен: браузер не дал разрешение. Разговор можно провести '
+                + 'без голоса — кнопки панели звонка работают.',
+            ));
+    }, [callMode, voice, callState]);
+
+    /* Микрофон слушает комнату только со снятой трубкой. */
+    useEffect(() => {
+        if (!voice) return undefined;
+        if (callState === 'talking' || callState === 'held') {
+            try { voice.start?.(); } catch { /* голос не мешает уроку */ }
+            return () => { try { voice.stop?.(); } catch { /* голос не мешает уроку */ } };
+        }
+        return undefined;
+    }, [voice, callState]);
+
     const doHint = useCallback(() => setRun((prev) => takeHint(prev)), []);
     const doRestart = useCallback(() => {
         runLog.restart();
-        setRun((prev) => restart(prev));
-    }, [runLog]);
+        // «Заново» — та же попытка с тем же делом, а не с запасным.
+        setRun((prev) => restart(prev, { caseData }));
+    }, [runLog, caseData]);
 
     /* Фокус переезжает на кнопку, которую ждут. Это и подсказка для мыши
        (кнопка подсвечена), и единственный способ пройти тренажёр с клавиатуры:
@@ -325,8 +554,14 @@ export function TrainerPlayer({
             hints: run.hints,
             /* ЧТО человек сделал — итог урока. Собирает его сценарий: только он
                знает, что в его мире является результатом. У прогулки по
-               инструкции результата нет, и здесь будет null. */
-            result: scenario.result ? scenario.result(run.world) : null,
+               инструкции результата нет, и здесь будет null.
+
+               Сверху докладываем ленту действий: без неё разбор видит, ЧТО
+               человек завёл, но не видит, куда он смотрел по дороге. */
+            result: withEvents(
+                scenario.result ? scenario.result(run.world) : null,
+                logRef.current,
+            ),
         });
     }, [runLog, scenario, step.stage, stages, run.errors, run.hints, run.world]);
 
@@ -334,7 +569,11 @@ export function TrainerPlayer({
        человек закроет окно. Иначе прошедший и закрывший вкладку не отличался бы
        от бросившего на середине. */
     useEffect(() => {
-        if (finished) runLog.close('finished');
+        if (finished) {
+            // Лента обязана уйти на завершении: дальше попытки уже нет.
+            logRef.current.flush();
+            runLog.close('finished');
+        }
     }, [finished, runLog]);
 
     // Закрытие проигрывателя: то, что не досчиталось, уходит как брошенное.
@@ -355,7 +594,7 @@ export function TrainerPlayer({
             className={`wt-root${settled && !leaving ? '' : ' wt-root--locked'}`
                 + `${worldMode ? ' wt-root--world' : ''}`
                 + `${deskMode ? ' wt-root--desk' : ''}`
-                + `${sandbox ? ' wt-root--sandbox' : ''}`}
+                + `${noLesson ? ' wt-root--sandbox' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
         >
             {/* Полупрозрачная подложка. Появляется ПОСЛЕ того, как телефон
@@ -439,7 +678,7 @@ export function TrainerPlayer({
                     </p>
                 </div>
 
-                {!finished && !sandbox && (
+                {!finished && !noLesson && (
                     <div className="wt-goal">
                         <span>Сейчас</span>
                         <motion.b
@@ -455,12 +694,32 @@ export function TrainerPlayer({
 
                 {/* Подсказка — часть урока. В свободной среде подсказывать
                     нечего: правильного следующего действия там нет. */}
-                {sandbox ? null : (
+                {noLesson ? null : (
                     <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
                         <HelpCircle size={15} /> Подсказка
                     </button>
                 )}
             </motion.aside>
+
+            {/* Лента действий. Сервера у неё пока нет — она копится в памяти и
+                видна здесь, чтобы разбор можно было писать уже сейчас. Только
+                в dev-сборке: пользователю она не нужна. */}
+            {devMode && logTick >= 0 && noLesson ? (
+                <aside className="wt-devlog" aria-label="Лента событий (отладка)">
+                    <header>
+                        Лента событий · {logRef.current.count()}
+                        <button type="button" onClick={() => setLogTick((n) => n + 1)}>обновить</button>
+                    </header>
+                    <ol>
+                        {logRef.current.all().slice(-40).reverse().map((item, index) => (
+                            <li key={`${item.at}-${index}`}>
+                                <code>{item.code}</code>
+                                <small>{EVENT_TITLES[item.code] || ''}</small>
+                            </li>
+                        ))}
+                    </ol>
+                </aside>
+            ) : null}
 
             {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
                 Высота считается от окна, ширина — от пропорций корпуса, поэтому
@@ -490,7 +749,6 @@ export function TrainerPlayer({
                            оператор смотрит на неё, пока заполняет поля, и
                            тренажёр повторяет это движение глаз. */
                         <div className="wt-desk">
-                            <CallCard call={run.world.call} />
                             <div className="wt-desk__window">
                                 {Screen && (
                                     <Screen
@@ -500,8 +758,25 @@ export function TrainerPlayer({
                                         tap={doTap}
                                         toggle={doToggle}
                                         browse={doBrowse}
+                                        emit={doEmit}
+                                        act={doAct}
+                                        onSave={doSave}
                                         target={target}
                                         onRestart={doRestart}
+                                        onCall={callMode ? handleCall : null}
+                                        voice={voice}
+                                        aiSpeaking={aiSpeaking}
+                                        micLevel={micLevel}
+                                        micError={micError}
+                                        devMode={devMode}
+                                        onRing={callMode && devMode
+                                            ? () => callApiRef.current.ring({
+                                                phone: run.world.case.call.phone_pretty
+                                                    || run.world.case.call.phone,
+                                                queue: run.world.case.call.queue,
+                                                waitedSec: run.world.case.call.waited_sec,
+                                            })
+                                            : null}
                                     />
                                 )}
                             </div>
@@ -653,7 +928,7 @@ export function TrainerPlayer({
                     <strong>{scenario.title}</strong>
                 </header>
 
-                {sandbox ? (
+                {noLesson ? (
                     /* В свободной среде на месте прогресса — что где лежит.
                        Это не шаги: порядок не обязателен, отметок «пройдено» нет. */
                     <ul className="wt-side__map">
@@ -700,7 +975,12 @@ export function TrainerPlayer({
                 <div className="wt-side__foot">
                     {/* Промахи и подсказки — счётчики урока. В свободной среде
                         промахнуться не по чему, и нули там только сбивают. */}
-                    {sandbox ? (
+                    {callMode ? (
+                        <span className="wt-counters">
+                            {`Звонок: ${CALL_TEXT[run.world.call?.state] || '—'}`}
+                            {run.world.saved ? ' · обращение оформлено' : ''}
+                        </span>
+                    ) : sandbox ? (
                         <span className="wt-counters">
                             {run.world.saved ? 'Обращение сохранено' : 'Обращение ещё не сохранено'}
                         </span>
@@ -710,6 +990,19 @@ export function TrainerPlayer({
                         </span>
                     )}
                     <div className="wt-side__buttons">
+                        {/* Попытку закрывает стажёр, а не «Сохранить»: после
+                            разговора остаётся постобработка, и обрывать её
+                            автоматически значит не дать её сделать. */}
+                        {callMode && !finished ? (
+                            <button
+                                type="button"
+                                className="wt-side__btn wt-side__btn--finish"
+                                disabled={!CAN_FINISH.has(run.world.call?.state)}
+                                onClick={() => { applyCall('finish'); doTap('finish_attempt'); }}
+                            >
+                                Завершить попытку
+                            </button>
+                        ) : null}
                         <button type="button" className="wt-side__btn" onClick={doRestart}>
                             <RotateCcw size={14} /> Заново
                         </button>
@@ -739,7 +1032,10 @@ export function TrainerPlayer({
  * статьи, а внутри .wiki-prose у текста своя типографика, которая тут же начала
  * бы красить учебные экраны.
  */
-export default function TrainerModal({ scenario, onClose, record = null }) {
+export default function TrainerModal({
+    scenario, onClose, record = null,
+    caseData = null, voice = null, onCallApi = null, onCall = null,
+}) {
     const reduceMotion = useReducedMotion();
     /* Закрытие тоже анимируется — тем же движением, что и открытие, только в
        обратную сторону: экран, который выехал снизу, обязан туда же и уехать.
@@ -786,6 +1082,10 @@ export default function TrainerModal({ scenario, onClose, record = null }) {
                 leaving={leaving}
                 onExited={() => onClose?.()}
                 record={record}
+                caseData={caseData}
+                voice={voice}
+                onCallApi={onCallApi}
+                onCall={onCall}
             />
         </div>,
         document.body,

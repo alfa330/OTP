@@ -21,6 +21,7 @@
  */
 
 import crmTicket from './scenarioCrmTicket.js';
+import operatorCall from './scenarioOperatorCall.js';
 import photoControl from './scenarioPhotoControl.js';
 import saparSite from './scenarioSapar.js';
 import taxiPro from './scenarioTaxiPro.js';
@@ -28,13 +29,13 @@ import yandexPro from './scenarioYandexPro.js';
 import { stageCount } from './runner.js';
 
 /* Порядок фиксирован и читается по адресату.
-   Первым — рабочее место САМОГО оператора: обращение в CRM он заводит на каждом
-   звонке, и это первое, чему учат новичка на линии.
+   Первыми — рабочее место САМОГО оператора: сначала свободная среда (осмотреться
+   в трёх системах), следом смена со звонком (то же место, но приходит вызов).
    Дальше — приложения ВОДИТЕЛЯ в порядке его дел: сначала выбрать провайдера
    ЭДО (без него подписывать нечего), потом основной способ подписания, потом
    запасной, потом фотоконтроль. Тот же порядок в инструкции — тренажёр не
    должен спорить с текстом рядом. */
-export const TRAINERS = [crmTicket, yandexPro, taxiPro, saparSite, photoControl];
+export const TRAINERS = [crmTicket, operatorCall, yandexPro, taxiPro, saparSite, photoControl];
 
 const BY_KEY = new Map(TRAINERS.map((scenario) => [scenario.key, scenario]));
 

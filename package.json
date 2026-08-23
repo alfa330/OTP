@@ -30,6 +30,7 @@
     "test:wiki-trainer": "node --test tests/wiki_trainer_runner.test.mjs",
     "test:wiki-trainer-provider": "node --test tests/wiki_trainer_provider.test.mjs",
     "test:wiki-trainer-crm": "node --test tests/wiki_trainer_crm.test.mjs",
+    "test:wiki-trainer-call": "node --test tests/wiki_trainer_call.test.mjs",
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",
     "test:desktop-notifications": "node --test tests/desktop_notifications.test.mjs",
     "test:telegram-text": "node --test tests/telegram_text.test.mjs",
