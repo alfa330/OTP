@@ -23,12 +23,13 @@ const two = (value) => String(value).padStart(2, '0');
 
 /** Разбор ISO без часового пояса: «2026-08-18T06:17» или «2026-08-18». */
 const parseIso = (iso) => {
-    const match = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(String(iso || ''));
+    const match = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/
+        .exec(String(iso || ''));
     if (!match) return null;
-    const [, y, m, d, hh, mm] = match;
+    const [, y, m, d, hh, mm, ss] = match;
     return {
         date: Date.UTC(Number(y), Number(m) - 1, Number(d)),
-        time: hh === undefined ? null : { hh, mm },
+        time: hh === undefined ? null : { hh, mm, ss },
     };
 };
 
@@ -61,6 +62,18 @@ export const fmtДатаВремя = (iso, days = 0) => {
     if (!at) return '';
     const head = `${at.day} ${MONTHS_SHORT[at.month - 1]}`;
     return at.time ? `${head}, ${at.time.hh}:${at.time.mm}` : head;
+};
+
+/* «23 авг., 17:51:33» — так подписаны этапы в карточке заказа. Секунды здесь
+   не педантизм: ожидание клиента считается как разница между «На месте» и
+   «В пути», и без секунд спор о минутах не разрешить. */
+export const fmtДатаВремяСек = (iso, days = 0) => {
+    const at = moved(iso, days);
+    if (!at) return '';
+    const head = `${at.day} ${MONTHS_SHORT[at.month - 1]}`;
+    if (!at.time) return head;
+    const { hh, mm, ss } = at.time;
+    return `${head}, ${hh}:${mm}${ss ? `:${ss}` : ''}`;
 };
 
 /** «19 июля» — так подписаны дни в фотоконтроле. */
@@ -105,7 +118,20 @@ export const prepareCase = (raw, today) => {
         tx_totals: list(source.tx_totals),
         income: list(source.income),
         balance_history: list(source.balance_history).map((b) => ({ ...b, when: when(b.at) })),
-        orders: list(source.orders).map((o) => ({ ...o, when: when(o.at) })),
+        orders: list(source.orders).map((o) => ({
+            ...o,
+            when: when(o.at),
+            finished_when: o.finished_at ? when(o.finished_at) : '',
+            /* Карточка заказа — отдельная страница кабинета. Этапы готовим
+               здесь же: посекундно и со сдвигом, как всё остальное. */
+            card: o.card ? {
+                ...o.card,
+                stages: list(o.card.stages).map((stage) => ({
+                    ...stage,
+                    when: fmtДатаВремяСек(stage.at, days),
+                })),
+            } : null,
+        })),
         gps_tiles: list(source.gps_tiles),
         gps_log: list(source.gps_log).map((g) => ({ ...g, when: when(g.at) })),
         photo_days: list(source.photo_days).map((p) => ({ ...p, title: fmtДень(p.date, days) })),

@@ -4932,3 +4932,127 @@
     .wt-cp__buttons { margin-left: 0; }
     .wt-devlog { display: none; }
 }
+
+/* ── Карточка заказа и панели шапки ─────────────────────────────────────────
+   Кадры s12–s16: карточка заказа — отдельная страница, «Диагностика» и
+   «Приоритет» — панели из шапки, «История изменений» — модалка без адреса. */
+
+.wt-fl__hdr-btn {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0 16px;
+    border-left: 1px solid #e6e3de;
+    font-size: 13px;
+    color: #21201f;
+    text-align: left;
+}
+.wt-fl__hdr-btn small { font-size: 10.5px; color: #8f8c87; }
+.wt-fl__hdr-btn:hover { color: #4060e3; }
+
+.wt-fl__diag { margin: 0 0 10px; font-size: 14px; }
+
+/* Таблица заказов широкая — 22 колонки прокручиваются по горизонтали. */
+.wt-fl__scroll-x { overflow-x: auto; overscroll-behavior-x: contain; }
+.wt-fl__table--wide { min-width: 1700px; }
+.wt-fl__table--wide th,
+.wt-fl__table--wide td { white-space: nowrap; }
+
+.wt-fl__link { font: inherit; color: #4060e3; text-decoration: underline; }
+.wt-fl__link:hover { color: #2f4fc0; }
+
+/* Пустая вкладка «Документы»: только плитка загрузки. */
+.wt-fl__docs { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 4px; }
+.wt-fl__doc-add {
+    display: grid;
+    place-items: center;
+    width: 96px;
+    height: 96px;
+    border-radius: 12px;
+    background: #f0eeea;
+    font-size: 26px;
+    color: #8f8c87;
+}
+.wt-fl__doc-add:hover { background: #e8e6e2; }
+
+/* Страница заказа: слева шапка, в центре блоки, справа поддержка. */
+.wt-fl__order {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) auto;
+    gap: 16px;
+    align-items: start;
+}
+
+.wt-fl__ord-head { padding: 14px 16px; border-radius: 14px; }
+.wt-fl__ord-head.is-done { background: #e6f6ec; }
+.wt-fl__ord-head.is-cancelled { background: #fdeceb; }
+.wt-fl__ord-head > b { display: block; margin-bottom: 10px; font-size: 14px; }
+.wt-fl__ord-who { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; font-size: 13px; }
+.wt-fl__ord-map {
+    height: 120px;
+    margin: 12px 0;
+    border-radius: 10px;
+    background: repeating-linear-gradient(135deg, #eceae6 0 12px, #e3e1dd 12px 24px);
+}
+
+.wt-fl__ord-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid #f0eeea;
+    font-size: 12.5px;
+}
+.wt-fl__ord-row span { color: #6d6b68; }
+.wt-fl__ord-row b { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
+.wt-fl__ord-row.is-open b { color: #21201f; }
+
+.wt-fl__ord-main { min-width: 0; }
+.wt-fl__ord-block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 18px 0 4px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #eeece8;
+    font-size: 15px;
+    font-weight: 600;
+}
+.wt-fl__ord-block-head:first-child { margin-top: 0; }
+.wt-fl__chip { padding: 4px 11px; border-radius: 8px; background: #f0eeea; font-size: 11.5px; font-weight: 400; }
+
+/* Этапы: подпись, дельта под ней и время справа. Секунды здесь важны —
+   ожидание клиента считается как «В пути» минус «На месте». */
+.wt-fl__stages { margin: 2px 0 6px; border-radius: 10px; background: #f7f6f4; }
+.wt-fl__stages.is-inline { margin-bottom: 10px; }
+.wt-fl__stage {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #efedea;
+    font-size: 12.5px;
+}
+.wt-fl__stage:last-child { border-bottom: 0; }
+.wt-fl__stage span { display: flex; flex-direction: column; }
+.wt-fl__stage i { font-size: 10.5px; font-style: normal; color: #8f8c87; }
+.wt-fl__stage b { font-weight: 400; }
+
+.wt-fl__ord-comment {
+    min-height: 76px;
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #f4f2ef;
+    font-size: 12.5px;
+    color: #a9a6a1;
+}
+.wt-fl__ord-foot { display: flex; gap: 8px; margin-top: 10px; }
+.wt-fl__ord-side { display: flex; }
+
+@media (max-width: 1023px) {
+    .wt-fl__order { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__hdr-btn { padding: 0 10px; }
+}

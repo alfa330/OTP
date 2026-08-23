@@ -320,3 +320,72 @@ test('слепки соседней дорожки читаются и в них
         }
     }
 });
+
+/* ── Карточка заказа и правда кабинета ───────────────────────────────────────
+ *
+ * Кадры s08–s16 опровергли три предположения, на которых стояли сценарии.
+ * Тесты ниже стерегут именно их: экран не должен показывать НИ БОЛЬШЕ, ни
+ * меньше настоящего кабинета — соврать в обе стороны одинаково вредно.
+ */
+
+test('вкладка «Документы» пуста — это правда кабинета, а не недоделка', () => {
+    assert.deepEqual(DEFAULT_CASE.documents, [],
+        'в кабинете вкладка «Документы» пустая: ни видов, ни сроков, ни статусов');
+    // Срок действия ВУ живёт в «Деталях», а не в документах.
+    assert.ok(DEFAULT_CASE.contractor.license_to, 'срок ВУ пропал из карточки');
+});
+
+test('допуск к линии объясняет «Диагностика», а не документы', () => {
+    assert.ok(DEFAULT_CASE.contractor.diagnostics, 'нет поля diagnostics');
+    assert.ok(Array.isArray(DEFAULT_CASE.contractor.diagnostics_details));
+    assert.ok(DEFAULT_CASE.contractor.priority, 'нет поля priority');
+});
+
+test('у заказа есть страница с посекундной хронологией', () => {
+    const order = DEFAULT_CASE.orders[0];
+    assert.match(order.order_uuid, /^[0-9a-f]{32}$/, 'номер заказа не 32 hex');
+    assert.ok(order.card, 'у заказа нет карточки');
+    assert.ok(order.card.totals.some(([label]) => label === 'Итого'), 'нет строки «Итого»');
+
+    const names = order.card.stages.map((s) => s.name);
+    for (const stage of ['Создан', 'На месте', 'В пути', 'Выполнено']) {
+        assert.ok(names.includes(stage), `нет этапа «${stage}»`);
+    }
+    assert.ok(names.includes('Ожидаемое время подачи'),
+        'без ожидаемого времени подачи не видно, опоздал ли водитель');
+});
+
+/* Ожидание клиента = «В пути» − «На месте». В кабинете такого поля НЕТ — оно
+   выводится из этапов, и стажёр обязан это уметь. Проверяем, что данных для
+   вывода достаточно, а НЕ то, что мы его показали. */
+test('по этапам считается ожидание клиента', () => {
+    const stages = DEFAULT_CASE.orders[0].card.stages;
+    const at = (name) => new Date(`${stages.find((s) => s.name === name).at}Z`).getTime();
+    const waiting = at('В пути') - at('На месте');
+    assert.ok(waiting > 0, 'ожидание получилось отрицательным');
+    assert.equal(waiting, 11000, 'ожидание клиента должно считаться посекундно');
+});
+
+test('готовые дела соседней дорожки тоже дают карточку заказа', () => {
+    const dir = new URL('../voice_trainer/cases/', import.meta.url);
+    let files;
+    try {
+        files = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+    } catch {
+        return;
+    }
+    let withCard = 0;
+    for (const name of files) {
+        const pub = JSON.parse(fs.readFileSync(new URL(name, dir), 'utf8')).public;
+        const world = createDeskWorld({ today: { year: 2026, month: 8, day: 23 }, caseData: pub });
+        for (const order of world.case.orders) {
+            if (!order.card) continue;
+            withCard += 1;
+            assert.ok(order.card.stages.every((s) => s.when),
+                `${name}: этапы заказа не подготовлены к показу`);
+        }
+        // Пустые «Документы» — норма и здесь.
+        assert.ok(Array.isArray(world.case.documents), `${name}: документы не массив`);
+    }
+    assert.ok(withCard > 0, 'ни в одном деле нет карточки заказа');
+});

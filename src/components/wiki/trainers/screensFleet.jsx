@@ -68,6 +68,23 @@ const SIDE = [
     ['help', 'help', 'Помощь'],
 ];
 
+/* 22 колонки «Заказов» — ровно те и в том порядке, что в кабинете. */
+const ORDER_COLUMNS = [
+    'Статус', 'Код заказа', 'Автомобиль', 'Дата подачи', 'Дата завершения',
+    'Причина отмены', 'Адрес', 'Категория', 'Пробег', 'Стоимость в Про',
+    'Наличные', 'Безналичная', 'Корпоративная', 'Чаевые', 'Компенсация промоакций',
+    'Бонус', 'Прочие начисления', 'Комиссии сервиса', 'Прочие платежи',
+    'Налоги и сборы', 'Платежи сервиса в счёт заказа', 'Комиссии партнёра',
+];
+
+/* Денежные колонки, которых у заказа может не быть: показываем ноль, как
+   кабинет, а не пустоту. */
+const ORDER_MONEY = [
+    'cash', 'cashless', 'corporate', 'tips', 'promo_compensation', 'bonus',
+    'other_income', 'service_commission', 'other_payments', 'taxes',
+    'service_payments', 'partner_commission',
+];
+
 const Overlay = ({ title, onClose, children, wide = false }) => (
     <div className={`wt-fl__overlay${wide ? ' is-wide' : ''}`}>
         <header>
@@ -212,7 +229,42 @@ const Shell = ({ world, go, emit, title, crumb = null, children }) => {
                 </Overlay>
             ) : null}
 
-            {world.fleetPanel === 'study' ? (
+            {world.fleetPanel === 'diagnostics' ? (
+            <Overlay title="Диагностика" onClose={() => go({ fleetPanel: null })}>
+                <p className="wt-fl__diag">{c.contractor.diagnostics || 'Нет данных'}</p>
+                {(c.contractor.diagnostics_details || []).map((line) => (
+                    <div key={line} className="wt-fl__notice"><b>{line}</b></div>
+                ))}
+                <p className="wt-fl__note">
+                    Допуск к линии кабинет объясняет здесь, а не во вкладке «Документы» —
+                    она пустая.
+                </p>
+            </Overlay>
+        ) : null}
+
+        {world.fleetPanel === 'priority' ? (
+            <Overlay title="Приоритет" onClose={() => go({ fleetPanel: null })}>
+                <p className="wt-fl__diag">{c.contractor.priority || 'Нет данных'}</p>
+                <p className="wt-fl__note">
+                    Баллы приоритета начисляются за выполненные заказы и сгорают за отмены.
+                    Их видно и в карточке заказа строкой «Баллы приоритета».
+                </p>
+            </Overlay>
+        ) : null}
+
+        {/* «История изменений» — модальное окно: своего адреса у неё нет. */}
+        {world.fleetPanel === 'changes' ? (
+            <Overlay title="История изменений" wide onClose={() => go({ fleetPanel: null })}>
+                {c.changes.length ? c.changes.map((ch, index) => (
+                    <div key={`${ch.at}-${index}`} className="wt-fl__change">
+                        <b>{ch.field}: {ch.from} → {ch.to}</b>
+                        <span>{ch.when} · {ch.author}</span>
+                    </div>
+                )) : <p className="wt-fl__note">Изменений не было</p>}
+            </Overlay>
+        ) : null}
+
+        {world.fleetPanel === 'study' ? (
                 <Overlay title="Обучение" onClose={() => go({ fleetPanel: null })}>
                     <p className="wt-fl__note">
                         В кабинете здесь курс «Основы управления таксопарком». В учебную среду
@@ -540,8 +592,17 @@ const CardHead = ({ world, go, emit }) => {
                     <em>−</em><u>{person.balance || '—'}</u><em className="is-plus">+</em>
                 </span>
                 <span><small>Рейтинг</small>{isHero ? hero.rating : '—'}</span>
-                <span><small>Диагностика ›</small>Нет данных</span>
-                <span><small>Приоритет ›</small>Нет данных</span>
+                {/* «Диагностика ›» и «Приоритет ›» — кнопки со стрелкой: они
+                    открывают панель справа. Именно диагностика объясняет допуск
+                    к линии, а не вкладка «Документы» — та в кабинете пуста. */}
+                <button type="button" className="wt-fl__hdr-btn"
+                    onClick={() => go({ fleetPanel: 'diagnostics' })}>
+                    <small>Диагностика ›</small>{isHero ? (hero.diagnostics || 'Нет данных') : 'Нет данных'}
+                </button>
+                <button type="button" className="wt-fl__hdr-btn"
+                    onClick={() => go({ fleetPanel: 'priority' })}>
+                    <small>Приоритет ›</small>{isHero ? (hero.priority || 'Нет данных') : 'Нет данных'}
+                </button>
                 <span><small>Термокороб</small>{isHero ? hero.thermobox : '—'}</span>
             </div>
             {isHero && (hero.warnings || []).map((w) => (
@@ -551,7 +612,13 @@ const CardHead = ({ world, go, emit }) => {
                 {CARD_TABS.map(([slug, label]) => (
                     <button key={slug} type="button"
                         className={world.fleetTab === slug ? 'is-on' : ''}
-                        onClick={() => { emit('ui.open_tab', { tab: slug }); go({ fleetTab: slug }); }}>
+                        onClick={() => {
+                            emit('ui.open_tab', { tab: slug });
+                            /* У «Истории изменений» нет своего адреса: это
+                               модальное окно, а не вкладка со слугом. */
+                            if (slug === 'changes') { go({ fleetPanel: 'changes' }); return; }
+                            go({ fleetTab: slug });
+                        }}>
                         {label}
                     </button>
                 ))}
@@ -681,19 +748,44 @@ const tabBody = (slug, world, go, emit, isHero) => {
         return c.orders.length ? (
             <>
                 <Filters items={['Дата подачи', 'Период', '+ Фильтры']} />
-                <table className="wt-fl__table">
-                    <thead>
-                        <tr><th>Дата</th><th>Заказ</th><th>Откуда</th><th>Куда</th><th>Статус</th><th className="is-right">Сумма</th></tr>
-                    </thead>
-                    <tbody>
-                        {c.orders.map((o) => (
-                            <tr key={o.id} className="is-open" onClick={() => emit('ui.open_order', { id: o.id })}>
-                                <td>{o.when}</td><td>{o.id}</td><td>{o.from}</td><td>{o.to}</td>
-                                <td>{o.status}</td><td className="is-right">{o.price}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+                {/* 22 колонки — столько их в кабинете. Короткий набор
+                    «дата · номер · сумма» научил бы читать не тот экран. */}
+                <div className="wt-fl__scroll-x">
+                    <table className="wt-fl__table wt-fl__table--wide">
+                        <thead>
+                            <tr>{ORDER_COLUMNS.map((col) => <th key={col}>{col}</th>)}</tr>
+                        </thead>
+                        <tbody>
+                            {c.orders.map((o) => (
+                                <tr key={o.id}>
+                                    <td>{o.status}</td>
+                                    <td>
+                                        {/* Карточка открывается ССЫЛКОЙ в этой
+                                            ячейке, а не кликом по строке. */}
+                                        <button type="button" className="wt-fl__link"
+                                            onClick={() => {
+                                                emit('ui.open_order', { id: o.id });
+                                                go({ fleetView: 'order', fleetOrderId: o.id });
+                                            }}>
+                                            {o.id}
+                                        </button>
+                                    </td>
+                                    <td>{c.car.plate}</td>
+                                    <td>{o.when}</td>
+                                    <td>{o.finished_when || '—'}</td>
+                                    <td>{o.cancel_reason || '—'}</td>
+                                    <td>{o.address}</td>
+                                    <td>{o.category}</td>
+                                    <td className="is-right">{o.distance_km}</td>
+                                    <td className="is-right">{o.price}</td>
+                                    {ORDER_MONEY.map((field) => (
+                                        <td key={field} className="is-right">{o[field] || '0,00'}</td>
+                                    ))}
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
             </>
         ) : <Empty title="Ничего не найдено" text="За выбранный период заказов нет" />;
     case 'subvention':
@@ -782,8 +874,14 @@ const tabBody = (slug, world, go, emit, isHero) => {
             </div>
         ) : <Empty title="Нет данных" text="Изменений не было" />;
     case 'documents':
+        /* В кабинете вкладка ПУСТАЯ: только плитка загрузки. Ни видов
+           документов, ни сроков, ни статусов — сроки живут в «Деталях» у ВУ,
+           а допуск к линии объясняет «Диагностика». */
         return (
-            <div className="wt-fl__cols">
+            <div className="wt-fl__docs">
+                <button type="button" className="wt-fl__doc-add"
+                    onClick={() => emit('ui.action', { what: 'upload_document', args: {} })}
+                    aria-label="Загрузить документ">+</button>
                 {c.documents.map(([label, value]) => <Field key={label} label={label} value={value} />)}
             </div>
         );
@@ -964,10 +1062,146 @@ const Fleet404 = (props) => (
     </Shell>
 );
 
+
+/* ── Карточка заказа ─────────────────────────────────────────────────────────
+ *
+ * Отдельная СТРАНИЦА `/orders/<32hex>`, а не строка таблицы: открывается
+ * ссылкой в ячейке «Код заказа». Здесь же единственное место в кабинете, где
+ * видно ожидание клиента — блок «Выполнение» с посекундными этапами.
+ * Ожидание = «В пути» минус «На месте»; у отменённого — от «На месте» до отмены.
+ */
+
+const Rows = ({ items }) => (
+    <>
+        {items.map(([label, value]) => (
+            <div key={label} className="wt-fl__ord-row"><span>{label}</span><b>{value}</b></div>
+        ))}
+    </>
+);
+
+const Stages = ({ stages, inline = false }) => (
+    <div className={`wt-fl__stages${inline ? ' is-inline' : ''}`}>
+        {stages.map((stage, index) => (
+            <div key={`${stage.name}-${index}`} className="wt-fl__stage">
+                <span>
+                    {stage.name}
+                    {stage.delta ? <i>{stage.delta}</i> : null}
+                </span>
+                <b>{stage.when}</b>
+            </div>
+        ))}
+    </div>
+);
+
+const FleetOrder = (props) => {
+    const { world, go, emit } = props;
+    const c = world.case;
+    const order = c.orders.find((o) => o.id === world.fleetOrderId) || c.orders[0];
+
+    if (!order) {
+        return (
+            <Shell {...props} title="Заказ">
+                <Empty title="Ничего не найдено" text="Такого заказа нет"
+                    action="К списку заказов"
+                    onAction={() => go({ fleetView: 'card', fleetTab: 'orders' })} />
+            </Shell>
+        );
+    }
+
+    const card = order.card;
+    const done = /Заверш|Выполн/i.test(order.status);
+
+    return (
+        <Shell {...props} title={`Заказ ${order.id}`}>
+            <div className="wt-fl__order">
+                <aside className={`wt-fl__ord-head${done ? ' is-done' : ' is-cancelled'}`}>
+                    <b>{order.status}</b>
+                    <div className="wt-fl__ord-who">
+                        <i className="wt-fl__ava" aria-hidden="true" />
+                        <span>{c.contractor.last} {c.contractor.first}</span>
+                    </div>
+                    <Rows items={[
+                        ['ВУ', c.contractor.license],
+                        ['Телефон', c.contractor.phone_pretty],
+                        ['Номер заказа в парке', order.id],
+                        ['Номер заказа', order.order_uuid || '—'],
+                        ['Дата подачи заказа', order.when],
+                        ['Тип заказа', card?.type || '—'],
+                    ]} />
+                    <div className="wt-fl__ord-map" aria-hidden="true" />
+                    <Rows items={[
+                        ['Откуда', order.address || '—'],
+                        ['Куда', order.address_to || '—'],
+                        ['Расстояние', order.distance_km ? `${order.distance_km} км` : '—'],
+                    ]} />
+                </aside>
+
+                <section className="wt-fl__ord-main">
+                    <header className="wt-fl__ord-block-head">
+                        Детализация
+                        <span className="wt-fl__chip">Транзакции</span>
+                    </header>
+                    {card?.totals?.length
+                        ? <Rows items={card.totals} />
+                        : <p className="wt-fl__note">Детализация по этому заказу не заполнена</p>}
+
+                    <header className="wt-fl__ord-block-head">Описание</header>
+                    <Rows items={[
+                        ['Баллы приоритета', card?.priority_points || '—'],
+                        ['Статус', order.status],
+                        ['Тариф', order.category || '—'],
+                        ['Номер заказа', order.id],
+                    ]} />
+                    {/* «Длительность поездки» раскрывается теми же этапами —
+                        так это и сделано в кабинете. */}
+                    {card?.stages?.length ? (
+                        <>
+                            <div className="wt-fl__ord-row is-open"><span>Длительность поездки</span>
+                                <b>{card.stages.find((x) => x.delta && /Выполн|Отмен/i.test(x.name))?.delta
+                                    || '—'}</b>
+                            </div>
+                            <Stages stages={card.stages} inline />
+                        </>
+                    ) : null}
+                    <Rows items={[
+                        ['Пробег', order.distance_km ? `${order.distance_km} км` : '—'],
+                        ['Оплата', card?.payment || '—'],
+                        ['Чей заказ', card?.owner || '—'],
+                    ]} />
+
+                    <header className="wt-fl__ord-block-head">Выполнение</header>
+                    {card?.stages?.length
+                        ? <Stages stages={card.stages} />
+                        : <p className="wt-fl__note">Хронология по этому заказу не заполнена</p>}
+
+                    <header className="wt-fl__ord-block-head">Комментарий</header>
+                    <div className="wt-fl__ord-comment">Введите текст</div>
+                    <div className="wt-fl__ord-foot">
+                        <button type="button" className="wt-fl__act"
+                            onClick={() => go({ fleetView: 'card', fleetTab: 'orders' })}>Отмена</button>
+                        <button type="button" className="wt-fl__yellow"
+                            onClick={() => emit('ui.action', { what: 'order_comment', args: { id: order.id } })}>
+                            Сохранить
+                        </button>
+                    </div>
+                </section>
+
+                <aside className="wt-fl__ord-side">
+                    <button type="button" className="wt-fl__act"
+                        onClick={() => emit('ui.action', { what: 'order_support', args: { id: order.id } })}>
+                        Поддержка
+                    </button>
+                </aside>
+            </div>
+        </Shell>
+    );
+};
+
 const VIEWS = {
     home: FleetHome,
     contractors: FleetContractors,
     card: FleetCard,
+    order: FleetOrder,
     vehicles: FleetVehicles,
     goals: FleetGoals,
     support: FleetSupport,
@@ -982,6 +1216,10 @@ const VIEWS = {
 export const fleetUrl = (world) => {
     const base = 'fleet.example-park.kz';
     const v = world.fleetView;
+    if (v === 'order') {
+        const order = (world.case.orders || []).find((o) => o.id === world.fleetOrderId);
+        return `${base}/orders/${String(order?.order_uuid || '').slice(0, 12)}…`;
+    }
     if (v === 'card') return `${base}/contractors/${String(world.fleetOpenId || '').slice(0, 8)}…/${world.fleetTab}`;
     if (v === 'contractors') {
         const filters = world.fleetFilters || [];

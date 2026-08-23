@@ -51,6 +51,7 @@ export const createDeskWorld = ({ today, caseData }) => {
         fleetMenu: null,
         fleetQuery: '',
         fleetOpenId: null,
+        fleetOrderId: null,
         fleet404: false,
 
         // Где мы внутри Okapp.
