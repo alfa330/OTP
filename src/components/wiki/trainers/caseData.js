@@ -114,7 +114,19 @@ export const prepareCase = (raw, today) => {
         support: list(source.support).map(([q, status, updated, created]) => ([
             q, status, fmtКоротко(updated, days), fmtКоротко(created, days),
         ])),
-        contractors: list(source.contractors),
+        /* Строку героя дополняем тем, что есть только в его карточке: номером
+           ВУ и позывным. По контракту строка списка их не несёт, а искать по
+           ним оператор обязан — иначе поиск по ВУ не находит даже звонящего. */
+        contractors: list(source.contractors).map((person) => (
+            person.id && person.id === source.contractor?.id
+                ? {
+                    phone: source.contractor.phone,
+                    license: source.contractor.license,
+                    callsign: source.contractor.callsign,
+                    ...person,
+                }
+                : person
+        )),
         cars: list(source.cars),
         crm: source.crm || { prefill: {} },
     };
@@ -146,7 +158,11 @@ export const findContractors = (people, query) => {
     const digits = /[a-zа-яё]/i.test(raw) ? '' : onlyDigits(raw);
 
     const items = (people || []).filter((person) => {
-        if (digits.length >= SEARCH_MIN && onlyDigits(person.phone).includes(digits)) return true;
+        /* Телефон берём из ОБОИХ полей: по контракту строка списка несёт
+           phone_pretty, а phone есть не всегда. Полагаться на одно из них —
+           значит не находить звонящего в чужом слепке. */
+        const phones = onlyDigits(person.phone) + ' ' + onlyDigits(person.phone_pretty);
+        if (digits.length >= SEARCH_MIN && phones.includes(digits)) return true;
         if (lower(person.name).includes(text)) return true;
         if (lower(person.license).includes(text)) return true;
         if (lower(person.callsign).includes(text)) return true;

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import { browse, currentStep, expectedTap, restart, startRun, tap }
@@ -12,6 +13,7 @@ import {
     applyEdit, findContractors, formatMoney, parseMoney, prepareCase, shiftDays,
 } from '../src/components/wiki/trainers/caseData.js';
 import { DEFAULT_CASE } from '../src/components/wiki/trainers/fleetData.js';
+import { createDeskWorld } from '../src/components/wiki/trainers/deskWorld.js';
 
 /* Режим смены: стажёр встаёт на линию и принимает звонок.
  *
@@ -274,4 +276,47 @@ test('перезапуск сохраняет слепок дела', () => {
 
     // Без слепка перезапуск честно берёт запасной — это тоже рабочий случай.
     assert.equal(restart(run).world.case.contractor.panel_only, false);
+});
+
+/* ── Стык двух дорожек ───────────────────────────────────────────────────────
+ *
+ * Слепки пишет другая машина (voice_trainer/cases), экраны читает эта. Пока
+ * контракт соблюдается, дорожки не мешают друг другу — но проверять это надо
+ * на НАСТОЯЩИХ файлах, а не на своём же DEFAULT_CASE: своя копия всегда
+ * подходит сама себе.
+ *
+ * На этом стыке уже поймали дефект: строка списка по контракту несёт только
+ * phone_pretty, а поиск смотрел в phone — звонящего не находило ни в одном
+ * чужом деле.
+ */
+test('слепки соседней дорожки читаются и в них находится звонящий', () => {
+    const dir = new URL('../voice_trainer/cases/', import.meta.url);
+    let files;
+    try {
+        files = fs.readdirSync(dir).filter((name) => name.endsWith('.json'));
+    } catch {
+        return; // Дел ещё нет — это не повод краснеть.
+    }
+    assert.ok(files.length, 'папка дел пуста');
+
+    for (const name of files) {
+        const raw = JSON.parse(fs.readFileSync(new URL(name, dir), 'utf8'));
+        const pub = raw.public || raw;
+        const world = createDeskWorld({ today: { year: 2026, month: 8, day: 23 }, caseData: pub });
+        const c = world.case;
+
+        assert.ok(c.contractors.length, `${name}: пустой список исполнителей`);
+        assert.ok(c.transactions.every((t) => t.when), `${name}: даты ведомости не подготовлены`);
+
+        // Первое настоящее действие смены — найти звонящего по номеру.
+        const found = findContractors(c.contractors, c.call.phone);
+        assert.equal(found.items.length, 1, `${name}: номер из звонка не даёт одну строку`);
+        assert.equal(found.items[0].id, c.contractor.id, `${name}: нашли не того человека`);
+
+        // Ответ остаётся на сервере: в public его быть не должно.
+        const text = JSON.stringify(pub);
+        for (const banned of ['"answer"', '"expected"', '"checks"', '"solution"']) {
+            assert.ok(!text.includes(banned), `${name}: в public утёк ${banned}`);
+        }
+    }
 });
