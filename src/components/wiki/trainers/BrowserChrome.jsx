@@ -27,12 +27,18 @@ import { Tap } from './screenKit';
 /* Значки вкладок рисуем сами, а не тянем картинки: в тренажёре они были бы
    единственными внешними файлами ради шестнадцати пикселей. Знак Диспетчерской
    намеренно НЕ повторяет чужой логотип — см. шапку screensFleet.jsx. */
+const TAB_BG = { fleet: '#1f2733', oktell: '#272d32', crm: '#4273fa' };
+
 const TabIcon = ({ kind }) => (
     <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-        <rect width="16" height="16" rx="4" fill={kind === 'fleet' ? '#1f2733' : '#4273fa'} />
+        <rect width="16" height="16" rx="4" fill={TAB_BG[kind] || TAB_BG.crm} />
         {kind === 'fleet' ? (
             <path d="M3.4 10.6h9.2M4.6 10.6V7.3l1-2.4h4.8l1 2.4v3.3M5.5 12.2v-1.6m5 1.6v-1.6"
                 fill="none" stroke="#fff" strokeWidth="1.1" strokeLinecap="round" />
+        ) : kind === 'oktell' ? (
+            // Треугольник знака Okapp — свой рисунок, не чужой логотип.
+            <path d="M3.6 12.2 8 3.8l4.4 8.4Z" fill="none" stroke="#fff" strokeWidth="1.2"
+                strokeLinejoin="round" />
         ) : (
             <text x="8" y="11.6" textAnchor="middle" fontSize="8.6" fontWeight="700"
                 fontFamily="system-ui, sans-serif" fill="#fff">iT</text>

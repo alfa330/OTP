@@ -3,9 +3,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Tap, TrainMark } from './screenKit';
 import BrowserChrome from './BrowserChrome';
 import FleetApp, { fleetUrl } from './screensFleet';
-import {
-    ANSWER, CATS, CITIES, PARKS, SOURCES, activeField, optionId,
-} from './scenarioCrmTicket';
+import OktellApp, { oktellUrl } from './screensOktell';
+import { PARKS, PARK_CITIES, SOURCES, childrenAt } from './crmCatalog.js';
 
 /* Экран CRM: тот же интерфейс, в котором оператор заводит обращение на смене.
  *
@@ -14,32 +13,31 @@ import {
  *   тёмно-синий сайдбар #485779 и синий акцент #4273fa (сняты пипеткой);
  *   порядок полей сверху вниз, включая «Город» СРАЗУ под таксопарком;
  *   поля, которых до времени нет: «Город» появляется после выбора парка,
- *   «Категория N+1» — после выбора N, «Комментарий» — после последней категории.
+ *   «Категория N+1» — после выбора N.
  *
- * Последнее — не украшение, а суть урока: новичок ищет город глазами и не
- * находит, потому что поля ещё нет. Показать его сразу значило бы стереть
- * ровно ту ошибку, ради которой тренажёр и сделан.
+ * Форма СВОБОДНАЯ: подсветки правильного варианта нет, ошибиться нельзя, любую
+ * ветку из 387 категорий можно пройти до конца. Дерево настоящее (crmCatalog),
+ * потому что учить искать в укороченном списке — учить не тому.
  */
 
 const CRM_URL = 'backend.yataxi.kz/admin/list-requests/create';
 
-/* Вкладки окна. Обе открыты с самого начала — так стоит браузер у оператора
-   на смене, и «открой вторую систему» не должно быть отдельной задачей. */
+/* Вкладки окна. Все три открыты сразу, как стоит браузер у оператора на смене:
+   открывать их по очереди — не задача урока, а лишний шаг. */
 const TABS = [
     { id: 'crm', title: 'Обращения - iTaxi', icon: 'crm' },
     { id: 'fleet', title: 'Диспетчерская', icon: 'fleet' },
+    { id: 'oktell', title: 'Okapp — Oktell', icon: 'oktell' },
 ];
 
-/* Разделы сайдбара. Активен «Обращения» — мы в нём и находимся. Остальные
-   кликабельны: уйти не туда посреди заполнения — живая ошибка. */
 const NAV = [
-    ['nav_drivers', 'Водители', false],
-    ['nav_tickets_group', 'Тикетная система', false],
-    ['nav_requests', 'Обращения', true],
-    ['nav_tickets', 'Тикеты', false],
-    ['nav_notifications', 'Уведомления', false],
-    ['nav_edo', 'ЭДО', false],
-    ['nav_news', 'Новостная лента', false],
+    ['nav_drivers', 'Водители'],
+    ['nav_tickets_group', 'Тикетная система'],
+    ['nav_requests', 'Обращения'],
+    ['nav_tickets', 'Тикеты'],
+    ['nav_notifications', 'Уведомления'],
+    ['nav_edo', 'ЭДО'],
+    ['nav_news', 'Новостная лента'],
 ];
 
 const NavIcon = ({ name }) => {
@@ -77,7 +75,6 @@ const Ok = () => (
     </svg>
 );
 
-/** Строка формы: подпись слева, поле справа — как в CRM. */
 const Field = ({ label, children }) => (
     <div className="wt-crm__row">
         <span className="wt-crm__label">{label}</span>
@@ -86,39 +83,25 @@ const Field = ({ label, children }) => (
 );
 
 /* Выпадающий список. Своя реализация, а не <select>: раскрытый список
-   системного селекта рисует ОС, и подсветить в нём нужный пункт невозможно —
-   а подсветка цели есть на каждом экране тренажёра. В самой CRM «Категория»
-   и так нарисована скриптом, а не системным списком. */
-const Picker = ({
-    name, group, options, value, active, open, setOpen, tap, target, placeholder,
-}) => {
+   системного селекта рисует ОС, и внутри учебного окна он выглядел бы чужим.
+   В самой CRM «Категория» тоже нарисована скриптом. */
+const Picker = ({ name, options, value, open, setOpen, onPick, placeholder }) => {
     const isOpen = open === name;
     const listRef = useRef(null);
 
-    /* Раскрытый список нужно ПОКАЗАТЬ целиком.
-     *
-     * Нижние поля формы стоят у самого низа вкладки, и список из тридцати одного
-     * пункта уходит за край окна: человек видит первые пять строк, не находит
-     * нужную и решает, что её нет. Прокручиваем вкладку к списку, а внутри
-     * списка — к искомому пункту, иначе до него всё равно надо докручивать
-     * вслепую. */
+    /* Раскрытый список нужно показать целиком: нижние поля формы стоят у края
+       вкладки, и список из тридцати пунктов уходит за него — человек видит пять
+       строк и решает, что остального нет. */
     useEffect(() => {
-        if (!isOpen || !listRef.current) return;
-        const list = listRef.current;
-        list.scrollIntoView({ block: 'nearest' });
-        const goal = list.querySelector('.is-target');
-        if (goal) goal.scrollIntoView({ block: 'nearest' });
+        if (isOpen && listRef.current) listRef.current.scrollIntoView({ block: 'nearest' });
     }, [isOpen]);
 
     return (
         <div className={`wt-crm__picker${isOpen ? ' is-open' : ''}`}>
             <button
                 type="button"
-                className={`wt-crm__box${active && !isOpen ? ' is-target' : ''}${value ? ' has-value' : ''}`}
-                /* Клик по ЧУЖОМУ полю — это ход в движке: человек трогает поле
-                   не вовремя, и ловушка объясняет, зачем оно. Клик по своему —
-                   просто раскрытие списка, за любопытство не наказываем. */
-                onClick={() => (active ? setOpen(isOpen ? null : name) : tap(`field_${name}`))}
+                className={`wt-crm__box${value ? ' has-value' : ''}`}
+                onClick={() => setOpen(isOpen ? null : name)}
             >
                 <span className={value ? '' : 'is-placeholder'}>{value || placeholder}</span>
                 {value ? <Ok /> : null}
@@ -126,17 +109,17 @@ const Picker = ({
             </button>
             {isOpen && (
                 <ul className="wt-crm__list" role="listbox" ref={listRef}>
-                    {options.map((option, index) => (
+                    {options.map((option) => (
                         <li key={option}>
-                            <Tap
-                                id={optionId(group, index)}
-                                target={target}
-                                tap={tap}
-                                className="wt-crm__option"
+                            <button
+                                type="button"
+                                className={`wt-crm__option${option === value ? ' is-picked' : ''}`}
                                 role="option"
+                                aria-selected={option === value}
+                                onClick={() => { onPick(option); setOpen(null); }}
                             >
                                 {option}
-                            </Tap>
+                            </button>
                         </li>
                     ))}
                 </ul>
@@ -145,59 +128,29 @@ const Picker = ({
     );
 };
 
-/* Поле ввода. Пока оно не «своё» — это коробка, по которой можно промахнуться;
-   как только своё — настоящий input, и значение уходит в движок по Enter.
-   Enter, а не потеря фокуса: на blur ошибка вылетала бы от простого клика
-   мимо, и человек получал бы разбор ошибки, которую не совершал. */
-const TextField = ({
-    name, action, active, value, placeholder, tap, multiline = false, hint,
-}) => {
+/* Поле ввода. Значение держится и локально (чтобы буквы появлялись сразу), и в
+   мире (чтобы дожить до «Сохранить»): мир обновляется на каждый ввод, локальный
+   стейт нужен только против дёрганья курсора. */
+const TextField = ({ value, placeholder, onChange, multiline = false }) => {
     const [draft, setDraft] = useState(value || '');
-
-    if (!active) {
-        return (
-            <button type="button" className={`wt-crm__box${value ? ' has-value' : ''}`}
-                onClick={() => tap(`field_${name}`)}>
-                <span className={value ? '' : 'is-placeholder'}>{value || placeholder}</span>
-                {value ? <Ok /> : null}
-            </button>
-        );
-    }
-
-    const send = () => tap(action, { value: draft });
-    const onKey = (event) => {
-        // Enter отправляет и в многострочном комментарии: перенос строки в нём
-        // всё равно не нужен, а вторая кнопка «Готово» рядом с полем в CRM
-        // отсутствует и сбивала бы с толку.
-        if (event.key === 'Enter') { event.preventDefault(); send(); }
-    };
     const Tag = multiline ? 'textarea' : 'input';
     return (
-        <div className="wt-crm__input-wrap is-target">
+        <div className="wt-crm__input-wrap">
             <Tag
                 className={`wt-crm__input${multiline ? ' wt-crm__input--area' : ''}`}
                 value={draft}
                 placeholder={placeholder}
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={onKey}
                 rows={multiline ? 3 : undefined}
-                autoFocus
                 aria-label={placeholder}
+                onChange={(event) => { setDraft(event.target.value); onChange(event.target.value); }}
             />
-            <button type="button" className="wt-crm__enter" onClick={send}>
-                Enter
-            </button>
-            {hint ? <small className="wt-crm__hint">{hint}</small> : null}
+            {draft ? <Ok /> : null}
         </div>
     );
 };
 
 /* Карточка входящего звонка — окно софтфона поверх рабочего стола.
- *
- * В самой CRM её нет и быть не может: это отдельная программа, в которой
- * оператор видит, кто звонит. В тренажёре она обязательна — иначе «выбери
- * таксопарк {park}» превращается в угадайку, тогда как на смене эти данные
- * перед глазами. */
+   В самой CRM её нет: это отдельная программа, в которой видно, кто звонит. */
 export const CallCard = ({ call }) => (
     <div className="wt-call">
         <div className="wt-call__head">
@@ -210,23 +163,33 @@ export const CallCard = ({ call }) => (
             <div><dt>Город</dt><dd>{call.city}</dd></div>
             <div><dt>Статус</dt><dd>{call.status}</dd></div>
         </dl>
-        <p className="wt-call__said">
-            <span>Водитель:</span> «{call.said}»
-        </p>
+        <p className="wt-call__said"><span>Водитель:</span> «{call.said}»</p>
     </div>
 );
 
-/** Страница CRM «Создать обращение» целиком. */
-const CrmPage = ({ world, tap, target }) => {
-    const { form } = world;
-    const active = activeField(form);
+/** Страница CRM «Создать обращение». */
+const CrmPage = ({ world, tap, target, browse }) => {
+    const form = world.form;
     const [open, setOpen] = useState(null);
 
-    /* Сколько уровней категорий показывать. Всегда на один больше, чем выбрано:
-       следующий уровень появляется ровно тогда, когда предыдущий заполнен —
-       так же, как это делает CRM. */
-    const levels = Math.min(form.cats.length + 1, ANSWER.cats.length);
-    const catOptions = [CATS.level1, CATS.level2, CATS.level3, CATS.level4];
+    const set = (patch) => browse({ form: { ...form, ...patch } });
+
+    /* Выбор категории уровня level обрезает всё, что было выбрано глубже:
+       иначе под новой веткой остались бы пункты из старой. */
+    const pickCat = (level, value) => {
+        const cats = form.cats.slice(0, level);
+        cats[level] = value;
+        set({ cats });
+    };
+
+    // Сколько уровней категорий показывать: всегда на один больше выбранного,
+    // пока у выбранного есть дети — ровно так ведёт себя CRM.
+    const levels = [];
+    for (let i = 0; i <= form.cats.length; i += 1) {
+        const options = childrenAt(form.cats.slice(0, i));
+        if (!options.length) break;
+        levels.push(options);
+    }
 
     return (
         <div className="wt-crm">
@@ -235,18 +198,13 @@ const CrmPage = ({ world, tap, target }) => {
             <aside className="wt-crm__side">
                 <div className="wt-crm__brand">iTaxi</div>
                 <nav>
-                    {NAV.map(([id, label, current]) => (
-                        <Tap
-                            key={id}
-                            id={id}
-                            target={target}
-                            tap={tap}
-                            className={`wt-crm__nav${current ? ' is-current' : ''}`}
-                            aria-current={current ? 'page' : undefined}
-                        >
+                    {NAV.map(([id, label]) => (
+                        <button key={id} type="button"
+                            className={`wt-crm__nav${id === 'nav_requests' ? ' is-current' : ''}`}
+                            aria-current={id === 'nav_requests' ? 'page' : undefined}>
                             <NavIcon name={id} />
                             {label}
-                        </Tap>
+                        </button>
                     ))}
                 </nav>
             </aside>
@@ -261,100 +219,75 @@ const CrmPage = ({ world, tap, target }) => {
 
                     <div className="wt-crm__form">
                         <Field label="Звонок/Чат">
-                            <Picker
-                                name="source" group="src" options={SOURCES}
-                                value={form.source} active={active === 'source'}
-                                open={open} setOpen={setOpen} tap={tap} target={target}
-                                placeholder="Выберите источник"
-                            />
+                            <Picker name="source" options={SOURCES} value={form.source}
+                                open={open} setOpen={setOpen}
+                                onPick={(v) => set({ source: v })}
+                                placeholder="Выберите источник" />
                         </Field>
 
                         <Field label="Номер телефона">
-                            <TextField
-                                name="phone" action="phone_done" active={active === 'phone'}
-                                value={form.phone} placeholder="Номер телефона" tap={tap}
-                                hint="Одиннадцать цифр без плюса, затем Enter"
-                            />
+                            <TextField value={form.phone} placeholder="Номер телефона"
+                                onChange={(v) => set({ phone: v })} />
                         </Field>
 
                         <Field label="Номер В/У">
-                            <button type="button" className="wt-crm__box"
-                                onClick={() => tap('field_license')}>
-                                <span className="is-placeholder">Номер В/У</span>
-                            </button>
+                            <TextField value={form.license} placeholder="Номер В/У"
+                                onChange={(v) => set({ license: v })} />
                         </Field>
 
                         <Field label="ID водителя">
-                            <button type="button" className="wt-crm__box"
-                                onClick={() => tap('field_account')}>
-                                <span className="is-placeholder">ID водителя</span>
-                            </button>
+                            <TextField value={form.account} placeholder="ID водителя"
+                                onChange={(v) => set({ account: v })} />
                         </Field>
 
                         <Field label="Дата обращения">
-                            <button type="button" className="wt-crm__box has-value"
-                                onClick={() => tap('field_date')}>
-                                <span>{world.now}</span>
-                            </button>
+                            <div className="wt-crm__box has-value"><span>{world.now}</span></div>
                         </Field>
 
                         <Field label="Таксопарк">
-                            <Picker
-                                name="park" group="park" options={PARKS}
-                                value={form.park} active={active === 'park'}
-                                open={open} setOpen={setOpen} tap={tap} target={target}
-                                placeholder="Выберите таксопарк"
-                            />
+                            <Picker name="park" options={PARKS} value={form.park}
+                                open={open} setOpen={setOpen}
+                                onPick={(v) => set({ park: v, city: '' })}
+                                placeholder="Выберите таксопарк" />
                         </Field>
 
-                        {/* Города нет, пока не выбран парк — главный урок формы. */}
+                        {/* Города нет, пока не выбран парк — так устроена CRM. */}
                         {form.park ? (
                             <Field label="Город">
-                                <Picker
-                                    name="city" group="city"
-                                    options={CITIES[form.park] || []}
-                                    value={form.city} active={active === 'city'}
-                                    open={open} setOpen={setOpen} tap={tap} target={target}
-                                    placeholder="Выберите город"
-                                />
+                                <Picker name="city" options={PARK_CITIES[form.park] || []}
+                                    value={form.city} open={open} setOpen={setOpen}
+                                    onPick={(v) => set({ city: v })}
+                                    placeholder="Выберите город" />
                             </Field>
                         ) : null}
 
-                        {Array.from({ length: levels }, (_, level) => (
-                            <Field key={`cat${level + 1}`} label={`Категория ${level + 1}`}>
-                                <Picker
-                                    name={`cat${level + 1}`} group={`c${level + 1}`}
-                                    options={catOptions[level]}
-                                    value={form.cats[level] || ''}
-                                    active={active === `cat${level + 1}`}
-                                    open={open} setOpen={setOpen} tap={tap} target={target}
-                                    placeholder="Выберите категорию"
-                                />
+                        {levels.map((options, level) => (
+                            <Field key={`cat${level}`} label={`Категория ${level + 1}`}>
+                                <Picker name={`cat${level}`} options={options}
+                                    value={form.cats[level] || ''} open={open} setOpen={setOpen}
+                                    onPick={(v) => pickCat(level, v)}
+                                    placeholder="Выберите категорию" />
                             </Field>
                         ))}
 
-                        {/* Комментарий приходит вместе с категорией: в CRM набор
-                            доп. полей задаётся выбранной категорией, а не формой. */}
-                        {form.cats.length >= ANSWER.cats.length ? (
-                            <Field label="Комментарий">
-                                <TextField
-                                    name="comment" action="comment_done"
-                                    active={active === 'comment'}
-                                    value={form.comment} placeholder="Комментарий"
-                                    tap={tap} multiline
-                                    hint="Опиши суть обращения, затем Enter"
-                                />
-                            </Field>
-                        ) : null}
+                        <Field label="Комментарий">
+                            <TextField value={form.comment} placeholder="Комментарий" multiline
+                                onChange={(v) => set({ comment: v })} />
+                        </Field>
 
                         <div className="wt-crm__dup">
-                            <Tap id="dup_check" target={target} tap={tap}
-                                className="wt-crm__check" aria-label="Дублировать обращение">
-                                <i aria-hidden="true" />
+                            <button type="button" className="wt-crm__check"
+                                onClick={() => set({ duplicate: !form.duplicate })}
+                                aria-pressed={form.duplicate}>
+                                <i className={form.duplicate ? 'is-on' : ''} aria-hidden="true">
+                                    {form.duplicate ? '✓' : ''}
+                                </i>
                                 Дублировать обращение
-                            </Tap>
+                            </button>
                         </div>
 
+                        {/* Единственное действие движка на всю среду: оно
+                            заканчивает попытку и отдаёт итог в статистику. */}
                         <div className="wt-crm__actions">
                             <Tap id="save" target={target} tap={tap} className="wt-crm__save">
                                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
@@ -372,25 +305,24 @@ const CrmPage = ({ world, tap, target }) => {
     );
 };
 
-/** Экран шага: окно браузера с двумя вкладками — CRM и Диспетчерская.
- *
- * Урок живёт только в CRM. Диспетчерская — справочник без шагов и ловушек:
- * туда ходят смотреть, чью комиссию удержали, и переход туда не ход, а
- * свободное перемещение (browse), поэтому промахом он не считается. */
-export const CrmForm = ({ world, tap, target, browse }) => {
-    const onFleet = world.tab === 'fleet';
+/** Экран рабочего места: окно браузера с тремя вкладками. */
+export const DeskScreen = ({ world, tap, target, browse }) => {
+    const tab = world.tab || 'crm';
+    const url = tab === 'fleet' ? fleetUrl(world)
+        : tab === 'oktell' ? oktellUrl(world)
+            : CRM_URL;
     return (
         <BrowserChrome
             tap={tap}
             target={target}
             tabs={TABS}
-            active={world.tab || 'crm'}
+            active={tab}
             onSwitch={(id) => browse({ tab: id })}
-            url={onFleet ? fleetUrl(world) : CRM_URL}
+            url={url}
         >
-            {onFleet
-                ? <FleetApp world={world} go={browse} />
-                : <CrmPage world={world} tap={tap} target={target} />}
+            {tab === 'fleet' ? <FleetApp world={world} go={browse} /> : null}
+            {tab === 'oktell' ? <OktellApp world={world} go={browse} /> : null}
+            {tab === 'crm' ? <CrmPage world={world} tap={tap} target={target} browse={browse} /> : null}
         </BrowserChrome>
     );
 };

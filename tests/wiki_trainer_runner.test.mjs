@@ -22,10 +22,6 @@ const INPUT = {
     submit_code: (run) => ({
         code: currentStep(run).key === 'code_docs' ? run.world.codes.docs : run.world.codes.auth,
     }),
-    phone_done: (run) => ({ value: run.world.call.phone }),
-    comment_done: () => ({
-        value: 'Водитель спросил, за что таксопарк удержал комиссию — объяснил условия.',
-    }),
 };
 
 /** Прогон сценария правильными нажатиями. Возвращает финальную попытку. */

@@ -4166,3 +4166,548 @@
     .wt-fl__field { grid-template-columns: minmax(0, 1fr); gap: 3px; }
     .wt-fl .wt-mark { right: 10px; }
 }
+
+/* ═════════════════════════════════════════════════════════════════════════
+   ТРЕТЬЯ ВКЛАДКА: учебный Oktell (клиент Okapp)
+   ─────────────────────────────────────────────────────────────────────────
+   Палитра снята пипеткой с кадров 23.08.2026: тёмная панель #272d32, фон
+   #ebedf0, блоки показателей #dddfe0, заголовки #666b70, тост #fef1ba.
+   Зелёная кнопка «Войти в call-центр» на кадре замазана вместе с подписью,
+   её оттенок подобран по эпохе интерфейса — см. шапку screensOktell.jsx.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.wt-ok {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    min-height: 100%;
+    background: #ebedf0;
+    font-size: 13px;
+    color: #33383d;
+}
+
+.wt-ok .wt-mark { position: absolute; top: 8px; right: 10px; z-index: 6; }
+
+.wt-ok__side {
+    position: relative;
+    display: flex;
+    flex: 0 0 140px;
+    flex-direction: column;
+    padding-bottom: 46px;
+    background: #272d32;
+    color: #9ea4a7;
+}
+
+.wt-ok__logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 13px 14px;
+    font-size: 14px;
+    color: #cfd3d6;
+}
+
+.wt-ok__nav {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    color: #9ea4a7;
+    text-align: left;
+}
+
+.wt-ok__nav:hover { background: #2f3439; color: #e6e9eb; }
+.wt-ok__nav.is-on { background: #3a4046; color: #fff; }
+
+/* Виджет телефона внизу слева — как в клиенте. */
+.wt-ok__phonebar {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    height: 46px;
+    background: #1f2429;
+}
+
+.wt-ok__ava { width: 46px; height: 46px; background: #333a40; }
+
+.wt-ok__phonebtn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    padding: 0 12px;
+    background: #2f3439;
+    color: #cfd3d6;
+}
+
+.wt-ok__phonebtn b { font-size: 11px; opacity: .7; }
+
+.wt-ok__phonemenu {
+    position: absolute;
+    bottom: 46px;
+    left: 8px;
+    z-index: 5;
+    display: flex;
+    width: 250px;
+    flex-direction: column;
+    padding: 6px;
+    border-radius: 4px;
+    background: #fff;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .3);
+    color: #33383d;
+}
+
+.wt-ok__phonemenu-head { padding: 6px 8px; font-size: 10.5px; color: #8b9095; }
+.wt-ok__phonemenu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    border-radius: 3px;
+    font-size: 12.5px;
+    text-align: left;
+}
+.wt-ok__phonemenu button:hover { background: #eef1f4; }
+.wt-ok__phonemenu button.is-on { color: #2b6cb0; }
+.wt-ok__phonemenu label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: #666b70;
+}
+.wt-ok__phonemenu label i {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    border: 1px solid #c3c8cc;
+    border-radius: 2px;
+}
+.wt-ok__phonemenu label i.is-checked {
+    display: grid;
+    place-items: center;
+    border-color: #5cb85c;
+    background: #5cb85c;
+    font-size: 9px;
+    font-style: normal;
+    color: #fff;
+}
+
+.wt-ok__body { flex: 1 1 auto; min-width: 0; }
+
+.wt-ok__cols { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+.wt-ok__main { min-width: 0; padding: 14px 18px 20px; }
+
+.wt-ok__head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #d9dcdf;
+}
+
+.wt-ok__head h2 { margin: 0; font-size: 21px; font-weight: 400; color: #666b70; }
+
+.wt-ok__refresh {
+    margin-left: auto;
+    padding: 5px 11px;
+    border: 1px solid #c9ced2;
+    border-radius: 3px;
+    background: #fff;
+    font-size: 11.5px;
+    color: #4a4f54;
+}
+
+.wt-ok__block {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    gap: 2px 12px;
+    margin-top: 10px;
+    padding: 12px 16px;
+    background: #dddfe0;
+}
+
+.wt-ok__block span { font-size: 11px; color: #8b9095; text-align: center; }
+.wt-ok__block b { font-size: 22px; font-weight: 400; text-align: center; }
+.wt-ok__block .is-right { text-align: center; }
+.wt-ok__block.is-first { grid-template-columns: 1fr auto; }
+.wt-ok__block.is-first span { grid-column: 1; }
+.wt-ok__block.is-first b { grid-column: 1; }
+
+.wt-ok__enter,
+.wt-ok__leave {
+    grid-row: span 2;
+    padding: 8px 16px;
+    border-radius: 3px;
+    font-size: 12.5px;
+    color: #fff;
+}
+
+.wt-ok__enter { background: #5cb85c; }
+.wt-ok__enter:hover { background: #4ca64c; }
+.wt-ok__leave { border: 1px solid #c9ced2; background: #fff; color: #4a4f54; }
+
+/* Блок статусов. В снятом кадре он скрыт (у той учётки нет телефона), но у
+   живого стажёра он есть — поэтому в клоне рисуется. */
+.wt-ok__statuses {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 12px 14px;
+    border: 1px dashed #c9ced2;
+    border-radius: 4px;
+    background: #f5f6f8;
+}
+
+.wt-ok__statuses > span { font-size: 11.5px; color: #8b9095; }
+.wt-ok__statuses button {
+    padding: 5px 12px;
+    border: 1px solid #c9ced2;
+    border-radius: 3px;
+    background: #fff;
+    font-size: 12px;
+}
+.wt-ok__statuses button.is-on { border-color: #d9a441; background: #fdf0d4; font-weight: 600; }
+.wt-ok__statuses em { flex-basis: 100%; font-size: 11px; font-style: normal; color: #8b9095; }
+
+.wt-ok__tasks { min-width: 0; padding: 14px 18px; background: #fff; }
+.wt-ok__tasks h2 {
+    margin: 0 0 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #d9dcdf;
+    font-size: 21px;
+    font-weight: 400;
+    color: #666b70;
+}
+.wt-ok__tasks a { display: block; padding: 5px 0; font-size: 12.5px; color: #2b6cb0; text-decoration: none; }
+
+/* Справочник коллег */
+.wt-ok__dir { min-width: 0; padding: 14px 18px; background: #fff; }
+.wt-ok__search {
+    padding: 7px 10px;
+    border: 1px solid #c9ced2;
+    border-radius: 3px;
+    font-size: 12px;
+    color: #a2a7ab;
+}
+.wt-ok__dept { margin-top: 12px; }
+.wt-ok__dept-name {
+    padding: 4px 0;
+    border-bottom: 1px solid #eceef0;
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #8b9095;
+}
+.wt-ok__person { display: flex; align-items: center; gap: 9px; padding: 7px 0; font-size: 12.5px; }
+.wt-ok__person span { flex: 1 1 auto; min-width: 0; }
+.wt-ok__person b { font-weight: 500; color: #666b70; }
+
+.wt-ok__dot { width: 8px; height: 8px; border-radius: 50%; background: #c9ced2; }
+.wt-ok__dot.is-online { background: #5cb85c; }
+.wt-ok__dot.is-busy { background: #d9a441; }
+.wt-ok__dot.is-offline { background: #c9ced2; }
+.wt-ok__dot.is-ok { background: #5cb85c; }
+.wt-ok__dot.is-warn { background: #d9a441; }
+.wt-ok__dot.is-miss { background: #d9534f; }
+
+.wt-ok__note { margin: 14px 0 0; font-size: 11px; color: #8b9095; }
+.wt-ok__empty { padding: 60px 20px; text-align: center; color: #8b9095; }
+
+/* Журнал */
+.wt-ok__journal { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: 100%; }
+.wt-ok__jside { padding: 14px; background: #fff; border-right: 1px solid #e3e6e8; }
+.wt-ok__jside h2 { margin: 0 0 10px; font-size: 21px; font-weight: 400; color: #666b70; }
+.wt-ok__jside button {
+    display: block;
+    width: 100%;
+    padding: 7px 9px;
+    border-radius: 3px;
+    font-size: 12.5px;
+    color: #4a4f54;
+    text-align: left;
+}
+.wt-ok__jside button.is-on { background: #eef1f4; font-weight: 500; }
+
+.wt-ok__cal { margin-top: 14px; font-size: 11px; }
+.wt-ok__cal-head { padding: 6px 0; color: #666b70; text-align: center; }
+.wt-ok__cal-week { display: grid; grid-template-columns: repeat(7, 1fr); }
+.wt-ok__cal-week span { padding: 4px 0; color: #2b6cb0; text-align: center; }
+.wt-ok__cal-week span.is-dim { color: #c3c8cc; }
+.wt-ok__cal-week span.is-on { border-radius: 3px; background: #2b6cb0; color: #fff; }
+
+.wt-ok__jmain { min-width: 0; padding: 14px 18px; }
+.wt-ok__jmain h2 { margin: 0 0 10px; font-size: 21px; font-weight: 400; color: #666b70; }
+.wt-ok__jfilters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.wt-ok__jfilters span {
+    padding: 6px 10px;
+    border: 1px solid #c9ced2;
+    border-radius: 3px;
+    background: #fff;
+    font-size: 11.5px;
+    color: #a2a7ab;
+}
+.wt-ok__jday { padding: 6px 8px; background: #fdf6dd; font-size: 11.5px; color: #7a6a3a; }
+.wt-ok__jrow {
+    display: grid;
+    grid-template-columns: 46px 18px minmax(0, 1fr) 12px 62px;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 8px;
+    border-bottom: 1px solid #eceef0;
+    font-size: 12px;
+}
+.wt-ok__jrow span.is-miss { color: #d9534f; }
+.wt-ok__arrow { font-style: normal; color: #8b9095; }
+.wt-ok__jrow b { font-weight: 400; }
+.wt-ok__jrow u { color: #8b9095; text-align: right; text-decoration: none; }
+
+/* Тост «Веб-телефон отключен» — висит на всех экранах клиента. */
+.wt-ok__toast {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+    padding: 8px 12px;
+    border: 1px solid #e8d9a0;
+    background: #fef1ba;
+    font-size: 11.5px;
+    color: #6b5c2a;
+}
+.wt-ok__toast b { display: block; font-size: 12px; }
+
+/* Экран входа */
+.wt-ok--login { align-items: center; justify-content: center; background: #ebedf0; }
+.wt-ok__login {
+    display: flex;
+    width: 280px;
+    flex-direction: column;
+    gap: 10px;
+    padding: 22px;
+    border-radius: 4px;
+    background: #fff;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .12);
+}
+.wt-ok__login-logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 18px;
+    color: #666b70;
+}
+.wt-ok__login label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8b9095; }
+.wt-ok__login input {
+    padding: 7px 10px;
+    border: 1px solid #c9ced2;
+    border-radius: 3px;
+    font: inherit;
+    font-size: 12.5px;
+    color: #33383d;
+}
+.wt-ok__login-save { flex-direction: row !important; align-items: center; gap: 7px !important; }
+.wt-ok__login-save i {
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    background: #5cb85c;
+    font-size: 9px;
+    font-style: normal;
+    color: #fff;
+}
+.wt-ok__login-btn {
+    margin-top: 4px;
+    padding: 8px;
+    border-radius: 3px;
+    background: #5cb85c;
+    font-size: 13px;
+    color: #fff;
+}
+
+/* Карта систем на месте прогресса — только в свободной среде. */
+.wt-side__map { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.wt-side__map li {
+    padding: 9px 11px;
+    border-radius: 12px;
+    background: var(--wt-line-soft);
+}
+.wt-side__map b { display: block; font-size: 12.5px; color: var(--wt-ink); }
+.wt-side__map span { display: block; margin-top: 2px; font-size: 11.5px; line-height: 1.4; color: var(--wt-ink-soft); }
+
+@media (max-width: 1023px) {
+    .wt-ok__cols { grid-template-columns: minmax(0, 1fr); }
+    .wt-ok__journal { grid-template-columns: minmax(0, 1fr); }
+    .wt-ok__side { flex-basis: 54px; }
+    .wt-ok__nav { justify-content: center; padding: 10px 0; font-size: 0; gap: 0; }
+    .wt-ok__logo { justify-content: center; padding: 12px 0; font-size: 0; gap: 0; }
+}
+
+/* ── Диспетчерская: панели, подменю, справочные списки ───────────────────── */
+
+.wt-fl__icon-btn {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: #6d6b68;
+}
+.wt-fl__icon-btn:hover { background: #eceae6; color: #21201f; }
+
+/* Подменю кабинета выезжает поверх страницы; адрес при этом не меняется —
+   в кабинете это кнопки, а не ссылки. */
+.wt-fl__submenu {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 56px;
+    z-index: 7;
+    display: flex;
+    width: 210px;
+    flex-direction: column;
+    padding: 12px 8px;
+    background: #fff;
+    box-shadow: 6px 0 24px rgba(15, 23, 42, .12);
+}
+.wt-fl__submenu-head {
+    padding: 6px 10px 10px;
+    font-size: 11px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: #8f8c87;
+}
+.wt-fl__submenu button {
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 12.5px;
+    text-align: left;
+}
+.wt-fl__submenu button:hover { background: #f4f2ef; }
+
+/* Панель поверх кабинета: фильтры, колонки, сортировка, поиск, лента. */
+.wt-fl__overlay {
+    position: absolute;
+    top: 50px;
+    right: 16px;
+    z-index: 8;
+    display: flex;
+    width: 340px;
+    max-height: calc(100% - 80px);
+    flex-direction: column;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 18px 44px rgba(15, 23, 42, .2);
+}
+.wt-fl__overlay.is-wide { width: 560px; }
+.wt-fl__overlay header {
+    display: flex;
+    align-items: center;
+    padding: 11px 14px;
+    border-bottom: 1px solid #eeece8;
+    font-size: 13.5px;
+    font-weight: 600;
+}
+.wt-fl__overlay header button { margin-left: auto; color: #8f8c87; }
+.wt-fl__overlay-body { min-height: 0; overflow: auto; padding: 12px 14px 14px; }
+.wt-fl__overlay-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; }
+
+.wt-fl__filters-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+.wt-fl__filters-grid b { display: block; margin-bottom: 4px; font-size: 12px; }
+.wt-fl__filters-grid ul { margin: 0; padding-left: 14px; font-size: 11px; line-height: 1.55; color: #6d6b68; }
+
+.wt-fl__checklist { margin: 0; padding: 0; list-style: none; }
+.wt-fl__checklist li { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 12.5px; }
+.wt-fl__checklist i {
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    border: 1px solid #dfdcd6;
+    border-radius: 4px;
+}
+.wt-fl__checklist i.is-on { border-color: #fce000; background: #fce000; }
+
+.wt-fl__search-big {
+    padding: 9px 12px;
+    border: 1px solid #dfdcd6;
+    border-radius: 8px;
+    font-size: 12.5px;
+    color: #a9a6a1;
+}
+.wt-fl__found {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin-top: 10px;
+    padding: 8px;
+    border-radius: 10px;
+    text-align: left;
+}
+.wt-fl__found:hover { background: #f4f2ef; }
+.wt-fl__found span { display: flex; flex-direction: column; font-size: 12.5px; line-height: 1.3; }
+.wt-fl__found small { font-size: 11px; color: #8f8c87; }
+
+.wt-fl__notice { padding: 9px 0; border-bottom: 1px solid #f4f2ef; }
+.wt-fl__notice b { display: block; font-size: 12.5px; font-weight: 500; }
+.wt-fl__notice small { font-size: 11px; color: #8f8c87; }
+
+/* Блоки карточки «Детали»: в кабинете они свёрнуты, здесь раскрыты. */
+.wt-fl__block { margin-bottom: 16px; }
+.wt-fl__block .wt-fl__cols { gap: 2px 40px; }
+
+.wt-fl__totals {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #f7f6f4;
+}
+.wt-fl__totals span { display: block; font-size: 11px; color: #8f8c87; }
+.wt-fl__totals b { font-size: 15px; font-weight: 600; }
+
+.wt-fl__changes { max-width: 520px; }
+.wt-fl__change { padding: 9px 0; border-bottom: 1px solid #f4f2ef; }
+.wt-fl__change b { display: block; font-size: 12.5px; font-weight: 500; }
+.wt-fl__change span { font-size: 11px; color: #8f8c87; }
+
+.wt-fl__status { padding: 3px 9px; border-radius: 20px; font-size: 11px; }
+.wt-fl__status.is-ok { background: #e3fff0; color: #1d7a4f; }
+.wt-fl__status.is-off { background: #f0eeea; color: #6d6b68; }
+.wt-fl__status.is-wait { background: #fff3df; color: #8a5d16; }
+
+.wt-fl__grades { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.wt-fl__grades .wt-fl__grade { padding: 14px 16px; }
+.wt-fl__grades .wt-fl__grade ul { font-size: 11.5px; }
+
+.wt-fl__form { max-width: 520px; }
+.wt-fl__tools button { font-size: 11.5px; color: #6d6b68; }
+.wt-fl__tools button:hover { color: #21201f; }
+
+@media (max-width: 1023px) {
+    .wt-fl__overlay { right: 8px; left: 8px; width: auto; }
+    .wt-fl__overlay.is-wide { width: auto; }
+    .wt-fl__filters-grid { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__totals { grid-template-columns: 1fr 1fr; }
+    .wt-fl__grades { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__submenu { left: 54px; width: 180px; }
+}
+
+/* В свободной среде «правильной кнопки» нет: пульсирующая обводка цели — это
+   подсказка, а подсказок здесь не должно быть вовсе. */
+.wt-root--sandbox .is-target {
+    outline: none;
+    animation: none;
+    box-shadow: none;
+}

@@ -2,272 +2,160 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    browse, currentStep, expectedTap, isFinished, speech, startRun, stepGoal, tap,
+    browse, currentStep, expectedTap, isFinished, startRun, tap,
 } from '../src/components/wiki/trainers/runner.js';
-import crm, {
-    ANSWER, CALL, CATS, CITIES, PARKS, SOURCES, activeField, optionId,
+import desk, {
+    CALL, DRIVER, PARKS, PARK_CITIES, SOURCES, childrenAt,
 } from '../src/components/wiki/trainers/scenarioCrmTicket.js';
+import { CATEGORY_TREE } from '../src/components/wiki/trainers/crmCatalog.js';
+import { CONTRACTORS, DRIVER as FLEET_DRIVER, FILTERS, TRANSACTIONS }
+    from '../src/components/wiki/trainers/fleetData.js';
 
-/* Тренажёр создания обращения проверяем отдельно от остальных: он единственный
- * с вводом текста и единственный, где «правильный ответ» — это ветка категорий,
- * а не кнопка. Всё, что ниже, — правила, из-за которых тренажёр вообще сделан;
- * сломать их правкой реплики легко, а заметить глазами на одиннадцати шагах —
- * нет.
+/* Рабочее место оператора — свободная среда, а не урок: три системы в одном
+ * окне, ни шагов, ни подсказок, ни ловушек. Проверяем ровно то, что от такой
+ * среды требуется: по ней нельзя «ошибиться», данные в ней настоящие (кроме
+ * человека, который выдуман), и работа человека доезжает до статистики.
  */
 
-const COMMENT = 'Водитель спросил, за что таксопарк удержал комиссию — объяснил условия.';
-
-const INPUT = {
-    phone_done: { value: CALL.phone },
-    comment_done: { value: COMMENT },
+/** Довести попытку до рабочего стола (единственный шаг перед «Сохранить»). */
+const atDesk = () => {
+    const run = startRun(desk);
+    const next = tap(run, expectedTap(run)).run;
+    assert.equal(currentStep(next).key, 'desk');
+    return next;
 };
 
-/** Довести попытку до шага с указанным ключом, идя только верным путём. */
-const upTo = (key) => {
-    let run = startRun(crm);
-    let guard = 0;
-    while (currentStep(run).key !== key && guard < 40) {
-        const id = expectedTap(run);
-        const result = tap(run, id, INPUT[id] || {});
-        assert.equal(result.ok, true,
-            `не дошли до «${key}»: шаг «${currentStep(run).key}» отверг «${id}» — `
-            + speech(result.run).text);
-        run = result.run;
-        guard += 1;
-    }
-    assert.equal(currentStep(run).key, key, `шаг «${key}» не найден`);
-    return run;
-};
-
-const play = () => {
-    let run = startRun(crm);
-    let guard = 0;
-    while (!isFinished(run) && guard < 40) {
-        const id = expectedTap(run);
-        run = tap(run, id, INPUT[id] || {}).run;
-        guard += 1;
-    }
-    return run;
-};
-
-test('тренажёр живёт на рабочем месте оператора, а не в телефоне', () => {
-    assert.equal(crm.key, 'crm-ticket-create');
-    assert.equal(crm.stage, 'desktop');
-});
-
-test('верный путь заполняет форму целиком и сохраняет обращение', () => {
-    const run = play();
-    assert.equal(run.errors, 0);
-    assert.equal(run.world.saved, true, 'обращение не сохранено');
-    assert.deepEqual(run.world.form.cats, ANSWER.cats);
-    assert.equal(run.world.form.source, 'Звонок');
-    assert.equal(run.world.form.phone, CALL.phone);
-    assert.equal(run.world.form.park, CALL.park);
-    assert.equal(run.world.form.city, CALL.city);
-    assert.equal(run.world.form.comment, COMMENT);
-});
-
-/* Главный урок формы: города не существует, пока не выбран таксопарк. В движке
-   это выражено порядком шагов, а на экране — тем, что поля просто нет. */
-test('город идёт строго после таксопарка', () => {
-    const beforePark = upTo('park');
-    assert.equal(beforePark.world.form.park, '', 'парк выбран раньше времени');
-    assert.equal(activeField(beforePark.world.form), 'park',
-        'до выбора парка подсвечиваться должен парк, а не город');
-
-    const afterPark = upTo('city');
-    assert.equal(afterPark.world.form.park, CALL.park);
-    assert.equal(activeField(afterPark.world.form), 'city');
-    assert.ok(CITIES[CALL.park].includes(CALL.city), 'город легенды не из списка своего парка');
-});
-
-/* Самая частая ошибка на линии: две «комиссии» стоят в списке рядом. Ловушка
-   обязана назвать обе стороны, иначе объяснение не помогает выбрать. */
-test('комиссия Яндекса вместо комиссии таксопарка объясняется, а не просто отвергается', () => {
-    const run = upTo('cat4');
-    const wrong = optionId('c4', CATS.level4.indexOf('Консультация по Комиссии от Яндекс'));
-    const result = tap(run, wrong);
-
-    assert.equal(result.ok, false, 'соседний пункт зачли как верный');
-    assert.equal(result.run.errors, 1);
-    const said = speech(result.run).text;
-    assert.match(said, /Яндекс/, 'в объяснении не сказано, чья это комиссия');
-    assert.match(said, /Таксопарка/, 'в объяснении не назван верный пункт');
-    // Шаг остался на месте: ошибка объясняет, но не пропускает вперёд.
-    assert.equal(currentStep(result.run).key, 'cat4');
-});
-
-test('верная категория четвёртого уровня закрывает шаг', () => {
-    const run = upTo('cat4');
-    const right = optionId('c4', CATS.level4.indexOf(ANSWER.cats[3]));
-    const result = tap(run, right);
-    assert.equal(result.ok, true, speech(result.run).text);
-    assert.equal(result.run.world.form.cats[3], 'Консультация по Комиссии от Таксопарка');
-});
-
-test('номер телефона: чужой не проходит, свой — в любом формате', () => {
-    const run = upTo('phone');
-
-    const empty = tap(run, 'phone_done', { value: '' });
-    assert.equal(empty.ok, false);
-    assert.match(speech(empty.run).text, /пуст/i);
-
-    const alien = tap(run, 'phone_done', { value: '77771234567' });
-    assert.equal(alien.ok, false, 'чужой номер зачли');
-    assert.match(speech(alien.run).text, new RegExp(CALL.phone),
-        'в объяснении не показан нужный номер');
-
-    // Оператор набирает привычно, со скобками и плюсом. Придираться к формату
-    // там, где CRM его сама вычистит, значит учить не тому.
-    const pretty = tap(run, 'phone_done', { value: '+7 (701) 555 01 42' });
-    assert.equal(pretty.ok, true, speech(pretty.run).text);
-    assert.equal(pretty.run.world.form.phone, CALL.phone, 'номер сохранён не в чистом виде');
-});
-
-test('комментарий из двух слов не принимается', () => {
-    const run = upTo('comment');
-
-    assert.equal(tap(run, 'comment_done', { value: '' }).ok, false);
-    const short = tap(run, 'comment_done', { value: 'звонил водитель' });
-    assert.equal(short.ok, false, 'отписка принята как комментарий');
-    assert.match(speech(short.run).text, /коротко/i);
-
-    assert.equal(tap(run, 'comment_done', { value: COMMENT }).ok, true);
-});
-
-/* «Сохранить» — цель последнего шага и одновременно общая ловушка. Нажатый
-   раньше времени, он обязан объяснить, а не молча сохранить полупустую форму. */
-test('сохранить раньше времени нельзя', () => {
-    for (const key of ['source', 'park', 'cat1', 'comment']) {
-        const run = upTo(key);
-        const result = tap(run, 'save');
-        assert.equal(result.ok, false, `на шаге «${key}» сохранение прошло`);
-        assert.equal(result.run.world.saved, false, 'форма сохранилась досрочно');
-        assert.match(speech(result.run).text, /Рано сохранять/);
+test('это свободная среда, а не урок', () => {
+    assert.equal(desk.key, 'crm-ticket-create', 'ключ уехал в статьи, его нельзя менять');
+    assert.equal(desk.stage, 'desktop');
+    assert.equal(desk.mode, 'sandbox');
+    assert.deepEqual(desk.traps, {}, 'в свободной среде ловушек быть не должно');
+    for (const step of desk.steps) {
+        assert.deepEqual(step.traps || {}, {}, `у шага «${step.key}» остались ловушки`);
     }
 });
 
-test('кнопки окна браузера и разделы CRM объясняются, а не молчат', () => {
-    const run = upTo('cat1');
-    for (const id of ['win_close', 'tab_close', 'browser_reload', 'browser_back',
-        'nav_tickets', 'nav_drivers', 'dup_check', 'field_date']) {
-        const result = tap(run, id);
-        assert.equal(result.ok, false, `«${id}» зачли как верное нажатие`);
-        const said = speech(result.run).text;
-        assert.ok(said.length > 25,
-            `у «${id}» нет внятного объяснения, только общая отговорка: ${said}`);
-        assert.ok(!/посмотри на подсвеченную кнопку/.test(said),
-            `«${id}» отвечает общей заглушкой вместо разбора`);
-    }
+test('в окне три вкладки, и открывается оно на CRM', () => {
+    const world = startRun(desk).world;
+    assert.equal(world.tab, 'crm');
+    assert.equal(world.fleetView, 'contractors');
+    assert.equal(world.oktLogged, false, 'в Oktell нужно войти самому');
+    assert.equal(world.oktIn, false, 'вход в клиент не ставит в очередь');
 });
 
-test('подсказки и цели шагов подставляют данные звонка, а не шаблон', () => {
-    let run = startRun(crm);
-    let guard = 0;
-    while (!isFinished(run) && guard < 40) {
-        assert.ok(!/\{\w+\}/.test(stepGoal(run)),
-            `в цели шага «${currentStep(run).key}» остался шаблон`);
-        assert.ok(!/\{\w+\}/.test(speech(run).text),
-            `в реплике шага «${currentStep(run).key}» остался шаблон`);
-        const id = expectedTap(run);
-        run = tap(run, id, INPUT[id] || {}).run;
-        guard += 1;
-    }
+/* Ходить по средe — не ход движка. Иначе тренажёр наказывал бы за то, что
+   человек открыл справочник, то есть отучал бы туда смотреть. */
+test('переходы по системам не считаются промахами и не двигают шаг', () => {
+    let run = atDesk();
+    const before = run.errors;
+    run = browse(run, { tab: 'fleet' });
+    run = browse(run, { fleetView: 'card', fleetTab: 'transactions' });
+    run = browse(run, { tab: 'oktell' });
+    run = browse(run, { oktLogged: true, oktIn: true, oktStatus: 'Перезвон' });
+    run = browse(run, { tab: 'crm' });
+
+    assert.equal(run.errors, before, 'прогулка засчитана промахом');
+    assert.equal(currentStep(run).key, 'desk', 'шаг сдвинулся от перехода');
+    assert.equal(run.world.fleetTab, 'transactions', 'кабинет забыл, где мы были');
+    assert.equal(run.world.oktStatus, 'Перезвон', 'Oktell забыл статус');
 });
 
-/* Списки сняты с рабочей CRM. Если кто-то «поправит» их на глаз, тренажёр
-   начнёт учить искать то, чего в системе нет. */
-test('списки формы совпадают с рабочей CRM', () => {
-    assert.equal(PARKS.length, 19, 'таксопарков стало не 19');
-    assert.ok(PARKS.includes(CALL.park));
-    assert.deepEqual(SOURCES, [
-        'Стажер', 'Звонок', 'Whatsapp', 'Электронная почта', 'Телеграм', 'Инстаграм',
-    ]);
-    assert.equal(CATS.level1.length, 6, 'корневых категорий стало не 6');
-    assert.equal(CATS.level4.length, 31, 'в «Консультации» стало не 31 пункт');
-    for (const [level, list] of Object.entries(CATS)) {
-        assert.equal(new Set(list).size, list.length, `в ${level} есть повторы`);
-    }
-    // Ответы обязаны существовать в своих списках: опечатка здесь сделала бы
-    // шаг непроходимым, а тренажёр — тупиком.
-    assert.ok(SOURCES.includes(ANSWER.source));
-    assert.ok(CATS.level1.includes(ANSWER.cats[0]));
-    assert.ok(CATS.level2.includes(ANSWER.cats[1]));
-    assert.ok(CATS.level3.includes(ANSWER.cats[2]));
-    assert.ok(CATS.level4.includes(ANSWER.cats[3]));
+test('форма свободная: любая ветка проходится до конца', () => {
+    let run = atDesk();
+    const form = (patch) => { run = browse(run, { form: { ...run.world.form, ...patch } }); };
+
+    form({ source: 'Whatsapp', phone: '77010000000', park: 'Регионы' });
+    assert.ok(PARK_CITIES['Регионы'].includes('Экибастуз'),
+        'города берутся из справочника своего парка');
+    form({ city: 'Экибастуз' });
+
+    // Ветка, не имеющая ничего общего с «правильной» — среда её принимает.
+    form({ cats: ['Пассажир', 'Двойная оплата'], comment: 'ок' });
+    assert.equal(run.errors, 0, 'свободный выбор дал промах');
 });
 
-test('порядок полей формы ведёт от источника к сохранению', () => {
-    const form = {
-        source: '', phone: '', park: '', city: '', cats: [], comment: '',
-    };
-    assert.equal(activeField(form), 'source');
-    assert.equal(activeField({ ...form, source: 'Звонок' }), 'phone');
-    assert.equal(activeField({ ...form, source: 'Звонок', phone: CALL.phone }), 'park');
+test('«Сохранить» заканчивает попытку и отдаёт итог', () => {
+    let run = atDesk();
+    assert.equal(desk.result(run.world), null, 'итог отдан до сохранения');
 
-    const filled = {
-        source: 'Звонок', phone: CALL.phone, park: CALL.park, city: CALL.city,
-        cats: ANSWER.cats, comment: COMMENT,
-    };
-    assert.equal(activeField(filled), 'save');
-    assert.equal(activeField({ ...filled, comment: '' }), 'comment');
-    assert.equal(activeField({ ...filled, cats: ANSWER.cats.slice(0, 2) }), 'cat3');
-});
+    run = browse(run, {
+        form: {
+            ...run.world.form,
+            source: 'Звонок', phone: CALL.phone, park: CALL.park, city: CALL.city,
+            cats: ['Водитель', 'Обычный водитель', 'Консультация'],
+            comment: 'Объяснил удержание комиссии парка.',
+        },
+    });
 
-/* ── Итог попытки и вторая вкладка ───────────────────────────────────────── */
+    const done = tap(run, 'save');
+    assert.equal(done.ok, true);
+    assert.ok(isFinished(done.run) || currentStep(done.run).key === 'done');
+    assert.equal(done.run.world.saved, true);
 
-test('итог попытки — сама заведённая карточка, и только после сохранения', () => {
-    const half = upTo('cat4');
-    assert.equal(crm.result(half.world), null,
-        'итог отдан до «Сохранить» — записывать ещё нечего');
-
-    const done = play();
-    const result = crm.result(done.world);
-    assert.ok(result, 'после сохранения итога нет');
-    assert.equal(result.correct, true);
-
+    const result = desk.result(done.run.world);
     const fields = Object.fromEntries(result.fields);
     assert.equal(fields['Звонок/Чат'], 'Звонок');
     assert.equal(fields['Таксопарк'], CALL.park);
-    assert.equal(fields['Город'], CALL.city);
-    assert.equal(fields['Категория'], ANSWER.cats.join(' / '));
-    assert.ok(fields['Комментарий'].length > 10);
+    assert.equal(fields['Категория'], 'Водитель / Обычный водитель / Консультация');
+    /* Правильного ответа у свободной среды нет, поэтому и вердикта быть не
+       должно: судит наставник, а не тренажёр. */
+    assert.equal(result.correct, undefined, 'в свободной среде появился вердикт');
 });
 
-/* Ветку можно провалить и без единого промаха — дойдя до неё по подсказке.
-   Ради этого случая итог и записывается: «промахов 0» о качестве не говорит. */
-test('неверная ветка видна в итоге, даже когда промахов нет', () => {
-    const run = upTo('cat4');
-    const wrongWorld = {
-        ...run.world,
-        saved: true,
-        form: { ...run.world.form, cats: [...ANSWER.cats.slice(0, 3), 'Консультация по Тарифам'], comment: COMMENT },
-    };
-    const result = crm.result(wrongWorld);
-    assert.equal(result.correct, false, 'чужая ветка зачтена как верная');
+test('в статистику попадают только завершённые попытки', () => {
+    assert.equal(desk.recordOnFinishOnly, true);
 });
 
-test('брошенные попытки этого тренажёра в статистику не пишутся', () => {
-    assert.equal(crm.recordOnFinishOnly, true);
+/* Справочники — настоящие, снятые с рабочей CRM. Если кто-то «сократит» их,
+   тренажёр начнёт учить искать в списке, которого на смене нет. */
+test('справочники CRM полные', () => {
+    assert.equal(PARKS.length, 19);
+    assert.equal(CATEGORY_TREE.length, 6, 'корневых категорий стало не 6');
+    assert.deepEqual(SOURCES.slice(0, 2), ['Стажер', 'Звонок']);
+
+    const count = (nodes) => nodes.reduce(
+        (sum, node) => sum + 1 + (node[1] ? count(node[1]) : 0), 0);
+    assert.equal(count(CATEGORY_TREE), 387, 'дерево категорий поредело');
+
+    assert.equal(childrenAt(['Водитель']).length, 2);
+    assert.equal(childrenAt(['Водитель', 'Обычный водитель', 'Консультация']).length, 31);
+    assert.deepEqual(childrenAt(['Тестовый звонок/Чат']), [], 'у листа не должно быть детей');
+    assert.deepEqual(childrenAt(['нет такой']), [], 'неизвестный путь не должен падать');
+
+    // Пары «парк — город» тоже настоящие: у каждого парка свой набор.
+    const pairs = Object.values(PARK_CITIES).reduce((sum, list) => sum + list.length, 0);
+    assert.equal(pairs, 95);
 });
 
-test('в окне две вкладки, и урок начинается на CRM', () => {
-    const run = startRun(crm);
-    assert.equal(run.world.tab, 'crm');
-    assert.equal(run.world.fleetView, 'contractors',
-        'Диспетчерская должна открываться на списке исполнителей');
+/* Водитель придуман и должен быть ОДИН на все три системы: иначе человек
+   пересобирает в голове «кто это» при каждом переходе между вкладками. */
+test('водитель выдуман и одинаков в CRM и Диспетчерской', () => {
+    assert.equal(FLEET_DRIVER.full, DRIVER.full);
+    assert.equal(FLEET_DRIVER.phone, DRIVER.phone);
+    assert.equal(CALL.phone, DRIVER.phone);
+    assert.equal(CONTRACTORS[0].name, DRIVER.full, 'в списке кабинета не тот человек');
+
+    // Признаки выдуманности: учебный номер и «никакой» номер ВУ.
+    assert.match(DRIVER.phone, /^7701555/, 'телефон перестал быть учебным');
+    assert.match(DRIVER.license, /0{4,}/, 'номер ВУ выглядит настоящим');
 });
 
-/* Диспетчерская — справочник, а не урок: сходить туда и вернуться не ошибка
-   и не ход. Иначе тренажёр отучал бы смотреть в кабинет перед выбором ветки. */
-test('переход в Диспетчерскую и обратно не считается промахом', () => {
-    const run = upTo('cat4');
-    let moved = browse(run, { tab: 'fleet' });
-    moved = browse(moved, { fleetView: 'card', fleetTab: 'transactions' });
-    moved = browse(moved, { tab: 'crm' });
+/* Ведомость — то место, ради которого кабинет вообще открыт: в ней рядом видно,
+   что удержал сервис и что удержал парк. */
+test('в ведомости различимы комиссии сервиса и таксопарка', () => {
+    const park = TRANSACTIONS.filter((t) => t.park);
+    const service = TRANSACTIONS.filter((t) => !t.park && t.category.includes('Комиссия сервиса'));
+    assert.ok(park.length >= 2, 'удержаний парка почти нет');
+    assert.ok(service.length >= 2, 'комиссий сервиса почти нет');
+    assert.ok(park.every((t) => t.category.includes('партнёра')),
+        'строка парка не названа комиссией партнёра');
+});
 
-    assert.equal(moved.errors, run.errors, 'поход в кабинет засчитан как промах');
-    assert.equal(currentStep(moved).key, 'cat4', 'шаг урока сдвинулся от перехода');
-    assert.equal(moved.world.form.cats.length, 3, 'состояние формы потерялось');
-    assert.equal(moved.world.fleetTab, 'transactions', 'вкладка кабинета не запомнилась');
+test('в кабинете есть все оси фильтрации', () => {
+    assert.ok(FILTERS.length >= 15, 'осей фильтрации стало меньше пятнадцати');
+    const names = FILTERS.map(([axis]) => axis);
+    for (const axis of ['Статус', 'Статус на линии', 'Профессия', 'Тип сотрудничества',
+        'Категории', 'Провайдер ЭДО']) {
+        assert.ok(names.includes(axis), `нет оси «${axis}»`);
+    }
 });

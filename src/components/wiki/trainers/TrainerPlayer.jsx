@@ -12,7 +12,7 @@ import {
     stageCount, startRun, stepGoal, takeHint, tap, toggle,
 } from './runner';
 import { IntroScreen, ResultScreen } from './screenKit';
-import { CallCard, CrmForm } from './screensCrm';
+import { CallCard, DeskScreen } from './screensCrm';
 import { EgCode, EgSign, EgSuccess } from './screensEgov';
 import {
     SpAd, SpProfile, SpSignAll, TpCheck, TpDocuments, TpHome,
@@ -53,7 +53,7 @@ const SCREENS = {
        состав полей, и приходят они из мира (см. scenarioCrmTicket). */
     'crm-ticket-create': {
         intro: IntroScreen,
-        crm_form: CrmForm,
+        desk: DeskScreen,
         result: ResultScreen,
     },
     'yandex-pro-edo-provider': {
@@ -170,6 +170,10 @@ export function TrainerPlayer({
        края экрана читается как жест телефона, а окно на компьютере так себя не
        ведёт. */
     const deskMode = scenario.stage === 'desktop';
+    /* Свободная среда: шагов нет, значит нет ни прогресса, ни целей, ни
+       подсказок. Показывать «шаг 1 из 1» и кнопку «Подсказка», за которой
+       ничего не стоит, — обещать урок, которого не будет. */
+    const sandbox = scenario.mode === 'sandbox';
     const [phase, setPhase] = useState(() => {
         if (!animateEntrance || reduceMotion) return 'done';
         return worldMode || deskMode ? 'cards' : 'rise';
@@ -285,15 +289,30 @@ export function TrainerPlayer({
 
     /* Фокус переезжает на кнопку, которую ждут. Это и подсказка для мыши
        (кнопка подсвечена), и единственный способ пройти тренажёр с клавиатуры:
-       иначе после каждого шага пришлось бы «дотабиваться» до нужной кнопки. */
+       иначе после каждого шага пришлось бы «дотабиваться» до нужной кнопки.
+     *
+     * Две ситуации, когда фокус трогать НЕЛЬЗЯ:
+     *
+     *   свободная среда — «ожидаемой кнопки» там нет вовсе: цель одна на весь
+     *   стенд («Сохранить»), и перевод фокуса на неё случался бы постоянно;
+     *
+     *   человек печатает — мир меняется на КАЖДЫЙ набранный символ, и эффект
+     *   выдёргивал курсор из поля после первой же буквы. Дальше пробел уходил
+     *   уже в кнопку и «нажимал» её: обращение сохранялось само, с телефоном
+     *   из одной цифры. */
     useEffect(() => {
+        if (sandbox) return undefined;
+        const focused = typeof document !== 'undefined' ? document.activeElement : null;
+        if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA')) {
+            return undefined;
+        }
         const node = stageRef.current?.querySelector('.is-target:not([disabled])');
         if (node) {
             const frame = requestAnimationFrame(() => node.focus({ preventScroll: true }));
             return () => cancelAnimationFrame(frame);
         }
         return undefined;
-    }, [run.index, run.world]);
+    }, [sandbox, run.index, run.world]);
 
     /* Докуда дошли — в учёт, на каждом шаге. Это присваивание в ref, а не
        запрос: отправка одна, при закрытии урока. Эффект, а не вызов в doTap,
@@ -335,7 +354,8 @@ export function TrainerPlayer({
         <div
             className={`wt-root${settled && !leaving ? '' : ' wt-root--locked'}`
                 + `${worldMode ? ' wt-root--world' : ''}`
-                + `${deskMode ? ' wt-root--desk' : ''}`}
+                + `${deskMode ? ' wt-root--desk' : ''}`
+                + `${sandbox ? ' wt-root--sandbox' : ''}`}
             style={{ fontFamily: APPLE_FONT }}
         >
             {/* Полупрозрачная подложка. Появляется ПОСЛЕ того, как телефон
@@ -419,7 +439,7 @@ export function TrainerPlayer({
                     </p>
                 </div>
 
-                {!finished && (
+                {!finished && !sandbox && (
                     <div className="wt-goal">
                         <span>Сейчас</span>
                         <motion.b
@@ -433,9 +453,13 @@ export function TrainerPlayer({
                     </div>
                 )}
 
-                <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
-                    <HelpCircle size={15} /> Подсказка
-                </button>
+                {/* Подсказка — часть урока. В свободной среде подсказывать
+                    нечего: правильного следующего действия там нет. */}
+                {sandbox ? null : (
+                    <button type="button" className="wt-hint-btn" onClick={doHint} disabled={finished}>
+                        <HelpCircle size={15} /> Подсказка
+                    </button>
+                )}
             </motion.aside>
 
             {/* ── ЦЕНТР: учебный телефон ───────────────────────────────────
@@ -459,7 +483,7 @@ export function TrainerPlayer({
                                 plate={run.world.car?.plate}
                             />
                         </Suspense>
-                    ) : deskMode && step.screen === 'crm_form' ? (
+                    ) : deskMode && step.screen === 'desk' ? (
                         /* Рабочий стол оператора: софтфон с карточкой звонка и
                            окно браузера с CRM. Карточка звонка обязана стоять
                            РЯДОМ с формой, а не в реплике помощника: на смене
@@ -629,36 +653,62 @@ export function TrainerPlayer({
                     <strong>{scenario.title}</strong>
                 </header>
 
-                <div className="wt-side__progress">
-                    <div className="wt-side__percent">
-                        <b>{percent}</b><i>%</i>
-                    </div>
-                    <div className="wt-bar" role="progressbar" aria-valuenow={percent}
-                        aria-valuemin={0} aria-valuemax={100}
-                        aria-label={`Прогресс тренажёра: ${percent}%`}>
-                        <i style={{ width: `${percent}%` }} />
-                    </div>
-                    <span>{finished ? 'Урок пройден' : `Шаг ${Math.max(1, step.stage)} из ${stages}`}</span>
-                </div>
+                {sandbox ? (
+                    /* В свободной среде на месте прогресса — что где лежит.
+                       Это не шаги: порядок не обязателен, отметок «пройдено» нет. */
+                    <ul className="wt-side__map">
+                        {(scenario.checklist || []).map((item) => {
+                            const [where, what] = String(item).split(' — ');
+                            return (
+                                <li key={item}>
+                                    <b>{where}</b>
+                                    {what ? <span>{what}</span> : null}
+                                </li>
+                            );
+                        })}
+                    </ul>
+                ) : (
+                    <>
+                        <div className="wt-side__progress">
+                            <div className="wt-side__percent">
+                                <b>{percent}</b><i>%</i>
+                            </div>
+                            <div className="wt-bar" role="progressbar" aria-valuenow={percent}
+                                aria-valuemin={0} aria-valuemax={100}
+                                aria-label={`Прогресс тренажёра: ${percent}%`}>
+                                <i style={{ width: `${percent}%` }} />
+                            </div>
+                            <span>{finished ? 'Урок пройден' : `Шаг ${Math.max(1, step.stage)} из ${stages}`}</span>
+                        </div>
 
-                <ol className="wt-steps">
-                    {(scenario.checklist || []).map((item, index) => {
-                        const number = index + 1;
-                        const state = finished || step.stage > number ? 'is-done'
-                            : (step.stage === number ? 'is-current' : '');
-                        return (
-                            <li key={`${index}-${item}`} className={state}>
-                                <i aria-hidden="true">{finished || step.stage > number ? '✓' : number}</i>
-                                {item}
-                            </li>
-                        );
-                    })}
-                </ol>
+                        <ol className="wt-steps">
+                            {(scenario.checklist || []).map((item, index) => {
+                                const number = index + 1;
+                                const state = finished || step.stage > number ? 'is-done'
+                                    : (step.stage === number ? 'is-current' : '');
+                                return (
+                                    <li key={`${index}-${item}`} className={state}>
+                                        <i aria-hidden="true">{finished || step.stage > number ? '✓' : number}</i>
+                                        {item}
+                                    </li>
+                                );
+                            })}
+                        </ol>
+                    </>
+                )}
 
                 <div className="wt-side__foot">
-                    <span className="wt-counters">
-                        Промахов: {run.errors} · подсказок: {run.hints}
-                    </span>
+                    {/* Промахи и подсказки — счётчики урока. В свободной среде
+                        промахнуться не по чему, и нули там только сбивают. */}
+                    {sandbox ? (
+                        <span className="wt-counters">
+                            {run.world.saved ? 'Обращение сохранено' : 'Обращение ещё не сохранено'}
+                        </span>
+                    ) : (
+                        <span className="wt-counters">
+                            Промахов: {run.errors} · подсказок: {run.hints}
+                        </span>
+                    )}
                     <div className="wt-side__buttons">
                         <button type="button" className="wt-side__btn" onClick={doRestart}>
                             <RotateCcw size={14} /> Заново
