@@ -23,7 +23,7 @@
 D,C,B,A) уже дают заголовку четырёхкратное преимущество.
 """
 
-from ..text import query_variants
+from ..text import query_variants, sql_fold
 
 # СЧЁТ ИДЁТ ПО IDF, а не по ts_rank_cd. Это не тюнинг, а исправление дефекта,
 # измеренного на боевом корпусе: у ts_rank_cd нет обратной документной частоты,
@@ -152,6 +152,115 @@ SELECT c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
 # «есть ли ответ вообще» ставится слоем ответа.
 DENSE_FLOOR = 0.68
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ТРЕТЬЯ ВЕТКА: ОДНА ПЕРЕПУТАННАЯ БУКВА В ИМЕНИ СОБСТВЕННОМ
+#
+# Ни лексика, ни вектор не переживают опечатку в редком названии, а голосовой
+# наставник получает вопрос ИЗ РАСПОЗНАВАНИЯ РЕЧИ, где такая опечатка —
+# норма. Замер на проде 23.08.2026, акция записана как «Лимонопад»:
+#
+#   вопрос                                 лексика   вектор   целевой кусок
+#   «расскажи про акцию Лимонопад»          17 кусков   —      ПЕРВЫМ, счёт 5,7
+#   «расскажи про акцию Лимонапад»          17 кусков   0      НЕ НАЙДЕН
+#
+# Разница — одна гласная (её и отдало распознавание). В куске лежит лексема
+# «лимонопад», в запросе «лимонапад»: это разные лексемы, лексика молчит, а
+# вектор не дотягивает до порога 0,68, потому что имя занимает одну строку в
+# табличном куске на 1430 знаков. Наставник ответил «в доступных мне статьях
+# нет информации об акции Лимонапад» — то есть УВЕРЕННО отрицал то, что лежит
+# в вике первым результатом обычного поиска.
+#
+# Лечится триграммами, ровно как опечатки в поиске статей (wiki/search.py), но
+# по ТЕЛУ куска, а не по заголовку: названия акций живут строками таблицы.
+#
+# Отбор слов — два предиката, и оба обязательны:
+#
+#   1. Слова, КОТОРЫХ ВИКА НЕ ЗНАЕТ ЛЕКСИКОЙ. Известное слово добирать нечего:
+#      его уже нашла лексическая ветка, а триграммы приделали бы к нему соседей
+#      («водитель» похож на 136 кусков из 295).
+#   2. ВСЯ выдача ветки лежит в ОДНОЙ статье. Это тот же признак имени
+#      собственного, что уже стоит в answer.named_term, и он же — граница между
+#      находкой и мусором. Замер по всей вике, порог 0,45:
+#
+#        лимонапад → 1 кусок, 1 статья     мотобайга  → 1 кусок, 1 статья
+#        тирмопакет → 1 кусок, 1 статья    кубокпро   → 1 кусок, 1 статья
+#        напомни   → 4 куска, 2 статьи     интересует → 6 кусков, 4 статьи
+#        страхавание → 22 куска, 4 статьи  бренирование → 25 кусков, 8 статей
+#
+#      Верхние четыре — искажённые названия, нижние четыре — общие слова, к
+#      которым добор не нужен. Одна статья отделяет их без исключений, а
+#      счётчик кусков — нет («донгелек» лежит в 8 кусках ОДНОЙ статьи).
+#
+#      Правило именно на ВСЮ выдачу, а не на каждое слово отдельно, и это цена
+#      ошибки: сначала оно стояло на слово, и казахский вопрос «жолаушы затын
+#      салонда қалдырды» (в вике его находит вектор, лексика — ничего) собрал
+#      три посторонних куска из двух статей, по одному на слово. Такому вопросу
+#      триграммы не помощник: незнакомых слов полфразы, и похоже в них всё на
+#      всё. Требование одной статьи гасит это без списка исключений.
+#
+# Чего ветка НЕ лечит (проверено там же): «Жетқызыны» вместо «Жеті қазына» —
+# два слова, слипшихся с искажением, триграммная близость 0,40 против 0,45.
+# Понижать порог нельзя: на 0,35 первым выходит уже посторонний кусок. Слитое
+# КАЗАХСКОЕ числительное разводит text.split_glued_numeral, но «жет» вместо
+# «жеті» ему не по силам.
+#
+# ЦЕНА. Полный проход по кускам: 94 мс на корпусе из 295 кусков (198 тыс.
+# знаков), против 37 мс у лексической ветки — замер EXPLAIN ANALYZE на проде
+# 23.08.2026. Платится она ТОЛЬКО когда в вопросе есть слово, которого вика не
+# знает: иначе внешняя часть соединения пуста и запрос сходит за единицы
+# миллисекунд. Индекса под word_similarity здесь нет намеренно — он потребовал
+# бы оператора <% и правки pg_trgm.word_similarity_threshold через SET LOCAL,
+# то есть скрытого состояния транзакции. Когда корпус вырастет до тысяч кусков,
+# ставить надо именно его (GIN gin_trgm_ops по свёрнутому тексту).
+FUZZY_THRESHOLD = 0.45
+# Короткие слова не берём: у слова из пяти букв триграмм слишком мало, и
+# близость 0,45 набирает половина корпуса.
+FUZZY_MIN_WORD = 6
+# Сколько кусков ветка приносит максимум. Найденным случаям хватает одного;
+# потолок стоит, чтобы имя, размазанное по статье (8 кусков со словом
+# «Донгелек»), не выело весь контекст.
+FUZZY_LIMIT = 3
+
+_FUZZY_CHUNKS_SQL = """
+WITH words AS (
+    SELECT DISTINCT {fold_word} AS w
+      FROM unnest(%(words)s::text[]) AS raw
+),
+unknown AS (
+    SELECT w.w
+      FROM words w
+     WHERE plainto_tsquery('russian', w.w)::text <> ''
+       AND NOT EXISTS (SELECT 1
+                         FROM wiki_ai_chunks c
+                        WHERE c.article_id = ANY(%(article_ids)s)
+                          AND c.chunk_tsv @@ plainto_tsquery('russian', w.w))
+),
+near AS (
+    SELECT * FROM (
+        SELECT u.w, c.id, c.article_id,
+               word_similarity(u.w, {fold_chunk}) AS wsim
+          FROM unknown u
+          JOIN wiki_ai_chunks c ON c.article_id = ANY(%(article_ids)s)
+    ) scored
+     WHERE wsim >= %(threshold)s
+),
+scope AS (
+    SELECT count(DISTINCT article_id) AS articles FROM near
+)
+SELECT c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
+       c.text, c.requires_ack, max(n.wsim) AS wsim
+  FROM near n
+  JOIN wiki_ai_chunks c ON c.id = n.id
+  JOIN wiki_articles a ON a.id = c.article_id
+ WHERE (SELECT articles FROM scope) = 1
+ GROUP BY c.id, c.article_id, a.title, a.slug, c.chunk_idx, c.heading_path,
+          c.text, c.requires_ack
+ ORDER BY max(n.wsim) DESC, c.article_id, c.chunk_idx
+ LIMIT %(limit)s
+""".format(fold_word=sql_fold('lower(raw)'),
+           fold_chunk=sql_fold("lower(coalesce(c.heading_path, '') || ' ' || c.text)"))
+
 # Константа RRF. 60 — общепринятое значение: оно делает вклад первых позиций
 # сопоставимым, а не подавляющим, поэтому кусок, найденный ОБЕИМИ ветками
 # невысоко, обгоняет кусок, найденный одной ветвью первым. Именно это нам и
@@ -179,6 +288,49 @@ def search_dense(cursor, *, article_ids, query_vector, limit=20,
     columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx',
                'heading_path', 'text', 'requires_ack', 'similarity')
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def search_fuzzy(cursor, *, article_ids, query, limit=FUZZY_LIMIT,
+                 threshold=FUZZY_THRESHOLD, min_word=FUZZY_MIN_WORD):
+    """Куски, похожие на редкое слово вопроса, которого вика не знает.
+
+    Зачем и почему отбор именно такой — в шапке у FUZZY_THRESHOLD.
+
+    Без pg_trgm ветка молчит, как и триграммная часть поиска статей. Проверка
+    идёт ДО обращения к word_similarity и БЕЗ кеша: запрос к pg_extension стоит
+    доли миллисекунды на уже открытом соединении, а неудачный вызов
+    несуществующей функции отравил бы транзакцию роута целиком (autocommit тут
+    нет, см. database._get_cursor).
+    """
+    ids = sorted({int(x) for x in (article_ids or ())})
+    # Слова разбираем ТЕМ ЖЕ разбором, что и гейт уточнения: две реализации
+    # «слов вопроса» рано или поздно расходятся, и расхождение будет молчаливым.
+    from .answer import meaningful_words
+
+    words = sorted({word for word in meaningful_words(query)
+                    if len(word) >= int(min_word)})
+    if not ids or not words:
+        return []
+    from ..schema import trigram_available
+
+    if not trigram_available(cursor):
+        return []
+
+    cursor.execute(_FUZZY_CHUNKS_SQL, {
+        'words': words,
+        'article_ids': ids,
+        'threshold': float(threshold),
+        'limit': int(limit),
+    })
+    columns = ('chunk_id', 'article_id', 'title', 'slug', 'chunk_idx',
+               'heading_path', 'text', 'requires_ack', 'fuzzy')
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    for row in rows:
+        row['fuzzy'] = float(row['fuzzy'])
+        # Человек назвал вещь своим именем, ошибившись буквой. Для гейта
+        # уточнения это то же самое, что точное совпадение термина.
+        row['fuzzy_hit'] = True
+    return rows
 
 
 def fuse_rrf(*branches, limit=8, per_article=3, weights=None):
@@ -238,7 +390,7 @@ def _cap_and_limit(rows, limit, per_article):
     return out
 
 
-def fuse(lexical, dense, *, limit=8, per_article=3):
+def fuse(lexical, dense, fuzzy=(), *, limit=8, per_article=3):
     """Слияние ветвей: порядок задаёт вектор, лексика ДОБИРАЕТ пропущенное.
 
     Не RRF — и это вывод замера, а не вкусовщина. На боевом корпусе (29 вопросов,
@@ -257,22 +409,37 @@ def fuse(lexical, dense, *, limit=8, per_article=3):
     — только за полноту. Она нужна не на этом наборе вопросов, а на том, чего
     набор не проверяет: точные термины, номера тарифов и пунктов. Диагностика это
     показала — запрос «термопакет» находится лексикой как strict-совпадение.
+
+    ТРИГРАММНАЯ ВЕТКА ИДЁТ ПЕРВОЙ, впереди вектора. Она срабатывает только
+    когда человек НАЗВАЛ вещь по имени, ошибившись буквой (отбор — в шапке у
+    FUZZY_THRESHOLD), и кусок с этим именем обязан дойти до контекста при любой
+    выдаче соседних ветвей. Иначе правка была бы половинчатой: на проде
+    23.08.2026 тот же вопрос про «Лимонапад» во второй раз пришёл при полной
+    плотной выдаче (21 кусок), и добор без гарантированного места вытеснился бы
+    ею целиком. Мусора отсюда не приходит: ветка либо молчит, либо приносит
+    один-три куска ОДНОЙ статьи.
     """
+    fuzzy_ids = {row['chunk_id'] for row in fuzzy}
     dense_ids = {row['chunk_id'] for row in dense}
-    extra = [row for row in lexical if row['chunk_id'] not in dense_ids]
-    merged = []
-    for branch_index, rows in ((1, dense), (0, extra)):
-        for row in rows:
-            merged.append({**row, 'found_by': [branch_index]})
-    # Пометим куски, найденные обеими ветвями: полезно в витрине и в журнале.
     lexical_ids = {row['chunk_id'] for row in lexical}
+    seen = set(fuzzy_ids)
+    merged = []
+    for branch_index, rows in ((2, fuzzy), (1, dense), (0, lexical)):
+        for row in rows:
+            if branch_index != 2 and row['chunk_id'] in seen:
+                continue
+            seen.add(row['chunk_id'])
+            merged.append({**row, 'found_by': [branch_index]})
+    # Пометим куски, найденные несколькими ветвями: полезно в витрине и в журнале.
+    membership = ((0, lexical_ids), (1, dense_ids), (2, fuzzy_ids))
     # strict_hit приходит только из лексической ветки, а в слиянии верх занимает
     # плотная — без переноса признак терялся ровно на самых точных попаданиях:
     # кусок, найденный обеими ветками, выглядел бы как «только вектор».
     strict_ids = {row['chunk_id'] for row in lexical if row.get('strict_hit')}
     for row in merged:
-        if row['chunk_id'] in lexical_ids and row['chunk_id'] in dense_ids:
-            row['found_by'] = [0, 1]
+        found_by = [index for index, ids in membership if row['chunk_id'] in ids]
+        if len(found_by) > 1:
+            row['found_by'] = found_by
         if row['chunk_id'] in strict_ids:
             row['strict_hit'] = True
     return _cap_and_limit(merged, limit, per_article)
@@ -280,11 +447,15 @@ def fuse(lexical, dense, *, limit=8, per_article=3):
 
 def search_hybrid(cursor, *, article_ids, query, query_vector=None,
                   limit=8, per_article=3, candidates=24):
-    """Гибрид: лексика + вектор, слияние RRF, ограничение на статью.
+    """Гибрид: лексика + вектор + триграммы, слияние, ограничение на статью.
 
     query_vector=None — вектор посчитать не удалось (нет ключа, провайдер лежит,
     расширение не установлено). Тогда работает одна лексика: помощник хуже, но
     жив. Молча деградировать нельзя — вызывающий видит это по полю branches.
+
+    Третья ветка (search_fuzzy) вступает только на редком слове, которого вика
+    не знает: она вытаскивает имя собственное, названное с ошибкой в букве, —
+    ровно то, что приносит распознавание речи. Её вклад тоже виден в branches.
     """
     lexical = search_chunks(cursor, article_ids=article_ids, query=query,
                             limit=candidates, per_article=per_article)
@@ -292,8 +463,9 @@ def search_hybrid(cursor, *, article_ids, query, query_vector=None,
     if query_vector:
         dense = search_dense(cursor, article_ids=article_ids,
                              query_vector=query_vector, limit=candidates)
+    fuzzy = search_fuzzy(cursor, article_ids=article_ids, query=query)
 
-    rows = fuse(lexical, dense, limit=limit, per_article=per_article)
+    rows = fuse(lexical, dense, fuzzy, limit=limit, per_article=per_article)
     # degraded — про НЕДОСТУПНОСТЬ плотной ветки, а не про её пустую выдачу.
     # Сначала здесь стояло `not dense`, и на проде это дало ложную тревогу:
     # честный отказ («сколько мне отпускных» — ни один кусок не прошёл порог)
@@ -301,7 +473,8 @@ def search_hybrid(cursor, *, article_ids, query, query_vector=None,
     # сломаны. Пустая плотная выдача — нормальный результат, отсутствие вектора —
     # нет.
     return {'rows': rows,
-            'branches': {'lexical': len(lexical), 'dense': len(dense)},
+            'branches': {'lexical': len(lexical), 'dense': len(dense),
+                         'fuzzy': len(fuzzy)},
             'degraded': query_vector is None}
 
 

@@ -125,7 +125,12 @@ class RrfStillAvailableTest(unittest.TestCase):
 
 
 class _FakeCursor:
-    """Курсор, отдающий заранее заданные строки: проверяем только развилку."""
+    """Курсор, отдающий заранее заданные строки: проверяем только развилку.
+
+    fetchone отдаёт None намеренно: так выглядит база БЕЗ pg_trgm, и на этих
+    тестах триграммная ветка обязана молчать — здесь проверяется развилка
+    вектора, а не она (её собственные тесты — в test_wiki_ai_fuzzy.py).
+    """
 
     def __init__(self, lexical_rows):
         self._rows = lexical_rows
@@ -133,6 +138,9 @@ class _FakeCursor:
 
     def execute(self, sql, params=None):
         self.executed.append(sql)
+
+    def fetchone(self):
+        return None
 
     def fetchall(self):
         return self._rows
@@ -148,6 +156,7 @@ class DegradedModeTest(unittest.TestCase):
         self.assertTrue(found['degraded'])
         self.assertEqual(1, found['branches']['lexical'])
         self.assertEqual(0, found['branches']['dense'])
+        self.assertEqual(0, found['branches']['fuzzy'])
         self.assertEqual(1, len(found['rows']))
 
     def test_empty_dense_result_is_not_degraded(self):
