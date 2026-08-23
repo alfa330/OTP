@@ -2,32 +2,41 @@ import React from 'react';
 
 import { Tap } from './screenKit';
 
-/* Корпус учебного КОМПЬЮТЕРА: окно браузера в Windows.
+/* Корпус учебного КОМПЬЮТЕРА: окно браузера в Windows с НЕСКОЛЬКИМИ вкладками.
  *
  * Зачем оно вообще нарисовано. Тренажёры про водителя показывают телефон,
  * потому что водитель работает с телефона. Оператор работает за компьютером, и
  * тот же приём («узнаю своё устройство — переношу действие на настоящее»)
- * требует не рамки-прямоугольника, а именно окна браузера: вкладка с названием
- * CRM, адрес в строке, кнопки окна справа. Без них экран читается как картинка
- * из инструкции, а не как «моя вторая вкладка».
+ * требует не рамки-прямоугольника, а именно окна браузера: вкладки с названиями
+ * систем, адрес в строке, кнопки окна справа.
  *
- * Кнопки окна и вкладки НЕ декоративные: по ним промахиваются в жизни
- * (закрыть вкладку вместо закрытия списка), и тренажёр обязан на это ответить
- * объяснением, а не молчанием. Поэтому они — обычные цели движка со своими
- * ловушками, как и всё остальное.
+ * Вкладок ДВЕ и они открыты сразу, как на смене: CRM, где заводят обращение, и
+ * Диспетчерская, куда идут смотреть. Оператор не открывает их по очереди —
+ * они уже открыты, и переключение между ними это одно движение, а не задача.
+ * Поэтому переключение вкладок — свободное действие (runner.browse), а не ход
+ * урока: наказывать за взгляд в справочник значит отучать туда смотреть.
+ *
+ * Кнопки окна и крестик вкладки, наоборот, НЕ декоративные: по ним промахиваются
+ * в жизни, и тренажёр обязан на это ответить объяснением, а не молчанием.
+ * Поэтому они — обычные цели движка со своими ловушками.
  *
  * Свернуть/развернуть/закрыть само окно тренажёр, разумеется, не делает: это
  * учебная картинка, и «закрыть» здесь означает разбор ошибки.
  */
 
-/* Значок вкладки — тот же знак, что стоит у CRM в углу интерфейса. Рисуем
-   сами, а не тянем картинку: в тренажёре она была бы единственным внешним
-   файлом ради шестнадцати пикселей. */
-const TabIcon = () => (
+/* Значки вкладок рисуем сами, а не тянем картинки: в тренажёре они были бы
+   единственными внешними файлами ради шестнадцати пикселей. Знак Диспетчерской
+   намеренно НЕ повторяет чужой логотип — см. шапку screensFleet.jsx. */
+const TabIcon = ({ kind }) => (
     <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-        <rect width="16" height="16" rx="4" fill="#4273fa" />
-        <text x="8" y="11.6" textAnchor="middle" fontSize="8.6" fontWeight="700"
-            fontFamily="system-ui, sans-serif" fill="#fff">iT</text>
+        <rect width="16" height="16" rx="4" fill={kind === 'fleet' ? '#1f2733' : '#4273fa'} />
+        {kind === 'fleet' ? (
+            <path d="M3.4 10.6h9.2M4.6 10.6V7.3l1-2.4h4.8l1 2.4v3.3M5.5 12.2v-1.6m5 1.6v-1.6"
+                fill="none" stroke="#fff" strokeWidth="1.1" strokeLinecap="round" />
+        ) : (
+            <text x="8" y="11.6" textAnchor="middle" fontSize="8.6" fontWeight="700"
+                fontFamily="system-ui, sans-serif" fill="#fff">iT</text>
+        )}
     </svg>
 );
 
@@ -46,7 +55,7 @@ const NavIcon = ({ name }) => {
 };
 
 /* Замок в адресной строке. Мелочь, но именно по нему оператора учат отличать
-   рабочую CRM от подделки, и убирать его из учебного окна не стоит. */
+   рабочую систему от подделки, и убирать его из учебного окна не стоит. */
 const Lock = () => (
     <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
         strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -56,19 +65,37 @@ const Lock = () => (
 );
 
 /** Полоса вкладок с кнопками окна Windows (прямоугольные, не «светофор» macOS). */
-const TabStrip = ({ tap, target, title }) => (
+const TabStrip = ({ tap, target, tabs, active, onSwitch }) => (
     <div className="wt-win__tabs">
-        <div className="wt-win__tab is-active">
-            <TabIcon />
-            <span className="wt-win__tab-name">{title}</span>
-            <Tap id="tab_close" target={target} tap={tap} className="wt-win__tab-x"
-                aria-label="Закрыть вкладку">
-                <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
-                    strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-                    <path d="M6 6l12 12M18 6 6 18" />
-                </svg>
-            </Tap>
-        </div>
+        {/* Вкладка — НЕ одна большая кнопка: внутри неё живёт крестик, который
+            сам является целью движка. Кнопка в кнопке — невалидная разметка, и
+            клик по крестику заодно переключал бы вкладку. Поэтому переключение
+            висит на «лице» вкладки, а крестик стоит рядом с ним. */}
+        {tabs.map((tab) => (
+            <div
+                key={tab.id}
+                className={`wt-win__tab${tab.id === active ? ' is-active' : ''}`}
+            >
+                <button
+                    type="button"
+                    className="wt-win__tab-face"
+                    onClick={() => (tab.id === active ? null : onSwitch(tab.id))}
+                    aria-current={tab.id === active ? 'page' : undefined}
+                >
+                    <TabIcon kind={tab.icon} />
+                    <span className="wt-win__tab-name">{tab.title}</span>
+                </button>
+                {tab.id === active ? (
+                    <Tap id="tab_close" target={target} tap={tap} className="wt-win__tab-x"
+                        aria-label="Закрыть вкладку">
+                        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor"
+                            strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                            <path d="M6 6l12 12M18 6 6 18" />
+                        </svg>
+                    </Tap>
+                ) : <i className="wt-win__tab-x is-ghost" aria-hidden="true" />}
+            </div>
+        ))}
         <Tap id="tab_new" target={target} tap={tap} className="wt-win__tab-add"
             aria-label="Новая вкладка">
             <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
@@ -124,11 +151,11 @@ const Toolbar = ({ tap, target, url }) => (
 
 /** Окно браузера целиком: полоса вкладок, панель навигации и содержимое. */
 export default function BrowserChrome({
-    tap, target, title = 'Обращения - ITaxi', url, children,
+    tap, target, tabs, active, onSwitch, url, children,
 }) {
     return (
         <div className="wt-win">
-            <TabStrip tap={tap} target={target} title={title} />
+            <TabStrip tap={tap} target={target} tabs={tabs} active={active} onSwitch={onSwitch} />
             <Toolbar tap={tap} target={target} url={url} />
             <div className="wt-win__page">{children}</div>
         </div>

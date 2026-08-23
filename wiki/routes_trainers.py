@@ -112,6 +112,30 @@ def register(bp, wiki_route, db, log_ip):
             source=str(payload.get('source') or 'article'),
             stages_total=payload.get('stages_total'),
         )
+
+        # Попытка, записанная СРАЗУ завершённой.
+        #
+        # Тренажёры-прогулки заводят строку на старте: половина их ценности —
+        # брошенные попытки («пятеро дошли до подписи и закрыли»). У тренажёра
+        # «Обращение в CRM» ценность другая — сама заведённая карточка, а она
+        # существует только после «Сохранить». Такой тренажёр присылает всё
+        # одним запросом в конце, и строка заводится и закрывается тут же.
+        #
+        # Отдельного эндпоинта для этого нет намеренно: путь один, и «завести»
+        # с «закрыть» не разойдутся при следующей правке.
+        if run_id is not None and str(payload.get('status') or '') == 'finished':
+            wiki_trainers.finish_run(
+                cursor,
+                run_id=run_id,
+                user_id=ctx['user_id'],
+                status='finished',
+                stages_done=payload.get('stages_done'),
+                errors=payload.get('errors'),
+                hints=payload.get('hints'),
+                restarts=payload.get('restarts'),
+                duration_ms=payload.get('duration_ms'),
+                result=payload.get('result'),
+            )
         return jsonify({"run_id": run_id})
 
     @wiki_route('/trainers/runs/<int:run_id>', methods=('POST',))
@@ -133,6 +157,7 @@ def register(bp, wiki_route, db, log_ip):
             hints=payload.get('hints'),
             restarts=payload.get('restarts'),
             duration_ms=payload.get('duration_ms'),
+            result=payload.get('result'),
         )
         # 200 и в случае «строка не нашлась»: попытку мог закрыть предыдущий
         # маячок, и ошибка здесь превратилась бы в красный тост поверх статьи

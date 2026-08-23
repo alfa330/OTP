@@ -21,6 +21,7 @@
    тренажёра, который ещё никто не проходил, и падать она там не должна.
 """
 
+import json
 import sys
 import unittest
 from contextlib import contextmanager
@@ -209,8 +210,10 @@ class StaleRunTest(unittest.TestCase):
     """Попытка, о закрытии которой никто не сказал, — брошенная, а не «идёт»."""
 
     def _rows(self, started_at):
+        # Последняя колонка — итог попытки (result). У тренажёров-прогулок его
+        # нет, поэтому здесь None: ровно то, что отдаст база для них.
         return [(1, started_at, None, 'started', 'article', 'Иванов', 'СЗоВ', 'Группа 1',
-                 'operator', 'Подписание', 'podpisanie', 3, 6, 1, 0, 0, None)]
+                 'operator', 'Подписание', 'podpisanie', 3, 6, 1, 0, 0, None, None)]
 
     def _status(self, minutes_ago):
         now = datetime(2026, 8, 22, 12, 0, 0)
@@ -284,3 +287,86 @@ class ReportTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RunResultTest(unittest.TestCase):
+    """Итог попытки: сама заведённая карточка, а не только счётчики.
+
+    У тренажёров-прогулок итог один на всех — «дошёл до конца». У тренажёра
+    «Обращение в CRM» итог это выбранная ветка категорий и текст комментария:
+    ошибиться веткой можно и с нулём промахов, взяв подсказку.
+    """
+
+    def test_only_a_dict_survives(self):
+        # Прилетает из браузера, поэтому мусор не пишем.
+        for junk in (None, '', [], 'строка', 0, {}):
+            self.assertIsNone(wiki_trainers._result_json(junk))
+
+    def test_dict_becomes_json_with_russian_text(self):
+        raw = wiki_trainers._result_json({'title': 'Обращение', 'correct': True})
+        self.assertIn('Обращение', raw, 'русский текст ушёл в \\uXXXX')
+        self.assertEqual(json.loads(raw)['correct'], True)
+
+    def test_oversized_result_is_dropped_not_cut(self):
+        # Резать JSON посередине нельзя: получилась бы неразбираемая строка,
+        # и колонка стала бы мусорной. Лучше не записать ничего.
+        self.assertIsNone(wiki_trainers._result_json({'x': 'я' * 5000}))
+
+    def test_finish_writes_result_and_keeps_it_on_beacon(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+        wiki_trainers.finish_run(
+            cursor, run_id=1, user_id=42, status='finished', stages_done=10,
+            errors=0, hints=0, restarts=0, duration_ms=1000,
+            result={'title': 'Обращение в CRM', 'correct': False},
+        )
+        sql, params = cursor.execute.call_args[0]
+        self.assertIn('result', sql)
+        self.assertIn('COALESCE', sql,
+                      'без COALESCE досылка брошенной попытки затрёт карточку')
+        self.assertIn('Обращение в CRM', params['result'])
+
+    def test_finish_without_result_sends_null(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (1,)
+        wiki_trainers.finish_run(
+            cursor, run_id=1, user_id=42, status='abandoned', stages_done=2,
+            errors=0, hints=0, restarts=0, duration_ms=None,
+        )
+        self.assertIsNone(cursor.execute.call_args[0][1]['result'])
+
+
+class FinishedOnlyRouteTest(unittest.TestCase):
+    """Попытка, записанная одним запросом: завести и сразу закрыть.
+
+    Тренажёр, у которого итог — сделанная работа, до «Сохранить» молчит: строки
+    со статусом «начал» у него не бывает вовсе.
+    """
+
+    def test_status_finished_in_start_closes_the_run(self):
+        client, cursor = build_client(self, make_context())
+        response = client.post('/api/wiki/trainers/runs', json={
+            'key': 'crm-ticket-create',
+            'source': 'article',
+            'stages_total': 10,
+            'status': 'finished',
+            'stages_done': 10,
+            'errors': 1,
+            'hints': 0,
+            'restarts': 0,
+            'duration_ms': 9000,
+            'result': {'title': 'Обращение в CRM', 'correct': True},
+        })
+        self.assertEqual(response.status_code, 200)
+        statements = ' '.join(sql for sql, _ in cursor.calls)
+        self.assertIn('INSERT INTO wiki_trainer_runs', statements)
+        self.assertIn('UPDATE wiki_trainer_runs', statements,
+                      'строка осталась в статусе «начал» — попытка не закрыта')
+
+    def test_plain_start_does_not_close_the_run(self):
+        client, cursor = build_client(self, make_context())
+        client.post('/api/wiki/trainers/runs', json={'key': 'sapar-site-avr', 'stages_total': 6})
+        statements = ' '.join(sql for sql, _ in cursor.calls)
+        self.assertIn('INSERT INTO wiki_trainer_runs', statements)
+        self.assertNotIn('UPDATE wiki_trainer_runs', statements,
+                         'обычный тренажёр не должен закрывать попытку на старте')

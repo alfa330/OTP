@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 
 import { Tap, TrainMark } from './screenKit';
 import BrowserChrome from './BrowserChrome';
+import FleetApp, { fleetUrl } from './screensFleet';
 import {
     ANSWER, CATS, CITIES, PARKS, SOURCES, activeField, optionId,
 } from './scenarioCrmTicket';
@@ -20,7 +21,14 @@ import {
  * ровно ту ошибку, ради которой тренажёр и сделан.
  */
 
-const URL = 'backend.yataxi.kz/admin/list-requests/create';
+const CRM_URL = 'backend.yataxi.kz/admin/list-requests/create';
+
+/* Вкладки окна. Обе открыты с самого начала — так стоит браузер у оператора
+   на смене, и «открой вторую систему» не должно быть отдельной задачей. */
+const TABS = [
+    { id: 'crm', title: 'Обращения - iTaxi', icon: 'crm' },
+    { id: 'fleet', title: 'Диспетчерская', icon: 'fleet' },
+];
 
 /* Разделы сайдбара. Активен «Обращения» — мы в нём и находимся. Остальные
    кликабельны: уйти не туда посреди заполнения — живая ошибка. */
@@ -364,9 +372,25 @@ const CrmPage = ({ world, tap, target }) => {
     );
 };
 
-/** Экран шага: окно браузера с открытой в нём CRM. */
-export const CrmForm = ({ world, tap, target }) => (
-    <BrowserChrome tap={tap} target={target} url={URL}>
-        <CrmPage world={world} tap={tap} target={target} />
-    </BrowserChrome>
-);
+/** Экран шага: окно браузера с двумя вкладками — CRM и Диспетчерская.
+ *
+ * Урок живёт только в CRM. Диспетчерская — справочник без шагов и ловушек:
+ * туда ходят смотреть, чью комиссию удержали, и переход туда не ход, а
+ * свободное перемещение (browse), поэтому промахом он не считается. */
+export const CrmForm = ({ world, tap, target, browse }) => {
+    const onFleet = world.tab === 'fleet';
+    return (
+        <BrowserChrome
+            tap={tap}
+            target={target}
+            tabs={TABS}
+            active={world.tab || 'crm'}
+            onSwitch={(id) => browse({ tab: id })}
+            url={onFleet ? fleetUrl(world) : CRM_URL}
+        >
+            {onFleet
+                ? <FleetApp world={world} go={browse} />
+                : <CrmPage world={world} tap={tap} target={target} />}
+        </BrowserChrome>
+    );
+};

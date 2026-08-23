@@ -8,8 +8,8 @@ import SnowLeopard from './SnowLeopard';
 import useTrainerRun from './useTrainerRun';
 import { StatusIcons, StatusTime } from './PhoneChrome';
 import {
-    currentStep, expectedTap, isFinished, progressPercent, restart, speech, stageCount,
-    startRun, stepGoal, takeHint, tap, toggle,
+    browse, currentStep, expectedTap, isFinished, progressPercent, restart, speech,
+    stageCount, startRun, stepGoal, takeHint, tap, toggle,
 } from './runner';
 import { IntroScreen, ResultScreen } from './screenKit';
 import { CallCard, CrmForm } from './screensCrm';
@@ -253,6 +253,9 @@ export function TrainerPlayer({
         articleId: record?.articleId ?? null,
         source: record?.source || 'article',
         enabled: !!record?.base,
+        /* Сценарий сам решает, писать ли брошенные попытки. Там, где итог —
+           сделанная работа, а не пройденный путь, писать до конца нечего. */
+        finishedOnly: !!scenario.recordOnFinishOnly,
     });
 
     const step = currentStep(run);
@@ -271,6 +274,9 @@ export function TrainerPlayer({
     }, []);
 
     const doToggle = useCallback((key) => setRun((prev) => toggle(prev, key)), []);
+    /* Свободное перемещение по учебной среде: вкладка браузера, раздел соседнего
+       кабинета. Не ход и не промах — см. runner.browse. */
+    const doBrowse = useCallback((patch) => setRun((prev) => browse(prev, patch)), []);
     const doHint = useCallback(() => setRun((prev) => takeHint(prev)), []);
     const doRestart = useCallback(() => {
         runLog.restart();
@@ -298,8 +304,12 @@ export function TrainerPlayer({
             total: stages,
             errors: run.errors,
             hints: run.hints,
+            /* ЧТО человек сделал — итог урока. Собирает его сценарий: только он
+               знает, что в его мире является результатом. У прогулки по
+               инструкции результата нет, и здесь будет null. */
+            result: scenario.result ? scenario.result(run.world) : null,
         });
-    }, [runLog, step.stage, stages, run.errors, run.hints]);
+    }, [runLog, scenario, step.stage, stages, run.errors, run.hints, run.world]);
 
     /* Дошёл до финального шага — попытка засчитана сразу, не дожидаясь, пока
        человек закроет окно. Иначе прошедший и закрывший вкладку не отличался бы
@@ -444,6 +454,7 @@ export function TrainerPlayer({
                                 world={run.world}
                                 tap={doTap}
                                 toggle={doToggle}
+                                browse={doBrowse}
                                 target={target}
                                 plate={run.world.car?.plate}
                             />
@@ -464,6 +475,7 @@ export function TrainerPlayer({
                                         world={run.world}
                                         tap={doTap}
                                         toggle={doToggle}
+                                        browse={doBrowse}
                                         target={target}
                                         onRestart={doRestart}
                                     />
@@ -479,6 +491,7 @@ export function TrainerPlayer({
                                     world={run.world}
                                     tap={doTap}
                                     toggle={doToggle}
+                                    browse={doBrowse}
                                     target={target}
                                     onRestart={doRestart}
                                 />
@@ -578,6 +591,7 @@ export function TrainerPlayer({
                                     world={run.world}
                                     tap={doTap}
                                     toggle={doToggle}
+                                    browse={doBrowse}
                                     target={target}
                                     purpose={purpose}
                                     period={run.world.period?.label}

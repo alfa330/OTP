@@ -27,6 +27,7 @@
 # читают в Алматы, и смещение в пять часов сдвинуло бы половину смены на вчера.
 # Берём то же выражение, которым проставляются DEFAULT'ы схемы, — второе
 # определение «сейчас» разошлось бы с первым молча.
+import json
 from datetime import datetime, timedelta
 
 from .schema import _NOW as ALMATY_NOW
@@ -37,6 +38,27 @@ from .schema import _NOW as ALMATY_NOW
 # урок человека.
 SOURCES = ('article', 'catalog')
 STATUSES = ('started', 'finished', 'abandoned')
+
+# Потолок итога попытки. Карточка обращения — десяток коротких строк; всё, что
+# заметно больше, прислано не тренажёром.
+_RESULT_LIMIT = 4000
+
+
+def _result_json(value):
+    """Итог попытки в JSON или None.
+
+    Приходит из браузера, поэтому не доверяем: берём только непустой словарь и
+    режем по объёму. Колонка не место для мегабайта — там карточка обращения на
+    десяток коротких строк.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    text = json.dumps(value, ensure_ascii=False)
+    if len(text) > _RESULT_LIMIT:
+        # Резать JSON посередине нельзя — получится не разбираемая строка.
+        # Лучше не записать итог, чем записать сломанный.
+        return None
+    return text
 
 
 def _clamp(value, low, high, default=0):
@@ -103,6 +125,9 @@ UPDATE wiki_trainer_runs
        errors      = %(errors)s,
        hints       = %(hints)s,
        restarts    = %(restarts)s,
+       -- Итог перезаписываем, только когда он ЕСТЬ: брошенную попытку маячок
+       -- досылает без него, и NULL из маячка стёр бы уже записанную карточку.
+       result      = COALESCE(%(result)s::jsonb, result),
        duration_ms = CASE WHEN %(status)s = 'finished' THEN %(duration)s ELSE duration_ms END,
        finished_at = CASE WHEN %(status)s = 'finished' THEN %(now)s ELSE finished_at END
  WHERE id = %(id)s
@@ -113,7 +138,7 @@ RETURNING id
 
 
 def finish_run(cursor, *, run_id, user_id, status, stages_done, errors, hints,
-               restarts, duration_ms, now_sql=ALMATY_NOW):
+               restarts, duration_ms, result=None, now_sql=ALMATY_NOW):
     """Дополнить свою попытку. Возвращает True, если строка нашлась.
 
     Условие status = 'started' делает вызов идемпотентным: повторный «закрыл
@@ -128,6 +153,7 @@ def finish_run(cursor, *, run_id, user_id, status, stages_done, errors, hints,
         'errors': _clamp(errors, 0, 9999),
         'hints': _clamp(hints, 0, 9999),
         'restarts': _clamp(restarts, 0, 9999),
+        'result': _result_json(result),
         # Полчаса — потолок осмысленной попытки. Больше означает, что вкладку
         # оставили открытой, и такое число в среднем времени бесполезно.
         'duration': _clamp(duration_ms, 0, 30 * 60 * 1000, default=None),
@@ -267,7 +293,8 @@ _RUNS_SQL = """
 SELECT r.id, r.started_at, r.finished_at, r.status, r.source,
        u.name, r.snapshot_department_name, r.snapshot_group_name, r.snapshot_role,
        COALESCE(r.article_title, a.title), a.slug,
-       r.stages_done, r.stages_total, r.errors, r.hints, r.restarts, r.duration_ms
+       r.stages_done, r.stages_total, r.errors, r.hints, r.restarts, r.duration_ms,
+       r.result
   FROM wiki_trainer_runs r
   LEFT JOIN users u ON u.id = r.user_id
   LEFT JOIN wiki_articles a ON a.id = r.article_id
@@ -390,7 +417,10 @@ def runs(cursor, key, *, since=None, until=None, departments=None,
         'hints': int(hints or 0),
         'restarts': int(restarts or 0),
         'duration_ms': int(duration_ms) if duration_ms is not None else None,
+        # ЧТО человек сделал. У тренажёра CRM это заведённая карточка обращения,
+        # у остальных итога нет и здесь будет None.
+        'result': result if isinstance(result, dict) else None,
     } for (run_id, started_at, finished_at, status, source, name, department, grp, role,
            article_title, slug, stages_done, stages_total, errors, hints,
-           restarts, duration_ms) in cursor.fetchall()]
+           restarts, duration_ms, result) in cursor.fetchall()]
     return {'total': total, 'items': items}

@@ -3198,12 +3198,24 @@
 .wt-win__tab {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     max-width: 250px;
     height: 31px;
-    padding: 0 8px 0 12px;
+    padding: 0 6px 0 10px;
     border-radius: 9px 9px 0 0;
     background: #f5f8ff;
+}
+
+/* «Лицо» вкладки — значок и название. Переключение висит здесь, а не на всей
+   вкладке: крестик рядом должен ловить свой клик сам (см. BrowserChrome). */
+.wt-win__tab-face {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    height: 100%;
+    padding: 0 2px;
+    text-align: left;
 }
 
 .wt-win__tab-name {
@@ -3555,4 +3567,602 @@
     .wt-crm__label { padding-top: 0; text-align: left; }
     .wt-crm__dup { margin-left: 0; }
     .wt-call__facts { gap: 4px 14px; }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   ВТОРАЯ ВКЛАДКА ОКНА: учебная Диспетчерская
+   ─────────────────────────────────────────────────────────────────────────
+   Цвета сняты пипеткой со скриншотов кабинета (23.08.2026): тёплый серый фон
+   #f5f4f2 (именно тёплый — холодный сразу читается чужим), зелёный #029154,
+   красный акцент #fc5230, суммы #cc2d32, синие ссылки #4060e3.
+
+   Логотип и фирменный знак НЕ повторяются: клон не должен выдавать себя за
+   чужой кабинет. Вместо них нейтральный знак и плашка «Учебная среда».
+   ═════════════════════════════════════════════════════════════════════════ */
+
+.wt-fl {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    min-height: 100%;
+    background: #f5f4f2;
+    font-size: 13px;
+    color: #21201f;
+}
+
+.wt-fl .wt-mark { position: absolute; top: 8px; right: 132px; z-index: 6; }
+
+/* ── Узкий сайдбар со значками ───────────────────────────────────────────── */
+
+.wt-fl__side {
+    display: flex;
+    flex: 0 0 56px;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 0;
+    background: #f5f4f2;
+}
+
+.wt-fl__logo {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    margin-bottom: 8px;
+    border-radius: 9px;
+    background: #21201f;
+    color: #fff;
+}
+
+.wt-fl__nav {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    color: #6d6b68;
+}
+
+.wt-fl__nav:hover { background: rgba(0, 0, 0, .06); color: #21201f; }
+.wt-fl__nav.is-on { background: #e8e6e2; color: #21201f; }
+.wt-fl__side-foot { margin-top: auto; color: #a9a6a1; }
+
+/* ── Шапка и содержимое ──────────────────────────────────────────────────── */
+
+.wt-fl__body { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; }
+
+.wt-fl__head {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 12px;
+    padding: 12px 16px 10px 4px;
+}
+
+.wt-fl__head h1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+}
+
+.wt-fl__head h1 b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wt-fl__arrow { color: #a9a6a1; }
+
+.wt-fl__head-right { display: flex; align-items: center; gap: 10px; margin-left: auto; color: #6d6b68; }
+
+.wt-fl__park {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px 4px 4px;
+    border-radius: 9px;
+    background: #eceae6;
+}
+
+.wt-fl__park b {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: #dcd9d3;
+    font-size: 10.5px;
+    color: #4b4945;
+}
+
+.wt-fl__park span { display: flex; flex-direction: column; font-size: 11.5px; line-height: 1.25; color: #21201f; }
+.wt-fl__park small { font-size: 10.5px; color: #8f8c87; }
+
+/* Содержимое — белая карточка на тёплом фоне, как в кабинете. */
+.wt-fl__content {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin: 0 12px 12px;
+    padding: 14px 16px 18px;
+    border-radius: 14px;
+    background: #fff;
+}
+
+.wt-fl__fabs { position: absolute; right: 16px; bottom: 14px; display: flex; gap: 8px; }
+
+.wt-fl__fab {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: #21201f;
+    color: #fff;
+}
+
+.wt-fl__fab--bell { background: #fc5230; }
+.wt-fl__fab i {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    padding: 0 4px;
+    border-radius: 7px;
+    background: #fc5230;
+    font-size: 9.5px;
+    font-style: normal;
+    font-weight: 700;
+    color: #fff;
+}
+
+/* ── Главная: плитки ─────────────────────────────────────────────────────── */
+
+.wt-fl__chip--period {
+    padding: 5px 11px;
+    border-radius: 8px;
+    background: #f0eeea;
+    font-size: 12px;
+    color: #4b4945;
+}
+
+/* Колонки неравные: в плитке лояльности две карточки уровней рядом, и при
+   равных долях её текст рвался посреди слова, а у соседей место пустовало. */
+.wt-fl__tiles {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr) minmax(0, 1.5fr) minmax(0, 1.15fr);
+    gap: 12px;
+    margin-top: 12px;
+}
+
+/* min-width: 0 обязателен: без него длинные строки внутри плитки распирают
+   колонку грида, и соседняя плитка обрезает свой текст на полуслове. */
+.wt-fl__tile {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: #f7f6f4;
+}
+
+.wt-fl__tile-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: #21201f;
+    text-align: left;
+}
+
+.wt-fl__tile-head svg { flex: 0 0 auto; }
+
+.wt-fl__tile-head.is-plain { cursor: default; }
+.wt-fl__tile-head svg:last-child { margin-left: -2px; color: #a9a6a1; }
+
+.wt-fl__big { display: flex; align-items: baseline; gap: 8px; font-size: 30px; font-weight: 600; }
+.wt-fl__big span { font-size: 12.5px; font-weight: 400; color: #6d6b68; }
+
+.wt-fl__legend { display: flex; flex-wrap: wrap; gap: 3px 10px; margin: 0; padding: 0; list-style: none; }
+.wt-fl__legend li { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: #6d6b68; }
+.wt-fl__legend i { width: 7px; height: 7px; border-radius: 2px; }
+
+.wt-fl__bars { display: flex; align-items: flex-end; gap: 5px; height: 54px; }
+.wt-fl__bars i { flex: 1 1 auto; border-radius: 3px 3px 0 0; }
+
+.wt-fl__mini { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.wt-fl__mini div { padding: 7px 9px; border-radius: 9px; background: #fff; }
+.wt-fl__mini span { display: block; font-size: 10.5px; color: #8f8c87; }
+.wt-fl__mini b { font-size: 15px; font-weight: 600; }
+.wt-fl__mini em { font-size: 11px; font-style: normal; color: #fc5230; }
+
+.wt-fl__loyalty { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+.wt-fl__grade { min-width: 0; padding: 9px 10px; border-radius: 11px; background: #fff; }
+.wt-fl__grade.is-bronze { background: linear-gradient(160deg, #d9b6ad, #c39a90); color: #40241e; }
+.wt-fl__grade b { font-size: 12.5px; }
+.wt-fl__grade small { display: block; margin-bottom: 5px; font-size: 10px; opacity: .8; }
+.wt-fl__grade ul {
+    margin: 0;
+    padding-left: 13px;
+    list-style: disc;
+    font-size: 9.6px;
+    line-height: 1.5;
+}
+/* Именно break-word, а не anywhere: anywhere режет посреди слова
+   («подтвержд|ают»), и это читается как сломанная вёрстка. */
+.wt-fl__grade li { overflow-wrap: break-word; }
+.wt-fl__grade small { overflow-wrap: break-word; }
+.wt-fl__grade b { overflow-wrap: break-word; }
+
+.wt-fl__tile--narrow { gap: 6px; }
+.wt-fl__dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.wt-fl__dot.is-red { background: #fc5230; }
+.wt-fl__dot.is-blue { background: #4060e3; }
+
+.wt-fl__row-link {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: #fff;
+    font-size: 11.5px;
+    color: #21201f;
+    text-align: left;
+}
+
+.wt-fl__row-link em {
+    flex: 0 0 auto;
+    padding: 1px 5px;
+    border-radius: 6px;
+    background: #fc5230;
+    font-size: 9.5px;
+    font-style: normal;
+    font-weight: 700;
+    color: #fff;
+}
+
+.wt-fl__row-link.is-off { color: #6d6b68; }
+.wt-fl__row-link.is-off em { background: #4060e3; }
+
+/* ── Список исполнителей ─────────────────────────────────────────────────── */
+
+.wt-fl__banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-radius: 11px;
+    background: #029154;
+    font-size: 12px;
+    color: #fff;
+}
+
+.wt-fl__banner-btn {
+    margin-left: auto;
+    flex: 0 0 auto;
+    padding: 5px 12px;
+    border-radius: 8px;
+    background: #fff;
+    font-weight: 600;
+    color: #21201f;
+}
+
+.wt-fl__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+
+.wt-fl__pill {
+    padding: 4px 11px;
+    border-radius: 20px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.wt-fl__pill.is-red { background: #fc5230; }
+.wt-fl__pill.is-orange { background: #fc9000; }
+.wt-fl__pill.is-blue { background: #4060e3; }
+.wt-fl__chips-sep { width: 4px; height: 4px; border-radius: 50%; background: #d3d0cb; }
+
+.wt-fl__seg {
+    padding: 4px 11px;
+    border-radius: 20px;
+    background: #fff;
+    border: 1px solid #eae7e2;
+    font-size: 11.5px;
+}
+
+.wt-fl__seg em { font-style: normal; color: #8f8c87; }
+
+.wt-fl__toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+
+.wt-fl__search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px 5px 5px;
+    border-radius: 9px;
+    background: #f0eeea;
+    font-size: 11.5px;
+    color: #8f8c87;
+}
+
+.wt-fl__search b {
+    padding: 3px 8px;
+    border-radius: 7px;
+    background: #dcd9d3;
+    font-size: 11px;
+    color: #4b4945;
+}
+
+.wt-fl__filter-add,
+.wt-fl__filter-chip {
+    padding: 6px 11px;
+    border-radius: 9px;
+    background: #f0eeea;
+    font-size: 11.5px;
+    color: #4b4945;
+}
+
+.wt-fl__filter-chip { background: #e5e2dc; font-weight: 600; }
+.wt-fl__tools { display: flex; gap: 12px; margin-left: auto; font-size: 11.5px; color: #6d6b68; }
+
+.wt-fl__table { width: 100%; margin-top: 12px; border-collapse: collapse; font-size: 12px; }
+.wt-fl__table th {
+    padding: 8px 10px;
+    border-bottom: 1px solid #eeece8;
+    font-size: 11px;
+    font-weight: 400;
+    color: #8f8c87;
+    text-align: left;
+}
+.wt-fl__table td { padding: 9px 10px; border-bottom: 1px solid #f4f2ef; vertical-align: middle; }
+.wt-fl__table .is-right { text-align: right; }
+.wt-fl__table .is-bad { color: #cc2d32; }
+.wt-fl__table .is-good { color: #029154; }
+.wt-fl__table tr.is-open { cursor: pointer; }
+.wt-fl__table tr.is-open:hover { background: #faf9f7; }
+
+/* Полоса слева у строк, где удержал ПАРК: в сценарии всё держится на том,
+   чтобы отличить их от комиссий сервиса, а колонка «Категория» длинная. */
+.wt-fl__table tr.is-park td:first-child { box-shadow: inset 3px 0 0 #fc9000; }
+
+.wt-fl__who { display: flex; align-items: center; gap: 9px; }
+.wt-fl__who span { display: flex; flex-direction: column; line-height: 1.3; }
+.wt-fl__who small { font-size: 10.5px; color: #8f8c87; }
+
+.wt-fl__ava { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; background: #e5e2dc; }
+.wt-fl__ava.is-big { width: 44px; height: 44px; border-radius: 10px; }
+
+.wt-fl__limit { margin-left: 6px; color: #8f8c87; }
+.wt-fl__note { margin: 12px 0 0; font-size: 11px; color: #8f8c87; }
+
+/* ── Карточка исполнителя ────────────────────────────────────────────────── */
+
+.wt-fl__sub { margin-bottom: 8px; font-size: 11.5px; color: #8f8c87; }
+
+.wt-fl__badge {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 8px 12px;
+    overflow-x: auto;
+    border-radius: 12px;
+    background: #f7f6f4;
+}
+
+.wt-fl__badge > span { flex: 0 0 auto; }
+
+.wt-fl__badge > b { margin: 0 16px 0 12px; font-size: 14px; font-weight: 600; }
+.wt-fl__badge > span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0 16px;
+    border-left: 1px solid #e6e3de;
+    font-size: 13px;
+}
+.wt-fl__badge small { font-size: 10.5px; color: #8f8c87; }
+.wt-fl__acct {
+    flex-direction: row !important;
+    align-items: baseline;
+    gap: 6px !important;
+    /* Сумма и знаки «−/+» — одной строкой: с переносом «₸» уезжал под число
+       и выглядел как отдельное поле. */
+    white-space: nowrap;
+}
+.wt-fl__acct small { flex-basis: 100%; }
+.wt-fl__acct u { color: #fc5230; text-decoration: none; }
+.wt-fl__acct em { font-style: normal; color: #fc5230; }
+.wt-fl__acct em.is-plus { color: #029154; }
+
+.wt-fl__warn { margin: 7px 0 0; font-size: 11.5px; color: #fc5230; }
+
+/* Вкладки карточки — В ОДНУ строку с прокруткой, как в кабинете.
+   С переносом последняя вкладка («Документы») падала на вторую строку и
+   читалась не как вкладка, а как заголовок раздела под ними. */
+.wt-fl__tabs {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 16px;
+    margin-top: 10px;
+    overflow-x: auto;
+    border-bottom: 1px solid #eeece8;
+    scrollbar-width: thin;
+}
+
+.wt-fl__tabs button { flex: 0 0 auto; white-space: nowrap; }
+
+.wt-fl__tabs button {
+    padding: 6px 0 9px;
+    border-bottom: 2px solid transparent;
+    font-size: 12.5px;
+    color: #6d6b68;
+}
+
+.wt-fl__tabs button:hover { color: #21201f; }
+.wt-fl__tabs button.is-on { border-bottom-color: #21201f; color: #21201f; font-weight: 500; }
+
+.wt-fl__tab-body { padding-top: 14px; }
+
+.wt-fl__h3 {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0 0 8px;
+    font-size: 15px;
+    font-weight: 600;
+}
+.wt-fl__h3.is-caps { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: #6d6b68; }
+.wt-fl__hint { margin: 0 0 12px; font-size: 11.5px; color: #8f8c87; }
+.wt-fl__hint u { color: #4060e3; text-decoration: none; }
+
+.wt-fl__cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 40px; }
+
+.wt-fl__field { display: grid; grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 10px; padding: 5px 0; }
+.wt-fl__field span { font-size: 11.5px; color: #6d6b68; }
+.wt-fl__field b {
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: #f4f2ef;
+    font-size: 12.5px;
+    font-weight: 400;
+    color: #21201f;
+}
+
+.wt-fl__seg-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12px; }
+.wt-fl__seg-row span { padding: 5px 12px; border-radius: 8px; background: #f0eeea; color: #6d6b68; }
+.wt-fl__seg-row span.is-on { background: #e5e2dc; color: #21201f; }
+.wt-fl__seg-row u { color: #4060e3; text-decoration: none; }
+
+.wt-fl__filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.wt-fl__filters span { padding: 5px 11px; border-radius: 8px; background: #f0eeea; font-size: 11.5px; color: #4b4945; }
+
+.wt-fl__check { display: flex; align-items: center; gap: 9px; font-size: 12px; }
+.wt-fl__check i {
+    display: grid;
+    place-items: center;
+    width: 19px;
+    height: 19px;
+    border-radius: 5px;
+    background: #fce000;
+    font-size: 11px;
+    font-style: normal;
+    color: #21201f;
+}
+
+.wt-fl__table--tx td:nth-child(6) { max-width: 210px; color: #6d6b68; }
+
+/* Заработок */
+.wt-fl__income { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 16px; }
+.wt-fl__report { padding: 12px 14px; border-radius: 12px; background: #f7f6f4; }
+.wt-fl__report-row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 12px; }
+.wt-fl__report-row span { color: #4b4945; text-decoration: underline dotted #d3d0cb; }
+.wt-fl__report-row .is-good { color: #029154; }
+.wt-fl__report-row .is-bad { color: #cc2d32; }
+.wt-fl__report-row .is-zero { color: #8f8c87; }
+.wt-fl__charts { padding: 12px 14px; border-radius: 12px; background: #f7f6f4; }
+.wt-fl__chart { display: flex; align-items: flex-end; gap: 10px; height: 110px; padding: 0 6px; }
+.wt-fl__chart i { flex: 0 0 46px; border-radius: 4px 4px 0 0; }
+.wt-fl__chart-foot { margin: 6px 0 14px; font-size: 11px; color: #8f8c87; }
+
+/* GPS */
+.wt-fl__gps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.wt-fl__gps-tile { padding: 12px 14px; border: 1px solid #eeece8; border-radius: 12px; }
+.wt-fl__gps-tile span { font-size: 11.5px; color: #6d6b68; }
+.wt-fl__gps-tile b { display: block; margin-top: 10px; font-size: 22px; font-weight: 500; }
+
+/* Фотоконтроль */
+.wt-fl__photo section { margin-bottom: 16px; }
+.wt-fl__shots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.wt-fl__shots figure { margin: 0; border: 1px solid #eeece8; border-radius: 11px; overflow: hidden; }
+.wt-fl__shots figcaption { padding: 7px 10px; font-size: 11.5px; }
+.wt-fl__shot {
+    height: 96px;
+    background: repeating-linear-gradient(135deg, #ecebe8 0 10px, #e3e1dd 10px 20px);
+}
+
+/* Пустые состояния */
+.wt-fl__empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 54px 20px;
+    text-align: center;
+}
+.wt-fl__empty b { font-size: 16px; font-weight: 600; }
+.wt-fl__empty span { max-width: 420px; font-size: 12px; color: #8f8c87; }
+
+.wt-fl__yellow {
+    margin-top: 10px;
+    padding: 8px 18px;
+    border-radius: 9px;
+    background: #fce000;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: #21201f;
+}
+
+.wt-fl__wa {
+    display: inline-block;
+    margin-top: 16px;
+    padding: 8px 14px;
+    border-radius: 9px;
+    background: #029154;
+    font-size: 12px;
+    color: #fff;
+}
+
+/* Выбор парка */
+.wt-fl--picker { align-items: center; justify-content: center; }
+.wt-fl__picker { display: flex; align-items: center; gap: 60px; }
+.wt-fl__picker h2 { margin: 0; font-size: 22px; font-weight: 600; }
+.wt-fl__picker-list { display: flex; flex-direction: column; gap: 4px; width: 260px; }
+.wt-fl__picker-search {
+    padding: 7px 12px;
+    margin-bottom: 6px;
+    border-radius: 9px;
+    background: #eceae6;
+    font-size: 12px;
+    color: #8f8c87;
+}
+.wt-fl__picker-list button {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px;
+    border-radius: 10px;
+    text-align: left;
+}
+.wt-fl__picker-list button:hover { background: #f0eeea; }
+.wt-fl__picker-list button.is-on { background: #e8e6e2; }
+.wt-fl__picker-list b {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: #dcd9d3;
+    font-size: 11px;
+    color: #4b4945;
+}
+.wt-fl__picker-list span { display: flex; flex-direction: column; font-size: 12.5px; line-height: 1.3; }
+.wt-fl__picker-list small { font-size: 10.5px; color: #8f8c87; }
+
+/* Неактивная вкладка окна — приглушена, крестика у неё нет. */
+.wt-win__tab:not(.is-active) { background: #cdd1d8; color: #4b5563; }
+.wt-win__tab:not(.is-active):hover { background: #d8dce2; }
+.wt-win__tab-x.is-ghost { width: 20px; }
+
+@media (max-width: 1023px) {
+    .wt-fl__tiles { grid-template-columns: 1fr 1fr; }
+    .wt-fl__cols,
+    .wt-fl__income { grid-template-columns: minmax(0, 1fr); }
+    .wt-fl__gps,
+    .wt-fl__shots { grid-template-columns: 1fr 1fr; }
+    .wt-fl__field { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+    .wt-fl .wt-mark { right: 10px; }
 }

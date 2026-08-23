@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    currentStep, expectedTap, isFinished, speech, startRun, stepGoal, tap,
+    browse, currentStep, expectedTap, isFinished, speech, startRun, stepGoal, tap,
 } from '../src/components/wiki/trainers/runner.js';
 import crm, {
     ANSWER, CALL, CATS, CITIES, PARKS, SOURCES, activeField, optionId,
@@ -212,4 +212,62 @@ test('порядок полей формы ведёт от источника к
     assert.equal(activeField(filled), 'save');
     assert.equal(activeField({ ...filled, comment: '' }), 'comment');
     assert.equal(activeField({ ...filled, cats: ANSWER.cats.slice(0, 2) }), 'cat3');
+});
+
+/* ── Итог попытки и вторая вкладка ───────────────────────────────────────── */
+
+test('итог попытки — сама заведённая карточка, и только после сохранения', () => {
+    const half = upTo('cat4');
+    assert.equal(crm.result(half.world), null,
+        'итог отдан до «Сохранить» — записывать ещё нечего');
+
+    const done = play();
+    const result = crm.result(done.world);
+    assert.ok(result, 'после сохранения итога нет');
+    assert.equal(result.correct, true);
+
+    const fields = Object.fromEntries(result.fields);
+    assert.equal(fields['Звонок/Чат'], 'Звонок');
+    assert.equal(fields['Таксопарк'], CALL.park);
+    assert.equal(fields['Город'], CALL.city);
+    assert.equal(fields['Категория'], ANSWER.cats.join(' / '));
+    assert.ok(fields['Комментарий'].length > 10);
+});
+
+/* Ветку можно провалить и без единого промаха — дойдя до неё по подсказке.
+   Ради этого случая итог и записывается: «промахов 0» о качестве не говорит. */
+test('неверная ветка видна в итоге, даже когда промахов нет', () => {
+    const run = upTo('cat4');
+    const wrongWorld = {
+        ...run.world,
+        saved: true,
+        form: { ...run.world.form, cats: [...ANSWER.cats.slice(0, 3), 'Консультация по Тарифам'], comment: COMMENT },
+    };
+    const result = crm.result(wrongWorld);
+    assert.equal(result.correct, false, 'чужая ветка зачтена как верная');
+});
+
+test('брошенные попытки этого тренажёра в статистику не пишутся', () => {
+    assert.equal(crm.recordOnFinishOnly, true);
+});
+
+test('в окне две вкладки, и урок начинается на CRM', () => {
+    const run = startRun(crm);
+    assert.equal(run.world.tab, 'crm');
+    assert.equal(run.world.fleetView, 'contractors',
+        'Диспетчерская должна открываться на списке исполнителей');
+});
+
+/* Диспетчерская — справочник, а не урок: сходить туда и вернуться не ошибка
+   и не ход. Иначе тренажёр отучал бы смотреть в кабинет перед выбором ветки. */
+test('переход в Диспетчерскую и обратно не считается промахом', () => {
+    const run = upTo('cat4');
+    let moved = browse(run, { tab: 'fleet' });
+    moved = browse(moved, { fleetView: 'card', fleetTab: 'transactions' });
+    moved = browse(moved, { tab: 'crm' });
+
+    assert.equal(moved.errors, run.errors, 'поход в кабинет засчитан как промах');
+    assert.equal(currentStep(moved).key, 'cat4', 'шаг урока сдвинулся от перехода');
+    assert.equal(moved.world.form.cats.length, 3, 'состояние формы потерялось');
+    assert.equal(moved.world.fleetTab, 'transactions', 'вкладка кабинета не запомнилась');
 });

@@ -152,6 +152,14 @@ export default function WikiTrainerStats({
 
     const totals = data?.totals || {};
     const runs = data?.runs?.items || [];
+    /* Какие итоги раскрыты. Карточка обращения — это шесть строк, и показывать
+       их у всех попыток сразу значит превратить ленту в простыню. */
+    const [shown, setShown] = useState(() => new Set());
+    const toggleRow = useCallback((id) => setShown((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+    }), []);
 
     return (
         <div className="space-y-3">
@@ -300,23 +308,71 @@ export default function WikiTrainerStats({
                 )}>
                 {runs.map((row) => {
                     const status = STATUS[row.status] || { label: row.status, tone: 'slate' };
+                    const open = shown.has(row.id);
                     return (
-                        <tr key={row.id}>
-                            <Td muted>{dateTime(row.started_at)}</Td>
-                            <Td>{row.name}</Td>
-                            <Td><IosBadge tone={status.tone}>{status.label}</IosBadge></Td>
-                            <Td right>
-                                {row.stages_total
-                                    ? `${row.stages_done} из ${row.stages_total}`
-                                    : row.stages_done}
-                            </Td>
-                            <Td right>{row.errors}</Td>
-                            <Td right>{row.hints}</Td>
-                            <Td right>{duration(row.duration_ms)}</Td>
-                            <Td muted>
-                                {row.article_title || SOURCE[row.source] || row.source}
-                            </Td>
-                        </tr>
+                        <React.Fragment key={row.id}>
+                            <tr>
+                                <Td muted>{dateTime(row.started_at)}</Td>
+                                <Td>{row.name}</Td>
+                                <Td>
+                                    <span className="flex flex-wrap items-center gap-1.5">
+                                        <IosBadge tone={status.tone}>{status.label}</IosBadge>
+                                        {/* Итог работы, а не пути: у тренажёра CRM видно,
+                                            верную ли ветку категорий выбрал человек.
+                                            Промахов может быть ноль и при неверной ветке —
+                                            если он дошёл до неё по подсказке. */}
+                                        {row.result ? (
+                                            <IosBadge tone={row.result.correct ? 'green' : 'red'}>
+                                                {row.result.correct ? 'верно' : 'неверно'}
+                                            </IosBadge>
+                                        ) : null}
+                                    </span>
+                                </Td>
+                                <Td right>
+                                    {row.stages_total
+                                        ? `${row.stages_done} из ${row.stages_total}`
+                                        : row.stages_done}
+                                </Td>
+                                <Td right>{row.errors}</Td>
+                                <Td right>{row.hints}</Td>
+                                <Td right>{duration(row.duration_ms)}</Td>
+                                <Td muted>
+                                    <span className="flex items-center gap-2">
+                                        {row.article_title || SOURCE[row.source] || row.source}
+                                        {row.result ? (
+                                            <button
+                                                type="button"
+                                                className="shrink-0 rounded-lg px-1.5 py-0.5 text-[11px]
+                                                           text-indigo-600 hover:bg-indigo-50"
+                                                onClick={() => toggleRow(row.id)}
+                                            >
+                                                {open ? 'скрыть' : 'что завёл'}
+                                            </button>
+                                        ) : null}
+                                    </span>
+                                </Td>
+                            </tr>
+                            {open && row.result ? (
+                                <tr>
+                                    <td colSpan={8} className="px-3 pb-3">
+                                        <div className="rounded-xl bg-slate-50 p-3">
+                                            <div className="mb-1.5 text-[11px] font-semibold uppercase
+                                                            tracking-wide text-slate-400">
+                                                {row.result.title || 'Итог попытки'}
+                                            </div>
+                                            <dl className="grid gap-1">
+                                                {(row.result.fields || []).map(([label, value]) => (
+                                                    <div key={label} className="flex gap-2 text-[12.5px]">
+                                                        <dt className="w-40 shrink-0 text-slate-400">{label}</dt>
+                                                        <dd className="m-0 min-w-0 text-slate-700">{value}</dd>
+                                                    </div>
+                                                ))}
+                                            </dl>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ) : null}
+                        </React.Fragment>
                     );
                 })}
             </Table>
