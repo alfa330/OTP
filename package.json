@@ -11,6 +11,7 @@
     "test:task-needs": "node --test tests/task_action_needs.test.mjs",
     "test:task-assignees": "node --test tests/task_assignees.test.mjs",
     "test:custom-select": "node --test tests/custom_select_render.test.mjs",
+    "test:date-picker": "node --test tests/date_picker_render.test.mjs",
     "test:board-query": "node --test tests/board_query.test.mjs",
     "test:task-focus": "node --test tests/task_focus.test.mjs",
     "test:url-hygiene": "node --test tests/url_hygiene.test.mjs",

@@ -52,18 +52,29 @@ export const rangeLabel = (from, to) => {
  * Черновик выбора инициализируется при МОНТИРОВАНИИ: обе обёртки рисуют
  * календарь только раскрытым, поэтому закрытие и открытие сами возвращают его
  * в исходное состояние — отдельная синхронизация по `open` не нужна. */
-export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = null, footer = null }) {
+export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = null, footer = null,
+                                      single = false, initialMonth = null }) {
     const today = isoDate(new Date());
     const [draft, setDraft] = useState({ from, to });   // выбор внутри календаря
     const [step, setStep] = useState(0);                // 0 — ждём начало, 1 — конец
     const [hover, setHover] = useState(null);
+    /* `initialMonth` нужен пустому полю с границами: у даты, которую ещё не
+       выбрали, месяц брать неоткуда, а сегодняшний у поля с min=«завтра» или
+       max=«прошлый год» встретил бы человека полностью серым месяцем. */
     const [view, setView] = useState(() => {
-        const [y, m] = (to || from || today).split('-').map(Number);
+        const [y, m] = (to || from || initialMonth || today).split('-').map(Number);
         return { y, m: m - 1 };
     });
 
     const pickDay = (iso, disabled) => {
         if (disabled) return;
+        /* Одиночная дата выбирается ОДНИМ кликом: второй клик здесь нечего
+           уточнять, а «шаг 1» оставил бы календарь ждать конца периода. */
+        if (single) {
+            setDraft({ from: iso, to: iso });
+            onChange({ from: iso, to: iso });
+            return;
+        }
         if (step === 0) {
             setDraft({ from: iso, to: iso });
             setStep(1);
@@ -124,10 +135,12 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
         );
     }
 
-    const footerPresets = presets || [
-        { label: 'Сегодня', range: () => ({ from: today, to: today }) },
-        { label: 'Весь период', range: () => ({ from: '', to: '' }) },
-    ];
+    const footerPresets = presets || (single
+        ? [{ label: 'Сегодня', range: () => ({ from: today, to: today }) }]
+        : [
+            { label: 'Сегодня', range: () => ({ from: today, to: today }) },
+            { label: 'Весь период', range: () => ({ from: '', to: '' }) },
+        ]);
 
     return (
         <div className="w-[268px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70">
@@ -160,9 +173,14 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
                     </button>
                 ))}
             </div>
-            <p className="mt-2 text-center text-[11px] text-slate-400">
-                {step === 0 ? 'Выберите начало периода' : 'Выберите конец периода'}
-            </p>
+            {/* Подсказка нужна только диапазону: там два клика и человеку
+                надо знать, какой из них он сейчас делает. Над одиночной датой
+                это была бы строка ради строки. */}
+            {!single && (
+                <p className="mt-2 text-center text-[11px] text-slate-400">
+                    {step === 0 ? 'Выберите начало периода' : 'Выберите конец периода'}
+                </p>
+            )}
             {footer}
         </div>
     );

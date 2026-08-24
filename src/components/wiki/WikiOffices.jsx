@@ -8,6 +8,7 @@ import {
     iosCard, iosInput, iosBtnPrimary, iosBtnSecondary,
     IosBadge, IosModal,
 } from '../ui/ios';
+import IosDatePicker from '../ui/DatePicker';
 import useStableCallback from './useStableCallback';
 import OfficeEditor from './OfficeEditor';
 import OfficeFilters, { DEFAULT_FILTERS, SORT_OPTIONS } from './OfficeFilters';
@@ -146,12 +147,14 @@ const shiftDay = (dayISO, days) => {
     return date.toISOString().slice(0, 10);
 };
 
-/* Поле даты набрано классами iosInput без w-full: рядом с w-full класс w-auto
+/* Вид триггера даты. Классы iosInput без w-full: рядом с w-full класс w-auto
    ничего не перебивает (побеждает порядок в CSS, а не в атрибуте), и поле
-   растягивалось на всю строку панели. */
-const dateInput = 'shrink-0 rounded-xl bg-slate-100 px-3.5 py-2.5 text-[14px] tabular-nums '
-    + 'font-medium text-slate-900 border-0 ring-1 ring-slate-200 transition '
-    + 'focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
+   растягивалось на всю строку панели.
+   Высота собрана из py-2.5 и text-[14px] под соседние кнопки-стрелки h-9 —
+   строка обязана оставаться выровненной. */
+const dateTrigger = 'flex shrink-0 items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
+    + 'text-[14px] tabular-nums font-medium text-slate-900 border-0 ring-1 ring-slate-200 '
+    + 'transition hover:bg-slate-200/70 focus:outline-none focus:ring-2 focus:ring-blue-500/70';
 
 /* Вид и сортировку помним между заходами: раздел открывают каждый день, и
  * выбирать «таблицу» заново каждое утро — работа, которую делать не надо.
@@ -463,13 +466,12 @@ export default function WikiOffices({ base, headers, showToast }) {
                     >
                         <ChevronLeft size={16} />
                     </button>
-                    <input
-                        type="date"
-                        className={dateInput}
+                    <IosDatePicker
                         value={dayISO}
                         max={today}
-                        onChange={(e) => setDayISO(e.target.value || today)}
-                        aria-label="Дата, на которую показан статус"
+                        onChange={(iso) => setDayISO(iso || today)}
+                        ariaLabel="Дата, на которую показан статус"
+                        triggerClassName={dateTrigger}
                     />
                     <button
                         type="button"
