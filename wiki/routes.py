@@ -261,7 +261,9 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     routes_articles.register(bp, wiki_route, db, _ip, gcs or {})
 
     from . import routes_edit
-    routes_edit.register(bp, wiki_route, db, _ip, session_id_provider)
+    # Возвращает общие замыкания (проверка прав на статью, право на раздел,
+    # синхронизация индекса ИИ) — их переиспользует перенос из внешней вики.
+    edit_helpers = routes_edit.register(bp, wiki_route, db, _ip, session_id_provider)
 
     from . import routes_import
     routes_import.register(bp, wiki_route, db, _ip, gcs or {})
@@ -280,5 +282,10 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     from . import routes_trainers
     routes_trainers.register(bp, wiki_route, db, _ip)
+
+    # Перенос из внешней вики — после routes_edit: берёт у него помощники.
+    from . import routes_migration
+    routes_migration.register(bp, wiki_route, db, _ip, session_id_provider,
+                              edit_helpers)
 
     return bp

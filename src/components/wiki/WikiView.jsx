@@ -2,7 +2,8 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
-    AlertCircle, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound, Layers, MapPin,
+    AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
+    Layers, MapPin,
     Network,
     Building2, ChevronDown, Loader2, Pencil, Plus, RefreshCw, ScrollText, ShieldCheck,
     Sparkles, Users,
@@ -16,6 +17,7 @@ import WikiParks from './WikiParks';
 import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
 import WikiTrainers from './WikiTrainers';
+import WikiMigration from './WikiMigration';
 import WikiAudit from './WikiAudit';
 import WikiSearch from './WikiSearch';
 import WikiSpaceModal from './WikiSpaceModal';
@@ -69,6 +71,12 @@ const MODES = [
        и «чем это отрабатывают». Отдельным пунктом меню они стали бы четвёртой
        вкладкой с двумя карточками внутри. */
     { key: 'trainers', label: 'Тренажёры', icon: Gamepad2 },
+    /* Перенос — половина ВРЕМЕННАЯ: она есть, только пока в очереди есть
+       неразобранные статьи из старой вики (см. catalogModes ниже). Разберут
+       очередь — половина исчезнет сама, и переключатель вернётся к трём
+       кнопкам. Постоянная кнопка, которая одиннадцать месяцев в году открывает
+       «ничего нет», — это ровно тот шум, которого в разделе быть не должно. */
+    { key: 'migration', label: 'Перенос', icon: ArrowDownToLine },
 ];
 
 /* Порядок половин — он же направление, с которого приезжает содержимое. */
@@ -412,7 +420,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // Тренажёры — редактору: это инструмент того, кто СТАВИТ тренажёр в
         // статью. Читателю он не нужен, тренажёр к нему приходит кнопкой в тексте.
         ...(isEditor && features.catalog_trainers ? ['trainers'] : []),
-    ], [isEditor, canManageStructure, canGrantAccess, features]);
+        /* Перенос — по ОСТАТКУ работы, а не по тумблеру пространства: это разовая
+           процедура, а не часть раздела, и настраивать её видимость незачем.
+           Число берём из каталога — он уже посчитал периметр, и половина
+           появляется ровно тогда, когда за ней есть что показать. */
+        ...(isEditor && (catalog?.migration?.pending || 0) > 0 ? ['migration'] : []),
+    ], [isEditor, canManageStructure, canGrantAccess, features, catalog]);
 
     /* Сторона, с которой въезжает выбранная половина. Предыдущую держим в ref,
        а не в состоянии: она нужна только для стартового смещения анимации, и
@@ -813,7 +826,24 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                 ? { duration: 0 }
                                 : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
                         >
-                            {catalogMode === 'trainers' ? (
+                            {catalogMode === 'migration' ? (
+                                <WikiMigration
+                                    base={base}
+                                    headers={headers}
+                                    showToast={showToast}
+                                    space={activeSpace}
+                                    /* Статья открывается там же, где все
+                                       статьи, — на главной: второго экрана
+                                       статьи в разделе быть не должно. */
+                                    onOpenArticle={(slug) => {
+                                        setTab('library');
+                                        setSearchTarget({ slug });
+                                    }}
+                                    /* Решение меняет корзину статьи и остаток
+                                       очереди — и то и другое живёт в каталоге. */
+                                    onReviewed={loadCatalog}
+                                />
+                            ) : catalogMode === 'trainers' ? (
                                 <WikiTrainers
                                     base={base}
                                     headers={headers}

@@ -10,6 +10,7 @@ from flask import jsonify, redirect, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
+from . import migration as wiki_migration
 from . import perimeter as wiki_perimeter
 from . import queries
 from . import schema as wiki_schema
@@ -175,6 +176,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
             "orphans": counts['orphans'],
             "totals": counts['totals'],
             "sections_total": len(sections),
+            # Остаток работы по переносу из внешней вики. Здесь, а не отдельным
+            # запросом: периметр уже посчитан, и второй его расчёт ради одного
+            # счётчика был бы платой ни за что. Из этого числа интерфейс решает,
+            # показывать ли половину «Перенос», поэтому периметр обязан быть тот
+            # же, что у очереди за ней.
+            "migration": wiki_migration.totals_for(cursor, visible),
         })
 
     # ── Тренажёры ────────────────────────────────────────────────────────

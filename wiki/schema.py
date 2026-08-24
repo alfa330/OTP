@@ -1399,6 +1399,86 @@ _TRAINER_STATEMENTS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ПЕРЕНОС СТАТЕЙ ИЗ ВНЕШНЕЙ ВИКИ И ИХ МОДЕРАЦИЯ
+#
+# Отдельная таблица, а не колонки в wiki_articles, и не расширение CHECK'а
+# статуса — по трём причинам, и каждая проверена на этом переносе.
+#
+# 1. ПРОВЕНАНС ЖИВЁТ ДОЛЬШЕ РЕШЕНИЯ. Строка отвечает на «откуда это взялось»
+#    и после того, как статью опубликовали или убрали в архив. Колонка
+#    moderation_state в самой статье обнулилась бы вместе с решением, и через
+#    месяц никто не ответил бы, что именно приехало из старой вики.
+# 2. НОВОГО СТАТУСА НЕ НУЖНО. «Ждёт модерации» — это не состояние текста, а
+#    состояние РАБОТЫ над ним. Текст при этом обычный черновик, и его уже
+#    правильно скрывают от читателя (wiki/articles.py: status = 'published'
+#    OR автор OR can_see_drafts). Добавь седьмой статус — и его пришлось бы
+#    разложить по ARTICLE_BUCKETS, по периметру ИИ, по счётчикам и по четырём
+#    местам, где статусы перечислены руками.
+# 3. ПОВТОРНЫЙ ПРОГОН НЕ ДОЛЖЕН ПЛОДИТЬ КОПИИ. Уникальный индекс по
+#    (source, source_id) — единственная надёжная защита от этого: сверка по
+#    slug ломается, как только slug в приёмнике занят и к нему дописали «-2».
+#
+# Вердикт ИИ хранится СНИМКОМ, а не пересчитывается при показе очереди. Вектор
+# считает внешний сервис, и открытие очереди из сорока статей означало бы сорок
+# обращений наружу на каждое нажатие «Обновить». Снимок берётся один раз, в
+# момент переноса — тогда же, когда статья и попадает в приёмник.
+# ─────────────────────────────────────────────────────────────────────────────
+_MIGRATION_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_article_imports (
+        article_id     INTEGER PRIMARY KEY
+                       REFERENCES wiki_articles(id) ON DELETE CASCADE,
+        -- Код источника: 'wikijs' — старая корпоративная вика на Wiki.js 2.
+        -- Строкой, а не ссылкой на справочник: источников переноса за всё время
+        -- два-три, и таблица на три строки читалась бы хуже, чем это поле.
+        source         VARCHAR(32) NOT NULL,
+        source_id      INTEGER,
+        source_slug    VARCHAR(255),
+        -- Название и статус в ИСТОЧНИКЕ снимком: в приёмнике статью переименуют
+        -- при модерации, а сверять с оригиналом надо будет по тому имени, под
+        -- которым она там лежала. Источник к тому моменту уже недоступен.
+        source_title   VARCHAR(255),
+        source_status  VARCHAR(32),
+        -- Вердикт проверки на дубль. 'unique' — ничего похожего не нашли;
+        -- degraded отдельным флагом, потому что «не нашли» и «не смогли
+        -- посмотреть» — разные ответы, и склеивать их значит врать в обоих.
+        dedup_verdict  VARCHAR(16) NOT NULL DEFAULT 'unique',
+        dedup_score    NUMERIC(5, 4),
+        dedup_match_id INTEGER REFERENCES wiki_articles(id) ON DELETE SET NULL,
+        dedup_note     TEXT,
+        dedup_degraded BOOLEAN NOT NULL DEFAULT FALSE,
+        imported_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        imported_at    TIMESTAMP NOT NULL DEFAULT %(now)s,
+        reviewed_by    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_at    TIMESTAMP,
+        review_action  VARCHAR(16),
+        review_note    TEXT,
+        CONSTRAINT wiki_article_imports_verdict_check
+            CHECK (dedup_verdict IN ('unique', 'nearby', 'similar', 'duplicate')),
+        CONSTRAINT wiki_article_imports_action_check
+            CHECK (review_action IS NULL
+                   OR review_action IN ('published', 'kept', 'discarded')),
+        -- Решение и его автор приходят вместе или не приходят вовсе: строка с
+        -- reviewed_at без review_action означала бы «промодерировано неизвестно
+        -- как», и очередь показывала бы её как закрытую.
+        CONSTRAINT wiki_article_imports_review_check
+            CHECK ((reviewed_at IS NULL AND review_action IS NULL)
+                   OR (reviewed_at IS NOT NULL AND review_action IS NOT NULL))
+    );
+    """,
+    # Главный запрос очереди — «что ещё не смотрели», и он частичный: закрытых
+    # строк со временем становится в разы больше, чем открытых.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_article_imports_pending "
+    "ON wiki_article_imports (source, imported_at) WHERE reviewed_at IS NULL;",
+    # Защита от второго переноса той же статьи. Частичный: source_id пуст у
+    # строк, восстановленных по slug, и NULL'ы в уникальном индексе не считаются
+    # равными — без WHERE такие строки прошли бы, а смысла в них нет.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_wiki_article_imports_source "
+    "ON wiki_article_imports (source, source_id) WHERE source_id IS NOT NULL;",
+]
+
+
 _SPACE_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS wiki_space_departments (
@@ -1684,6 +1764,11 @@ def init_wiki_schema(cursor):
     # Прохождения тренажёров — после базовых таблиц: строка ссылается и на
     # users, и на wiki_articles.
     for statement in _TRAINER_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Перенос из внешней вики — после базовых таблиц: строка ссылается и на
+    # wiki_articles, и на users.
+    for statement in _MIGRATION_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
 
     for statement in _PARK_STATEMENTS:

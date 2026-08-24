@@ -592,3 +592,19 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                                            if removed.get('subject_type') == 'user' else None),
                            details=removed, ip_address=log_ip())
         return jsonify({"status": "deleted"})
+
+    # Общие для роутов статьи помощники — наружу, а не копией.
+    #
+    # Перенос из внешней вики (routes_migration.py) делает ровно то же, что
+    # создание и правка: проверяет право на КОНКРЕТНУЮ статью, спрашивает право
+    # на раздел и синхронизирует индекс помощника. Все три — замыкания: они
+    # держат session_id_provider и log_ip, которые приходят аргументами в этот
+    # register. Второй набор таких же в соседнем модуле однажды разошёлся бы с
+    # этим — а расходиться им нельзя, это проверки доступа.
+    return {
+        'load_with_permissions': _load_with_permissions,
+        'forbidden_sections': _forbidden_sections,
+        'section_forbidden': _section_forbidden,
+        'sync_ai_index': _sync_ai_index,
+        'perimeter': _perimeter,
+    }

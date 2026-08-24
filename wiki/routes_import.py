@@ -14,7 +14,9 @@ document_import_sessions, правился во внешнем ONLYOFFICE и т�
   * /import/ai — тот же разбор плюс сборка статьи моделью и проверка на дубль;
   * /articles/similar — та же проверка на дубль, но по тому, что уже набрано в
     редакторе (кнопка «Такая статья уже есть?»). Живёт здесь, а не в routes_ai,
-    потому что делит с импортом одну реализацию поиска похожего.
+    потому что делит с импортом одну дверь для редактора. Сама реализация — в
+    wiki/migration.py: третья дверь к ней, перенос из внешней вики, отвечает на
+    тот же вопрос, и трёх копий одной проверки быть не должно.
 
 Сборка включается флажком «Поддержка ИИ» в редакторе, и без него /import/ai
 отказывает: отправка чужого документа наружу должна быть осознанным действием
@@ -28,21 +30,18 @@ document_import_sessions, правился во внешнем ONLYOFFICE и т�
 """
 
 import os
-import re
 
 from flask import jsonify, request
 
 from . import articles as wiki_articles
 from . import importer as wiki_importer
-from . import perimeter as wiki_perimeter
+from . import migration as wiki_migration
 from . import queries
 from . import sanitize as wiki_sanitize
 from .routes_structure import _int_or_none
 from .ai import authoring as ai_authoring
-from .ai import embed as ai_embed
 from .ai import providers as ai_providers
 from .ai import revise as ai_revise
-from .ai import similar as ai_similar
 
 # Картинки и PDF модель читает сама — см. шапку wiki/ai/authoring.py про то,
 # почему для них нет другого пути.
@@ -123,16 +122,6 @@ def register(bp, wiki_route, db, log_ip, gcs):
         return jsonify(result)
 
     # ── Импорт документа через ИИ ────────────────────────────────────────
-    def _document_words(plain):
-        """Слова документа для лексической ветки поиска дублей.
-
-        dict.fromkeys сохраняет порядок первого появления: начало документа
-        описывает тему точнее, чем его хвост, а брать все слова статьи на 17
-        тысяч знаков (максимум корпуса) — значит утопить редкие слова в частых.
-        """
-        words = re.findall(r'[^\W\d_]{4,}', str(plain or '').lower(), re.UNICODE)
-        return list(dict.fromkeys(words))[:40]
-
     def _document_links(ext, data):
         """Ссылки документа. Для PDF их иначе не получить вовсе.
 
@@ -147,43 +136,6 @@ def register(bp, wiki_route, db, log_ip, gcs):
             return wiki_importer.pdf_links(data)
         except Exception:
             return []      # битые аннотации не повод отказать в сборке статьи
-
-    def _duplicates(cursor, ctx, *, title, content, exclude_id=None,
-                    allow_vector=True):
-        """Есть ли уже такая статья. Пустой ответ — не доказательство отсутствия.
-
-        allow_vector=False — смысловая ветка не считается ВООБЩЕ. Это не
-        оптимизация: вектор считает внешний сервис, то есть текст статьи уходит
-        наружу, а панель обещает ровно обратное, пока флажок «Поддержка ИИ»
-        выключен. Обещание, которое нарушается там, где этого не видно, хуже
-        отсутствующего. По названию и словам текста проверка при этом работает —
-        она целиком у нас в базе.
-
-        Вектор считается по названию и НАЧАЛУ текста, а не по всей статье: у
-        документа на 17 тысяч знаков (максимум корпуса) вектор целого текста
-        размывается до бессмысленного, а тема живёт в первых абзацах.
-        """
-        _subjects, _sections, visible = wiki_perimeter.read_perimeter(cursor, ctx)
-        indexed = wiki_perimeter.eligible_article_ids(cursor, visible)
-        plain = wiki_sanitize.to_plain_text(content)
-        probe = ('%s. %s' % (title or '', plain[:1200])).strip()
-
-        vector = None
-        if allow_vector:
-            try:
-                vector = ai_embed.embed_query(probe)
-            except Exception:
-                vector = None      # лексика справится и одна, см. wiki/ai/similar.py
-
-        found = ai_similar.find_duplicates(
-            cursor, visible_ids=visible, indexed_ids=indexed,
-            title=title, text_words=_document_words(plain), vector=vector,
-            exclude_id=exclude_id)
-        # degraded — про сбой эмбеддингов, а не про выключенный флажок: это
-        # разные причины неполноты, и смешивать их значит врать в обеих.
-        found['degraded'] = allow_vector and vector is None
-        found['ai_support'] = bool(allow_vector)
-        return found
 
     @wiki_route('/import/ai', methods=('POST',), capability='can_create')
     def wiki_import_ai(cursor, ctx):
@@ -262,8 +214,8 @@ def register(bp, wiki_route, db, log_ip, gcs):
             draft['warnings'].append('Источник — изображение: сверить числа с '
                                      'документом программа не может, проверьте их сами')
 
-        duplicates = _duplicates(cursor, ctx, title=draft['title'],
-                                 content=draft['content'])
+        duplicates = wiki_migration.duplicate_probe(
+            cursor, ctx, title=draft['title'], content=draft['content'])
 
         meta = draft.get('meta') or {}
         queries.log_action(
@@ -421,8 +373,9 @@ def register(bp, wiki_route, db, log_ip, gcs):
             exclude = None
         # Флажок выключен — ищем только у себя в базе, наружу ничего не отдаём.
         allow_vector = str(data.get('ai_support', True)).strip().lower() in _TRUE
-        return jsonify(_duplicates(cursor, ctx, title=title, content=content,
-                                   exclude_id=exclude, allow_vector=allow_vector))
+        return jsonify(wiki_migration.duplicate_probe(
+            cursor, ctx, title=title, content=content,
+            exclude_id=exclude, allow_vector=allow_vector))
 
     # ── Загрузка картинки из редактора ───────────────────────────────────
     @wiki_route('/upload', methods=('POST',), capability='can_create')
