@@ -14798,6 +14798,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, [user?.id, user?.role]);
 
             // Подробности грузятся лениво — по клику на конкретный день.
+            // Текст ошибки собираем здесь: сервер отвечает по-английски, а в панель
+            // должно попасть предложение, понятное супервайзеру.
             const fetchPlannerHistoryEntries = useCallback(async (operatorId, date) => {
                 const qs = new URLSearchParams({
                     mode: 'entries',
@@ -14811,7 +14813,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     headers: withAccessTokenHeader()
                 });
                 const data = await response.json().catch(() => ({}));
-                if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                if (!response.ok) {
+                    console.error('История изменений графика:', response.status, data?.error);
+                    if (response.status === 401) throw new Error('Сессия истекла — войдите заново.');
+                    if (response.status === 403) throw new Error('Нет доступа к истории этого оператора.');
+                    throw new Error('Не удалось загрузить историю. Попробуйте ещё раз.');
+                }
                 return Array.isArray(data?.items) ? data.items : [];
             }, []);
 
