@@ -35,6 +35,11 @@ import useStableCallback from './useStableCallback';
  * ответом, а не назвала модель. Клик по чипу открывает статью с подсветкой —
  * плумбинг тот же, что у поиска раздела.
  *
+ * ВОПРОС ПРИХОДИТ И ИЗ ПОИСКА РАЗДЕЛА (askRequest): не нашлось статьи — из
+ * выдачи предлагают спросить здесь, и вопрос уходит сам, без второго набора.
+ * Отправку ждёт статус помощника: пока неизвестно, выдан ли ему доступ и собран
+ * ли индекс, отправлять некуда, а терять вопрос нельзя — он лёг бы в пустоту.
+ *
  * ОТВЕТ РЕНДЕРИТСЯ РАЗМЕТКОЙ, включая таблицы (src/components/ui/markdown.jsx).
  * Таблица — главный формат справочных данных вики: город, цена, срок, парк; в
  * корпусе их 63, и помощник отвечает такими же. Плоским текстом такая таблица
@@ -118,9 +123,11 @@ const SourceChip = ({ source, onOpen }) => {
 };
 
 export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
-                                        spaceId = null }) {
+                                        spaceId = null,
+                                        askRequest = null, onAskRequestConsumed }) {
     const toast = useStableCallback(showToast);
     const openArticle = useStableCallback(onOpenArticle);
+    const consumeAskRequest = useStableCallback(onAskRequestConsumed);
 
     const [status, setStatus] = useState(null);
     const [chats, setChats] = useState([]);
@@ -131,6 +138,13 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [confirmDelete, setConfirmDelete] = useState(null);
+    /* Вопрос, пришедший из поиска раздела. Ждёт здесь, пока не станет ясно,
+       доступен ли помощник вообще: /ai/status отвечает уже после первого
+       рендера, и отправка «на удачу» упиралась бы в отключённый композер. */
+    const [pendingAsk, setPendingAsk] = useState(null);
+    // Отдельно от status: неудачный запрос тоже кладёт туда null, а вопрос
+    // в этом случае обязан не потеряться, а лечь в поле ввода.
+    const [statusReady, setStatusReady] = useState(false);
 
     // Гонки: ответ на старый чат не должен затирать открытый (приём из Wazzup).
     const threadRequest = useRef(0);
@@ -139,7 +153,8 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
     const loadStatus = useCallback(() => {
         axios.get(`${base}/ai/status`, { headers, params: { space_id: spaceId } })
             .then((r) => setStatus(r.data))
-            .catch(() => setStatus(null));
+            .catch(() => setStatus(null))
+            .finally(() => setStatusReady(true));
     }, [base, headers]);
 
     const loadChats = useCallback(() => {
@@ -254,6 +269,27 @@ export default function WikiAssistant({ base, headers, showToast, onOpenArticle,
     }, [noAccess, status, indexReady]);
 
     const canAsk = !noAccess && indexReady;
+
+    /* Пришли из поиска раздела: чат открываем чистый, вопрос запоминаем.
+       Просьбу гасим сразу — иначе возврат на вкладку помощника переспрашивал бы
+       одно и то же при каждом рендере родителя. */
+    useEffect(() => {
+        if (!askRequest?.text) return;
+        startNewChat();
+        setError('');
+        setPendingAsk(askRequest.text);
+        consumeAskRequest();
+    }, [askRequest, startNewChat, consumeAskRequest]);
+
+    useEffect(() => {
+        if (!pendingAsk || busy || !statusReady) return;
+        setPendingAsk(null);
+        /* Помощник недоступен — статей ему не выдали, индекс пуст или статус не
+           ответил. Вопрос не выбрасываем, а кладём в поле ввода: причина уже
+           написана баннером выше, и перепечатывать её человеку не за что. */
+        if (!canAsk) { setDraft(pendingAsk); return; }
+        ask(pendingAsk);
+    }, [pendingAsk, busy, statusReady, canAsk, ask]);
 
     return (
         <div className="space-y-3">

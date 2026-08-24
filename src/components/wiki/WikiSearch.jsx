@@ -14,6 +14,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { matchBrand, matchCar } from './carMatch';
+import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 
 /* Поиск по вики — порт search-modal.tsx исходной вики на примитивы портала.
@@ -33,6 +34,12 @@ import useStableCallback from './useStableCallback';
  *      (транслит, раскладка, алиасы — searchText.js) по справочнику
  *      классификатора, и если это марка/модель, справа открывается бар
  *      с тарифами по городу и году.
+ *
+ * Третий выход — Помощник (WikiAskAssistant): тем же запросом можно спросить
+ * чат по базе знаний. Под найденными статьями это тихая строка, а когда не
+ * нашлось ничего — карточка вместо тупика «ничего не найдено». Помощник —
+ * такая же строка выдачи, как статья: он входит в rows, ходится стрелками и
+ * открывается по Enter.
  *
  * Справочник классификатора (106 КБ) грузится динамическим import при первом
  * обращении и кэшируется на модуль — в бандл вики он не входит.
@@ -70,6 +77,24 @@ const snippetHtml = (snippet) => escapeHtml(snippet)
 export const markedWord = (snippet, fallback) => {
     const match = /<mark>(.*?)<\/mark>/i.exec(String(snippet || ''));
     return (match && match[1].trim()) || fallback;
+};
+
+/* Плоский список того, по чему ходят стрелки: сначала статьи, следом
+   дополнительные фрагменты («Совпадения в тексте»), последним — помощник.
+   В оригинале клавиатура так же шла сквозь обе секции.
+
+   Вынесено из компонента и экспортировано ради теста: порядок строк — это и
+   есть поведение клавиатуры, а проверять его кликами по выпадашке нечем. */
+export const searchRows = (items, withAssistant = false) => {
+    const articles = (items || []).map((item) => ({ kind: 'article', item }));
+    const fragments = [];
+    (items || []).forEach((item) => {
+        (item.highlights || []).slice(1).forEach((fragment, index) => {
+            fragments.push({ kind: 'fragment', item, fragment, index });
+        });
+    });
+    const found = articles.concat(fragments);
+    return withAssistant ? found.concat([{ kind: 'assistant' }]) : found;
 };
 
 /* Человек тянул мышью по строке, чтобы скопировать кусок сниппета — а mouseup
@@ -205,16 +230,27 @@ const SectionLabel = ({ icon: Icon, children }) => (
 /** Левая колонка: модели марки, статьи и совпадения в тексте.
  *
  * Одна и та же для выпадашки и для мобильного листа — иначе две верстки
- * неизбежно разъезжаются.
+ * неизбежно разъезжаются. Экспортируется ради теста: сам WikiSearch держит
+ * портал мобильного листа и в серверном рендере не поднимается.
  */
-function ResultsPane({
+export function ResultsPane({
     term, rows, articleRows, fragmentRows, selectedIndex, onHover, onPick,
     brandModels, matchedBrand, activeCar, onPickCar,
     loading, failed, onRetry, classifierFailed, listRef, maxHeight,
 }) {
     const showEmpty = !loading && !failed && term.length >= 2
-        && rows.length === 0 && brandModels.length === 0;
+        && articleRows.length === 0 && fragmentRows.length === 0
+        && brandModels.length === 0;
     const rowClass = (index) => (index === selectedIndex ? 'bg-indigo-50' : 'hover:bg-slate-50');
+
+    /* Помощник живёт в общем списке строк — иначе он выпал бы из клавиатуры.
+       Индекс берём оттуда же, а не считаем «последний»: список строит родитель,
+       и второе место, знающее его состав, однажды с ним разойдётся. */
+    const askRow = rows.find((row) => row.kind === 'assistant') || null;
+    const askIndex = askRow ? rows.indexOf(askRow) : -1;
+    /* Карточкой помощник встаёт, только когда искать больше нечего. Машина
+       найдена — ответ уже на экране, и главным в кадре остаётся она. */
+    const askLeads = !!askRow && showEmpty && !activeCar;
 
     return (
         <div className="min-w-0 flex-1">
@@ -238,14 +274,21 @@ function ResultsPane({
                 </div>
             )}
 
-            {showEmpty && (
+            {showEmpty && (askLeads ? (
+                <AskAssistantEmpty
+                    compact
+                    term={term}
+                    onAsk={() => onPick(askRow)}
+                    note="Или попробуйте другое слово: поиск понимает опечатки, латиницу и забытую раскладку."
+                />
+            ) : (
                 <div className="px-3 py-8 text-center text-[13px] text-slate-400">
                     {/* Без «справа»: на телефоне бар классификатора идёт снизу. */}
                     {activeCar
                         ? <>Статей по запросу «{term}» нет —<br />ответ в карточке классификатора</>
                         : <>Ничего не найдено по запросу «{term}»</>}
                 </div>
-            )}
+            ))}
 
             {classifierFailed && term.length >= 2 && (
                 <div className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-[11.5px] text-amber-800">
@@ -370,11 +413,28 @@ function ResultsPane({
                     </div>
                 )}
             </div>
+
+            {/* Под выдачей, а НЕ внутри её прокрутки: предложение спросить
+                обязано быть видно сразу, иначе до него доходит только тот, кто
+                домотал список до конца, — то есть никто. Карточкой помощник уже
+                показан выше, второй раз его не повторяем. */}
+            {askRow && !askLeads && (
+                <div className="mt-1.5 border-t border-slate-100 pt-1.5">
+                    <AskAssistantRow
+                        term={term}
+                        dataRow={askIndex}
+                        selected={selectedIndex === askIndex}
+                        onHover={() => onHover(askIndex)}
+                        onAsk={() => onPick(askRow)}
+                    />
+                </div>
+            )}
         </div>
     );
 }
 
-export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassifier }) {
+export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassifier,
+                                     onAskAssistant = null }) {
     const [query, setQuery] = useState('');
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -405,6 +465,10 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
 
     const openArticle = useStableCallback(onOpenArticle);
     const openClassifier = useStableCallback(onOpenClassifier);
+    const askAssistant = useStableCallback(onAskAssistant);
+    // Сам факт наличия помощника — реактивный: вкладку выключают тумблером
+    // пространства, и строка обязана исчезнуть вместе с ней.
+    const canAskAssistant = !!onAskAssistant;
 
     const term = query.trim();
     const active = focused || sheetOpen;
@@ -480,19 +544,13 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     useEffect(() => { setPickedCar(null); }, [term]);
     const activeCar = pickedCar || matchedCar;
 
-    /* Плоский список того, по чему ходят стрелки: сначала статьи, следом
-       дополнительные фрагменты («Совпадения в тексте»). В оригинале клавиатура
-       так же шла сквозь обе секции. */
-    const rows = useMemo(() => {
-        const articles = items.map((item) => ({ kind: 'article', item }));
-        const fragments = [];
-        items.forEach((item) => {
-            (item.highlights || []).slice(1).forEach((fragment, index) => {
-                fragments.push({ kind: 'fragment', item, fragment, index });
-            });
-        });
-        return articles.concat(fragments);
-    }, [items]);
+    /* Помощник — ПОСЛЕДНЯЯ строка выдачи. Отсюда и клавиатура: при пустом
+       поиске он оказывается нулевой строкой, и Enter сразу уносит вопрос в чат,
+       не заставляя тянуться к мыши. */
+    const rows = useMemo(
+        () => searchRows(items, canAskAssistant && term.length >= 2),
+        [items, canAskAssistant, term],
+    );
 
     const articleRows = useMemo(() => rows.filter((r) => r.kind === 'article'), [rows]);
     const fragmentRows = useMemo(() => rows.filter((r) => r.kind === 'fragment'), [rows]);
@@ -504,10 +562,17 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     }, []);
 
     const pickRow = useCallback((row) => {
+        if (row.kind === 'assistant') {
+            // Закрываемся ДО вопроса: помощник открывается на своей вкладке, и
+            // висящая над ней выпадашка поиска была бы мусором на экране.
+            close();
+            askAssistant(term);
+            return;
+        }
         const source = row.kind === 'fragment' ? row.fragment : row.item.snippet;
         close();
         openArticle(row.item.slug, markedWord(source, term));
-    }, [close, openArticle, term]);
+    }, [close, openArticle, askAssistant, term]);
 
     /* Прокрутка выделенного — ТОЛЬКО под стрелками. Без этого условия любая
        новая выдача проматывала список к первой статье, унося за верхний край
@@ -592,9 +657,24 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
        Само по себе центрирование может увести широкий блок (с баром
        классификатора это 900 px) за край экрана, поэтому после раскладки
        замеряем и при необходимости подвигаем обратно. Замер идёт от
-       НЕсдвинутого положения (r.left - shift), иначе поправка накапливалась бы
-       от прохода к проходу. */
+       НЕсдвинутого положения (rect.left - shift), иначе поправка накапливалась
+       бы от прохода к проходу.
+
+       СДВИГ — ТОЛЬКО TRANSFORM, и это не косметика. Раньше здесь стоял
+       marginLeft, и он ронял весь раздел в белый экран: у абсолютного блока с
+       left:50% и шириной по содержимому доступная ширина считается от left, то
+       есть отрицательный marginLeft её УВЕЛИЧИВАЕТ. Блок становился шире —
+       замер давал новую поправку — поправка снова меняла ширину, и так по
+       кругу, пока React не обрывал его на пятидесятом («Maximum update depth
+       exceeded»). Ловилось на закрытии по Escape, по Enter и просто на стирании
+       запроса — везде, где поправка была ненулевой, то есть когда поле поиска
+       близко к краю экрана. transform на раскладку не влияет вовсе, поэтому
+       замер после него совпадает с замером до и круг сходится за один проход. */
+    const dropOpen = focused && term.length >= 2;
     useLayoutEffect(() => {
+        // Закрывающуюся выпадашку не меряем: AnimatePresence держит её в DOM
+        // ещё 120 мс, и это замер уезжающего блока.
+        if (!dropOpen) return;
         const el = dropRef.current;
         if (!el) return;
         const GAP = 12;
@@ -691,11 +771,11 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
             {/* Выпадашка: выходит ПОД полем, ничего не затемняя, и расширяется
                 влево, когда справа появляется бар классификатора. */}
             <AnimatePresence>
-                {focused && term.length >= 2 && (
+                {dropOpen && (
                     <div
                         ref={dropRef}
-                        className="absolute left-1/2 top-full z-40 mt-2 hidden -translate-x-1/2 sm:block"
-                        style={{ marginLeft: shift }}
+                        className="absolute left-1/2 top-full z-40 mt-2 hidden sm:block"
+                        style={{ transform: `translateX(calc(-50% + ${shift}px))` }}
                     >
                     <motion.div
                         initial={reduceMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.99 }}

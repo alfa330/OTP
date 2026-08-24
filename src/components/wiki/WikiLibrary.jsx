@@ -8,6 +8,7 @@ import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
 import WikiPark from './WikiPark';
 import { markedWord } from './WikiSearch';
+import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
 import { selectableSections } from './sectionPicker';
@@ -99,7 +100,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                       onOpenParks, onOpenCatalog, reloadCatalog,
                                       initialSlug, onInitialSlugConsumed,
                                       searchTarget, onSearchTargetConsumed,
-                                      features = null, spaceId = null }) {
+                                      features = null, spaceId = null,
+                                      onAskAssistant = null }) {
     /* Колбэки родителя стабилизируем: showToast — обычная функция в теле App,
        onSearchTargetConsumed — инлайновая стрелка в WikiView. Без этого список
        статей перезапрашивался на каждый чужой рендер (см. useStableCallback). */
@@ -109,6 +111,8 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const consumeCreate = useStableCallback(onCreateConsumed);
     const consumeEditTarget = useStableCallback(onEditTargetConsumed);
     const refreshCatalog = useStableCallback(reloadCatalog);
+    const askAssistant = useStableCallback(onAskAssistant);
+    const canAskAssistant = !!onAskAssistant;
 
     const [openSlug, setOpenSlug] = useState(initialSlug || null);
     // Открытый парк — такая же страница витрины, как статья (см. WikiPark).
@@ -521,6 +525,25 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                                 <ArticleCard key={article.id} article={article}
                                              onOpen={() => openHit(article)} />
                             ))}
+                            {/* Статьи нашлись, но ответа в них может и не быть:
+                                выход к помощнику остаётся под выдачей — тихой
+                                строкой, тем же видом, что и в поиске шапки. */}
+                            {canAskAssistant && (
+                                <div className={`${iosCard} p-1.5`}>
+                                    <AskAssistantRow
+                                        term={query.trim()}
+                                        onAsk={() => askAssistant(query.trim())}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    ) : canAskAssistant ? (
+                        <div className={iosCard}>
+                            <AskAssistantEmpty
+                                term={query.trim()}
+                                onAsk={() => askAssistant(query.trim())}
+                                note="Или попробуйте другое слово: поиск понимает опечатки, латиницу и забытую раскладку."
+                            />
                         </div>
                     ) : (
                         <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>

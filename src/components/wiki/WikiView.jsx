@@ -216,6 +216,10 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     const [structureLoading, setStructureLoading] = useState(true);
     const [tab, setTab] = useState('library');
     const [searchTarget, setSearchTarget] = useState(null);   // {slug, highlight}
+    /* Вопрос, уехавший из поиска к помощнику. Просьба одноразовая, как
+       createRequest: помощник её выполняет и гасит. Своим id, а не текстом —
+       один и тот же запрос, заданный дважды подряд, обязан уйти дважды. */
+    const [assistantAsk, setAssistantAsk] = useState(null);   // {id, text}
     /* Каталог разделов — данные вкладки «Статьи». Живут ЗДЕСЬ, а не в ней, по
        двум причинам: счётчики на главной берут из них свои числа (иначе «29
        статей» и список за плиткой считались бы разными запросами и разошлись),
@@ -409,6 +413,21 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
     ].filter((t) => t.show)),
     [canManageStructure, canManageAccess, canGrantAccess, isEditor, features]);
 
+    /* Поиск предлагает спросить помощника ровно тогда, когда вкладка помощника
+       вообще есть: у пространства без неё это была бы кнопка в никуда.
+       Периметр и готовность индекса проверяет уже сам помощник — знать о них
+       поиску не нужно, а лишний запрос /ai/status на каждый заход в раздел
+       стоил бы дороже редкого перехода на пустой чат. */
+    const canAskAssistant = useMemo(
+        () => tabs.some((t) => t.key === 'assistant'), [tabs]);
+
+    const askAssistant = useCallback((question) => {
+        const text = String(question || '').trim();
+        if (!text) return;
+        setTab('assistant');
+        setAssistantAsk({ id: `${Date.now()}-${text}`, text });
+    }, []);
+
     /* Половины вкладки «Статьи» гейтятся по отдельности: каталог — редактору,
        структура — тому, кто правит дерево или раздаёт доступы. Обычно человек
        имеет обе (см. матрицу в wiki/access.py), но роль вики можно собрать
@@ -540,6 +559,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                 setTab('library');
                                 setSearchTarget({ slug: CLASSIFIER_SLUG, prefill });
                             }}
+                            onAskAssistant={canAskAssistant ? askAssistant : null}
                         />
 
                         <button type="button" onClick={refresh} className={iosBtnSecondary}>
@@ -750,6 +770,9 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         onInitialSlugConsumed={onInitialArticleConsumed}
                         searchTarget={searchTarget}
                         onSearchTargetConsumed={() => setSearchTarget(null)}
+                        /* Поиск на витрине — тот же поиск, что в шапке, и выход
+                           к помощнику у них обязан быть один и тот же. */
+                        onAskAssistant={canAskAssistant ? askAssistant : null}
                     />
                 )}
 
@@ -771,6 +794,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                кому выдано два пространства, ответ иначе собрался
                                бы из обоих вперемешку. */
                             spaceId={activeSpace?.id || null}
+                            askRequest={assistantAsk}
+                            onAskRequestConsumed={() => setAssistantAsk(null)}
                             onOpenArticle={(slug, highlight) => {
                                 setTab('library');
                                 setSearchTarget({ slug, highlight });
