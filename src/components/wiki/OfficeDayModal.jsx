@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { iosBtnPrimary, iosBtnSecondary, iosGroupLabel, iosInput, IosModal } from '../ui/ios';
+import IosDatePicker from '../ui/DatePicker';
 import { formatDay, formatDayShort, officeDayStatus } from './officeDayStatus';
 
 /* Отметка «офис открыт / закрыт» и закрытие на срок.
@@ -51,6 +52,18 @@ const Segmented = ({ value, options, onChange }) => (
     </div>
 );
 
+/* Вид триггера даты повторяет соседнее поле причины: те же габариты iosInput
+   (px-3.5 py-2.5, text-[14px]) и та же ширина во всю строку — кнопка по ширине
+   содержимого выглядела бы в столбце полей обрезком. Классы выписаны, а не
+   склеены с iosInput, потому что у кнопки свои состояния: placeholder красит
+   сам пикер, а фокусное кольцо нужно и без focus:bg-white.
+   Подпись внутри триггера растягиваем ([&>span]:flex-1), чтобы стрелка ушла к
+   правому краю: в поле во всю ширину она иначе висит посреди пустоты, а у
+   системного поля значок стоял именно справа. */
+const dateTrigger = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
+    + 'text-[14px] tabular-nums text-slate-900 border-0 transition hover:bg-slate-200/70 '
+    + 'focus:outline-none focus:ring-2 focus:ring-blue-500/70 [&>span]:flex-1 [&>span]:text-left';
+
 /** Следующий календарный день — минимум для даты открытия: закрытие, которое
  *  кончается в день своего начала, это не закрытие. */
 const nextDay = (dayISO) => {
@@ -77,6 +90,7 @@ export default function OfficeDayModal({ office, dayISO, busy, onSubmit, onClear
     // действие «считать по графику», а не два разных.
     const hasRecord = office?.day?.source === 'manual' || !!closure;
 
+    const minUntil = nextDay(dayISO);
     const closedTerm = state === 'closed' ? term : 'day';
     const invalid = closedTerm === 'until' && (!until || until <= dayISO);
 
@@ -133,13 +147,24 @@ export default function OfficeDayModal({ office, dayISO, busy, onSubmit, onClear
                                     интерфейс и таблица расходились бы на сутки.
                                     Подпись снизу проговаривает обе границы, чтобы
                                     угадывать не пришлось. */}
-                                <input
-                                    type="date"
-                                    className={`${iosInput} mt-2`}
+                                {/* Кнопки «Очистить» здесь нет (allowEmpty
+                                    выключен): пустое поле — единственное
+                                    состояние, из которого форма не сохраняется,
+                                    и предлагать его кнопкой значит вести
+                                    дежурного в тупик. А пресет «Сегодня» в
+                                    панели календаря про границы не знает и
+                                    отдаёт запрещённый для этого поля день —
+                                    поднимаем такой выбор до минимума: человек
+                                    просит открыть как можно раньше, а не
+                                    выключить «Сохранить» без объяснений. */}
+                                <IosDatePicker
+                                    className="mt-2"
                                     value={until}
-                                    min={nextDay(dayISO)}
-                                    onChange={(e) => setUntil(e.target.value)}
-                                    aria-label="День, когда офис откроется"
+                                    min={minUntil}
+                                    onChange={(iso) => setUntil(iso && iso < minUntil ? minUntil : iso)}
+                                    placeholder="Выберите день открытия"
+                                    triggerClassName={dateTrigger}
+                                    ariaLabel="День, когда офис откроется"
                                 />
                                 <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-slate-500">
                                     {until && until > dayISO

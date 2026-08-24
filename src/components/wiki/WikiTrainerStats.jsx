@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 
 /* Статистика одного тренажёра.
  *
@@ -106,13 +107,18 @@ export default function WikiTrainerStats({
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [since, setSince] = useState('');
-    const [until, setUntil] = useState('');
+    /* Период одним значением: «с» и «по» — это не два независимых фильтра, а
+       две границы одного отрезка, и календарь их так и показывает. Пустые
+       границы = «за всё время»: ниже они превращаются в отсутствие параметров,
+       и сервер отдаёт всю историю — и на экран, и в выгрузку. */
+    const [range, setRange] = useState({ from: '', to: '' });
     const [downloading, setDownloading] = useState(false);
 
+    /* Зависимости — примитивы, а не сам `range`: календарь отдаёт новый объект
+       на каждый выбор, и по ссылке запрос уходил бы даже за тем же периодом. */
     const params = useMemo(
-        () => ({ since: since || undefined, until: until || undefined, limit: 200 }),
-        [since, until],
+        () => ({ since: range.from || undefined, until: range.to || undefined, limit: 200 }),
+        [range.from, range.to],
     );
 
     const load = useCallback(() => {
@@ -180,25 +186,20 @@ export default function WikiTrainerStats({
                 </button>
             </header>
 
-            <section className={`${iosCard} flex flex-wrap items-end gap-3 px-4 py-3`}>
-                <label className="flex flex-col gap-1">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">С даты</span>
-                    <input type="date" value={since} onChange={(e) => setSince(e.target.value)}
-                        className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px]" />
-                </label>
-                <label className="flex flex-col gap-1">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">По дату</span>
-                    <input type="date" value={until} onChange={(e) => setUntil(e.target.value)}
-                        className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-[13px]" />
-                </label>
-                {(since || until) && (
-                    <button type="button" className="pb-2 text-[12.5px] font-medium text-indigo-600"
-                        onClick={() => { setSince(''); setUntil(''); }}>
-                        За всё время
-                    </button>
-                )}
+            {/* Чип сам называет выбранный период, поэтому подписи «С даты» и
+                «По дату» не нужны, а отдельная кнопка «За всё время» уехала в
+                пресет «Весь период» внутри календаря: возврат к полной истории —
+                такой же выбор периода, как и любой другой.
+                Дальше сегодняшнего дня смотреть нечего: статистика считается по
+                уже состоявшимся попыткам, и завтрашняя граница только добавила
+                бы пустых ответов. */}
+            <section className={`${iosCard} flex flex-wrap items-center gap-3 px-4 py-3`}>
+                <IosDateRangePicker
+                    from={range.from} to={range.to} max={isoDate(new Date())}
+                    onChange={setRange}
+                />
                 {loading && (
-                    <span className="inline-flex items-center gap-1.5 pb-2 text-[12.5px] text-slate-400">
+                    <span className="inline-flex items-center gap-1.5 text-[12.5px] text-slate-400">
                         <Loader2 size={13} className="animate-spin" /> считаем…
                     </span>
                 )}

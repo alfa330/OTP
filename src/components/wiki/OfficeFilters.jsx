@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, RotateCcw, SlidersHorizontal } from 'lucide-react';
-import { APPLE_FONT, IosToggle, iosGroupLabel, iosInput } from '../ui/ios';
+import { APPLE_FONT, IosToggle, iosGroupLabel } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 
 /* Фильтр офисов одной кнопкой.
  *
@@ -36,6 +37,15 @@ export const activeFilterCount = (value) => (
 );
 
 const PANEL_WIDTH = 268;
+
+/* Поповер внутри поповера: список CustomSelect уходит в портал body, то есть
+   лежит ВНЕ панели фильтров. Без этой проверки первый же mousedown по строке
+   списка считался бы «щелчком мимо», панель фильтров схлопывалась бы вместе с
+   селектом — и клик по опции не успевал бы случиться, выбор терялся.
+   Ищем по раскрытому listbox и берём его родителя: так внутрь попадают и
+   строка поиска, и поля/границы карточки списка, а не только сами опции. */
+const isInsideOpenSelect = (target) => Array.from(document.querySelectorAll('[role="listbox"]'))
+    .some((list) => list.parentElement?.contains(target));
 
 const Row = ({ label, children }) => (
     <label className="flex items-center justify-between gap-3 py-1">
@@ -76,16 +86,24 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
         if (!open) return undefined;
         const onDoc = (e) => {
             if (btnRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
+            if (isInsideOpenSelect(e.target)) return;
             setOpen(false);
         };
         const onKey = (e) => {
             if (e.key !== 'Escape') return;
+            // Escape сначала обслуживает верхний слой: раскрытый список гасит
+            // себя сам, и панель фильтров при этом обязана остаться.
+            if (document.querySelector('[role="listbox"]')) return;
             setOpen(false);
             requestAnimationFrame(() => btnRef.current?.focus());
         };
         // Прокрутка закрывает, а не тащит панель за собой: кнопка уезжает, и
-        // «приклеенная» панель повисла бы над чужим содержимым.
-        const onScroll = () => setOpen(false);
+        // «приклеенная» панель повисла бы над чужим содержимым. Прокрутка
+        // внутри раскрытого списка — исключение: она к кнопке не относится.
+        const onScroll = (e) => {
+            if (isInsideOpenSelect(e.target)) return;
+            setOpen(false);
+        };
         document.addEventListener('mousedown', onDoc);
         document.addEventListener('keydown', onKey);
         window.addEventListener('scroll', onScroll, true);
@@ -97,6 +115,21 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
             window.removeEventListener('resize', recompute);
         };
     }, [open, recompute]);
+
+    /* Пустая строка — законное значение «без условия»: на ней держится и
+       activeFilterCount, и решение не слать параметр в запрос.
+       У парка идентификатор приходит с сервера числом, а фильтр всегда хранил
+       строку (нативный select иначе не умел) — приводим явно, чтобы тип
+       value.parkId не менялся. */
+    const cityOptions = useMemo(() => [
+        { value: '', label: 'Все города' },
+        ...cities.map((item) => ({ value: item.city, label: `${item.city} (${item.count})` })),
+    ], [cities]);
+
+    const parkOptions = useMemo(() => [
+        { value: '', label: 'Все таксопарки' },
+        ...parks.map((park) => ({ value: String(park.id), label: park.name })),
+    ], [parks]);
 
     const patch = (part) => onChange({ ...value, ...part });
 
@@ -165,32 +198,28 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
                     <div className="space-y-2">
                         <div>
                             <div className={iosGroupLabel}>Город</div>
-                            <select
-                                className={`${iosInput} mt-1 py-2`}
+                            <CustomSelect
+                                variant="ios"
+                                className="mt-1"
                                 value={value.city}
-                                onChange={(e) => patch({ city: e.target.value })}
-                            >
-                                <option value="">Все города</option>
-                                {cities.map((item) => (
-                                    <option key={item.city} value={item.city}>
-                                        {item.city} ({item.count})
-                                    </option>
-                                ))}
-                            </select>
+                                onChange={(city) => patch({ city })}
+                                options={cityOptions}
+                                searchable
+                                searchPlaceholder="Город…"
+                                ariaLabel="Город"
+                            />
                         </div>
 
                         <div>
                             <div className={iosGroupLabel}>Таксопарк</div>
-                            <select
-                                className={`${iosInput} mt-1 py-2`}
+                            <CustomSelect
+                                variant="ios"
+                                className="mt-1"
                                 value={value.parkId}
-                                onChange={(e) => patch({ parkId: e.target.value })}
-                            >
-                                <option value="">Все таксопарки</option>
-                                {parks.map((park) => (
-                                    <option key={park.id} value={park.id}>{park.name}</option>
-                                ))}
-                            </select>
+                                onChange={(parkId) => patch({ parkId })}
+                                options={parkOptions}
+                                ariaLabel="Таксопарк"
+                            />
                         </div>
 
                         {/* Архивные раньше приезжали управляющему всегда и молча

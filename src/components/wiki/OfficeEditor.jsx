@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import axios from 'axios';
 import { Loader2, MapPin, MapPinOff, Phone } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
+import IosTimePicker from '../ui/TimePicker';
 import OfficeMap from './OfficeMap';
 import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
 import { Field, CitySelect } from './formField';
@@ -32,14 +33,37 @@ const PRESETS = [
     { label: 'Пн–Пт 10:00–19:00', days: WORKDAYS, from: '10:00', to: '19:00' },
 ];
 
-const TimeInput = ({ value, onChange, disabled }) => (
-    <input
-        type="time"
-        step={300}
+/* Поле времени расписания. Снаружи сигнатура прежняя, внутри — пикер раздела
+ * вместо `<input type="time">`: системное поле рисовал браузер, и рядом с
+ * карточками формы оно читалось как деталь из другой программы. Габариты
+ * (h-9, ширина 104px, цифры по центру) у примитива те же по умолчанию,
+ * поэтому inputClassName здесь не переопределяем — сетка недели не поедет.
+ *
+ * min/max не задаём намеренно: закрытие раньше открытия модель понимает как
+ * смену через полночь (officeSchedule.dayInterval), и офис 20:00–04:00 обязан
+ * остаться набираемым.
+ *
+ * allowEmpty по умолчанию выключен: день считается рабочим, пока заполнены
+ * `from` и `to`, — стёртое поле часов схлопнуло бы строку в «выходной» прямо
+ * под пальцами у того, кто всего лишь чистил поле перед перенабором. У обеда
+ * пусто — законное значение (день без обеда), там очистку включаем.
+ *
+ * shrink-0 на обёртке: у поля теперь есть шеврон справа, и сжатие в тесной
+ * строке наехало бы им на цифры. Пусть строка переносится, как и раньше.
+ *
+ * ariaLabel обязателен: в строке дня четыре одинаковых текстовых поля, и без
+ * подписи скринридер читает их как четыре безымянных ввода — системное поле
+ * хотя бы называло себя временем.
+ */
+const TimeInput = ({ value, onChange, disabled, allowEmpty = false, defaultTime, ariaLabel }) => (
+    <IosTimePicker
+        value={value}
+        onChange={onChange}
         disabled={disabled}
-        value={value || ''}
-        onChange={(e) => onChange(e.target.value)}
-        className={`${iosInput} h-9 w-[104px] px-2 text-center tabular-nums disabled:opacity-40`}
+        allowEmpty={allowEmpty}
+        defaultTime={defaultTime}
+        ariaLabel={ariaLabel}
+        className="shrink-0"
     />
 );
 
@@ -90,13 +114,36 @@ function ScheduleEditor({ schedule, onChange }) {
                             />
                             {isOpen ? (
                                 <>
-                                    <TimeInput value={day.from} onChange={(v) => setDay(code, { from: v })} />
+                                    <TimeInput
+                                        value={day.from}
+                                        ariaLabel={`${DAY_LABELS[code]}, открытие`}
+                                        onChange={(v) => setDay(code, { from: v })}
+                                    />
                                     <span className="text-slate-300">–</span>
-                                    <TimeInput value={day.to} onChange={(v) => setDay(code, { to: v })} />
+                                    <TimeInput
+                                        value={day.to}
+                                        ariaLabel={`${DAY_LABELS[code]}, закрытие`}
+                                        onChange={(v) => setDay(code, { to: v })}
+                                    />
                                     <span className="ml-1 text-[11.5px] text-slate-400">обед</span>
-                                    <TimeInput value={day.break_from} onChange={(v) => setDay(code, { break_from: v })} />
+                                    {/* Обед разрешено стирать — так и задаётся день без обеда.
+                                        Пустому полю стрелка подставляет свой конец обеда, а не
+                                        рабочее утро примитива. */}
+                                    <TimeInput
+                                        value={day.break_from}
+                                        allowEmpty
+                                        defaultTime="13:00"
+                                        ariaLabel={`${DAY_LABELS[code]}, начало обеда`}
+                                        onChange={(v) => setDay(code, { break_from: v })}
+                                    />
                                     <span className="text-slate-300">–</span>
-                                    <TimeInput value={day.break_to} onChange={(v) => setDay(code, { break_to: v })} />
+                                    <TimeInput
+                                        value={day.break_to}
+                                        allowEmpty
+                                        defaultTime="14:00"
+                                        ariaLabel={`${DAY_LABELS[code]}, конец обеда`}
+                                        onChange={(v) => setDay(code, { break_to: v })}
+                                    />
                                 </>
                             ) : (
                                 <span className="text-[12.5px] text-slate-400">выходной</span>

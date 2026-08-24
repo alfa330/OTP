@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, MapPin, Phone, Plus, StickyNote, Trash2 } from 'lucide-react';
+import { MapPin, Phone, Plus, StickyNote, Trash2 } from 'lucide-react';
 import { iosInput, iosGroupLabel, IosBadge } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import { Field, CitySelect } from './formField';
 import {
     PHONE_DIGITS, digitsOf, emptyNumber, formatDigits, parkDraftIssue, toPhone,
@@ -23,43 +24,51 @@ import {
    номера, и адрес самого парка — списки обязаны быть одинаковыми, иначе в
    одной форме появятся два разных перечня офисов. */
 const OfficeSelect = ({ value, offices, onChange, placeholder, className = '' }) => {
-    // Города в порядке появления: список офисов уже отсортирован сервером, и
-    // пересортировка тут развела бы одинаковые списки в двух вкладках.
-    const byCity = useMemo(() => {
+    const options = useMemo(() => {
+        // Города в порядке появления: список офисов уже отсортирован сервером, и
+        // пересортировка тут развела бы одинаковые списки в двух вкладках.
+        // Офисы одного города складываем в одну группу, даже если в ответе они
+        // идут вразбивку: иначе заголовок города повторился бы ниже по списку.
         const groups = [];
         offices.forEach((item) => {
             const city = item.city || 'Без города';
+            const option = {
+                value: item.id,
+                label: `${item.name}${item.is_online ? ' · только по телефону' : ''}`,
+                groupLabel: city,
+            };
             const group = groups.find(([name]) => name === city);
-            if (group) group[1].push(item);
-            else groups.push([city, [item]]);
+            if (group) group[1].push(option);
+            else groups.push([city, [option]]);
         });
-        return groups;
-    }, [offices]);
+        /* «Не выбрано» — первая строка списка, а не только подпись на кнопке:
+           без неё выбранный офис нечем снять. Значение у неё пустая строка, а
+           не null: выбранное ищется сравнением значений по строке, и null
+           совпал бы не с пустотой. */
+        return [{ value: '', label: placeholder }, ...groups.flatMap(([, items]) => items)];
+    }, [offices, placeholder]);
 
     return (
-        <div className={`relative min-w-0 ${className}`}>
-            <select
-                className={`${iosInput} h-10 appearance-none py-0 pr-9`}
-                value={value ?? ''}
-                onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
-            >
-                <option value="">{placeholder}</option>
-                {byCity.map(([city, items]) => (
-                    <optgroup key={city} label={city}>
-                        {items.map((item) => (
-                            <option key={item.id} value={item.id}>
-                                {item.name}
-                                {item.is_online ? ' · только по телефону' : ''}
-                            </option>
-                        ))}
-                    </optgroup>
-                ))}
-            </select>
-            <ChevronDown
-                size={15}
-                className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-        </div>
+        <CustomSelect
+            variant="ios"
+            /* h-10 на кнопке: селектор стоит в строке номера рядом с полем
+               телефона той же высоты, и своя высота списка увела бы строку. */
+            className={`min-w-0 [&>button]:h-10 ${className}`}
+            value={value ?? ''}
+            options={options}
+            /* Значение приходит из опции как есть, а не строкой из события:
+               id остаётся числом, и поиск офиса по === продолжает работать.
+               Пустая строка обязана превратиться именно в null — по нему
+               считается «номер только по телефону» (isOnline в parkPoints). */
+            onChange={(next) => onChange(next === '' ? null : next)}
+            placeholder={placeholder}
+            /* Поиск включаем только на длинном справочнике: у системного списка
+               была подсказка по набранным буквам, здесь её заменяет строка
+               поиска. На коротком списке она была бы лишней деталью. */
+            searchable={offices.length > 12}
+            searchPlaceholder="Поиск по названию офиса…"
+            ariaLabel="Офис"
+        />
     );
 };
 

@@ -1,6 +1,5 @@
 import React, { useMemo } from 'react';
-import { ChevronDown } from 'lucide-react';
-import { iosInput } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import { OPERATING_CITIES } from '../../utils/kazakhstanCities';
 
 /* Поле формы раздела: подпись, контрол, необязательная подсказка.
@@ -19,6 +18,18 @@ export const Field = ({ label, hint, children, className = '' }) => (
     </div>
 );
 
+/* Вид кнопки списка. В редакторах офиса и парка «Город» стоит в одной строке
+   с «Названием», а то заполнено iosInput — контрол на несколько пикселей ниже
+   соседнего сразу заметен, поэтому геометрию поля повторяем один в один.
+   Своего класса на триггер CustomSelect не принимает, и классы вешаются на
+   дочернюю кнопку: селектор `.класс > button` специфичнее утилит самой кнопки
+   и перебивает их без !important. Отдельно переопределён и наведённый фон —
+   `hover:` кнопки иначе выигрывает по специфичности и осветляет поле.
+   Панель списка остаётся своя, из примитива. */
+const cityTrigger = '[&>button]:bg-slate-100 [&>button]:px-3.5 [&>button]:py-2.5 '
+    + '[&>button]:text-[14px] [&>button]:font-normal [&>button]:text-slate-900 '
+    + '[&>button:hover]:bg-slate-200/70';
+
 /* Выбор города для справочника: офис и таксопарк заводят в одних и тех же
  * городах, и перечень у них обязан быть один — разные списки в двух формах
  * дают парк в «Астане» и его офис в «Нур-Султане».
@@ -29,29 +40,35 @@ export const Field = ({ label, hint, children, className = '' }) => (
  */
 export const CitySelect = ({ value, onChange, placeholder = 'Город не выбран' }) => {
     const current = String(value ?? '').trim();
-    const cities = useMemo(() => (
-        current && !OPERATING_CITIES.includes(current)
+    /* Пустая строка — не заглушка, а полноценный вариант: «города нет» у
+       записи справочника такой же осмысленный ответ, как название города,
+       и выбрать его обратно должно быть можно. Поэтому она стоит первой
+       строкой списка, а не только подписью на кнопке. */
+    const options = useMemo(() => {
+        const cities = current && !OPERATING_CITIES.includes(current)
             ? [current, ...OPERATING_CITIES]
-            : OPERATING_CITIES
-    ), [current]);
+            : OPERATING_CITIES;
+        return [
+            { value: '', label: placeholder },
+            ...cities.map((city) => ({ value: city, label: city })),
+        ];
+    }, [current, placeholder]);
 
     return (
-        <div className="relative min-w-0">
-            <select
-                className={`${iosInput} appearance-none pr-9`}
-                value={current}
-                onChange={(e) => onChange(e.target.value)}
-            >
-                <option value="">{placeholder}</option>
-                {cities.map((city) => (
-                    <option key={city} value={city}>{city}</option>
-                ))}
-            </select>
-            <ChevronDown
-                size={15}
-                className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-        </div>
+        <CustomSelect
+            variant="ios"
+            className={`min-w-0 ${cityTrigger}`}
+            value={current}
+            onChange={onChange}
+            options={options}
+            placeholder={placeholder}
+            /* Городов два десятка: у системного списка была подсказка по первой
+               букве, здесь её заменяет строка поиска — иначе нужный город
+               приходится выискивать прокруткой. */
+            searchable
+            searchPlaceholder="Поиск по городу…"
+            ariaLabel="Город"
+        />
     );
 };
 
