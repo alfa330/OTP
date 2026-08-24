@@ -5,6 +5,7 @@ import {
     Loader2, Trash2,
 } from 'lucide-react';
 import { iosCard, IosBadge, iosBtnGhost } from '../ui/ios';
+import useStableCallback from './useStableCallback';
 
 /* Половина вкладки «Статьи» — «Перенос»: очередь модерации приехавших статей.
  *
@@ -197,6 +198,14 @@ const Row = ({ item, busy, locked, onOpen, onApprove, onDiscard }) => {
 
 export default function WikiMigration({ base, headers, showToast, onOpenArticle,
                                         onReviewed, space = null }) {
+    /* Колбэки родителя приходят новыми на КАЖДЫЙ его рендер. Попади они в
+       зависимости load — и очередь перезапрашивалась бы по кругу: ответ →
+       setState → рендер → новый load → снова запрос. Ровно это и выглядело как
+       «раздел лагает». Обёртка стабильна, актуальная функция живёт в ref. */
+    const toast = useStableCallback(showToast);
+    const reviewed = useStableCallback(onReviewed);
+    const openArticle = useStableCallback(onOpenArticle);
+
     const [state, setState] = useState(null);      // {totals, items}
     const [loading, setLoading] = useState(true);
     const [showAll, setShowAll] = useState(false);
@@ -207,14 +216,17 @@ export default function WikiMigration({ base, headers, showToast, onOpenArticle,
         /* Пространство просим ТО ЖЕ, что показано в шапке: по счётчику из
            каталога эта половина и появилась, а он сужен пространством. Не
            передай его — список окажется шире счётчика. */
-        return axios.get(`${base}/api/wiki/migration`, {
+        return axios.get(`${base}/migration`, {
             headers,
             params: { space_id: space?.id || null, ...(withAll ? { all: 1 } : {}) },
         })
             .then((r) => setState(r.data))
-            .catch((e) => showToast?.(errText(e, 'Не удалось получить очередь переноса'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось получить очередь переноса'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, showToast, space]);
+        /* headers родитель мемоизирует (WikiView: useMemo по
+           withAccessTokenHeader), поэтому в зависимостях он безопасен — как и
+           у остальных загрузчиков раздела. Круг давали только колбэки. */
+    }, [base, headers, space?.id, toast]);
 
     useEffect(() => { load(showAll); }, [load, showAll]);
 
@@ -224,24 +236,24 @@ export default function WikiMigration({ base, headers, showToast, onOpenArticle,
     const decide = (item, publish) => {
         setActing(item.article_id);
         const path = publish ? 'publish' : 'discard';
-        axios.post(`${base}/api/wiki/migration/${item.article_id}/${path}`, {}, { headers })
+        axios.post(`${base}/migration/${item.article_id}/${path}`, {}, { headers })
             .then((r) => {
                 if (r.data?.status === 'already_reviewed') {
-                    showToast?.('Эту статью уже разобрали', 'info');
+                    toast('Эту статью уже разобрали', 'info');
                 } else if (publish) {
-                    showToast?.(item.status === 'published'
+                    toast(item.status === 'published'
                         ? 'Статья подтверждена и снята из очереди'
                         : 'Статья опубликована', 'success');
                 } else {
-                    showToast?.('Статья убрана в архив', 'success');
+                    toast('Статья убрана в архив', 'success');
                 }
                 // Каталог и счётчики главной меняются вместе с решением: статья
                 // сменила корзину. Обновляет их владелец экрана, а не мы —
                 // второй перезапрос того же списка был бы платой ни за что.
-                onReviewed?.();
+                reviewed();
                 return load(showAll);
             })
-            .catch((e) => showToast?.(errText(e, 'Не удалось применить решение'), 'error'))
+            .catch((e) => toast(errText(e, 'Не удалось применить решение'), 'error'))
             .finally(() => setActing(null));
     };
 
@@ -323,7 +335,7 @@ export default function WikiMigration({ base, headers, showToast, onOpenArticle,
                             item={item}
                             busy={acting === item.article_id}
                             locked={acting != null && acting !== item.article_id}
-                            onOpen={() => onOpenArticle?.(item.slug)}
+                            onOpen={() => openArticle(item.slug)}
                             onApprove={() => decide(item, true)}
                             onDiscard={() => decide(item, false)}
                         />
