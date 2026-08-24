@@ -105,7 +105,8 @@ def _column_index(key):
 
 
 def _rows_for_sheet(rows, results, park_names):
-    from .engine import EMPLOYMENT_LABELS, WORK_STATUS_LABELS
+    from .engine import (EMPLOYMENT_LABELS, PARK_EMPLOYEE, SOURCE_NO_PROVIDER,
+                         WORK_STATUS_LABELS)
 
     table = []
     for row in rows:
@@ -117,6 +118,13 @@ def _rows_for_sheet(rows, results, park_names):
             comment = row['error']
         elif not entry:
             comment = 'Водитель не найден ни в одной диспетчерской'
+        elif (entry.get('source') == SOURCE_NO_PROVIDER
+              or entry.get('employment_type') == PARK_EMPLOYEE):
+            # Это ОТВЕТ, а не пропуск: поле ЭДО есть только у ИП и самозанятых, а
+            # сотрудник парка работает по трудовому договору — провайдера у него
+            # не бывает. Формулировка отдельная, чтобы «не применяется» не читали
+            # как «мы не смогли узнать».
+            comment = 'Сотрудник парка — ЭДО не применяется'
         elif not entry.get('provider_name'):
             # Пусто в карточке — это не «нет провайдера», а «поле не про него»:
             # у сотрудников парка провайдера ЭДО не бывает вовсе.
@@ -189,6 +197,10 @@ def _fill_context(sheet, table, resolution, source_name, generated_at):
          'Поле ЭДО есть только у ИП и самозанятых.'),
         ('Соединение по ID водителя, а не по ФИО.', 'Совпадение точное.'),
     ]
+    if stats.get('no_provider_by_kind'):
+        lines.append(('Сотрудников парка', '{} строк — ЭДО к ним не применяется '
+                                           '(работают по трудовому договору)'
+                                           .format(stats['no_provider_by_kind'])))
     if stats.get('from_card'):
         lines.append(('Добрано из карточек', '{} строк — список кабинета их не отдал'
                                              .format(stats['from_card'])))

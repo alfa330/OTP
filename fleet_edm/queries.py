@@ -10,7 +10,7 @@
 import json
 
 import psycopg2
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 
 # Колонки карточки, которые уходят в интерфейс. Тела файлов и куки здесь нет и
 # быть не должно.
@@ -18,7 +18,7 @@ JOB_COLUMNS = (
     'id', 'created_by', 'created_by_name', 'created_at', 'started_at', 'finished_at',
     'status', 'source_name', 'source_size', 'rows_total', 'rows_resolved', 'rows_failed',
     'requests_count', 'progress_percent', 'progress_note', 'duration_ms', 'error',
-    'error_code', 'stats', 'file_name', 'file_size',
+    'error_code', 'stats', 'file_name', 'file_size', 'attempts',
 )
 
 
@@ -34,19 +34,25 @@ def _row_to_dict(cursor, row):
 
 # ── Задания ──────────────────────────────────────────────────────────────────
 
-def create_job(cursor, *, user_id, user_name, source_name, source_bytes):
+def create_job(cursor, *, user_id, user_name, source_name, source_bytes,
+               owner_instance=None):
     """Карточка «формируется» + исходник. Раздел показывает её сразу, не дожидаясь
     первого запроса в Fleet: обход занимает минуты, и человеку нужно видеть, что
-    его файл принят."""
+    его файл принят.
+
+    owner_instance — идентификатор процесса, который взялся считать. По нему
+    следующий процесс отличает «работа идёт» от «процесс умер вместе с потоком».
+    """
     cursor.execute(
         """
         INSERT INTO fleet_edm_jobs (created_by, created_by_name, source_name, source_size,
-                                    status, started_at, progress_note)
-        VALUES (%s, %s, %s, %s, 'running', NOW(), 'Файл принят, разбираем')
+                                    status, started_at, progress_note, progress_at,
+                                    owner_instance)
+        VALUES (%s, %s, %s, %s, 'running', NOW(), 'Файл принят, разбираем', NOW(), %s)
         RETURNING id
         """,
         (int(user_id) if user_id else None, (user_name or None),
-         (source_name or None), len(source_bytes or b'')),
+         (source_name or None), len(source_bytes or b''), (owner_instance or None)),
     )
     job_id = int(cursor.fetchone()[0])
     cursor.execute(
@@ -83,7 +89,7 @@ def update_progress(cursor, job_id, *, percent=None, note=None, rows_total=None,
         sets.append('requests_count = %s')
         params.append(int(requests_count))
     # Отметку времени ставим всегда, даже если менять больше нечего: по ней
-    # видно, что выгрузка жива, — см. fail_stale_jobs.
+    # видно, что выгрузка жива, — см. orphan_jobs и touch_job.
     sets.append('progress_at = NOW()')
     params.append(int(job_id))
     cursor.execute(
@@ -108,7 +114,13 @@ def finish_job(cursor, job_id, *, file_bytes=None, file_name=None, stats=None,
                rows_resolved = COALESCE(%s, rows_resolved),
                rows_failed = COALESCE(%s, rows_failed),
                requests_count = COALESCE(%s, requests_count),
-               duration_ms = %s,
+               -- Длительность считаем от ПЕРВОГО старта, а не от начала последней
+               -- попытки: выгрузку могли подхватывать после каждого деплоя, а
+               -- человек ждал всё это время целиком.
+               duration_ms = COALESCE(
+                   %s,
+                   (EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, created_at))) * 1000)::bigint
+               ),
                stats = %s,
                progress_percent = CASE WHEN %s THEN 100 ELSE progress_percent END,
                progress_note = NULL,
@@ -201,38 +213,213 @@ def has_running_job(cursor):
     return int(row[0]) if row else None
 
 
-def fail_stale_jobs(cursor, silence_minutes=10):
-    """Задания, пережившие рестарт процесса, закрываем ошибкой.
+def orphan_jobs(cursor, instance_id, silence_seconds=90, own_silence_seconds=600,
+                max_attempts=12):
+    """Выгрузки, за которыми больше никого нет, — их нужно подхватить.
 
-    Поток выгрузки живёт в памяти инстанса: деплой или падение убивают его молча,
-    и карточка остаётся «формируется» навсегда — раздел показывает застывший
-    прогресс, за которым никого нет, и вдобавок не даёт запустить новую выгрузку.
-    Так и случилось 20.08.2026: деплой посреди прогона заморозил карточку на 54%.
+    Поток выгрузки живёт в памяти процесса, а процесс на Render перезапускается
+    от каждого пуша в main: 21.08.2026 деплоев было 61, и обе выгрузки того дня
+    (6 962 и 15 738 строк) погибли ровно так. Раньше такую карточку закрывали
+    ошибкой «запустите заново» — то есть перекладывали работу робота на человека,
+    который к тому же не мог знать, сколько раз ещё придётся запускать.
 
-    Отличаем по МОЛЧАНИЮ, а не по времени старта: живая выгрузка отмечается в
-    базе каждые пару секунд, поэтому десять минут тишины — это точно смерть, а
-    вот «идёт полчаса» для большого файла совершенно нормально.
+    Отличаем смерть от жизни ДВУМЯ признаками, а не одним:
+
+    * чужой owner_instance + полторы минуты молчания — это точно мёртвый процесс,
+      потому что живая выгрузка отмечается в базе каждые 15 секунд (heartbeat);
+    * свой owner_instance + десять минут молчания — это уже наш собственный
+      подвисший поток; ждём дольше, чтобы не отнять работу у живого.
+
+    Про попытки. Каждый подхват увеличивает attempts. Двенадцать — это заведомо
+    больше, чем деплоев успевает случиться за одну выгрузку (медиана промежутка
+    между деплоями 10 минут, самая долгая выгрузка укладывается в четверть часа);
+    если попыток стало больше, дело не в деплоях, и карточку честно закрываем.
     """
     cursor.execute(
         """
         UPDATE fleet_edm_jobs
            SET status = 'error',
-               error = 'Выгрузка прервана: приложение перезапустилось. Запустите заново.',
-               error_code = 'interrupted',
+               error = 'Выгрузку прерывали слишком часто — она не смогла дойти до конца.',
+               error_code = 'too_many_restarts',
                finished_at = NOW()
          WHERE status = 'running'
+           AND attempts >= %s
            AND COALESCE(progress_at, started_at, created_at)
-               < NOW() - make_interval(mins => %s)
+               < NOW() - make_interval(secs => %s)
         RETURNING id
         """,
-        (int(silence_minutes),),
+        (int(max_attempts), int(silence_seconds)),
     )
-    return [int(row[0]) for row in cursor.fetchall()]
+    exhausted = [int(row[0]) for row in cursor.fetchall()]
+
+    cursor.execute(
+        """
+        SELECT id
+          FROM fleet_edm_jobs
+         WHERE status = 'running'
+           AND attempts < %(max_attempts)s
+           AND (
+                 (owner_instance IS DISTINCT FROM %(instance)s
+                  AND COALESCE(progress_at, started_at, created_at)
+                      < NOW() - make_interval(secs => %(silence)s))
+                 OR
+                 (owner_instance = %(instance)s
+                  AND COALESCE(progress_at, started_at, created_at)
+                      < NOW() - make_interval(secs => %(own_silence)s))
+               )
+         ORDER BY id
+        """,
+        {'instance': instance_id, 'silence': int(silence_seconds),
+         'own_silence': int(own_silence_seconds), 'max_attempts': int(max_attempts)},
+    )
+    return {'resume': [int(row[0]) for row in cursor.fetchall()], 'exhausted': exhausted}
 
 
-def cleanup(cursor, files_days=60):
+def claim_job(cursor, job_id, instance_id, note=None):
+    """Забрать выгрузку себе. Возвращает номер попытки либо None, если её уже
+    забрал кто-то другой (на одном инстансе такого не бывает, но условие в
+    UPDATE стоит дешевле, чем разбор гонки, если инстансов станет два)."""
+    cursor.execute(
+        """
+        UPDATE fleet_edm_jobs
+           SET owner_instance = %s,
+               attempts = attempts + 1,
+               progress_at = NOW(),
+               progress_note = COALESCE(%s, progress_note)
+         WHERE id = %s
+           AND status = 'running'
+           AND owner_instance IS DISTINCT FROM %s
+        RETURNING attempts
+        """,
+        (instance_id, (str(note)[:500] if note else None), int(job_id), instance_id),
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if row else None
+
+
+def release_job(cursor, job_id, instance_id, note=None):
+    """Отдать выгрузку обратно в общую очередь, оставив её «идущей».
+
+    Нужно, когда обход прервался не смертью процесса, а отказом кабинета: поток
+    закончился, а работа — нет. Владельца обнуляем НАМЕРЕННО: подхват берёт только
+    записи с чужим владельцем, и без этого обнуления выгрузка ждала бы своего же
+    процесса, который её уже бросил.
+    """
+    cursor.execute(
+        """
+        UPDATE fleet_edm_jobs
+           SET owner_instance = NULL,
+               progress_note = COALESCE(%s, progress_note),
+               progress_at = NOW()
+         WHERE id = %s AND status = 'running' AND owner_instance = %s
+        RETURNING id
+        """,
+        ((str(note)[:500] if note else None), int(job_id), instance_id),
+    )
+    return bool(cursor.fetchone())
+
+
+def touch_job(cursor, job_id, instance_id):
+    """Сердцебиение: «я живой». Возвращает статус и владельца — по ним поток
+    понимает, что карточку у него отняли (или закрыли), и останавливается сам.
+
+    Без этого удара пульса раздел убивал СВОИ ЖЕ живые выгрузки: прогресс
+    писался только на границах раундов, а добор карточками на прогоне 21.08.2026
+    молчал двадцать минут — сторож справедливо счёл выгрузку мёртвой, хотя она
+    работала (и продолжала работать ещё двадцать минут, впустую).
+    """
+    cursor.execute(
+        """
+        UPDATE fleet_edm_jobs SET progress_at = NOW()
+         WHERE id = %s AND status = 'running' AND owner_instance = %s
+        RETURNING status, owner_instance, attempts
+        """,
+        (int(job_id), instance_id),
+    )
+    row = cursor.fetchone()
+    if row:
+        return {'status': row[0], 'owner_instance': row[1], 'attempts': int(row[2]),
+                'mine': True}
+    cursor.execute(
+        "SELECT status, owner_instance, attempts FROM fleet_edm_jobs WHERE id = %s",
+        (int(job_id),),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return {'status': 'gone', 'owner_instance': None, 'attempts': 0, 'mine': False}
+    return {'status': row[0], 'owner_instance': row[1], 'attempts': int(row[2]),
+            'mine': False}
+
+
+# ── Контрольная точка обхода ─────────────────────────────────────────────────
+
+def save_checkpoint(cursor, job_id, *, rows=None, checkpoint=None):
+    """Найденное — в базу. rows: [(contractor_id, park_id, payload|None), …].
+
+    ON CONFLICT DO UPDATE, а не DO NOTHING: сначала прилетает «парк нашли»
+    (payload NULL), позже по той же строке — сам провайдер. COALESCE у park_id
+    защищает от обратного порядка: добор карточкой знает провайдера и парк, а
+    строка «парк без провайдера» может прийти после него из соседнего сегмента.
+    """
+    if rows:
+        execute_values(
+            cursor,
+            """
+            INSERT INTO fleet_edm_job_rows (job_id, contractor_id, park_id, payload)
+            VALUES %s
+            ON CONFLICT (job_id, contractor_id) DO UPDATE
+                SET park_id = COALESCE(EXCLUDED.park_id, fleet_edm_job_rows.park_id),
+                    payload = COALESCE(EXCLUDED.payload, fleet_edm_job_rows.payload)
+            """,
+            [(int(job_id), str(cid), (park or None), (Json(payload) if payload else None))
+             for cid, park, payload in rows],
+            page_size=500,
+        )
+    if checkpoint is not None:
+        cursor.execute(
+            "UPDATE fleet_edm_jobs SET checkpoint = %s, progress_at = NOW() WHERE id = %s",
+            (Json(checkpoint), int(job_id)),
+        )
+
+
+def load_checkpoint(cursor, job_id):
+    """Что уже сделано по этой выгрузке: результаты, найденные парки и этапы."""
+    cursor.execute(
+        "SELECT checkpoint FROM fleet_edm_jobs WHERE id = %s", (int(job_id),))
+    row = cursor.fetchone()
+    stages = (row[0] if row else None) or {}
+    cursor.execute(
+        "SELECT contractor_id, park_id, payload FROM fleet_edm_job_rows WHERE job_id = %s",
+        (int(job_id),),
+    )
+    results, parks = {}, {}
+    for contractor_id, park_id, payload in cursor.fetchall():
+        if park_id:
+            parks[contractor_id] = park_id
+        if payload:
+            results[contractor_id] = payload
+    return {'results': results, 'parks': parks, 'stages': stages}
+
+
+def drop_checkpoint(cursor, job_id):
+    """Выгрузка дошла до конца — контрольная точка больше не нужна. Файл с
+    результатом уже лежит в fleet_edm_job_files, а держать рядом ещё и 15 тысяч
+    строк с ФИО и телефонами по каждому заданию значит хранить одно и то же
+    дважды (см. never-commit-personal-data: чем меньше копий, тем лучше)."""
+    cursor.execute("DELETE FROM fleet_edm_job_rows WHERE job_id = %s", (int(job_id),))
+    cursor.execute("UPDATE fleet_edm_jobs SET checkpoint = NULL WHERE id = %s",
+                   (int(job_id),))
+    return cursor.rowcount
+
+
+def cleanup(cursor, files_days=60, checkpoint_days=3):
     """Тела файлов старше срока удаляем, карточки оставляем: история выгрузок —
-    это две сотни коротких строк, а файлы — десятки мегабайт каждый."""
+    это две сотни коротких строк, а файлы — десятки мегабайт каждый.
+
+    Контрольные точки живут гораздо меньше: они нужны, только пока выгрузку ещё
+    можно продолжить. У завершённых заданий их сносит drop_checkpoint, здесь —
+    подчистка за упавшими.
+    """
     cursor.execute(
         """
         DELETE FROM fleet_edm_job_files
@@ -241,7 +428,18 @@ def cleanup(cursor, files_days=60):
         """,
         (int(files_days),),
     )
-    return cursor.rowcount
+    removed = cursor.rowcount
+    cursor.execute(
+        """
+        DELETE FROM fleet_edm_job_rows
+         WHERE job_id IN (SELECT id FROM fleet_edm_jobs
+                           WHERE status <> 'running'
+                             AND COALESCE(finished_at, created_at)
+                                 < NOW() - make_interval(days => %s))
+        """,
+        (int(checkpoint_days),),
+    )
+    return removed
 
 
 # ── Сессия кабинета ──────────────────────────────────────────────────────────

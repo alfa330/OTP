@@ -85,14 +85,18 @@ class FakeClient:
                 continue                                  # чужой парк — пустота
             if bool(driver.get('archive')) != bool(archive):
                 continue                                  # архив отдельным проходом
-            if edm_provider and driver.get('provider') != edm_provider:
-                continue
+            kind = driver.get('employment_type', 'individual_entrepreneur')
+            if edm_provider:
+                # У сотрудника парка провайдера нет вовсе — фильтр его не находит
+                # (проверено карточками на живом кабинете 24.08.2026).
+                if kind == 'park_employee' or driver.get('provider') != edm_provider:
+                    continue
             out.append({
                 'id': cid,
                 'full_name': driver.get('full_name', 'Водитель ' + cid[:4]),
                 'phone': driver.get('phone', '+77000000000'),
-                'work_status': 'working',
-                'employment_type': 'individual_entrepreneur',
+                'work_status': driver.get('work_status', 'working'),
+                'employment_type': kind,
             })
         return out
 
@@ -105,14 +109,20 @@ class FakeClient:
             return None
         if driver['park'] != park_id:
             return None                                   # карточка привязана к парку
-        name = {'paperdo': 'Бумажный документооборот', '2KZSP': 'Sapar',
-                '2KZVZ': 'Vezunchik.Pro'}[driver['provider']]
+        kind = driver.get('employment_type', 'individual_entrepreneur')
+        # У сотрудника парка поле ЭДО в карточке пусто — это не пропуск, а «поле
+        # не про него» (проверено на живом кабинете 24.08.2026).
+        if kind == 'park_employee':
+            name = ''
+        else:
+            name = {'paperdo': 'Бумажный документооборот', '2KZSP': 'Sapar',
+                    '2KZVZ': 'Vezunchik.Pro'}[driver['provider']]
         return {
             'edm_provider': name,
             'full_name': driver.get('full_name', 'Водитель ' + driver_id[:4]),
             'phone': driver.get('phone', '+77000000000'),
-            'work_status': 'working',
-            'employment_type': 'individual_entrepreneur',
+            'work_status': driver.get('work_status', 'working'),
+            'employment_type': kind,
         }
 
 
@@ -331,6 +341,202 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(result['check']['checked'], 5)
         self.assertEqual(result['check']['matched'], 0)
         self.assertEqual(len(result['check']['mismatched']), 5)
+
+
+class ParkEmployeeTest(unittest.TestCase):
+    """Сотрудник парка: провайдера ЭДО у него не бывает, и это ОТВЕТ, а не пропуск.
+
+    Проверено на живом кабинете 24.08.2026 — у сотрудников парка edm_provider
+    пуст, и ни один из 12 фильтров провайдера их не находит. На файле прогона №10
+    таких было 955 из 15 738: каждый стоил 12 бесплодных раундов и запрос карточки.
+    """
+
+    def test_park_employee_needs_no_provider_rounds_or_card(self):
+        # Один сотрудник парка среди ИП, но парк большой (>=3) — идёт списком.
+        drivers = {
+            _driver_id(1): {'park': PARK_A, 'provider': 'paperdo'},
+            _driver_id(2): {'park': PARK_A, 'provider': 'paperdo'},
+            _driver_id(3): {'park': PARK_A, 'provider': '2KZSP'},
+            _driver_id(9): {'park': PARK_A, 'employment_type': 'park_employee',
+                            'provider': 'paperdo'},   # provider в данных, но не отдаётся
+        }
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]  # нет ID парка
+        client = FakeClient(drivers)
+        result = engine.resolve(rows, client, control_sample=0)
+
+        entry = result['results'][_driver_id(9)]
+        self.assertEqual(entry['provider_name'], '')
+        self.assertEqual(entry['source'], engine.SOURCE_NO_PROVIDER)
+        self.assertEqual(result['stats'].get('no_provider_by_kind'), 1)
+        # Сотрудника парка не искали карточкой — его сняли ещё на переборе.
+        self.assertNotIn(_driver_id(9), [cid for _park, cid in client.card_calls])
+
+    def test_park_employee_with_park_id_is_classified_not_carded(self):
+        """ID парка в файле есть, перебора нет — тип занятости берём разбором остатка,
+        а не карточкой на каждого. Иначе 955 сотрудников = 955 карточек."""
+        drivers = {}
+        for index in range(1, 26):
+            drivers[_driver_id(index)] = {'park': PARK_A, 'employment_type': 'park_employee',
+                                          'provider': 'paperdo'}
+        drivers[_driver_id(99)] = {'park': PARK_A, 'provider': '2KZSP'}
+        client = FakeClient(drivers)
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+
+        self.assertEqual(result['stats'].get('no_provider_by_kind'), 25)
+        # Ни одного сотрудника парка не спрашивали карточкой.
+        self.assertEqual(client.card_calls, [])
+        self.assertGreater(result['stats'].get('classified', 0), 0)
+        # ИП всё равно определился провайдером.
+        self.assertEqual(result['results'][_driver_id(99)]['provider_name'], 'Sapar')
+
+    def test_park_employee_is_checked_every_run(self):
+        """Ярлык «провайдера не бывает» — наше утверждение о чужой системе, и
+        контрольная сверка обязана трогать его каждым прогоном."""
+        drivers = {_driver_id(i): {'park': PARK_A, 'employment_type': 'park_employee',
+                                   'provider': 'paperdo'} for i in range(1, 6)}
+        drivers[_driver_id(50)] = {'park': PARK_A, 'provider': 'paperdo'}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = FakeClient(drivers)
+        result = engine.resolve(rows, client, control_sample=25)
+        # Карточки сверки должны включать сотрудников парка (у честного клиента
+        # карточка тоже отдаёт пусто — значит совпадает с нашим ярлыком).
+        checked_ids = {cid for _park, cid in client.card_calls}
+        employees = {_driver_id(i) for i in range(1, 6)}
+        self.assertTrue(employees & checked_ids)
+        self.assertEqual(result['check']['mismatched'], [])
+        self.assertGreater(result['check']['checked'], 0)
+
+
+class SegmentTest(unittest.TestCase):
+    """Архив спрашиваем там, где архивные есть.
+
+    Перебор парков говорит не только парк, но и сегмент — тем же ответом. Значит
+    шесть архивных раундов по диспетчерской без архивных водителей — это шесть
+    заведомо пустых запросов. А вот когда сегмент неизвестен (ID парка пришёл в
+    файле, перебора не было), спрашивать надо оба: в августе без второго прохода
+    терялось 14 444 строки из 147 238.
+    """
+
+    def test_archive_is_not_asked_when_probe_saw_nobody_there(self):
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                   for i in range(1, 6)}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = FakeClient(drivers)
+        engine.resolve(rows, client, control_sample=0)
+        archive_provider_calls = [call for call in client.list_calls
+                                  if call['archive'] and call['provider']]
+        self.assertEqual(archive_provider_calls, [])
+
+    def test_archived_driver_is_still_found_after_probe(self):
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'},
+                   _driver_id(2): {'park': PARK_A, 'provider': '2KZSP', 'archive': True},
+                   _driver_id(3): {'park': PARK_A, 'provider': 'paperdo'}}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        result = engine.resolve(rows, FakeClient(drivers), control_sample=0)
+        self.assertEqual(result['results'][_driver_id(2)]['provider_name'], 'Sapar')
+        self.assertEqual(result['results'][_driver_id(2)]['source'], 'архив')
+
+    def test_unknown_segment_is_asked_in_both(self):
+        """ID парка в файле есть — сегмент неизвестен, архив обязан спрашиваться."""
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'},
+                   _driver_id(2): {'park': PARK_A, 'provider': '2KZSP', 'archive': True},
+                   _driver_id(3): {'park': PARK_A, 'provider': 'paperdo'}}
+        client = FakeClient(drivers)
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0)
+        self.assertEqual(result['results'][_driver_id(2)]['provider_name'], 'Sapar')
+        self.assertTrue([call for call in client.list_calls
+                         if call['archive'] and call['provider']])
+
+
+class ResumeTest(unittest.TestCase):
+    """Продолжение прерванной выгрузки — то, из-за чего сорвались оба прогона 21.08.
+
+    Прерывание изображаем исключением из клиента посреди раундов, затем передаём
+    накопленную контрольную точку во второй вызов resolve — как это сделает
+    подхват после перезапуска процесса.
+    """
+
+    class _CheckpointSink:
+        """То, что в бою делают queries.save_checkpoint/load_checkpoint, но в
+        памяти: копит строки и этапы, отдаёт их обратно как resume."""
+
+        def __init__(self):
+            self.results = {}
+            self.parks = {}
+            self.stages = {}
+
+        def save(self, rows=(), stages=None):
+            for cid, park, payload in rows or ():
+                if park:
+                    self.parks[cid] = park
+                if payload:
+                    self.results[cid] = payload
+            if stages is not None:
+                self.stages = dict(stages)
+
+        def resume(self):
+            return {'results': dict(self.results), 'parks': dict(self.parks),
+                    'stages': dict(self.stages)}
+
+    def test_interrupted_run_resumes_without_redoing_rounds(self):
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                   for i in range(1, 21)}
+        drivers[_driver_id(90)] = {'park': PARK_A, 'provider': '2KZVZ'}
+        rows = _park_rows(drivers)
+        sink = self._CheckpointSink()
+
+        # Первый прогон: клиент падает после того, как «Бумажный» уже прошёл.
+        class DyingClient(FakeClient):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.paperdo_seen = False
+
+            def contractors_all(self, park_id, *, edm_provider=None, **kw):
+                if edm_provider == '2KZVZ':
+                    # Сессия «протухла» ровно на раунде Vezunchik — до него
+                    # «Бумажный» успел записаться в контрольную точку.
+                    raise FleetSessionExpired('обрыв посреди обхода')
+                return super().contractors_all(park_id, edm_provider=edm_provider, **kw)
+
+        with self.assertRaises(FleetSessionExpired):
+            engine.resolve(rows, DyingClient(drivers), control_sample=0,
+                           checkpoint=sink.save)
+        # Контрольная точка успела снять «Бумажный».
+        self.assertGreaterEqual(len(sink.results), 20)
+        self.assertIn('paperdo|0', sink.stages.get('rounds', []))
+
+        # Второй прогон на свежем клиенте продолжает с контрольной точки.
+        client2 = FakeClient(drivers)
+        result = engine.resolve(rows, client2, control_sample=0, resume=sink.resume())
+        self.assertEqual(len(result['results']), 21)
+        self.assertEqual(result['results'][_driver_id(90)]['provider_name'],
+                         'Vezunchik.Pro')
+
+        # Раунд «Бумажного» второй раз не запрашивался — его сняла контрольная точка.
+        paperdo_calls = [c for c in client2.list_calls if c['provider'] == 'paperdo']
+        self.assertEqual(paperdo_calls, [])
+
+    def test_stopper_halts_the_walk(self):
+        """Стоп-кран: если карточку подхватил другой процесс, обход обязан встать
+        сам, а не жечь второй темп запросов к чужому кабинету."""
+        drivers = {_driver_id(i): {'park': PARK_A, 'provider': 'paperdo'}
+                   for i in range(1, 40)}
+        with self.assertRaises(engine.Cancelled):
+            engine.resolve(_park_rows(drivers), FakeClient(drivers), control_sample=0,
+                           should_stop=lambda: True)
+
+
+class NeedsClassificationTest(unittest.TestCase):
+    def test_classify_only_pays_off_above_two_per_park(self):
+        park = PARK_A
+        few = [(park, _driver_id(i)) for i in range(3)]           # 3 строки, 1 парк
+        many = [(park, _driver_id(i)) for i in range(30)]          # 30 строк, 1 парк
+        self.assertFalse(engine._needs_classification(few))        # ниже пола
+        self.assertTrue(engine._needs_classification(many))
+
+    def test_orphans_without_park_are_not_classified(self):
+        no_park = [('', _driver_id(i)) for i in range(30)]
+        self.assertFalse(engine._needs_classification(no_park))
 
 
 class ParallelismTest(unittest.TestCase):

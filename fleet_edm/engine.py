@@ -17,32 +17,59 @@
 2. **Определение парка** для строк без него: каждой диспетчерской отдаём ВЕСЬ
    остаток списка разом, диспетчерские опрашиваем параллельно. Раньше это стоило
    86 × (строк/100) запросов и было самым дорогим местом раздела; теперь — 86
-   запросов плюс страница на сотню найденных.
+   запросов плюс страница на сотню найденных. Спрашиваем при этом ПОЛНЫЙ набор
+   полей, а не только id: тип занятости приезжает теми же запросами бесплатно, а
+   стоит он дорого — см. пункт 3.
 
-3. **Провайдер раундами.** Раунд на провайдера, внутри раунда парки идут
+3. **Сотрудников парка снимаем с дорогого пути сразу.** Провайдер ЭДО бывает
+   только у ИП и самозанятых; у сотрудника парка поля нет вовсе (проверено
+   карточками 24.08.2026 — пусто у всех, и ни один из 12 фильтров провайдера их
+   не находит). На настоящем файле сорвавшегося прогона №10 таких оказалось 955
+   строк из 15 738: раньше каждая из них проходила 12 бесплодных раундов и стоила
+   отдельный запрос карточки в доборе — 955 запросов ради ответа, известного
+   заранее.
+
+4. **Провайдер раундами.** Раунд на провайдера, внутри раунда парки идут
    параллельно; найденные уходят из очереди, следующий раунд спрашивает про
    остаток. «Бумажный документооборот» первым — на нём три четверти водителей.
    Потом такие же раунды по архиву: это отдельный сегмент, по умолчанию список
    его не отдаёт вовсе. Парки, где остались один-два водителя, дешевле спросить
    карточками — они уходят туда сразу.
 
-4. **Добор карточками.** Фильтр списка молча не возвращает часть действующих
+5. **Разбор остатка.** Если после раундов не определилось много строк и тип
+   занятости у них неизвестен (так бывает, когда ID парка был в файле и перебора
+   не было), спрашиваем по одному запросу на парк БЕЗ фильтра провайдера. Это
+   стоит два запроса на парк вместо одного на каждую строку — арифметика в
+   _needs_classification().
+
+6. **Добор карточками.** Фильтр списка молча не возвращает часть действующих
    профилей — 286 строк из 147 238 в августе и 4 из 8 800 в повторном прогоне.
    Причина неизвестна до сих пор, поэтому остаток добираем поштучно из карточки,
    где провайдер лежит значением.
 
-5. **Контрольная сверка.** Случайная выборка результата перепроверяется ДРУГИМ
+7. **Контрольная сверка.** Случайная выборка результата перепроверяется ДРУГИМ
    путём — карточкой. Это не перестраховка: в августе первый (неполный) индекс
    идеально сходился со счётчиками самого кабинета, потому что счётчик считал тот
-   же урезанный срез. Дефект нашла только сверка карточками.
+   же урезанный срез. Дефект нашла только сверка карточками. В выборку намеренно
+   попадают и сотрудники парка — тот самый ярлык «провайдера не бывает» из
+   пункта 3 обязан проверяться каждым прогоном, а не один раз при разработке.
+
+ПРО ПЕРЕЗАПУСКИ. Обход умеет продолжаться с середины: найденное отдаётся наружу
+контрольной точкой (`checkpoint`), а прерванная выгрузка приходит обратно с
+`resume` — уже найденными строками, уже определёнными парками и списком
+пройденных раундов. Причина простая: приложение живёт на Render, где каждый пуш
+в main перезапускает процесс (21.08.2026 — 61 деплой, медиана промежутка 10
+минут), а выгрузка на 15 тысяч строк идёт дольше. Без продолжения она просто
+не доходила до конца — так и погибли оба прогона того дня.
 """
 
 import logging
 import random
 import re
 import threading
+import time
 from collections import Counter, OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .client import MAX_FILTER_IDS, FleetClient, FleetError, FleetSessionExpired
 
@@ -73,6 +100,31 @@ MAX_ORPHAN_CARD_LOOKUPS = 40
 # До скольких строк в доборе разрешаем перебор диспетчерских. Больше — значит
 # добирать нужно многих, и перебор из полезного превращается в час ожидания.
 MAX_CARD_SCANS = 50
+
+# Типы занятости, у которых провайдер ЭДО бывает. У остальных поля нет вовсе:
+# проверено карточками 24.08.2026 — у шести сотрудников парка edm_provider пуст,
+# и ни один из 12 раундов (6 провайдеров × обычный/архив) их не находит.
+PROVIDER_BEARING = ('individual_entrepreneur', 'self_employed')
+PARK_EMPLOYEE = 'park_employee'
+
+# Ярлык источника для строк, где провайдера не бывает по природе занятости.
+# Отдельный, а не пустой «список»: в отчёте «нет провайдера» и «не смогли узнать
+# провайдера» — это два разных ответа, и путать их нельзя.
+SOURCE_NO_PROVIDER = 'сотрудник парка'
+
+# Сколько сотрудников парка перепроверяем карточкой в контрольной сверке.
+# Ярлык «провайдера не бывает» — это наше утверждение о чужой системе, и оно
+# обязано подтверждаться каждым прогоном.
+CONTROL_NO_PROVIDER_SAMPLE = 10
+
+# Меньше этого числа строк в остатке разбирать списком не имеет смысла — проще
+# спросить карточки (см. _needs_classification).
+CLASSIFY_LEFTOVERS_FLOOR = 20
+
+# Как часто выгрузка отмечается в базе, пока идут длинные однообразные шаги
+# (добор карточками, разбор остатка). Сторож считает молчание смертью, а на
+# прогоне 21.08.2026 добор молчал двадцать минут — и был убит живым.
+PROGRESS_EVERY = 40
 
 WORK_STATUS_LABELS = {
     'working': 'Работает',
@@ -241,6 +293,16 @@ def _cell(row, position):
 
 # ── обход ────────────────────────────────────────────────────────────────────
 
+class Cancelled(RuntimeError):
+    """Выгрузку у нас забрали: карточку либо закрыли, либо подхватил другой
+    процесс. Останавливаемся сразу — второй обход по тому же файлу удвоил бы темп
+    запросов к чужому кабинету, а его лимит нам не принадлежит.
+
+    Именно это и произошло 21.08.2026: сторож счёл живую выгрузку мёртвой, человек
+    запустил её заново, а старый поток продолжал работать ещё двадцать минут —
+    два обхода разом, и оба в 429."""
+
+
 class Progress:
     """Прогресс наружу. Отдельным объектом, чтобы движок ничего не знал ни про
     базу, ни про Flask — в тестах сюда приходит список."""
@@ -256,129 +318,303 @@ class Progress:
                 logging.exception('Провайдер ЭДО: не удалось записать прогресс')
 
 
+class Checkpoint:
+    """Контрольная точка наружу — то же разделение, что у Progress: движок знает
+    про «сохрани найденное», но ничего не знает про базу.
+
+    rows — [(contractor_id, park_id, payload|None)], stages — словарь этапов.
+    Ошибка записи не роняет обход: не сохранённая контрольная точка означает
+    лишний повтор после перезапуска, а упавший обход — потерянный час работы.
+    """
+
+    def __init__(self, callback=None):
+        self._callback = callback
+
+    def __call__(self, rows=None, stages=None):
+        if not self._callback or (not rows and stages is None):
+            return
+        try:
+            self._callback(rows=rows or (), stages=stages)
+        except Exception:
+            logging.exception('Провайдер ЭДО: контрольная точка не записана')
+
+
+class Stopper:
+    """Проверка «нас ещё ждут?». Спрашиваем не чаще раза в пять секунд: обход
+    зовёт её из каждой задачи, а поход в базу на каждый чих — это соединение из
+    общего пула."""
+
+    def __init__(self, callback=None, interval=5.0):
+        self._callback = callback
+        self._interval = float(interval)
+        self._checked_at = 0.0
+        self._stopped = False
+        self._lock = threading.Lock()
+
+    def __call__(self):
+        if not self._callback:
+            return
+        with self._lock:
+            if self._stopped:
+                raise Cancelled('Выгрузку остановили')
+            now = time.time()
+            if now - self._checked_at < self._interval:
+                return
+            self._checked_at = now
+        try:
+            stop = bool(self._callback())
+        except Exception:
+            logging.exception('Провайдер ЭДО: не удалось проверить, ждут ли выгрузку')
+            return
+        if stop:
+            with self._lock:
+                self._stopped = True
+            raise Cancelled('Выгрузку остановили')
+
+
 def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_SAMPLE,
-            max_orphan_lookups=MAX_ORPHAN_CARD_LOOKUPS, rng=None):
+            max_orphan_lookups=MAX_ORPHAN_CARD_LOOKUPS, rng=None,
+            checkpoint=None, resume=None, should_stop=None):
     """Главная функция: заполняет провайдера по строкам. Возвращает словарь с
-    результатом по каждому уникальному ID и статистикой прогона."""
+    результатом по каждому уникальному ID и статистикой прогона.
+
+    checkpoint, resume и should_stop — про перезапуски (см. шапку модуля):
+    найденное отдаётся наружу по ходу дела, прерванная выгрузка приходит обратно
+    с уже готовыми строками, а должна ли она вообще продолжаться — спрашивается
+    у вызывающего.
+    """
     progress = Progress(progress) if not isinstance(progress, Progress) else progress
+    save = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint(checkpoint)
+    stop = should_stop if isinstance(should_stop, Stopper) else Stopper(should_stop)
     rng = rng or random.Random(20260820)
+    resume = resume or {}
+    stages = dict(resume.get('stages') or {})
+    done_rounds = set(stages.get('rounds') or ())
 
     valid = [row for row in rows if not row.get('error')]
+    known_parks = dict(resume.get('parks') or {})
     unique = OrderedDict()
     for row in valid:
-        unique.setdefault(row['contractor_id'], row.get('park_id') or '')
+        contractor_id = row['contractor_id']
+        unique.setdefault(contractor_id,
+                          row.get('park_id') or known_parks.get(contractor_id) or '')
 
-    progress(percent=4, note='Читаем справочник парков и провайдеров',
-             rows_total=len(rows))
+    # Уже готовое с прошлой попытки. Берём только то, что есть в этом файле:
+    # карточка одна на файл, но лишняя проверка дешевле, чем строка-призрак.
+    results = {}
+    for contractor_id, entry in (resume.get('results') or {}).items():
+        if contractor_id in unique:
+            results[contractor_id] = dict(entry)
+            if not unique[contractor_id] and entry.get('park_id'):
+                unique[contractor_id] = entry['park_id']
+
+    # Тип занятости, если он уже известен: у сотрудника парка провайдера не
+    # бывает вовсе, и знание об этом снимает с человека 12 раундов и карточку.
+    kinds = {contractor_id: (entry.get('employment_type') or '')
+             for contractor_id, entry in results.items()}
+
+    if results:
+        progress(percent=6, rows_total=len(rows), rows_resolved=len(results),
+                 note='Продолжаем прерванную выгрузку: {} строк уже собрано'
+                      .format(len(results)))
+    else:
+        progress(percent=4, rows_total=len(rows),
+                 note='Читаем справочник парков и провайдеров')
 
     parks = client.parks()
     park_names = {str(park.get('id')): _park_label(park) for park in parks}
     if not parks:
         raise FleetError('Кабинет не отдал ни одного парка')
 
-    first_park = next(iter(unique.values()), '') or str(parks[0].get('id'))
+    first_park = next((park for park in unique.values() if park), '') \
+        or str(parks[0].get('id'))
     providers = client.edm_providers(first_park)
     if not providers:
         raise FleetError('Кабинет не отдал справочник провайдеров ЭДО')
 
-    results = {}          # contractor_id -> запись результата
     stats = Counter()
     park_probe_requests = 0
+    classify_requests = 0
+    # Где человек лежит — в обычном сегменте или в архиве. Перебор парков говорит
+    # это тем же ответом, которым сообщает парк; знание бесплатное, а экономит
+    # шесть пустых запросов на каждой диспетчерской без архивных.
+    segments = {}
 
     # ── шаг 1: у кого нет парка ──────────────────────────────────────────────
-    orphans = [cid for cid, park in unique.items() if not park]
-    if orphans:
+    orphans = [contractor_id for contractor_id, park in unique.items()
+               if not park and contractor_id not in results]
+    if orphans and not stages.get('probe_done'):
         progress(percent=8, note='В файле нет ID парка — ищем водителей по паркам '
                                 '({} шт.)'.format(len(orphans)))
         before = client.requests_count
-        found_parks = _probe_parks(client, orphans, parks, progress)
+        found_parks = _probe_parks(client, orphans, parks, progress, stop=stop)
         park_probe_requests = client.requests_count - before
-        for cid, park_id in found_parks.items():
-            unique[cid] = park_id
+        checkpoint_rows = []
+        for contractor_id, info in found_parks.items():
+            unique[contractor_id] = info['park_id']
+            kinds[contractor_id] = info.get('employment_type') or ''
+            segments[contractor_id] = bool(info.get('archive'))
+            if kinds[contractor_id] == PARK_EMPLOYEE:
+                # Провайдера у сотрудника парка не бывает — это готовый ответ, а
+                # не пропуск. Те же запросы уже принесли и ФИО, и телефон.
+                results[contractor_id] = _entry_without_provider(contractor_id, info)
+                checkpoint_rows.append((contractor_id, info['park_id'],
+                                        results[contractor_id]))
+            else:
+                checkpoint_rows.append((contractor_id, info['park_id'], None))
         stats['parks_probed'] = len(found_parks)
+        stages['probe_done'] = True
+        save(rows=checkpoint_rows, stages=stages)
 
     # ── шаг 2: провайдер — раундами по провайдерам, парки параллельно ────────
     by_park = OrderedDict()
-    for cid, park_id in unique.items():
-        if park_id:
-            by_park.setdefault(park_id, []).append(cid)
+    for contractor_id, park_id in unique.items():
+        if park_id and contractor_id not in results:
+            by_park.setdefault(park_id, []).append(contractor_id)
 
     # Совсем мелкие парки дешевле спросить карточками: проход по провайдерам
     # стоит до семи запросов даже там, где в парке один человек.
     tiny = {park: ids for park, ids in by_park.items() if len(ids) < CARDS_CHEAPER_BELOW}
     big = {park: ids for park, ids in by_park.items() if len(ids) >= CARDS_CHEAPER_BELOW}
 
-    seen_providers = Counter()
+    seen_providers = Counter(stages.get('provider_counts') or {})
     leftovers = []
+    round_leftovers = []
     if big:
         found, pending = _resolve_by_providers(
             client, big, providers, seen_providers, progress,
             total=len(unique), done_before=len(results),
+            stop=stop, save=save, stages=stages, done_rounds=done_rounds,
+            segments=segments,
         )
         results.update(found)
+        round_leftovers.extend(pending)
         leftovers.extend(pending)
     for park_id, ids in tiny.items():
-        leftovers.extend((park_id, cid) for cid in ids)
+        leftovers.extend((park_id, contractor_id) for contractor_id in ids)
 
-    # ── шаг 3: добор карточками ──────────────────────────────────────────────
-    orphan_left = [cid for cid, park_id in unique.items()
-                   if not park_id and cid not in results]
+    # ── шаг 3: разбор остатка одним запросом на парк ─────────────────────────
+    # Кто эти люди, мы часто уже знаем из перебора парков. Но когда ID парка был
+    # в файле, перебора не было — и остаток приходится разбирать здесь, иначе
+    # каждый сотрудник парка стоил бы отдельную карточку (на прогоне №10 это 955
+    # запросов ради ответа «провайдера не бывает»).
+    #
+    # Берём только остаток ПОСЛЕ раундов. Мелкие парки (один-два человека) сюда
+    # не идут: там карточка и дешевле (один запрос против двух), и честнее —
+    # отвечает первоисточник, а не наш вывод из типа занятости.
+    unknown = [(park_id, contractor_id) for park_id, contractor_id in round_leftovers
+               if not kinds.get(contractor_id)]
+    if _needs_classification(unknown):
+        progress(percent=89, requests=client.requests_count,
+                 note='Разбираем остаток: {} строк'.format(len(unknown)))
+        before = client.requests_count
+        classified = _classify_leftovers(client, unknown, progress, stop=stop)
+        classify_requests = client.requests_count - before
+        checkpoint_rows = []
+        for contractor_id, info in classified.items():
+            kinds[contractor_id] = info.get('employment_type') or ''
+            if kinds[contractor_id] == PARK_EMPLOYEE:
+                results[contractor_id] = _entry_without_provider(contractor_id, info)
+                checkpoint_rows.append((contractor_id, info['park_id'],
+                                        results[contractor_id]))
+        save(rows=checkpoint_rows)
+        stats['classified'] = len(classified)
+        leftovers = [(park_id, contractor_id) for park_id, contractor_id in leftovers
+                     if contractor_id not in results]
+
+    # ── шаг 4: добор карточками ──────────────────────────────────────────────
+    orphan_left = [contractor_id for contractor_id, park_id in unique.items()
+                   if not park_id and contractor_id not in results]
     skipped_orphans = 0
     if len(orphan_left) > max_orphan_lookups:
         skipped_orphans = len(orphan_left) - max_orphan_lookups
         orphan_left = orphan_left[:max_orphan_lookups]
 
-    to_card = [(park_id, cid) for park_id, cid in leftovers] + \
-              [('', cid) for cid in orphan_left]
+    to_card = [(park_id, contractor_id) for park_id, contractor_id in leftovers] + \
+              [('', contractor_id) for contractor_id in orphan_left]
     if to_card:
-        progress(percent=90, note='Добираем из карточек: {} строк'.format(len(to_card)),
-                 requests=client.requests_count)
+        progress(percent=90, requests=client.requests_count,
+                 note='Добираем из карточек: {} строк'.format(len(to_card)))
         # Карточки не зависят друг от друга — значит идут в те же потоки.
         # Перебор диспетчерских включаем, только когда добирать нужно немногих:
         # один такой водитель стоит до 86 запросов.
         allow_scan = len(to_card) <= MAX_CARD_SCANS
-        for entry in _run_parallel(
-                client, to_card,
-                lambda task: _card_lookup(client, task[1], task[0], parks,
-                                          allow_scan=allow_scan)):
+
+        def card_task(task):
+            stop()
+            return _card_lookup(client, task[1], task[0], parks, allow_scan=allow_scan)
+
+        # Шаг длинный и однообразный — отмечаемся в базе по ходу, иначе сторож
+        # сочтёт живую выгрузку мёртвой (так и вышло 21.08.2026 на 1068 строках).
+        def card_progress(entry, done, total):
+            if entry:
+                save(rows=[(entry['contractor_id'], entry.get('park_id'), entry)])
+            if done % PROGRESS_EVERY == 0 or done == total:
+                progress(percent=90, requests=client.requests_count,
+                         note='Добираем из карточек: {} из {}'.format(done, total))
+
+        for entry in _run_parallel(client, to_card, card_task,
+                                   stop=stop, on_result=card_progress):
             if entry:
                 results[entry['contractor_id']] = entry
-                stats['from_card'] += 1
             else:
                 stats['not_found'] += 1
 
-    # ── шаг 4: контрольная сверка ────────────────────────────────────────────
+    # ── шаг 5: контрольная сверка ────────────────────────────────────────────
     check = {'checked': 0, 'matched': 0, 'mismatched': []}
-    from_list = [cid for cid, entry in results.items() if entry.get('source') != 'карточка']
-    if from_list and control_sample:
-        sample = rng.sample(from_list, min(control_sample, len(from_list)))
-        progress(percent=95, note='Контрольная сверка {} строк по карточкам'.format(len(sample)),
-                 requests=client.requests_count)
-        def verify(cid):
-            entry = results[cid]
+    sample = []
+    if control_sample:
+        from_list = [contractor_id for contractor_id, entry in results.items()
+                     if entry.get('provider_name') and entry.get('source') != 'карточка']
+        sample += rng.sample(from_list, min(control_sample, len(from_list)))
+        # И отдельно — те, кому мы САМИ поставили «провайдера не бывает». Это
+        # наше утверждение о чужой системе, и проверять его надо каждый прогон.
+        no_provider = [contractor_id for contractor_id, entry in results.items()
+                       if entry.get('source') == SOURCE_NO_PROVIDER]
+        sample += rng.sample(no_provider,
+                             min(CONTROL_NO_PROVIDER_SAMPLE, len(no_provider)))
+    if sample:
+        progress(percent=95, requests=client.requests_count,
+                 note='Контрольная сверка {} строк по карточкам'.format(len(sample)))
+
+        def verify(contractor_id):
+            stop()
+            entry = results[contractor_id]
             try:
-                profile = client.driver_card(entry.get('park_id'), cid)
+                profile = client.driver_card(entry.get('park_id'), contractor_id)
             except FleetSessionExpired:
                 raise
             except FleetError:
                 return None
             if profile is None:
                 return None
-            return cid, entry.get('provider_name'), FleetClient.card_provider(profile)
+            return (contractor_id, entry.get('provider_name') or '',
+                    FleetClient.card_provider(profile))
 
-        for outcome in _run_parallel(client, sample, verify):
+        for outcome in _run_parallel(client, sample, verify, stop=stop):
             if not outcome:
                 continue
-            cid, listed, card_value = outcome
-            if not card_value:
+            contractor_id, listed, card_value = outcome
+            if not card_value and listed:
+                # Карточка молчит там, где список ответил: это «поле не про
+                # него», а не расхождение.
                 continue
             check['checked'] += 1
             if card_value == listed:
                 check['matched'] += 1
             else:
                 check['mismatched'].append({
-                    'contractor_id': cid, 'list': listed, 'card': card_value,
+                    'contractor_id': contractor_id, 'list': listed, 'card': card_value,
                 })
+
+    # Итоговые числа считаем ПО РЕЗУЛЬТАТУ, а не счётчиками по ходу дела: после
+    # перезапуска половина строк приезжает из контрольной точки, и счётчик той
+    # попытки остался в умершем процессе. Отчёт же обязан говорить про файл, а не
+    # про последнюю попытку его собрать.
+    stats['from_card'] = sum(1 for entry in results.values()
+                             if entry.get('source') == 'карточка')
+    stats['no_provider_by_kind'] = sum(1 for entry in results.values()
+                                       if entry.get('source') == SOURCE_NO_PROVIDER)
 
     return {
         'results': results,
@@ -388,10 +624,46 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         'check': check,
         'requests': client.requests_count,
         'park_probe_requests': park_probe_requests,
+        'classify_requests': classify_requests,
         'skipped_orphans': skipped_orphans,
         'stats': dict(stats),
         'provider_counts': dict(seen_providers),
     }
+
+
+def _entry_without_provider(contractor_id, info):
+    """Запись для того, кому провайдер ЭДО не положен по типу занятости.
+
+    Пустой провайдер здесь — это ОТВЕТ, а не отсутствие ответа, поэтому у записи
+    свой источник: в отчёте «ЭДО не применяется» и «не смогли узнать» обязаны
+    читаться по-разному.
+    """
+    return {
+        'contractor_id': contractor_id,
+        'provider_id': '',
+        'provider_name': '',
+        'full_name': str(info.get('full_name') or '').strip(),
+        'phone': str(info.get('phone') or '').strip(),
+        'work_status': str(info.get('work_status') or '').strip(),
+        'employment_type': str(info.get('employment_type') or PARK_EMPLOYEE).strip(),
+        'park_id': info.get('park_id') or '',
+        'source': SOURCE_NO_PROVIDER,
+    }
+
+
+def _needs_classification(unknown):
+    """Стоит ли разбирать остаток списком, а не карточками.
+
+    Арифметика прямая: разбор стоит два запроса на парк (обычный сегмент и
+    архив), карточка — один запрос на строку. Значит список выгоден, когда строк
+    в остатке больше, чем по две на каждый задействованный парк. Нижний порог —
+    чтобы на десятке строк не устраивать обход диспетчерских: там карточки и
+    быстрее, и честнее (ответ из первоисточника).
+    """
+    if len(unknown) < CLASSIFY_LEFTOVERS_FLOOR:
+        return False
+    parks = {park_id for park_id, _contractor_id in unknown if park_id}
+    return bool(parks) and len(unknown) > 2 * len(parks)
 
 
 def _park_label(park):
@@ -406,18 +678,36 @@ def _percent(done, total, low=10, high=90):
     return int(low + (high - low) * min(1.0, done / float(total)))
 
 
-def _run_parallel(client, tasks, worker):
+def _run_parallel(client, tasks, worker, *, stop=None, on_result=None):
     """Раскладывает задачи по потокам. Параллельность — не украшение: замерено
     20.08.2026, шесть потоков дают 590 запросов/мин против 170 в один, и медиана
     ответа при этом не растёт. Упавшая задача не роняет остальные — её строки
-    просто уйдут в добор карточками."""
+    просто уйдут в добор карточками.
+
+    on_result зовётся по КАЖДОЙ доехавшей задаче, а не после всех: длинные шаги
+    (добор карточками — до тысячи запросов) обязаны отмечаться в базе по ходу
+    дела и складывать найденное в контрольную точку. Порядок результатов при
+    этом теряется — всем вызывающим он безразличен, они кладут ответы в словари.
+    """
     if not tasks:
         return []
+    if stop:
+        stop()
     workers = max(1, min(client.concurrency, len(tasks)))
     if workers == 1:
-        return [worker(tasks[0])]
+        outcome = worker(tasks[0])
+        if on_result:
+            on_result(outcome, 1, 1)
+        return [outcome]
+    collected = []
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='fleet-edm-io') as pool:
-        return list(pool.map(worker, tasks))
+        futures = [pool.submit(worker, task) for task in tasks]
+        for done, future in enumerate(as_completed(futures), start=1):
+            outcome = future.result()
+            collected.append(outcome)
+            if on_result:
+                on_result(outcome, done, len(tasks))
+    return collected
 
 
 def _split_tasks(pending, concurrency, slice_min=1000):
@@ -440,7 +730,8 @@ def _split_tasks(pending, concurrency, slice_min=1000):
 
 
 def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
-                          total, done_before=0):
+                          total, done_before=0, stop=None, save=None, stages=None,
+                          done_rounds=(), segments=None):
     """Провайдер для всех сразу: раунд на провайдера, парки внутри раунда параллельно.
 
     Почему именно так. Спросить можно про десять тысяч ID за раз, и пустой ответ
@@ -449,13 +740,36 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
     найденные уходят из очереди, и следующий провайдер спрашивается уже про
     остаток. «Бумажный документооборот» идёт первым не случайно — на нём три
     четверти водителей, и один раунд снимает большую часть работы.
+
+    Раунд — это ещё и естественная граница контрольной точки: он заканчивается
+    целиком или не заканчивается вовсе, и пройденные раунды после перезапуска
+    можно честно не повторять (найденное ими уже в базе).
+
+    segments — где человек лежит: в обычном сегменте или в архиве. Если перебор
+    парков уже это выяснил (а он выясняет — тем же ответом, что и парк), спрашивать
+    парк про архив, когда архивных в нём нет, незачем: это шесть пустых запросов
+    на каждую такую диспетчерскую. Кого не знаем — спрашиваем в обоих сегментах,
+    как раньше: терять архивных нельзя (в августе так потерялось 14 444 строки).
     """
-    pending = {park: list(ids) for park, ids in by_park.items()}
+    segments = segments or {}
+    # Очередь ведём ПО СЕГМЕНТАМ: у обычного и архивного прохода она своя.
+    pending = {False: {}, True: {}}
+    for park, ids in by_park.items():
+        for contractor_id in ids:
+            known = segments.get(contractor_id)
+            targets = (False, True) if known is None else (bool(known),)
+            for target in targets:
+                pending[target].setdefault(park, []).append(contractor_id)
+    stages = stages if stages is not None else {}
+    done_rounds = set(done_rounds or ())
+    save = save or Checkpoint(None)
     found = {}
     lock = threading.Lock()
 
     def ask(task, provider, archive):
         park_id, ids = task
+        if stop:
+            stop()
         try:
             items = client.contractors_all(
                 park_id, contractor_ids=ids, edm_provider=provider['id'],
@@ -477,18 +791,51 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
 
     rounds = [(archive, provider) for archive in (False, True) for provider in providers]
     for archive, provider in rounds:
-        tasks = _split_tasks(pending, client.concurrency)
-        if not tasks:
+        round_key = '{}|{}'.format(provider['id'], 1 if archive else 0)
+        if round_key in done_rounds:
+            # Раунд уже проходили в прошлой попытке, и всё найденное им лежит в
+            # контрольной точке. Повторять — значит платить за это второй раз.
+            continue
+        tasks = _split_tasks(pending[archive], client.concurrency)
+        if not tasks and not any(ids for queue in pending.values()
+                                 for ids in queue.values()):
             break
-        results = _run_parallel(client, tasks, lambda task: ask(task, provider, archive))
+        if not tasks:
+            # В этом сегменте спрашивать некого — но в другом ещё есть.
+            done_rounds.add(round_key)
+            continue
+
+        # Найденное кладём в контрольную точку по КАЖДОЙ доехавшей диспетчерской,
+        # не дожидаясь конца раунда: раунд по «Бумажному документообороту» на
+        # большом файле идёт минуты, а деплой не спрашивает разрешения. Отметку
+        # «раунд пройден» ставим только после полного раунда — незаконченный
+        # обязан повториться, но повторится он уже по остатку.
+        def keep(outcome, _done, _total):
+            if outcome and outcome[1]:
+                park_id, entries = outcome
+                save(rows=[(cid, park_id, entry) for cid, entry in entries.items()])
+
+        results = _run_parallel(client, tasks, lambda task: ask(task, provider, archive),
+                                stop=stop, on_result=keep)
         with lock:
             for park_id, entries in results:
                 if not entries:
                     continue
                 found.update(entries)
                 seen_providers[provider['id']] += len(entries)
-                pending[park_id] = [cid for cid in pending.get(park_id, [])
-                                    if cid not in entries]
+                # Найденного вычёркиваем из ОБОИХ сегментов: человек с неизвестным
+                # сегментом стоит в двух очередях, и без этого его бы спросили
+                # второй раз уже после ответа.
+                for queue in pending.values():
+                    if park_id in queue:
+                        queue[park_id] = [cid for cid in queue[park_id]
+                                          if cid not in entries]
+        done_rounds.add(round_key)
+        stages['rounds'] = sorted(done_rounds)
+        stages['provider_counts'] = dict(seen_providers)
+        # Строки уже улетели в контрольную точку по ходу раунда — здесь только
+        # отметка «раунд пройден целиком».
+        save(stages=stages)
         done = done_before + len(found)
         progress(
             percent=_percent(done, total, low=12, high=88),
@@ -498,7 +845,16 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
             requests=client.requests_count,
         )
 
-    leftovers = [(park_id, cid) for park_id, ids in pending.items() for cid in ids]
+    # Остаток — то, чего не нашёл ни один сегмент. Через множество, потому что
+    # человек с неизвестным сегментом стоял в двух очередях сразу.
+    leftovers, seen = [], set()
+    for queue in pending.values():
+        for park_id, ids in queue.items():
+            for contractor_id in ids:
+                if contractor_id in found or contractor_id in seen:
+                    continue
+                seen.add(contractor_id)
+                leftovers.append((park_id, contractor_id))
     return found, leftovers
 
 
@@ -515,7 +871,7 @@ def _entry_from_list(item, provider, archive):
     }
 
 
-def _probe_parks(client, ids, parks, progress):
+def _probe_parks(client, ids, parks, progress, stop=None):
     """Перебор диспетчерских для строк без парка — параллельно и одним списком.
 
     Здесь выигрыш от больших пачек самый большой. Раньше каждый парк спрашивали
@@ -525,12 +881,21 @@ def _probe_parks(client, ids, parks, progress):
 
     Два круга: обычные сегменты, затем архив — архивного водителя список по
     умолчанию не отдаёт вовсе.
+
+    Возвращает не «ID → парк», а ID → всё, что кабинет отдал про человека. Просим
+    полный набор полей вместо одного id, и это НЕ стоит ни одного лишнего запроса
+    (замер 24.08.2026 на файле прогона №10: 326 запросов, 38 секунд — ровно как с
+    projection=['id']). Зато среди полей есть тип занятости, а он снимает с
+    сотрудников парка 12 бесплодных раундов и по запросу карточки на каждого: на
+    том же файле — 955 строк из 15 738.
     """
     pending = set(ids)
     found = {}
     lock = threading.Lock()
 
     def probe(park, archive):
+        if stop:
+            stop()
         park_id = str(park.get('id'))
         with lock:
             snapshot = list(pending)
@@ -538,7 +903,8 @@ def _probe_parks(client, ids, parks, progress):
             return 0
         try:
             items = client.contractors_all(
-                park_id, contractor_ids=snapshot, archive=archive, projection=['id'],
+                park_id, contractor_ids=snapshot, archive=archive,
+                projection=LIST_PROJECTION,
             )
         except FleetSessionExpired:
             raise
@@ -550,17 +916,82 @@ def _probe_parks(client, ids, parks, progress):
                 cid = str(item.get('id') or '')
                 if cid in pending:
                     pending.discard(cid)
-                    found[cid] = park_id
+                    found[cid] = _info_from_list(item, park_id, archive)
         return len(items)
 
     for archive in (False, True):
         if not pending:
             break
-        _run_parallel(client, list(parks), lambda park: probe(park, archive))
+        _run_parallel(client, list(parks), lambda park: probe(park, archive), stop=stop)
         progress(
             note='Ищем диспетчерские: осталось найти {} из {}'.format(len(pending), len(ids)),
             requests=client.requests_count,
         )
+    return found
+
+
+def _info_from_list(item, park_id, archive):
+    """Что кабинет рассказал о человеке в ответе списка — без провайдера: его в
+    полях нет и быть не может (см. шапку client.py)."""
+    return {
+        'park_id': park_id,
+        'full_name': str(item.get('full_name') or '').strip(),
+        'phone': str(item.get('phone') or '').strip(),
+        'work_status': str(item.get('work_status') or '').strip(),
+        'employment_type': str(item.get('employment_type') or '').strip(),
+        'archive': bool(archive),
+    }
+
+
+def _classify_leftovers(client, unknown, progress, stop=None):
+    """Кто эти люди из остатка — одним запросом на парк, без фильтра провайдера.
+
+    Нужно, когда ID парка пришёл в файле: перебора диспетчерских не было, значит
+    тип занятости остатка неизвестен, и каждый сотрудник парка обошёлся бы в
+    отдельный запрос карточки. Список же за один запрос отвечает про весь остаток
+    парка сразу — цена зависит от числа НАЙДЕННЫХ, а не спрошенных.
+
+    Ненайденные здесь — это не «нет провайдера», а «в этом парке такого нет»:
+    они уходят в добор карточками, где парк перебирается заново.
+    """
+    by_park = OrderedDict()
+    for park_id, contractor_id in unknown:
+        if park_id:
+            by_park.setdefault(park_id, []).append(contractor_id)
+    found = {}
+    lock = threading.Lock()
+
+    def ask(task):
+        park_id, archive = task
+        if stop:
+            stop()
+        with lock:
+            ids = [cid for cid in by_park.get(park_id, ()) if cid not in found]
+        if not ids:
+            return
+        try:
+            items = client.contractors_all(
+                park_id, contractor_ids=ids, archive=archive, projection=LIST_PROJECTION,
+            )
+        except FleetSessionExpired:
+            raise
+        except FleetError:
+            logging.exception('Провайдер ЭДО: разбор остатка по парку %s не удался', park_id)
+            return
+        with lock:
+            for item in items:
+                cid = str(item.get('id') or '')
+                if cid:
+                    found[cid] = _info_from_list(item, park_id, archive)
+
+    tasks = [(park_id, archive) for archive in (False, True) for park_id in by_park]
+
+    def tick(_outcome, done, total):
+        if done % PROGRESS_EVERY == 0 or done == total:
+            progress(note='Разбираем остаток: диспетчерская {} из {}'.format(done, total),
+                     requests=client.requests_count)
+
+    _run_parallel(client, tasks, ask, stop=stop, on_result=tick)
     return found
 
 
