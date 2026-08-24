@@ -172,7 +172,10 @@
     padding-left: 1rem;
     border-left: 4px solid var(--wiki-line);
     font-style: italic;
-    color: var(--wiki-ink-mute);
+    /* ink-mute (#94a3b8) — цвет подписей, а не абзаца: цитата в статье
+       читалась как выцветшая. Курсив и так снижает контраст, поэтому
+       берём ink-soft — текст плотный, но по-прежнему тише основного. */
+    color: var(--wiki-ink-soft);
 }
 
 .wiki-prose code {
