@@ -584,11 +584,22 @@ class DayPayloadTest(unittest.TestCase):
     def test_read_office_day_asks_for_recorded_at(self):
         cursor = _DayCursor(('closed', None, 'manual',
                              date(2026, 8, 19), datetime(2026, 8, 19, 7, 41, 2)))
-        payload = read_office_day(cursor, 7, '2026-08-19')
+        payload = read_office_day(cursor, 7, '2026-08-19', space_id=11)
         self.assertEqual(payload['recorded_at'], '2026-08-19T07:41:02')
 
     def test_read_office_day_without_row_is_none(self):
-        self.assertIsNone(read_office_day(_DayCursor(None), 7, '2026-08-19'))
+        self.assertIsNone(read_office_day(_DayCursor(None), 7, '2026-08-19', space_id=11))
+
+    def test_read_office_day_is_scoped_to_space(self):
+        """Отметку дня читаем через офис, а не по одному office_id.
+
+        Иначе «статус на 19 августа» доехал бы и по офису соседней вики: в
+        wiki_office_days пространства нет, оно только у самого офиса.
+        """
+        cursor = _DayCursor(None)
+        read_office_day(cursor, 7, '2026-08-19', space_id=11)
+        self.assertIn('wiki_offices', cursor.captured)
+        self.assertIn('space_id', cursor.captured)
 
 
 class OfficeRowTest(unittest.TestCase):

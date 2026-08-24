@@ -58,12 +58,19 @@ class _RouteHarness:
     тянет за собой и все его тесты, и они начинают исполняться дважды.
     """
 
-    def build(self, context, granted=None):
+    def build(self, context, granted=None, spaces=(11,)):
         """granted — права, УЖЕ выписанные человеку правилами (см.
         queries.granted_rule_rights). Заглушка обязательна: курсор здесь один на
         все запросы и отвечает всем одними и теми же строками, а расчёт
         способностей ходит в базу первым — без подмены он разобрал бы чужую
-        выдачу как свою и сдвинул нумерацию execute()."""
+        выдачу как свою и сдвинул нумерацию execute().
+
+        spaces — пространства, доступные человеку. Тоже заглушкой, и по той же
+        причине: справочники парков и офисов начинаются с request_space, а
+        настоящий spaces_for_user на этом курсоре вернул бы пустой список — и
+        каждый роут отвечал бы 403 «нет пространства» ДО гейта прав, то есть
+        наборы ниже проверяли бы не то, что написано в их названиях. Пустой
+        кортеж передают там, где проверяют как раз саму границу."""
         cursor = MagicMock()
         cursor.fetchone.return_value = None
         cursor.fetchall.return_value = []
@@ -84,6 +91,10 @@ class _RouteHarness:
         self._orig_granted = queries.granted_rule_rights
         queries.granted_rule_rights = lambda _c, _s, _u: (dict(granted or {}), [])
         self.addCleanup(setattr, queries, 'granted_rule_rights', self._orig_granted)
+
+        self._orig_spaces = queries.spaces_for_user
+        queries.spaces_for_user = lambda _c, _ctx: list(spaces)
+        self.addCleanup(setattr, queries, 'spaces_for_user', self._orig_spaces)
 
         app = Flask(__name__)
         app.register_blueprint(build_wiki_blueprint(

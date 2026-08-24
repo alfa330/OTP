@@ -7,6 +7,18 @@
 к таблице. Поэтому связь «офис ↔ парк» несёт переопределения телефона и
 графика: NULL означает «как у офиса», значение — «у этого парка иначе».
 
+Справочник принадлежит ПРОСТРАНСТВУ вики (wiki_offices.space_id), поэтому
+space_id — обязательный аргумент у каждой функции, которая читает или пишет
+записи. Именно обязательный, а не со значением по умолчанию: у офиса нет второй
+границы, кроме этой колонки, и забытый параметр открыл бы адреса и телефоны
+одной вики сотрудникам другой. Кто именно спросил и вправе ли он спрашивать
+про это пространство — решает routes_structure.request_space.
+
+Связь «офис ↔ парк» границу не пересекает: вторую сторону, приехавшую из тела
+запроса, до записи просеивают own_park_ids / own_office_ids — одним запросом на
+весь список. Чужой id при этом не вызывает ошибку, а просто не создаёт связи:
+сообщение «такого парка тут нет» подтверждало бы, что где-то он есть.
+
 Модуль держит и чистые функции (разбор ссылки 2ГИС, нормализация графика) —
 они покрыты тестами без базы: tests/test_wiki_offices.py.
 """
@@ -388,39 +400,48 @@ def closure_covers(closed_from, closed_until, day):
     return end is None or day < end
 
 
-def set_office_closure(cursor, office_id, closed_from, closed_until, note=None):
-    """Закрытие офиса на срок. Возвращает False, если офиса нет."""
+def set_office_closure(cursor, office_id, closed_from, closed_until, note=None,
+                       *, space_id):
+    """Закрытие офиса на срок. Возвращает False, если офиса нет.
+
+    space_id в WHERE, хотя роут уже проверил офис через get_office: условие
+    здесь стоит дешевле проверки, а «False, если офиса нет» обязано означать и
+    «офиса нет в ЭТОМ пространстве» — иначе смысл возвращаемого значения
+    зависел бы от того, не забыл ли вызывающий сделать проверку.
+    """
     cursor.execute(
         """
         UPDATE wiki_offices
            SET closed_from = %s::date, closed_until = %s::date, closed_note = %s,
                updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-         WHERE id = %s
+         WHERE id = %s AND space_id = %s
         """,
-        (closed_from, closed_until, note, office_id),
+        (closed_from, closed_until, note, office_id, space_id),
     )
     return cursor.rowcount > 0
 
 
-def clear_office_closure(cursor, office_id):
+def clear_office_closure(cursor, office_id, *, space_id):
     """Снимает закрытие — офис снова считается по графику."""
     cursor.execute(
         """
         UPDATE wiki_offices
            SET closed_from = NULL, closed_until = NULL, closed_note = NULL,
                updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-         WHERE id = %s
+         WHERE id = %s AND space_id = %s
         """,
-        (office_id,),
+        (office_id, space_id),
     )
     return cursor.rowcount > 0
 
 
-def read_office_day(cursor, office_id, day):
+def read_office_day(cursor, office_id, day, *, space_id):
     cursor.execute(
-        'SELECT state, note, source, day, recorded_at FROM wiki_office_days '
-        ' WHERE office_id = %s AND day = %s::date',
-        (office_id, day),
+        'SELECT d.state, d.note, d.source, d.day, d.recorded_at '
+        '  FROM wiki_office_days d'
+        '  JOIN wiki_offices o ON o.id = d.office_id AND o.space_id = %s'
+        ' WHERE d.office_id = %s AND d.day = %s::date',
+        (space_id, office_id, day),
     )
     row = cursor.fetchone()
     if not row:
@@ -428,12 +449,19 @@ def read_office_day(cursor, office_id, day):
     return _day_payload(*row)
 
 
-def set_office_day(cursor, office_id, day, state, note=None, recorded_by=None):
-    """Отметка человека: «в этот день офис был закрыт (открыт), вот причина»."""
+def set_office_day(cursor, office_id, day, state, note=None, recorded_by=None,
+                   *, space_id):
+    """Отметка человека: «в этот день офис был закрыт (открыт), вот причина».
+
+    INSERT ... SELECT, а не VALUES: так «офис чужого пространства» не пишется
+    вовсе, а не пишется и потом отсеивается на чтении.
+    """
     cursor.execute(
         """
         INSERT INTO wiki_office_days (office_id, day, state, note, source, recorded_by)
-        VALUES (%s, %s::date, %s, %s, 'manual', %s)
+        SELECT o.id, %s::date, %s, %s, 'manual', %s
+          FROM wiki_offices o
+         WHERE o.id = %s AND o.space_id = %s
         ON CONFLICT (office_id, day) DO UPDATE
            SET state = EXCLUDED.state,
                note = EXCLUDED.note,
@@ -441,15 +469,19 @@ def set_office_day(cursor, office_id, day, state, note=None, recorded_by=None):
                recorded_by = EXCLUDED.recorded_by,
                recorded_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
         """,
-        (office_id, day, state, note, recorded_by),
+        (day, state, note, recorded_by, office_id, space_id),
     )
+    return cursor.rowcount > 0
 
 
-def clear_office_day(cursor, office_id, day):
+def clear_office_day(cursor, office_id, day, *, space_id):
     """Снимает отметку — день снова считается по графику."""
     cursor.execute(
-        'DELETE FROM wiki_office_days WHERE office_id = %s AND day = %s::date',
-        (office_id, day),
+        'DELETE FROM wiki_office_days d'
+        '  USING wiki_offices o'
+        ' WHERE o.id = d.office_id AND o.space_id = %s'
+        '   AND d.office_id = %s AND d.day = %s::date',
+        (space_id, office_id, day),
     )
     return cursor.rowcount > 0
 
@@ -558,17 +590,45 @@ def link_phones(link):
     return None
 
 
-def phones_by_park(cursor, park_ids):
+def own_office_ids(cursor, office_ids, *, space_id):
+    """Из присланных id офисов — только те, что лежат в этом пространстве.
+
+    Один запрос на весь список: id приезжают из тела запроса, и проверять их
+    по одному значило бы N походов в базу там, где хватает одного. Форма
+    возвращает множество, а не список: порядок задаёт вызывающий, ему нужна
+    только принадлежность.
+    """
+    ids = sorted({int(x) for x in (office_ids or []) if x is not None})
+    if not ids:
+        return frozenset()
+    cursor.execute('SELECT id FROM wiki_offices WHERE id = ANY(%s) AND space_id = %s',
+                   (ids, space_id))
+    return frozenset(row[0] for row in cursor.fetchall())
+
+
+def own_park_ids(cursor, park_ids, *, space_id):
+    """Из присланных id парков — только свои. Зеркало own_office_ids."""
+    ids = sorted({int(x) for x in (park_ids or []) if x is not None})
+    if not ids:
+        return frozenset()
+    cursor.execute('SELECT id FROM wiki_taxi_parks WHERE id = ANY(%s) AND space_id = %s',
+                   (ids, space_id))
+    return frozenset(row[0] for row in cursor.fetchall())
+
+
+def phones_by_park(cursor, park_ids, *, space_id):
     """{park_id: {office_id | None: [номера]}} в порядке, заданном формой."""
     if not park_ids:
         return {}
     cursor.execute(
         """
-        SELECT park_id, office_id, phone, note FROM wiki_park_phones
-         WHERE park_id = ANY(%s)
-         ORDER BY park_id, office_id NULLS FIRST, position, id
+        SELECT ph.park_id, ph.office_id, ph.phone, ph.note
+          FROM wiki_park_phones ph
+          JOIN wiki_taxi_parks p ON p.id = ph.park_id AND p.space_id = %s
+         WHERE ph.park_id = ANY(%s)
+         ORDER BY ph.park_id, ph.office_id NULLS FIRST, ph.position, ph.id
         """,
-        (list(park_ids),),
+        (space_id, list(park_ids)),
     )
     result = {}
     for park_id, office_id, phone, note in cursor.fetchall():
@@ -578,7 +638,13 @@ def phones_by_park(cursor, park_ids):
 
 
 def set_point_phones(cursor, park_id, office_id, phones):
-    """Переписывает номера одной точки парка. office_id=None — «онлайн»."""
+    """Переписывает номера одной точки парка. office_id=None — «онлайн».
+
+    Пространства не проверяет намеренно: её вызывают только после того, как
+    связь «парк ↔ офис» уже создана запросом с условием на пространство, то
+    есть обе стороны заведомо свои. Отдельный параметр здесь был бы третьим
+    местом, где то же условие можно забыть.
+    """
     cursor.execute(
         'DELETE FROM wiki_park_phones '
         ' WHERE park_id = %s AND office_id IS NOT DISTINCT FROM %s',
@@ -592,7 +658,7 @@ def set_point_phones(cursor, park_id, office_id, phones):
         )
 
 
-def set_park_numbers(cursor, park_id, numbers):
+def set_park_numbers(cursor, park_id, numbers, *, space_id):
     """Переписывает номера парка одним плоским списком.
 
     numbers — [{office_id: int | None, phone, note}] в том порядке, в котором
@@ -631,7 +697,14 @@ def set_park_numbers(cursor, park_id, numbers):
         """,
         (park_id, office_ids),
     )
+    # Офисы чужого пространства отсеиваем ОДНИМ запросом, до записи: их
+    # id приезжают из тела запроса, а связь «парк ↔ офис» границу пересекать
+    # не должна. Одним запросом, а не проверкой на каждый офис, потому что
+    # список короткий и целиком известен заранее.
+    bound = own_office_ids(cursor, office_ids, space_id=space_id)
     for office_id in office_ids:
+        if office_id not in bound:
+            continue
         cursor.execute(
             'INSERT INTO wiki_office_taxi_parks (office_id, park_id) VALUES (%s, %s) '
             'ON CONFLICT (office_id, park_id) DO NOTHING',
@@ -651,6 +724,10 @@ def set_park_numbers(cursor, park_id, numbers):
         (park_id,),
     )
     for office_id in order:
+        # Номер, привязанный к офису чужого пространства, не пишем: связи для
+        # него нет, и строка осталась бы висеть невидимым мусором.
+        if office_id is not None and office_id not in bound:
+            continue
         for position, number in enumerate(clean_phones(grouped[office_id])):
             cursor.execute(
                 'INSERT INTO wiki_park_phones (park_id, office_id, phone, note, position) '
@@ -660,7 +737,11 @@ def set_park_numbers(cursor, park_id, numbers):
 
 
 def set_park_online_phones(cursor, park_id, phones):
-    """Номера парка без офиса — то, что в форме помечено «онлайн»."""
+    """Номера парка без офиса — то, что в форме помечено «онлайн».
+
+    Пространство не спрашиваем: у номера без офиса вторая сторона одна — сам
+    парк, а его роут уже проверил (update_park не найдёт чужой).
+    """
     set_point_phones(cursor, park_id, None, phones)
 
 
@@ -700,8 +781,8 @@ def _office_row(row):
 
 
 def list_offices(cursor, include_archived=False, query=None, park_id=None, city=None,
-                 day=None):
-    """Офисы со списком парков и переопределениями.
+                 day=None, *, space_id):
+    """Офисы со списком парков и переопределениями. Только своего пространства.
 
     Парки приезжают одним запросом на всю выборку, а не запросом на карточку:
     офисов два десятка, но раскладывать их по вкладке «парк → его офисы» фронт
@@ -720,7 +801,8 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
           FROM wiki_offices o
           LEFT JOIN wiki_office_days d
                  ON d.office_id = o.id AND d.day = %(day)s::date
-         WHERE (%(archived)s OR o.status = 'active')
+         WHERE o.space_id = %(space)s
+           AND (%(archived)s OR o.status = 'active')
            AND (%(city)s::text IS NULL OR o.city = %(city)s::text)
            AND (%(query)s::text IS NULL
                 OR o.name ILIKE '%%' || %(query)s::text || '%%'
@@ -734,7 +816,8 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
          ORDER BY o.position, o.city NULLS LAST, o.name
         """,
         {'archived': include_archived, 'query': query or None,
-         'park': park_id, 'city': city or None, 'day': day or None},
+         'park': park_id, 'city': city or None, 'day': day or None,
+         'space': space_id},
     )
     offices = []
     for row in cursor.fetchall():
@@ -761,9 +844,10 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
           FROM wiki_office_taxi_parks op
           JOIN wiki_taxi_parks p ON p.id = op.park_id
          WHERE op.office_id = ANY(%s) AND p.status = 'active'
+           AND p.space_id = %s
          ORDER BY p.position, p.name
         """,
-        (list(by_id.keys()),),
+        (list(by_id.keys()), space_id),
     )
     for office_id, park_id_, park_name, schedule, note, phones in cursor.fetchall():
         by_id[office_id]['parks'].append({
@@ -773,23 +857,30 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
     return offices
 
 
-def get_office(cursor, office_id):
+def get_office(cursor, office_id, *, space_id):
     cursor.execute(
-        'SELECT ' + _OFFICE_COLUMNS + ' FROM wiki_offices o WHERE o.id = %s',
-        (office_id,),
+        'SELECT ' + _OFFICE_COLUMNS +
+        ' FROM wiki_offices o WHERE o.id = %s AND o.space_id = %s',
+        (office_id, space_id),
     )
     row = cursor.fetchone()
     return _office_row(row) if row else None
 
 
-def cities(cursor):
-    """Города для фильтра — из самих офисов, отдельного справочника нет."""
+def cities(cursor, *, space_id):
+    """Города для фильтра — из самих офисов, отдельного справочника нет.
+
+    Пространство обязательно: список городов — это тоже сведение о чужой вике
+    («у соседей есть офис в Атырау»), пусть и без адреса.
+    """
     cursor.execute(
         """
         SELECT city, count(*) FROM wiki_offices
-         WHERE status = 'active' AND city IS NOT NULL AND city <> ''
+         WHERE space_id = %s AND status = 'active'
+           AND city IS NOT NULL AND city <> ''
          GROUP BY city ORDER BY city
-        """
+        """,
+        (space_id,),
     )
     return [{'city': row[0], 'count': row[1]} for row in cursor.fetchall()]
 
@@ -805,22 +896,25 @@ def _schedule_param(value):
     return Json(value) if value is not None else None
 
 
-def create_office(cursor, *, slug, name, fields, created_by):
+def create_office(cursor, *, slug, name, fields, created_by, space_id):
     cursor.execute(
         """
-        INSERT INTO wiki_offices (slug, name, city, address, address_note, phone,
+        INSERT INTO wiki_offices (space_id, slug, name, city, address, address_note, phone,
                                   map_url, map_resolved_url, lat, lon, map_checked_at,
                                   schedule, is_online, all_parks, kind, partner_label,
                                   no_office, position, created_by)
-        VALUES (%(slug)s, %(name)s, %(city)s, %(address)s, %(address_note)s, %(phone)s,
+        VALUES (%(space)s, %(slug)s, %(name)s, %(city)s, %(address)s, %(address_note)s, %(phone)s,
                 %(map_url)s, %(map_resolved_url)s, %(lat)s, %(lon)s,
                 CASE WHEN %(lat)s IS NULL THEN NULL ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') END,
                 %(schedule)s, %(is_online)s, %(all_parks)s, %(kind)s, %(partner_label)s,
                 %(no_office)s,
-                COALESCE((SELECT max(position) + 1 FROM wiki_offices), 0), %(by)s)
+                -- Позиция считается ВНУТРИ пространства: общий max сдвигал бы
+                -- первый офис новой вики на сорок седьмое место.
+                COALESCE((SELECT max(position) + 1 FROM wiki_offices
+                           WHERE space_id = %(space)s), 0), %(by)s)
         RETURNING id
         """,
-        {'slug': slug, 'name': name, 'by': created_by,
+        {'slug': slug, 'name': name, 'by': created_by, 'space': space_id,
          'no_office': bool(fields.get('no_office')),
          'city': fields.get('city'), 'address': fields.get('address'),
          'address_note': fields.get('address_note'), 'phone': fields.get('phone'),
@@ -835,7 +929,7 @@ def create_office(cursor, *, slug, name, fields, created_by):
     return cursor.fetchone()[0]
 
 
-def update_office(cursor, office_id, fields):
+def update_office(cursor, office_id, fields, *, space_id):
     sets, values = [], []
     for key in _OFFICE_WRITABLE:
         if key not in fields:
@@ -851,8 +945,9 @@ def update_office(cursor, office_id, fields):
                     "ELSE (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') END")
         values.append(fields['lat'])
     sets.append("updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')")
-    values.append(office_id)
-    cursor.execute('UPDATE wiki_offices SET ' + ', '.join(sets) + ' WHERE id = %s', values)
+    values.extend((office_id, space_id))
+    cursor.execute('UPDATE wiki_offices SET ' + ', '.join(sets) +
+                   ' WHERE id = %s AND space_id = %s', values)
     return cursor.rowcount > 0
 
 
@@ -869,7 +964,7 @@ def _link_ids(links, key):
     return result
 
 
-def set_office_parks(cursor, office_id, links):
+def set_office_parks(cursor, office_id, links, *, space_id):
     """Переписывает привязку офиса к паркам.
 
     links — список {park_id, phones, schedule, note}. Переписываем целиком, а не
@@ -877,6 +972,10 @@ def set_office_parks(cursor, office_id, links):
 
     Сносим только связи с ЖИВЫМИ парками: архивных нет в форме, и общая
     очистка тихо оторвала бы их от офиса — а парк из архива возвращают.
+
+    Парки чужого пространства отбрасываются до записи (own_park_ids): связь
+    границу не пересекает, иначе телефон парка Таксопарков всплыл бы в карточке
+    офиса Тез.
     """
     cursor.execute(
         """
@@ -897,13 +996,14 @@ def set_office_parks(cursor, office_id, links):
         """,
         (office_id, _link_ids(links, 'park_id')),
     )
+    own = own_park_ids(cursor, _link_ids(links, 'park_id'), space_id=space_id)
     seen = set()
     for link in links or []:
         try:
             park_id = int(link.get('park_id'))
         except (TypeError, ValueError, AttributeError):
             continue
-        if park_id in seen:
+        if park_id in seen or park_id not in own:
             continue
         seen.add(park_id)
         cursor.execute(
@@ -1037,7 +1137,7 @@ def fetch_tile(z, x, y):
     return response.content if ok else None
 
 
-def offices_by_park(cursor, park_ids):
+def offices_by_park(cursor, park_ids, *, space_id):
     """Офисы каждого парка. {park_id: [{office_id, name, city, is_online, phones, ...}]}
 
     Зеркало list_offices: там к офису подтягиваются парки, здесь к парку —
@@ -1057,9 +1157,10 @@ def offices_by_park(cursor, park_ids):
           FROM wiki_office_taxi_parks op
           JOIN wiki_offices o ON o.id = op.office_id
          WHERE op.park_id = ANY(%s) AND o.status = 'active'
+           AND o.space_id = %s
          ORDER BY o.position, o.city NULLS LAST, o.name
         """,
-        (list(park_ids),),
+        (list(park_ids), space_id),
     )
     result = {}
     for row in cursor.fetchall():
@@ -1072,7 +1173,7 @@ def offices_by_park(cursor, park_ids):
     return result
 
 
-def set_park_offices(cursor, park_id, links):
+def set_park_offices(cursor, park_id, links, *, space_id):
     """Переписывает офисы парка.
 
     links — список {office_id, phones, schedule, note}: номера этого парка в
@@ -1101,13 +1202,14 @@ def set_park_offices(cursor, park_id, links):
         """,
         (park_id, _link_ids(links, 'office_id')),
     )
+    own = own_office_ids(cursor, _link_ids(links, 'office_id'), space_id=space_id)
     seen = set()
     for link in links or []:
         try:
             office_id = int(link.get('office_id'))
         except (TypeError, ValueError, AttributeError):
             continue
-        if office_id in seen:
+        if office_id in seen or office_id not in own:
             continue
         seen.add(office_id)
         cursor.execute(
@@ -1125,9 +1227,11 @@ def set_park_offices(cursor, park_id, links):
         set_point_phones(cursor, park_id, office_id, link_phones(link) or [])
 
 
-def slug_is_free(cursor, slug, exclude_id=None):
+def slug_is_free(cursor, slug, exclude_id=None, *, space_id):
+    """Свободен ли слаг В ЭТОМ пространстве (уникальность там же — см. схему)."""
     cursor.execute(
-        'SELECT 1 FROM wiki_offices WHERE slug = %s AND (%s::int IS NULL OR id <> %s::int)',
-        (slug, exclude_id, exclude_id),
+        'SELECT 1 FROM wiki_offices '
+        ' WHERE space_id = %s AND slug = %s AND (%s::int IS NULL OR id <> %s::int)',
+        (space_id, slug, exclude_id, exclude_id),
     )
     return cursor.fetchone() is None

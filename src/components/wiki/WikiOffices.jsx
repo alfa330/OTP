@@ -177,9 +177,19 @@ const readPrefs = () => {
     }
 };
 
-export default function WikiOffices({ base, headers, showToast }) {
+export default function WikiOffices({ base, headers, showToast, spaceId = null }) {
     const toast = useStableCallback(showToast);
     const prefs = useMemo(readPrefs, []);
+
+    /* Пространство едет в КАЖДОМ запросе вкладки, а не только в списке:
+       справочник офисов принадлежит пространству, и на офис соседней вики
+       сервер отвечает «Офис не найден» (wiki/routes_structure.request_space).
+       Одним объектом, чтобы очередной добавленный запрос не забыл параметр —
+       забытый, он молча ушёл бы не в ту вику. */
+    const req = useMemo(
+        () => ({ headers, params: { space_id: spaceId || undefined } }),
+        [headers, spaceId],
+    );
 
     const [offices, setOffices] = useState([]);
     const [cities, setCities] = useState([]);
@@ -224,8 +234,8 @@ export default function WikiOffices({ base, headers, showToast }) {
         if (filters.showArchived) params.archived = 1;
 
         Promise.all([
-            axios.get(`${base}/offices`, { headers, params }),
-            axios.get(`${base}/parks`, { headers }),
+            axios.get(`${base}/offices`, { ...req, params: { ...req.params, ...params } }),
+            axios.get(`${base}/parks`, req),
         ])
             .then(([officeResponse, parkResponse]) => {
                 setOffices(officeResponse.data?.items || []);
@@ -235,7 +245,7 @@ export default function WikiOffices({ base, headers, showToast }) {
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить офисы'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, query, dayISO, filters.city, filters.parkId, filters.showArchived, toast]);
+    }, [base, req, query, dayISO, filters.city, filters.parkId, filters.showArchived, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);
@@ -260,8 +270,8 @@ export default function WikiOffices({ base, headers, showToast }) {
         };
         setBusy(true);
         const request = draft.id
-            ? axios.patch(`${base}/offices/${draft.id}`, payload, { headers })
-            : axios.post(`${base}/offices`, payload, { headers });
+            ? axios.patch(`${base}/offices/${draft.id}`, payload, req)
+            : axios.post(`${base}/offices`, payload, req);
         request
             .then(() => { toast(draft.id ? 'Офис обновлён' : 'Офис добавлен', 'success'); setDraft(null); load(); })
             .catch((e) => toast(errText(e, 'Не удалось сохранить'), 'error'))
@@ -270,7 +280,7 @@ export default function WikiOffices({ base, headers, showToast }) {
 
     const archive = (office) => {
         setBusy(true);
-        axios.delete(`${base}/offices/${office.id}`, { headers })
+        axios.delete(`${base}/offices/${office.id}`, req)
             .then(() => { toast('Офис убран в архив', 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
             .finally(() => setBusy(false));
@@ -278,7 +288,7 @@ export default function WikiOffices({ base, headers, showToast }) {
 
     const restore = (office) => {
         setBusy(true);
-        axios.patch(`${base}/offices/${office.id}`, { status: 'active' }, { headers })
+        axios.patch(`${base}/offices/${office.id}`, { status: 'active' }, req)
             .then(() => { toast('Офис возвращён из архива', 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
@@ -319,12 +329,12 @@ export default function WikiOffices({ base, headers, showToast }) {
 
         const requests = period
             ? [axios.put(closure, { from, until: term.until || null, note: note || null },
-                         { headers }),
-               axios.delete(day, { headers })]
-            : [axios.put(day, { state, note: note || null }, { headers })];
+                         req),
+               axios.delete(day, req)]
+            : [axios.put(day, { state, note: note || null }, req)];
         // Снимаем срок, только если он был: лишний DELETE трогал бы updated_at
         // и колонка «Обновлено» врала бы о правке, которой не было.
-        if (!period && office.closed_from) requests.push(axios.delete(closure, { headers }));
+        if (!period && office.closed_from) requests.push(axios.delete(closure, req));
 
         setBusy(true);
         Promise.all(requests)
@@ -343,9 +353,9 @@ export default function WikiOffices({ base, headers, showToast }) {
         // Для дежурного «считать по графику» — одно действие, а не выбор между
         // отметкой и сроком: снимаем оба.
         Promise.all([
-            axios.delete(`${base}/offices/${office.id}/day/${dayISO}`, { headers }),
+            axios.delete(`${base}/offices/${office.id}/day/${dayISO}`, req),
             ...(office.closed_from
-                ? [axios.delete(`${base}/offices/${office.id}/closure`, { headers })] : []),
+                ? [axios.delete(`${base}/offices/${office.id}/closure`, req)] : []),
         ])
             .then(() => { toast('Офис снова считается по графику', 'success'); setDayTarget(null); load(); })
             .catch((e) => toast(errText(e, 'Не удалось снять отметку'), 'error'))

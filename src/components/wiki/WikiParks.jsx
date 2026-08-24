@@ -138,8 +138,17 @@ const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => {
     );
 };
 
-export default function WikiParks({ base, headers, showToast }) {
+export default function WikiParks({ base, headers, showToast, spaceId = null }) {
     const toast = useStableCallback(showToast);
+
+    /* Пространство едет в КАЖДОМ запросе вкладки: справочник парков и офисов
+       принадлежит пространству, и на чужой парк сервер отвечает «Парк не
+       найден» (wiki/routes_structure.request_space). Одним объектом, чтобы
+       очередной добавленный запрос не забыл параметр. */
+    const req = useMemo(
+        () => ({ headers, params: { space_id: spaceId || undefined } }),
+        [headers, spaceId],
+    );
 
     const [parks, setParks] = useState([]);
     const [promotions, setPromotions] = useState([]);
@@ -153,9 +162,12 @@ export default function WikiParks({ base, headers, showToast }) {
     const load = useCallback(() => {
         setLoading(true);
         Promise.all([
-            axios.get(`${base}/parks`, { headers, params: query.trim() ? { q: query.trim() } : {} }),
-            axios.get(`${base}/promotions`, { headers }),
-            axios.get(`${base}/offices`, { headers }),
+            axios.get(`${base}/parks`, {
+                ...req,
+                params: { ...req.params, ...(query.trim() ? { q: query.trim() } : {}) },
+            }),
+            axios.get(`${base}/promotions`, req),
+            axios.get(`${base}/offices`, req),
         ])
             .then(([parksResponse, promoResponse, officeResponse]) => {
                 setParks(parksResponse.data?.items || []);
@@ -166,7 +178,7 @@ export default function WikiParks({ base, headers, showToast }) {
             })
             .catch((e) => toast(errText(e, 'Не удалось загрузить справочник'), 'error'))
             .finally(() => setLoading(false));
-    }, [base, headers, query, toast]);
+    }, [base, req, query, toast]);
 
     useEffect(() => {
         const timer = setTimeout(load, query ? 250 : 0);
@@ -186,8 +198,8 @@ export default function WikiParks({ base, headers, showToast }) {
         };
         setBusy(true);
         const request = draft.id
-            ? axios.patch(`${base}/parks/${draft.id}`, payload, { headers })
-            : axios.post(`${base}/parks`, payload, { headers });
+            ? axios.patch(`${base}/parks/${draft.id}`, payload, req)
+            : axios.post(`${base}/parks`, payload, req);
         request
             .then(() => { toast(draft.id ? 'Парк обновлён' : 'Парк добавлен', 'success'); setDraft(null); load(); })
             .catch((e) => toast(errText(e, 'Не удалось сохранить'), 'error'))
@@ -196,7 +208,7 @@ export default function WikiParks({ base, headers, showToast }) {
 
     const archive = (park) => {
         setBusy(true);
-        axios.delete(`${base}/parks/${park.id}`, { headers })
+        axios.delete(`${base}/parks/${park.id}`, req)
             .then(() => { toast('Парк убран в архив', 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
             .finally(() => setBusy(false));
@@ -204,7 +216,7 @@ export default function WikiParks({ base, headers, showToast }) {
 
     const restore = (park) => {
         setBusy(true);
-        axios.patch(`${base}/parks/${park.id}`, { status: 'active' }, { headers })
+        axios.patch(`${base}/parks/${park.id}`, { status: 'active' }, req)
             .then(() => { toast('Парк возвращён из архива', 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));

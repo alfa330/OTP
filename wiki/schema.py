@@ -908,6 +908,81 @@ _OFFICE_STATEMENTS = [
 ]
 
 
+# Граница пространства у справочников парков и офисов.
+#
+# Отдельной функцией, а не строками в _OFFICE_STATEMENTS, по двум причинам:
+# порядок шагов внутри имеет значение (сначала заполнить, потом NOT NULL, потом
+# уникальность), и нужен DEFAULT_SPACE_CODE, который объявлен ниже в файле —
+# из списка-литерала его не достать.
+def _scope_directories_to_space(cursor):
+    """Привязывает парки, офисы и акции к пространству.
+
+    Справочник был общекомпанейским: одна таблица офисов на всю вику. Пока
+    пространство было одно, это совпадало с правдой; со вторым («Тез»)
+    совпадать перестало. Слова space в wiki/offices.py и wiki/parks.py не было
+    ни разу, то есть границу нельзя было выразить вовсе — стоило включить
+    вкладку «Офисы» конструктором, и сотрудник Тез КЦ видел адреса, телефоны и
+    графики офисов Таксопарков (и через фильтр «по парку» — сам список парков).
+
+    space_id — колонка на самой записи, как у wiki_sections, а НЕ таблица
+    связи: у физического офиса один хозяин, и «офис двух пространств» означал
+    бы, что правка телефона в одной вике меняет его в другой — ровно та
+    болезнь, от которой ушла статья «Адреса офисов». Понадобится общий на две
+    вики адрес — его заведут двумя записями, и каждая будет править свою.
+
+    ON DELETE CASCADE — как у wiki_sections.space_id. Пространства архивируют,
+    а не удаляют (routes_structure), так что каскад срабатывает только на
+    переезде в _merge_legacy_spaces.
+
+    NOT NULL обязателен: NULL здесь прочитался бы как «принадлежит всем» —
+    ровно та дыра, которую эта миграция закрывает.
+    """
+    tables = ('wiki_taxi_parks', 'wiki_offices', 'wiki_promotions')
+    for table in tables:
+        cursor.execute(
+            'ALTER TABLE ' + table + ' ADD COLUMN IF NOT EXISTS space_id INTEGER '
+            'REFERENCES wiki_spaces(id) ON DELETE CASCADE'
+        )
+
+    # Существующие записи — в пространство по умолчанию: именно в нём их и
+    # вели, других пространств на момент их создания не было. Придумывать
+    # раскладку по названиям городов нельзя — это угадывание, а справочник
+    # после миграции обязан выглядеть точно так же, как до неё.
+    cursor.execute('SELECT id FROM wiki_spaces WHERE code = %s', (DEFAULT_SPACE_CODE,))
+    row = cursor.fetchone()
+    if not row:
+        # Пространства ещё нет — значит и справочников нет. NOT NULL поставим
+        # на следующем старте, когда _merge_legacy_spaces заведёт контейнер.
+        return
+    for table in tables:
+        cursor.execute('UPDATE ' + table + ' SET space_id = %s WHERE space_id IS NULL',
+                       (row[0],))
+        # Идемпотентно: у колонки, которая уже NOT NULL, это пустая операция.
+        cursor.execute('ALTER TABLE ' + table + ' ALTER COLUMN space_id SET NOT NULL')
+
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wiki_offices_space '
+                   'ON wiki_offices(space_id, status, city, position, id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wiki_parks_space '
+                   'ON wiki_taxi_parks(space_id, status, position, id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wiki_promotions_space '
+                   'ON wiki_promotions(space_id, status, ends_at)')
+
+    # Слаг уникален В ПРОСТРАНСТВЕ, а не на всю вику. Иначе офис «Астана»,
+    # заведённый в Тез, получил бы слаг astana-2 (routes_offices досыпает
+    # суффикс, пока slug_is_free не согласится), и по номеру суффикса читалось
+    # бы, сколько одноимённых записей лежит в чужой вике.
+    #
+    # Ограничение объявлено внутри CREATE TABLE, то есть на проде лежит с
+    # автоматическим именем <таблица>_slug_key — снимаем по нему. Уникальность
+    # при этом не ослабляется: составной индекс создаётся тем же шагом.
+    for table, index in (('wiki_offices', 'uq_wiki_offices_space_slug'),
+                         ('wiki_taxi_parks', 'uq_wiki_parks_space_slug')):
+        cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS ' + index +
+                       ' ON ' + table + '(space_id, slug)')
+        cursor.execute('ALTER TABLE ' + table +
+                       ' DROP CONSTRAINT IF EXISTS ' + table + '_slug_key')
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Поиск
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1886,6 +1961,11 @@ def init_wiki_schema(cursor):
     # Офисы — строго после парков: связь ссылается на wiki_taxi_parks.
     for statement in _OFFICE_STATEMENTS:
         cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Граница пространства у справочников — после обеих групп: функция трогает
+    # и парки, и офисы, и акции, и читает wiki_spaces, которую к этому моменту
+    # уже завёл _merge_legacy_spaces.
+    _scope_directories_to_space(cursor)
 
     # Выражение генерируемой колонки менять через ALTER нельзя — только
     # пересоздать; «ADD COLUMN IF NOT EXISTS» молча оставит старое определение.

@@ -544,10 +544,23 @@ def load_env(path):
     return values
 
 
+def _with_space(payload, space_id):
+    """Дописывает пространство в тело запроса. None — сервер решит сам."""
+    if space_id is None:
+        return payload
+    return dict(payload, space_id=space_id)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--apply', action='store_true', help='записывать, а не только показывать план')
     parser.add_argument('--api', default=None, help='адрес API (по умолчанию из окружения)')
+    # Справочник принадлежит пространству вики. Без параметра сервер возьмёт
+    # единственное доступное учётке (так и было при первом переносе), но у
+    # учётки с двумя пространствами это уже неоднозначно — и он честно ответит
+    # 400 вместо того, чтобы залить 39 офисов не в ту вику.
+    parser.add_argument('--space', type=int, default=None,
+                        help='id пространства вики, куда переносить')
     args = parser.parse_args()
 
     env = load_env(os.path.join(ROOT, '.env.codex.local'))
@@ -582,13 +595,16 @@ def main():
 
     log('\nТаксопарки: есть %d, нужно создать %d' % (len(existing_parks), len(needed)))
     for name in needed:
-        created = api.call('POST', '/api/wiki/parks', {'name': name}, label=name)
+        created = api.call('POST', '/api/wiki/parks',
+                           _with_space({'name': name}, args.space), label=name)
         existing_parks[name.strip().lower()] = created.get('id')
         log('   + парк %s' % name)
 
     # ── Офисы ────────────────────────────────────────────────────────────
+    offices_path = ('/api/wiki/offices?space_id=%d' % args.space
+                    if args.space else '/api/wiki/offices')
     existing_offices = {o['name'].strip().lower(): o
-                        for o in (api.call('GET', '/api/wiki/offices').get('items') or [])}
+                        for o in (api.call('GET', offices_path).get('items') or [])}
 
     log('\nОфисы:')
     created_count = skipped_count = 0
@@ -627,7 +643,8 @@ def main():
             except RuntimeError as error:
                 log('     ! ссылка не развернулась: %s' % error)
 
-        api.call('POST', '/api/wiki/offices', payload, label=office['name'])
+        api.call('POST', '/api/wiki/offices', _with_space(payload, args.space),
+                 label=office['name'])
         created_count += 1
         parks_note = ('парков: %d' % len(payload['parks'])) if payload['parks'] else 'без парков'
         overrides = sum(1 for link in office['parks'] if link['phone'] or link['schedule'])

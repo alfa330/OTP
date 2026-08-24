@@ -3,6 +3,12 @@
 Отдельным модулем, а не внутри routes_parks: у офисов своя форма с картой,
 графиком и переопределениями по паркам, и вместе с акциями файл стал бы
 третьим по величине в разделе.
+
+Каждый роут начинается с request_space: справочник принадлежит пространству, и
+без него офисы одной вики были бы видны в другой (см. шапку wiki/offices.py).
+Единственное исключение — прокси тайлов: он и так без авторизации, потому что
+<img> не отправляет заголовков, и отдаёт чужие публичные картинки 2ГИС, в
+которых нет ни адреса, ни того, чей это офис.
 """
 
 from flask import Response, g, jsonify, request
@@ -10,7 +16,7 @@ from flask import Response, g, jsonify, request
 from . import access as wiki_access
 from . import offices as wiki_offices
 from . import queries
-from .routes_structure import _clean, _int_or_none, _slugify
+from .routes_structure import _clean, _int_or_none, _slugify, request_space
 
 
 def _body():
@@ -127,7 +133,9 @@ def register(bp, wiki_route, db, log_ip):
         # «хоть что-то сверх чтения»; изменилось лишь то, что теперь это
         # «что-то» может прийти не только от должности.
         #
-        # Да, справочник общекомпанейский, а правило выписано на один раздел.
+        # Да, справочник шире одного раздела, а правило выписано на раздел.
+        # Границей остаётся ПРОСТРАНСТВО: способность отвечает «вправе ли
+        # править», request_space — «что именно правит».
         # Владелец выбрал это осознанно: следить за телефонами парков некому,
         # кроме тех, кто вообще ведёт содержимое, а поимённая выдача прав в
         # разделе — такое же решение руководителя, как и назначение на должность.
@@ -139,6 +147,10 @@ def register(bp, wiki_route, db, log_ip):
 
     @wiki_route('/offices', methods=('GET', 'POST'))
     def wiki_offices_list(cursor, ctx):
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
+
         if request.method == 'GET':
             can_manage = _may_edit(ctx)
             # Дата — «на какой день показать статус». По умолчанию сегодня по
@@ -157,8 +169,9 @@ def register(bp, wiki_route, db, log_ip):
                     park_id=_int_or_none(request.args.get('park_id')),
                     city=request.args.get('city'),
                     day=day,
+                    space_id=space_id,
                 ),
-                'cities': wiki_offices.cities(cursor),
+                'cities': wiki_offices.cities(cursor, space_id=space_id),
                 'date': day.isoformat(),
                 'can_manage': can_manage,
             })
@@ -173,28 +186,37 @@ def register(bp, wiki_route, db, log_ip):
 
         slug = _clean(data.get('slug'), 120) or _slugify(name)
         base, suffix = slug, 2
-        while not wiki_offices.slug_is_free(cursor, slug):
+        while not wiki_offices.slug_is_free(cursor, slug, space_id=space_id):
             slug = '%s-%d' % (base, suffix)
             suffix += 1
 
         office_id = wiki_offices.create_office(
             cursor, slug=slug, name=name, created_by=ctx['user_id'],
-            fields=_fields(data, partial=False))
-        wiki_offices.set_office_parks(cursor, office_id, _links(data) or [])
+            fields=_fields(data, partial=False), space_id=space_id)
+        wiki_offices.set_office_parks(cursor, office_id, _links(data) or [],
+                                      space_id=space_id)
 
         queries.log_action(cursor, actor_id=ctx['user_id'], action='office.create',
                            entity_type='office', entity_id=office_id,
-                           details={'name': name}, ip_address=log_ip())
+                           details={'name': name, 'space_id': space_id},
+                           ip_address=log_ip())
         return jsonify({"id": office_id, "slug": slug}), 201
 
     @wiki_route('/offices/<int:office_id>', methods=('PATCH', 'DELETE'))
     def wiki_office_item(cursor, ctx, office_id):
         if not _may_edit(ctx):
             return _forbidden()
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
+
         if request.method == 'DELETE':
             # Архивируем, как парки и акции: за офисом стоят связи с парками,
             # физическое удаление снесло бы их каскадом без следа в журнале.
-            if not wiki_offices.update_office(cursor, office_id, {'status': 'archived'}):
+            # «Не найден» отвечаем и на чужой офис: он для этого пространства и
+            # правда не существует, а «нет прав» подтвердило бы, что он есть.
+            if not wiki_offices.update_office(cursor, office_id, {'status': 'archived'},
+                                              space_id=space_id):
                 return jsonify({"error": "Офис не найден"}), 404
             queries.log_action(cursor, actor_id=ctx['user_id'], action='office.archive',
                                entity_type='office', entity_id=office_id, ip_address=log_ip())
@@ -208,10 +230,18 @@ def register(bp, wiki_route, db, log_ip):
                 return jsonify({"error": "Название офиса не может быть пустым"}), 400
             fields['name'] = name
 
-        changed = wiki_offices.update_office(cursor, office_id, fields) if fields else False
+        # Проверяем офис ДО правки связей: без этого чужой офис ответил бы
+        # «Нечего обновлять» на пустых полях, а привязку парков успел бы
+        # переписать — set_office_parks работает от office_id.
+        if not wiki_offices.get_office(cursor, office_id, space_id=space_id):
+            return jsonify({"error": "Офис не найден"}), 404
+
+        changed = (wiki_offices.update_office(cursor, office_id, fields,
+                                              space_id=space_id)
+                   if fields else False)
         links = _links(data)
         if links is not None:
-            wiki_offices.set_office_parks(cursor, office_id, links)
+            wiki_offices.set_office_parks(cursor, office_id, links, space_id=space_id)
             changed = True
 
         if not changed:
@@ -240,12 +270,15 @@ def register(bp, wiki_route, db, log_ip):
         """
         if not _may_edit(ctx):
             return _forbidden()
-        if not wiki_offices.get_office(cursor, office_id):
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
+        if not wiki_offices.get_office(cursor, office_id, space_id=space_id):
             return jsonify({"error": "Офис не найден"}), 404
 
         if request.method == 'DELETE':
             # Идемпотентно: закрытия не было — офис и так по графику.
-            wiki_offices.clear_office_closure(cursor, office_id)
+            wiki_offices.clear_office_closure(cursor, office_id, space_id=space_id)
             queries.log_action(cursor, actor_id=ctx['user_id'], action='office.closure.clear',
                                entity_type='office', entity_id=office_id,
                                details={}, ip_address=log_ip())
@@ -273,7 +306,8 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"error": "Офис должен открыться позже дня закрытия"}), 400
 
         wiki_offices.set_office_closure(cursor, office_id, start, until,
-                                        note=_clean(data.get('note'), 500))
+                                        note=_clean(data.get('note'), 500),
+                                        space_id=space_id)
         queries.log_action(cursor, actor_id=ctx['user_id'], action='office.closure.set',
                            entity_type='office', entity_id=office_id,
                            details={'from': start.isoformat(),
@@ -295,19 +329,22 @@ def register(bp, wiki_route, db, log_ip):
         """
         if not _may_edit(ctx):
             return _forbidden()
+        space_id, error = request_space(cursor, ctx)
+        if error:
+            return error
 
         target = wiki_offices.parse_day(day)
         if target is None:
             return jsonify({"error": "Неверная дата"}), 400
         if target > wiki_offices.office_today():
             return jsonify({"error": "Отметить можно сегодняшний или прошедший день"}), 400
-        if not wiki_offices.get_office(cursor, office_id):
+        if not wiki_offices.get_office(cursor, office_id, space_id=space_id):
             return jsonify({"error": "Офис не найден"}), 404
 
         if request.method == 'DELETE':
             # Идемпотентно: не было отметки — значит день и так считается по
             # графику, и это ровно тот результат, которого просили.
-            wiki_offices.clear_office_day(cursor, office_id, target)
+            wiki_offices.clear_office_day(cursor, office_id, target, space_id=space_id)
             queries.log_action(cursor, actor_id=ctx['user_id'], action='office.day.clear',
                                entity_type='office', entity_id=office_id,
                                details={'day': target.isoformat()}, ip_address=log_ip())
@@ -320,13 +357,14 @@ def register(bp, wiki_route, db, log_ip):
 
         wiki_offices.set_office_day(cursor, office_id, target, state,
                                    note=_clean(data.get('note'), 500),
-                                   recorded_by=ctx['user_id'])
+                                   recorded_by=ctx['user_id'], space_id=space_id)
         queries.log_action(cursor, actor_id=ctx['user_id'], action='office.day.set',
                            entity_type='office', entity_id=office_id,
                            details={'day': target.isoformat(), 'state': state},
                            ip_address=log_ip())
         return jsonify({"status": "ok",
-                        "day": wiki_offices.read_office_day(cursor, office_id, target)})
+                        "day": wiki_offices.read_office_day(cursor, office_id, target,
+                                                            space_id=space_id)})
 
     @wiki_route('/offices/resolve-map', methods=('POST',))
     def wiki_office_resolve_map(cursor, ctx):

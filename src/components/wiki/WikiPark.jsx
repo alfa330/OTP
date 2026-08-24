@@ -56,7 +56,8 @@ const ContactRow = ({ icon: Icon, label, children }) => (
     </div>
 );
 
-export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
+export default function WikiPark({ base, headers, slug, onBack, onOpenParks,
+                                  spaceId = null }) {
     const [park, setPark] = useState(null);
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(true);
@@ -64,11 +65,14 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks }) {
     useEffect(() => {
         setLoading(true);
         setError('');
-        axios.get(`${base}/parks/${encodeURIComponent(slug)}`, { headers })
+        /* Слаг уникален В ПРОСТРАНСТВЕ, а не на всю вику (см. схему), поэтому
+           без space_id запрос спрашивал бы «парк с таким слагом где угодно». */
+        axios.get(`${base}/parks/${encodeURIComponent(slug)}`,
+                  { headers, params: { space_id: spaceId || undefined } })
             .then((r) => setPark(r.data))
             .catch((e) => { setPark(null); setError(errText(e, 'Не удалось открыть парк')); })
             .finally(() => setLoading(false));
-    }, [base, headers, slug]);
+    }, [base, headers, slug, spaceId]);
 
     if (loading) {
         return (
