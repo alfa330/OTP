@@ -130,9 +130,24 @@ export const useThreadAutoScroll = (dependency, { threshold = 120 } = {}) => {
 export const ChatComposer = ({
     value, onChange, onSubmit, busy = false, disabled = false,
     placeholder = 'Спросите что-нибудь…', maxLength = 1000, hint = null,
+    focusKey = null,
 }) => {
     const areaRef = useRef(null);
     const [rows, setRows] = useState(1);
+
+    /* Просьба извне встать в поле: текст вопроса уже подставили, человеку
+       осталось нажать Enter. Ключ, а не флаг — вторая такая же просьба обязана
+       сработать снова, а флаг после первого раза залип бы. */
+    useEffect(() => {
+        if (focusKey == null) return;
+        const area = areaRef.current;
+        if (!area || area.disabled) return;
+        area.focus();
+        // Курсор в конец: иначе он встаёт в начало и следующая буква уходит
+        // перед подставленным вопросом.
+        const end = area.value.length;
+        area.setSelectionRange(end, end);
+    }, [focusKey]);
 
     useEffect(() => {
         const area = areaRef.current;
