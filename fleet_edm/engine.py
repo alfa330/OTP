@@ -133,6 +133,24 @@ CONTROL_NO_PROVIDER_SAMPLE = 10
 # спросить карточки (см. _needs_classification).
 CLASSIFY_LEFTOVERS_FLOOR = 20
 
+# Сколько раз возвращаемся к диспетчерским, которые не ответили, и сколько ждём
+# между заходами.
+#
+# ЭТО САМОЕ ДОРОГОЕ МЕСТО РАЗДЕЛА ПО ЦЕНЕ ОШИБКИ. До 24.08.2026 не ответивший парк
+# просто выпадал из обхода (`except FleetError: return 0`), и ВСЕ его водители
+# уезжали в отчёт как «не найден ни в одной диспетчерской». На выгрузке №13 так
+# случилось с парком Jana Taxi: 1 250 строк объявлены ненайденными, а на самом
+# деле 1 106 из них — работающие ИП с провайдером, и список отдаёт их за 14
+# запросов. Причина — не редкость: кабинет в тот момент отвечал 20–40 отказами
+# «помедленнее» в минуту, и семи попыток внутри клиента не хватило.
+#
+# Поэтому теперь: не ответившие диспетчерские спрашиваем заново, а если и после
+# трёх заходов молчат — обход честно прерывается. Врать «не найден» он больше не
+# имеет права, а прерваться ему теперь не страшно: контрольная точка на месте, и
+# подхват продолжит с того же места (см. шапку модуля).
+FAILED_PARK_RETRIES = 3
+FAILED_PARK_PAUSE = 8.0
+
 # Как часто выгрузка отмечается в базе, пока идут длинные однообразные шаги
 # (добор карточками, разбор остатка). Сторож считает молчание смертью, а на
 # прогоне 21.08.2026 добор молчал двадцать минут — и был убит живым.
@@ -793,9 +811,12 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
             )
         except FleetSessionExpired:
             raise
-        except FleetError:
-            logging.exception('Провайдер ЭДО: запрос по парку %s не удался', park_id)
-            return park_id, {}
+        except FleetError as error:
+            # НЕ «здесь никого нет», а «мы не спросили». Разница стоила 1 250
+            # ложных «не найден» на выгрузке №13 — см. FAILED_PARK_RETRIES.
+            logging.warning('Провайдер ЭДО: запрос по парку %s не удался (%s) — '
+                            'вернёмся к нему', park_id, str(error)[:120])
+            return park_id, None, task
         entries = {}
         for item in items:
             cid = str(item.get('id') or '')
@@ -803,7 +824,7 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
                 entry = _entry_from_list(item, provider, archive)
                 entry['park_id'] = park_id
                 entries[cid] = entry
-        return park_id, entries
+        return park_id, entries, task
 
     rounds = [(archive, provider) for archive in (False, True) for provider in providers]
     for archive, provider in rounds:
@@ -828,24 +849,45 @@ def _resolve_by_providers(client, by_park, providers, seen_providers, progress,
         # обязан повториться, но повторится он уже по остатку.
         def keep(outcome, _done, _total):
             if outcome and outcome[1]:
-                park_id, entries = outcome
+                park_id, entries, _task = outcome
                 save(rows=[(cid, park_id, entry) for cid, entry in entries.items()])
 
-        results = _run_parallel(client, tasks, lambda task: ask(task, provider, archive),
-                                stop=stop, on_result=keep)
-        with lock:
-            for park_id, entries in results:
-                if not entries:
-                    continue
-                found.update(entries)
-                seen_providers[provider['id']] += len(entries)
-                # Найденного вычёркиваем из ОБОИХ сегментов: человек с неизвестным
-                # сегментом стоит в двух очередях, и без этого его бы спросили
-                # второй раз уже после ответа.
-                for queue in pending.values():
-                    if park_id in queue:
-                        queue[park_id] = [cid for cid in queue[park_id]
-                                          if cid not in entries]
+        attempt = 0
+        while tasks:
+            results = _run_parallel(client, tasks,
+                                    lambda task: ask(task, provider, archive),
+                                    stop=stop, on_result=keep)
+            retry = []
+            with lock:
+                for park_id, entries, task in results:
+                    if entries is None:
+                        retry.append(task)
+                        continue
+                    if not entries:
+                        continue
+                    found.update(entries)
+                    seen_providers[provider['id']] += len(entries)
+                    # Найденного вычёркиваем из ОБОИХ сегментов: человек с
+                    # неизвестным сегментом стоит в двух очередях, и без этого его
+                    # бы спросили второй раз уже после ответа.
+                    for queue in pending.values():
+                        if park_id in queue:
+                            queue[park_id] = [cid for cid in queue[park_id]
+                                              if cid not in entries]
+            if not retry:
+                break
+            attempt += 1
+            if attempt >= FAILED_PARK_RETRIES:
+                # Молчат — прерываемся. Соврать «не найден» про целую
+                # диспетчерскую нельзя, а продолжить позже теперь можно.
+                raise FleetError(
+                    'Диспетчерские не ответили после {} заходов ({} шт.) — '
+                    'обход продолжится позже'.format(attempt, len(retry)))
+            progress(note='Диспетчерские не ответили ({} шт.) — повторяем'
+                          .format(len(retry)),
+                     requests=client.requests_count)
+            time.sleep(FAILED_PARK_PAUSE * attempt)
+            tasks = retry
         done_rounds.add(round_key)
         stages['rounds'] = sorted(done_rounds)
         stages['provider_counts'] = dict(seen_providers)
@@ -909,14 +951,15 @@ def _probe_parks(client, ids, parks, progress, stop=None):
     found = {}
     lock = threading.Lock()
 
-    def probe(park, archive):
+    def probe(item):
+        park, archive = item
         if stop:
             stop()
         park_id = str(park.get('id'))
         with lock:
             snapshot = list(pending)
         if not snapshot:
-            return 0
+            return None
         try:
             items = client.contractors_all(
                 park_id, contractor_ids=snapshot, archive=archive,
@@ -924,21 +967,42 @@ def _probe_parks(client, ids, parks, progress, stop=None):
             )
         except FleetSessionExpired:
             raise
-        except FleetError:
-            logging.exception('Провайдер ЭДО: перебор парка %s не удался', park_id)
-            return 0
+        except FleetError as error:
+            # Молча пропустить парк здесь — это соврать про КАЖДОГО его водителя:
+            # он уедет в отчёт как «не найден ни в одной диспетчерской». Именно так
+            # выгрузка №13 объявила ненайденными 1 250 работающих людей из Jana
+            # Taxi. Возвращаем задачу на повтор.
+            logging.warning('Провайдер ЭДО: перебор парка %s не удался (%s) — '
+                            'вернёмся к нему', park_id, str(error)[:120])
+            return item
         with lock:
-            for item in items:
-                cid = str(item.get('id') or '')
+            for entry in items:
+                cid = str(entry.get('id') or '')
                 if cid in pending:
                     pending.discard(cid)
-                    found[cid] = _info_from_list(item, park_id, archive)
-        return len(items)
+                    found[cid] = _info_from_list(entry, park_id, archive)
+        return None
 
     for archive in (False, True):
         if not pending:
             break
-        _run_parallel(client, list(parks), lambda park: probe(park, archive), stop=stop)
+        tasks = [(park, archive) for park in parks]
+        attempt = 0
+        while tasks:
+            retry = [task for task in _run_parallel(client, tasks, probe, stop=stop)
+                     if task]
+            if not retry:
+                break
+            attempt += 1
+            if attempt >= FAILED_PARK_RETRIES:
+                raise FleetError(
+                    'Диспетчерские не ответили после {} заходов ({} шт.) — '
+                    'перебор продолжится позже'.format(attempt, len(retry)))
+            progress(note='Диспетчерские не ответили ({} шт.) — повторяем'
+                          .format(len(retry)),
+                     requests=client.requests_count)
+            time.sleep(FAILED_PARK_PAUSE * attempt)
+            tasks = retry
         progress(
             note='Ищем диспетчерские: осталось найти {} из {}'.format(len(pending), len(ids)),
             requests=client.requests_count,
@@ -984,21 +1048,23 @@ def _classify_leftovers(client, unknown, progress, stop=None):
         with lock:
             ids = [cid for cid in by_park.get(park_id, ()) if cid not in found]
         if not ids:
-            return
+            return None
         try:
             items = client.contractors_all(
                 park_id, contractor_ids=ids, archive=archive, projection=LIST_PROJECTION,
             )
         except FleetSessionExpired:
             raise
-        except FleetError:
-            logging.exception('Провайдер ЭДО: разбор остатка по парку %s не удался', park_id)
-            return
+        except FleetError as error:
+            logging.warning('Провайдер ЭДО: разбор остатка по парку %s не удался (%s) — '
+                            'вернёмся к нему', park_id, str(error)[:120])
+            return task
         with lock:
             for item in items:
                 cid = str(item.get('id') or '')
                 if cid:
                     found[cid] = _info_from_list(item, park_id, archive)
+        return None
 
     tasks = [(park_id, archive) for archive in (False, True) for park_id in by_park]
 
@@ -1007,7 +1073,21 @@ def _classify_leftovers(client, unknown, progress, stop=None):
             progress(note='Разбираем остаток: диспетчерская {} из {}'.format(done, total),
                      requests=client.requests_count)
 
-    _run_parallel(client, tasks, ask, stop=stop, on_result=tick)
+    attempt = 0
+    while tasks:
+        retry = [task for task in _run_parallel(client, tasks, ask, stop=stop,
+                                                on_result=tick) if task]
+        if not retry:
+            break
+        attempt += 1
+        if attempt >= FAILED_PARK_RETRIES:
+            # Не разобранный остаток — это не «сотрудники парка» и не «нет
+            # провайдера», это «мы не спросили». Прерываемся и продолжим позже.
+            raise FleetError(
+                'Диспетчерские не ответили при разборе остатка ({} шт.) — '
+                'обход продолжится позже'.format(len(retry)))
+        time.sleep(FAILED_PARK_PAUSE * attempt)
+        tasks = retry
     return found
 
 
@@ -1028,6 +1108,10 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
     if allow_scan or not park_id:
         candidates.extend(str(park.get('id')) for park in parks
                           if str(park.get('id')) != park_id)
+    # Отказ кабинета — это НЕ «здесь такого нет». Если хоть одна диспетчерская не
+    # ответила и водителя мы так и не нашли, честного ответа у нас нет: молчаливое
+    # «не найден» здесь того же сорта, что потерянный парк в переборе.
+    silent = 0
     for candidate in candidates:
         if not candidate:
             continue
@@ -1035,7 +1119,10 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
             profile = client.driver_card(candidate, contractor_id)
         except FleetSessionExpired:
             raise
-        except FleetError:
+        except FleetError as error:
+            silent += 1
+            logging.warning('Провайдер ЭДО: карточка %s в парке %s не ответила (%s)',
+                            contractor_id[:8], candidate[:8], str(error)[:80])
             continue
         if not profile:
             continue
@@ -1050,6 +1137,10 @@ def _card_lookup(client, contractor_id, park_id, parks, allow_scan=True):
             'park_id': candidate,
             'source': 'карточка',
         }
+    if silent:
+        raise FleetError(
+            'Карточка водителя {}…: {} диспетчерских не ответили, «не найден» '
+            'сказать не можем'.format(contractor_id[:8], silent))
     return None
 
 

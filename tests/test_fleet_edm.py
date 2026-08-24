@@ -407,6 +407,72 @@ class ParkEmployeeTest(unittest.TestCase):
         self.assertGreater(result['check']['checked'], 0)
 
 
+class SilentParkTest(unittest.TestCase):
+    """Диспетчерская, которая не ответила, — это НЕ «здесь никого нет».
+
+    24.08.2026 на проде это стоило 1 250 ложных «не найден ни в одной
+    диспетчерской»: кабинет придушил запрос по парку Jana Taxi, код поймал
+    FleetError и пошёл дальше, а все 1 250 человек (из них 1 106 работающих ИП с
+    провайдером) уехали в отчёт заказчицы как ненайденные. Список отдавал их за
+    14 запросов.
+    """
+
+    def setUp(self):
+        # Пауза между заходами настоящая (8 и 16 секунд) — в тестах ждать нечего.
+        self._pause = engine.FAILED_PARK_PAUSE
+        engine.FAILED_PARK_PAUSE = 0
+
+    def tearDown(self):
+        engine.FAILED_PARK_PAUSE = self._pause
+
+    class _MutePark(FakeClient):
+        """Кабинет, который по одному парку отвечает отказом ровно N первых раз."""
+
+        def __init__(self, drivers, mute_park, times=99, **kw):
+            super().__init__(drivers, **kw)
+            self.mute_park = mute_park
+            self.times = times
+            self.refusals = 0
+
+        def contractors_all(self, park_id, **kw):
+            if park_id == self.mute_park and self.refusals < self.times:
+                self.refusals += 1
+                raise FleetError('429 Too Many Requests')
+            return super().contractors_all(park_id, **kw)
+
+    def test_silent_park_never_becomes_not_found(self):
+        drivers = {_driver_id(i): {'park': PARK_B, 'provider': 'paperdo'}
+                   for i in range(1, 6)}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = self._MutePark(drivers, mute_park=PARK_B)
+        with self.assertRaises(FleetError):
+            engine.resolve(rows, client, control_sample=0)
+        # И ни одной строки не объявили ненайденной по дороге.
+        self.assertGreaterEqual(client.refusals, engine.FAILED_PARK_RETRIES)
+
+    def test_park_answering_on_retry_is_not_lost(self):
+        drivers = {_driver_id(i): {'park': PARK_B, 'provider': 'paperdo'}
+                   for i in range(1, 6)}
+        rows = [{'contractor_id': cid, 'park_id': ''} for cid in drivers]
+        client = self._MutePark(drivers, mute_park=PARK_B, times=1)
+        result = engine.resolve(rows, client, control_sample=0)
+        self.assertEqual(len(result['results']), 5)
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'],
+                         'Бумажный документооборот')
+
+    def test_silent_card_is_not_absence(self):
+        """Молчащая карточка тоже не означает «такого водителя нет»."""
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': 'paperdo'}}
+
+        class MuteCard(FakeClient):
+            def driver_card(self, park_id, driver_id):
+                raise FleetError('429 Too Many Requests')
+
+        rows = [{'contractor_id': _driver_id(1), 'park_id': PARK_A}]
+        with self.assertRaises(FleetError):
+            engine.resolve(rows, MuteCard(drivers), control_sample=0)
+
+
 class SegmentTest(unittest.TestCase):
     """Архив спрашиваем там, где архивные есть.
 
