@@ -46,6 +46,7 @@
     "test:salary-yandex-reg": "node --test tests/salary_yandex_reg.test.mjs",
     "test:salary-op-render": "node --test tests/salary_op_calculator_render.test.mjs",
     "test:trainings": "node --test tests/trainings_summary.test.mjs",
+  "test:survey-runs": "node --test tests/survey_answer_runs.test.mjs",
     "test:trainer": "node --test tests/trainer_format.test.mjs tests/trainer_speech.test.mjs tests/trainer_clock.test.mjs tests/trainer_speak.test.mjs"
   },
   "dependencies": {

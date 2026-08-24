@@ -398,7 +398,9 @@ class SurveyArchiveFrontendTests(unittest.TestCase):
     def test_scope_tabs_and_pagination(self):
         self.assertIn("const SCOPE_ACTIVE = 'active';", self.src)
         self.assertIn("const SCOPE_ARCHIVE = 'archive';", self.src)
-        self.assertIn("scope: listScope", self.src)
+        # Список просит тот срез, который человеку положен по правам:
+        # у оператора вкладки «Архив» нет вовсе (SurveyArchiveAccessTests).
+        self.assertIn("scope: requestedScope", self.src)
         self.assertIn("listPages", self.src)
         self.assertIn("В архиве пока пусто", self.src)
 
@@ -409,6 +411,99 @@ class SurveyArchiveFrontendTests(unittest.TestCase):
     def test_archive_badge_on_the_card(self):
         self.assertIn("В архиве", self.src)
         self.assertIn("selectedSurvey?.is_archived", self.src)
+
+
+class SurveyArchiveAccessTests(unittest.TestCase):
+    """Архив открыт с СВ и выше — оператору его не видно и не выпросить."""
+
+    def setUp(self):
+        self.src = _read(SURVEYS_VIEW_PATH)
+        self.app = _read(APP_PATH)
+
+    def test_operator_list_route_ignores_archive_scope(self):
+        route = self.app.split("def handle_surveys(")[1].split("def ")[0]
+        operator_call = route.split("if requester_role == 'operator':")[1].split("return jsonify")[0]
+        self.assertIn("archived=False", operator_call)
+        self.assertNotIn("archived=archived", operator_call)
+
+    def test_scope_tabs_are_hidden_from_operator(self):
+        tabs = self.src.split("ariaLabel=\"Активные или архив\"")[0][-400:]
+        self.assertIn("{canManage && (", tabs)
+        # Запрос списка тоже идёт от прав, а не от залипшего состояния вкладки.
+        self.assertIn("const requestedScope = canManage ? listScope : SCOPE_ACTIVE;", self.src)
+        self.assertIn("scope: requestedScope,", self.src)
+
+    def test_operator_hint_does_not_send_him_to_the_archive(self):
+        hint = self.src.split("label=\"О разделе\"")[1].split("/>")[0]
+        self.assertNotIn("вкладке «Архив»", hint)
+
+
+class SurveyAnswerRunsTests(unittest.TestCase):
+    """Вкладка «Ответы»: сначала выбор запуска, потом сотрудники.
+
+    Повтор — отдельный прогон опроса, и его ответы читаются сами по себе:
+    девять запусков в одной сетке различались только значком «#7».
+    """
+
+    def setUp(self):
+        self.src = _read(SURVEYS_VIEW_PATH)
+        self.db = _read(DATABASE_PATH)
+
+    def test_run_cards_come_from_the_shared_builder(self):
+        # Сборка запусков живёт отдельным модулем — её прогоняет node-тест
+        # tests/survey_answer_runs.test.mjs, а не только глаз в браузере.
+        self.assertTrue((ROOT / "src" / "components" / "surveys" / "surveyRuns.js").exists())
+        self.assertIn("from './surveyRuns'", self.src)
+        self.assertIn("buildAnswerRuns({", self.src)
+
+    def test_choice_appears_only_when_there_are_several_runs(self):
+        self.assertIn("const hasSeveralRuns = answerRuns.length > 1;", self.src)
+        # Шаг выбора — только при нескольких запусках…
+        self.assertIn(
+            "activeTab === 'answers' && !openedRespondent && hasSeveralRuns && !activeRun",
+            self.src
+        )
+        # …а сетка сотрудников открывается либо внутри выбранного запуска,
+        # либо сразу, когда выбирать не из чего.
+        self.assertIn(
+            "activeTab === 'answers' && !openedRespondent && (!hasSeveralRuns || activeRun)",
+            self.src
+        )
+
+    def test_visible_set_and_summary_agree(self):
+        # Цифры вкладки считаются по тому, что на экране: иначе «прошли 47»
+        # стояло бы над четырьмя карточками одного запуска.
+        self.assertIn(
+            "const visibleRespondentCards = hasSeveralRuns ? (activeRun?.cards || []) : respondentCardsAll;",
+            self.src
+        )
+        summary = self.src.split("const respondentsSummary = useMemo(")[1].split("}, [")[0]
+        self.assertIn("visibleRespondentCards", summary)
+        self.assertNotIn("respondentCardsAll", summary)
+
+    def test_escape_walks_one_step_up(self):
+        ladder = self.src.split("Escape поднимает ровно на шаг")[1][:700]
+        self.assertIn("if (openedRespondentKey) setOpenedRespondentKey(null);", ladder)
+        self.assertIn("else closeAnswersRun();", ladder)
+        # При открытом конструкторе слушатель не вешаем вовсе.
+        self.assertIn("if (showBuilder) return undefined;", ladder)
+
+    def test_switching_run_resets_the_search(self):
+        opener = self.src.split("const openAnswersRun = useCallback(")[1].split("}, []);")[0]
+        self.assertIn("setStatsOperatorQuery('')", opener)
+
+    def test_question_stats_are_counted_for_one_run(self):
+        # Под фильтром по отделу в проценты попадали ВСЕ повторения разом,
+        # хотя цифры над вкладкой сервер считает по выбранному опросу.
+        self.assertIn("const selectedRunDetailedRows = useMemo(", self.src)
+        stats = self.src.split("const displayQuestionStats = useMemo(")[1].split("]);")[0]
+        self.assertIn("selectedRunDetailedRows", stats)
+        self.assertNotIn("departmentFilteredDetailedStatsRows", stats)
+
+    def test_detail_sends_the_run_date(self):
+        repetitions = self.db.split("repetitions = [{")[1].split("}]")[0]
+        self.assertIn("'created_at': item.get('created_at')", repetitions)
+        self.assertIn("'iteration'", repetitions)
 
 
 if __name__ == '__main__':

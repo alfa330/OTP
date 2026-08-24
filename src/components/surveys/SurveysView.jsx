@@ -13,6 +13,7 @@ import {
     iosCard,
     iosInput
 } from '../ui/ios';
+import { buildAnswerRuns, surveyRunLabel } from './surveyRuns';
 
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
@@ -195,6 +196,16 @@ const formatPoints = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return '—';
     return String(Math.round(number * 100) / 100);
+};
+
+// Цвет результата — один на все места показа (карточка сотрудника, карточка
+// запуска, шапка разбора): пороги, разъехавшиеся между экранами, читались бы
+// как разные оценки одного и того же процента.
+const scoreToneClass = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 'text-slate-400';
+    if (number >= 80) return 'text-emerald-600';
+    return number >= 60 ? 'text-blue-600' : 'text-amber-600';
 };
 
 /* ─── small reusable primitives ─── */
@@ -490,6 +501,8 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     const [activeTab, setActiveTab] = useState('questions'); // 'questions' | 'answers' | 'stats'
     const [statsOperatorQuery, setStatsOperatorQuery] = useState('');
     const [openedRespondentKey, setOpenedRespondentKey] = useState(null);
+    // Выбранный запуск на вкладке «Ответы»: null — показываем карточки запусков.
+    const [openedRunSurveyId, setOpenedRunSurveyId] = useState(null);
     const [departmentFilter, setDepartmentFilter] = useState('');
     const showToastRef = useRef(showToast);
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
@@ -728,9 +741,14 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         return () => window.clearTimeout(timerId);
     }, [listQueryInput]);
 
+    // Архив — от СВ и выше: оператору вкладки нет, и список он просит только
+    // активный. Держим это отдельным значением, а не только скрытой кнопкой:
+    // иначе залипшее состояние отправило бы за архивом и без вкладки.
+    const requestedScope = canManage ? listScope : SCOPE_ACTIVE;
+
     // Смена вкладки, поиска или отдела возвращает на первую страницу:
     // иначе после сужения списка человек оказывался бы на пустой странице.
-    useEffect(() => { setListPage(1); }, [listScope, listQuery, departmentFilter]);
+    useEffect(() => { setListPage(1); }, [requestedScope, listQuery, departmentFilter]);
 
     const loadSurveyList = useCallback(async () => {
         if (!apiBaseUrl || !user?.id) return;
@@ -739,7 +757,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             const response = await axios.get(`${apiBaseUrl}/api/surveys`, {
                 headers,
                 params: {
-                    scope: listScope,
+                    scope: requestedScope,
                     page: listPage,
                     page_size: LIST_PAGE_SIZE,
                     ...(listQuery ? { q: listQuery } : {}),
@@ -757,7 +775,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         } finally {
             setIsLoading(false);
         }
-    }, [apiBaseUrl, departmentFilter, headers, listPage, listQuery, listScope, notify, user?.id]);
+    }, [apiBaseUrl, departmentFilter, headers, listPage, listQuery, notify, requestedScope, user?.id]);
 
     useEffect(() => { loadSurveyList(); }, [loadSurveyList]);
 
@@ -816,6 +834,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     useEffect(() => {
         setStatsOperatorQuery('');
         setOpenedRespondentKey(null);
+        setOpenedRunSurveyId(null);
         setActiveTab('questions');
     }, [selectedSurveyId]);
 
@@ -933,6 +952,19 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         return detailedStatsSourceRows.filter((row) => assignmentMatchesSelectedDepartment(row));
     }, [assignmentMatchesSelectedDepartment, canManage, detailedStatsSourceRows, selectedDepartmentId]);
 
+    // Вкладка «Статистика» — про ОДИН запуск: цифры над ней (назначено, прошли)
+    // сервер считает по выбранному опросу, и распределение ответов по вопросам
+    // должно считаться по нему же. Без этого среза под фильтром по отделу в
+    // проценты попадали все повторения разом, и доля «ответили» уходила за сто.
+    const selectedRunDetailedRows = useMemo(() => {
+        const selectedId = Number(selectedSurvey?.id);
+        if (!Number.isFinite(selectedId)) return departmentFilteredDetailedStatsRows;
+        return departmentFilteredDetailedStatsRows.filter((row) => {
+            const rowSurveyId = Number(row?.repeat_survey_id);
+            return !Number.isFinite(rowSurveyId) || rowSurveyId === selectedId;
+        });
+    }, [departmentFilteredDetailedStatsRows, selectedSurvey?.id]);
+
     const resolveStatsQuestionAndAnswer = useCallback((row, baseQuestion, questionIndex) => {
         const rowSurveyId = Number(row?.repeat_survey_id);
         const rowQuestions = Number.isFinite(rowSurveyId)
@@ -968,7 +1000,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         if (!canManage || selectedDepartmentId == null) return serverStats;
 
         const questions = Array.isArray(selectedSurvey?.questions) ? selectedSurvey.questions : [];
-        const respondentsTotal = departmentFilteredDetailedStatsRows.length;
+        const respondentsTotal = selectedRunDetailedRows.length;
 
         return questions.map((question, questionIndex) => {
             const type = String(question?.type || 'single');
@@ -978,7 +1010,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             let answeredCount = 0;
             let selectionsTotal = 0;
 
-            departmentFilteredDetailedStatsRows.forEach((row) => {
+            selectedRunDetailedRows.forEach((row) => {
                 const resolved = resolveStatsQuestionAndAnswer(row, question, questionIndex);
                 const resolvedQuestion = resolved.question || question;
                 const answer = resolved.answer;
@@ -1053,10 +1085,10 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         });
     }, [
         canManage,
-        departmentFilteredDetailedStatsRows,
         hasSurveyAnswer,
         resolveStatsQuestionAndAnswer,
         selectedDepartmentId,
+        selectedRunDetailedRows,
         selectedSurvey?.questions,
         selectedSurvey?.statistics?.question_stats
     ]);
@@ -1132,13 +1164,44 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         surveyQuestionsBySurveyId
     ]);
 
+    /* ─── Запуски опроса: сначала выбор повторения, потом сотрудники ───
+       Сама сборка — в surveyRuns.js: её видно без браузера и она под тестом. */
+    const answerRuns = useMemo(() => buildAnswerRuns({
+        survey: selectedSurvey,
+        repetitions: selectedRepetitions,
+        cards: respondentCardsAll
+    }), [respondentCardsAll, selectedRepetitions, selectedSurvey]);
+
+    const hasSeveralRuns = answerRuns.length > 1;
+    const activeRun = useMemo(() => {
+        if (!hasSeveralRuns) return null;
+        return answerRuns.find((run) => run.id === Number(openedRunSurveyId)) || null;
+    }, [answerRuns, hasSeveralRuns, openedRunSurveyId]);
+
+    // Пока запуск не выбран, сетки сотрудников на экране нет вовсе, поэтому
+    // видимый набор — карточки выбранного запуска (или все, если выбирать
+    // не из чего).
+    const visibleRespondentCards = hasSeveralRuns ? (activeRun?.cards || []) : respondentCardsAll;
+
+    // Смена запуска сбрасывает поиск: имя из прошлого прогона спрятало бы всех,
+    // кто есть в новом, и вкладка выглядела бы пустой.
+    const openAnswersRun = useCallback((runId) => {
+        setOpenedRunSurveyId(Number(runId));
+        setStatsOperatorQuery('');
+    }, []);
+
+    const closeAnswersRun = useCallback(() => {
+        setOpenedRunSurveyId(null);
+        setStatsOperatorQuery('');
+    }, []);
+
     const respondentCards = useMemo(() => {
         const query = String(statsOperatorQuery || '').trim().toLowerCase();
-        if (!query) return respondentCardsAll;
-        return respondentCardsAll.filter((card) => (
+        if (!query) return visibleRespondentCards;
+        return visibleRespondentCards.filter((card) => (
             card.name.toLowerCase().includes(query) || String(card.operatorId).includes(query)
         ));
-    }, [respondentCardsAll, statsOperatorQuery]);
+    }, [statsOperatorQuery, visibleRespondentCards]);
 
     // Средний балл теста — по тем, кто его прошёл. Медиана здесь была бы
     // честнее на выбросах, но в тесте важен именно средний процент: он же
@@ -1148,30 +1211,34 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         [openedRespondentKey, respondentCardsAll]
     );
 
-    // Escape возвращает к списку карточек — так же, как кнопка «Назад».
-    // Обработчик снимаем вместе с закрытием: висящий слушатель перехватывал бы
-    // Escape у конструктора.
+    // Escape поднимает ровно на шаг: разбор → сотрудники запуска → запуски.
+    // Обработчик снимаем вместе с закрытием, а при открытом конструкторе не
+    // вешаем вовсе: там Escape закрывает панель, и два слушателя сработали бы
+    // на одно нажатие.
     useEffect(() => {
-        if (!openedRespondentKey) return undefined;
+        if (showBuilder) return undefined;
+        if (!openedRespondentKey && !openedRunSurveyId) return undefined;
         const onKeyDown = (event) => {
-            if (event.key === 'Escape') setOpenedRespondentKey(null);
+            if (event.key !== 'Escape') return;
+            if (openedRespondentKey) setOpenedRespondentKey(null);
+            else closeAnswersRun();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
-    }, [openedRespondentKey]);
+    }, [closeAnswersRun, openedRespondentKey, openedRunSurveyId, showBuilder]);
 
     const respondentsSummary = useMemo(() => {
-        const completed = respondentCardsAll.filter((card) => card.isCompleted);
+        const completed = visibleRespondentCards.filter((card) => card.isCompleted);
         const scored = completed.filter((card) => card.hasScore);
         const averageScore = scored.length
             ? scored.reduce((sum, card) => sum + card.scoreValue, 0) / scored.length
             : null;
         return {
             completedCount: completed.length,
-            pendingCount: Math.max(0, respondentCardsAll.length - completed.length),
+            pendingCount: Math.max(0, visibleRespondentCards.length - completed.length),
             averageScore
         };
-    }, [respondentCardsAll]);
+    }, [visibleRespondentCards]);
 
     const formatSurveyDateTime = useCallback((value) => {
         if (!value) return '—';
@@ -2051,7 +2118,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                 label="О разделе"
                                 text={canManage
                                     ? 'Создание и назначение опросов и тестов по стажу, направлению, группам и конкретным сотрудникам. Опросы старше двух недель уходят в архив: они перестают показываться сотрудникам и не считаются в уведомлениях раздела.'
-                                    : 'Здесь показаны назначенные вам опросы и тесты. Опросы старше двух недель уходят в архив — пройти их уже нельзя, но свои ответы можно посмотреть на вкладке «Архив».'}
+                                    : 'Здесь показаны назначенные вам опросы и тесты. Опрос старше двух недель закрывается — пройти его уже нельзя, и из списка он пропадает.'}
                             />
                         </div>
                     </div>
@@ -2689,17 +2756,20 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                             <span className="text-[12px] tabular-nums text-slate-400">{listTotal}</span>
                         </div>
                         {/* Активные и архив — разные списки, а не фильтр внутри одного:
-                            архив копится и без разделения затопил бы рабочую очередь. */}
-                        <IosSegmented
-                            value={listScope}
-                            onChange={setListScope}
-                            stretch
-                            ariaLabel="Активные или архив"
-                            options={[
-                                { value: SCOPE_ACTIVE, label: 'Активные' },
-                                { value: SCOPE_ARCHIVE, label: 'Архив' }
-                            ]}
-                        />
+                            архив копится и без разделения затопил бы рабочую очередь.
+                            Оператору архива нет вовсе — вкладка открывается с СВ. */}
+                        {canManage && (
+                            <IosSegmented
+                                value={listScope}
+                                onChange={setListScope}
+                                stretch
+                                ariaLabel="Активные или архив"
+                                options={[
+                                    { value: SCOPE_ACTIVE, label: 'Активные' },
+                                    { value: SCOPE_ARCHIVE, label: 'Архив' }
+                                ]}
+                            />
+                        )}
                         <div className="relative">
                             <FaIcon className="fas fa-search pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-slate-400" />
                             <input
@@ -2716,12 +2786,12 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                         {!isLoading && surveyRows.length === 0 && (
                             <div className="p-8 text-center">
                                 <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-slate-50">
-                                    <FaIcon className={`fas ${listScope === SCOPE_ARCHIVE ? 'fa-box-archive' : 'fa-clipboard-list'} text-xl text-slate-300`} />
+                                    <FaIcon className={`fas ${requestedScope === SCOPE_ARCHIVE ? 'fa-box-archive' : 'fa-clipboard-list'} text-xl text-slate-300`} />
                                 </div>
                                 <p className="text-[13px] text-slate-400">
                                     {listQuery
                                         ? 'Ничего не нашлось'
-                                        : (listScope === SCOPE_ARCHIVE
+                                        : (requestedScope === SCOPE_ARCHIVE
                                             ? 'В архиве пока пусто'
                                             : (isOperator ? 'Назначенных опросов пока нет' : 'Опросов пока нет'))}
                                 </p>
@@ -3414,14 +3484,86 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                     </div>
                                 )}
 
+                                {/* Выбор запуска. Повтор — отдельный прогон того же
+                                    опроса, и ответы каждого читаются сами по себе;
+                                    в одной сетке девять прогонов различались только
+                                    значком «#7» в углу карточки. Карточки здесь те
+                                    же, что и у сотрудников ниже, — на шаг выше. */}
+                                {canManage && activeTab === 'answers' && !openedRespondent && hasSeveralRuns && !activeRun && (
+                                    <div className="animate-card-open space-y-3">
+                                        <p className="text-[12px] text-slate-500">
+                                            Опрос запускали несколько раз — выберите запуск, чтобы посмотреть его ответы.
+                                        </p>
+
+                                        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                                            {answerRuns.map((run) => (
+                                                <button
+                                                    key={run.id}
+                                                    type="button"
+                                                    onClick={() => openAnswersRun(run.id)}
+                                                    className="flex min-h-[92px] flex-col justify-between rounded-2xl bg-white px-4 py-3.5 text-left ring-1 ring-slate-200/70 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[0_6px_20px_-12px_rgba(15,23,42,0.4)] hover:ring-blue-300 active:scale-[0.99]"
+                                                >
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <div className="min-w-0">
+                                                            <div className="text-[13.5px] font-semibold leading-snug text-slate-900">
+                                                                {surveyRunLabel(run.iteration)}
+                                                            </div>
+                                                            {/* Название — только если этот прогон назывался
+                                                                иначе: у остальных оно слово в слово повторяло
+                                                                бы заголовок карточки. */}
+                                                            {run.title && run.title !== String(selectedSurvey?.title || '') && (
+                                                                <div className="mt-0.5 truncate text-[12px] text-slate-500">{run.title}</div>
+                                                            )}
+                                                            <div className="mt-0.5 text-[11.5px] tabular-nums text-slate-400">
+                                                                {formatSurveyDateTime(run.createdAt)}
+                                                            </div>
+                                                        </div>
+                                                        {run.id === Number(selectedSurvey?.id) && <Badge color="gray">Открыт</Badge>}
+                                                    </div>
+                                                    <div className="mt-2 flex items-end justify-between gap-2">
+                                                        <span className="text-[11.5px] tabular-nums text-slate-500">
+                                                            {run.assignedCount > 0
+                                                                ? `Прошли ${run.completedCount} из ${run.assignedCount}`
+                                                                : 'Назначений нет'}
+                                                        </span>
+                                                        {isTestStatsSurvey && run.averageScore != null && (
+                                                            <span className={`shrink-0 text-[19px] font-bold leading-none tabular-nums ${scoreToneClass(run.averageScore)}`}>
+                                                                {formatPercent(run.averageScore)}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* Manager answers tab.
                                     Два состояния на одном месте: сетка карточек и
                                     разбор одного человека во всю область. Разбор
                                     НЕ модалка и не аккордеон внутри строки: у теста
                                     на 25 вопросов ему нужен весь экран, а внутри
                                     строки он ужимался бы в щель между соседями. */}
-                                {canManage && activeTab === 'answers' && !openedRespondent && (
+                                {canManage && activeTab === 'answers' && !openedRespondent && (!hasSeveralRuns || activeRun) && (
                                     <div className="animate-card-open space-y-3">
+                                        {activeRun && (
+                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={closeAnswersRun}
+                                                    className={iosBtnGhost}
+                                                >
+                                                    <FaIcon className="fas fa-chevron-left text-[11px]" />
+                                                    Все запуски
+                                                </button>
+                                                <span className="text-[11.5px] text-slate-400">
+                                                    {surveyRunLabel(activeRun.iteration)}
+                                                    {' · '}
+                                                    <span className="tabular-nums">{formatSurveyDateTime(activeRun.createdAt)}</span>
+                                                </span>
+                                            </div>
+                                        )}
+
                                         <div className="flex flex-wrap items-center justify-between gap-2">
                                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-slate-500">
                                                 <span>
@@ -3463,11 +3605,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
 
                                         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                                             {respondentCards.map((card) => {
-                                                const scoreColor = card.scoreValue == null
-                                                    ? 'text-slate-400'
-                                                    : (card.scoreValue >= 80
-                                                        ? 'text-emerald-600'
-                                                        : (card.scoreValue >= 60 ? 'text-blue-600' : 'text-amber-600'));
+                                                const scoreColor = scoreToneClass(card.scoreValue);
                                                 return (
                                                     <button
                                                         key={card.key}
@@ -3487,7 +3625,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                                                                 {!card.isCompleted && <Badge color="amber">Не проходил</Badge>}
                                                                 {card.isDismissed && <Badge color="gray">Уволен</Badge>}
-                                                                {card.repeatIteration > 1 && <Badge color="blue">#{card.repeatIteration}</Badge>}
+                                                                {!hasSeveralRuns && card.repeatIteration > 1 && (
+                                                                    <Badge color="blue">#{card.repeatIteration}</Badge>
+                                                                )}
                                                             </div>
                                                             {card.isCompleted && (
                                                                 isTestStatsSurvey && card.hasScore ? (
@@ -3566,11 +3706,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                                 </div>
                                             </div>
                                             {isTestStatsSurvey && openedRespondent.hasScore && (
-                                                <div className={`shrink-0 text-[26px] font-bold leading-none tabular-nums ${
-                                                    openedRespondent.scoreValue >= 80
-                                                        ? 'text-emerald-600'
-                                                        : (openedRespondent.scoreValue >= 60 ? 'text-blue-600' : 'text-amber-600')
-                                                }`}>
+                                                <div className={`shrink-0 text-[26px] font-bold leading-none tabular-nums ${scoreToneClass(openedRespondent.scoreValue)}`}>
                                                     {formatPercent(openedRespondent.scoreValue)}
                                                 </div>
                                             )}

@@ -17748,9 +17748,11 @@ def handle_surveys():
             page_size = request.args.get('page_size')
 
             if requester_role == 'operator':
+                # Архив — с СВ и выше. Оператору его не отдаём даже по прямому
+                # scope=archive: вкладки у него нет, и списка тоже быть не должно.
                 page_data = db.get_operator_surveys_page(
                     requester_id,
-                    archived=archived,
+                    archived=False,
                     search=search,
                     page=page,
                     page_size=page_size

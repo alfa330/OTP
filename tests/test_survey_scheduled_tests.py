@@ -486,7 +486,10 @@ class SurveyTestFrontendTests(unittest.TestCase):
         self.assertIn("activeTab === 'answers' && openedRespondent", self.src)
         self.assertIn("Назад к списку", self.src)
         self.assertIn("Esc — вернуться", self.src)
-        self.assertIn("if (event.key === 'Escape') setOpenedRespondentKey(null);", self.src)
+        # Escape поднимает ровно на шаг: из разбора — к списку сотрудников,
+        # а из списка одного запуска — к выбору запуска (SurveyAnswerRunsTests).
+        self.assertIn("if (event.key !== 'Escape') return;", self.src)
+        self.assertIn("if (openedRespondentKey) setOpenedRespondentKey(null);", self.src)
         # Раскрытие анимируем общим классом, а не своими стилями в разделе.
         self.assertIn("animate-card-open", self.src)
 

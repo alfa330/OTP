@@ -46567,10 +46567,13 @@ class Database:
         if selected is None:
             return None
 
+        # created_at нужен карточке запуска на вкладке «Ответы»: без даты
+        # девять повторений одного опроса различались бы только номером.
         repetitions = [{
             'id': int(item.get('id')),
             'title': item.get('title'),
             'iteration': int((item.get('repeat') or {}).get('iteration') or 1),
+            'created_at': item.get('created_at'),
             'questions': item.get('questions') or [],
         } for item in surveys if int(item.get('id')) != survey_id]
 
