@@ -2,12 +2,12 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import { motion } from 'framer-motion';
 import {
     Check, X, Minus, Clock, Sparkles, Server, User2, Headphones,
-    Quote, ShieldAlert, ChevronDown, Languages, Save, RotateCcw, Wand2, Loader2,
+    Quote, ShieldAlert, ChevronDown, Languages, Save, RotateCcw, Plus, Loader2,
     Database, Search, Timer, Hash, AlertTriangle, ShieldCheck,
     MessageSquare, Paperclip, ImageOff, Users,
 } from 'lucide-react';
 import {
-    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, scoreTone,
+    APPLE_FONT, iosCard, iosInput, iosBtnPrimary, iosBtnGhost, IosBadge, IosHint, IosSegmented, scoreTone,
 } from '../ui/ios';
 import ChatThread from '../c2d_eval/ChatThread';
 
@@ -237,6 +237,11 @@ function ChatMeta({ call }) {
 }
 
 const fieldCls = `${iosInput} px-3 py-2 text-[12.5px]`;
+// Чип «добавить поле»: необязательные части разбора не занимают место, пока не нужны.
+const chipCls = 'inline-flex min-h-7 items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 '
+    + 'text-[11.5px] font-medium text-slate-500 transition-all hover:bg-slate-200 hover:text-slate-700 '
+    + 'active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 '
+    + 'disabled:opacity-50';
 
 function EvaluationMeta({ evaluation }) {
     if (!evaluation) return null;
@@ -310,55 +315,55 @@ function EvidenceReview({ c, decision, onEdit, disabled, transcriptText }) {
         onEdit(c.idx, { excerpt: normalized, excerpt_verified: true, evidence_status: 'verified' });
     };
 
+    // Тонировка всей рамки убрана: янтарный фон кричал на каждом исправлении, хотя
+    // сообщал ровно то же, что строка «подтвердите цитату» под полем. Цветом помечено
+    // только подтверждённое состояние — там цвет действительно несёт смысл.
     return (
-        <fieldset className={`rounded-xl p-3 ring-1 ${verified ? 'bg-emerald-50/60 ring-emerald-200' : noEvidence ? 'bg-slate-100/70 ring-slate-200' : 'bg-amber-50/60 ring-amber-200'}`}>
-            <legend className="px-1 text-[10.5px] font-semibold uppercase tracking-wide text-slate-500">Подтверждение по транскрипту</legend>
-            <p className="mb-2 text-[11.5px] leading-snug text-slate-500">
-                Сверьте цитату с транскриптом. Текст, предложенный ИИ, не считается подтверждённым автоматически.
-            </p>
-            <div className="grid gap-1.5 sm:grid-cols-2" role="group" aria-label="Наличие подтверждающей цитаты">
-                <button type="button" onClick={chooseEvidence} disabled={disabled} aria-pressed={hasEvidence}
-                    className={`rounded-lg px-2.5 py-2 text-left text-[11.5px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
-                        hasEvidence ? 'bg-white text-blue-700 shadow-sm ring-1 ring-blue-100' : 'bg-white/60 text-slate-500 hover:bg-white'}`}>
-                    <Quote size={12} className="mr-1.5 inline" />Есть подтверждающая цитата
-                </button>
-                <button type="button" onClick={chooseNoEvidence} disabled={disabled} aria-pressed={noEvidence}
-                    className={`rounded-lg px-2.5 py-2 text-left text-[11.5px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
-                        noEvidence ? 'bg-white text-slate-800 shadow-sm ring-1 ring-slate-200' : 'bg-white/60 text-slate-500 hover:bg-white'}`}>
-                    <Minus size={12} className="mr-1.5 inline" />В транскрипте нет подтверждающей цитаты
-                </button>
+        <fieldset className={`rounded-xl p-3 ring-1 ${verified ? 'bg-emerald-50/50 ring-emerald-200' : 'bg-slate-50/70 ring-slate-200/80'}`}>
+            <div className="mb-1.5 flex items-center gap-1.5">
+                <span className="text-[12.5px] font-semibold text-slate-600">Подтверждение цитатой</span>
+                <IosHint label="Зачем подтверждать цитату"
+                    text="Сверьте цитату с транскриптом: текст, предложенный ИИ, не считается подтверждённым автоматически. Если подтверждения в транскрипте нет — отметьте «Цитаты нет», и сохранится честная отметка, а не сочинённый моделью текст." />
+            </div>
+            <div className={disabled ? 'pointer-events-none opacity-50' : ''}>
+                <IosSegmented
+                    ariaLabel="Наличие подтверждающей цитаты"
+                    value={hasEvidence ? 'quote' : noEvidence ? 'none' : null}
+                    onChange={(v) => (v === 'none' ? chooseNoEvidence() : chooseEvidence())}
+                    options={[
+                        { value: 'quote', label: 'Цитата есть', icon: <Quote size={12} /> },
+                        { value: 'none', label: 'Цитаты нет', icon: <Minus size={12} /> },
+                    ]}
+                />
             </div>
             {!noEvidence && (
-                <div className="mt-2 space-y-2">
-                    <label className="block">
-                        <span className="mb-1 block text-[10.5px] font-semibold uppercase tracking-wide text-slate-500">Точная цитата</span>
-                        <textarea rows={2} value={excerpt} disabled={disabled}
-                            onChange={(event) => updateExcerpt(event.target.value)}
-                            placeholder="Скопируйте фрагмент из транскрипта без пересказа"
-                            className={`${fieldCls} resize-y ${verified ? '!bg-white ring-1 ring-emerald-200' : ''}`} />
-                    </label>
-                    <button type="button" onClick={verifyExcerpt} disabled={disabled || !excerpt.trim() || verified}
-                        className={`flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11.5px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 disabled:cursor-not-allowed ${
-                            verified ? 'bg-emerald-100 text-emerald-700' : 'bg-white text-emerald-700 ring-1 ring-emerald-200 hover:bg-emerald-50 disabled:opacity-50'}`}>
-                        {verified ? <ShieldCheck size={14} /> : <Check size={14} />}
-                        {verified ? 'Цитата сверена и подтверждена' : 'Подтверждаю: цитата дословно есть в транскрипте'}
-                    </button>
+                <div className="mt-2 space-y-1.5">
+                    <textarea rows={2} value={excerpt} disabled={disabled}
+                        aria-label="Точная цитата из транскрипта"
+                        onChange={(event) => updateExcerpt(event.target.value)}
+                        placeholder="Точная цитата: скопируйте фрагмент из транскрипта без пересказа"
+                        className={`${fieldCls} resize-y ${verified ? '!bg-white ring-1 ring-emerald-200' : ''}`} />
+                    {verified ? (
+                        <p className="flex items-center gap-1.5 text-[11.5px] font-medium text-emerald-700">
+                            <ShieldCheck size={13} className="shrink-0" />Цитата сверена с транскриптом
+                        </p>
+                    ) : (
+                        <button type="button" onClick={verifyExcerpt} disabled={disabled || !excerpt.trim()}
+                            className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-[12px] font-medium text-slate-600 ring-1 ring-slate-200 transition-all hover:bg-slate-50 hover:text-slate-800 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50">
+                            <Check size={13} />Цитата дословно есть в транскрипте
+                        </button>
+                    )}
                     {notFound && (
                         <p className="flex items-start gap-1.5 text-[11.5px] font-medium text-rose-600">
                             <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                            Не нашли эту цитату в транскрипте дословно. Скопируйте точный фрагмент из транскрипта слева или отметьте, что подтверждающей цитаты нет.
+                            Такой цитаты в транскрипте нет дословно. Скопируйте фрагмент слева или отметьте «Цитаты нет».
                         </p>
                     )}
                 </div>
             )}
-            {noEvidence && (
-                <p className="mt-2 flex items-start gap-1.5 text-[11.5px] leading-snug text-slate-500">
-                    <Check size={13} className="mt-0.5 shrink-0" />Сохранится явная отметка об отсутствии цитаты, а не текст, созданный моделью.
-                </p>
-            )}
-            {!verified && !noEvidence && (
-                <p className="mt-2 flex items-start gap-1.5 text-[11.5px] font-medium text-amber-700">
-                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />Чтобы сохранить исправление, подтвердите цитату или отметьте её отсутствие.
+            {!verified && !noEvidence && !notFound && (
+                <p className="mt-2 flex items-start gap-1.5 text-[11.5px] text-amber-700">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />Без подтверждения цитаты исправление не сохранится.
                 </p>
             )}
         </fieldset>
@@ -369,6 +374,10 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
     const [open, setOpen] = useState(false);
     const [refining, setRefining] = useState(false);
     const [aiNote, setAiNote] = useState(null);
+    // Необязательные части разбора скрыты, пока в них нечего показывать. Заполнил ИИ
+    // или человек — поле открывается само, поэтому это производное, а не второй флаг.
+    const [showSituation, setShowSituation] = useState(false);
+    const [showBounds, setShowBounds] = useState(false);
     const refineRequest = useRef(0);
     const src = SOURCE[c.source] || SOURCE.transcript;
     const svPanel = panel === 'sv';
@@ -378,6 +387,8 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
     chosenRef.current = chosen;
     const corrected = editable && chosen !== c.ai;
     const rowDisabled = disabled || refining;
+    const situationOpen = showSituation || Boolean(decision?.situation);
+    const boundsOpen = showBounds || Boolean(decision?.not_covered);
     const verdictOpts = c.deficiency
         ? [HUMAN_OPTS[0], HUMAN_OPTS[1], DEFICIENCY_OPT, HUMAN_OPTS[2]]
         : HUMAN_OPTS;
@@ -396,6 +407,7 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
         if (decision && v !== chosen) {
             patch.reason = ''; patch.situation = ''; patch.not_covered = ''; patch._refined_for = null;
             setAiNote(null);
+            setShowSituation(false); setShowBounds(false);
         }
         onEdit(c.idx, patch);
     };
@@ -512,36 +524,71 @@ const CriterionRow = memo(function CriterionRow({ c, decision, onEdit, onRefine,
                     </div>
 
                     {corrected && (
-                        <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mt-2 space-y-1.5">
-                            <label className="block">
-                                <span className="mb-0.5 block text-[10.5px] font-semibold uppercase tracking-wide text-slate-500">Правило <span className="normal-case text-rose-500">· обязательно</span></span>
-                                <textarea rows={2} value={decision?.reason || ''} disabled={rowDisabled}
-                                onChange={(e) => onEdit(c.idx, { reason: e.target.value })}
-                                placeholder="Почему так правильно? Сформулируйте правило для похожих случаев"
-                                className={`${fieldCls} resize-y`} />
-                            </label>
-                            <label className="block">
-                                <span className="mb-0.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ситуация (когда применять правило)</span>
-                                <input value={decision?.situation || ''} disabled={rowDisabled}
-                                    onChange={(e) => onEdit(c.idx, { situation: e.target.value })}
-                                    placeholder="Обобщённо: в какой ситуации действует правило" className={fieldCls} />
-                            </label>
-                            <label className="block">
-                                <span className="mb-0.5 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Чего правило не оправдывает</span>
-                                <input value={decision?.not_covered || ''} disabled={rowDisabled}
-                                    onChange={(e) => onEdit(c.idx, { not_covered: e.target.value })}
-                                    placeholder="Границы: какие нарушения этим правилом не прощаются" className={fieldCls} />
-                            </label>
-                            {aiNote && <p className="text-[11.5px] leading-snug text-amber-600">{aiNote}</p>}
-                            {onRefine && (
-                                <div className="flex items-center gap-2">
-                                    <button type="button" onClick={refine} disabled={refining || disabled}
-                                        className="flex min-h-9 items-center gap-1.5 rounded-lg bg-violet-50 px-2.5 py-1.5 text-[12px] font-semibold text-violet-600 ring-1 ring-violet-200/70 transition hover:bg-violet-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 disabled:opacity-60">
-                                        {refining ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
-                                        {refining ? 'Формулирую…' : 'Сформулировать с ИИ'}
-                                    </button>
-                                    <span className="text-[11px] text-slate-500">подсказка — финальный текст за вами</span>
+                        <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} className="mt-2 space-y-2">
+                            {/* Видимым оставлено только обязательное поле. «Ситуация» и «Границы»
+                              * открываются чипами: они нужны не всегда, а три поля с крупными
+                              * подписями подряд читались как анкета. Объяснение, зачем всё это
+                              * и что кнопка — лишь подсказка, ушло под «i» (IosHint). */}
+                            <div className="space-y-1.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-600">
+                                        Правило
+                                        <IosHint label="Зачем правило" text="Это правило ИИ-оценщик применит к похожим случаям в будущих звонках. Пишите от решения: что считать нарушением, а что нет. «Сформулировать» — только подсказка: ИИ предложит текст, финальную формулировку сохраняете вы." />
+                                    </span>
+                                    {onRefine && (
+                                        <button type="button" onClick={refine} disabled={refining || disabled}
+                                            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium text-slate-500 transition-all hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 disabled:opacity-50">
+                                            {refining ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                                            {refining ? 'Формулирую…' : 'Сформулировать'}
+                                        </button>
+                                    )}
                                 </div>
+                                <textarea rows={3} value={decision?.reason || ''} disabled={rowDisabled}
+                                    aria-label="Правило для похожих случаев"
+                                    onChange={(e) => onEdit(c.idx, { reason: e.target.value })}
+                                    placeholder="Почему так правильно? Правило для похожих случаев"
+                                    className={`${fieldCls} resize-y`} />
+                            </div>
+
+                            {/* Многострочные: ИИ пишет здесь по два-три предложения, и в
+                              * однострочном поле человек не видел, что именно предложено. */}
+                            {situationOpen && (
+                                <label className="block">
+                                    <span className="mb-0.5 block text-[11.5px] text-slate-500">Ситуация — когда правило действует</span>
+                                    <textarea rows={2} value={decision?.situation || ''} disabled={rowDisabled}
+                                        onChange={(e) => onEdit(c.idx, { situation: e.target.value })}
+                                        placeholder="Обобщённо, без имён и названий из этого звонка"
+                                        className={`${fieldCls} resize-y`} />
+                                </label>
+                            )}
+                            {boundsOpen && (
+                                <label className="block">
+                                    <span className="mb-0.5 block text-[11.5px] text-slate-500">Границы — чего правило не оправдывает</span>
+                                    <textarea rows={2} value={decision?.not_covered || ''} disabled={rowDisabled}
+                                        onChange={(e) => onEdit(c.idx, { not_covered: e.target.value })}
+                                        placeholder="Нарушения, которые этим правилом не прощаются"
+                                        className={`${fieldCls} resize-y`} />
+                                </label>
+                            )}
+                            {(!situationOpen || !boundsOpen) && (
+                                <div className="flex flex-wrap gap-1.5">
+                                    {!situationOpen && (
+                                        <button type="button" onClick={() => setShowSituation(true)} disabled={rowDisabled} className={chipCls}>
+                                            <Plus size={11} strokeWidth={2.5} />Ситуация
+                                        </button>
+                                    )}
+                                    {!boundsOpen && (
+                                        <button type="button" onClick={() => setShowBounds(true)} disabled={rowDisabled} className={chipCls}>
+                                            <Plus size={11} strokeWidth={2.5} />Границы
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+
+                            {aiNote && (
+                                <p className="flex items-start gap-1.5 rounded-lg bg-amber-50/70 px-2.5 py-1.5 text-[11.5px] leading-snug text-slate-600 ring-1 ring-amber-100">
+                                    <AlertTriangle size={12} className="mt-[3px] shrink-0 text-amber-500" />{aiNote}
+                                </p>
                             )}
                             <EvidenceReview c={c} decision={decision} onEdit={onEdit} disabled={rowDisabled} transcriptText={transcriptText} />
                         </motion.div>

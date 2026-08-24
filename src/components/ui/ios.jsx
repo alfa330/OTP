@@ -146,19 +146,26 @@ export const IosSection = ({ title, hint, children, right = null }) => (
  * белой карточки читается как часть содержимого, а не как всплывающее пояснение.
  */
 export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) => {
-    const [open, setOpen] = React.useState(false);
+    // Наведение и клик — разные состояния, а не одно. Пока они делили один флаг,
+    // клик по «i» ГАСИЛ подсказку: мышь уже открыла её наведением, а клик
+    // переключал в закрытое. На мыши это выглядело как «кнопка не работает»,
+    // на тач-экране подсказка не закреплялась. Теперь клик закрепляет.
+    const [hover, setHover] = React.useState(false);
+    const [pinned, setPinned] = React.useState(false);
+    const open = hover || pinned;
     return (
         <span
             className="relative inline-flex"
-            onMouseEnter={() => setOpen(true)}
-            onMouseLeave={() => setOpen(false)}
+            onMouseEnter={() => setHover(true)}
+            onMouseLeave={() => setHover(false)}
         >
             <button
                 type="button"
                 aria-label={label}
                 aria-expanded={open}
-                onClick={(event) => { event.preventDefault(); setOpen((v) => !v); }}
-                onKeyDown={(event) => { if (event.key === 'Escape') setOpen(false); }}
+                onClick={(event) => { event.preventDefault(); setPinned((v) => !v); }}
+                onKeyDown={(event) => { if (event.key === 'Escape') setPinned(false); }}
+                onBlur={() => setPinned(false)}
                 className="grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full bg-slate-200/70 text-[11px] font-semibold leading-none text-slate-500 transition hover:bg-slate-300/80 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
             >
                 i
