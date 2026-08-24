@@ -27260,8 +27260,8 @@ class Database:
             ]
 
     # Разбор user-agent живёт в SQL, потому что по нему и фильтруют, и считают
-    # плашки устройств. Второй копии в Python нет намеренно: разъехавшиеся
-    # правила давали бы «Телефон 230», а в списке — пусто.
+    # плашки. Второй копии в Python нет намеренно: разъехавшиеся правила давали
+    # бы «Телефон 230», а в списке — пусто.
     _UA_BOT_SQL = "ua ~* 'bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot'"
     _UA_TABLET_SQL = (
         "("
@@ -27275,12 +27275,20 @@ class Database:
 
     ACTIVE_SESSION_ROLE_FILTERS = ('admin', 'sv', 'operator')
     ACTIVE_SESSION_DEVICE_FILTERS = ('desktop', 'mobile', 'tablet', 'bot', 'unknown')
+    # Сортировка людей, а не сессий: список раздела — по одной строке на человека.
     ACTIVE_SESSION_SORT_KEYS = {
-        'user_name': 'u.name',
-        'ip_address': 'us.ip_address',
-        'last_seen_at': 'us.last_seen_at',
-        'created_at': 'us.created_at',
-        'expires_at': 'us.expires_at'
+        'user_name': 'p.user_name',
+        'sessions_count': 'p.sessions_count',
+        'last_seen_at': 'p.last_seen_at',
+        'first_seen_at': 'p.first_seen_at',
+        'sensitive': 'p.sensitive_open_count'
+    }
+
+    _ROLE_FILTER_VALUES = {
+        # super_admin считается админом всюду в разделе, supervisor — СВ.
+        'admin': ('admin', 'super_admin'),
+        'sv': ('sv', 'supervisor'),
+        'operator': ('operator',)
     }
 
     @classmethod
@@ -27297,262 +27305,382 @@ class Database:
             f"ELSE 'desktop' END"
         )
 
-    def _build_active_sessions_where_clause(self, search: Optional[str] = None,
-                                            role: Optional[str] = None,
-                                            device: Optional[str] = None):
-        where_clauses = [
-            "us.revoked_at IS NULL",
-            "us.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
-        ]
-        params: List[Any] = []
+    # Живые сессии с их владельцем и типом устройства. Тип считается ОДИН раз
+    # здесь и дальше переиспользуется фильтром, плашками и счётчиками человека:
+    # прежняя сводка гоняла десяток регулярок по каждой строке заново.
+    def _live_sessions_cte(self):
+        # MATERIALIZED обязателен. Без него Postgres встраивает CTE, и разбор
+        # user-agent пересчитывается на КАЖДЫЙ счётчик устройства — пять раз по
+        # десятку регулярок на строку. На боевых 1444 сессиях это разница
+        # 183 мс против 40 мс на один только запрос сводки.
+        return f"""
+            live AS MATERIALIZED (
+                SELECT
+                    us.session_id::text AS session_id,
+                    us.user_id,
+                    us.user_agent,
+                    us.ip_address,
+                    us.created_at,
+                    us.last_seen_at,
+                    us.expires_at,
+                    us.sensitive_data_unlocked,
+                    us.sensitive_data_unlocked_at,
+                    us.sensitive_data_unlocked_by,
+                    unlocker.name AS unlocked_by_name,
+                    unlocker.role AS unlocked_by_role,
+                    u.name AS user_name,
+                    LOWER(COALESCE(u.role, '')) AS user_role,
+                    u.login AS user_login,
+                    u.supervisor_id,
+                    sv.name AS supervisor_name,
+                    u.department_id,
+                    d.name AS department_name,
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    ({self._active_session_device_sql()}) AS device
+                FROM user_sessions us
+                JOIN users u ON u.id = us.user_id
+                LEFT JOIN users sv ON sv.id = u.supervisor_id
+                LEFT JOIN departments d ON d.id = u.department_id
+                LEFT JOIN users unlocker ON unlocker.id = us.sensitive_data_unlocked_by
+                WHERE us.revoked_at IS NULL
+                  AND us.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+            )
+        """
 
-        search_text = (search or '').strip()
-        if search_text:
-            pattern = f"%{search_text}%"
-            where_clauses.append("""
+    @staticmethod
+    def _live_search_predicate(search: Optional[str]):
+        """Поиск идёт и по человеку, и по любой его сессии.
+
+        Найти сотрудника по IP или по ID сессии — обычный сценарий раздела,
+        поэтому строка сравнивается с обоими уровнями сразу, а человек попадает
+        в выдачу, если совпала хотя бы одна его сессия.
+        """
+        text = (search or '').strip()
+        if not text:
+            return '', []
+        pattern = f'%{text}%'
+        return (
+            """
                 (
-                    us.session_id::text ILIKE %s
-                    OR COALESCE(us.ip_address, '') ILIKE %s
-                    OR COALESCE(us.user_agent, '') ILIKE %s
-                    OR COALESCE(u.name, '') ILIKE %s
-                    OR COALESCE(u.login, '') ILIKE %s
-                    OR COALESCE(sv.name, '') ILIKE %s
+                    session_id ILIKE %s
+                    OR COALESCE(ip_address, '') ILIKE %s
+                    OR COALESCE(user_agent, '') ILIKE %s
+                    OR COALESCE(user_name, '') ILIKE %s
+                    OR COALESCE(user_login, '') ILIKE %s
+                    OR COALESCE(supervisor_name, '') ILIKE %s
                 )
-            """)
-            params.extend([pattern, pattern, pattern, pattern, pattern, pattern])
+            """,
+            [pattern] * 6
+        )
+
+    # Одна строка на человека: сколько у него живых сессий, где и когда он был
+    # последний раз, на чём сидит и открыты ли ему чувствительные данные.
+    _PEOPLE_CTE = """
+        people AS (
+            SELECT
+                user_id,
+                MIN(user_name) AS user_name,
+                MIN(user_role) AS user_role,
+                MIN(user_login) AS user_login,
+                MIN(supervisor_id) AS supervisor_id,
+                MIN(supervisor_name) AS supervisor_name,
+                MIN(department_id) AS department_id,
+                MIN(department_name) AS department_name,
+                MIN(avatar_bucket) AS avatar_bucket,
+                MIN(avatar_blob_path) AS avatar_blob_path,
+                COUNT(*) AS sessions_count,
+                MAX(last_seen_at) AS last_seen_at,
+                MIN(created_at) AS first_seen_at,
+                MAX(expires_at) AS expires_at,
+                COUNT(DISTINCT ip_address) AS ip_count,
+                COUNT(*) FILTER (WHERE device = 'desktop') AS desktop_count,
+                COUNT(*) FILTER (WHERE device = 'mobile') AS mobile_count,
+                COUNT(*) FILTER (WHERE device = 'tablet') AS tablet_count,
+                COUNT(*) FILTER (WHERE device = 'bot') AS bot_count,
+                COUNT(*) FILTER (WHERE device = 'unknown') AS unknown_count,
+                COUNT(*) FILTER (WHERE sensitive_data_unlocked) AS sensitive_open_count,
+                MAX(sensitive_data_unlocked_at) FILTER (WHERE sensitive_data_unlocked)
+                    AS sensitive_last_granted_at,
+                (ARRAY_AGG(unlocked_by_name ORDER BY sensitive_data_unlocked_at DESC NULLS LAST)
+                    FILTER (WHERE sensitive_data_unlocked))[1] AS sensitive_last_granted_by_name,
+                (ARRAY_AGG(unlocked_by_role ORDER BY sensitive_data_unlocked_at DESC NULLS LAST)
+                    FILTER (WHERE sensitive_data_unlocked))[1] AS sensitive_last_granted_by_role
+            FROM searched
+            GROUP BY user_id
+        )
+    """
+
+    _PEOPLE_COLUMNS = (
+        'user_id', 'user_name', 'user_role', 'user_login', 'supervisor_id', 'supervisor_name',
+        'department_id', 'department_name', 'avatar_bucket', 'avatar_blob_path',
+        'sessions_count', 'last_seen_at', 'first_seen_at', 'expires_at', 'ip_count',
+        'desktop_count', 'mobile_count', 'tablet_count', 'bot_count', 'unknown_count',
+        'sensitive_open_count', 'sensitive_last_granted_at',
+        'sensitive_last_granted_by_name', 'sensitive_last_granted_by_role'
+    )
+
+    @classmethod
+    def _people_row(cls, row):
+        item = dict(zip(cls._PEOPLE_COLUMNS, row))
+        item['sessions_count'] = int(item['sessions_count'] or 0)
+        item['ip_count'] = int(item['ip_count'] or 0)
+        item['sensitive_open_count'] = int(item['sensitive_open_count'] or 0)
+        item['device_counts'] = {
+            'desktop': int(item.pop('desktop_count') or 0),
+            'mobile': int(item.pop('mobile_count') or 0),
+            'tablet': int(item.pop('tablet_count') or 0),
+            'bot': int(item.pop('bot_count') or 0),
+            'unknown': int(item.pop('unknown_count') or 0)
+        }
+        return item
+
+    def _people_filter_sql(self, role: Optional[str] = None, device: Optional[str] = None,
+                           alias: str = 'p'):
+        """Фильтры применяются к ЧЕЛОВЕКУ, а не к отдельной сессии.
+
+        «Телефон» означает «у человека есть живая сессия с телефона»: список
+        показывает людей, и строка не может исчезнуть наполовину.
+        """
+        clauses = []
+        params: List[Any] = []
+        prefix = f'{alias}.' if alias else ''
 
         role_key = (role or '').strip().lower()
         if role_key in self.ACTIVE_SESSION_ROLE_FILTERS:
-            # super_admin считается админом всюду в разделе, supervisor — СВ.
-            role_values = {
-                'admin': ('admin', 'super_admin'),
-                'sv': ('sv', 'supervisor'),
-                'operator': ('operator',)
-            }[role_key]
-            where_clauses.append("LOWER(COALESCE(u.role, '')) = ANY(%s)")
-            params.append(list(role_values))
+            clauses.append(f'{prefix}user_role = ANY(%s)')
+            params.append(list(self._ROLE_FILTER_VALUES[role_key]))
 
         device_key = (device or '').strip().lower()
         if device_key in self.ACTIVE_SESSION_DEVICE_FILTERS:
-            where_clauses.append(f"({self._active_session_device_sql()}) = %s")
-            params.append(device_key)
+            clauses.append(f'{prefix}{device_key}_count > 0')
 
-        return " AND ".join(where_clauses), params
+        return (' AND '.join(clauses) if clauses else 'TRUE'), params
 
-    def _active_sessions_order_by(self, sort_key: Optional[str] = None,
-                                  sort_dir: Optional[str] = None):
-        """Сортировка считается на сервере: клиент видит только одну страницу.
-
-        Сортировка по загруженной пачке переставляла бы строки внутри первых ста
-        и врала бы про «сверху самые свежие».
-        """
+    def _people_order_by(self, sort_key: Optional[str] = None, sort_dir: Optional[str] = None,
+                         alias: str = 'p'):
+        """Сортировка считается на сервере: клиент видит только одну страницу."""
+        prefix = f'{alias}.' if alias else ''
         column = self.ACTIVE_SESSION_SORT_KEYS.get((sort_key or '').strip())
         direction = 'ASC' if (sort_dir or '').strip().lower() == 'asc' else 'DESC'
         if not column:
-            column, direction = 'us.last_seen_at', 'DESC'
+            column, direction = 'p.last_seen_at', 'DESC'
+        column = prefix + column.split('.', 1)[-1]
         nulls = 'NULLS LAST' if direction == 'DESC' else 'NULLS FIRST'
-        # session_id в хвосте — устойчивый порядок между страницами, иначе
-        # строки с одинаковым временем прыгают между пачками при догрузке.
-        return f"ORDER BY {column} {direction} {nulls}, us.session_id ASC"
+        # user_id в хвосте — устойчивый порядок между страницами, иначе люди с
+        # одинаковым значением прыгают между пачками при догрузке.
+        return f'ORDER BY {column} {direction} {nulls}, {prefix}user_id ASC'
 
-    ACTIVE_SESSION_COLUMNS_SQL = """
-                us.session_id::text,
-                us.user_id,
-                u.name,
-                u.role,
-                u.login,
-                u.supervisor_id,
-                sv.name AS supervisor_name,
-                u.avatar_bucket,
-                u.avatar_blob_path,
-                us.user_agent,
-                us.ip_address,
-                us.created_at,
-                us.last_seen_at,
-                us.expires_at,
-                us.sensitive_data_unlocked,
-                us.sensitive_data_unlocked_at,
-                us.sensitive_data_unlocked_by,
-                unlocker.name AS sensitive_data_unlocked_by_name,
-                unlocker.role AS sensitive_data_unlocked_by_role
+    _SUMMARY_COLUMNS_SQL = """
+        COUNT(*) AS total_people,
+        COALESCE(SUM(sessions_count), 0) AS total_sessions,
+        COUNT(*) FILTER (WHERE user_role IN ('admin', 'super_admin')) AS admin_people,
+        COUNT(*) FILTER (WHERE user_role IN ('sv', 'supervisor')) AS sv_people,
+        COUNT(*) FILTER (WHERE user_role = 'operator') AS operator_people,
+        COUNT(*) FILTER (WHERE desktop_count > 0) AS desktop_people,
+        COUNT(*) FILTER (WHERE mobile_count > 0) AS mobile_people,
+        COUNT(*) FILTER (WHERE tablet_count > 0) AS tablet_people,
+        COUNT(*) FILTER (WHERE bot_count > 0) AS bot_people,
+        COUNT(*) FILTER (WHERE unknown_count > 0) AS unknown_people,
+        COUNT(*) FILTER (WHERE sensitive_open_count > 0) AS sensitive_people,
+        COALESCE(SUM(sensitive_open_count), 0) AS sensitive_sessions
     """
+    _SUMMARY_COLUMN_COUNT = 12
 
-    ACTIVE_SESSION_FROM_SQL = """
-            FROM user_sessions us
-            JOIN users u ON u.id = us.user_id
-            LEFT JOIN users sv ON sv.id = u.supervisor_id
-            LEFT JOIN users unlocker ON unlocker.id = us.sensitive_data_unlocked_by
-    """
-
-    @staticmethod
-    def _active_session_row(row):
+    @classmethod
+    def _summary_from_row(cls, row):
+        row = row or (0,) * (cls._SUMMARY_COLUMN_COUNT + 2)
         return {
-            "session_id": row[0],
-            "user_id": row[1],
-            "user_name": row[2],
-            "user_role": row[3],
-            "user_login": row[4],
-            "supervisor_id": row[5],
-            "supervisor_name": row[6],
-            "avatar_bucket": row[7],
-            "avatar_blob_path": row[8],
-            "user_agent": row[9],
-            "ip_address": row[10],
-            "created_at": row[11],
-            "last_seen_at": row[12],
-            "expires_at": row[13],
-            "sensitive_data_unlocked": bool(row[14]),
-            "sensitive_data_unlocked_at": row[15],
-            "sensitive_data_unlocked_by": row[16],
-            "sensitive_data_unlocked_by_name": row[17],
-            "sensitive_data_unlocked_by_role": row[18]
-        }
-
-    def _active_sessions_summary_sql(self, where_sql: str):
-        bot_expr = self._UA_BOT_SQL
-        tablet_expr = self._UA_TABLET_SQL
-        mobile_expr = self._UA_MOBILE_SQL
-        return f"""
-            WITH filtered AS (
-                SELECT
-                    us.user_id,
-                    LOWER(COALESCE(u.role, '')) AS user_role,
-                    LOWER(COALESCE(us.user_agent, '')) AS ua
-                {self.ACTIVE_SESSION_FROM_SQL}
-                WHERE {where_sql}
-            )
-            SELECT
-                COUNT(*) AS total_sessions,
-                COUNT(DISTINCT user_id) AS total_users,
-                COUNT(*) FILTER (WHERE user_role IN ('admin', 'super_admin')) AS admin_sessions,
-                COUNT(*) FILTER (WHERE user_role IN ('sv', 'supervisor')) AS sv_sessions,
-                COUNT(*) FILTER (WHERE user_role = 'operator') AS operator_sessions,
-                COUNT(*) FILTER (WHERE ua = '') AS unknown_sessions,
-                COUNT(*) FILTER (WHERE {bot_expr}) AS bot_sessions,
-                COUNT(*) FILTER (
-                    WHERE ua <> ''
-                      AND NOT ({bot_expr})
-                      AND {tablet_expr}
-                ) AS tablet_sessions,
-                COUNT(*) FILTER (
-                    WHERE ua <> ''
-                      AND NOT ({bot_expr})
-                      AND NOT ({tablet_expr})
-                      AND {mobile_expr}
-                ) AS mobile_sessions,
-                COUNT(*) FILTER (
-                    WHERE ua <> ''
-                      AND NOT ({bot_expr})
-                      AND NOT ({tablet_expr})
-                      AND NOT ({mobile_expr})
-                ) AS desktop_sessions
-            FROM filtered
-        """
-
-    @staticmethod
-    def _active_sessions_summary_row(row):
-        row = row or (0,) * 10
-        return {
-            "total_sessions": int(row[0] or 0),
-            "total_users": int(row[1] or 0),
-            "role_counts": {
-                "admin": int(row[2] or 0),
-                "sv": int(row[3] or 0),
-                "operator": int(row[4] or 0)
+            'total_people': int(row[0] or 0),
+            'total_sessions': int(row[1] or 0),
+            'role_counts': {
+                'admin': int(row[2] or 0),
+                'sv': int(row[3] or 0),
+                'operator': int(row[4] or 0)
             },
-            "device_counts": {
-                "unknown": int(row[5] or 0),
-                "bot": int(row[6] or 0),
-                "tablet": int(row[7] or 0),
-                "mobile": int(row[8] or 0),
-                "desktop": int(row[9] or 0)
-            }
+            'device_counts': {
+                'desktop': int(row[5] or 0),
+                'mobile': int(row[6] or 0),
+                'tablet': int(row[7] or 0),
+                'bot': int(row[8] or 0),
+                'unknown': int(row[9] or 0)
+            },
+            'sensitive_people': int(row[10] or 0),
+            'sensitive_sessions': int(row[11] or 0),
+            'matched_people': int(row[12] or 0),
+            'matched_sessions': int(row[13] or 0)
         }
 
-    def get_active_sessions_page(self, limit: int = 100, offset: int = 0,
-                                 search: Optional[str] = None, role: Optional[str] = None,
-                                 device: Optional[str] = None, sort_key: Optional[str] = None,
-                                 sort_dir: Optional[str] = None):
-        """Страница списка + сводка одним походом в базу.
+    def get_active_session_people_page(self, limit: int = 50, offset: int = 0,
+                                       search: Optional[str] = None, role: Optional[str] = None,
+                                       device: Optional[str] = None, sort_key: Optional[str] = None,
+                                       sort_dir: Optional[str] = None):
+        """Страница списка людей и сводка — ОДНИМ запросом.
 
-        Раньше роут дергал два метода, а каждый брал СВОЙ коннект из общего
-        пула — два слота на один запрос поиска, который летит на каждое нажатие
-        клавиши. Здесь оба запроса идут на одном курсоре.
+        Раздел показывает по строке на человека, а не на сессию: у одного
+        сотрудника их бывает несколько десятков, и список из них ничего не
+        сообщал.
 
-        Плашки ролей и устройств считаются по поисковому запросу, но БЕЗ
-        выбранного фильтра: иначе, нажав «Админы», пользователь увидел бы нули
-        у остальных плашек и не смог бы переключиться обратно. Отдельным числом
-        отдаётся `matched_sessions` — сколько строк реально в выборке; на нём
-        строится пагинация.
+        Почему один оператор, а не два. Сводка и страница строятся на одной и
+        той же цепочке live → searched → people, и раздельные execute гоняли
+        весь разбор живых сессий ДВАЖДЫ на каждое нажатие клавиши в поиске.
+        Здесь `people` упоминается трижды в одном операторе и считается один раз.
+
+        Почему счётчик выборки идёт отдельной строкой, а не COUNT(*) OVER ().
+        Оконная функция не возвращает НИ ОДНОЙ строки, если OFFSET вырезал
+        пустой хвост, и «сколько всего нашли» молча превращалось в ноль на
+        догрузке. Агрегат `matched` есть всегда, даже когда страница пуста.
+
+        Плашки считаются по поисковому запросу, но БЕЗ выбранного фильтра:
+        иначе, нажав «Админы», пользователь увидел бы нули у остальных плашек и
+        не смог бы переключиться обратно.
         """
         limit = max(1, int(limit))
         offset = max(0, int(offset))
 
-        summary_where, summary_params = self._build_active_sessions_where_clause(search=search)
-        list_where, list_params = self._build_active_sessions_where_clause(
-            search=search, role=role, device=device)
+        search_sql, search_params = self._live_search_predicate(search)
+        # Поиск отбирает ЛЮДЕЙ, а не сессии: нашли человека по IP одной его
+        # сессии — показываем его целиком, со всеми остальными. Иначе строка
+        # списка сообщала бы «1 сессия» тому, у кого их три.
+        searched_cte = (
+            """
+            searched AS (
+                SELECT l.*
+                FROM live l
+                JOIN (SELECT DISTINCT user_id FROM live WHERE """ + search_sql + """) m
+                  ON m.user_id = l.user_id
+            )
+            """
+            if search_sql else
+            """
+            searched AS (SELECT * FROM live)
+            """
+        )
 
-        list_query = f"""
-            SELECT {self.ACTIVE_SESSION_COLUMNS_SQL}
-            {self.ACTIVE_SESSION_FROM_SQL}
-            WHERE {list_where}
-            {self._active_sessions_order_by(sort_key, sort_dir)}
-            LIMIT %s OFFSET %s
+        filter_sql, filter_params = self._people_filter_sql(role=role, device=device, alias='p')
+        window_order = self._people_order_by(sort_key, sort_dir, alias='p')
+
+        query = f"""
+            WITH {self._live_sessions_cte()},
+            {searched_cte},
+            {self._PEOPLE_CTE},
+            summary AS (SELECT {self._SUMMARY_COLUMNS_SQL} FROM people),
+            filtered AS (
+                SELECT p.*, ROW_NUMBER() OVER ({window_order}) AS rn
+                FROM people p
+                WHERE {filter_sql}
+            ),
+            matched AS (
+                SELECT COUNT(*) AS matched_people,
+                       COALESCE(SUM(sessions_count), 0) AS matched_sessions
+                FROM filtered
+            )
+            SELECT
+                s.total_people, s.total_sessions,
+                s.admin_people, s.sv_people, s.operator_people,
+                s.desktop_people, s.mobile_people, s.tablet_people,
+                s.bot_people, s.unknown_people,
+                s.sensitive_people, s.sensitive_sessions,
+                m.matched_people, m.matched_sessions,
+                {', '.join('f.' + name for name in self._PEOPLE_COLUMNS)}
+            FROM summary s
+            CROSS JOIN matched m
+            LEFT JOIN filtered f ON f.rn > %s AND f.rn <= %s
+            ORDER BY f.rn
         """
 
+        params = tuple(search_params) + tuple(filter_params) + (offset, offset + limit)
         with self._get_cursor() as cursor:
-            cursor.execute(self._active_sessions_summary_sql(summary_where), tuple(summary_params))
-            summary = self._active_sessions_summary_row(cursor.fetchone())
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
 
-            has_filter = bool(list_params) and list_where != summary_where
-            if has_filter:
-                cursor.execute(
-                    f"SELECT COUNT(*) {self.ACTIVE_SESSION_FROM_SQL} WHERE {list_where}",
-                    tuple(list_params))
-                matched = int((cursor.fetchone() or (0,))[0] or 0)
-            else:
-                matched = summary["total_sessions"]
-
-            cursor.execute(list_query, tuple(list_params) + (limit, offset))
-            rows = [self._active_session_row(row) for row in cursor.fetchall()]
-
-        summary["matched_sessions"] = matched
+        summary = self._summary_from_row(rows[0] if rows else None)
+        head = self._SUMMARY_COLUMN_COUNT + 2
+        people = [
+            self._people_row(row[head:])
+            for row in rows
+            if row[head] is not None  # строка-заглушка от LEFT JOIN, когда страница пуста
+        ]
         return {
-            "sessions": rows,
-            "summary": summary,
-            "matched_sessions": matched,
-            "has_more": (offset + len(rows)) < matched
+            'people': people,
+            'summary': summary,
+            'matched_people': summary['matched_people'],
+            'matched_sessions': summary['matched_sessions'],
+            'has_more': (offset + len(people)) < summary['matched_people']
         }
 
-    def get_active_session_detail(self, session_id):
-        """Карточка одной сессии: сама сессия, её владелец и журнал доступа."""
+    _SESSION_COLUMNS = (
+        'session_id', 'user_id', 'user_agent', 'ip_address', 'created_at', 'last_seen_at',
+        'expires_at', 'sensitive_data_unlocked', 'sensitive_data_unlocked_at',
+        'sensitive_data_unlocked_by', 'sensitive_data_unlocked_by_name',
+        'sensitive_data_unlocked_by_role', 'device_type'
+    )
+
+    def get_active_session_user_detail(self, user_id):
+        """Карточка человека: он сам, все его живые сессии и журнал выдач.
+
+        Журнал берётся одним запросом на ВСЕ его сессии, а не по одной на
+        сессию: у сотрудника их бывает четыре десятка, и цикл превратил бы
+        открытие карточки в сорок походов в базу.
+        """
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
         with self._get_cursor() as cursor:
-            cursor.execute(f"""
-                SELECT {self.ACTIVE_SESSION_COLUMNS_SQL},
-                    us.revoked_at,
-                    u.status,
-                    u.telegram_id,
-                    d.id AS department_id,
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    LOWER(COALESCE(u.role, '')) AS role,
+                    u.login,
+                    u.supervisor_id,
+                    sv.name AS supervisor_name,
+                    u.department_id,
                     d.name AS department_name,
-                    ({self._active_session_device_sql()}) AS device_type
-                {self.ACTIVE_SESSION_FROM_SQL}
+                    u.avatar_bucket,
+                    u.avatar_blob_path,
+                    u.status,
+                    u.telegram_id
+                FROM users u
+                LEFT JOIN users sv ON sv.id = u.supervisor_id
                 LEFT JOIN departments d ON d.id = u.department_id
-                WHERE us.session_id = %s
-                LIMIT 1
-            """, (session_id,))
+                WHERE u.id = %s
+            """, (user_id,))
             row = cursor.fetchone()
             if not row:
                 return None
 
-            detail = self._active_session_row(row)
-            detail.update({
-                "revoked_at": row[19],
-                "user_status": row[20],
-                "telegram_id": row[21],
-                "department_id": row[22],
-                "department_name": row[23],
-                "device_type": row[24]
-            })
+            user = {
+                'user_id': row[0],
+                'user_name': row[1],
+                'user_role': row[2],
+                'user_login': row[3],
+                'supervisor_id': row[4],
+                'supervisor_name': row[5],
+                'department_id': row[6],
+                'department_name': row[7],
+                'avatar_bucket': row[8],
+                'avatar_blob_path': row[9],
+                'user_status': row[10],
+                'has_telegram': bool(row[11])
+            }
+
+            cursor.execute(f"""
+                WITH {self._live_sessions_cte()}
+                SELECT
+                    session_id, user_id, user_agent, ip_address, created_at, last_seen_at,
+                    expires_at, sensitive_data_unlocked, sensitive_data_unlocked_at,
+                    sensitive_data_unlocked_by,
+                    unlocked_by_name AS sensitive_data_unlocked_by_name,
+                    unlocked_by_role AS sensitive_data_unlocked_by_role,
+                    device AS device_type
+                FROM live
+                WHERE user_id = %s
+                ORDER BY last_seen_at DESC NULLS LAST, session_id ASC
+            """, (user_id,))
+            sessions = [dict(zip(self._SESSION_COLUMNS, item)) for item in cursor.fetchall()]
 
             cursor.execute("""
                 SELECT
@@ -27563,42 +27691,79 @@ class Database:
                     COUNT(*) AS total_sessions
                 FROM user_sessions
                 WHERE user_id = %s
-            """, (detail["user_id"],))
+            """, (user_id,))
             counts = cursor.fetchone() or (0, 0)
-            detail["user_active_sessions"] = int(counts[0] or 0)
-            detail["user_total_sessions"] = int(counts[1] or 0)
+            user['active_sessions'] = int(counts[0] or 0)
+            user['total_sessions'] = int(counts[1] or 0)
 
             cursor.execute("""
                 SELECT
                     e.id,
+                    e.session_id::text,
                     e.action,
                     e.actor_id,
                     a.name AS actor_name,
                     COALESCE(e.actor_role, a.role) AS actor_role,
                     e.ip_address,
-                    e.user_agent,
                     e.created_at
                 FROM session_access_events e
                 LEFT JOIN users a ON a.id = e.actor_id
-                WHERE e.session_id = %s
+                WHERE e.user_id = %s
                 ORDER BY e.created_at DESC, e.id DESC
-                LIMIT 50
-            """, (session_id,))
-            detail["access_events"] = [
+                LIMIT 100
+            """, (user_id,))
+            events = [
                 {
-                    "id": item[0],
-                    "action": item[1],
-                    "actor_id": item[2],
-                    "actor_name": item[3],
-                    "actor_role": item[4],
-                    "ip_address": item[5],
-                    "user_agent": item[6],
-                    "created_at": item[7]
+                    'id': item[0],
+                    'session_id': item[1],
+                    'action': item[2],
+                    'actor_id': item[3],
+                    'actor_name': item[4],
+                    'actor_role': item[5],
+                    'ip_address': item[6],
+                    'created_at': item[7]
                 }
                 for item in cursor.fetchall()
             ]
 
-        return detail
+        by_session = {}
+        for event in events:
+            by_session.setdefault(event['session_id'], []).append(event)
+        for session in sessions:
+            session['access_events'] = by_session.get(session['session_id'], [])
+
+        user['avatar_bucket'] = user.get('avatar_bucket')
+        return {'user': user, 'sessions': sessions, 'access_events': events}
+
+    def list_active_session_ids_for_users(self, user_ids):
+        """ID живых сессий перечисленных людей — для кнопки «прервать все».
+
+        Собирает их СЕРВЕР, одним запросом. Клиент знает только тех, кто попал
+        в загруженную страницу, и цикл «по человеку за запрос» молча пропускал
+        выбранных со второй страницы, а на полусотне выбранных превращался в
+        полсотни HTTP-запросов подряд.
+        """
+        ids = []
+        for value in (user_ids or []):
+            try:
+                ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT session_id::text
+                FROM user_sessions
+                WHERE user_id = ANY(%s)
+                  AND revoked_at IS NULL
+                  AND expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+            """, (ids,))
+            return [row[0] for row in cursor.fetchall()]
+
+    def list_active_session_ids_for_user(self, user_id):
+        """ID живых сессий одного человека."""
+        return self.list_active_session_ids_for_users([user_id])
 
     def get_call_evaluations(self, operator_id, month=None, include_target: bool = False):
         """

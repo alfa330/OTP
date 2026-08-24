@@ -8950,20 +8950,30 @@ def revoke_auth_session(session_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+# Потолок пачки на «прервать сессии выбранных». Страница списка отдаёт максимум
+# 200 человек, и запрос крупнее означает ошибку клиента, а не намерение.
+ADMIN_SESSION_BULK_USERS_LIMIT = 200
+
+
+def _admin_sessions_guard():
+    """Общая проверка доступа к разделу «Сессии». Возвращает (ошибка, код)."""
+    requester_id = getattr(g, 'user_id', None)
+    if not requester_id:
+        return {"error": "Unauthorized"}, 401
+    requester = db.get_user(id=requester_id)
+    if not requester or not _is_admin_role(requester[3]):
+        return {"error": "Forbidden: only admins can access"}, 403
+    return None, None
+
+
 def _serialize_admin_session(item, current_session_id=None):
-    """Строка сессии для раздела «Сессии»."""
+    """Одна сессия внутри карточки человека."""
     return {
         "session_id": item["session_id"],
-        "user_id": item["user_id"],
-        "user_name": item["user_name"],
-        "user_role": item["user_role"],
-        "user_login": item["user_login"],
-        "supervisor_id": item["supervisor_id"],
-        "supervisor_name": item["supervisor_name"],
-        "avatar_url": _build_avatar_signed_url(item.get("avatar_bucket"), item.get("avatar_blob_path")),
         "is_current": item["session_id"] == current_session_id,
         "user_agent": item["user_agent"],
         "ip_address": item["ip_address"],
+        "device_type": item.get("device_type"),
         "created_at": item["created_at"].isoformat() if item["created_at"] else None,
         "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
         "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None,
@@ -8975,34 +8985,81 @@ def _serialize_admin_session(item, current_session_id=None):
         ),
         "sensitive_data_unlocked_by": item.get("sensitive_data_unlocked_by"),
         "sensitive_data_unlocked_by_name": item.get("sensitive_data_unlocked_by_name"),
-        "sensitive_data_unlocked_by_role": item.get("sensitive_data_unlocked_by_role")
+        "sensitive_data_unlocked_by_role": item.get("sensitive_data_unlocked_by_role"),
+        "access_events": [
+            _serialize_access_event(event) for event in item.get("access_events", [])
+        ]
+    }
+
+
+def _serialize_access_event(event):
+    return {
+        "id": event["id"],
+        "session_id": event.get("session_id"),
+        "action": event["action"],
+        "actor_id": event["actor_id"],
+        "actor_name": event["actor_name"],
+        "actor_role": event["actor_role"],
+        "ip_address": event.get("ip_address"),
+        "created_at": event["created_at"].isoformat() if event["created_at"] else None
+    }
+
+
+def _serialize_session_person(item):
+    """Строка списка: человек и сводка по всем его живым сессиям."""
+    return {
+        "user_id": item["user_id"],
+        "user_name": item["user_name"],
+        "user_role": item["user_role"],
+        "user_login": item["user_login"],
+        "supervisor_id": item["supervisor_id"],
+        "supervisor_name": item["supervisor_name"],
+        "department_id": item["department_id"],
+        "department_name": item["department_name"],
+        "avatar_url": _build_avatar_signed_url(item.get("avatar_bucket"), item.get("avatar_blob_path")),
+        "sessions_count": item["sessions_count"],
+        "ip_count": item["ip_count"],
+        "device_counts": item["device_counts"],
+        "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
+        "first_seen_at": item["first_seen_at"].isoformat() if item["first_seen_at"] else None,
+        "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None,
+        "sensitive_open_count": item["sensitive_open_count"],
+        "sensitive_last_granted_at": (
+            item["sensitive_last_granted_at"].isoformat()
+            if item.get("sensitive_last_granted_at")
+            else None
+        ),
+        "sensitive_last_granted_by_name": item.get("sensitive_last_granted_by_name"),
+        "sensitive_last_granted_by_role": item.get("sensitive_last_granted_by_role")
     }
 
 
 @app.route('/api/admin/sessions', methods=['GET', 'OPTIONS'])
 @require_api_key
 def list_admin_sessions():
-    try:
-        requester_id = getattr(g, 'user_id', None)
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
+    """Список раздела «Сессии» — по строке на ЧЕЛОВЕКА, а не на сессию.
 
-        requester = db.get_user(id=requester_id)
-        if not requester or not _is_admin_role(requester[3]):
-            return jsonify({"error": "Forbidden: only admins can access"}), 403
+    У одного сотрудника живых сессий бывает несколько десятков, и список из них
+    ничего не сообщал: одно и то же имя занимало весь экран. Сессии переехали
+    внутрь карточки человека.
+    """
+    try:
+        error, status = _admin_sessions_guard()
+        if error:
+            return jsonify(error), status
 
         raw_limit = request.args.get('limit')
         raw_offset = request.args.get('offset')
         query_text = (request.args.get('q') or '').strip()
 
         try:
-            limit = int(raw_limit) if raw_limit is not None else 100
+            limit = int(raw_limit) if raw_limit is not None else 50
             offset = int(raw_offset) if raw_offset is not None else 0
         except Exception:
             return jsonify({"error": "Invalid pagination params"}), 400
 
-        if limit < 1 or limit > 500:
-            return jsonify({"error": "limit must be in range 1..500"}), 400
+        if limit < 1 or limit > 200:
+            return jsonify({"error": "limit must be in range 1..200"}), 400
         if offset < 0:
             return jsonify({"error": "offset must be >= 0"}), 400
 
@@ -9028,8 +9085,7 @@ def list_admin_sessions():
         if sort_dir and sort_dir not in ('asc', 'desc'):
             return jsonify({"error": "Invalid sort direction"}), 400
 
-        current_session_id = _current_session_id_from_access_token()
-        page = db.get_active_sessions_page(
+        page = db.get_active_session_people_page(
             limit=limit,
             offset=offset,
             search=query_text,
@@ -9038,20 +9094,17 @@ def list_admin_sessions():
             sort_key=sort_key or None,
             sort_dir=sort_dir or None
         )
-        serialized = [
-            _serialize_admin_session(item, current_session_id)
-            for item in page["sessions"]
-        ]
 
         return jsonify({
             "status": "success",
-            "sessions": serialized,
+            "people": [_serialize_session_person(item) for item in page["people"]],
             "summary": page["summary"],
             "pagination": {
                 "limit": limit,
                 "offset": offset,
-                "returned": len(serialized),
-                "matched": page["matched_sessions"],
+                "returned": len(page["people"]),
+                "matched": page["matched_people"],
+                "matched_sessions": page["matched_sessions"],
                 "has_more": page["has_more"]
             },
             "query": query_text,
@@ -9067,53 +9120,124 @@ def list_admin_sessions():
         return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/admin/sessions/<session_id>', methods=['GET', 'OPTIONS'])
+@app.route('/api/admin/session-users/<int:user_id>', methods=['GET', 'OPTIONS'])
 @require_api_key
-def get_admin_session_detail(session_id):
-    """Карточка сессии: владелец, устройство, сроки и журнал выдачи доступа."""
+def get_admin_session_user(user_id):
+    """Карточка человека: он сам, все его живые сессии и журнал выдач доступа."""
     try:
-        requester_id = getattr(g, 'user_id', None)
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
+        error, status = _admin_sessions_guard()
+        if error:
+            return jsonify(error), status
 
-        requester = db.get_user(id=requester_id)
-        if not requester or not _is_admin_role(requester[3]):
-            return jsonify({"error": "Forbidden: only admins can access"}), 403
-
-        detail = db.get_active_session_detail(session_id)
+        detail = db.get_active_session_user_detail(user_id)
         if not detail:
-            return jsonify({"error": "Session not found"}), 404
+            return jsonify({"error": "User not found"}), 404
 
+        user = detail["user"]
         current_session_id = _current_session_id_from_access_token()
-        payload = _serialize_admin_session(detail, current_session_id)
-        payload.update({
-            "revoked_at": detail["revoked_at"].isoformat() if detail.get("revoked_at") else None,
-            "is_active": detail.get("revoked_at") is None,
-            "user_status": detail.get("user_status"),
-            "has_telegram": bool(detail.get("telegram_id")),
-            "department_id": detail.get("department_id"),
-            "department_name": detail.get("department_name"),
-            "device_type": detail.get("device_type"),
-            "user_active_sessions": detail.get("user_active_sessions", 0),
-            "user_total_sessions": detail.get("user_total_sessions", 0),
-            "access_events": [
-                {
-                    "id": event["id"],
-                    "action": event["action"],
-                    "actor_id": event["actor_id"],
-                    "actor_name": event["actor_name"],
-                    "actor_role": event["actor_role"],
-                    "ip_address": event["ip_address"],
-                    "user_agent": event["user_agent"],
-                    "created_at": event["created_at"].isoformat() if event["created_at"] else None
-                }
-                for event in detail.get("access_events", [])
-            ]
-        })
-
-        return jsonify({"status": "success", "session": payload}), 200
+        return jsonify({
+            "status": "success",
+            "user": {
+                "user_id": user["user_id"],
+                "user_name": user["user_name"],
+                "user_role": user["user_role"],
+                "user_login": user["user_login"],
+                "supervisor_id": user["supervisor_id"],
+                "supervisor_name": user["supervisor_name"],
+                "department_id": user["department_id"],
+                "department_name": user["department_name"],
+                "avatar_url": _build_avatar_signed_url(
+                    user.get("avatar_bucket"), user.get("avatar_blob_path")),
+                "user_status": user["user_status"],
+                "has_telegram": user["has_telegram"],
+                "active_sessions": user["active_sessions"],
+                "total_sessions": user["total_sessions"]
+            },
+            "sessions": [
+                _serialize_admin_session(item, current_session_id)
+                for item in detail["sessions"]
+            ],
+            "access_events": [_serialize_access_event(e) for e in detail["access_events"]]
+        }), 200
     except Exception as e:
-        logging.error(f"get_admin_session_detail error: {e}", exc_info=True)
+        logging.error(f"get_admin_session_user error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+def _revoke_sessions_of_users(user_ids):
+    """Прервать все живые сессии перечисленных людей — одним заходом.
+
+    Список id собирает сервер: клиент знает только загруженную страницу, а у
+    одного сотрудника сессий бывает четыре десятка. Прерываются они одним
+    UPDATE, поэтому «выбрал пачку, а среди них себя» больше не обрывает работу
+    на середине: свою сессию человек теряет уже после того, как прервались все
+    остальные.
+    """
+    session_ids = db.list_active_session_ids_for_users(user_ids)
+    if not session_ids:
+        return jsonify({
+            "status": "success",
+            "revoked_count": 0,
+            "users_count": 0,
+            "current_session_revoked": False
+        }), 200
+
+    revoked_count = db.revoke_user_sessions_bulk(session_ids=session_ids)
+    current_session_revoked = _current_session_id_from_access_token() in session_ids
+
+    response = jsonify({
+        "status": "success",
+        "revoked_count": revoked_count,
+        "users_count": len(set(int(v) for v in user_ids if str(v).lstrip('-').isdigit())),
+        "current_session_revoked": current_session_revoked
+    })
+    if current_session_revoked:
+        _clear_auth_cookies(response)
+    return response, 200
+
+
+@app.route('/api/admin/session-users/revoke', methods=['POST', 'OPTIONS'])
+@require_api_key
+def revoke_admin_session_users_bulk():
+    """Прервать сессии сразу нескольких сотрудников одним запросом."""
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        error, status = _admin_sessions_guard()
+        if error:
+            return jsonify(error), status
+
+        data = request.get_json(silent=True) or {}
+        user_ids = data.get('user_ids')
+        if not isinstance(user_ids, list) or not user_ids:
+            return jsonify({"error": "user_ids list is required and cannot be empty"}), 400
+        if len(user_ids) > ADMIN_SESSION_BULK_USERS_LIMIT:
+            return jsonify({
+                "error": f"user_ids must not exceed {ADMIN_SESSION_BULK_USERS_LIMIT} items"
+            }), 400
+
+        return _revoke_sessions_of_users(user_ids)
+    except Exception as e:
+        logging.error(f"revoke_admin_session_users_bulk error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/session-users/<int:user_id>/revoke', methods=['POST', 'OPTIONS'])
+@require_api_key
+def revoke_admin_session_user(user_id):
+    """Прервать все живые сессии одного человека."""
+    try:
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+
+        error, status = _admin_sessions_guard()
+        if error:
+            return jsonify(error), status
+
+        return _revoke_sessions_of_users([user_id])
+    except Exception as e:
+        logging.error(f"revoke_admin_session_user error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -9147,42 +9271,6 @@ def revoke_admin_session(session_id):
         return response, 200
     except Exception as e:
         logging.error(f"revoke_admin_session error: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/admin/sessions/revoke_bulk', methods=['POST', 'OPTIONS'])
-@require_api_key
-def revoke_admin_sessions_bulk():
-    try:
-        requester_id = getattr(g, 'user_id', None)
-        if not requester_id:
-            return jsonify({"error": "Unauthorized"}), 401
-
-        requester = db.get_user(id=requester_id)
-        if not requester or not _is_admin_role(requester[3]):
-            return jsonify({"error": "Forbidden: only admins can access"}), 403
-
-        data = request.get_json() or {}
-        session_ids = data.get('session_ids')
-        
-        if not isinstance(session_ids, list) or not session_ids:
-            return jsonify({"error": "session_ids list is required and cannot be empty"}), 400
-
-        revoked_count = db.revoke_user_sessions_bulk(session_ids=session_ids)
-
-        current_session_id = _current_session_id_from_access_token()
-        current_session_revoked = current_session_id in session_ids
-
-        response = jsonify({
-            "status": "success",
-            "revoked_count": revoked_count,
-            "current_session_revoked": current_session_revoked
-        })
-        if current_session_revoked:
-            _clear_auth_cookies(response)
-        return response, 200
-    except Exception as e:
-        logging.error(f"revoke_admin_sessions_bulk error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 

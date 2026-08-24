@@ -43,7 +43,7 @@ import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuali
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
-import { parseUserAgent } from './components/sessions/userAgent';
+import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -140,7 +140,7 @@ const lazyWithRetry = (importer) =>
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
-const SessionDetailModal = lazyWithRetry(() => import('./components/sessions/SessionDetailModal'));
+const SessionUserModal = lazyWithRetry(() => import('./components/sessions/SessionUserModal'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -190,7 +190,9 @@ const TICKET_ID_QUERY_PARAM = 'ticket_id';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
-const ADMIN_SESSIONS_PAGE_SIZE = 100;
+const ADMIN_SESSIONS_PAGE_SIZE = 50;
+// Стабильная пустая ссылка: новый [] на каждый рендер ломал бы мемоизацию строк.
+const EMPTY_ARRAY = Object.freeze([]);
 // Фильтры, поиск и сортировка раздела «Сессии» едут на сервер одним объектом:
 // одна страница ответа = ровно то, что видно на экране.
 const ADMIN_SESSIONS_DEFAULT_VIEW = Object.freeze({
@@ -34770,7 +34772,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         };
 
         const SessionRoleBadge = ({ role }) => {
-            const m = SESSION_ROLE_META[role] || { label: role || '—', cls: 'bg-gray-100 text-gray-500 ring-gray-200' };
+            const key = role === 'super_admin' ? 'admin' : role;
+            const m = SESSION_ROLE_META[key] || { label: role || '—', cls: 'bg-gray-100 text-gray-500 ring-gray-200' };
             return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ${m.cls}`}>{m.label}</span>;
         };
 
@@ -34779,33 +34782,32 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             mobile:  <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18h3"/>,
             tablet:  <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/>,
             bot:     <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21M6.75 19.5h10.5a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0017.25 4.5H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm5.25-6a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H12v-.008zm-3 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H9v-.008zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H15v-.008z"/>,
+            unknown: <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z"/>,
         };
 
         const SessionDeviceIcon = ({ type, className = 'w-3.5 h-3.5' }) => {
             const path = SESSION_DEVICE_ICONS[type];
             if (!path) return null;
-            return (
-                <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>{path}</svg>
-            );
+            return <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>{path}</svg>;
         };
 
+        const SESSION_DEVICE_ORDER = ['desktop', 'mobile', 'tablet', 'bot', 'unknown'];
+        const SESSION_DEVICE_LABELS = { desktop: 'ПК', mobile: 'Телефон', tablet: 'Планшет', bot: 'Боты', unknown: 'Неизвестно' };
+
         /**
-         * Строка таблицы сессий.
+         * Строка списка — ЧЕЛОВЕК со сводкой по всем его живым сессиям.
          *
          * Вынесена в memo намеренно: раньше набор в поиске перерисовывал всю
-         * таблицу целиком (сотня строк по восемь ячеек с инлайновыми SVG) на
-         * КАЖДУЮ букву — именно это ощущалось как лаги раздела. Теперь строка
-         * перерисовывается, только если изменилась она сама.
-         *
-         * Условие memo: обработчики приходят стабильными (useCallback в панели),
-         * а `row` — новый объект лишь после ответа сервера.
+         * таблицу на КАЖДУЮ букву — именно это ощущалось как лаги раздела.
+         * Теперь строка перерисовывается, только если изменилась она сама.
          */
-        const SessionRow = React.memo(function SessionRow({
-            row, isSelected, isRevoking, bulkRevoking, formatDate, onToggle, onRevoke, onOpen
+        const SessionPersonRow = React.memo(function SessionPersonRow({
+            person, isSelected, formatDate, onToggle, onOpen, onRevokeAll, busy
         }) {
+            const devices = person.device_counts || {};
             return (
                 <tr
-                    onClick={() => !isRevoking && !bulkRevoking && onOpen(row)}
+                    onClick={() => onOpen(person)}
                     className={`transition-colors duration-100 group cursor-pointer select-none ${
                         isSelected ? 'bg-blue-50/60 hover:bg-blue-50' : 'hover:bg-gray-50/60'
                     }`}>
@@ -34814,106 +34816,90 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <input
                             type="checkbox"
                             checked={isSelected}
-                            onChange={() => !isRevoking && !bulkRevoking && onToggle(row.session_id)}
-                            disabled={isRevoking || bulkRevoking}
+                            onChange={() => onToggle(person)}
+                            disabled={busy}
                             className="w-4 h-4 rounded border-gray-300 text-blue-600 cursor-pointer focus:ring-blue-500/30 accent-blue-600 disabled:opacity-40"
                         />
                     </td>
 
-                    {/* Пользователь */}
+                    {/* Сотрудник */}
                     <td className="px-3 py-3">
                         <div className="flex items-center gap-2.5">
                             <div className="w-8 h-8 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
-                                {row.avatar_url ? (
-                                    <AvatarImage src={row.avatar_url} alt={row.user_name || 'avatar'} className="h-full w-full object-cover" />
+                                {person.avatar_url ? (
+                                    <AvatarImage src={person.avatar_url} alt={person.user_name || 'avatar'} className="h-full w-full object-cover" />
                                 ) : (
-                                    (row.user_name || 'U').charAt(0).toUpperCase()
+                                    (person.user_name || 'U').charAt(0).toUpperCase()
                                 )}
                             </div>
                             <div className="min-w-0">
                                 <div className="font-medium text-gray-800 text-sm truncate leading-tight">
-                                    {row.user_name || `#${row.user_id}`}
+                                    {person.user_name || `#${person.user_id}`}
                                 </div>
                                 <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                    <SessionRoleBadge role={row.user_role} />
-                                    {row.user_login && <span className="text-xs text-gray-400 font-mono">@{row.user_login}</span>}
-                                    {row.supervisor_name && <span className="text-xs text-gray-400">↳ {row.supervisor_name}</span>}
+                                    <SessionRoleBadge role={person.user_role} />
+                                    {person.user_login && <span className="text-xs text-gray-400 font-mono">@{person.user_login}</span>}
+                                    {person.supervisor_name && <span className="text-xs text-gray-400">↳ {person.supervisor_name}</span>}
                                 </div>
                             </div>
                         </div>
                     </td>
 
-                    {/* Сессия */}
+                    {/* Сессии */}
+                    <td className="px-3 py-3 whitespace-nowrap">
+                        <div className="text-sm font-semibold text-gray-800 tabular-nums">{person.sessions_count}</div>
+                        <div className="text-xs text-gray-400 tabular-nums">
+                            {person.ip_count} {addressWord(person.ip_count)}
+                        </div>
+                    </td>
+
+                    {/* Устройства */}
                     <td className="px-3 py-3">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-mono text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
-                                {row.session_id?.slice(0, 10)}…
-                            </span>
-                            {row.is_current && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 ring-1 ring-green-200">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                                    Текущая
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {SESSION_DEVICE_ORDER.filter((key) => devices[key] > 0).map((key) => (
+                                <span key={key} className="inline-flex items-center gap-1 text-xs text-gray-500" title={SESSION_DEVICE_LABELS[key]}>
+                                    <span className="text-gray-400"><SessionDeviceIcon type={key} /></span>
+                                    <span className="tabular-nums">{devices[key]}</span>
                                 </span>
-                            )}
-                            {/* Закрытый доступ — норма, и плашку ему не рисуем:
-                                нейтральное состояние не должно кричать. */}
-                            {row.sensitive_data_unlocked && (
+                            ))}
+                        </div>
+                    </td>
+
+                    {/* Доступ к данным — рисуем, только когда он открыт: столбец
+                        прочерков на всю таблицу сообщает ровно ничего. */}
+                    <td className="px-3 py-3">
+                        {person.sensitive_open_count > 0 ? (
+                            <div className="min-w-0">
                                 <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 ring-1 ring-amber-200">
-                                    Данные открыты
+                                    Открыт{person.sensitive_open_count > 1 ? ` · ${person.sensitive_open_count}` : ''}
                                 </span>
-                            )}
-                        </div>
-                        <div className="text-xs text-gray-400 mt-0.5 font-mono tabular-nums">{formatDate(row.created_at)}</div>
-                    </td>
-
-                    {/* IP */}
-                    <td className="px-3 py-3 font-mono text-xs text-gray-600 whitespace-nowrap tabular-nums">
-                        {row.ip_address || '—'}
-                    </td>
-
-                    {/* Устройство */}
-                    <td className="px-3 py-3">
-                        <div className="flex items-center gap-1.5">
-                            <span className="text-gray-400 shrink-0"><SessionDeviceIcon type={row.device?.type} /></span>
-                            <div>
-                                <div className="text-xs font-medium text-gray-700">{row.device?.os || '—'}</div>
-                                <div className="text-xs text-gray-400">{row.device?.browser || '—'}</div>
+                                <div className="text-xs text-gray-500 mt-0.5 truncate max-w-[180px]">
+                                    {person.sensitive_last_granted_by_name
+                                        ? `выдал ${person.sensitive_last_granted_by_name}`
+                                        : 'выдавший неизвестен'}
+                                </div>
+                                {person.sensitive_last_granted_at && (
+                                    <div className="text-xs text-gray-400 tabular-nums">
+                                        {formatDate(person.sensitive_last_granted_at)}
+                                    </div>
+                                )}
                             </div>
-                        </div>
+                        ) : null}
                     </td>
 
                     <td className="px-3 py-3 text-xs text-gray-600 whitespace-nowrap tabular-nums">
-                        {formatDate(row.last_seen_at)}
-                    </td>
-
-                    <td className="px-3 py-3 text-xs text-gray-600 whitespace-nowrap tabular-nums">
-                        {formatDate(row.expires_at)}
+                        {formatDate(person.last_seen_at)}
                     </td>
 
                     <td className="px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
                         <button
-                            onClick={() => onRevoke(row)}
-                            disabled={isRevoking || bulkRevoking}
-                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150 ${
-                                isRevoking
-                                    ? 'bg-red-50 text-red-400 cursor-not-allowed ring-1 ring-red-100'
-                                    : 'bg-red-50 text-red-600 ring-1 ring-red-100 hover:bg-red-600 hover:text-white hover:shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-30'
-                            }`}>
-                            {isRevoking ? (
-                                <>
-                                    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
-                                        <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83" strokeLinecap="round"/>
-                                    </svg>
-                                    Прерывание…
-                                </>
-                            ) : (
-                                <>
-                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
-                                    </svg>
-                                    Прервать
-                                </>
-                            )}
+                            onClick={() => onRevokeAll(person)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-50 text-red-600 ring-1 ring-red-100 transition-all duration-150 hover:bg-red-600 hover:text-white hover:shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-30">
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                            </svg>
+                            Прервать все
                         </button>
                     </td>
                 </tr>
@@ -34921,7 +34907,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         });
 
         const SessionsPanel = ({
-        adminSessions,
+        adminSessionPeople,
         adminSessionsSummary,
         isAdminSessionsLoading,
         isAdminSessionsLoadingMore,
@@ -34929,11 +34915,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         fetchAdminSessions,
         loadMoreAdminSessions,
         onApplyAdminSessionsView,
-        onFetchAdminSessionDetail,
+        onFetchAdminSessionUser,
         sessionsView,
         revokingSessionId,       // одиночное прерывание — внешнее состояние
         handleRevokeAdminSession,
-        handleBulkRevokeAdminSessions,
+        handleRevokeAdminSessionUser,
+        handleBulkRevokeAdminSessionUsers,
         formatDate,
         }) => {
         const view = sessionsView || ADMIN_SESSIONS_DEFAULT_VIEW;
@@ -34946,14 +34933,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const lastAppliedSearchRef = React.useRef(view.query || '');
         const loadMoreRef = React.useRef(null);
 
-        // ── Карточка сессии ──────────────────────────────────────────────────────
-        const [detailId, setDetailId] = React.useState('');
+        // ── Карточка сотрудника ──────────────────────────────────────────────────
+        const [detailPerson, setDetailPerson] = React.useState(null);
         const [detail, setDetail] = React.useState(null);
         const [detailLoading, setDetailLoading] = React.useState(false);
         const [detailError, setDetailError] = React.useState('');
 
-        // ── Multi-select ─────────────────────────────────────────────────────────
-        const [selected, setSelected]         = React.useState(new Set()); // Set<session_id>
+        // ── Multi-select (по людям) ──────────────────────────────────────────────
+        // Храним не только id, но и имя с числом сессий: выбранный человек может
+        // уехать со страницы (обновили список, сменили сортировку), а диалог
+        // обязан честно сказать, сколько сессий будет прервано.
+        const [selected, setSelected]         = React.useState(() => new Map()); // Map<user_id, {name, sessions}>
         const [bulkRevoking, setBulkRevoking] = React.useState(false);
         const [confirmOpen, setConfirmOpen]   = React.useState(false);
 
@@ -34966,19 +34956,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             setSearch(applied);
         }, [view.query]);
 
-        // ── Строки: разбор user-agent один раз на ответ сервера ──────────────────
-        const allRows = React.useMemo(
-            () => (adminSessions || []).map((session) => {
-                const normalizedRole = session?.user_role === 'super_admin' ? 'admin' : session?.user_role;
-                return {
-                    ...session,
-                    user_role: normalizedRole,
-                    user_role_original: session?.user_role || normalizedRole,
-                    device: parseUserAgent(session.user_agent)
-                };
-            }),
-            [adminSessions]
-        );
+        const people = adminSessionPeople || EMPTY_ARRAY;
 
         const statCounts = React.useMemo(() => {
             const roleCounts = adminSessionsSummary?.role_counts || {};
@@ -35000,13 +34978,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             };
         }, [adminSessionsSummary]);
 
+        const totalPeople = Number(adminSessionsSummary?.total_people ?? 0);
         const totalSessions = Number(adminSessionsSummary?.total_sessions ?? 0);
-        const totalUsers = Number(adminSessionsSummary?.total_users ?? 0);
+        const matchedPeople = Number(adminSessionsSummary?.matched_people ?? totalPeople);
         const matchedSessions = Number(adminSessionsSummary?.matched_sessions ?? totalSessions);
+        const sensitivePeople = Number(adminSessionsSummary?.sensitive_people ?? 0);
         const hasFilters = Boolean(search.trim()) || roleFilter !== 'all' || deviceFilter !== 'all';
 
         // ── Selection helpers ────────────────────────────────────────────────────
-        const visibleIds = React.useMemo(() => allRows.map((r) => r.session_id), [allRows]);
+        const visibleIds = React.useMemo(() => people.map((p) => p.user_id), [people]);
         const selectedVisibleCount = React.useMemo(
             () => visibleIds.reduce((acc, id) => acc + (selected.has(id) ? 1 : 0), 0),
             [visibleIds, selected]
@@ -35014,24 +34994,31 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         const allVisChecked   = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
         const someVisChecked  = selectedVisibleCount > 0 && !allVisChecked;
 
-        const toggleRow = React.useCallback((id) =>
+        const selectedSessionsCount = React.useMemo(() => {
+            let total = 0;
+            selected.forEach((info) => { total += info.sessions || 0; });
+            return total;
+        }, [selected]);
+
+        const toggleRow = React.useCallback((person) =>
             setSelected((prev) => {
-                const next = new Set(prev);
-                if (next.has(id)) next.delete(id); else next.add(id);
+                const next = new Map(prev);
+                if (next.has(person.user_id)) next.delete(person.user_id);
+                else next.set(person.user_id, { name: person.user_name, sessions: person.sessions_count });
                 return next;
             }), []);
 
         const toggleAll = React.useCallback(() => {
             setSelected((prev) => {
-                const next = new Set(prev);
-                const allChecked = visibleIds.length > 0 && visibleIds.every((id) => next.has(id));
-                if (allChecked) visibleIds.forEach((id) => next.delete(id));
-                else visibleIds.forEach((id) => next.add(id));
+                const next = new Map(prev);
+                const allChecked = people.length > 0 && people.every((p) => next.has(p.user_id));
+                if (allChecked) people.forEach((p) => next.delete(p.user_id));
+                else people.forEach((p) => next.set(p.user_id, { name: p.user_name, sessions: p.sessions_count }));
                 return next;
             });
-        }, [visibleIds]);
+        }, [people]);
 
-        const clearSelection = React.useCallback(() => setSelected(new Set()), []);
+        const clearSelection = React.useCallback(() => setSelected(new Map()), []);
 
         // ── Поиск: одна задержка, без гонок ──────────────────────────────────────
         // Раньше эффект зависел от обработчика, который пересоздавался на каждом
@@ -35041,30 +35028,33 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             if (normalized === lastAppliedSearchRef.current) return undefined;
             const timer = window.setTimeout(() => {
                 lastAppliedSearchRef.current = normalized;
-                setSelected(new Set());
+                setSelected(new Map());
                 onApplyAdminSessionsView({ query: normalized });
             }, 300);
             return () => window.clearTimeout(timer);
         }, [search, onApplyAdminSessionsView]);
 
         const setRole = React.useCallback((next) => {
-            setSelected(new Set());
+            setSelected(new Map());
             onApplyAdminSessionsView({ role: next });
         }, [onApplyAdminSessionsView]);
 
         const setDeviceFilter = React.useCallback((next) => {
-            setSelected(new Set());
+            setSelected(new Map());
             onApplyAdminSessionsView({ device: next });
         }, [onApplyAdminSessionsView]);
 
         const resetFilters = React.useCallback(() => {
             lastAppliedSearchRef.current = '';
             setSearch('');
-            setSelected(new Set());
+            setSelected(new Map());
             onApplyAdminSessionsView({ query: '', role: 'all', device: 'all' });
         }, [onApplyAdminSessionsView]);
 
         const toggleSort = React.useCallback((key) => {
+            // Выбор снимаем и здесь: после пересортировки отмеченные уезжают за
+            // пределы страницы, а бейдж продолжал показывать их число.
+            setSelected(new Map());
             onApplyAdminSessionsView(
                 key === sortKey
                     ? { dir: sortDir === 'asc' ? 'desc' : 'asc' }
@@ -35072,65 +35062,74 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         }, [onApplyAdminSessionsView, sortKey, sortDir]);
 
-        // ── Bulk revoke ───────────────────────────────────────────────────────────
+        // ── Прервать сессии у выбранных людей ─────────────────────────────────────
         const handleBulkRevoke = async () => {
-            const ids = [...selected];
+            const ids = [...selected.keys()];
             setConfirmOpen(false);
             setBulkRevoking(true);
             try {
-                if (typeof handleBulkRevokeAdminSessions === 'function') {
-                    await handleBulkRevokeAdminSessions(ids);
-                } else {
-                    for (let i = 0; i < ids.length; i++) {
-                        try { await handleRevokeAdminSession({ session_id: ids[i] }); } catch (_) {}
-                    }
-                    fetchAdminSessions();
-                }
+                // Один запрос на всю пачку: сервер сам соберёт сессии. Выбор
+                // снимаем только при успехе — иначе после ошибки человеку
+                // пришлось бы отмечать всех заново.
+                const ok = await handleBulkRevokeAdminSessionUsers(ids);
+                if (ok) setSelected(new Map());
             } finally {
                 setBulkRevoking(false);
-                setSelected(new Set());
             }
         };
 
         // ── Открыть карточку ──────────────────────────────────────────────────────
-        const openDetail = React.useCallback((row) => {
-            setDetailId(row.session_id);
+        const openDetail = React.useCallback((person) => {
+            setDetailPerson(person);
+            setDetail(null);
             setDetailError('');
-            // Строку списка показываем сразу, чтобы карточка не открывалась
-            // пустой: догруженные поля просто дополнят её.
-            setDetail(row);
             setDetailLoading(true);
         }, []);
 
         const closeDetail = React.useCallback(() => {
-            setDetailId('');
+            setDetailPerson(null);
             setDetail(null);
             setDetailError('');
             setDetailLoading(false);
         }, []);
 
+        const detailUserId = detailPerson?.user_id || null;
+
         React.useEffect(() => {
-            if (!detailId || typeof onFetchAdminSessionDetail !== 'function') return undefined;
+            if (!detailUserId || typeof onFetchAdminSessionUser !== 'function') return undefined;
             let cancelled = false;
             setDetailLoading(true);
-            onFetchAdminSessionDetail(detailId)
+            onFetchAdminSessionUser(detailUserId)
                 .then((data) => {
                     if (cancelled || !data) return;
-                    setDetail((prev) => ({ ...(prev || {}), ...data }));
+                    setDetail(data);
                     setDetailError('');
                 })
                 .catch((err) => {
                     if (cancelled) return;
-                    setDetailError(err?.response?.data?.error || err?.message || 'Не удалось загрузить карточку сессии');
+                    setDetailError(err?.response?.data?.error || err?.message || 'Не удалось загрузить карточку сотрудника');
                 })
                 .finally(() => { if (!cancelled) setDetailLoading(false); });
             return () => { cancelled = true; };
-        }, [detailId, onFetchAdminSessionDetail]);
+        }, [detailUserId, onFetchAdminSessionUser]);
 
-        const revokeFromDetail = React.useCallback(async (session) => {
+        // Прервали одну сессию из карточки — перечитываем карточку, а не закрываем:
+        // остальные сессии человека остаются на месте, и он всё ещё нужен на экране.
+        const revokeSessionFromDetail = React.useCallback(async (session) => {
             await handleRevokeAdminSession(session);
-            closeDetail();
-        }, [handleRevokeAdminSession, closeDetail]);
+            if (!detailUserId || typeof onFetchAdminSessionUser !== 'function') return;
+            try {
+                const data = await onFetchAdminSessionUser(detailUserId);
+                if (data) setDetail(data);
+            } catch (_) { /* список уже обновлён, карточку просто не трогаем */ }
+        }, [handleRevokeAdminSession, detailUserId, onFetchAdminSessionUser]);
+
+        const revokeAllFromDetail = React.useCallback(async (person, count) => {
+            // Закрываем карточку только если прервали: на отказе в диалоге
+            // подтверждения и на ошибке человек должен остаться на месте.
+            const ok = await handleRevokeAdminSessionUser(person, count);
+            if (ok) closeDetail();
+        }, [handleRevokeAdminSessionUser, closeDetail]);
 
         const SortBtn = ({ col, children }) => {
             const active = sortKey === col;
@@ -35139,9 +35138,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 className={`inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wider transition-colors ${active ? 'text-gray-600' : 'text-gray-400 hover:text-gray-600'}`}>
                 {children}
                 {/* Стрелка своим SVG: символы ↑↓↕ в системных шрифтах рисуются
-                    эмодзи-глифом, и шапка таблицы пестрит цветными значками.
-                    У неактивной колонки она бледная — сортируемость видна,
-                    а внимание не тянет. */}
+                    эмодзи-глифом, и шапка таблицы пестрит цветными значками. */}
                 <svg className={`w-2.5 h-2.5 shrink-0 ${active ? 'opacity-90' : 'opacity-25'}`}
                     viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
                     {(!active || sortDir === 'asc') && <path d="M5 0.5 8 4H2z" />}
@@ -35179,7 +35176,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         ]);
 
         // ── Loading ───────────────────────────────────────────────────────────────
-        if (isAdminSessionsLoading && allRows.length === 0 && !hasFilters)
+        if (isAdminSessionsLoading && people.length === 0 && !hasFilters)
             return (
             <div className="flex items-center justify-center py-24 gap-3 text-gray-400">
                 <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -35194,15 +35191,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             <div className="space-y-4">
 
             <Suspense fallback={null}>
-                <SessionDetailModal
-                    open={Boolean(detailId)}
+                <SessionUserModal
+                    open={Boolean(detailUserId)}
                     onClose={closeDetail}
-                    session={detail}
+                    person={detailPerson}
+                    detail={detail}
                     isLoading={detailLoading}
                     error={detailError}
                     formatDate={formatDate}
-                    onRevoke={revokeFromDetail}
-                    isRevoking={revokingSessionId === detailId}
+                    onRevokeSession={revokeSessionFromDetail}
+                    onRevokeAll={revokeAllFromDetail}
+                    revokingSessionId={revokingSessionId}
                 />
             </Suspense>
 
@@ -35219,10 +35218,13 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </svg>
                     </div>
                     <div>
-                        <h3 className="font-semibold text-gray-900 text-base">Прервать выбранные сессии?</h3>
+                        <h3 className="font-semibold text-gray-900 text-base">Прервать сессии выбранных?</h3>
                         <p className="text-sm text-gray-500 mt-1">
-                        Будет прервано <span className="font-medium text-gray-800">{selected.size}</span> сессий.
-                        Пользователи будут принудительно разлогинены.
+                        У <span className="font-medium text-gray-800 tabular-nums">{selected.size}</span>{' '}
+                        {pluralRu(selected.size, 'сотрудника', 'сотрудников', 'сотрудников')} будет прервано{' '}
+                        <span className="font-medium text-gray-800 tabular-nums">{selectedSessionsCount}</span>{' '}
+                        {sessionWord(selectedSessionsCount)}.
+                        Они будут принудительно разлогинены.
                         </p>
                     </div>
                     </div>
@@ -35233,7 +35235,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     </button>
                     <button onClick={handleBulkRevoke}
                         className="flex-1 px-4 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 shadow-sm transition-all">
-                        Прервать {selected.size} сессий
+                        Прервать
                     </button>
                     </div>
                 </div>
@@ -35244,7 +35246,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             <div className="flex items-start justify-between gap-4">
                 <div>
                 <h2 className="text-xl font-semibold text-gray-900 tracking-tight">Активные сессии</h2>
-                <p className="text-sm text-gray-400 mt-0.5 tabular-nums">{totalSessions} сессий · {totalUsers} пользователей</p>
+                <p className="text-sm text-gray-400 mt-0.5 tabular-nums">
+                    {totalPeople} {personWord(totalPeople)} · {totalSessions} {sessionWord(totalSessions)}
+                    {sensitivePeople > 0 && (
+                        <span className="text-amber-600"> · {sensitivePeople} с открытыми данными</span>
+                    )}
+                </p>
                 </div>
                 <button onClick={fetchAdminSessions} disabled={isAdminSessionsLoading}
                 className="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-white text-sm font-medium text-gray-600 shadow-sm hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
@@ -35255,7 +35262,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </button>
             </div>
 
-            {/* ── Stat tiles ── */}
+            {/* ── Stat tiles: сколько ЧЕЛОВЕК, столько же строк в списке ── */}
             <div className="grid grid-cols-3 gap-3">
                 {[
                 { key: 'admin',    label: 'Администраторы' },
@@ -35306,17 +35313,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 </div>
             </div>
 
-            {/* ── Device filter ── */}
+            {/* ── Device filter: «у человека есть такая сессия» ── */}
             <div className="flex flex-wrap gap-2">
-                {[
-                { val: 'all',     label: 'Все устройства' },
-                { val: 'desktop', label: 'ПК'             },
-                { val: 'mobile',  label: 'Телефон'        },
-                { val: 'tablet',  label: 'Планшет'        },
-                { val: 'bot',     label: 'Боты'           },
-                { val: 'unknown', label: 'Неизвестно'     },
-                ].map(({ val, label }) => {
-                const count = val === 'all' ? totalSessions : (deviceCounts[val] || 0);
+                {[{ val: 'all', label: 'Все устройства' }].concat(
+                    SESSION_DEVICE_ORDER.map((val) => ({ val, label: SESSION_DEVICE_LABELS[val] }))
+                ).map(({ val, label }) => {
+                const count = val === 'all' ? totalPeople : (deviceCounts[val] || 0);
                 const active = deviceFilter === val;
                 // Пустую плашку прячем, но не ту, что сейчас выбрана — иначе
                 // выключить фильтр было бы нечем.
@@ -35354,8 +35356,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <div className="w-5 h-5 rounded bg-white/20 flex items-center justify-center shrink-0">
                         <span className="text-xs font-bold leading-none tabular-nums">{selected.size}</span>
                         </div>
-                        <span className="text-sm font-medium">
-                        {selected.size === 1 ? '1 сессия выбрана' : `${selected.size} сессии выбраны`}
+                        <span className="text-sm font-medium tabular-nums">
+                        выбрано · {selectedSessionsCount} {sessionWord(selectedSessionsCount)}
                         </span>
                     </>
                     )}
@@ -35372,7 +35374,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
                         </svg>
-                        Прервать выбранные
+                        Прервать их сессии
                     </button>
                     </div>
                 )}
@@ -35380,7 +35382,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
 
             {/* ── Table ── */}
-            {totalSessions === 0 && !hasFilters ? (
+            {totalPeople === 0 && !hasFilters ? (
                 <div className="flex flex-col items-center justify-center py-20 gap-3 text-gray-400">
                 <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center">
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -35396,7 +35398,6 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     <table className="min-w-full text-sm">
                     <thead>
                         <tr className="bg-gray-50/80 border-b border-gray-100">
-                        {/* Select-all checkbox */}
                         <th className="pl-4 pr-2 py-3 w-px">
                             <input
                             type="checkbox"
@@ -35406,21 +35407,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             className="w-4 h-4 rounded border-gray-300 text-blue-600 cursor-pointer focus:ring-blue-500/30 accent-blue-600"
                             />
                         </th>
-                        <th className="px-3 py-3 text-left"><SortBtn col="user_name">Пользователь</SortBtn></th>
-                        <th className="px-3 py-3 text-left"><SortBtn col="created_at">Сессия</SortBtn></th>
-                        <th className="px-3 py-3 text-left"><SortBtn col="ip_address">IP</SortBtn></th>
+                        <th className="px-3 py-3 text-left"><SortBtn col="user_name">Сотрудник</SortBtn></th>
+                        <th className="px-3 py-3 text-left"><SortBtn col="sessions_count">Сессии</SortBtn></th>
                         <th className="px-3 py-3 text-left">
-                            <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">Устройство</span>
+                            <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">Устройства</span>
                         </th>
+                        <th className="px-3 py-3 text-left"><SortBtn col="sensitive">Доступ к данным</SortBtn></th>
                         <th className="px-3 py-3 text-left"><SortBtn col="last_seen_at">Активность</SortBtn></th>
-                        <th className="px-3 py-3 text-left"><SortBtn col="expires_at">Истекает</SortBtn></th>
                         <th className="px-3 py-3 w-px" />
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
                         {isAdminSessionsLoading && (
                         <tr>
-                            <td colSpan={8} className="px-4 py-3 text-center">
+                            <td colSpan={7} className="px-4 py-3 text-center">
                             <span className="inline-flex items-center gap-2 text-xs text-gray-400">
                                 <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                                 <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4" strokeLinecap="round"/>
@@ -35430,35 +35430,34 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             </td>
                         </tr>
                         )}
-                        {allRows.length === 0 && !isAdminSessionsLoading ? (
+                        {people.length === 0 && !isAdminSessionsLoading ? (
                         <tr>
-                            <td colSpan={8} className="px-4 py-12 text-center text-sm text-gray-400">
+                            <td colSpan={7} className="px-4 py-12 text-center text-sm text-gray-400">
                             Ничего не найдено{search && <> по запросу <span className="font-medium text-gray-600">«{search}»</span></>}
                             </td>
                         </tr>
-                        ) : allRows.map((row) => (
-                            <SessionRow
-                                key={row.session_id}
-                                row={row}
-                                isSelected={selected.has(row.session_id)}
-                                isRevoking={revokingSessionId === row.session_id}
-                                bulkRevoking={bulkRevoking}
+                        ) : people.map((person) => (
+                            <SessionPersonRow
+                                key={person.user_id}
+                                person={person}
+                                isSelected={selected.has(person.user_id)}
                                 formatDate={formatDate}
                                 onToggle={toggleRow}
-                                onRevoke={handleRevokeAdminSession}
                                 onOpen={openDetail}
+                                onRevokeAll={handleRevokeAdminSessionUser}
+                                busy={bulkRevoking}
                             />
                         ))}
                         {isAdminSessionsLoadingMore && (
                         <tr>
-                            <td colSpan={8} className="px-4 py-4 text-center text-xs text-gray-400">
-                            Загрузка еще сессий…
+                            <td colSpan={7} className="px-4 py-4 text-center text-xs text-gray-400">
+                            Загрузка ещё…
                             </td>
                         </tr>
                         )}
                         {hasMoreAdminSessions && (
                         <tr>
-                            <td colSpan={8} className="p-0">
+                            <td colSpan={7} className="p-0">
                             <div ref={loadMoreRef} className="h-2" />
                             </td>
                         </tr>
@@ -35471,11 +35470,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50/60 flex items-center justify-between">
                     <span className="text-xs text-gray-400 tabular-nums">
                     {hasMoreAdminSessions
-                        ? `Показано ${allRows.length} из ${matchedSessions}`
-                        : `${matchedSessions} ${hasFilters ? 'в выборке' : 'сессий'}`}
-                    {hasFilters && matchedSessions !== totalSessions && (
-                        <span className="ml-1 text-gray-300">· всего {totalSessions}</span>
-                    )}
+                        ? `Показано ${people.length} из ${matchedPeople}`
+                        : `${matchedPeople} ${hasFilters ? 'в выборке' : personWord(matchedPeople)}`}
+                    <span className="ml-1 text-gray-300">· {matchedSessions} {sessionWord(matchedSessions)}</span>
                     {selected.size > 0 && (
                         <span className="ml-2 text-blue-600 font-medium">· {selected.size} выбрано</span>
                     )}
@@ -35898,11 +35895,14 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [adminUsers, setAdminUsers] = useState([]);
             const [systemAdmins, setSystemAdmins] = useState([]);
             const [trainerUsers, setTrainerUsers] = useState([]);
-            const [adminSessions, setAdminSessions] = useState([]);
+            const [adminSessionPeople, setAdminSessionPeople] = useState([]);
             const [adminSessionsSummary, setAdminSessionsSummary] = useState({
+                total_people: 0,
                 total_sessions: 0,
-                total_users: 0,
+                matched_people: 0,
                 matched_sessions: 0,
+                sensitive_people: 0,
+                sensitive_sessions: 0,
                 role_counts: { admin: 0, sv: 0, operator: 0 },
                 device_counts: { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 }
             });
@@ -40223,7 +40223,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     });
                     const data = response.data || {};
                     if (data.status === 'success' && isMounted.current && requestId === adminSessionsRequestIdRef.current) {
-                        const rows = Array.isArray(data.sessions) ? data.sessions : [];
+                        const rows = Array.isArray(data.people) ? data.people : [];
                         const summary = data.summary || {};
                         const roleCounts = summary.role_counts || {};
                         const deviceCounts = summary.device_counts || {};
@@ -40232,14 +40232,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         state.offset = nextOffset + rows.length;
                         state.hasMore = Boolean(pagination.has_more);
 
-                        setAdminSessions((prev) => (reset ? rows : [...prev, ...rows]));
+                        setAdminSessionPeople((prev) => (reset ? rows : [...prev, ...rows]));
                         setAdminSessionsHasMore(state.hasMore);
                         setAdminSessionsSummary({
+                            total_people: Number(summary.total_people || 0),
                             total_sessions: Number(summary.total_sessions || 0),
-                            total_users: Number(summary.total_users || 0),
-                            matched_sessions: Number(
-                                pagination.matched ?? summary.matched_sessions ?? summary.total_sessions ?? 0
-                            ),
+                            matched_people: Number(pagination.matched ?? summary.matched_people ?? 0),
+                            matched_sessions: Number(pagination.matched_sessions ?? summary.matched_sessions ?? 0),
+                            sensitive_people: Number(summary.sensitive_people || 0),
+                            sensitive_sessions: Number(summary.sensitive_sessions || 0),
                             role_counts: {
                                 admin: Number(roleCounts.admin || 0),
                                 sv: Number(roleCounts.sv || 0),
@@ -40285,49 +40286,72 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 fetchAdminSessions({ reset: false });
             }, [fetchAdminSessions]);
 
-            const fetchAdminSessionDetail = useCallback(async (sessionId) => {
-                if (!sessionId || !user) return null;
+            const fetchAdminSessionUser = useCallback(async (userId) => {
+                if (!userId || !user) return null;
                 const response = await axios.get(
-                    `${API_BASE_URL}/api/admin/sessions/${encodeURIComponent(sessionId)}`,
+                    `${API_BASE_URL}/api/admin/session-users/${encodeURIComponent(userId)}`,
                     { headers: { 'X-User-Id': user.id } }
                 );
                 const data = response.data || {};
-                if (data.status !== 'success' || !data.session) {
-                    throw new Error(data.error || 'Не удалось загрузить карточку сессии');
+                if (data.status !== 'success' || !data.user) {
+                    throw new Error(data.error || 'Не удалось загрузить карточку сотрудника');
                 }
-                return data.session;
+                return {
+                    user: data.user,
+                    sessions: Array.isArray(data.sessions) ? data.sessions : [],
+                    access_events: Array.isArray(data.access_events) ? data.access_events : []
+                };
             }, [user?.id]);
 
-            const handleBulkRevokeAdminSessions = async (sessionIds) => {
-                if (!sessionIds || sessionIds.length === 0) return;
+            // Пачка уходит ОДНИМ запросом по списку людей: сессии собирает
+            // сервер. Цикл «по человеку за запрос» молча терял выбранных,
+            // которых не было в загруженной странице, а если админ отметил и
+            // себя — обрывался на его собственном разлогине, не тронув
+            // остальных. Возвращает true, если всё прошло.
+            const handleBulkRevokeAdminSessionUsers = useCallback(async (userIds) => {
+                if (!userIds || userIds.length === 0) return false;
                 try {
                     const response = await axios.post(
-                        `${API_BASE_URL}/api/admin/sessions/revoke_bulk`,
-                        { session_ids: sessionIds },
+                        `${API_BASE_URL}/api/admin/session-users/revoke`,
+                        { user_ids: userIds },
                         { headers: { 'X-User-Id': user.id } }
                     );
                     const data = response.data || {};
-                    if (data.status === 'success') {
-                        showToast(`Успешно прервано сессий: ${data.revoked_count ?? sessionIds.length}`, 'success');
-                        if (data.current_session_revoked) {
-                            await confirmLogout();
-                            return;
-                        }
-                        await refreshAdminSessions();
-                    } else {
-                        showToast(data.error || 'Failed to revoke sessions', 'error');
+                    if (data.status !== 'success') {
+                        showToast(data.error || 'Не удалось прервать сессии', 'error');
+                        return false;
                     }
+                    showToast(`Прервано сессий: ${data.revoked_count ?? 0}`, 'success');
+                    // Свою сессию теряем последней — к этому моменту чужие уже
+                    // прерваны, поэтому выход из приложения ничего не обрывает.
+                    if (data.current_session_revoked) {
+                        await confirmLogout();
+                        return true;
+                    }
+                    await refreshAdminSessions();
+                    return true;
                 } catch (err) {
-                    console.error('Bulk revoke admin sessions error:', err);
-                    showToast(err.response?.data?.error || 'Failed to revoke sessions', 'error');
+                    console.error('Bulk revoke session users error:', err);
+                    showToast(err.response?.data?.error || 'Не удалось прервать сессии', 'error');
+                    return false;
                 }
-            };
+            }, [user?.id, refreshAdminSessions]);
 
-            const handleRevokeAdminSession = async (session) => {
+            // Прервать все сессии человека. Список id собирает сервер: у
+            // сотрудника их бывает четыре десятка, и гонять их на клиент только
+            // затем, чтобы вернуть обратно, незачем.
+            const handleRevokeAdminSessionUser = useCallback(async (person, sessionsCount) => {
+                const targetId = person?.user_id;
+                if (!targetId) return false;
+                const label = person.user_name || `#${targetId}`;
+                const count = sessionsCount || person.sessions_count || 0;
+                if (!window.confirm(`Прервать все сессии сотрудника «${label}»${count ? ` (${count})` : ''}?`)) return false;
+                return handleBulkRevokeAdminSessionUsers([targetId]);
+            }, [handleBulkRevokeAdminSessionUsers]);
+
+            const handleRevokeAdminSession = useCallback(async (session) => {
                 if (!session?.session_id) return;
-                const userLabel = session.user_name || `#${session.user_id || ''}`;
-                const confirmed = window.confirm(`Прервать сессию пользователя "${userLabel}"?`);
-                if (!confirmed) return;
+                if (!window.confirm('Прервать эту сессию?')) return;
 
                 setRevokingSessionId(session.session_id);
                 try {
@@ -40347,15 +40371,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         }
                         await refreshAdminSessions();
                     } else {
-                        showToast(data.error || 'Failed to revoke session', 'error');
+                        showToast(data.error || 'Не удалось прервать сессию', 'error');
                     }
                 } catch (err) {
                     console.error('Revoke admin session error:', err);
-                    showToast(err.response?.data?.error || 'Failed to revoke session', 'error');
+                    showToast(err.response?.data?.error || 'Не удалось прервать сессию', 'error');
                 } finally {
                     if (isMounted.current) setRevokingSessionId('');
                 }
-            };
+            }, [user?.id, refreshAdminSessions]);
 
             const openUsersReportModal = () => {
                     if (isLoading) return;
@@ -45892,7 +45916,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 
                                 {view === 'admin_sessions' && (
                                 <SessionsPanel
-                                    adminSessions={adminSessions}
+                                    adminSessionPeople={adminSessionPeople}
                                     adminSessionsSummary={adminSessionsSummary}
                                     isAdminSessionsLoading={isAdminSessionsLoading}
                                     isAdminSessionsLoadingMore={isAdminSessionsLoadingMore}
@@ -45900,11 +45924,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     fetchAdminSessions={refreshAdminSessions}
                                     loadMoreAdminSessions={loadMoreAdminSessions}
                                     onApplyAdminSessionsView={applyAdminSessionsView}
-                                    onFetchAdminSessionDetail={fetchAdminSessionDetail}
+                                    onFetchAdminSessionUser={fetchAdminSessionUser}
                                     sessionsView={adminSessionsView}
                                     revokingSessionId={revokingSessionId}
                                     handleRevokeAdminSession={handleRevokeAdminSession}
-                                    handleBulkRevokeAdminSessions={handleBulkRevokeAdminSessions}
+                                    handleRevokeAdminSessionUser={handleRevokeAdminSessionUser}
+                                    handleBulkRevokeAdminSessionUsers={handleBulkRevokeAdminSessionUsers}
                                     formatDate={formatDate}
                                 />
                                 )}

@@ -71,3 +71,17 @@ export const ROLE_META = {
 export function roleLabel(role) {
     return ROLE_META[role === 'super_admin' ? 'admin' : role]?.label || role || '—';
 }
+
+/* Русская форма числительного. Без неё раздел писал бы «42 сессий» и «2 адрес». */
+export function plural(count, one, few, many) {
+    const abs = Math.abs(Number(count) || 0) % 100;
+    const last = abs % 10;
+    if (abs > 10 && abs < 20) return many;
+    if (last > 1 && last < 5) return few;
+    if (last === 1) return one;
+    return many;
+}
+
+export const sessionWord = (n) => plural(n, 'сессия', 'сессии', 'сессий');
+export const personWord = (n) => plural(n, 'сотрудник', 'сотрудника', 'сотрудников');
+export const addressWord = (n) => plural(n, 'адрес', 'адреса', 'адресов');

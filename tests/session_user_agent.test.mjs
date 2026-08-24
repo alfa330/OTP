@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { parseUserAgent, DEVICE_LABELS, roleLabel } from '../src/components/sessions/userAgent.js';
+import { parseUserAgent, DEVICE_LABELS, roleLabel, sessionWord, personWord, addressWord } from '../src/components/sessions/userAgent.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const corpus = JSON.parse(readFileSync(join(here, 'data', 'session_user_agents.json'), 'utf8'));
@@ -53,4 +53,23 @@ test('подписи типов и ролей — по-русски', () => {
     assert.equal(roleLabel('super_admin'), 'Админ', 'super_admin показывается админом, как и в списке');
     assert.equal(roleLabel('sv'), 'Супервайзер');
     assert.equal(roleLabel(null), '—');
+});
+
+test('русские числительные — раздел не пишет «42 сессий» и «2 адрес»', () => {
+    assert.equal(sessionWord(1), 'сессия');
+    assert.equal(sessionWord(2), 'сессии');
+    assert.equal(sessionWord(5), 'сессий');
+    assert.equal(sessionWord(11), 'сессий', '11–14 — исключение, не «сессия»');
+    assert.equal(sessionWord(21), 'сессия');
+    assert.equal(sessionWord(42), 'сессии');
+    assert.equal(sessionWord(0), 'сессий');
+
+    assert.equal(personWord(1), 'сотрудник');
+    assert.equal(personWord(3), 'сотрудника');
+    assert.equal(personWord(9), 'сотрудников');
+    assert.equal(personWord(112), 'сотрудников');
+
+    assert.equal(addressWord(1), 'адрес');
+    assert.equal(addressWord(2), 'адреса');
+    assert.equal(addressWord(7), 'адресов');
 });
