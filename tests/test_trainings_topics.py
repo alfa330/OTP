@@ -10,6 +10,7 @@
 import os
 import re
 import sys
+import textwrap
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -501,3 +502,120 @@ class SupervisorTargetRolesTest(unittest.TestCase):
         body = source[start:end]
         self.assertEqual(body.count('supervisor_target_roles=TRAINING_TARGET_ROLES'), 4)
         self.assertNotIn("supervisor_target_roles=('operator',)", body)
+class GroupBranchOutcomeTest(unittest.TestCase):
+    """Ветка ?group_id= прогоняется как код — по одной роли за раз.
+
+    Текстовых проверок выше не хватило: явный else, закрывший операторам чужие
+    группы, забрал заодно и админа портала (он не глава отдела, не СВ и не
+    тренер), и «Учёт часов» с выбранной группой начал отвечать ему 400
+    «Unsupported target role». Здесь блок вынимается из монолита как есть и
+    исполняется с заглушками — так регресс виден по ответу, а не по тексту.
+    """
+
+    @staticmethod
+    def _blocks():
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+            source = handle.read()
+        out = []
+        for name, after in (('def get_trainings():', 'def _training_reason_catalog'),
+                            ('def get_training_rejections():', 'def add_training_rejection')):
+            start = source.index(name)
+            body = source[start:source.index(after, start)]
+            head = body.index('if group_id is not None:')
+            block = body[head:body.index('where_clauses.append', head)]
+            # index указывает на сам `if`, отступ первой строки съеден: возвращаем
+            # его, иначе dedent посчитает общий префикс равным нулю.
+            block = textwrap.dedent(' ' * 8 + block).rstrip()
+            eol = chr(10)
+            out.append((name, eol.join((
+                'def probe():', textwrap.indent(block, '    '), '    return None'))))
+        return out
+
+    @staticmethod
+    def _run(probe_src, *, role, headed_dept_id=None, group_dept_id=5,
+             requester_dept_id=None, sv_period_access=False):
+        class Db:
+            def get_group(self, group_id):
+                return {'id': group_id, 'department_id': group_dept_id}
+
+            def get_user_department_id(self, _requester_id):
+                return requester_dept_id
+
+            def supervisor_has_group_access_for_period(self, *_args, **_kwargs):
+                return sv_period_access
+
+        namespace = {
+            'jsonify': lambda payload: payload,
+            'db': Db(),
+            'role': role,
+            'headed_dept_id': headed_dept_id,
+            'requester_id': 1,
+            'group_id': 38,
+            'period_start': None,
+            'period_end': None,
+            'where_clauses': [],
+            'params': [],
+            # Семантика ролевых предикатов монолита, без импорта монолита.
+            '_is_admin_role': lambda value: value in ('admin', 'super_admin'),
+            '_is_supervisor_role': lambda value: value == 'sv',
+            '_is_global_admin_requester': lambda value, _rid=None: (
+                value == 'super_admin' or (value == 'admin' and headed_dept_id is None)),
+        }
+        exec(compile(probe_src, '<group-branch>', 'exec'), namespace)  # noqa: S102
+        return namespace['probe']()
+
+    def test_portal_admin_reads_any_group(self):
+        """Тот самый отчёт: month + id + group_id от админа отвечал 400."""
+        for name, probe in self._blocks():
+            self.assertIsNone(
+                self._run(probe, role='admin', headed_dept_id=None, group_dept_id=9),
+                '%s: админ портала снова получает отказ на выбранную группу' % name)
+
+    def test_super_admin_ignores_the_department_border(self):
+        for name, probe in self._blocks():
+            self.assertIsNone(
+                self._run(probe, role='super_admin', headed_dept_id=5, group_dept_id=9),
+                '%s: супер-админ ограничен отделом' % name)
+
+    def test_department_head_is_bounded(self):
+        for name, probe in self._blocks():
+            self.assertIsNone(
+                self._run(probe, role='admin', headed_dept_id=5, group_dept_id=5), name)
+            payload, status = self._run(
+                probe, role='admin', headed_dept_id=5, group_dept_id=9)
+            self.assertEqual(403, status, name)
+            self.assertIn("not your department's group", payload['error'], name)
+
+    def test_supervisor_sees_own_department_or_led_group(self):
+        for name, probe in self._blocks():
+            self.assertIsNone(
+                self._run(probe, role='sv', requester_dept_id=5, group_dept_id=5), name)
+            self.assertIsNone(
+                self._run(probe, role='sv', requester_dept_id=5, group_dept_id=9,
+                          sv_period_access=True), name)
+            payload, status = self._run(
+                probe, role='sv', requester_dept_id=5, group_dept_id=9)
+            self.assertEqual(403, status, name)
+            self.assertIn('not your group', payload['error'], name)
+
+    def test_trainer_sees_own_department_only(self):
+        for name, probe in self._blocks():
+            self.assertIsNone(
+                self._run(probe, role='trainer', requester_dept_id=5, group_dept_id=5), name)
+            payload, status = self._run(
+                probe, role='trainer', requester_dept_id=5, group_dept_id=9)
+            self.assertEqual(403, status, name)
+            self.assertIn("not your department's group", payload['error'], name)
+            _payload, status = self._run(
+                probe, role='trainer', requester_dept_id=None, group_dept_id=5)
+            self.assertEqual(403, status,
+                             '%s: тренер без отдела не должен читать группы' % name)
+
+    def test_rank_and_file_still_cut_off(self):
+        for name, probe in self._blocks():
+            for role in ('operator', 'trainee', 'newrole'):
+                payload, status = self._run(probe, role=role, requester_dept_id=5)
+                self.assertEqual(400, status, '%s/%s' % (name, role))
+                self.assertEqual('Unsupported target role', payload['error'],
+                                 '%s/%s' % (name, role))

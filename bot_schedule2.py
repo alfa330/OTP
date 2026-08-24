@@ -24868,6 +24868,13 @@ def get_trainings():
             if headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
                 if group.get('department_id') != headed_dept_id:
                     return jsonify({"error": "Forbidden: not your department's group"}), 403
+            elif _is_admin_role(role):
+                # Админ портала и супер-админ смотрят любую группу: границы отдела
+                # у них нет (главу отдела забрала ветка выше). Ветка выглядит
+                # пустой, но без неё они падают в else и получают 400
+                # «Unsupported target role» — ровно это и сломало «Учёт часов»,
+                # когда отсечение операторов заменили на явный else.
+                pass
             elif _is_supervisor_role(role):
                 # СВ может смотреть группы своего отдела (как в /api/sv/daily_hours),
                 # либо те, что ведёт сам в выбранном периоде.
@@ -25696,6 +25703,13 @@ def get_training_rejections():
             if headed_dept_id is not None and not _is_global_admin_requester(role, requester_id):
                 if group.get('department_id') != headed_dept_id:
                     return jsonify({"error": "Forbidden: not your department's group"}), 403
+            elif _is_admin_role(role):
+                # Админ портала и супер-админ смотрят любую группу: границы отдела
+                # у них нет (главу отдела забрала ветка выше). Ветка выглядит
+                # пустой, но без неё они падают в else и получают 400
+                # «Unsupported target role» — ровно это и сломало «Учёт часов»,
+                # когда отсечение операторов заменили на явный else.
+                pass
             elif _is_supervisor_role(role):
                 _req_dept = db.get_user_department_id(requester_id)
                 _same_dept = _req_dept is not None and group.get('department_id') == _req_dept
