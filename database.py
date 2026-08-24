@@ -27308,13 +27308,21 @@ class Database:
     # Живые сессии с их владельцем и типом устройства. Тип считается ОДИН раз
     # здесь и дальше переиспользуется фильтром, плашками и счётчиками человека:
     # прежняя сводка гоняла десяток регулярок по каждой строке заново.
-    def _live_sessions_cte(self):
-        # MATERIALIZED обязателен. Без него Postgres встраивает CTE, и разбор
-        # user-agent пересчитывается на КАЖДЫЙ счётчик устройства — пять раз по
-        # десятку регулярок на строку. На боевых 1444 сессиях это разница
-        # 183 мс против 40 мс на один только запрос сводки.
+    def _live_sessions_cte(self, materialized: bool = True):
+        """Живые сессии с владельцем и типом устройства.
+
+        materialized=True нужен СПИСКУ: без него Postgres встраивает CTE, и
+        разбор user-agent пересчитывается на КАЖДЫЙ счётчик устройства — пять
+        раз по десятку регулярок на строку (на боевых 1444 сессиях это 183 мс
+        против 40 мс).
+
+        КАРТОЧКЕ одного человека он, наоборот, вреден: MATERIALIZED запрещает
+        пробросить `WHERE user_id = %s` внутрь CTE, и вместо точечного попадания
+        по `idx_user_sessions_user_id` строится весь набор живых сессий ради
+        трёх строк. Поэтому там CTE обычный.
+        """
         return f"""
-            live AS MATERIALIZED (
+            live AS {'MATERIALIZED ' if materialized else ''}(
                 SELECT
                     us.session_id::text AS session_id,
                     us.user_id,
@@ -27668,7 +27676,7 @@ class Database:
             }
 
             cursor.execute(f"""
-                WITH {self._live_sessions_cte()}
+                WITH {self._live_sessions_cte(materialized=False)}
                 SELECT
                     session_id, user_id, user_agent, ip_address, created_at, last_seen_at,
                     expires_at, sensitive_data_unlocked, sensitive_data_unlocked_at,

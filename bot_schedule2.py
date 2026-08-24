@@ -3017,70 +3017,54 @@ def _build_sensitive_access_approved_message_html(
     approval_context,
     operator_supervisor_name
 ):
+    """Короткое уведомление о выдаче QR-доступа.
+
+    Раньше сюда сваливали всё, что знал сервер: внутренние id, Telegram-id обеих
+    сторон, срок жизни токена, origin, оба user-agent целиком — сорок с лишним
+    строк, в которых главное («кто кому открыл») тонуло. Остальное давно видно
+    в разделе «Сессии», поэтому здесь только то, по чему принимают решение.
+    """
     approval_context = approval_context or {}
     session = operator_session or {}
     claims = claims or {}
 
-    operator_id = operator[0] if isinstance(operator, (tuple, list)) and len(operator) > 0 else None
-    operator_tg = operator[1] if isinstance(operator, (tuple, list)) and len(operator) > 1 else None
-    operator_name = operator[2] if isinstance(operator, (tuple, list)) and len(operator) > 2 else None
-    operator_role = _normalize_user_role(operator[3] if isinstance(operator, (tuple, list)) and len(operator) > 3 else None)
-    operator_direction = operator[4] if isinstance(operator, (tuple, list)) and len(operator) > 4 else None
-    operator_supervisor_id = operator[6] if isinstance(operator, (tuple, list)) and len(operator) > 6 else None
-    operator_login = operator[7] if isinstance(operator, (tuple, list)) and len(operator) > 7 else None
+    def field(source, index):
+        return source[index] if isinstance(source, (tuple, list)) and len(source) > index else None
 
-    approver_id = approver[0] if isinstance(approver, (tuple, list)) and len(approver) > 0 else None
-    approver_tg = approver[1] if isinstance(approver, (tuple, list)) and len(approver) > 1 else None
-    approver_name = approver[2] if isinstance(approver, (tuple, list)) and len(approver) > 2 else None
-    approver_role = _normalize_user_role(approver[3] if isinstance(approver, (tuple, list)) and len(approver) > 3 else None)
-    approver_login = approver[7] if isinstance(approver, (tuple, list)) and len(approver) > 7 else None
+    operator_name = field(operator, 2)
+    operator_login = field(operator, 7)
+    operator_role = _normalize_user_role(field(operator, 3))
+    approver_name = field(approver, 2)
+    approver_role = _normalize_user_role(field(approver, 3))
 
     operator_role_label = SENSITIVE_ACCESS_ROLE_LABELS.get(operator_role, operator_role or '—')
     approver_role_label = SENSITIVE_ACCESS_ROLE_LABELS.get(approver_role, approver_role or '—')
-    operator_device = _parse_user_agent_details(session.get('user_agent'))
-    approver_device = _parse_user_agent_details(approval_context.get('request_user_agent'))
+
+    device = _parse_user_agent_details(session.get('user_agent'))
+    device_parts = [device.get(key) for key in ('device', 'os', 'browser')]
+    device_line = ' · '.join(part for part in device_parts if part and part != '—') or '—'
+
+    session_id = str(session.get('session_id') or claims.get('session_id') or '')
+
+    def person(name, role_label, login=None):
+        text = _escape_telegram_html(name or '—', 120)
+        if login:
+            text += f' (@{_escape_telegram_html(login, 60)})'
+        if role_label and role_label != '—':
+            text += f', {_escape_telegram_html(role_label.lower(), 40)}'
+        return text
 
     lines = [
-        "<b>🔐 QR-доступ открыт: оценки, «Обращения», «Вики»</b>",
+        "<b>Открыт доступ к чувствительным данным</b>",
         "",
-        f"<b>Время события:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
-        f"<b>ID сессии:</b> <code>{_escape_telegram_html(session.get('session_id') or claims.get('session_id') or '—', 180)}</code>",
-        f"<b>QR токен действителен до:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(claims.get('expires_at'), assume_utc=True), 40)}",
+        f"<b>Кому:</b> {person(operator_name, operator_role_label, operator_login)}",
+        f"<b>Супервайзер:</b> {_escape_telegram_html(operator_supervisor_name or '—', 120)}",
+        f"<b>Открыл:</b> {person(approver_name, approver_role_label)}",
+        f"<b>Когда:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(datetime.now()), 40)}",
         "",
-        "<b>Оператор</b>",
-        f"<b>ФИО:</b> {_escape_telegram_html(operator_name or '—', 120)}",
-        f"<b>ID:</b> {_escape_telegram_html(operator_id or '—', 40)}",
-        f"<b>Роль:</b> {_escape_telegram_html(operator_role_label, 40)}",
-        f"<b>Логин:</b> {_escape_telegram_html(operator_login or '—', 80)}",
-        f"<b>Telegram ID:</b> {_escape_telegram_html(operator_tg or '—', 40)}",
-        f"<b>Направление:</b> {_escape_telegram_html(operator_direction or '—', 80)}",
-        f"<b>Супервайзер:</b> {_escape_telegram_html(operator_supervisor_name or '—', 120)} (ID: {_escape_telegram_html(operator_supervisor_id or '—', 40)})",
-        "",
-        "<b>Кто подтвердил доступ</b>",
-        f"<b>ФИО:</b> {_escape_telegram_html(approver_name or '—', 120)}",
-        f"<b>ID:</b> {_escape_telegram_html(approver_id or '—', 40)}",
-        f"<b>Роль:</b> {_escape_telegram_html(approver_role_label, 40)}",
-        f"<b>Логин:</b> {_escape_telegram_html(approver_login or '—', 80)}",
-        f"<b>Telegram ID:</b> {_escape_telegram_html(approver_tg or '—', 40)}",
-        "",
-        "<b>Сессия оператора</b>",
-        f"<b>IP:</b> {_escape_telegram_html(session.get('ip_address') or '—', 64)}",
-        f"<b>Устройство:</b> {_escape_telegram_html(operator_device.get('device') or '—', 80)}",
-        f"<b>ОС:</b> {_escape_telegram_html(operator_device.get('os') or '—', 80)}",
-        f"<b>Браузер:</b> {_escape_telegram_html(operator_device.get('browser') or '—', 100)}",
-        f"<b>User-Agent:</b> {_escape_telegram_html(operator_device.get('raw') or '—', 240)}",
-        f"<b>Создана:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('created_at')), 40)}",
-        f"<b>Последняя активность:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('last_seen_at')), 40)}",
-        f"<b>Истекает:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('expires_at')), 40)}",
-        f"<b>Разблокирована в:</b> {_escape_telegram_html(_format_sensitive_access_notification_dt(session.get('sensitive_data_unlocked_at')), 40)}",
-        "",
-        "<b>Контекст подтверждения</b>",
-        f"<b>IP подтверждающего:</b> {_escape_telegram_html(approval_context.get('request_ip') or '—', 64)}",
-        f"<b>Origin:</b> {_escape_telegram_html(approval_context.get('request_origin') or '—', 120)}",
-        f"<b>Устройство подтверждающего:</b> {_escape_telegram_html(approver_device.get('device') or '—', 80)}",
-        f"<b>ОС подтверждающего:</b> {_escape_telegram_html(approver_device.get('os') or '—', 80)}",
-        f"<b>Браузер подтверждающего:</b> {_escape_telegram_html(approver_device.get('browser') or '—', 100)}",
-        f"<b>User-Agent подтверждающего:</b> {_escape_telegram_html(approver_device.get('raw') or '—', 240)}"
+        f"<b>Сессия:</b> <code>{_escape_telegram_html(session_id[:8] or '—', 40)}</code> · "
+        f"{_escape_telegram_html(session.get('ip_address') or '—', 64)} · "
+        f"{_escape_telegram_html(device_line, 120)}"
     ]
     message = "\n".join(lines)
     if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:

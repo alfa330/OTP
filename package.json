@@ -37,6 +37,7 @@
     "test:notifications-realtime": "node --test tests/notifications_realtime_client.test.mjs",
     "test:desktop-notifications": "node --test tests/desktop_notifications.test.mjs",
     "test:session-user-agent": "node --test tests/session_user_agent.test.mjs",
+    "test:session-card-paging": "node --test tests/session_card_paging.test.mjs",
     "test:telegram-text": "node --test tests/telegram_text.test.mjs",
     "test:kazakhstan-cities": "node --test tests/kazakhstan_cities.test.mjs",
     "test:crm-wizard": "node --test tests/crm_wizard_rules.test.mjs",

@@ -83,5 +83,8 @@ export function plural(count, one, few, many) {
 }
 
 export const sessionWord = (n) => plural(n, 'сессия', 'сессии', 'сессий');
+/* Винительный падеж — для «прервать все 41 сессию». Именительный дал бы
+   «прервать все 41 сессия». */
+export const sessionWordAcc = (n) => plural(n, 'сессию', 'сессии', 'сессий');
 export const personWord = (n) => plural(n, 'сотрудник', 'сотрудника', 'сотрудников');
 export const addressWord = (n) => plural(n, 'адрес', 'адреса', 'адресов');

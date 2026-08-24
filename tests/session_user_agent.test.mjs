@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { parseUserAgent, DEVICE_LABELS, roleLabel, sessionWord, personWord, addressWord } from '../src/components/sessions/userAgent.js';
+import { parseUserAgent, DEVICE_LABELS, roleLabel, sessionWord, sessionWordAcc, personWord, addressWord } from '../src/components/sessions/userAgent.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const corpus = JSON.parse(readFileSync(join(here, 'data', 'session_user_agents.json'), 'utf8'));
@@ -72,4 +72,11 @@ test('русские числительные — раздел не пишет �
     assert.equal(addressWord(1), 'адрес');
     assert.equal(addressWord(2), 'адреса');
     assert.equal(addressWord(7), 'адресов');
+
+    // «Прервать все N …» требует винительного: «41 сессию», а не «41 сессия».
+    assert.equal(sessionWordAcc(1), 'сессию');
+    assert.equal(sessionWordAcc(41), 'сессию');
+    assert.equal(sessionWordAcc(2), 'сессии');
+    assert.equal(sessionWordAcc(5), 'сессий');
+    assert.equal(sessionWordAcc(11), 'сессий');
 });

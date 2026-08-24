@@ -193,6 +193,9 @@ const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 50;
 // Стабильная пустая ссылка: новый [] на каждый рендер ломал бы мемоизацию строк.
 const EMPTY_ARRAY = Object.freeze([]);
+// Сервер берёт за раз не больше стольких сотрудников; выбор может быть больше,
+// потому что список догружается страницами и копится.
+const ADMIN_SESSIONS_BULK_CHUNK = 200;
 // Фильтры, поиск и сортировка раздела «Сессии» едут на сервер одним объектом:
 // одна страница ответа = ровно то, что видно на экране.
 const ADMIN_SESSIONS_DEFAULT_VIEW = Object.freeze({
@@ -35020,6 +35023,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
         const clearSelection = React.useCallback(() => setSelected(new Map()), []);
 
+        // Снимок числа сессий в выборе стареет: у отмеченного человека сессии
+        // могли прервать из его же строки, из карточки или вообще из другой
+        // вкладки. Догоняем свежим списком — иначе диалог обещает прервать то,
+        // чего уже нет. Тех, кто просто уехал на другую страницу, не трогаем:
+        // их снимок остаётся последним известным.
+        React.useEffect(() => {
+            if (people.length === 0) return;
+            setSelected((prev) => {
+                if (prev.size === 0) return prev;
+                let changed = false;
+                const next = new Map(prev);
+                people.forEach((p) => {
+                    const known = next.get(p.user_id);
+                    if (known && known.sessions !== p.sessions_count) {
+                        next.set(p.user_id, { name: p.user_name, sessions: p.sessions_count });
+                        changed = true;
+                    }
+                });
+                return changed ? next : prev;
+            });
+        }, [people]);
+
+        const forgetSelected = React.useCallback((userId) => {
+            setSelected((prev) => {
+                if (!prev.has(userId)) return prev;
+                const next = new Map(prev);
+                next.delete(userId);
+                return next;
+            });
+        }, []);
+
         // ── Поиск: одна задержка, без гонок ──────────────────────────────────────
         // Раньше эффект зависел от обработчика, который пересоздавался на каждом
         // старте загрузки: таймер сбрасывался, и запрос уходил на каждую букву.
@@ -35124,12 +35158,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             } catch (_) { /* список уже обновлён, карточку просто не трогаем */ }
         }, [handleRevokeAdminSession, detailUserId, onFetchAdminSessionUser]);
 
+        const revokeAllForPerson = React.useCallback(async (person, count) => {
+            const ok = await handleRevokeAdminSessionUser(person, count);
+            if (ok) forgetSelected(person?.user_id);
+            return ok;
+        }, [handleRevokeAdminSessionUser, forgetSelected]);
+
         const revokeAllFromDetail = React.useCallback(async (person, count) => {
             // Закрываем карточку только если прервали: на отказе в диалоге
             // подтверждения и на ошибке человек должен остаться на месте.
-            const ok = await handleRevokeAdminSessionUser(person, count);
+            const ok = await revokeAllForPerson(person, count);
             if (ok) closeDetail();
-        }, [handleRevokeAdminSessionUser, closeDetail]);
+        }, [revokeAllForPerson, closeDetail]);
 
         const SortBtn = ({ col, children }) => {
             const active = sortKey === col;
@@ -35444,7 +35484,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 formatDate={formatDate}
                                 onToggle={toggleRow}
                                 onOpen={openDetail}
-                                onRevokeAll={handleRevokeAdminSessionUser}
+                                onRevokeAll={revokeAllForPerson}
                                 busy={bulkRevoking}
                             />
                         ))}
@@ -40309,37 +40349,55 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             // себя — обрывался на его собственном разлогине, не тронув
             // остальных. Возвращает true, если всё прошло.
             const handleBulkRevokeAdminSessionUsers = useCallback(async (userIds) => {
-                if (!userIds || userIds.length === 0) return false;
+                const ids = (userIds || []).filter(Boolean);
+                if (ids.length === 0) return false;
+
+                // Список догружается страницами и копится, поэтому «выбрать все»
+                // легко даёт больше, чем сервер берёт за раз. Режем на пачки
+                // сами: иначе весь выбор отбивался одним 400, и не прерывался
+                // никто.
+                const chunks = [];
+                for (let i = 0; i < ids.length; i += ADMIN_SESSIONS_BULK_CHUNK) {
+                    chunks.push(ids.slice(i, i + ADMIN_SESSIONS_BULK_CHUNK));
+                }
+
+                let revoked = 0;
+                let ownSessionRevoked = false;
                 try {
-                    const response = await axios.post(
-                        `${API_BASE_URL}/api/admin/session-users/revoke`,
-                        { user_ids: userIds },
-                        { headers: { 'X-User-Id': user.id } }
-                    );
-                    const data = response.data || {};
-                    if (data.status !== 'success') {
-                        showToast(data.error || 'Не удалось прервать сессии', 'error');
-                        return false;
+                    for (const chunk of chunks) {
+                        // eslint-disable-next-line no-await-in-loop
+                        const response = await axios.post(
+                            `${API_BASE_URL}/api/admin/session-users/revoke`,
+                            { user_ids: chunk },
+                            { headers: { 'X-User-Id': user.id } }
+                        );
+                        const data = response.data || {};
+                        if (data.status !== 'success') {
+                            showToast(data.error || 'Не удалось прервать сессии', 'error');
+                            if (revoked) showToast(`Успели прервать: ${revoked}`, 'info');
+                            return false;
+                        }
+                        revoked += Number(data.revoked_count || 0);
+                        // Свою сессию теряем последней, уже после всех пачек:
+                        // выход из приложения не должен обрывать работу.
+                        if (data.current_session_revoked) ownSessionRevoked = true;
                     }
-                    showToast(`Прервано сессий: ${data.revoked_count ?? 0}`, 'success');
-                    // Свою сессию теряем последней — к этому моменту чужие уже
-                    // прерваны, поэтому выход из приложения ничего не обрывает.
-                    if (data.current_session_revoked) {
-                        await confirmLogout();
-                        return true;
-                    }
-                    await refreshAdminSessions();
-                    return true;
                 } catch (err) {
                     console.error('Bulk revoke session users error:', err);
                     showToast(err.response?.data?.error || 'Не удалось прервать сессии', 'error');
+                    if (revoked) showToast(`Успели прервать: ${revoked}`, 'info');
                     return false;
                 }
+
+                showToast(`Прервано сессий: ${revoked}`, 'success');
+                if (ownSessionRevoked) {
+                    await confirmLogout();
+                    return true;
+                }
+                await refreshAdminSessions();
+                return true;
             }, [user?.id, refreshAdminSessions]);
 
-            // Прервать все сессии человека. Список id собирает сервер: у
-            // сотрудника их бывает четыре десятка, и гонять их на клиент только
-            // затем, чтобы вернуть обратно, незачем.
             const handleRevokeAdminSessionUser = useCallback(async (person, sessionsCount) => {
                 const targetId = person?.user_id;
                 if (!targetId) return false;
