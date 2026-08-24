@@ -43,6 +43,7 @@ import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuali
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
 import { stripTechnicalQueryParams } from './utils/urlHygiene';
 import { WIKI_ARTICLE_QUERY_PARAM, readArticleSlugFromSearch } from './components/wiki/articleLink';
+import { parseUserAgent } from './components/sessions/userAgent';
 
 const CHUNK_RELOAD_STORAGE_KEY = 'otp_chunk_reload_attempted';
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -139,6 +140,7 @@ const lazyWithRetry = (importer) =>
 const DisputeModal = lazyWithRetry(() => import('./components/modals/DisputeModal'));
 const HistoryModal = lazyWithRetry(() => import('./components/modals/HistoryModal'));
 const UserEditModal = lazyWithRetry(() => import('./components/modals/UserEditModal'));
+const SessionDetailModal = lazyWithRetry(() => import('./components/sessions/SessionDetailModal'));
 const AccountAvatarModal = lazyWithRetry(() => import('./components/modals/AccountAvatarModal'));
 const SalaryCalculatorChat = lazyWithRetry(() => import('./components/salary/SalaryCalculatorChat'));
 const SalaryCalculatorTez = lazyWithRetry(() => import('./components/salary/SalaryCalculatorTez'));
@@ -188,6 +190,15 @@ const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
 const ACCESS_TOKEN_STORAGE_KEY = 'otp_access_token';
 const REFRESH_TOKEN_STORAGE_KEY = 'otp_refresh_token';
 const ADMIN_SESSIONS_PAGE_SIZE = 100;
+// Фильтры, поиск и сортировка раздела «Сессии» едут на сервер одним объектом:
+// одна страница ответа = ровно то, что видно на экране.
+const ADMIN_SESSIONS_DEFAULT_VIEW = Object.freeze({
+    query: '',
+    role: 'all',
+    device: 'all',
+    sort: 'last_seen_at',
+    dir: 'desc'
+});
 const FOUR_YOU_ADMIN_USER_ID = 2;
 const FOUR_YOU_VIEWER_USER_ID = 241;
 const AI_QA_OP_DEPARTMENT_ID = 367;
@@ -34684,6 +34695,163 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             );
         };
 
+        const SESSION_ROLE_META = {
+            admin:    { label: 'Админ',       cls: 'bg-violet-100 text-violet-700 ring-violet-200',    stat: 'text-violet-600 bg-violet-50 border-violet-100 hover:border-violet-300' },
+            sv:       { label: 'Супервайзер', cls: 'bg-blue-100 text-blue-700 ring-blue-200',          stat: 'text-blue-600 bg-blue-50 border-blue-100 hover:border-blue-300'         },
+            operator: { label: 'Оператор',    cls: 'bg-emerald-100 text-emerald-700 ring-emerald-200', stat: 'text-emerald-600 bg-emerald-50 border-emerald-100 hover:border-emerald-300' },
+        };
+
+        const SessionRoleBadge = ({ role }) => {
+            const m = SESSION_ROLE_META[role] || { label: role || '—', cls: 'bg-gray-100 text-gray-500 ring-gray-200' };
+            return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ${m.cls}`}>{m.label}</span>;
+        };
+
+        const SESSION_DEVICE_ICONS = {
+            desktop: <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3"/>,
+            mobile:  <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18h3"/>,
+            tablet:  <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/>,
+            bot:     <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21M6.75 19.5h10.5a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0017.25 4.5H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm5.25-6a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H12v-.008zm-3 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H9v-.008zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H15v-.008z"/>,
+        };
+
+        const SessionDeviceIcon = ({ type, className = 'w-3.5 h-3.5' }) => {
+            const path = SESSION_DEVICE_ICONS[type];
+            if (!path) return null;
+            return (
+                <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>{path}</svg>
+            );
+        };
+
+        /**
+         * Строка таблицы сессий.
+         *
+         * Вынесена в memo намеренно: раньше набор в поиске перерисовывал всю
+         * таблицу целиком (сотня строк по восемь ячеек с инлайновыми SVG) на
+         * КАЖДУЮ букву — именно это ощущалось как лаги раздела. Теперь строка
+         * перерисовывается, только если изменилась она сама.
+         *
+         * Условие memo: обработчики приходят стабильными (useCallback в панели),
+         * а `row` — новый объект лишь после ответа сервера.
+         */
+        const SessionRow = React.memo(function SessionRow({
+            row, isSelected, isRevoking, bulkRevoking, formatDate, onToggle, onRevoke, onOpen
+        }) {
+            return (
+                <tr
+                    onClick={() => !isRevoking && !bulkRevoking && onOpen(row)}
+                    className={`transition-colors duration-100 group cursor-pointer select-none ${
+                        isSelected ? 'bg-blue-50/60 hover:bg-blue-50' : 'hover:bg-gray-50/60'
+                    }`}>
+
+                    <td className="pl-4 pr-2 py-3" onClick={(e) => e.stopPropagation()}>
+                        <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => !isRevoking && !bulkRevoking && onToggle(row.session_id)}
+                            disabled={isRevoking || bulkRevoking}
+                            className="w-4 h-4 rounded border-gray-300 text-blue-600 cursor-pointer focus:ring-blue-500/30 accent-blue-600 disabled:opacity-40"
+                        />
+                    </td>
+
+                    {/* Пользователь */}
+                    <td className="px-3 py-3">
+                        <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                                {row.avatar_url ? (
+                                    <AvatarImage src={row.avatar_url} alt={row.user_name || 'avatar'} className="h-full w-full object-cover" />
+                                ) : (
+                                    (row.user_name || 'U').charAt(0).toUpperCase()
+                                )}
+                            </div>
+                            <div className="min-w-0">
+                                <div className="font-medium text-gray-800 text-sm truncate leading-tight">
+                                    {row.user_name || `#${row.user_id}`}
+                                </div>
+                                <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                    <SessionRoleBadge role={row.user_role} />
+                                    {row.user_login && <span className="text-xs text-gray-400 font-mono">@{row.user_login}</span>}
+                                    {row.supervisor_name && <span className="text-xs text-gray-400">↳ {row.supervisor_name}</span>}
+                                </div>
+                            </div>
+                        </div>
+                    </td>
+
+                    {/* Сессия */}
+                    <td className="px-3 py-3">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
+                                {row.session_id?.slice(0, 10)}…
+                            </span>
+                            {row.is_current && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 ring-1 ring-green-200">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                                    Текущая
+                                </span>
+                            )}
+                            {/* Закрытый доступ — норма, и плашку ему не рисуем:
+                                нейтральное состояние не должно кричать. */}
+                            {row.sensitive_data_unlocked && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700 ring-1 ring-amber-200">
+                                    Данные открыты
+                                </span>
+                            )}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-0.5 font-mono tabular-nums">{formatDate(row.created_at)}</div>
+                    </td>
+
+                    {/* IP */}
+                    <td className="px-3 py-3 font-mono text-xs text-gray-600 whitespace-nowrap tabular-nums">
+                        {row.ip_address || '—'}
+                    </td>
+
+                    {/* Устройство */}
+                    <td className="px-3 py-3">
+                        <div className="flex items-center gap-1.5">
+                            <span className="text-gray-400 shrink-0"><SessionDeviceIcon type={row.device?.type} /></span>
+                            <div>
+                                <div className="text-xs font-medium text-gray-700">{row.device?.os || '—'}</div>
+                                <div className="text-xs text-gray-400">{row.device?.browser || '—'}</div>
+                            </div>
+                        </div>
+                    </td>
+
+                    <td className="px-3 py-3 text-xs text-gray-600 whitespace-nowrap tabular-nums">
+                        {formatDate(row.last_seen_at)}
+                    </td>
+
+                    <td className="px-3 py-3 text-xs text-gray-600 whitespace-nowrap tabular-nums">
+                        {formatDate(row.expires_at)}
+                    </td>
+
+                    <td className="px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                        <button
+                            onClick={() => onRevoke(row)}
+                            disabled={isRevoking || bulkRevoking}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150 ${
+                                isRevoking
+                                    ? 'bg-red-50 text-red-400 cursor-not-allowed ring-1 ring-red-100'
+                                    : 'bg-red-50 text-red-600 ring-1 ring-red-100 hover:bg-red-600 hover:text-white hover:shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-30'
+                            }`}>
+                            {isRevoking ? (
+                                <>
+                                    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+                                        <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83" strokeLinecap="round"/>
+                                    </svg>
+                                    Прерывание…
+                                </>
+                            ) : (
+                                <>
+                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                                    </svg>
+                                    Прервать
+                                </>
+                            )}
+                        </button>
+                    </td>
+                </tr>
+            );
+        });
+
         const SessionsPanel = ({
         adminSessions,
         adminSessionsSummary,
@@ -34692,83 +34860,45 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         hasMoreAdminSessions,
         fetchAdminSessions,
         loadMoreAdminSessions,
-        onSearchAdminSessions,
-        initialSearch,
+        onApplyAdminSessionsView,
+        onFetchAdminSessionDetail,
+        sessionsView,
         revokingSessionId,       // одиночное прерывание — внешнее состояние
         handleRevokeAdminSession,
         handleBulkRevokeAdminSessions,
         formatDate,
         }) => {
-        const [search, setSearch]     = React.useState(initialSearch || '');
-        const [roleFilter, setRole]   = React.useState('all');
-        const [sortKey, setSortKey]   = React.useState('last_seen_at');
-        const [sortDir, setSortDir]   = React.useState('desc');
-        const [deviceFilter, setDeviceFilter] = React.useState('all'); // 'all' | 'desktop' | 'mobile' | 'tablet' | 'bot' | 'unknown'
-        const lastAppliedSearchRef = React.useRef((initialSearch || '').trim());
+        const view = sessionsView || ADMIN_SESSIONS_DEFAULT_VIEW;
+        const roleFilter = view.role || 'all';
+        const deviceFilter = view.device || 'all';
+        const sortKey = view.sort || 'last_seen_at';
+        const sortDir = view.dir || 'desc';
+
+        const [search, setSearch] = React.useState(view.query || '');
+        const lastAppliedSearchRef = React.useRef(view.query || '');
         const loadMoreRef = React.useRef(null);
 
-        React.useEffect(() => {
-            const next = initialSearch || '';
-            setSearch(next);
-            lastAppliedSearchRef.current = next.trim();
-        }, [initialSearch]);
-
-        // ── UA Parser ────────────────────────────────────────────────────────────
-        const parseUA = React.useCallback((ua) => {
-            if (!ua) return { type: 'unknown', os: '—', browser: '—', label: 'Неизвестно' };
-            const u = ua.toLowerCase();
-
-            // Device type
-            const isBot     = /bot|crawl|spider|slurp|bingpreview|facebookexternalhit|linkedinbot|twitterbot/.test(u);
-            const isTablet  = !isBot && /(ipad|tablet|(android(?!.*mobile))|(windows(?!.*phone)(.*touch))|kindle|playbook|silk|(puffin(?!.*(ip|ap|wp))))/.test(u);
-            const isMobile  = !isBot && !isTablet && /(mobi|android|iphone|ipod|blackberry|iemobile|opera mini|windows phone)/.test(u);
-            const type      = isBot ? 'bot' : isTablet ? 'tablet' : isMobile ? 'mobile' : 'desktop';
-
-            // OS
-            let os = '—';
-            if (/windows nt 10/.test(u))        os = 'Windows 10/11';
-            else if (/windows nt 6\.3/.test(u)) os = 'Windows 8.1';
-            else if (/windows nt 6\.1/.test(u)) os = 'Windows 7';
-            else if (/windows/.test(u))         os = 'Windows';
-            else if (/ipad/.test(u))            os = 'iPadOS';
-            else if (/iphone|ipod/.test(u))     os = 'iOS';
-            else if (/mac os x/.test(u)) {
-            const v = u.match(/mac os x (\d+[._]\d+)/);
-            os = v ? `macOS ${v[1].replace('_', '.')}` : 'macOS';
-            }
-            else if (/android/.test(u)) {
-            const v = u.match(/android (\d+(\.\d+)?)/);
-            os = v ? `Android ${v[1]}` : 'Android';
-            }
-            else if (/linux/.test(u))           os = 'Linux';
-            else if (/chromeos|cros/.test(u))   os = 'ChromeOS';
-
-            // Browser
-            let browser = '—';
-            if (/edg\/|edge\//.test(u))                          browser = 'Edge';
-            else if (/opr\/|opera/.test(u))                      browser = 'Opera';
-            else if (/yabrowser/.test(u))                        browser = 'Яндекс';
-            else if (/firefox\//.test(u))                        browser = 'Firefox';
-            else if (/chrome\//.test(u) && !/chromium/.test(u)) browser = 'Chrome';
-            else if (/chromium/.test(u))                         browser = 'Chromium';
-            else if (/safari\//.test(u) && !/chrome/.test(u))   browser = 'Safari';
-            else if (/msie|trident/.test(u))                     browser = 'IE';
-            else if (isBot)                                      browser = 'Bot';
-
-            const typeLabel = { desktop: 'ПК', mobile: 'Телефон', tablet: 'Планшет', bot: 'Бот', unknown: '?' };
-            const label = [typeLabel[type], os !== '—' ? os : null, browser !== '—' ? browser : null]
-            .filter(Boolean).join(' · ');
-
-            return { type, os, browser, label };
-        }, []);
+        // ── Карточка сессии ──────────────────────────────────────────────────────
+        const [detailId, setDetailId] = React.useState('');
+        const [detail, setDetail] = React.useState(null);
+        const [detailLoading, setDetailLoading] = React.useState(false);
+        const [detailError, setDetailError] = React.useState('');
 
         // ── Multi-select ─────────────────────────────────────────────────────────
         const [selected, setSelected]         = React.useState(new Set()); // Set<session_id>
         const [bulkRevoking, setBulkRevoking] = React.useState(false);
-        const [bulkProgress, setBulkProgress] = React.useState({ done: 0, total: 0 });
         const [confirmOpen, setConfirmOpen]   = React.useState(false);
 
-        // ── Flatten + enrich with parsed device ──────────────────────────────────
+        // Строка ввода — местная, но если вид сменили снаружи (сброс фильтров,
+        // возврат в раздел), она должна догнать: сравниваем с уже применённым.
+        React.useEffect(() => {
+            const applied = view.query || '';
+            if (applied === lastAppliedSearchRef.current) return;
+            lastAppliedSearchRef.current = applied;
+            setSearch(applied);
+        }, [view.query]);
+
+        // ── Строки: разбор user-agent один раз на ответ сервера ──────────────────
         const allRows = React.useMemo(
             () => (adminSessions || []).map((session) => {
                 const normalizedRole = session?.user_role === 'super_admin' ? 'admin' : session?.user_role;
@@ -34776,98 +34906,103 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     ...session,
                     user_role: normalizedRole,
                     user_role_original: session?.user_role || normalizedRole,
-                    device: parseUA(session.user_agent)
+                    device: parseUserAgent(session.user_agent)
                 };
             }),
-            [adminSessions, parseUA]
+            [adminSessions]
         );
 
         const statCounts = React.useMemo(() => {
-            const roleCounts = adminSessionsSummary?.role_counts;
-            if (roleCounts) {
-                return {
-                    admin: Number(roleCounts.admin || 0),
-                    sv: Number(roleCounts.sv || 0),
-                    operator: Number(roleCounts.operator || 0)
-                };
-            }
-            const c = { admin: 0, sv: 0, operator: 0 };
-            allRows.forEach((r) => { if (r.user_role in c) c[r.user_role]++; });
-            return c;
-        }, [adminSessionsSummary, allRows]);
+            const roleCounts = adminSessionsSummary?.role_counts || {};
+            return {
+                admin: Number(roleCounts.admin || 0),
+                sv: Number(roleCounts.sv || 0),
+                operator: Number(roleCounts.operator || 0)
+            };
+        }, [adminSessionsSummary]);
 
         const deviceCounts = React.useMemo(() => {
-            const summaryDeviceCounts = adminSessionsSummary?.device_counts;
-            if (summaryDeviceCounts) {
-                return {
-                    desktop: Number(summaryDeviceCounts.desktop || 0),
-                    mobile: Number(summaryDeviceCounts.mobile || 0),
-                    tablet: Number(summaryDeviceCounts.tablet || 0),
-                    bot: Number(summaryDeviceCounts.bot || 0),
-                    unknown: Number(summaryDeviceCounts.unknown || 0)
-                };
-            }
-            const c = { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 };
-            allRows.forEach((r) => { const t = r.device?.type || 'unknown'; if (t in c) c[t]++; });
-            return c;
-        }, [adminSessionsSummary, allRows]);
+            const counts = adminSessionsSummary?.device_counts || {};
+            return {
+                desktop: Number(counts.desktop || 0),
+                mobile: Number(counts.mobile || 0),
+                tablet: Number(counts.tablet || 0),
+                bot: Number(counts.bot || 0),
+                unknown: Number(counts.unknown || 0)
+            };
+        }, [adminSessionsSummary]);
 
-        const totalSessions = Number(adminSessionsSummary?.total_sessions ?? allRows.length);
+        const totalSessions = Number(adminSessionsSummary?.total_sessions ?? 0);
         const totalUsers = Number(adminSessionsSummary?.total_users ?? 0);
-
-        // ── Filtered + sorted ────────────────────────────────────────────────────
-        const filtered = React.useMemo(() => {
-            return allRows
-            .filter((r) => {
-                if (roleFilter !== 'all' && r.user_role !== roleFilter) return false;
-                if (deviceFilter !== 'all' && r.device?.type !== deviceFilter) return false;
-                return true;
-            })
-            .sort((a, b) => {
-                const av = a[sortKey] ?? '', bv = b[sortKey] ?? '';
-                const cmp = av < bv ? -1 : av > bv ? 1 : 0;
-                return sortDir === 'asc' ? cmp : -cmp;
-            });
-        }, [allRows, roleFilter, deviceFilter, sortKey, sortDir]);
-        const isSearchLoading = isAdminSessionsLoading && Boolean(search.trim());
+        const matchedSessions = Number(adminSessionsSummary?.matched_sessions ?? totalSessions);
+        const hasFilters = Boolean(search.trim()) || roleFilter !== 'all' || deviceFilter !== 'all';
 
         // ── Selection helpers ────────────────────────────────────────────────────
-        const visibleIds      = filtered.map((r) => r.session_id);
-        const selectedVisible = visibleIds.filter((id) => selected.has(id));
-        const allVisChecked   = visibleIds.length > 0 && selectedVisible.length === visibleIds.length;
-        const someVisChecked  = selectedVisible.length > 0 && !allVisChecked;
+        const visibleIds = React.useMemo(() => allRows.map((r) => r.session_id), [allRows]);
+        const selectedVisibleCount = React.useMemo(
+            () => visibleIds.reduce((acc, id) => acc + (selected.has(id) ? 1 : 0), 0),
+            [visibleIds, selected]
+        );
+        const allVisChecked   = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+        const someVisChecked  = selectedVisibleCount > 0 && !allVisChecked;
 
-        const toggleRow = (id) =>
-            setSelected((prev) => {
-            const next = new Set(prev);
-            next.has(id) ? next.delete(id) : next.add(id);
-            return next;
-            });
-
-        const toggleAll = () => {
-            if (allVisChecked) {
+        const toggleRow = React.useCallback((id) =>
             setSelected((prev) => {
                 const next = new Set(prev);
-                visibleIds.forEach((id) => next.delete(id));
+                if (next.has(id)) next.delete(id); else next.add(id);
+                return next;
+            }), []);
+
+        const toggleAll = React.useCallback(() => {
+            setSelected((prev) => {
+                const next = new Set(prev);
+                const allChecked = visibleIds.length > 0 && visibleIds.every((id) => next.has(id));
+                if (allChecked) visibleIds.forEach((id) => next.delete(id));
+                else visibleIds.forEach((id) => next.add(id));
                 return next;
             });
-            } else {
-            setSelected((prev) => new Set([...prev, ...visibleIds]));
-            }
-        };
+        }, [visibleIds]);
 
-        const clearSelection = () => setSelected(new Set());
+        const clearSelection = React.useCallback(() => setSelected(new Set()), []);
 
+        // ── Поиск: одна задержка, без гонок ──────────────────────────────────────
+        // Раньше эффект зависел от обработчика, который пересоздавался на каждом
+        // старте загрузки: таймер сбрасывался, и запрос уходил на каждую букву.
         React.useEffect(() => {
+            const normalized = search.trim();
+            if (normalized === lastAppliedSearchRef.current) return undefined;
             const timer = window.setTimeout(() => {
-                const normalized = search.trim();
-                if (normalized === lastAppliedSearchRef.current) return;
                 lastAppliedSearchRef.current = normalized;
                 setSelected(new Set());
-                onSearchAdminSessions(normalized);
-            }, 350);
+                onApplyAdminSessionsView({ query: normalized });
+            }, 300);
             return () => window.clearTimeout(timer);
-        }, [search, onSearchAdminSessions]);
+        }, [search, onApplyAdminSessionsView]);
+
+        const setRole = React.useCallback((next) => {
+            setSelected(new Set());
+            onApplyAdminSessionsView({ role: next });
+        }, [onApplyAdminSessionsView]);
+
+        const setDeviceFilter = React.useCallback((next) => {
+            setSelected(new Set());
+            onApplyAdminSessionsView({ device: next });
+        }, [onApplyAdminSessionsView]);
+
+        const resetFilters = React.useCallback(() => {
+            lastAppliedSearchRef.current = '';
+            setSearch('');
+            setSelected(new Set());
+            onApplyAdminSessionsView({ query: '', role: 'all', device: 'all' });
+        }, [onApplyAdminSessionsView]);
+
+        const toggleSort = React.useCallback((key) => {
+            onApplyAdminSessionsView(
+                key === sortKey
+                    ? { dir: sortDir === 'asc' ? 'desc' : 'asc' }
+                    : { sort: key, dir: 'desc' }
+            );
+        }, [onApplyAdminSessionsView, sortKey, sortDir]);
 
         // ── Bulk revoke ───────────────────────────────────────────────────────────
         const handleBulkRevoke = async () => {
@@ -34889,29 +35024,63 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }
         };
 
-        // ── Sort ──────────────────────────────────────────────────────────────────
-        const toggleSort = (key) => {
-            if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-            else { setSortKey(key); setSortDir('desc'); }
-        };
+        // ── Открыть карточку ──────────────────────────────────────────────────────
+        const openDetail = React.useCallback((row) => {
+            setDetailId(row.session_id);
+            setDetailError('');
+            // Строку списка показываем сразу, чтобы карточка не открывалась
+            // пустой: догруженные поля просто дополнят её.
+            setDetail(row);
+            setDetailLoading(true);
+        }, []);
 
-        const SortBtn = ({ col, children }) => (
-            <button onClick={() => toggleSort(col)}
-            className="inline-flex items-center gap-0.5 text-xs font-semibold uppercase tracking-wider text-gray-400 hover:text-gray-600 transition-colors">
-            {children}
-            <span className="ml-0.5 opacity-60">{sortKey === col ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
-            </button>
-        );
+        const closeDetail = React.useCallback(() => {
+            setDetailId('');
+            setDetail(null);
+            setDetailError('');
+            setDetailLoading(false);
+        }, []);
 
-        const roleMeta = {
-            admin:    { label: 'Админ',       cls: 'bg-violet-100 text-violet-700 ring-violet-200',    stat: 'text-violet-600 bg-violet-50 border-violet-100 hover:border-violet-300' },
-            sv:       { label: 'Супервайзер', cls: 'bg-blue-100 text-blue-700 ring-blue-200',          stat: 'text-blue-600 bg-blue-50 border-blue-100 hover:border-blue-300'         },
-            operator: { label: 'Оператор',    cls: 'bg-emerald-100 text-emerald-700 ring-emerald-200', stat: 'text-emerald-600 bg-emerald-50 border-emerald-100 hover:border-emerald-300' },
-        };
+        React.useEffect(() => {
+            if (!detailId || typeof onFetchAdminSessionDetail !== 'function') return undefined;
+            let cancelled = false;
+            setDetailLoading(true);
+            onFetchAdminSessionDetail(detailId)
+                .then((data) => {
+                    if (cancelled || !data) return;
+                    setDetail((prev) => ({ ...(prev || {}), ...data }));
+                    setDetailError('');
+                })
+                .catch((err) => {
+                    if (cancelled) return;
+                    setDetailError(err?.response?.data?.error || err?.message || 'Не удалось загрузить карточку сессии');
+                })
+                .finally(() => { if (!cancelled) setDetailLoading(false); });
+            return () => { cancelled = true; };
+        }, [detailId, onFetchAdminSessionDetail]);
 
-        const RoleBadge = ({ role }) => {
-            const m = roleMeta[role] || { label: role || '—', cls: 'bg-gray-100 text-gray-500 ring-gray-200' };
-            return <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ring-1 ${m.cls}`}>{m.label}</span>;
+        const revokeFromDetail = React.useCallback(async (session) => {
+            await handleRevokeAdminSession(session);
+            closeDetail();
+        }, [handleRevokeAdminSession, closeDetail]);
+
+        const SortBtn = ({ col, children }) => {
+            const active = sortKey === col;
+            return (
+                <button onClick={() => toggleSort(col)}
+                className={`inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wider transition-colors ${active ? 'text-gray-600' : 'text-gray-400 hover:text-gray-600'}`}>
+                {children}
+                {/* Стрелка своим SVG: символы ↑↓↕ в системных шрифтах рисуются
+                    эмодзи-глифом, и шапка таблицы пестрит цветными значками.
+                    У неактивной колонки она бледная — сортируемость видна,
+                    а внимание не тянет. */}
+                <svg className={`w-2.5 h-2.5 shrink-0 ${active ? 'opacity-90' : 'opacity-25'}`}
+                    viewBox="0 0 10 10" fill="currentColor" aria-hidden="true">
+                    {(!active || sortDir === 'asc') && <path d="M5 0.5 8 4H2z" />}
+                    {(!active || sortDir === 'desc') && <path d="M5 9.5 2 6h6z" />}
+                </svg>
+                </button>
+            );
         };
 
         // Indeterminate checkbox ref
@@ -34942,7 +35111,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         ]);
 
         // ── Loading ───────────────────────────────────────────────────────────────
-        if (isAdminSessionsLoading && allRows.length === 0 && !search.trim())
+        if (isAdminSessionsLoading && allRows.length === 0 && !hasFilters)
             return (
             <div className="flex items-center justify-center py-24 gap-3 text-gray-400">
                 <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -34955,6 +35124,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
         // ── Render ────────────────────────────────────────────────────────────────
         return (
             <div className="space-y-4">
+
+            <Suspense fallback={null}>
+                <SessionDetailModal
+                    open={Boolean(detailId)}
+                    onClose={closeDetail}
+                    session={detail}
+                    isLoading={detailLoading}
+                    error={detailError}
+                    formatDate={formatDate}
+                    onRevoke={revokeFromDetail}
+                    isRevoking={revokingSessionId === detailId}
+                />
+            </Suspense>
 
             {/* ── Confirmation modal ── */}
             {confirmOpen && (
@@ -34994,7 +35176,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             <div className="flex items-start justify-between gap-4">
                 <div>
                 <h2 className="text-xl font-semibold text-gray-900 tracking-tight">Активные сессии</h2>
-                <p className="text-sm text-gray-400 mt-0.5">{totalSessions} сессий · {totalUsers} пользователей</p>
+                <p className="text-sm text-gray-400 mt-0.5 tabular-nums">{totalSessions} сессий · {totalUsers} пользователей</p>
                 </div>
                 <button onClick={fetchAdminSessions} disabled={isAdminSessionsLoading}
                 className="shrink-0 inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-gray-200 bg-white text-sm font-medium text-gray-600 shadow-sm hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
@@ -35013,11 +35195,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 { key: 'operator', label: 'Операторы'      },
                 ].map(({ key, label }) => {
                 const active = roleFilter === key;
-                const m = roleMeta[key];
+                const m = SESSION_ROLE_META[key];
                 return (
                     <button key={key} onClick={() => setRole(active ? 'all' : key)}
                     className={`rounded-xl border px-4 py-3 text-left transition-all ${m.stat} ${active ? 'ring-2 ring-current ring-offset-1' : ''}`}>
-                    <div className="text-2xl font-bold leading-none">{statCounts[key]}</div>
+                    <div className="text-2xl font-bold leading-none tabular-nums">{statCounts[key]}</div>
                     <div className="text-xs font-medium mt-1 opacity-75">{label}</div>
                     </button>
                 );
@@ -35059,15 +35241,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             {/* ── Device filter ── */}
             <div className="flex flex-wrap gap-2">
                 {[
-                { val: 'all',     label: 'Все устройства', icon: null },
-                { val: 'desktop', label: 'ПК',              icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3"/></svg> },
-                { val: 'mobile',  label: 'Телефон',         icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18h3"/></svg> },
-                { val: 'tablet',  label: 'Планшет',         icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/></svg> },
-                { val: 'bot',     label: 'Боты',            icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21M6.75 19.5h10.5a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0017.25 4.5H6.75A2.25 2.25 0 004.5 6.75v10.5a2.25 2.25 0 002.25 2.25zm5.25-6a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H12v-.008zm-3 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H9v-.008zm6 0a.75.75 0 11-1.5 0 .75.75 0 011.5 0zm0 0h.008v.008H15v-.008z"/></svg> },
-                ].map(({ val, label, icon }) => {
+                { val: 'all',     label: 'Все устройства' },
+                { val: 'desktop', label: 'ПК'             },
+                { val: 'mobile',  label: 'Телефон'        },
+                { val: 'tablet',  label: 'Планшет'        },
+                { val: 'bot',     label: 'Боты'           },
+                { val: 'unknown', label: 'Неизвестно'     },
+                ].map(({ val, label }) => {
                 const count = val === 'all' ? totalSessions : (deviceCounts[val] || 0);
-                if (val !== 'all' && count === 0) return null;
                 const active = deviceFilter === val;
+                // Пустую плашку прячем, но не ту, что сейчас выбрана — иначе
+                // выключить фильтр было бы нечем.
+                if (val !== 'all' && count === 0 && !active) return null;
                 return (
                     <button key={val} onClick={() => setDeviceFilter(active ? 'all' : val)}
                     className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all ${
@@ -35075,9 +35260,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         ? 'bg-gray-900 text-white border-gray-900 shadow-sm'
                         : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'
                     }`}>
-                    {icon}
+                    <SessionDeviceIcon type={val === 'all' ? null : val} />
                     {label}
-                    <span className={`px-1.5 py-0.5 rounded-full text-xs leading-none ${active ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                    <span className={`px-1.5 py-0.5 rounded-full text-xs leading-none tabular-nums ${active ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-500'}`}>
                         {count}
                     </span>
                     </button>
@@ -35094,19 +35279,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         <svg className="w-4 h-4 animate-spin text-red-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                         <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4" strokeLinecap="round"/>
                         </svg>
-                        <span className="text-sm font-medium">
-                        Прерывание… {bulkProgress.done} / {bulkProgress.total}
-                        </span>
-                        {/* Progress bar */}
-                        <div className="w-28 h-1.5 rounded-full bg-white/20 overflow-hidden">
-                        <div className="h-full bg-red-400 rounded-full transition-all duration-300"
-                            style={{ width: `${bulkProgress.total ? (bulkProgress.done / bulkProgress.total) * 100 : 0}%` }} />
-                        </div>
+                        <span className="text-sm font-medium">Прерывание…</span>
                     </>
                     ) : (
                     <>
                         <div className="w-5 h-5 rounded bg-white/20 flex items-center justify-center shrink-0">
-                        <span className="text-xs font-bold leading-none">{selected.size}</span>
+                        <span className="text-xs font-bold leading-none tabular-nums">{selected.size}</span>
                         </div>
                         <span className="text-sm font-medium">
                         {selected.size === 1 ? '1 сессия выбрана' : `${selected.size} сессии выбраны`}
@@ -35134,7 +35312,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             </div>
 
             {/* ── Table ── */}
-            {totalSessions === 0 ? (
+            {totalSessions === 0 && !hasFilters ? (
                 <div className="flex flex-col items-center justify-center py-20 gap-3 text-gray-400">
                 <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center">
                     <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -35161,9 +35339,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             />
                         </th>
                         <th className="px-3 py-3 text-left"><SortBtn col="user_name">Пользователь</SortBtn></th>
-                        <th className="px-3 py-3 text-left">
-                            <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">Сессия</span>
-                        </th>
+                        <th className="px-3 py-3 text-left"><SortBtn col="created_at">Сессия</SortBtn></th>
                         <th className="px-3 py-3 text-left"><SortBtn col="ip_address">IP</SortBtn></th>
                         <th className="px-3 py-3 text-left">
                             <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">Устройство</span>
@@ -35174,177 +35350,37 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
-                        {isSearchLoading && (
+                        {isAdminSessionsLoading && (
                         <tr>
                             <td colSpan={8} className="px-4 py-3 text-center">
                             <span className="inline-flex items-center gap-2 text-xs text-gray-400">
                                 <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
                                 <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4" strokeLinecap="round"/>
                                 </svg>
-                                Поиск...
+                                Обновляем список…
                             </span>
                             </td>
                         </tr>
                         )}
-                        {filtered.length === 0 && !isSearchLoading ? (
+                        {allRows.length === 0 && !isAdminSessionsLoading ? (
                         <tr>
                             <td colSpan={8} className="px-4 py-12 text-center text-sm text-gray-400">
                             Ничего не найдено{search && <> по запросу <span className="font-medium text-gray-600">«{search}»</span></>}
                             </td>
                         </tr>
-                        ) : filtered.map((row) => {
-                        const isSelected = selected.has(row.session_id);
-                        const isRevoking = revokingSessionId === row.session_id;
-                        return (
-                            <tr key={row.session_id}
-                            onClick={() => !isRevoking && !bulkRevoking && toggleRow(row.session_id)}
-                            className={`transition-colors duration-100 group cursor-pointer select-none ${
-                                isSelected
-                                ? 'bg-blue-50/60 hover:bg-blue-50'
-                                : 'hover:bg-gray-50/60'
-                            }`}>
-
-                            {/* Checkbox */}
-                            <td className="pl-4 pr-2 py-3" onClick={(e) => e.stopPropagation()}>
-                                <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => !isRevoking && !bulkRevoking && toggleRow(row.session_id)}
-                                disabled={isRevoking || bulkRevoking}
-                                className="w-4 h-4 rounded border-gray-300 text-blue-600 cursor-pointer focus:ring-blue-500/30 accent-blue-600 disabled:opacity-40"
-                                />
-                            </td>
-
-                            {/* Пользователь */}
-                            <td className="px-3 py-3">
-                                <div className="flex items-center gap-2.5">
-                                <div className="w-8 h-8 rounded-full overflow-hidden border border-slate-200 bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
-                                    {row.avatar_url ? (
-                                        <AvatarImage src={row.avatar_url} alt={row.user_name || 'avatar'} className="h-full w-full object-cover" />
-                                    ) : (
-                                        (row.user_name || 'U').charAt(0).toUpperCase()
-                                    )}
-                                </div>
-                                <div className="min-w-0">
-                                    <div className="font-medium text-gray-800 text-sm truncate leading-tight">
-                                    {row.user_name || `#${row.user_id}`}
-                                    </div>
-                                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                    <RoleBadge role={row.user_role} />
-                                    {row.user_login && <span className="text-xs text-gray-400 font-mono">@{row.user_login}</span>}
-                                    {row.supervisor_name && <span className="text-xs text-gray-400">↳ {row.supervisor_name}</span>}
-                                    </div>
-                                </div>
-                                </div>
-                            </td>
-
-                            {/* Сессия */}
-                            <td className="px-3 py-3">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="font-mono text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
-                                    {row.session_id?.slice(0, 10)}…
-                                </span>
-                                {row.is_current && (
-                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700 ring-1 ring-green-200">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                                    Текущая
-                                    </span>
-                                )}
-                                <span
-                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-medium ring-1 ${
-                                        row.sensitive_data_unlocked
-                                            ? 'bg-amber-100 text-amber-700 ring-amber-200'
-                                            : 'bg-gray-100 text-gray-500 ring-gray-200'
-                                    }`}
-                                >
-                                    {row.sensitive_data_unlocked ? 'Доступ к данным: открыт' : 'Доступ к данным: закрыт'}
-                                </span>
-                                </div>
-                                <div className="text-xs text-gray-400 mt-0.5 font-mono">{formatDate(row.created_at)}</div>
-                                {row.sensitive_data_unlocked_at && (
-                                    <div className="text-xs text-amber-600 mt-0.5">
-                                        Открыт: {formatDate(row.sensitive_data_unlocked_at)}
-                                    </div>
-                                )}
-                            </td>
-
-                            {/* IP */}
-                            <td className="px-3 py-3 font-mono text-xs text-gray-600 whitespace-nowrap">
-                                {row.ip_address || '—'}
-                            </td>
-
-                            {/* Device */}
-                            <td className="px-3 py-3">
-                                <div className="flex items-center gap-1.5">
-                                {row.device?.type === 'desktop' && (
-                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0H3"/>
-                                    </svg>
-                                )}
-                                {row.device?.type === 'mobile' && (
-                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18h3"/>
-                                    </svg>
-                                )}
-                                {row.device?.type === 'tablet' && (
-                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5h3m-6.75 2.25h10.5a2.25 2.25 0 002.25-2.25v-15a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 4.5v15a2.25 2.25 0 002.25 2.25z"/>
-                                    </svg>
-                                )}
-                                <div>
-                                    <div className="text-xs font-medium text-gray-700">
-                                    {row.device?.os || '—'}
-                                    </div>
-                                    <div className="text-xs text-gray-400">{row.device?.browser || '—'}</div>
-                                </div>
-                                </div>
-                                {row.user_agent && (
-                                <div className="text-xs text-gray-300 truncate mt-0.5 max-w-[160px]" title={row.user_agent}>
-                                    {row.user_agent}
-                                </div>
-                                )}
-                            </td>
-
-                            {/* Last seen */}
-                            <td className="px-3 py-3 text-xs text-gray-600 whitespace-nowrap">
-                                {formatDate(row.last_seen_at)}
-                            </td>
-
-                            {/* Expires */}
-                            <td className="px-3 py-3 text-xs text-gray-600 whitespace-nowrap">
-                                {formatDate(row.expires_at)}
-                            </td>
-
-                            {/* Single revoke */}
-                            <td className="px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                                <button
-                                onClick={() => handleRevokeAdminSession(row)}
-                                disabled={isRevoking || bulkRevoking}
-                                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all duration-150 ${
-                                    isRevoking
-                                    ? 'bg-red-50 text-red-400 cursor-not-allowed ring-1 ring-red-100'
-                                    : 'bg-red-50 text-red-600 ring-1 ring-red-100 hover:bg-red-600 hover:text-white hover:shadow-sm opacity-0 group-hover:opacity-100 disabled:opacity-30'
-                                }`}>
-                                {isRevoking ? (
-                                    <>
-                                    <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
-                                        <path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83" strokeLinecap="round"/>
-                                    </svg>
-                                    Прерывание…
-                                    </>
-                                ) : (
-                                    <>
-                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/>
-                                    </svg>
-                                    Прервать
-                                    </>
-                                )}
-                                </button>
-                            </td>
-                            </tr>
-                        );
-                        })}
+                        ) : allRows.map((row) => (
+                            <SessionRow
+                                key={row.session_id}
+                                row={row}
+                                isSelected={selected.has(row.session_id)}
+                                isRevoking={revokingSessionId === row.session_id}
+                                bulkRevoking={bulkRevoking}
+                                formatDate={formatDate}
+                                onToggle={toggleRow}
+                                onRevoke={handleRevokeAdminSession}
+                                onOpen={openDetail}
+                            />
+                        ))}
                         {isAdminSessionsLoadingMore && (
                         <tr>
                             <td colSpan={8} className="px-4 py-4 text-center text-xs text-gray-400">
@@ -35365,18 +35401,19 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
 
                 {/* Footer */}
                 <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50/60 flex items-center justify-between">
-                    <span className="text-xs text-gray-400">
-                    {filtered.length === allRows.length
-                        ? (hasMoreAdminSessions
-                            ? `Показано ${allRows.length} из ${totalSessions} сессий`
-                            : `${totalSessions} сессий`)
-                        : `${filtered.length} из ${allRows.length} загруженных (всего ${totalSessions})`}
+                    <span className="text-xs text-gray-400 tabular-nums">
+                    {hasMoreAdminSessions
+                        ? `Показано ${allRows.length} из ${matchedSessions}`
+                        : `${matchedSessions} ${hasFilters ? 'в выборке' : 'сессий'}`}
+                    {hasFilters && matchedSessions !== totalSessions && (
+                        <span className="ml-1 text-gray-300">· всего {totalSessions}</span>
+                    )}
                     {selected.size > 0 && (
                         <span className="ml-2 text-blue-600 font-medium">· {selected.size} выбрано</span>
                     )}
                     </span>
-                    {(search || roleFilter !== 'all' || deviceFilter !== 'all') && (
-                    <button onClick={() => { setSearch(''); setRole('all'); setDeviceFilter('all'); }}
+                    {hasFilters && (
+                    <button onClick={resetFilters}
                         className="text-xs text-blue-500 hover:text-blue-700 font-medium transition-colors">
                         Сбросить фильтры
                     </button>
@@ -35797,16 +35834,27 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [adminSessionsSummary, setAdminSessionsSummary] = useState({
                 total_sessions: 0,
                 total_users: 0,
+                matched_sessions: 0,
                 role_counts: { admin: 0, sv: 0, operator: 0 },
                 device_counts: { desktop: 0, mobile: 0, tablet: 0, bot: 0, unknown: 0 }
             });
-            const [adminSessionsOffset, setAdminSessionsOffset] = useState(0);
             const [adminSessionsHasMore, setAdminSessionsHasMore] = useState(false);
-            const [adminSessionsQuery, setAdminSessionsQuery] = useState('');
+            const [adminSessionsView, setAdminSessionsView] = useState(ADMIN_SESSIONS_DEFAULT_VIEW);
             const [isAdminSessionsLoading, setIsAdminSessionsLoading] = useState(false);
             const [isAdminSessionsLoadingMore, setIsAdminSessionsLoadingMore] = useState(false);
             const [revokingSessionId, setRevokingSessionId] = useState('');
             const adminSessionsRequestIdRef = useRef(0);
+            // Изменяемая часть состояния раздела живёт в ref, а не в зависимостях
+            // useCallback. Иначе fetchAdminSessions пересоздавался на каждом
+            // старте и финише загрузки, а вместе с ним — эффект с debounce в
+            // панели: таймер сбрасывался, и поиск улетал на каждой букве.
+            const adminSessionsStateRef = useRef({
+                view: ADMIN_SESSIONS_DEFAULT_VIEW,
+                offset: 0,
+                hasMore: false,
+                loading: false
+            });
+            const adminSessionsAbortRef = useRef(null);
             const [showUserEditModal, setShowUserEditModal] = useState(false);
             const [userToEdit, setUserToEdit] = useState(null);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
@@ -40064,16 +40112,25 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 });
             };
 
-            const fetchAdminSessions = useCallback(async ({ reset = true, query } = {}) => {
+            const fetchAdminSessions = useCallback(async ({ reset = true, view } = {}) => {
                 if (!user || !isAdminLikeRole) return;
 
-                const normalizedQuery = typeof query === 'string' ? query.trim() : adminSessionsQuery;
-                const nextOffset = reset ? 0 : adminSessionsOffset;
+                const state = adminSessionsStateRef.current;
+                const nextView = view ? { ...state.view, ...view } : state.view;
+                const nextOffset = reset ? 0 : state.offset;
 
-                if (!reset && (!adminSessionsHasMore || isAdminSessionsLoading || isAdminSessionsLoadingMore)) {
-                    return;
-                }
+                if (!reset && (!state.hasMore || state.loading)) return;
 
+                // Свежий запрос отменяет предыдущий. Без этого ответы по
+                // старым строкам поиска приходили после новых и оседали в
+                // списке — так и выглядела «нестабильность» раздела.
+                if (adminSessionsAbortRef.current) adminSessionsAbortRef.current.abort();
+                const controller = new AbortController();
+                adminSessionsAbortRef.current = controller;
+
+                state.view = nextView;
+                state.loading = true;
+                setAdminSessionsView(nextView);
                 if (reset) {
                     setIsAdminSessionsLoading(true);
                     setIsAdminSessionsLoadingMore(false);
@@ -40086,10 +40143,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         limit: String(ADMIN_SESSIONS_PAGE_SIZE),
                         offset: String(nextOffset)
                     });
-                    if (normalizedQuery) params.set('q', normalizedQuery);
+                    if (nextView.query) params.set('q', nextView.query);
+                    if (nextView.role && nextView.role !== 'all') params.set('role', nextView.role);
+                    if (nextView.device && nextView.device !== 'all') params.set('device', nextView.device);
+                    if (nextView.sort) params.set('sort', nextView.sort);
+                    if (nextView.dir) params.set('dir', nextView.dir);
 
                     const response = await axios.get(`${API_BASE_URL}/api/admin/sessions?${params.toString()}`, {
-                        headers: { 'X-User-Id': user.id }
+                        headers: { 'X-User-Id': user.id },
+                        signal: controller.signal
                     });
                     const data = response.data || {};
                     if (data.status === 'success' && isMounted.current && requestId === adminSessionsRequestIdRef.current) {
@@ -40099,13 +40161,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         const deviceCounts = summary.device_counts || {};
                         const pagination = data.pagination || {};
 
+                        state.offset = nextOffset + rows.length;
+                        state.hasMore = Boolean(pagination.has_more);
+
                         setAdminSessions((prev) => (reset ? rows : [...prev, ...rows]));
-                        setAdminSessionsOffset(nextOffset + rows.length);
-                        setAdminSessionsHasMore(Boolean(pagination.has_more));
-                        setAdminSessionsQuery(normalizedQuery);
+                        setAdminSessionsHasMore(state.hasMore);
                         setAdminSessionsSummary({
                             total_sessions: Number(summary.total_sessions || 0),
                             total_users: Number(summary.total_users || 0),
+                            matched_sessions: Number(
+                                pagination.matched ?? summary.matched_sessions ?? summary.total_sessions ?? 0
+                            ),
                             role_counts: {
                                 admin: Number(roleCounts.admin || 0),
                                 sv: Number(roleCounts.sv || 0),
@@ -40120,39 +40186,49 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                             }
                         });
                     } else if (data.status !== 'success') {
-                        showToast(data.error || 'Failed to fetch active sessions', 'error');
+                        showToast(data.error || 'Не удалось загрузить активные сессии', 'error');
                     }
                 } catch (err) {
+                    if (axios.isCancel(err) || err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError') return;
                     console.error('Fetch admin sessions error:', err);
-                    showToast(err.response?.data?.error || 'Failed to fetch active sessions', 'error');
+                    showToast(err.response?.data?.error || 'Не удалось загрузить активные сессии', 'error');
                 } finally {
-                    if (isMounted.current && requestId === adminSessionsRequestIdRef.current) {
-                        if (reset) setIsAdminSessionsLoading(false);
-                        else setIsAdminSessionsLoadingMore(false);
+                    if (requestId === adminSessionsRequestIdRef.current) {
+                        state.loading = false;
+                        if (isMounted.current) {
+                            if (reset) setIsAdminSessionsLoading(false);
+                            else setIsAdminSessionsLoadingMore(false);
+                        }
                     }
                 }
-            }, [
-                user,
-                isAdminLikeRole,
-                adminSessionsQuery,
-                adminSessionsOffset,
-                adminSessionsHasMore,
-                isAdminSessionsLoading,
-                isAdminSessionsLoadingMore
-            ]);
+            }, [user?.id, isAdminLikeRole]);
 
             const refreshAdminSessions = useCallback(() => {
                 fetchAdminSessions({ reset: true });
             }, [fetchAdminSessions]);
 
-            const searchAdminSessions = useCallback((query) => {
-                fetchAdminSessions({ reset: true, query });
+            // Единая точка для поиска, фильтров и сортировки: панель шлёт
+            // только изменившуюся часть, остальное берётся из текущего вида.
+            const applyAdminSessionsView = useCallback((patch) => {
+                fetchAdminSessions({ reset: true, view: patch });
             }, [fetchAdminSessions]);
 
             const loadMoreAdminSessions = useCallback(() => {
-                if (isAdminSessionsLoading || isAdminSessionsLoadingMore || !adminSessionsHasMore) return;
                 fetchAdminSessions({ reset: false });
-            }, [fetchAdminSessions, isAdminSessionsLoading, isAdminSessionsLoadingMore, adminSessionsHasMore]);
+            }, [fetchAdminSessions]);
+
+            const fetchAdminSessionDetail = useCallback(async (sessionId) => {
+                if (!sessionId || !user) return null;
+                const response = await axios.get(
+                    `${API_BASE_URL}/api/admin/sessions/${encodeURIComponent(sessionId)}`,
+                    { headers: { 'X-User-Id': user.id } }
+                );
+                const data = response.data || {};
+                if (data.status !== 'success' || !data.session) {
+                    throw new Error(data.error || 'Не удалось загрузить карточку сессии');
+                }
+                return data.session;
+            }, [user?.id]);
 
             const handleBulkRevokeAdminSessions = async (sessionIds) => {
                 if (!sessionIds || sessionIds.length === 0) return;
@@ -45755,8 +45831,9 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                     hasMoreAdminSessions={adminSessionsHasMore}
                                     fetchAdminSessions={refreshAdminSessions}
                                     loadMoreAdminSessions={loadMoreAdminSessions}
-                                    onSearchAdminSessions={searchAdminSessions}
-                                    initialSearch={adminSessionsQuery}
+                                    onApplyAdminSessionsView={applyAdminSessionsView}
+                                    onFetchAdminSessionDetail={fetchAdminSessionDetail}
+                                    sessionsView={adminSessionsView}
                                     revokingSessionId={revokingSessionId}
                                     handleRevokeAdminSession={handleRevokeAdminSession}
                                     handleBulkRevokeAdminSessions={handleBulkRevokeAdminSessions}

@@ -8950,6 +8950,35 @@ def revoke_auth_session(session_id):
         return jsonify({"error": "Internal server error"}), 500
 
 
+def _serialize_admin_session(item, current_session_id=None):
+    """Строка сессии для раздела «Сессии»."""
+    return {
+        "session_id": item["session_id"],
+        "user_id": item["user_id"],
+        "user_name": item["user_name"],
+        "user_role": item["user_role"],
+        "user_login": item["user_login"],
+        "supervisor_id": item["supervisor_id"],
+        "supervisor_name": item["supervisor_name"],
+        "avatar_url": _build_avatar_signed_url(item.get("avatar_bucket"), item.get("avatar_blob_path")),
+        "is_current": item["session_id"] == current_session_id,
+        "user_agent": item["user_agent"],
+        "ip_address": item["ip_address"],
+        "created_at": item["created_at"].isoformat() if item["created_at"] else None,
+        "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
+        "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None,
+        "sensitive_data_unlocked": bool(item.get("sensitive_data_unlocked", False)),
+        "sensitive_data_unlocked_at": (
+            item["sensitive_data_unlocked_at"].isoformat()
+            if item.get("sensitive_data_unlocked_at")
+            else None
+        ),
+        "sensitive_data_unlocked_by": item.get("sensitive_data_unlocked_by"),
+        "sensitive_data_unlocked_by_name": item.get("sensitive_data_unlocked_by_name"),
+        "sensitive_data_unlocked_by_role": item.get("sensitive_data_unlocked_by_role")
+    }
+
+
 @app.route('/api/admin/sessions', methods=['GET', 'OPTIONS'])
 @require_api_key
 def list_admin_sessions():
@@ -8977,52 +9006,114 @@ def list_admin_sessions():
         if offset < 0:
             return jsonify({"error": "offset must be >= 0"}), 400
 
-        current_session_id = _current_session_id_from_access_token()
-        sessions = db.list_all_active_sessions(limit=limit, offset=offset, search=query_text)
-        summary = db.get_all_active_sessions_summary(search=query_text)
-        serialized = []
-        for item in sessions:
-            serialized.append({
-                "session_id": item["session_id"],
-                "user_id": item["user_id"],
-                "user_name": item["user_name"],
-                "user_role": item["user_role"],
-                "user_login": item["user_login"],
-                "supervisor_id": item["supervisor_id"],
-                "supervisor_name": item["supervisor_name"],
-                "avatar_url": _build_avatar_signed_url(item.get("avatar_bucket"), item.get("avatar_blob_path")),
-                "is_current": item["session_id"] == current_session_id,
-                "user_agent": item["user_agent"],
-                "ip_address": item["ip_address"],
-                "created_at": item["created_at"].isoformat() if item["created_at"] else None,
-                "last_seen_at": item["last_seen_at"].isoformat() if item["last_seen_at"] else None,
-                "expires_at": item["expires_at"].isoformat() if item["expires_at"] else None,
-                "sensitive_data_unlocked": bool(item.get("sensitive_data_unlocked", False)),
-                "sensitive_data_unlocked_at": (
-                    item["sensitive_data_unlocked_at"].isoformat()
-                    if item.get("sensitive_data_unlocked_at")
-                    else None
-                )
-            })
+        # Фильтры и сортировка считаются в базе. Раньше клиент фильтровал уже
+        # загруженную пачку: нажав «Админы», человек видел горсть строк из
+        # первой сотни и бесконечную догрузку остальных.
+        role_filter = (request.args.get('role') or '').strip().lower()
+        if role_filter in ('', 'all'):
+            role_filter = None
+        elif role_filter not in db.ACTIVE_SESSION_ROLE_FILTERS:
+            return jsonify({"error": "Invalid role filter"}), 400
 
-        total_sessions = int(summary.get("total_sessions", 0))
-        returned = len(serialized)
-        has_more = (offset + returned) < total_sessions
+        device_filter = (request.args.get('device') or '').strip().lower()
+        if device_filter in ('', 'all'):
+            device_filter = None
+        elif device_filter not in db.ACTIVE_SESSION_DEVICE_FILTERS:
+            return jsonify({"error": "Invalid device filter"}), 400
+
+        sort_key = (request.args.get('sort') or '').strip()
+        if sort_key and sort_key not in db.ACTIVE_SESSION_SORT_KEYS:
+            return jsonify({"error": "Invalid sort key"}), 400
+        sort_dir = (request.args.get('dir') or '').strip().lower()
+        if sort_dir and sort_dir not in ('asc', 'desc'):
+            return jsonify({"error": "Invalid sort direction"}), 400
+
+        current_session_id = _current_session_id_from_access_token()
+        page = db.get_active_sessions_page(
+            limit=limit,
+            offset=offset,
+            search=query_text,
+            role=role_filter,
+            device=device_filter,
+            sort_key=sort_key or None,
+            sort_dir=sort_dir or None
+        )
+        serialized = [
+            _serialize_admin_session(item, current_session_id)
+            for item in page["sessions"]
+        ]
 
         return jsonify({
             "status": "success",
             "sessions": serialized,
-            "summary": summary,
+            "summary": page["summary"],
             "pagination": {
                 "limit": limit,
                 "offset": offset,
-                "returned": returned,
-                "has_more": has_more
+                "returned": len(serialized),
+                "matched": page["matched_sessions"],
+                "has_more": page["has_more"]
             },
-            "query": query_text
+            "query": query_text,
+            "filters": {
+                "role": role_filter or 'all',
+                "device": device_filter or 'all',
+                "sort": sort_key or 'last_seen_at',
+                "dir": sort_dir or 'desc'
+            }
         }), 200
     except Exception as e:
         logging.error(f"list_admin_sessions error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route('/api/admin/sessions/<session_id>', methods=['GET', 'OPTIONS'])
+@require_api_key
+def get_admin_session_detail(session_id):
+    """Карточка сессии: владелец, устройство, сроки и журнал выдачи доступа."""
+    try:
+        requester_id = getattr(g, 'user_id', None)
+        if not requester_id:
+            return jsonify({"error": "Unauthorized"}), 401
+
+        requester = db.get_user(id=requester_id)
+        if not requester or not _is_admin_role(requester[3]):
+            return jsonify({"error": "Forbidden: only admins can access"}), 403
+
+        detail = db.get_active_session_detail(session_id)
+        if not detail:
+            return jsonify({"error": "Session not found"}), 404
+
+        current_session_id = _current_session_id_from_access_token()
+        payload = _serialize_admin_session(detail, current_session_id)
+        payload.update({
+            "revoked_at": detail["revoked_at"].isoformat() if detail.get("revoked_at") else None,
+            "is_active": detail.get("revoked_at") is None,
+            "user_status": detail.get("user_status"),
+            "has_telegram": bool(detail.get("telegram_id")),
+            "department_id": detail.get("department_id"),
+            "department_name": detail.get("department_name"),
+            "device_type": detail.get("device_type"),
+            "user_active_sessions": detail.get("user_active_sessions", 0),
+            "user_total_sessions": detail.get("user_total_sessions", 0),
+            "access_events": [
+                {
+                    "id": event["id"],
+                    "action": event["action"],
+                    "actor_id": event["actor_id"],
+                    "actor_name": event["actor_name"],
+                    "actor_role": event["actor_role"],
+                    "ip_address": event["ip_address"],
+                    "user_agent": event["user_agent"],
+                    "created_at": event["created_at"].isoformat() if event["created_at"] else None
+                }
+                for event in detail.get("access_events", [])
+            ]
+        })
+
+        return jsonify({"status": "success", "session": payload}), 200
+    except Exception as e:
+        logging.error(f"get_admin_session_detail error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 
@@ -9187,7 +9278,15 @@ def revoke_sensitive_access():
         if not session_id:
             return jsonify({"error": "Active session not found"}), 401
 
-        db.set_session_sensitive_access(session_id=session_id, user_id=requester_id, unlocked=False)
+        db.set_session_sensitive_access(
+            session_id=session_id,
+            user_id=requester_id,
+            unlocked=False,
+            actor_id=requester_id,
+            actor_role=requester[3],
+            ip_address=_client_ip(),
+            user_agent=request.headers.get('User-Agent')
+        )
         return jsonify({"status": "success", "granted": False}), 200
     except Exception as e:
         logging.error(f"revoke_sensitive_access error: {e}", exc_info=True)
@@ -9259,7 +9358,11 @@ def approve_sensitive_access():
         updated = db.set_session_sensitive_access(
             session_id=claims["session_id"],
             user_id=operator_id,
-            unlocked=True
+            unlocked=True,
+            actor_id=approver_id,
+            actor_role=approver[3],
+            ip_address=_client_ip(),
+            user_agent=request.headers.get('User-Agent')
         )
         if not updated:
             return jsonify({"error": "Failed to activate access for operator session"}), 409
