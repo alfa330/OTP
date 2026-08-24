@@ -56,7 +56,14 @@ const WORLD_AXIS = {
 const CAR_LENGTH = 4.4;
 
 /* Углы обзора телефона: сверхширик 0,5x и основной модуль 1x. Фотоконтроль
-   снимают шириком — только с ним машина влезает целиком с трёх метров. */
+   снимают шириком — только с ним машина влезает целиком с трёх метров.
+ *
+ * Угол задан по ДЛИННОЙ стороне кадра, а не по вертикали. Причина простая: в
+ * длинную сторону и вписывают машину — кузов снимают горизонтально, салон
+ * вертикально. Держи мы вертикальный угол постоянным, поворот телефона менял
+ * бы охват вдоль машины вдвое, и один и тот же силуэт то жал бы её, то оставлял
+ * четверть кадра пустой. А заодно поехали бы пороги дистанции: они посчитаны
+ * ровно для этих 64° вдоль машины. */
 const PHONE_FOV_WIDE = 64;
 const PHONE_FOV_MAIN = 42;
 
@@ -191,6 +198,9 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
      * дешевле отдельного холста (один контекст WebGL вместо двух) и дешевле
      * рендера в текстуру с последующей выдачей её в DOM. */
     const phoneCamera = new THREE.PerspectiveCamera(PHONE_FOV_WIDE, 0.46, 0.1, 120);
+    /* Угол вдоль машины. Вертикальный fov камеры считается из него на каждом
+       кадре: он зависит от того, как повёрнут телефон. */
+    let phoneFovLong = PHONE_FOV_WIDE;
     let phoneRect = null;
     const root = new THREE.Group();
     scene.add(root);
@@ -228,12 +238,14 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             Math.cos(a) * state.distance,
         );
         camera.lookAt(0, LOOK_HEIGHT, 0);
-        /* Телефон человек держит перед собой, опустив руки от глаз. Целится
-           объектив чуть НИЖЕ середины борта: так машина поднимается к середине
-           экрана и попадает в рамку-подсказку, а не сползает под неё. */
+        /* Телефон человек держит перед собой, опустив руки от глаз, поэтому
+           объектив ниже глаз. А целится он в СЕРЕДИНУ борта: силуэт нарисован
+           по центру кадра, и машина обязана лечь туда же. Прежний прицел был
+           уведён на полметра ниже — под старую рамку-уголки, — и машина
+           заметно поднималась над силуэтом. */
         phoneCamera.position.copy(camera.position);
         phoneCamera.position.y -= 0.14;
-        phoneCamera.lookAt(0, LOOK_HEIGHT - 0.55, 0);
+        phoneCamera.lookAt(0, LOOK_HEIGHT - 0.08, 0);
     }
 
     function tick() {
@@ -296,7 +308,14 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
             renderer.setScissorTest(true);
             renderer.setViewport(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
             renderer.setScissor(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
-            phoneCamera.aspect = phoneRect.w / phoneRect.h;
+            const aspect = phoneRect.w / phoneRect.h;
+            phoneCamera.aspect = aspect;
+            /* three знает только вертикальный угол, поэтому у горизонтального
+               кадра его пересчитываем из длинной стороны. */
+            phoneCamera.fov = aspect >= 1
+                ? THREE.MathUtils.radToDeg(2 * Math.atan(
+                    Math.tan(THREE.MathUtils.degToRad(phoneFovLong) / 2) / aspect))
+                : phoneFovLong;
             phoneCamera.updateProjectionMatrix();
             renderer.render(scene, phoneCamera);
             renderer.setScissorTest(false);
@@ -622,8 +641,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
            Меняем угол обзора, а не расстояние: человек стоит там же, где стоял,
            а в кадр попадает больше или меньше — как на настоящем телефоне. */
         setPhoneWide(isWide) {
-            phoneCamera.fov = isWide ? PHONE_FOV_WIDE : PHONE_FOV_MAIN;
-            phoneCamera.updateProjectionMatrix();
+            phoneFovLong = isWide ? PHONE_FOV_WIDE : PHONE_FOV_MAIN;
             invalidate();
         },
 
