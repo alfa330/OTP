@@ -43,7 +43,6 @@ def _sessions_api():
         '_active_session_device_sql', '_build_active_sessions_where_clause',
         '_active_sessions_order_by', '_active_session_row',
         '_active_sessions_summary_sql', '_active_sessions_summary_row',
-        'list_all_active_sessions', 'get_all_active_sessions_summary',
         'get_active_sessions_page', 'get_active_session_detail',
         'list_session_access_events', 'set_session_sensitive_access',
     }

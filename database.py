@@ -27469,38 +27469,6 @@ class Database:
             }
         }
 
-    def list_all_active_sessions(self, limit: Optional[int] = None, offset: int = 0,
-                                 search: Optional[str] = None, role: Optional[str] = None,
-                                 device: Optional[str] = None, sort_key: Optional[str] = None,
-                                 sort_dir: Optional[str] = None):
-        where_sql, params = self._build_active_sessions_where_clause(
-            search=search, role=role, device=device)
-
-        query = f"""
-            SELECT {self.ACTIVE_SESSION_COLUMNS_SQL}
-            {self.ACTIVE_SESSION_FROM_SQL}
-            WHERE {where_sql}
-            {self._active_sessions_order_by(sort_key, sort_dir)}
-        """
-
-        final_params = list(params)
-        if limit is not None:
-            query += " LIMIT %s"
-            final_params.append(max(1, int(limit)))
-        if offset:
-            query += " OFFSET %s"
-            final_params.append(max(0, int(offset)))
-
-        with self._get_cursor() as cursor:
-            cursor.execute(query, tuple(final_params))
-            return [self._active_session_row(row) for row in cursor.fetchall()]
-
-    def get_all_active_sessions_summary(self, search: Optional[str] = None):
-        where_sql, params = self._build_active_sessions_where_clause(search=search)
-        with self._get_cursor() as cursor:
-            cursor.execute(self._active_sessions_summary_sql(where_sql), tuple(params))
-            return self._active_sessions_summary_row(cursor.fetchone())
-
     def get_active_sessions_page(self, limit: int = 100, offset: int = 0,
                                  search: Optional[str] = None, role: Optional[str] = None,
                                  device: Optional[str] = None, sort_key: Optional[str] = None,
