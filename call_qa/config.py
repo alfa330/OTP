@@ -9,18 +9,40 @@ _ENV_FILE = os.path.join(os.path.dirname(__file__), os.pardir, ".env.codex.local
 
 @functools.lru_cache(maxsize=1)
 def _dev_env() -> dict:
-    """Парсит .env.codex.local (только для локальной разработки)."""
+    """Парсит .env.codex.local (только для локальной разработки).
+
+    Значение может занимать НЕСКОЛЬКО СТРОК: JSON сервисного аккаунта в файле лежит
+    с переносами, и построчный разбор давал по ключу
+    GOOGLE_APPLICATION_CREDENTIALS_CONTENT ровно один символ «{». Из-за этого Vertex
+    (эмбеддинги вики и разбора звонков, теперь ещё и оценка на Gemini) с машины
+    разработчика не работал вовсе, а выглядело это как «провайдер молча отвалился».
+    Поэтому у значения, начинающегося с «{», собираем строки, пока JSON не закроется.
+    """
     out = {}
     try:
         with open(_ENV_FILE, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip().strip('"').strip("'")
+            lines = f.read().splitlines()
     except FileNotFoundError:
-        pass
+        return out
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip('"').strip("'")
+        if value.startswith("{"):
+            buffer = value
+            while i < len(lines):
+                try:
+                    json.loads(buffer)
+                    break
+                except ValueError:
+                    buffer += "\n" + lines[i]
+                    i += 1
+            value = buffer
+        out[key.strip()] = value
     return out
 
 
@@ -103,8 +125,23 @@ EMBED_MAX_CHUNKS = int(env("EMBED_MAX_CHUNKS", "16"))
 # что Opus точнее Sonnet в разы (MAE 5 vs 18-24), а двухуровневая схема с разборами
 # эскалирует ~все звонки и выходит ДОРОЖЕ чистого Opus. Механизм эскалации сохранён:
 # задайте CLAUDE_MODEL_BULK дешевле HARD — и двухуровневость включится сама. ---
-CLAUDE_MODEL_BULK = env("CLAUDE_MODEL_BULK", "claude-opus-4-8")     # первый проход
-CLAUDE_MODEL_HARD = env("CLAUDE_MODEL_HARD", "claude-opus-4-8")     # эскалация (если отличается от BULK)
+#
+# Провайдер выбирается ПО ИМЕНИ МОДЕЛИ (см. call_qa/providers.py): всё, что начинается
+# с «gemini», уходит в Vertex, остальное — в Anthropic. Отдельного переключателя нет
+# намеренно: модель уже входит в evaluation_fingerprint и в ai_review_cache, и второй
+# независимый флаг означал бы оценки, подписанные не тем провайдером.
+# Имена AI_QA_MODEL_* — основные; CLAUDE_MODEL_* оставлены как совместимость, потому
+# что они уже заданы на Render и в скриптах. ---
+#
+# Умолчание — `gemini-3.7-flash`. Не ради экономии: баланс Anthropic исчерпан, и на
+# Claude сейчас отказывает даже подсчёт токенов, то есть раздел не работает вовсе.
+# Из моделей Gemini выбрана эта: замер 24.08.2026 на 24 звонках Основа ОП дал ей
+# лучшее совпадение штрафующих вердиктов с Opus 4.8 (84,8 %) при 1 603 выходных
+# токенах и 24 с на звонок. Оговорка, которую нельзя терять: Opus она НЕ повторяет —
+# около трети его штрафов пропускает и примерно столько же ставит своих.
+# Вернуться на Claude — одна переменная: AI_QA_MODEL_BULK=claude-opus-4-8 (и HARD).
+CLAUDE_MODEL_BULK = env("AI_QA_MODEL_BULK") or env("CLAUDE_MODEL_BULK", "gemini-3.7-flash")
+CLAUDE_MODEL_HARD = env("AI_QA_MODEL_HARD") or env("CLAUDE_MODEL_HARD", "gemini-3.7-flash")
 ESCALATE_CONF = float(env("CLAUDE_ESCALATE_CONF", "0.6"))          # не выше порога — критерий уходит на HARD-модель
 # Тег для кэша/меты (при смене моделей меняется → старые кэш-оценки не подмешиваются).
 CLAUDE_MODEL = env("CLAUDE_MODEL", f"{CLAUDE_MODEL_BULK}+{CLAUDE_MODEL_HARD}")
@@ -117,6 +154,37 @@ CLAUDE_EFFORT = env("CLAUDE_EFFORT", "high")
 # Пустое значение возвращает дефолтные 5 минут (для интерактивной оценки так и надо:
 # одиночный вызов не окупает удвоенную запись).
 CLAUDE_CACHE_TTL_BATCH = env("CLAUDE_CACHE_TTL_BATCH", "1h") or None
+
+# --- LLM (Vertex / Gemini). Значения по умолчанию — из замера 24.08.2026 на 24 звонках
+# Основа ОП тем же промптом и той же схемой, что у Claude. ---
+# Регион: модели 3.x отдаются только в `global` и `us-central1`; во Франкфурте (там прод)
+# доступны лишь 2.5.x. `global` маршрутизирует сам и принимает пакетные задания на 3.x,
+# тогда как us-central1 отклоняет их с MODEL_NOT_SUPPORTED_FOR_BATCH.
+VERTEX_LLM_REGION = env("VERTEX_LLM_REGION", "global")
+VERTEX_TEMPERATURE = float(env("VERTEX_TEMPERATURE", "0.1"))
+VERTEX_TIMEOUT = float(env("VERTEX_TIMEOUT", "180"))
+VERTEX_TRIES = int(env("VERTEX_TRIES", "5"))
+VERTEX_RETRY_BASE_S = float(env("VERTEX_RETRY_BASE_S", "8"))
+# «Мышление» тарифицируется как выход. На 3.5-flash гашение даёт ровный ноль, у
+# 3.7-flash протекает ~178 токенов, у 3.1-pro не работает вовсе (3 510 токенов и 60 с
+# на звонок). Пустое значение = не трогать параметр.
+_VERTEX_THINKING_RAW = env("VERTEX_THINKING_BUDGET", "0")
+VERTEX_THINKING_BUDGET = (int(_VERTEX_THINKING_RAW)
+                          if str(_VERTEX_THINKING_RAW).strip() != "" else None)
+# Неявный кеш промпта у Vertex срабатывает через раз (3 попадания из 9, включая промах
+# на двух ОДИНАКОВЫХ запросах подряд), поэтому системный блок кешируется явно через
+# cachedContents: замер даёт попадание 4 155 токенов из ~5 250 на каждом запросе.
+# В деньгах на месяц Основа ОП это 49 тыс ₸ против 62 тыс.
+VERTEX_EXPLICIT_CACHE = str(env("VERTEX_EXPLICIT_CACHE", "1")).strip().lower() in {
+    "1", "true", "yes", "on",
+}
+VERTEX_CACHE_TTL_S = int(env("VERTEX_CACHE_TTL_S", "3600"))
+# У Vertex пакетный режим — задание с файлом на GCS, а не один HTTP-запрос, как у
+# Anthropic. Пока он не написан, ночной прогон на Gemini идёт последовательными
+# вызовами в несколько потоков: это дороже ровно вдвое (нет скидки батча), но работает
+# без нового хранилища. Потолок скромный: у Vertex общая квота на модель, и плотный
+# прогон отвечает 429.
+VERTEX_LOCAL_BATCH_WORKERS = int(env("VERTEX_LOCAL_BATCH_WORKERS", "4"))
 
 
 def anthropic_key():

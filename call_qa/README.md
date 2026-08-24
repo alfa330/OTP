@@ -296,15 +296,15 @@ SELECT rule_status, index_status, count(*)
 | `DATABASE_URL` или `POSTGRES_*` | Read-write runtime, миграции, review и индексирование. |
 | `DATABASE_URL_READONLY` | Отдельное read-only подключение; при отсутствии используется `POSTGRES_*` в read-only session. |
 | `SONIOX_API_KEY` | ASR. |
-| `ANTHROPIC_API_KEY` или `CLAUDE_API_KEY` | Claude. |
+| `ANTHROPIC_API_KEY` или `CLAUDE_API_KEY` | Claude (нужен, только если основная модель — Claude, и всегда — для описания вложений чатов). |
 | `GCS_BUCKET` | Bucket аудиозаписей. |
-| `GOOGLE_APPLICATION_CREDENTIALS_CONTENT` | JSON service account для Vertex embeddings. |
+| `GOOGLE_APPLICATION_CREDENTIALS_CONTENT` | JSON service account для Vertex — и embeddings, и генерация на Gemini. |
 
 ### Модели и индекс
 
 | Переменная | Default | Назначение |
 |---|---:|---|
-| `CLAUDE_MODEL_BULK` | `claude-opus-4-8` | Основной проход. |
+| `AI_QA_MODEL_BULK` (или `CLAUDE_MODEL_BULK`) | `gemini-3.7-flash` | Основной проход. Провайдер выбирается ПО ИМЕНИ МОДЕЛИ: всё, что начинается с `gemini`, уходит в Vertex, остальное — в Anthropic. |
 | `CLAUDE_MODEL_VISION` | `claude-sonnet-5` | Описание изображений из чатов. |
 | `CLAUDE_VISION_EFFORT` | `low` | Effort описания вложений (рассуждение отключено). |
 | `CLAUDE_DOCUMENT_MAX_TOKENS` | `3000` | Предел ответа по документу (обрезанный ответ = неудача). |
@@ -313,7 +313,12 @@ SELECT rule_status, index_status, count(*)
 | `WZ_MIN_OPERATOR_MESSAGES` | `2` | Минимум ответов оператора в эпизоде. |
 | `WZ_MEDIA_MAX_PER_EPISODE` | `24` | Максимум расшифровываемых вложений на эпизод. |
 | `WZ_MEDIA_MAX_BYTES` | `5242880` | Лимит размера вложения (Anthropic: 5 МБ на картинку). |
-| `CLAUDE_MODEL_HARD` | `claude-opus-4-8` | Эскалация спорных критериев. |
+| `AI_QA_MODEL_HARD` (или `CLAUDE_MODEL_HARD`) | `gemini-3.7-flash` | Эскалация спорных критериев. |
+| `VERTEX_LLM_REGION` | `global` | Регион генерации. Модели 3.x есть только в `global` и `us-central1`; во Франкфурте — лишь 2.5.x. |
+| `VERTEX_THINKING_BUDGET` | `0` | Гашение «мышления» (тарифицируется как выход). Пусто — не трогать параметр. |
+| `VERTEX_EXPLICIT_CACHE` | `1` | Явный `cachedContents` для системного блока. Неявный кеш Vertex срабатывает через раз, явный — всегда. |
+| `VERTEX_CACHE_TTL_S` | `3600` | Время жизни явного кеша. |
+| `VERTEX_LOCAL_BATCH_WORKERS` | `4` | Потоков в ночном прогоне на Gemini (пакетного API у нас для него пока нет). |
 | `CLAUDE_EFFORT` | `high` | Effort модели. |
 | `CLAUDE_ESCALATE_CONF` | `0.6` | Порог эскалации. |
 | `EMBEDDINGS_PROVIDER` | `vertex` | `vertex` или локальный `selfhost`. |
@@ -342,7 +347,7 @@ SELECT rule_status, index_status, count(*)
 | `RAG_REINDEX_MAX_ATTEMPTS` | `5` | Максимум durable retry reindex job с экспоненциальной задержкой. |
 | `AI_QA_CODE_VERSION` | `ai-qa-2026-07-v2` | Версия evaluator в fingerprint; меняйте при несовместимой логике. |
 
-Для денежной observability можно задать тарифы в USD за миллион токенов: `CLAUDE_INPUT_USD_PER_MTOK`, `CLAUDE_OUTPUT_USD_PER_MTOK`, `CLAUDE_CACHE_READ_USD_PER_MTOK`, `CLAUDE_CACHE_WRITE_USD_PER_MTOK`. Для Batch используются отдельные `CLAUDE_BATCH_INPUT_USD_PER_MTOK`, `CLAUDE_BATCH_OUTPUT_USD_PER_MTOK`, `CLAUDE_BATCH_CACHE_READ_USD_PER_MTOK`, `CLAUDE_BATCH_CACHE_WRITE_USD_PER_MTOK`. Без них usage сохраняется, а cost остаётся `null`, без выдуманной цены.
+Для денежной observability можно задать тарифы в USD за миллион токенов: `CLAUDE_INPUT_USD_PER_MTOK`, `CLAUDE_OUTPUT_USD_PER_MTOK`, `CLAUDE_CACHE_READ_USD_PER_MTOK`, `CLAUDE_CACHE_WRITE_USD_PER_MTOK`. Для Batch используются отдельные `CLAUDE_BATCH_INPUT_USD_PER_MTOK`, `CLAUDE_BATCH_OUTPUT_USD_PER_MTOK`, `CLAUDE_BATCH_CACHE_READ_USD_PER_MTOK`, `CLAUDE_BATCH_CACHE_WRITE_USD_PER_MTOK`. Без них usage сохраняется, а cost остаётся `null`, без выдуманной цены. У Gemini ставки другие, поэтому для него читается свой префикс: `GEMINI_INPUT_USD_PER_MTOK`, `GEMINI_OUTPUT_USD_PER_MTOK`, `GEMINI_CACHE_READ_USD_PER_MTOK`, `GEMINI_CACHE_WRITE_USD_PER_MTOK` — считать расход Gemini по ставкам `CLAUDE_*` значило бы завысить счёт на порядок.
 
 Пороги нельзя тюнинговать «на глаз» в production: изменение любого retrieval-параметра меняет fingerprint и должно пройти повторный gold/shadow benchmark.
 

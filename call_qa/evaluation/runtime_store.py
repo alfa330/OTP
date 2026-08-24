@@ -9,6 +9,7 @@ import uuid
 from psycopg2.extras import Json
 
 from .. import config
+from .. import providers
 from .fingerprint import content_hash
 
 
@@ -430,13 +431,19 @@ def _usage_totals(llm_meta: dict | None) -> dict:
     return totals
 
 
-def _estimate_cost(usage: dict) -> float | None:
-    """Use deployment-supplied prices; never bake a time-sensitive price table."""
+def _estimate_cost(usage: dict, model: str | None = None) -> float | None:
+    """Use deployment-supplied prices; never bake a time-sensitive price table.
+
+    Префикс переменных зависит от провайдера: у Gemini другие ставки, и считать его
+    расход по CLAUDE_* значило бы завысить счёт на порядок. Если для провайдера цены
+    не заданы, стоимость остаётся пустой — это честнее выдуманного числа.
+    """
+    prefix = "GEMINI_" if providers.provider_for_tag(model or "") == providers.VERTEX else "CLAUDE_"
     keys = {
-        "input_tokens": "CLAUDE_INPUT_USD_PER_MTOK",
-        "output_tokens": "CLAUDE_OUTPUT_USD_PER_MTOK",
-        "cache_read_tokens": "CLAUDE_CACHE_READ_USD_PER_MTOK",
-        "cache_write_tokens": "CLAUDE_CACHE_WRITE_USD_PER_MTOK",
+        "input_tokens": f"{prefix}INPUT_USD_PER_MTOK",
+        "output_tokens": f"{prefix}OUTPUT_USD_PER_MTOK",
+        "cache_read_tokens": f"{prefix}CACHE_READ_USD_PER_MTOK",
+        "cache_write_tokens": f"{prefix}CACHE_WRITE_USD_PER_MTOK",
     }
     prices = {}
     for usage_key, env_key in keys.items():
@@ -478,7 +485,7 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
     """Atomically persist one final run and its normalized retrieval facts."""
     usage = _usage_totals(llm_meta)
     if estimated_cost is _AUTO_COST:
-        estimated_cost = _estimate_cost(usage)
+        estimated_cost = _estimate_cost(usage, model)
     latency_ms = max(0, round((completed_at - started_at).total_seconds() * 1000))
     trace = (payload or {}).get("_retrieval_trace") or (payload or {}).get("retrieval_trace") or {}
     retrieval_hash = content_hash(retrieval_config or {})
@@ -497,13 +504,13 @@ def save_evaluation_run(*, run_id: str, call_id: int, direction_id: int,
                             per_criterion,payload,error_code,error_message,latency_ms,input_tokens,
                             output_tokens,cache_read_tokens,cache_write_tokens,estimated_cost,
                             started_at,completed_at)
-                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'anthropic',%s,%s,%s,%s,%s,%s,
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                                  %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (str(run_id), subject_kind, int(call_id), int(direction_id), transcript_cache_id,
                      transcript_hash, evaluation_fingerprint,
                      int(fingerprint_components.get("fingerprint_version") or 1),
                      Json(fingerprint_components), run_kind, pair_id, primary_run_id,
-                     model, model_config_hash,
+                     providers.provider_for_tag(model), model, model_config_hash,
                      prompt_hash, output_schema_hash, output_schema_version, criteria_hash,
                      criterion_config_hash, scale_revision_id, knowledge_snapshot_id,
                      knowledge_revision, Json(retrieval_config or {}), retrieval_hash, status,

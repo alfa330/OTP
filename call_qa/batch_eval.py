@@ -35,6 +35,7 @@ import httpx
 
 from . import config
 from . import llm
+from . import providers
 from . import media as media_mod
 from . import subjects as subjects_mod
 from .asr import soniox
@@ -505,6 +506,67 @@ def _dir_cache() -> dict:
     return get
 
 
+_LOCAL_PREFIX = "local:"
+
+
+def _run_locally(requests_: list[dict], workdir: str, marker: str) -> str:
+    """Пакетный прогон без Batch API — для провайдеров, у которых его формы у нас нет.
+
+    У Vertex пакетный режим — задание с файлом на GCS (проверено: работает и на
+    моделях 3.x, но только в регионе `global`), и это отдельное хранилище со своей
+    уборкой. Пока оно не написано, ночной прогон на Gemini идёт обычными вызовами в
+    несколько потоков. Дороже ровно вдвое (нет скидки батча) и не мгновенно, но
+    остальной конвейер — отпечатки, локи, карточки, сохранение прогонов — работает
+    без единой правки: результат укладывается в ту же форму, что отдаёт Anthropic.
+
+    Результат пишется файлом до возврата: прогон в 19 тыс. звонков нельзя терять
+    из-за обрыва на предпоследнем.
+    """
+    path = os.path.join(workdir, "local_results.jsonl")
+    done = set()
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    done.add(json.loads(line).get("custom_id"))
+                except ValueError:
+                    continue
+        log(f"локальный прогон продолжается: уже готово {len(done)}")
+    todo = [r for r in requests_ if r["custom_id"] not in done]
+    log(f"пакетного API у провайдера нет — считаю сам: {len(todo)} оценок, "
+        f"модель {config.CLAUDE_MODEL_BULK}, потоков {config.VERTEX_LOCAL_BATCH_WORKERS}")
+
+    def one(item):
+        custom_id = item["custom_id"]
+        try:
+            parsed = llm.post_body(item["params"], timeout=config.VERTEX_TIMEOUT,
+                                   include_meta=True)
+            meta = parsed.pop("_llm_meta", None) or {}
+            return {"custom_id": custom_id, "result": {"type": "succeeded", "message": {
+                "id": meta.get("request_id"), "model": meta.get("model"),
+                "usage": meta.get("usage") or {},
+                "content": [{"type": "text", "text": json.dumps(parsed, ensure_ascii=False)}],
+            }}}
+        except Exception as exc:
+            log(f"{custom_id}: оценка не удалась — {exc}")
+            return {"custom_id": custom_id,
+                    "result": {"type": "errored", "error": {"message": str(exc)[:500]}}}
+
+    with open(path, "a", encoding="utf-8") as out:
+        with ThreadPoolExecutor(max_workers=max(1, config.VERTEX_LOCAL_BATCH_WORKERS)) as pool:
+            for done_count, row in enumerate(pool.map(one, todo), 1):
+                out.write(json.dumps(row, ensure_ascii=False) + chr(10))
+                out.flush()
+                if done_count % 25 == 0:
+                    log(f"  посчитано {done_count} из {len(todo)}")
+    bid = _LOCAL_PREFIX + path
+    with open(marker, "w", encoding="utf-8") as fh:
+        fh.write(bid)
+        fh.flush()
+        os.fsync(fh.fileno())
+    return bid
+
+
 def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) -> str | None:
     """Собирает батч оценок и отправляет. Возвращает batch_id (или существующий из workdir)."""
     marker = os.path.join(workdir, "batch_id.txt")
@@ -513,6 +575,14 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             raise RuntimeError("batch_id exists without the frozen Batch manifest")
         bid = open(marker).read().strip()
         log(f"нашёл незавершённый батч {bid} — продолжаю его")
+        if bid.startswith(_LOCAL_PREFIX):
+            # Локальный прогон мог оборваться на середине, а process_results требует
+            # результат по КАЖДОЙ заявке манифеста. Досчитываем остаток — уже готовые
+            # заявки _run_locally пропускает по файлу.
+            manifest = _load_manifest(workdir)
+            return _run_locally(
+                [{"custom_id": cid, "params": entry["request_body"]}
+                 for cid, entry in manifest["entries"].items()], workdir, marker)
         return bid
 
     manifest = _load_manifest(workdir)
@@ -585,6 +655,9 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
         os.remove(_manifest_path(workdir))
         log("нечего отправлять в батч")
         return None
+    if providers.provider_for(config.CLAUDE_MODEL_BULK) != providers.ANTHROPIC:
+        return _run_locally(requests_, workdir, marker)
+
     log(f"отправляю батч: {len(requests_)} оценок, модель {config.CLAUDE_MODEL_BULK}")
 
     def _post():
@@ -603,6 +676,9 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
 
 def poll_batch(batch_id: str, interval: int = 30) -> dict:
     """Ждёт завершения батча (обычно < 1 часа)."""
+    if batch_id.startswith(_LOCAL_PREFIX):
+        path = batch_id[len(_LOCAL_PREFIX):]
+        return {"processing_status": "ended", "results_path": path}
     def _get():
         r = httpx.get(f"{llm.BATCHES_URL}/{batch_id}", headers=llm._headers(), timeout=60.0)
         r.raise_for_status()
@@ -638,7 +714,11 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
         rr = httpx.get(batch["results_url"], headers=llm._headers(), timeout=300.0)
         rr.raise_for_status()
         return rr.text
-    results_text = _retry(_results, what="результаты батча")
+    if batch.get("results_path"):
+        with open(batch["results_path"], encoding="utf-8") as fh:
+            results_text = fh.read()
+    else:
+        results_text = _retry(_results, what="результаты батча")
     for line in results_text.splitlines():
         item = json.loads(line)
         custom_id = item.get("custom_id")

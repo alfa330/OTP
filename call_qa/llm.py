@@ -1,6 +1,11 @@
-"""Единая точка вызова Claude (сырой httpx, без anthropic SDK — см. заголовок evaluator.py).
+"""Единая точка вызова модели (сырой httpx, без SDK — см. заголовок evaluator.py).
 Структурный вывод через output_config.format (json_schema). Используется оценщиком,
-формулировкой разборов и пакетной оценкой — правки протокола API делаются здесь один раз."""
+формулировкой разборов и пакетной оценкой — правки протокола API делаются здесь один раз.
+
+Провайдеров два: Anthropic (Claude) и Vertex (Gemini). Выбор — по имени модели, а не
+по отдельному флагу, поэтому вызывающему коду достаточно передать `model`; всё, что
+начинается с «gemini», уходит в call_qa/providers.py. Так подпись оценки (модель в
+evaluation_fingerprint) и фактический адресат запроса не могут разойтись."""
 from __future__ import annotations
 import json
 import time
@@ -8,6 +13,7 @@ import time
 import httpx
 
 from . import config
+from . import providers
 
 _API_URL = "https://api.anthropic.com/v1/messages"
 BATCHES_URL = "https://api.anthropic.com/v1/messages/batches"
@@ -36,6 +42,10 @@ def build_body(*, model, system, user, schema, max_tokens=8000, cache_system=Fal
     effort/thinking переопределяют дефолты для дешёвых вспомогательных вызовов
     (описание вложений): рассуждать над картинкой не нужно, а effort='high'
     удваивал бы её цену."""
+    if providers.provider_for(model) == providers.VERTEX:
+        return providers.build_body(
+            model=model, system=system, user=user, schema=schema, max_tokens=max_tokens,
+            cache_system=cache_system, cache_ttl=cache_ttl, effort=effort, thinking=thinking)
     sys_block = {"type": "text", "text": system}
     if cache_system:
         sys_block["cache_control"] = {"type": "ephemeral"}
@@ -63,6 +73,8 @@ def parse_message(message: dict) -> dict:
 
 
 def post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
+    if body.get("_provider") == providers.VERTEX:
+        return providers.post_body(body, timeout=timeout, include_meta=include_meta)
     started = time.perf_counter()
     r = httpx.post(_API_URL, json=body, headers=_headers(), timeout=timeout)
     r.raise_for_status()
