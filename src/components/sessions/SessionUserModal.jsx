@@ -17,11 +17,20 @@ import { DEVICE_LABELS, parseUserAgent, roleLabel, sessionWord, sessionWordAcc }
 const dash = (value) => (value === null || value === undefined || value === '' ? '—' : value);
 
 const Row = ({ label, children, mono = false }) => (
-    <div className="flex items-start justify-between gap-4 px-3.5 py-2.5">
+    <div className="flex items-start justify-between gap-4 bg-white px-3.5 py-2.5">
         <span className="shrink-0 text-[13px] text-slate-500">{label}</span>
         <span className={`min-w-0 text-right text-[13px] font-medium text-slate-800 ${mono ? 'font-mono tabular-nums break-all' : ''}`}>
             {children}
         </span>
+    </div>
+);
+
+/* Пары «поле — значение» в две колонки. В одну на широкой карточке метка и
+   значение разъезжались на всю ширину, и глазу приходилось прыгать через
+   полкарточки. Разделители рисует сама сетка через gap-px по фону. */
+const FactGrid = ({ children }) => (
+    <div className={`${iosCard} overflow-hidden`}>
+        <div className="grid grid-cols-1 gap-px bg-slate-100 sm:grid-cols-2">{children}</div>
     </div>
 );
 
@@ -36,6 +45,18 @@ const Section = ({ title, children, right = null }) => (
 );
 
 const ACCESS_ACTION_LABEL = { granted: 'Доступ открыт', revoked: 'Доступ закрыт' };
+
+const EMPLOYMENT_LABELS = {
+    working: 'Работает',
+    fired: 'Уволен',
+    dismissal: 'На увольнении',
+    bs: 'Б/С',
+    sick_leave: 'Больничный',
+    annual_leave: 'Отпуск',
+    unpaid_leave: 'Б/С'
+};
+
+const employmentLabel = (status) => EMPLOYMENT_LABELS[status] || dash(status);
 
 /* Сессий у одного человека бывает под сотню, и списком они превращают карточку
    в бесконечную ленту: до подвала с «Прервать все» не дойти. Порог низкий
@@ -240,7 +261,10 @@ const SessionUserModal = ({
             onClose={onClose}
             title={user?.user_name || 'Карточка сотрудника'}
             subtitle={user ? `${roleLabel(user.user_role)}${user.user_login ? ` · @${user.user_login}` : ''}` : 'Загрузка…'}
-            maxWidth="max-w-2xl"
+            /* Шире обычной модалки: внутри лежит список сессий, у каждой —
+               три колонки дат и строка с адресом и устройством. На max-w-2xl
+               они жались и переносились на вторую строку. */
+            maxWidth="max-w-4xl"
             footer={
                 <>
                     <button
@@ -279,11 +303,21 @@ const SessionUserModal = ({
             {user && (
                 <div className="space-y-4">
                     <Section title="Сотрудник">
-                        <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                        <FactGrid>
                             <Row label="Логин" mono>{dash(user.user_login)}</Row>
                             <Row label="Роль">{roleLabel(user.user_role)}</Row>
                             <Row label="Отдел">{dash(user.department_name || person?.department_name)}</Row>
                             <Row label="Супервайзер">{dash(user.supervisor_name || person?.supervisor_name)}</Row>
+                            {/* Уволенный с живыми сессиями — то, ради чего в этот
+                                раздел и заходят, поэтому статус здесь, а не «где-то
+                                в карточке сотрудника». */}
+                            <Row label="Трудоустройство">
+                                {user.user_status === 'fired' || user.user_status === 'dismissal' ? (
+                                    <span className="text-red-600">{employmentLabel(user.user_status)}</span>
+                                ) : (
+                                    employmentLabel(user.user_status)
+                                )}
+                            </Row>
                             <Row label="Сессий сейчас">
                                 <span className="tabular-nums">{user.active_sessions ?? sessionsCount}</span>
                                 {user.total_sessions ? (
@@ -292,7 +326,7 @@ const SessionUserModal = ({
                                     </span>
                                 ) : null}
                             </Row>
-                        </div>
+                        </FactGrid>
                     </Section>
 
                     <Section
