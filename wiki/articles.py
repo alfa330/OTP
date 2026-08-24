@@ -237,7 +237,11 @@ SELECT a.id, a.slug, a.title, a.summary, a.article_type, a.status,
    AND (%(query)s::text IS NULL
         OR a.title ILIKE '%%' || %(query)s::text || '%%'
         OR a.summary ILIKE '%%' || %(query)s::text || '%%')
- ORDER BY a.position, a.updated_at DESC
+ -- id в хвосте сортировки — ради СТРАНИЦ: оглавление витрины забирает список
+ -- несколькими запросами со сдвигом, и при неоднозначном порядке одна статья
+ -- попала бы в две страницы, а другая — ни в одну. Порядок держится на одном
+ -- updated_at: position на бою у всех статей нулевой.
+ ORDER BY a.position, a.updated_at DESC, a.id DESC
  LIMIT %(limit)s OFFSET %(offset)s
 """
 
