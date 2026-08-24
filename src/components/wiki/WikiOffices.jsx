@@ -17,7 +17,7 @@ import OfficeInfoModal from './OfficeInfoModal';
 import { OfficeStatusBadge } from './officeBadges';
 import { officeTodayISO } from './officeSchedule';
 import {
-    DAY_LEGEND, DAY_STATE_EDGE, formatDay, officeDayStatus,
+    DAY_LEGEND, DAY_STATE_EDGE, closureCovers, formatDay, officeDayStatus,
 } from './officeDayStatus';
 
 /* Офисы: адреса, карта, график и привязка к таксопаркам.
@@ -305,8 +305,17 @@ export default function WikiOffices({ base, headers, showToast }) {
         const closure = `${base}/offices/${office.id}/closure`;
         const period = state === 'closed' && term?.kind !== 'day';
 
+        /* Закрытие уже идёт — правим его, а не заводим новое: срок у закрытия
+           «по техническим причинам» сплошь и рядом появляется потом, когда его
+           наконец назвали. Начало при этом обязано остаться прежним, иначе
+           добавление даты сдвигало бы его на сегодня, и уже прошедшие дни
+           ремонта возвращались к графику — в истории офис «работал» во время
+           ремонта. Закончившееся закрытие таким не считается: там начинается
+           новое, с сегодняшнего дня. */
+        const from = closureCovers(office, dayISO) ? office.closed_from : dayISO;
+
         const requests = period
-            ? [axios.put(closure, { from: dayISO, until: term.until || null, note: note || null },
+            ? [axios.put(closure, { from, until: term.until || null, note: note || null },
                          { headers }),
                axios.delete(day, { headers })]
             : [axios.put(day, { state, note: note || null }, { headers })];
