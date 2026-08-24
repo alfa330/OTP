@@ -141,7 +141,10 @@ def verdict_of(found):
 
 
 def already_imported(cursor, *, source, source_id):
-    """Ту же статью уже переносили? Возвращает id статьи в приёмнике или None.
+    """Ту же статью уже переносили? Возвращает {article_id, slug} или None.
+
+    Слаг здесь не для удобства: по нему скрипт переноса строит карту внутренних
+    ссылок, и без него повторный прогон оставил бы их указывать на источник.
 
     Сверка по (source, source_id), а НЕ по slug: slug в приёмнике мог оказаться
     занят, и статья легла под «-2». Повторный прогон по slug её не нашёл бы и
@@ -150,12 +153,13 @@ def already_imported(cursor, *, source, source_id):
     if source_id is None:
         return None
     cursor.execute(
-        'SELECT article_id FROM wiki_article_imports '
-        ' WHERE source = %s AND source_id = %s',
+        'SELECT i.article_id, a.slug FROM wiki_article_imports i '
+        '  JOIN wiki_articles a ON a.id = i.article_id '
+        ' WHERE i.source = %s AND i.source_id = %s',
         (source, int(source_id)),
     )
     row = cursor.fetchone()
-    return row[0] if row else None
+    return {'article_id': row[0], 'slug': row[1]} if row else None
 
 
 def record(cursor, *, article_id, source, source_id=None, source_slug=None,
@@ -261,7 +265,14 @@ def _visible(cursor, ctx, space_id=None):
     return visible
 
 
-def queue(cursor, ctx, *, pending_only=True, limit=200, space_id=None):
+# Потолок строк очереди. Перенос старой вики привёз 247 статей за один
+# прогон, и на 200 список молча терял 47 — а очередь это список ДЕЛ, и
+# незаметно выпавшее из неё дело не будет сделано никогда. Интерфейс, если
+# упрётся в потолок, честно говорит, сколько показал (см. WikiMigration).
+QUEUE_LIMIT = 1000
+
+
+def queue(cursor, ctx, *, pending_only=True, limit=QUEUE_LIMIT, space_id=None):
     """Очередь модерации переноса в границах видимости человека."""
     visible = _visible(cursor, ctx, space_id)
     if not visible:

@@ -258,6 +258,8 @@ class MigrationRouteTest(unittest.TestCase):
             (wiki_migration, 'duplicate_probe', fake_probe),
             (wiki_migration, 'already_imported',
              lambda _c, **k: getattr(self, 'already', None)),
+            # already_imported отдаёт {article_id, slug}: слаг нужен скрипту
+            # переноса для карты внутренних ссылок.
             (wiki_migration, 'record', fake_record),
             (wiki_migration, 'pending_row', fake_pending_row),
             (wiki_migration, 'mark_reviewed', fake_mark),
@@ -318,7 +320,7 @@ class MigrationRouteTest(unittest.TestCase):
 
     # ── Требование 2: повторный прогон ───────────────────────────────────
     def test_second_run_returns_the_same_article(self):
-        self.already = 500
+        self.already = {'article_id': 500, 'slug': 'tarify'}
         answer = self.client.post('/api/wiki/migration/import', json={
             'title': 'Тарифы', 'content': '<p>x</p>', 'source_id': 77})
         self.assertEqual(answer.status_code, 200)
@@ -326,6 +328,9 @@ class MigrationRouteTest(unittest.TestCase):
         self.assertEqual(body['id'], 500)
         self.assertFalse(body['created'])
         self.assertEqual(self.created, [], 'создали вторую копию той же страницы')
+        # Слаг обязателен и здесь: по нему скрипт строит карту внутренних ссылок,
+        # и без него повторный прогон молча оставит их указывать на источник.
+        self.assertEqual(body['slug'], 'tarify')
 
     def test_title_is_required(self):
         answer = self.client.post('/api/wiki/migration/import', json={'content': 'x'})

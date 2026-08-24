@@ -620,8 +620,13 @@ def transfer(api, pages, sections, only=None, links_only=False):
         for row in queue:
             filled[row['article_id']] = row.get('size') or 0
             if row.get('source_id') is not None:
-                id_of_source.setdefault(row['source_id'], row['article_id'])
-                slug_of_source.setdefault(row['source_id'], row['slug'])
+                # Именно присваиванием, а не setdefault: первый проход на уже
+                # перенесённой статье кладёт то, что вернул сервер, и если слаг
+                # оттуда не приехал, setdefault оставил бы пустое значение —
+                # карта ссылок собралась бы пустой (так и случилось на первом
+                # боевом доборе).
+                id_of_source[row['source_id']] = row['article_id']
+                slug_of_source[row['source_id']] = row['slug']
 
     log('\n=== ПРОХОД 2: ТЕКСТ, КАРТИНКИ, ССЫЛКИ ===')
     mapping = link_map(pages, slug_of_source)

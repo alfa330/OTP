@@ -305,6 +305,16 @@ export default function WikiMigration({ base, headers, showToast, onOpenArticle,
                 </div>
             )}
 
+            {/* Обрезанный список обязан сказать, что он обрезан: очередь — это
+                список ДЕЛ, и незаметно выпавшее из него дело не будет сделано
+                никогда. Появляется только когда обрезание реально случилось. */}
+            {items.length > 0 && !showAll && totals.pending > items.length && (
+                <p className="border-b border-slate-200/70 bg-amber-50/60 px-3 py-2 text-[11.5px] text-amber-700">
+                    Показаны первые {items.length} из {totals.pending}. Разберите
+                    их — остальные подтянутся.
+                </p>
+            )}
+
             {items.length > 0 && (
                 <div className="divide-y divide-slate-100">
                     {items.map((item) => (

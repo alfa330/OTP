@@ -89,7 +89,13 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers):
         existing = wiki_migration.already_imported(
             cursor, source=source, source_id=source_id)
         if existing:
-            return jsonify({"id": existing, "created": False,
+            # Слаг отдаём ВСЕГДА, а не только при создании: по нему скрипт
+            # переноса строит карту «путь в источнике → статья приёмника» и
+            # переписывает внутренние ссылки. Без слага повторный прогон собирал
+            # пустую карту и молча оставлял 367 ссылок указывать на источник.
+            return jsonify({"id": existing['article_id'],
+                            "slug": existing['slug'],
+                            "created": False,
                             "status": "already_imported"})
 
         content = data.get('content') or ''
