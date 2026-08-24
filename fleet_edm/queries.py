@@ -297,6 +297,51 @@ def claim_job(cursor, job_id, instance_id, note=None):
     return int(row[0]) if row else None
 
 
+def stop_job(cursor, job_id, by_name=None):
+    """Остановить идущую выгрузку по просьбе человека.
+
+    Карточку закрываем ЗДЕСЬ, а поток узнает об этом сам: пульс (`touch_job`)
+    увидит, что запись больше не «идёт», и обход поднимет `engine.Cancelled` —
+    не позже чем через 15 секунд. Ждать поток здесь было бы неправильно: он в это
+    время может висеть в паузе, которую попросил кабинет, а человек уже нажал
+    кнопку и ждёт ответа.
+
+    Статус — 'error' с кодом 'stopped', а не отдельный статус: менять CHECK на
+    боевой таблице ради одного значения незачем, а интерфейс всё равно рисует
+    подпись по коду («Остановлена», серым, без красного).
+    """
+    cursor.execute(
+        """
+        UPDATE fleet_edm_jobs
+           SET status = 'error',
+               error_code = 'stopped',
+               error = %s,
+               progress_note = NULL,
+               finished_at = NOW()
+         WHERE id = %s AND status = 'running'
+        RETURNING id
+        """,
+        ('Выгрузку остановил(а) {}'.format(by_name) if by_name else 'Выгрузку остановили',
+         int(job_id)),
+    )
+    return bool(cursor.fetchone())
+
+
+def delete_job(cursor, job_id):
+    """Убрать карточку из истории вместе с файлами и контрольной точкой.
+
+    Идущую не удаляем — сначала остановить: иначе поток продолжал бы писать
+    контрольную точку в удалённое задание и падал бы на чужой ошибке.
+
+    Файлы и строки контрольной точки уходят сами — на них ON DELETE CASCADE.
+    """
+    cursor.execute(
+        "DELETE FROM fleet_edm_jobs WHERE id = %s AND status <> 'running' RETURNING id",
+        (int(job_id),),
+    )
+    return bool(cursor.fetchone())
+
+
 def release_job(cursor, job_id, instance_id, note=None):
     """Отдать выгрузку обратно в общую очередь, оставив её «идущей».
 

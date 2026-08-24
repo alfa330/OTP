@@ -1,12 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertTriangle, CheckCircle2, ChevronDown, Download, FileSpreadsheet, Loader2,
-    RefreshCw, UploadCloud,
+    AlertTriangle, CheckCircle2, ChevronDown, CircleStop, Download, Ellipsis,
+    FileDown, FileSpreadsheet, Loader2, RefreshCw, RotateCcw, Trash2, UploadCloud,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosBtnPrimary, iosBtnGhost, iosGroupLabel, IosBadge,
 } from '../ui/ios';
+
+/* Красная кнопка живёт здесь, а не в общем ios.jsx: она нужна одному экрану, а
+ * общий файл правят обе машины сразу, и лишняя правка там — лишний конфликт. */
+const btnDanger = 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-rose-600 '
+    + 'px-3 py-2 text-[13px] font-semibold text-white shadow-sm transition-all '
+    + 'hover:bg-rose-700 active:scale-[0.98] disabled:opacity-50';
 
 /* Раздел «Провайдер ЭДО» (задача #176).
  *
@@ -39,6 +45,15 @@ const ERROR_HINTS = {
     interrupted: 'Выгрузку прервал перезапуск сервера (до того, как раздел научился продолжать сам).',
     too_many_restarts: 'Выгрузку прерывали слишком часто, и она не смогла дойти до конца. '
         + 'Попробуйте запустить её ещё раз.',
+};
+
+/* Остановленная вручную — не ошибка, и краснеть ей незачем: человек сам так решил.
+ * Отдельного статуса в базе нет, отличаем по коду. */
+const isStopped = (job) => job.status === 'error' && job.error_code === 'stopped';
+
+const badgeFor = (job) => {
+    if (isStopped(job)) return { label: 'Остановлена', tone: 'slate' };
+    return STATUS_META[job.status] || { label: job.status, tone: 'slate' };
 };
 
 const num = (value) => Number(value || 0).toLocaleString('ru-RU');
@@ -94,6 +109,11 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
     const [busy, setBusy] = useState('');
     const [dragging, setDragging] = useState(false);
     const [linkOpen, setLinkOpen] = useState(false);
+    // Опасные действия — в два нажатия: здесь лежит id выгрузки, у которой
+    // спросили подтверждение.
+    const [stopAsked, setStopAsked] = useState(null);
+    const [deleteAsked, setDeleteAsked] = useState(null);
+    const [menuOpen, setMenuOpen] = useState(null);
 
     const fileInput = useRef(null);
     const poll = useRef(null);
@@ -133,6 +153,21 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
         if (overview && !linked) setLinkOpen(true);
     }, [overview, linked]);
 
+    // Меню строки закрывается щелчком мимо него. Слушаем mousedown и смотрим, попал
+    // ли щелчок внутрь какого-нибудь меню: иначе то же нажатие, которое меню
+    // открыло, тут же его и закрыло бы.
+    useEffect(() => {
+        if (menuOpen === null) return undefined;
+        const close = (event) => {
+            if (!event.target.closest?.('[data-row-menu]')) {
+                setMenuOpen(null);
+                setDeleteAsked(null);
+            }
+        };
+        document.addEventListener('mousedown', close);
+        return () => document.removeEventListener('mousedown', close);
+    }, [menuOpen]);
+
     const upload = async (file) => {
         if (!file) return;
         setBusy('upload');
@@ -150,22 +185,66 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
         }
     };
 
-    const download = async (job) => {
+    const download = async (job, kind = 'result') => {
         setBusy(`file:${job.id}`);
         try {
             const response = await axios.get(`${base}/jobs/${job.id}/file`, {
-                headers: headers(), responseType: 'blob',
+                headers: headers(),
+                responseType: 'blob',
+                params: kind === 'source' ? { kind: 'source' } : undefined,
             });
             const url = URL.createObjectURL(response.data);
             const link = document.createElement('a');
             link.href = url;
-            link.download = job.file_name || `Провайдер ЭДО ${job.id}.xlsx`;
+            link.download = kind === 'source'
+                ? (job.source_name || `Исходник ${job.id}.xlsx`)
+                : (job.file_name || `Провайдер ЭДО ${job.id}.xlsx`);
             document.body.appendChild(link);
             link.click();
             link.remove();
             URL.revokeObjectURL(url);
         } catch (error) {
             showToast?.('Не удалось скачать файл', 'error');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const stop = async (job) => {
+        setBusy(`stop:${job.id}`);
+        try {
+            await axios.post(`${base}/jobs/${job.id}/stop`, {}, { headers: headers() });
+            showToast?.(`Выгрузка №${job.id} остановлена`, 'success');
+            await load();
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось остановить', 'error');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const repeat = async (job) => {
+        setBusy(`repeat:${job.id}`);
+        try {
+            const response = await axios.post(`${base}/jobs/${job.id}/repeat`, {},
+                { headers: headers() });
+            showToast?.(`Собираем заново — выгрузка №${response.data?.job_id}`, 'success');
+            await load();
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось повторить', 'error');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const remove = async (job) => {
+        setBusy(`delete:${job.id}`);
+        try {
+            await axios.delete(`${base}/jobs/${job.id}`, { headers: headers() });
+            showToast?.(`Выгрузка №${job.id} удалена`, 'success');
+            await load();
+        } catch (error) {
+            showToast?.(error?.response?.data?.error || 'Не удалось удалить', 'error');
         } finally {
             setBusy('');
         }
@@ -228,6 +307,29 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                         <div className="text-[15px] font-semibold text-slate-700 tabular-nums">
                             {Math.max(0, Math.min(100, running.progress_percent || 0))}%
                         </div>
+                        {/* Остановка — в два нажатия. Одно случайное касание не должно
+                            убивать обход, который идёт десять минут. */}
+                        {stopAsked === running.id ? (
+                            <div className="flex items-center gap-1.5">
+                                <button type="button" className={btnDanger}
+                                        onClick={() => { setStopAsked(null); stop(running); }}
+                                        disabled={busy === `stop:${running.id}`}>
+                                    {busy === `stop:${running.id}`
+                                        ? <Loader2 size={14} className="animate-spin" />
+                                        : <CircleStop size={14} />}
+                                    Точно остановить
+                                </button>
+                                <button type="button" className={iosBtnGhost}
+                                        onClick={() => setStopAsked(null)}>
+                                    Нет
+                                </button>
+                            </div>
+                        ) : (
+                            <button type="button" className={iosBtnGhost}
+                                    onClick={() => setStopAsked(running.id)}>
+                                <CircleStop size={14} /> Остановить
+                            </button>
+                        )}
                     </div>
                     <div className="h-1 w-full overflow-hidden rounded-full bg-slate-100">
                         <div className="h-full rounded-full bg-blue-500 transition-all duration-700"
@@ -315,8 +417,23 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                         <div key={job.id} className={index ? 'border-t border-slate-100' : ''}>
                             <JobRow
                                 job={job}
-                                busy={busy === `file:${job.id}`}
+                                busy={busy}
+                                menuOpen={menuOpen === job.id}
+                                deleteAsked={deleteAsked === job.id}
+                                blocked={Boolean(running)}
+                                onMenu={() => {
+                                    setMenuOpen(menuOpen === job.id ? null : job.id);
+                                    setDeleteAsked(null);
+                                }}
                                 onDownload={() => download(job)}
+                                onSource={() => { setMenuOpen(null); download(job, 'source'); }}
+                                onRepeat={() => { setMenuOpen(null); repeat(job); }}
+                                onAskDelete={() => setDeleteAsked(job.id)}
+                                onDelete={() => {
+                                    setDeleteAsked(null);
+                                    setMenuOpen(null);
+                                    remove(job);
+                                }}
                             />
                         </div>
                     ))}
@@ -397,16 +514,20 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
     );
 }
 
-function JobRow({ job, busy, onDownload }) {
-    const meta = STATUS_META[job.status] || { label: job.status, tone: 'slate' };
+function JobRow({ job, busy, menuOpen, deleteAsked, blocked, onMenu, onDownload,
+                 onSource, onRepeat, onAskDelete, onDelete }) {
+    const meta = badgeFor(job);
     const stats = job.stats || {};
     const check = stats.check || {};
+    const stopped = isStopped(job);
+    const working = busy.endsWith(`:${job.id}`);
 
     return (
         <div className="px-5 py-4">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                 <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
-                    job.status === 'error' ? 'bg-rose-50 text-rose-500' : 'bg-slate-100 text-slate-400'
+                    job.status === 'error' && !stopped
+                        ? 'bg-rose-50 text-rose-500' : 'bg-slate-100 text-slate-400'
                 }`}>
                     <FileSpreadsheet size={16} />
                 </div>
@@ -421,19 +542,67 @@ function JobRow({ job, busy, onDownload }) {
                     </div>
                 </div>
                 {job.status === 'done' && job.has_file ? (
-                    <button type="button" className={iosBtnPrimary} onClick={onDownload} disabled={busy}>
-                        {busy ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                    <button type="button" className={iosBtnPrimary} onClick={onDownload}
+                            disabled={working}>
+                        {working ? <Loader2 size={14} className="animate-spin" />
+                                 : <Download size={14} />}
                         Скачать
                     </button>
                 ) : (
                     <IosBadge tone={meta.tone}>{meta.label}</IosBadge>
                 )}
+                {/* Остальное — под «тремя точками»: в обычный день человеку нужна
+                    одна кнопка «Скачать», а не шесть. */}
+                <div className="relative" data-row-menu>
+                    <button type="button" aria-label="Ещё" onClick={onMenu}
+                            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-600">
+                        <Ellipsis size={16} />
+                    </button>
+                    {menuOpen && (
+                        <div className="absolute right-0 top-10 z-20 w-[236px] overflow-hidden rounded-2xl bg-white py-1 shadow-lg ring-1 ring-slate-900/10">
+                            <button type="button" onClick={onRepeat} disabled={blocked}
+                                    className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[13px] text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"
+                                    title={blocked ? 'Сначала дождитесь текущей выгрузки' : ''}>
+                                <RotateCcw size={14} className="shrink-0 text-slate-400" />
+                                Собрать заново
+                            </button>
+                            <button type="button" onClick={onSource}
+                                    className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[13px] text-slate-700 transition hover:bg-slate-50">
+                                <FileDown size={14} className="shrink-0 text-slate-400" />
+                                Скачать исходный файл
+                            </button>
+                            {deleteAsked ? (
+                                <button type="button" onClick={onDelete}
+                                        className="flex w-full items-center gap-2 bg-rose-50 px-3.5 py-2.5 text-left text-[13px] font-semibold text-rose-700 transition hover:bg-rose-100">
+                                    <Trash2 size={14} className="shrink-0" />
+                                    Точно удалить выгрузку
+                                </button>
+                            ) : (
+                                <button type="button" onClick={onAskDelete}
+                                        className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[13px] text-rose-600 transition hover:bg-rose-50">
+                                    <Trash2 size={14} className="shrink-0" />
+                                    Удалить из истории
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
             </div>
 
             {job.status === 'error' && (
-                <div className="mt-3 flex items-start gap-2 rounded-xl bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700">
-                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                    <span>{ERROR_HINTS[job.error_code] || job.error || 'Выгрузка не удалась'}</span>
+                <div className={`mt-3 flex items-start gap-2 rounded-xl px-3 py-2 text-[12.5px] ${
+                    stopped ? 'bg-slate-50 text-slate-600' : 'bg-rose-50 text-rose-700'
+                }`}>
+                    {stopped ? <CircleStop size={14} className="mt-0.5 shrink-0" />
+                             : <AlertTriangle size={14} className="mt-0.5 shrink-0" />}
+                    <span>
+                        {stopped
+                            ? (job.error || 'Выгрузку остановили')
+                            : (ERROR_HINTS[job.error_code] || job.error || 'Выгрузка не удалась')}
+                        {stopped && job.rows_resolved
+                            ? ` · успела собрать ${num(job.rows_resolved)} из ${num(job.rows_total)}`
+                            : ''}
+                    </span>
                 </div>
             )}
 

@@ -520,6 +520,15 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             return jsonify({"error": "Файл больше {} МБ".format(
                 MAX_UPLOAD_BYTES // (1024 * 1024))}), 413
 
+        return _start_job(source_name, file_bytes, requester_id, requester)
+
+    def _start_job(source_name, file_bytes, requester_id, requester):
+        """Общий старт выгрузки: и для загруженного файла, и для «Повторить».
+
+        Одной функцией, потому что проверок здесь четыре и забыть любую — значит
+        либо удвоить темп запросов к чужому кабинету, либо запустить обход, которому
+        некуда идти.
+        """
         # Брошенные выгрузки сначала подхватываем: та, что убита деплоем, должна
         # дойти до конца сама, а не мешать запустить новую и не пропасть.
         sweep_jobs()
@@ -557,13 +566,78 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                               "встало — уйдёт на подхват", job_id)
         return jsonify({'status': 'success', 'job_id': job_id, 'job_status': 'running'}), 202
 
-    @section_route('/jobs/<int:job_id>')
+    @section_route('/jobs/<int:job_id>', methods=('GET', 'DELETE'))
     def fleet_edm_job(requester_id, requester, job_id):
+        if request.method == 'DELETE':
+            if not access.can_run_job(requester):
+                return jsonify({"error": "Недостаточно прав"}), 403
+            with db._get_cursor() as cursor:
+                job = queries.get_job(cursor, job_id)
+                if not job:
+                    return jsonify({"error": "Выгрузка не найдена"}), 404
+                if job.get('status') == 'running':
+                    return jsonify({
+                        "error": "Выгрузка ещё идёт — сначала остановите её.",
+                        "code": "STILL_RUNNING",
+                    }), 409
+                queries.delete_job(cursor, job_id)
+            logging.info("Провайдер ЭДО: выгрузка %s удалена пользователем %s",
+                         job_id, requester_id)
+            return jsonify({'status': 'success', 'deleted_job_id': job_id}), 200
+
         with db._get_cursor() as cursor:
             job = queries.get_job(cursor, job_id)
         if not job:
             return jsonify({"error": "Выгрузка не найдена"}), 404
         return jsonify({'status': 'success', 'job': job}), 200
+
+    @section_route('/jobs/<int:job_id>/stop', methods=('POST',))
+    def fleet_edm_job_stop(requester_id, requester, job_id):
+        """Остановить идущую выгрузку.
+
+        Отвечаем сразу, не дожидаясь потока: он в этот момент может стоять в
+        паузе, которую попросил кабинет. Карточку закрывает сам запрос, а поток
+        увидит это пульсом и остановится не позже чем через 15 секунд.
+        """
+        if not access.can_run_job(requester):
+            return jsonify({"error": "Недостаточно прав"}), 403
+        with db._get_cursor() as cursor:
+            job = queries.get_job(cursor, job_id)
+            if not job:
+                return jsonify({"error": "Выгрузка не найдена"}), 404
+            if job.get('status') != 'running':
+                return jsonify({"error": "Эта выгрузка уже не идёт",
+                                "code": "NOT_RUNNING"}), 409
+            queries.stop_job(cursor, job_id, (requester or {}).get('name'))
+            job = queries.get_job(cursor, job_id)
+        logging.info("Провайдер ЭДО: выгрузку %s остановил пользователь %s",
+                     job_id, requester_id)
+        return jsonify({'status': 'success', 'job': job}), 200
+
+    @section_route('/jobs/<int:job_id>/repeat', methods=('POST',))
+    def fleet_edm_job_repeat(requester_id, requester, job_id):
+        """Собрать заново по тому же исходнику.
+
+        Исходник раздел хранит у себя ровно для этого — просить у человека тот же
+        файл второй раз незачем. Пригодилось в тот же день, когда обнаружился
+        дефект с потерянной диспетчерской: файл заказчицы пришлось пересобирать, и
+        делать это руками через API было стыдно.
+        """
+        if not access.can_run_job(requester):
+            return jsonify({"error": "Недостаточно прав"}), 403
+        with db._get_cursor() as cursor:
+            job = queries.get_job(cursor, job_id)
+            if not job:
+                return jsonify({"error": "Выгрузка не найдена"}), 404
+            source = queries.job_file(cursor, job_id, kind='source')
+        if not source or not source.get('content'):
+            return jsonify({
+                "error": "Исходный файл этой выгрузки уже удалён по сроку хранения — "
+                         "загрузите его заново.",
+                "code": "SOURCE_GONE",
+            }), 410
+        name = source.get('file_name') or job.get('source_name') or 'file.xlsx'
+        return _start_job(_safe_name(name), source['content'], requester_id, requester)
 
     @section_route('/jobs/<int:job_id>/file')
     def fleet_edm_job_file(requester_id, requester, job_id):
@@ -571,11 +645,15 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             payload = queries.job_file(cursor, job_id, kind=request.args.get('kind', 'result'))
         if not payload:
             return jsonify({"error": "Файл не найден"}), 404
+        name = payload['file_name'] or 'Провайдер ЭДО {}.xlsx'.format(job_id)
+        # Исходник бывает и csv — отдавать его как xlsx значит получить файл,
+        # который Excel откроет кракозябрами.
+        mimetype = 'text/csv' if name.lower().endswith('.csv') else XLSX_MIME
         return send_file(
             BytesIO(payload['content']),
-            mimetype=XLSX_MIME,
+            mimetype=mimetype,
             as_attachment=True,
-            download_name=payload['file_name'] or 'Провайдер ЭДО {}.xlsx'.format(job_id),
+            download_name=name,
         )
 
     @section_route('/session', methods=('GET', 'POST'), manage_session=True)
