@@ -167,6 +167,7 @@ const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdm
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
 const ShiftHistoryPopover = lazyWithRetry(() => import('./components/schedule/ShiftHistoryPopover'));
+const ShiftHistoryList = lazyWithRetry(() => import('./components/schedule/ShiftHistoryList'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
@@ -13952,6 +13953,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [plannerHistorySummary, setPlannerHistorySummary] = useState({});
             const [shiftHistoryTarget, setShiftHistoryTarget] = useState(null);
             const [plannerHistoryReloadToken, setPlannerHistoryReloadToken] = useState(0);
+            // Вкладка «История» в карточке смены грузится отдельно от всплывающей
+            // панели: у них разное время жизни, общее состояние гасило бы одно
+            // при открытии другого.
+            const [modalHistoryState, setModalHistoryState] = useState({ status: 'loading', items: [], error: '' });
             const [plannerTechStatusActionLoading, setPlannerTechStatusActionLoading] = useState(false);
             const [plannerTechStatusModalError, setPlannerTechStatusModalError] = useState('');
             const [plannerTechReasonOptions, setPlannerTechReasonOptions] = useState([]);
@@ -14836,6 +14841,40 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             }, []);
 
             const closeShiftHistory = useCallback(() => setShiftHistoryTarget(null), []);
+
+            // Историю в карточке смены тянем только когда вкладку открыли —
+            // и перезапрашиваем после правок, чтобы список не врал сразу после
+            // сохранения смены.
+            useEffect(() => {
+                if (!modalState?.open || modalActiveTab !== 'history') return undefined;
+                const operatorId = modalState?.opId;
+                const date = modalState?.date;
+                if (operatorId == null || !date) return undefined;
+
+                let cancelled = false;
+                setModalHistoryState({ status: 'loading', items: [], error: '' });
+                fetchPlannerHistoryEntries(operatorId, date)
+                    .then((items) => {
+                        if (cancelled) return;
+                        setModalHistoryState({ status: 'ready', items, error: '' });
+                    })
+                    .catch((error) => {
+                        if (cancelled) return;
+                        setModalHistoryState({
+                            status: 'error',
+                            items: [],
+                            error: error?.message || 'Не удалось загрузить историю'
+                        });
+                    });
+                return () => { cancelled = true; };
+            }, [
+                modalState?.open,
+                modalState?.opId,
+                modalState?.date,
+                modalActiveTab,
+                plannerHistoryReloadToken,
+                fetchPlannerHistoryEntries
+            ]);
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
             useEffect(() => {
@@ -20721,6 +20760,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const modalTabShifts = !modalShowTabs || modalActiveTab === 'shifts';
             const modalTabStatus = !modalShowTabs || modalActiveTab === 'status';
             const modalTabControl = !modalShowTabs || modalActiveTab === 'control';
+            // Вкладка «История» показывается только вместе с табами: в массовом
+            // режиме дней несколько, и «история этого дня» теряет смысл.
+            const modalTabHistory = modalShowTabs && modalActiveTab === 'history';
+            const modalHistoryCount = Number(
+                plannerHistorySummary[makeSelectedCellKey(modalState?.opId, modalState?.date)]?.count || 0
+            );
             const modalActiveScheduleStatus = useMemo(() => {
                 if (isBulkSelectionModal) return null;
                 if (!modalState?.opId || !modalState?.date) return null;
@@ -27172,7 +27217,8 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                 {[
                                     { key: 'shifts', label: 'Смены', icon: 'fa-clock' },
                                     { key: 'status', label: 'Статус', icon: 'fa-user-clock' },
-                                    { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' }
+                                    { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' },
+                                    { key: 'history', label: 'История', icon: 'fa-clock-rotate-left', count: modalHistoryCount }
                                 ].map(tab => {
                                     const active = modalActiveTab === tab.key;
                                     return (
@@ -27184,12 +27230,44 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         >
                                             <FaIcon className={`fas ${tab.icon} text-[11px]`}></FaIcon>
                                             {tab.label}
+                                            {/* Счётчик появляется, только когда правки были: ноль
+                                                на вкладке — это шум, а не информация. */}
+                                            {tab.count > 0 && (
+                                                <span className={`px-1.5 rounded-full text-[10px] font-semibold tabular-nums ${active ? 'bg-slate-100 text-slate-600' : 'bg-slate-200/70 text-slate-500'}`}>
+                                                    {tab.count}
+                                                </span>
+                                            )}
                                         </button>
                                     );
                                 })}
                             </div>
                         </div>
                     )}
+                    {modalTabHistory && (
+                    <div className="mb-6">
+                        <div className="rounded-2xl bg-white ring-1 ring-slate-200/70 overflow-hidden">
+                            <Suspense fallback={(
+                                <div className="px-6 py-10 text-center text-[13px] text-slate-500">Загружаем историю…</div>
+                            )}>
+                                {/* Счётчик уже стоит на самой вкладке — в списке его не повторяем. */}
+                                <ShiftHistoryList
+                                    status={modalHistoryState.status}
+                                    items={modalHistoryState.items}
+                                    error={modalHistoryState.error}
+                                    showCount={false}
+                                />
+                            </Suspense>
+                        </div>
+                        {/* Объяснение нужно ровно тогда, когда список пуст и человек
+                            думает «почему?». Рядом с непустым списком это лишняя строка. */}
+                        {modalHistoryState.status === 'ready' && modalHistoryState.items.length === 0 && (
+                            <div className="mt-3 text-xs text-slate-400">
+                                Записи копятся с 24 августа 2026 года — раньше система изменений графика не хранила.
+                            </div>
+                        )}
+                    </div>
+                    )}
+
                     {!modalState.multipleDates && modalTabShifts && (
                     <div className="mb-6 p-4 bg-sky-50 border border-sky-200 rounded-xl">
                         <label className="flex items-center gap-3 cursor-pointer group">
@@ -27944,29 +28022,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {!modalState.isDayOff && !modalState.multipleDates && modalTabShifts && (
                     <>
                     <div className="mb-6">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                                <FaIcon className="fas fa-list text-slate-500"></FaIcon>
-                                Существующие смены
-                            </h4>
-                            {/* Кнопка появляется только когда правки по этому дню были —
-                                иначе она обещала бы содержимое, которого нет. */}
-                            {plannerHistorySummary[makeSelectedCellKey(modalState.opId, modalState.date)] && (
-                                <button
-                                    type="button"
-                                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-1.5"
-                                    onClick={(e) => openShiftHistory(
-                                        e.currentTarget,
-                                        modalState.opId,
-                                        modalState.date,
-                                        operators.find(o => o.id === modalState.opId)?.name
-                                    )}
-                                >
-                                    <FaIcon className="fas fa-clock-rotate-left text-[10px]"></FaIcon>
-                                    История изменений
-                                </button>
-                            )}
-                        </div>
+                        {/* Историю этого дня показывает вкладка «История» — второй
+                            путь к тому же списку на одном экране был бы лишним. */}
+                        <h4 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                            <FaIcon className="fas fa-list text-slate-500"></FaIcon>
+                            Существующие смены
+                        </h4>
                         <div className="space-y-2">
                         {(() => {
                             const op = operators.find(o => o.id === modalState.opId);

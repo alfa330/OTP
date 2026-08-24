@@ -1,16 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import {
-    AlertCircle, CalendarOff, CalendarPlus, Clock, Loader2, Minus, PenLine, Plus, X,
-} from 'lucide-react';
-import { APPLE_FONT, iosGroupLabel } from '../ui/ios';
-import {
-    shiftHistoryActionLabel,
-    shiftHistoryActorLabel,
-    shiftHistoryTimeLabel,
-    shiftHistoryTone,
-    shiftHistoryWhenLabel,
-} from './shiftHistoryFormat';
+import { X } from 'lucide-react';
+import { APPLE_FONT } from '../ui/ios';
+import ShiftHistoryList, { shiftHistoryDayTitle } from './ShiftHistoryList';
 
 /*
  * История изменений по одной ячейке графика — «оператор + день».
@@ -21,88 +13,13 @@ import {
  * IosMenu (src/components/ui/ios.jsx): прокрутка закрывает панель, а не тащит
  * её за собой — ячейка уезжает из-под курсора, и «приклеенная» панель повисла
  * бы над чужой строкой.
+ *
+ * Сами строки рисует общий ShiftHistoryList — тот же, что и вкладка «История»
+ * в карточке смены.
  */
 
 const PANEL_WIDTH = 380;
 const VIEWPORT_GAP = 8;
-
-const TONE_ICON = {
-    green: 'bg-emerald-50 text-emerald-600',
-    blue: 'bg-blue-50 text-blue-600',
-    red: 'bg-rose-50 text-rose-600',
-    sky: 'bg-sky-50 text-sky-600',
-    slate: 'bg-slate-100 text-slate-500',
-};
-
-const ACTION_ICON = {
-    added: Plus,
-    removed: Minus,
-    changed: PenLine,
-    day_off_set: CalendarOff,
-    day_off_cleared: CalendarPlus,
-};
-
-const MONTHS_RU = [
-    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
-];
-
-const dayTitle = (dateStr) => {
-    const parts = String(dateStr || '').split('-');
-    if (parts.length !== 3) return dateStr || '';
-    const day = Number(parts[2]);
-    const month = Number(parts[1]) - 1;
-    if (!Number.isFinite(day) || !MONTHS_RU[month]) return dateStr;
-    return `${day} ${MONTHS_RU[month]} ${parts[0]}`;
-};
-
-const fullWhen = (iso) => {
-    if (!iso) return '';
-    const parsed = new Date(iso);
-    if (Number.isNaN(parsed.getTime())) return '';
-    return parsed.toLocaleString('ru-RU');
-};
-
-const Block = ({ children }) => (
-    <div className="flex flex-col items-center gap-2 px-6 py-10 text-center">{children}</div>
-);
-
-const HistoryRow = ({ entry }) => {
-    const Icon = ACTION_ICON[entry.action] || Clock;
-    const tone = TONE_ICON[shiftHistoryTone(entry)] || TONE_ICON.slate;
-    const times = shiftHistoryTimeLabel(entry);
-    const actor = shiftHistoryActorLabel(entry);
-
-    return (
-        <li className="flex items-start gap-3 px-3.5 py-2.5 transition hover:bg-slate-50/70">
-            <span className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${tone}`}>
-                <Icon size={15} />
-            </span>
-
-            <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-baseline gap-x-1.5">
-                    <span className="text-[13.5px] font-semibold text-slate-900">
-                        {shiftHistoryActionLabel(entry)}
-                    </span>
-                    {times && (
-                        <span className="text-[13.5px] tabular-nums text-slate-700">{times}</span>
-                    )}
-                </div>
-                {/* Либо источник говорит сам за себя («Взята с аукциона»),
-                    либо тут стоит ФИО. Никогда и то и другое сразу. */}
-                {actor && <div className="mt-0.5 text-[12px] text-slate-500">{actor}</div>}
-            </div>
-
-            <time
-                className="mt-0.5 shrink-0 text-[11.5px] tabular-nums text-slate-500"
-                dateTime={entry.changedAt || undefined}
-                title={fullWhen(entry.changedAt)}
-            >
-                {shiftHistoryWhenLabel(entry.changedAt)}
-            </time>
-        </li>
-    );
-};
 
 function ShiftHistoryPopover({ target, onClose, fetchEntries }) {
     const panelRef = useRef(null);
@@ -179,7 +96,7 @@ function ShiftHistoryPopover({ target, onClose, fetchEntries }) {
         return () => { cancelled = true; };
     }, [operatorId, date, fetchEntries]);
 
-    const subtitle = useMemo(() => dayTitle(date), [date]);
+    const subtitle = useMemo(() => shiftHistoryDayTitle(date), [date]);
 
     if (typeof document === 'undefined' || !document.body || !anchorRect) return null;
 
@@ -219,42 +136,7 @@ function ShiftHistoryPopover({ target, onClose, fetchEntries }) {
             </div>
 
             <div className="max-h-[340px] overflow-y-auto overscroll-contain">
-                {state.status === 'loading' && (
-                    <Block>
-                        <Loader2 size={18} className="animate-spin text-slate-400" />
-                        <div className="text-[13px] text-slate-500">Загружаем историю…</div>
-                    </Block>
-                )}
-
-                {state.status === 'error' && (
-                    <Block>
-                        <AlertCircle size={18} className="text-rose-500" />
-                        <div className="text-[13px] text-slate-600">{state.error}</div>
-                    </Block>
-                )}
-
-                {state.status === 'ready' && state.items.length === 0 && (
-                    <Block>
-                        <Clock size={18} className="text-slate-300" />
-                        <div className="text-[13px] font-medium text-slate-600">Изменений не было</div>
-                        <div className="text-[12px] text-slate-400">
-                            Смены этого дня не добавляли, не меняли и не снимали.
-                        </div>
-                    </Block>
-                )}
-
-                {state.status === 'ready' && state.items.length > 0 && (
-                    <>
-                        <div className={`${iosGroupLabel} px-4 pb-1 pt-3`}>
-                            Изменений: {state.items.length}
-                        </div>
-                        <ul className="divide-y divide-slate-100">
-                            {state.items.map((entry) => (
-                                <HistoryRow key={entry.id} entry={entry} />
-                            ))}
-                        </ul>
-                    </>
-                )}
+                <ShiftHistoryList status={state.status} items={state.items} error={state.error} />
             </div>
         </div>,
         document.body,
