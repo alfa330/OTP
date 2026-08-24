@@ -38615,6 +38615,90 @@ def get_shift_swap_journal():
         return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route('/api/work_schedules/history', methods=['GET'])
+@require_api_key
+def get_work_schedule_history():
+    """
+    История изменений графика: кто, когда и откуда правил смены операторов.
+
+    Query params:
+      start_date, end_date — YYYY-MM-DD (обязательны)
+      mode=summary|entries — summary (по умолчанию) отдаёт по одной строке на
+          «оператор + день» для отметки в сетке, entries — сами записи
+      operator_id — сузить до одного оператора (для истории конкретной ячейки)
+      limit, offset — только для mode=entries
+
+    Читать историю может тот же, кто видит графики, — включая тренера: это
+    просмотр, а не правка. Состав операторов обязательно прогоняется через
+    зону видимости запрашивающего, иначе по id можно было бы вытащить чужой отдел.
+    """
+    try:
+        requester_id, user_data, auth_error = _resolve_work_schedule_viewer()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+
+        start_date = (request.args.get('start_date') or '').strip()
+        end_date = (request.args.get('end_date') or '').strip()
+        if not start_date or not end_date:
+            return jsonify({"error": "start_date and end_date are required"}), 400
+
+        mode = (request.args.get('mode') or 'summary').strip().lower()
+        if mode not in ('summary', 'entries'):
+            return jsonify({"error": "Invalid mode"}), 400
+
+        candidate_ids = db.get_work_shift_change_operator_ids(start_date, end_date)
+
+        requested_operator_id = (request.args.get('operator_id') or '').strip()
+        if requested_operator_id:
+            try:
+                requested_operator_id = int(requested_operator_id)
+            except ValueError:
+                return jsonify({"error": "Invalid operator_id"}), 400
+            candidate_ids = [
+                operator_id for operator_id in candidate_ids
+                if operator_id == requested_operator_id
+            ]
+
+        allowed = _filter_operators_for_requester_scope(
+            user_data,
+            requester_id,
+            [{'id': operator_id} for operator_id in candidate_ids]
+        )
+        allowed_ids = [_operator_item_id(item) for item in allowed]
+        allowed_ids = [operator_id for operator_id in allowed_ids if operator_id is not None]
+
+        if mode == 'summary':
+            return jsonify({
+                "range": {"start_date": start_date, "end_date": end_date},
+                "days": db.get_work_shift_change_summary(allowed_ids, start_date, end_date)
+            }), 200
+
+        raw_limit = request.args.get('limit')
+        raw_offset = request.args.get('offset')
+        try:
+            limit = int(raw_limit) if raw_limit is not None else 200
+            offset = int(raw_offset) if raw_offset is not None else 0
+        except ValueError:
+            return jsonify({"error": "Invalid limit or offset"}), 400
+
+        payload = db.get_work_shift_changes(
+            allowed_ids,
+            start_date,
+            end_date,
+            limit=limit,
+            offset=offset
+        )
+        payload["range"] = {"start_date": start_date, "end_date": end_date}
+        return jsonify(payload), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logging.error(f"Error getting work schedule history: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/work_schedules/operators', methods=['GET'])
 @require_api_key
 def get_operators_with_schedules():
@@ -38930,7 +39014,8 @@ def save_work_shift():
             breaks,
             shift_type=shift_type,
             previous_start_time=previous_start_time,
-            previous_end_time=previous_end_time
+            previous_end_time=previous_end_time,
+            actor_id=user_id
         )
         
         return jsonify({"message": "Shift saved successfully", "shift_id": shift_id}), 200
@@ -38974,7 +39059,9 @@ def delete_work_shift():
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
         
-        success = db.delete_shift(int(target_operator[0]), shift_date, start_time, end_time)
+        success = db.delete_shift(
+            int(target_operator[0]), shift_date, start_time, end_time, actor_id=user_id
+        )
         
         if success:
             return jsonify({"message": "Shift deleted successfully"}), 200
@@ -39016,7 +39103,7 @@ def toggle_work_day_off():
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
         
-        is_day_off = db.toggle_day_off(int(target_operator[0]), day_off_date)
+        is_day_off = db.toggle_day_off(int(target_operator[0]), day_off_date, actor_id=user_id)
         
         return jsonify({
             "message": "Day off toggled successfully",
@@ -39205,7 +39292,7 @@ def save_shifts_bulk():
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
         
-        shift_ids = db.save_shifts_bulk(int(target_operator[0]), shifts)
+        shift_ids = db.save_shifts_bulk(int(target_operator[0]), shifts, actor_id=user_id)
         
         return jsonify({
             "message": f"Successfully saved {len(shift_ids)} shifts",
@@ -39251,7 +39338,7 @@ def apply_work_schedule_bulk_actions():
                 return jsonify({"error": message}), status_code
             action['operator_id'] = int(target_operator[0])
 
-        result = db.apply_work_schedule_bulk_actions(actions)
+        result = db.apply_work_schedule_bulk_actions(actions, actor_id=requester_id)
         return jsonify({
             "message": "Bulk work schedule actions applied successfully",
             "result": result
@@ -39882,7 +39969,7 @@ def import_work_schedules_excel():
             break_gaps_map=break_gaps_map
         )
 
-        result = db.import_work_schedule_excel_entries(parsed_entries)
+        result = db.import_work_schedule_excel_entries(parsed_entries, actor_id=requester_id)
         return jsonify({
             "message": "Work schedules imported from Excel successfully",
             "result": result,

@@ -519,6 +519,29 @@ SHIFT_BREAK_PLANNING_BUFFER_MINUTES = 15
 SHIFT_BREAK_MIN_EDGE_MARGIN_MINUTES = 30
 SHIFT_BREAK_MIN_GAP_MINUTES = 15
 
+# История изменений графика. Действие описывает, что стало со сменой, источник —
+# откуда пришла правка. Пара «действие + источник» и даёт подпись в интерфейсе
+# («Взята с аукциона», «Добавлена супервайзером ...»), поэтому источник хранится
+# отдельным полем, а не зашит в текст: тексты меняются, данные — нет.
+WORK_SHIFT_CHANGE_ACTIONS = (
+    'added',
+    'removed',
+    'changed',
+    'day_off_set',
+    'day_off_cleared',
+)
+WORK_SHIFT_CHANGE_SOURCES = (
+    'supervisor',          # ручная правка в разделе «Графики работы»
+    'auction',             # публикация аукциона смен
+    'auction_topup',       # оператор сам добрал смену после аукциона
+    'auction_topup_cancel',  # оператор отменил свой добор
+    'auction_admin',       # смену с аукциона выдал/снял администратор
+    'swap',                # обмен сменами между операторами
+    'import',              # загрузка графика из файла
+    'status_period',       # отпуск/больничный/увольнение стирает смены периода
+    'system',              # источник не определён
+)
+
 # Пересечение перерывов РАЗНЫХ операторов направления (задача #175).
 # Перерывы больше не разбегаются от любого пересечения — иначе на плотном
 # направлении свободными остаются только края смены, и вся норма сбивается
@@ -3047,6 +3070,36 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # История изменений графика: кто, когда и откуда правил смены оператора.
+            # Пишется не построчно по work_shifts, а сравнением состояния дня «до» и
+            # «после» операции: публикация аукциона стирает день и пересобирает его
+            # заново, и построчный аудит выдавал бы пару «удалена + добавлена» на
+            # каждую смену при каждой перепубликации. actor_name хранится копией —
+            # чтобы запись читалась и после переименования или увольнения автора.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS work_shift_changes (
+                    id BIGSERIAL PRIMARY KEY,
+                    operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    shift_date DATE NOT NULL,
+                    -- Без CHECK намеренно: набор действий и источников будет
+                    -- пополняться, а расширение констрейнта на живой таблице —
+                    -- миграция там, где достаточно нового значения. Допустимые
+                    -- значения перечислены в WORK_SHIFT_CHANGE_ACTIONS/SOURCES,
+                    -- незнакомый код интерфейс показывает как есть, а не прячет.
+                    action VARCHAR(24) NOT NULL,
+                    source VARCHAR(32) NOT NULL,
+                    start_time TIME NULL,
+                    end_time TIME NULL,
+                    prev_start_time TIME NULL,
+                    prev_end_time TIME NULL,
+                    shift_type VARCHAR(32) NULL,
+                    prev_shift_type VARCHAR(32) NULL,
+                    actor_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    actor_name VARCHAR(255) NOT NULL DEFAULT '',
+                    actor_role VARCHAR(32) NOT NULL DEFAULT '',
+                    changed_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS work_schedule_break_rules (
                     id SERIAL PRIMARY KEY,
@@ -4608,6 +4661,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_operator_date ON work_shifts(operator_id, shift_date);
                 CREATE INDEX IF NOT EXISTS idx_work_shifts_date ON work_shifts(shift_date);
                 CREATE INDEX IF NOT EXISTS idx_days_off_operator_date ON days_off(operator_id, day_off_date);
+                CREATE INDEX IF NOT EXISTS idx_work_shift_changes_operator_date
+                ON work_shift_changes(operator_id, shift_date, changed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_work_shift_changes_date
+                ON work_shift_changes(shift_date, changed_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_target_status
                 ON work_shift_swap_requests(target_operator_id, status, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_work_shift_swap_requests_requester_status
@@ -10816,6 +10873,14 @@ class Database:
             day_breaks_snapshots = {}
             publish_now = self._almaty_now()
             publish_direction_keys = {}
+            # Публикация стирает неделю и собирает заново. В историю попадёт только
+            # то, что реально изменилось: повторная публикация без правок молчит.
+            audit_actor = self._schedule_change_actor(cursor, actor_id=updated_by, source='auction')
+            audit_before = self._snapshot_schedule_days_tx(cursor, [
+                (int(operator_id), lot_date)
+                for operator_id in operator_ids
+                for lot_date in lot_dates
+            ])
             for operator_id in operator_ids:
                 blocked_date_map = self._get_shift_auction_operator_blocked_date_map_tx(
                     cursor,
@@ -10876,6 +10941,8 @@ class Database:
                     ),
                 )
                 summary["shifts_saved"] += 1
+
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
 
             for operator_id in operator_ids:
                 self._recalculate_auto_daily_hours_tx(
@@ -13205,6 +13272,11 @@ class Database:
             if not updated:
                 raise ValueError("LOT_ALREADY_CLAIMED")
 
+            audit_actor = self._schedule_change_actor(
+                cursor, actor_id=operator_id, source='auction_topup'
+            )
+            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date)])
+
             if day_off_row:
                 cursor.execute(
                     "DELETE FROM days_off WHERE operator_id = %s AND day_off_date = %s",
@@ -13244,6 +13316,8 @@ class Database:
                     shift_type=None,
                     day_breaks_snapshot=day_breaks_snapshot,
                 )
+
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
 
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
@@ -13453,6 +13527,11 @@ class Database:
                 new_end_min
             )
 
+            audit_actor = self._schedule_change_actor(
+                cursor, actor_id=operator_id, source='auction_topup'
+            )
+            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date)])
+
             if day_off_row:
                 cursor.execute(
                     "DELETE FROM days_off WHERE operator_id = %s AND day_off_date = %s",
@@ -13492,6 +13571,8 @@ class Database:
                     shift_type=None,
                     day_breaks_snapshot=day_breaks_snapshot,
                 )
+
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
 
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
@@ -13706,6 +13787,10 @@ class Database:
                     """, (resolved_plan_id, resolved_shift_id))
 
             if operator_id and shift_date and start_time and end_time:
+                audit_actor = self._schedule_change_actor(
+                    cursor, actor_id=admin_id, source='auction_admin'
+                )
+                audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date)])
                 cursor.execute("""
                     DELETE FROM work_shifts
                     WHERE operator_id = %s
@@ -13713,6 +13798,7 @@ class Database:
                       AND start_time = %s
                       AND end_time = %s
                 """, (operator_id, shift_date, start_time, end_time))
+                self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
                 self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
                     operator_ids=[operator_id],
@@ -13993,6 +14079,10 @@ class Database:
                 # Корректное разъединение: вычитаем отрезок добора, оставшиеся части
                 # пересоздаём с пересчётом перерывов по текущим правилам. Если смена,
                 # содержащая отрезок, не найдена — запасное точное удаление.
+                audit_actor = self._schedule_change_actor(
+                    cursor, actor_id=operator_id, source='auction_topup_cancel'
+                )
+                audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id, shift_date)])
                 split_done = self._split_post_auction_shift_slice_tx(
                     cursor, operator_id, shift_date, start_time, end_time
                 )
@@ -14002,6 +14092,7 @@ class Database:
                         WHERE operator_id = %s AND shift_date = %s
                           AND start_time = %s AND end_time = %s
                     """, (operator_id, shift_date, start_time, end_time))
+                self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
                 self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
                     operator_ids=[operator_id],
@@ -14183,6 +14274,10 @@ class Database:
                 if row:
                     claimed_at = row[0]
 
+            audit_actor = self._schedule_change_actor(
+                cursor, actor_id=admin_id, source='auction_admin'
+            )
+            audit_before = self._snapshot_schedule_days_tx(cursor, [(operator_id_int, shift_date)])
             self._save_shift_tx(
                 cursor=cursor,
                 operator_id=operator_id_int,
@@ -14192,6 +14287,7 @@ class Database:
                 breaks=None,
                 shift_type=None,
             )
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
                 operator_ids=[operator_id_int],
@@ -42592,6 +42688,18 @@ class Database:
                     self._load_day_shift_breaks_tx(cursor, target_operator_id, day_obj)
                 )
 
+            # Обмен меняет графики обоих операторов, а инициатор действия один —
+            # тот, кто согласовал заявку. В истории у обеих сторон будет он.
+            audit_actor = self._schedule_change_actor(
+                cursor, actor_id=responder_operator_id, source='swap'
+            )
+            audit_before = self._snapshot_schedule_days_tx(
+                cursor,
+                [(int(requester_operator_id), day_obj) for day_obj in requester_affected_dates]
+                + [(int(target_operator_id), day_obj) for day_obj in target_affected_dates]
+                + [(int(requester_operator_id), day_obj) for day_obj in requester_day_off_dates]
+            )
+
             for day_obj in requester_affected_dates:
                 self._clear_day_schedule_tx(cursor, requester_operator_id, day_obj)
             for day_obj in target_affected_dates:
@@ -42631,6 +42739,8 @@ class Database:
             for day_obj in requester_day_off_dates:
                 self._set_day_off_tx(cursor, requester_operator_id, day_obj)
 
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
+
             cursor.execute(
                 """
                 UPDATE work_shift_swap_requests
@@ -42655,6 +42765,376 @@ class Database:
             row = self._select_shift_swap_request_by_id_tx(cursor, request_id)
             return self._serialize_shift_swap_request_row(row)
 
+    # ------------------------------------------------------------------
+    # История изменений графика
+    # ------------------------------------------------------------------
+    #
+    # Пишем не построчно по work_shifts, а сравнением дня «до» и «после».
+    # Причин две. Первая: правка смены физически выглядит как удаление старой
+    # строки и вставка новой (см. _save_shift_tx), а публикация аукциона стирает
+    # день целиком и собирает заново — построчный аудит выдавал бы пару
+    # «удалена + добавлена» на каждую смену при каждой перепубликации, даже когда
+    # ничего не изменилось. Вторая: у смены нет устойчивого идентификатора —
+    # SERIAL id меняется при каждой перезаписи, и на фронт он вообще не доезжает.
+    # Сравнение по значениям (начало, конец, вид) даёт ровно те записи, которые
+    # человек и считает изменением.
+
+    def _schedule_change_actor(self, cursor, actor_id=None, source='supervisor', actor_name=None):
+        """Кто и откуда правит. Имя и роль запоминаем копией — чтобы запись читалась
+        и после переименования автора, и после его увольнения."""
+        try:
+            resolved_id = int(actor_id) if actor_id is not None else None
+        except (TypeError, ValueError):
+            resolved_id = None
+
+        name = str(actor_name or '').strip()
+        role = ''
+        if resolved_id is not None:
+            cursor.execute("SELECT name, role FROM users WHERE id = %s", (resolved_id,))
+            row = cursor.fetchone()
+            if row:
+                if not name:
+                    name = str(row[0] or '').strip()
+                role = normalize_role_value(row[1]) or ''
+
+        source_norm = str(source or '').strip() or 'system'
+        if source_norm not in WORK_SHIFT_CHANGE_SOURCES:
+            source_norm = 'system'
+
+        return {
+            'id': resolved_id,
+            'name': name[:255],
+            'role': str(role or '')[:32],
+            'source': source_norm
+        }
+
+    def _normalize_schedule_day_keys(self, keys):
+        normalized = []
+        seen = set()
+        for item in (keys or []):
+            if item is None:
+                continue
+            operator_id, day = item
+            try:
+                operator_id = int(operator_id)
+            except (TypeError, ValueError):
+                continue
+            try:
+                day_obj = self._normalize_schedule_date(day)
+            except (TypeError, ValueError):
+                continue
+            key = (operator_id, day_obj)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(key)
+        return normalized
+
+    def _snapshot_schedule_days_tx(self, cursor, keys):
+        """Состояние дней (смены + признак выходного) двумя запросами на всю пачку."""
+        normalized = self._normalize_schedule_day_keys(keys)
+        if not normalized:
+            return {}
+
+        snapshot = {key: {'shifts': [], 'day_off': False} for key in normalized}
+        operator_ids = sorted({operator_id for operator_id, _ in normalized})
+        dates = sorted({day for _, day in normalized})
+
+        cursor.execute("""
+            SELECT operator_id, shift_date, start_time, end_time, shift_type
+            FROM work_shifts
+            WHERE operator_id = ANY(%s) AND shift_date = ANY(%s)
+        """, (operator_ids, dates))
+        for operator_id, day, start_time, end_time, shift_type in (cursor.fetchall() or []):
+            bucket = snapshot.get((int(operator_id), day))
+            if bucket is None:
+                continue
+            bucket['shifts'].append((start_time, end_time, self._normalize_work_shift_type(shift_type)))
+
+        cursor.execute("""
+            SELECT operator_id, day_off_date
+            FROM days_off
+            WHERE operator_id = ANY(%s) AND day_off_date = ANY(%s)
+        """, (operator_ids, dates))
+        for operator_id, day in (cursor.fetchall() or []):
+            bucket = snapshot.get((int(operator_id), day))
+            if bucket is not None:
+                bucket['day_off'] = True
+
+        for bucket in snapshot.values():
+            bucket['shifts'].sort(key=lambda item: (item[0], item[1]))
+        return snapshot
+
+    def _schedule_days_with_records_tx(self, cursor, operator_id, start_date, end_date=None):
+        """Дни периода, где вообще есть что менять. Открытый период (увольнение)
+        иначе пришлось бы снимать «до конца времён»."""
+        operator_id = int(operator_id)
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date) if end_date is not None else None
+
+        if end_obj is None:
+            cursor.execute("""
+                SELECT shift_date FROM work_shifts
+                WHERE operator_id = %s AND shift_date >= %s
+                UNION
+                SELECT day_off_date FROM days_off
+                WHERE operator_id = %s AND day_off_date >= %s
+            """, (operator_id, start_obj, operator_id, start_obj))
+        else:
+            cursor.execute("""
+                SELECT shift_date FROM work_shifts
+                WHERE operator_id = %s AND shift_date BETWEEN %s AND %s
+                UNION
+                SELECT day_off_date FROM days_off
+                WHERE operator_id = %s AND day_off_date BETWEEN %s AND %s
+            """, (operator_id, start_obj, end_obj, operator_id, start_obj, end_obj))
+        return [(operator_id, row[0]) for row in (cursor.fetchall() or [])]
+
+    def _pair_shift_changes(self, removed, added):
+        """Сопоставить снятые и появившиеся смены. Пара с наибольшим пересечением —
+        это одна и та же смена, которой подвинули время, а не «удалили и добавили»:
+        именно так изменение видит человек, который смотрит в график."""
+        scored = []
+        for removed_index, removed_item in enumerate(removed):
+            removed_start, removed_end = self._schedule_interval_minutes(removed_item[0], removed_item[1])
+            for added_index, added_item in enumerate(added):
+                added_start, added_end = self._schedule_interval_minutes(added_item[0], added_item[1])
+                overlap = min(removed_end, added_end) - max(removed_start, added_start)
+                if overlap <= 0:
+                    continue
+                scored.append((-overlap, removed_index, added_index))
+        scored.sort()
+
+        used_removed = set()
+        used_added = set()
+        pairs = []
+        for _, removed_index, added_index in scored:
+            if removed_index in used_removed or added_index in used_added:
+                continue
+            used_removed.add(removed_index)
+            used_added.add(added_index)
+            pairs.append((removed[removed_index], added[added_index]))
+
+        rest_removed = [item for index, item in enumerate(removed) if index not in used_removed]
+        rest_added = [item for index, item in enumerate(added) if index not in used_added]
+        return pairs, rest_removed, rest_added
+
+    def _diff_schedule_day(self, operator_id, day, before_state, after_state, actor):
+        before_map = {(item[0], item[1]): item[2] for item in (before_state or {}).get('shifts') or []}
+        after_map = {(item[0], item[1]): item[2] for item in (after_state or {}).get('shifts') or []}
+
+        entries = []
+
+        # Границы те же, поменялся только вид смены (обычная / практика / телефонная).
+        for key in sorted(set(before_map) & set(after_map)):
+            if before_map[key] != after_map[key]:
+                entries.append((
+                    'changed', key[0], key[1], key[0], key[1], after_map[key], before_map[key]
+                ))
+
+        removed = sorted(set(before_map) - set(after_map))
+        added = sorted(set(after_map) - set(before_map))
+        pairs, rest_removed, rest_added = self._pair_shift_changes(removed, added)
+
+        for previous_key, next_key in pairs:
+            entries.append((
+                'changed', next_key[0], next_key[1], previous_key[0], previous_key[1],
+                after_map[next_key], before_map[previous_key]
+            ))
+        for key in rest_added:
+            entries.append(('added', key[0], key[1], None, None, after_map[key], None))
+        for key in rest_removed:
+            entries.append(('removed', None, None, key[0], key[1], None, before_map[key]))
+
+        before_day_off = bool((before_state or {}).get('day_off'))
+        after_day_off = bool((after_state or {}).get('day_off'))
+        if before_day_off != after_day_off:
+            entries.append((
+                'day_off_set' if after_day_off else 'day_off_cleared',
+                None, None, None, None, None, None
+            ))
+
+        return [
+            (
+                int(operator_id), day, action, actor['source'],
+                start_time, end_time, prev_start_time, prev_end_time,
+                shift_type, prev_shift_type, actor['id'], actor['name'], actor.get('role') or ''
+            )
+            for action, start_time, end_time, prev_start_time, prev_end_time, shift_type, prev_shift_type
+            in entries
+        ]
+
+    def _record_schedule_day_changes_tx(self, cursor, before, actor):
+        if not before or not actor:
+            return 0
+
+        after = self._snapshot_schedule_days_tx(cursor, before.keys())
+        rows = []
+        for (operator_id, day), before_state in before.items():
+            after_state = after.get((operator_id, day)) or {'shifts': [], 'day_off': False}
+            rows.extend(self._diff_schedule_day(operator_id, day, before_state, after_state, actor))
+
+        if not rows:
+            return 0
+
+        execute_values(cursor, """
+            INSERT INTO work_shift_changes (
+                operator_id, shift_date, action, source,
+                start_time, end_time, prev_start_time, prev_end_time,
+                shift_type, prev_shift_type, actor_id, actor_name, actor_role
+            )
+            VALUES %s
+        """, rows)
+        return len(rows)
+
+    @contextmanager
+    def _schedule_change_audit(self, cursor, keys, actor_id=None, source='supervisor', actor_name=None):
+        """Обернуть правку графика: снимок до, операция, запись отличий после.
+        Всё внутри той же транзакции — история не может разойтись с графиком."""
+        actor = self._schedule_change_actor(
+            cursor, actor_id=actor_id, source=source, actor_name=actor_name
+        )
+        before = self._snapshot_schedule_days_tx(cursor, keys)
+        yield
+        self._record_schedule_day_changes_tx(cursor, before, actor)
+
+    @staticmethod
+    def _serialize_work_shift_change_row(row):
+        (
+            entry_id, operator_id, operator_name, shift_date, action, source,
+            start_time, end_time, prev_start_time, prev_end_time,
+            shift_type, prev_shift_type, actor_id, actor_name, actor_role, changed_at
+        ) = row
+
+        def as_time(value):
+            return value.strftime('%H:%M') if hasattr(value, 'strftime') else None
+
+        return {
+            'id': int(entry_id),
+            'operatorId': int(operator_id),
+            'operatorName': operator_name or '',
+            'date': shift_date.strftime('%Y-%m-%d') if shift_date else None,
+            'action': action,
+            'source': source,
+            'start': as_time(start_time),
+            'end': as_time(end_time),
+            'prevStart': as_time(prev_start_time),
+            'prevEnd': as_time(prev_end_time),
+            'shiftType': shift_type or None,
+            'prevShiftType': prev_shift_type or None,
+            'actorId': int(actor_id) if actor_id is not None else None,
+            'actorName': actor_name or '',
+            'actorRole': actor_role or '',
+            'changedAt': changed_at.isoformat() if hasattr(changed_at, 'isoformat') else None
+        }
+
+    def get_work_shift_change_operator_ids(self, start_date, end_date):
+        """Операторы, у которых в периоде вообще есть история. Роут пересекает их
+        со своей зоной видимости — так не приходится тянуть весь список сотрудников."""
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date)
+        if end_obj < start_obj:
+            raise ValueError("end_date must be >= start_date")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT operator_id
+                FROM work_shift_changes
+                WHERE shift_date BETWEEN %s AND %s
+            """, (start_obj, end_obj))
+            return [int(row[0]) for row in (cursor.fetchall() or []) if row[0] is not None]
+
+    def get_work_shift_change_summary(self, operator_ids, start_date, end_date):
+        """Сводка «в каком дне что-то меняли» — один запрос на весь видимый период.
+        Сетке нужен только факт и последняя правка, поэтому подробности не тянем."""
+        operator_ids = [int(value) for value in (operator_ids or []) if value is not None]
+        if not operator_ids:
+            return {}
+
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date)
+        if end_obj < start_obj:
+            raise ValueError("end_date must be >= start_date")
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    operator_id,
+                    shift_date,
+                    COUNT(*)::int AS changes_count,
+                    MAX(changed_at) AS last_changed_at,
+                    (array_agg(action ORDER BY changed_at DESC, id DESC))[1] AS last_action,
+                    (array_agg(source ORDER BY changed_at DESC, id DESC))[1] AS last_source,
+                    (array_agg(actor_name ORDER BY changed_at DESC, id DESC))[1] AS last_actor_name,
+                    (array_agg(COALESCE(actor_role, '') ORDER BY changed_at DESC, id DESC))[1] AS last_actor_role
+                FROM work_shift_changes
+                WHERE operator_id = ANY(%s)
+                  AND shift_date BETWEEN %s AND %s
+                GROUP BY operator_id, shift_date
+            """, (operator_ids, start_obj, end_obj))
+            rows = cursor.fetchall() or []
+
+        summary = {}
+        for operator_id, shift_date, changes_count, last_changed_at, last_action, last_source, last_actor_name, last_actor_role in rows:
+            key = f"{int(operator_id)}|{shift_date.strftime('%Y-%m-%d')}"
+            summary[key] = {
+                'count': int(changes_count or 0),
+                'lastAt': last_changed_at.isoformat() if hasattr(last_changed_at, 'isoformat') else None,
+                'lastAction': last_action,
+                'lastSource': last_source,
+                'lastActorName': last_actor_name or '',
+                'lastActorRole': last_actor_role or ''
+            }
+        return summary
+
+    def get_work_shift_changes(self, operator_ids, start_date, end_date, limit=200, offset=0):
+        """Сами записи истории: для одной ячейки (один оператор, один день)
+        или для всего периода — журналом."""
+        operator_ids = [int(value) for value in (operator_ids or []) if value is not None]
+        if not operator_ids:
+            return {'items': [], 'total': 0}
+
+        start_obj = self._normalize_schedule_date(start_date)
+        end_obj = self._normalize_schedule_date(end_date)
+        if end_obj < start_obj:
+            raise ValueError("end_date must be >= start_date")
+
+        limit = max(1, min(int(limit or 200), 500))
+        offset = max(0, int(offset or 0))
+
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT COUNT(*)::int
+                FROM work_shift_changes
+                WHERE operator_id = ANY(%s)
+                  AND shift_date BETWEEN %s AND %s
+            """, (operator_ids, start_obj, end_obj))
+            total_row = cursor.fetchone()
+            total = int(total_row[0]) if total_row else 0
+
+            cursor.execute("""
+                SELECT
+                    c.id, c.operator_id, op.name, c.shift_date, c.action, c.source,
+                    c.start_time, c.end_time, c.prev_start_time, c.prev_end_time,
+                    c.shift_type, c.prev_shift_type, c.actor_id,
+                    COALESCE(NULLIF(c.actor_name, ''), actor.name, ''),
+                    COALESCE(c.actor_role, ''),
+                    c.changed_at
+                FROM work_shift_changes c
+                LEFT JOIN users op ON op.id = c.operator_id
+                LEFT JOIN users actor ON actor.id = c.actor_id
+                WHERE c.operator_id = ANY(%s)
+                  AND c.shift_date BETWEEN %s AND %s
+                ORDER BY c.changed_at DESC, c.id DESC
+                LIMIT %s OFFSET %s
+            """, (operator_ids, start_obj, end_obj, limit, offset))
+            rows = cursor.fetchall() or []
+
+        return {
+            'items': [self._serialize_work_shift_change_row(row) for row in rows],
+            'total': total
+        }
+
     def save_shift(
         self,
         operator_id,
@@ -42664,7 +43144,9 @@ class Database:
         breaks=None,
         shift_type=None,
         previous_start_time=None,
-        previous_end_time=None
+        previous_end_time=None,
+        actor_id=None,
+        change_source='supervisor'
     ):
         """
         Сохранить смену для оператора и синхронизировать её с фронтовым merged-состоянием.
@@ -42677,17 +43159,23 @@ class Database:
         end_time_obj = self._normalize_schedule_time(end_time, 'end_time')
 
         with self._get_cursor() as cursor:
-            shift_id = self._save_shift_tx(
-                cursor=cursor,
-                operator_id=int(operator_id),
-                shift_date=shift_date_obj,
-                start_time=start_time_obj,
-                end_time=end_time_obj,
-                breaks=breaks,
-                shift_type=shift_type,
-                previous_start_time=previous_start_time,
-                previous_end_time=previous_end_time
-            )
+            with self._schedule_change_audit(
+                cursor,
+                [(int(operator_id), shift_date_obj)],
+                actor_id=actor_id,
+                source=change_source
+            ):
+                shift_id = self._save_shift_tx(
+                    cursor=cursor,
+                    operator_id=int(operator_id),
+                    shift_date=shift_date_obj,
+                    start_time=start_time_obj,
+                    end_time=end_time_obj,
+                    breaks=breaks,
+                    shift_type=shift_type,
+                    previous_start_time=previous_start_time,
+                    previous_end_time=previous_end_time
+                )
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
                 operator_ids=[int(operator_id)],
@@ -42696,7 +43184,7 @@ class Database:
             )
             return shift_id
 
-    def delete_shift(self, operator_id, shift_date, start_time, end_time):
+    def delete_shift(self, operator_id, shift_date, start_time, end_time, actor_id=None, change_source='supervisor'):
         """
         Удалить конкретную смену оператора.
         """
@@ -42705,13 +43193,19 @@ class Database:
         end_time_obj = self._normalize_schedule_time(end_time, 'end_time')
 
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                DELETE FROM work_shifts
-                WHERE operator_id = %s AND shift_date = %s
-                  AND start_time = %s AND end_time = %s
-                RETURNING id
-            """, (int(operator_id), shift_date_obj, start_time_obj, end_time_obj))
-            deleted = cursor.fetchone() is not None
+            with self._schedule_change_audit(
+                cursor,
+                [(int(operator_id), shift_date_obj)],
+                actor_id=actor_id,
+                source=change_source
+            ):
+                cursor.execute("""
+                    DELETE FROM work_shifts
+                    WHERE operator_id = %s AND shift_date = %s
+                      AND start_time = %s AND end_time = %s
+                    RETURNING id
+                """, (int(operator_id), shift_date_obj, start_time_obj, end_time_obj))
+                deleted = cursor.fetchone() is not None
             if deleted:
                 self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
@@ -42721,7 +43215,7 @@ class Database:
                 )
             return deleted
 
-    def toggle_day_off(self, operator_id, day_off_date):
+    def toggle_day_off(self, operator_id, day_off_date, actor_id=None, change_source='supervisor'):
         """
         Переключить выходной день для оператора.
         Если день уже выходной - убрать, иначе - добавить и удалить все смены в этот день.
@@ -42731,42 +43225,42 @@ class Database:
         operator_id = int(operator_id)
 
         with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT 1
-                FROM days_off
-                WHERE operator_id = %s AND day_off_date = %s
-            """, (operator_id, day_off_date_obj))
-            existing = cursor.fetchone()
-
-            if existing:
+            with self._schedule_change_audit(
+                cursor,
+                [(operator_id, day_off_date_obj)],
+                actor_id=actor_id,
+                source=change_source
+            ):
                 cursor.execute("""
-                    DELETE FROM days_off
+                    SELECT 1
+                    FROM days_off
                     WHERE operator_id = %s AND day_off_date = %s
                 """, (operator_id, day_off_date_obj))
-                self._recalculate_auto_daily_hours_tx(
-                    cursor=cursor,
-                    operator_ids=[operator_id],
-                    start_date=day_off_date_obj,
-                    end_date=day_off_date_obj
-                )
-                return False
+                existing = cursor.fetchone()
 
-            cursor.execute("""
-                INSERT INTO days_off (operator_id, day_off_date)
-                VALUES (%s, %s)
-                ON CONFLICT (operator_id, day_off_date) DO NOTHING
-            """, (operator_id, day_off_date_obj))
-            cursor.execute("""
-                DELETE FROM work_shifts
-                WHERE operator_id = %s AND shift_date = %s
-            """, (operator_id, day_off_date_obj))
+                if existing:
+                    cursor.execute("""
+                        DELETE FROM days_off
+                        WHERE operator_id = %s AND day_off_date = %s
+                    """, (operator_id, day_off_date_obj))
+                else:
+                    cursor.execute("""
+                        INSERT INTO days_off (operator_id, day_off_date)
+                        VALUES (%s, %s)
+                        ON CONFLICT (operator_id, day_off_date) DO NOTHING
+                    """, (operator_id, day_off_date_obj))
+                    cursor.execute("""
+                        DELETE FROM work_shifts
+                        WHERE operator_id = %s AND shift_date = %s
+                    """, (operator_id, day_off_date_obj))
+
             self._recalculate_auto_daily_hours_tx(
                 cursor=cursor,
                 operator_ids=[operator_id],
                 start_date=day_off_date_obj,
                 end_date=day_off_date_obj
             )
-            return True
+            return not existing
 
     def _delete_all_shifts_for_day_tx(self, cursor, operator_id, shift_date):
         operator_id = int(operator_id)
@@ -42882,7 +43376,7 @@ class Database:
             'deleted_shifts': deleted_shifts
         }
 
-    def apply_work_schedule_bulk_actions(self, actions):
+    def apply_work_schedule_bulk_actions(self, actions, actor_id=None, change_source='supervisor'):
         """
         Атомарное выполнение массовых действий по графикам в одном запросе.
         Поддерживаемые actions:
@@ -42892,6 +43386,15 @@ class Database:
         """
         if not isinstance(actions, list) or not actions:
             raise ValueError("actions must be a non-empty list")
+
+        # Пары «оператор + день», которые тронет пачка: снимок для истории снимаем
+        # один раз на всю транзакцию, а не по действию — иначе соседние действия
+        # по одному дню записались бы как несколько отдельных правок.
+        audit_keys = [
+            (item.get('operator_id'), item.get('date') or item.get('shift_date') or item.get('day_off_date'))
+            for item in actions
+            if isinstance(item, dict)
+        ]
 
         summary = {
             'total': 0,
@@ -42921,6 +43424,9 @@ class Database:
                 prev[1] = day_obj
 
         with self._get_cursor() as cursor:
+            audit_actor = self._schedule_change_actor(cursor, actor_id=actor_id, source=change_source)
+            audit_before = self._snapshot_schedule_days_tx(cursor, audit_keys)
+
             for item in actions:
                 if not isinstance(item, dict):
                     raise ValueError("Each action must be an object")
@@ -43002,6 +43508,8 @@ class Database:
 
                 raise ValueError(f"Unsupported action type: {action_type}")
 
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
+
             for op_id, bounds in affected_range_by_operator.items():
                 self._recalculate_auto_daily_hours_tx(
                     cursor=cursor,
@@ -43013,7 +43521,7 @@ class Database:
         summary['affected_operator_ids'] = sorted(affected_operator_ids)
         return summary
 
-    def import_work_schedule_excel_entries(self, entries):
+    def import_work_schedule_excel_entries(self, entries, actor_id=None, change_source='import'):
         """
         Импорт расписания из Excel-матрицы (ФИО x Даты), уже после парсинга.
         Каждый entry:
@@ -43089,6 +43597,13 @@ class Database:
             summary['blacklist_skipped_total'] += 1
 
         with self._get_cursor() as cursor:
+            audit_actor = self._schedule_change_actor(cursor, actor_id=actor_id, source=change_source)
+            audit_before = self._snapshot_schedule_days_tx(cursor, [
+                (item.get('operator_id'), item.get('date'))
+                for item in entries
+                if isinstance(item, dict)
+            ])
+
             for item in entries:
                 if not isinstance(item, dict):
                     raise ValueError("Each entry must be an object")
@@ -43187,6 +43702,8 @@ class Database:
 
                 summary['set_shift_days'] += 1
                 summary['days_processed'] += 1
+
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
 
             for op_id, bounds in affected_range_by_operator.items():
                 self._recalculate_auto_daily_hours_tx(
@@ -43970,12 +44487,23 @@ class Database:
                 created_by_id
             ))
             saved_row = cursor.fetchone()
+            # В истории графика отпуск/больничный/увольнение виден как снятие смен:
+            # снимок берём только по дням, где действительно что-то стоит, — период
+            # увольнения открытый, и «до конца времён» снимать нечего и незачем.
+            audit_actor = self._schedule_change_actor(
+                cursor, actor_id=created_by_id, source='status_period'
+            )
+            audit_before = self._snapshot_schedule_days_tx(
+                cursor,
+                self._schedule_days_with_records_tx(cursor, operator_id, start_date_obj, end_date_obj)
+            )
             deleted_schedule = self._delete_shifts_for_period_tx(
                 cursor=cursor,
                 operator_id=operator_id,
                 start_date=start_date_obj,
                 end_date=end_date_obj
             )
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
             recalc_end_date_obj = end_date_obj
             if recalc_end_date_obj is None:
                 recalc_end_date_obj = start_date_obj
@@ -44078,7 +44606,7 @@ class Database:
             self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[int(row[1])])
             return self._serialize_schedule_status_period(row)
 
-    def save_shifts_bulk(self, operator_id, shifts_data):
+    def save_shifts_bulk(self, operator_id, shifts_data, actor_id=None, change_source='supervisor'):
         """
         Массовое сохранение смен для оператора.
         shifts_data: [{'date': 'YYYY-MM-DD', 'start': 'HH:MM', 'end': 'HH:MM', 'breaks': [...]}, ...]
@@ -44091,6 +44619,13 @@ class Database:
         min_date_obj = None
         max_date_obj = None
         with self._get_cursor() as cursor:
+            audit_actor = self._schedule_change_actor(cursor, actor_id=actor_id, source=change_source)
+            audit_before = self._snapshot_schedule_days_tx(cursor, [
+                (operator_id, shift.get('date'))
+                for shift in shifts_data
+                if isinstance(shift, dict)
+            ])
+
             for shift in shifts_data:
                 if not isinstance(shift, dict):
                     raise ValueError("Each shift must be an object")
@@ -44111,6 +44646,8 @@ class Database:
                     shift_type=shift.get('shift_type')
                 )
                 result_ids.append(shift_id)
+
+            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
 
             if min_date_obj is not None and max_date_obj is not None:
                 self._recalculate_auto_daily_hours_tx(

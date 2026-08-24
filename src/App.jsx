@@ -32,6 +32,7 @@ import InfoHint from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import OrazAitSplash from './components/common/OrazAitSplash';
 import ScheduleTimelineTooltip from './components/common/ScheduleTimelineTooltip';
+import { shiftHistoryCellKey, shiftHistoryTooltipLine } from './components/schedule/shiftHistoryFormat';
 import SensitiveSectionGate from './components/common/SensitiveSectionGate';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
@@ -163,6 +164,7 @@ const TrainerView = lazyWithRetry(() => import('./components/trainer/TrainerView
 const FleetEdmView = lazyWithRetry(() => import('./components/fleet_edm/FleetEdmView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
 const WikiView = lazyWithRetry(() => import('./components/wiki/WikiView'));
+const ShiftHistoryPopover = lazyWithRetry(() => import('./components/schedule/ShiftHistoryPopover'));
 const ChatSnapshotModal = lazyWithRetry(() => import('./components/c2d_eval/ChatSnapshotModal'));
 const MyLowRatings = lazyWithRetry(() => import('./components/c2d_eval/MyLowRatings'));
 const ChatThread = lazyWithRetry(() => import('./components/c2d_eval/ChatThread'));
@@ -13933,6 +13935,12 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 workplaceNumber: '',
                 comment: ''
             });
+            // Сводка истории по видимому диапазону: `${opId}|${date}` → последняя правка.
+            // Ровно один объект состояния на всю сетку — состояние внутри map
+            // перерисовывало бы каждую ячейку каждого оператора на любой ховер.
+            const [plannerHistorySummary, setPlannerHistorySummary] = useState({});
+            const [shiftHistoryTarget, setShiftHistoryTarget] = useState(null);
+            const [plannerHistoryReloadToken, setPlannerHistoryReloadToken] = useState(0);
             const [plannerTechStatusActionLoading, setPlannerTechStatusActionLoading] = useState(false);
             const [plannerTechStatusModalError, setPlannerTechStatusModalError] = useState('');
             const [plannerTechReasonOptions, setPlannerTechReasonOptions] = useState([]);
@@ -14597,6 +14605,10 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     const serverOperators = Array.isArray(data?.operators) ? data.operators : [];
                     mergePlannerOperatorsFromServer(serverOperators);
                     monthKeysToFetch.forEach(key => plannerLoadedMonthKeysRef.current.add(key));
+                    // Принудительная перезагрузка сетки идёт ровно после правки
+                    // графика — значит, и сводка истории устарела. Один общий
+                    // сигнал вместо вызова в каждом из полутора десятков мест.
+                    if (force) setPlannerHistoryReloadToken(value => value + 1);
                     return data;
                 } finally {
                     monthKeysToFetch.forEach(key => plannerLoadingMonthKeysRef.current.delete(key));
@@ -14748,6 +14760,64 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     plannerLoadingStatusRangeKeysRef.current.delete(rangeKey);
                 }
             }, [user?.id, user?.role, plannerStatusRangeKey, mergePlannerOperatorsFromServer]);
+
+            // ── История изменений графика ──────────────────────────────────
+            //
+            // Сводка «в каком дне что-то меняли» тянется отдельным лёгким
+            // запросом и только на ВИДИМЫЙ диапазон: складывать её в ответ
+            // /operators нельзя — тот и так тяжёлый и после каждой правки
+            // перезапрашивается сразу на три месяца.
+            const fetchPlannerHistorySummary = useCallback(async (startDate, endDate, { signal } = {}) => {
+                if (!user?.id || user?.role === 'operator') return null;
+                const start = String(startDate || '').trim();
+                const end = String(endDate || '').trim();
+                if (!start || !end) return null;
+
+                const qs = new URLSearchParams({ mode: 'summary', start_date: start, end_date: end });
+                const response = await fetch(`${API_BASE_URL}/api/work_schedules/history?${qs.toString()}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader(),
+                    signal
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                if (signal?.aborted) return null;
+                setPlannerHistorySummary(data?.days && typeof data.days === 'object' ? data.days : {});
+                return data;
+            }, [user?.id, user?.role]);
+
+            // Подробности грузятся лениво — по клику на конкретный день.
+            const fetchPlannerHistoryEntries = useCallback(async (operatorId, date) => {
+                const qs = new URLSearchParams({
+                    mode: 'entries',
+                    start_date: date,
+                    end_date: date,
+                    operator_id: String(operatorId),
+                    limit: '200'
+                });
+                const response = await fetch(`${API_BASE_URL}/api/work_schedules/history?${qs.toString()}`, {
+                    credentials: 'include',
+                    headers: withAccessTokenHeader()
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+                return Array.isArray(data?.items) ? data.items : [];
+            }, []);
+
+            const openShiftHistory = useCallback((anchorEl, operatorId, date, operatorName) => {
+                const rect = anchorEl?.getBoundingClientRect?.();
+                if (!rect) return;
+                setShiftHistoryTarget({
+                    operatorId,
+                    date,
+                    operatorName: operatorName || '',
+                    anchorRect: {
+                        top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right
+                    }
+                });
+            }, []);
+
+            const closeShiftHistory = useCallback(() => setShiftHistoryTarget(null), []);
 
             // Восстановление выбранной даты/фильтров/режима после перезагрузки
             useEffect(() => {
@@ -15375,6 +15445,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 [plannerStatusRangeKey, plannerStatusFetchRange?.start, plannerStatusFetchRange?.end]
             );
             const shouldLoadPlannerVisibleImportedStatuses = viewMode === 'day';
+
+            // Сводку истории тянем на видимый диапазон и перезапрашиваем после
+            // правок графика — тем же токеном, что и остальные перезагрузки.
+            useEffect(() => {
+                const days = Array.isArray(visibleRange) ? visibleRange.filter(Boolean) : [];
+                if (days.length === 0) return undefined;
+                const start = days[0];
+                const end = days[days.length - 1];
+                const controller = new AbortController();
+                const timer = setTimeout(() => {
+                    fetchPlannerHistorySummary(start, end, { signal: controller.signal })
+                        .catch((error) => {
+                            if (error?.name === 'AbortError') return;
+                            // История — вспомогательный слой: её отсутствие не должно
+                            // ломать сетку, поэтому только пишем в консоль.
+                            console.error('Не удалось загрузить историю изменений графика:', error);
+                        });
+                }, 140);
+                return () => {
+                    clearTimeout(timer);
+                    controller.abort();
+                };
+            }, [visibleRange, plannerHistoryReloadToken, fetchPlannerHistorySummary]);
             // Подгружаем сохранённые тренинги для всех месяцев видимого диапазона,
             // чтобы полосы тренингов в таймлайне статусов и список в модалке дня были заполнены.
             useEffect(() => {
@@ -25180,6 +25273,17 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             return (
                 <div className="px-4 py-2 min-h-screen bg-slate-50">
                 <ScheduleTimelineTooltip />
+                {shiftHistoryTarget && (
+                    // Панель рендерится один раз вне цикла по операторам: внутри
+                    // него любое её состояние перерисовывало бы всю сетку.
+                    <Suspense fallback={null}>
+                        <ShiftHistoryPopover
+                            target={shiftHistoryTarget}
+                            onClose={closeShiftHistory}
+                            fetchEntries={fetchPlannerHistoryEntries}
+                        />
+                    </Suspense>
+                )}
                 <div className="flex items-start gap-4 mb-0 h-[calc(100vh-1rem)]">
                     <div className="flex flex-col gap-3">
                     <SmallCalendar currentDate={currentDate} onChange={(d) => setCurrentDate(d)} viewMode={viewMode} />
@@ -26408,7 +26512,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                 showCarryDayOffBadge ? 'День отмечен как выходной' : '',
                                                 markerTooltipText
                                             ].filter(Boolean).join('\n');
-                                            const isSelected = selectedDayKeySet.has(makeSelectedCellKey(op.id, d));
+                                            const cellKey = makeSelectedCellKey(op.id, d);
+                                            const isSelected = selectedDayKeySet.has(cellKey);
+                                            // История есть далеко не у каждого дня: где её нет — в ячейке
+                                            // не появляется ничего и никогда.
+                                            const cellHistorySummary = plannerHistorySummary[cellKey] || null;
                                             let bgColor = ' bg-white';
                                             let borderClass = ' border-slate-300';
                                             let emphasisClass = '';
@@ -26434,10 +26542,38 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                             return (
                                             <div
                                                 key={d}
-                                                className={`${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
+                                                className={`group ${plannerStatusSpecialDayViewEnabled ? 'h-[100px]' : 'h-[56px]'} overflow-hidden border rounded p-1 relative` + borderClass + bgColor + emphasisClass + (viewMode !== 'day' ? ' cursor-pointer hover:border-slate-500 hover:shadow-sm' : '')}
                                                 style={viewMode === 'day' ? { flex: 1 } : { minWidth: cellMinWidth, flex: '0 0 auto' }}
                                                 onClick={(e) => handleDayClick(e, op.id, d)}
+                                                onContextMenu={(viewMode !== 'day' && cellHistorySummary)
+                                                    // В режиме дня правая кнопка занята выделением офлайн-активности,
+                                                    // поэтому там историю открывает только значок в углу.
+                                                    ? (e) => {
+                                                        e.preventDefault();
+                                                        e.stopPropagation();
+                                                        openShiftHistory(e.currentTarget, op.id, d, op.name);
+                                                    }
+                                                    : undefined}
                                             >
+                                                {/* Значок истории проявляется только под курсором и только там,
+                                                    где правки были. Место — середина правого края: углы уже
+                                                    заняты («Ожидает», индикаторы недочётов, часы, счётчик «+N»).
+                                                    В режиме дня ячейка — это таймлайн, свободного места в ней нет,
+                                                    поэтому там история открывается из карточки смены. */}
+                                                {viewMode !== 'day' && cellHistorySummary && (
+                                                    <button
+                                                        type="button"
+                                                        aria-label="История изменений смены"
+                                                        data-schedule-tooltip={shiftHistoryTooltipLine(cellHistorySummary)}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            openShiftHistory(e.currentTarget, op.id, d, op.name);
+                                                        }}
+                                                        className="absolute right-0 top-1/2 -translate-y-1/2 z-[55] hidden group-hover:grid h-5 w-5 place-items-center rounded-full bg-white/80 text-slate-400 shadow-sm ring-1 ring-slate-200/80 transition hover:bg-white hover:text-slate-700"
+                                                    >
+                                                        <FaIcon className="fas fa-clock-rotate-left text-[10px]"></FaIcon>
+                                                    </button>
+                                                )}
                                                 {(viewMode === 'week' || viewMode === 'month') && pendingFlagLabels.length > 0 && (
                                                     <span
                                                         className="absolute top-0.5 left-0.5 z-50 flex items-center gap-0.5"
@@ -26591,12 +26727,18 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                                         color: "white",
                                                                                     }}
                                                                                     data-schedule-tooltip={(() => {
-                                                                                        if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
-                                                                                        const srcStart = timeToMinutes(srcSeg.start);
-                                                                                        const srcEnd = timeToMinutes(srcSeg.end);
-                                                                                        const isCrossing = srcEnd <= srcStart;
-                                                                                        if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
-                                                                                        return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                        const timeText = (() => {
+                                                                                            if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                            const srcStart = timeToMinutes(srcSeg.start);
+                                                                                            const srcEnd = timeToMinutes(srcSeg.end);
+                                                                                            const isCrossing = srcEnd <= srcStart;
+                                                                                            if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                                                            return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                                        })();
+                                                                                        const historyLine = shiftHistoryTooltipLine(
+                                                                                            plannerHistorySummary[makeSelectedCellKey(op.id, p.sourceDate)]
+                                                                                        );
+                                                                                        return historyLine ? `${timeText}\n${historyLine}` : timeText;
                                                                                     })()}
                                                                                 >
                                                                                     <button
@@ -26786,12 +26928,20 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                             color: "white",
                                                             }}
                                                             data-schedule-tooltip={(() => {
-                                                                if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
-                                                                const srcStart = timeToMinutes(srcSeg.start);
-                                                                const srcEnd = timeToMinutes(srcSeg.end);
-                                                                const isCrossing = srcEnd <= srcStart;
-                                                                if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
-                                                                return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                const timeText = (() => {
+                                                                    if (!srcSeg) return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                    const srcStart = timeToMinutes(srcSeg.start);
+                                                                    const srcEnd = timeToMinutes(srcSeg.end);
+                                                                    const isCrossing = srcEnd <= srcStart;
+                                                                    if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
+                                                                    return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
+                                                                })();
+                                                                // Строка о последней правке появляется только там, где правка была.
+                                                                // Смена ночная — историю ищем по дню её начала.
+                                                                const historyLine = shiftHistoryTooltipLine(
+                                                                    plannerHistorySummary[makeSelectedCellKey(op.id, p.sourceDate)]
+                                                                );
+                                                                return historyLine ? `${timeText}\n${historyLine}` : timeText;
                                                             })()}
                                                         >
                                                             <div className="px-1 truncate text-[11px] border border-white/30 bg-white/10 rounded-sm z-40" style={{ paddingLeft: 6, paddingRight: 6 }}>{(() => {
@@ -26802,6 +26952,15 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                                                 if (isCrossing && srcSeg.end !== '00:00') return `${srcSeg.start} — ${srcSeg.end} (+1)`;
                                                                 return `${minutesToTime(p.start)} — ${minutesToTime(p.end)}`;
                                                             })()}</div>
+                                                            {plannerHistorySummary[makeSelectedCellKey(op.id, p.sourceDate)] && (
+                                                            <button
+                                                            aria-label="История изменений смены"
+                                                            onClick={(e) => { e.stopPropagation(); openShiftHistory(e.currentTarget, op.id, p.sourceDate, op.name); }}
+                                                            className="hidden group-hover:block text-[10px] px-1 py-0.5 ml-auto rounded bg-white/20"
+                                                            >
+                                                            <FaIcon className="fas fa-clock-rotate-left"></FaIcon>
+                                                            </button>
+                                                            )}
                                                             <button
                                                             onClick={(e) => { e.stopPropagation(); openEditModal(op.id, p.sourceDate, p.sourceIndex); }}
                                                             className="text-[10px] px-1 py-0.5 mr-1 rounded bg-white/20"
@@ -27767,10 +27926,29 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                     {!modalState.isDayOff && !modalState.multipleDates && modalTabShifts && (
                     <>
                     <div className="mb-6">
-                        <h4 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
-                            <FaIcon className="fas fa-list text-slate-500"></FaIcon>
-                            Существующие смены
-                        </h4>
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                            <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                                <FaIcon className="fas fa-list text-slate-500"></FaIcon>
+                                Существующие смены
+                            </h4>
+                            {/* Кнопка появляется только когда правки по этому дню были —
+                                иначе она обещала бы содержимое, которого нет. */}
+                            {plannerHistorySummary[makeSelectedCellKey(modalState.opId, modalState.date)] && (
+                                <button
+                                    type="button"
+                                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 transition-colors flex items-center gap-1.5"
+                                    onClick={(e) => openShiftHistory(
+                                        e.currentTarget,
+                                        modalState.opId,
+                                        modalState.date,
+                                        operators.find(o => o.id === modalState.opId)?.name
+                                    )}
+                                >
+                                    <FaIcon className="fas fa-clock-rotate-left text-[10px]"></FaIcon>
+                                    История изменений
+                                </button>
+                            )}
+                        </div>
                         <div className="space-y-2">
                         {(() => {
                             const op = operators.find(o => o.id === modalState.opId);
