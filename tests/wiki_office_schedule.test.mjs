@@ -4,7 +4,7 @@ import test from 'node:test';
 import {
     breakLines, dayHoursOn, dayIndexOf, officeNow, officeStatus, officeStatusOn,
     officeTodayISO,
-    scheduleLines,
+    scheduleLines, untilText,
 } from '../src/components/wiki/officeSchedule.js';
 
 /* График офиса считается по времени офиса, а не браузера: оператор может
@@ -47,27 +47,49 @@ test('границы интервалов: открытие включитель
     assert.equal(officeStatus(KOSTANAY, at('2026-08-12T09:00:00Z')).state, 'open');   // 14:00
 });
 
-test('до открытия — сегодняшнее время без названия дня', () => {
+test('до открытия — сегодняшний день, сдвиг нулевой', () => {
     assert.deepEqual(officeStatus(KOSTANAY, at('2026-08-12T02:00:00Z')), // 07:00 среда
-        { state: 'closed', opensAt: '09:00', opensDay: null });
+        { state: 'closed', opensAt: '09:00', opensCode: 'wed', opensIn: 0 });
 });
 
 test('после закрытия — ближайший рабочий день, а не завтрашний', () => {
     // Вечер субботы: воскресенье выходное, значит открытие в понедельник.
     assert.deepEqual(officeStatus(KOSTANAY, at('2026-08-15T15:00:00Z')), // 20:00 суббота
-        { state: 'closed', opensAt: '09:00', opensDay: 'Пн' });
+        { state: 'closed', opensAt: '09:00', opensCode: 'mon', opensIn: 2 });
 });
 
 test('в выходной день офис закрыт', () => {
     assert.deepEqual(officeStatus(KOSTANAY, at('2026-08-16T07:00:00Z')), // 12:00 воскресенье
-        { state: 'closed', opensAt: '09:00', opensDay: 'Пн' });
+        { state: 'closed', opensAt: '09:00', opensCode: 'mon', opensIn: 1 });
 });
 
 test('время берётся по Алматы, а не по машине пользователя', () => {
     // 22:00 UTC — по Гринвичу среда почти кончилась, в Алматы уже 03:00 четверга.
     const now = officeNow(at('2026-08-12T22:00:00Z'));
     assert.deepEqual(now, { dayIndex: 3, minutes: 180 });
-    assert.equal(officeStatus(KOSTANAY, at('2026-08-12T22:00:00Z')).opensDay, null);
+    assert.equal(officeStatus(KOSTANAY, at('2026-08-12T22:00:00Z')).opensIn, 0);
+});
+
+/* Срок рядом со статусом — просьба задачи #236: «закрыт до завтра 10:00»,
+ * «закрыт до 29.08». Формулировка «до …» одна на оба состояния: оператор
+ * диктует водителю одну и ту же конструкцию, открыт офис или закрыт. */
+
+test('срок словами: сегодня, завтра и день недели', () => {
+    assert.equal(untilText(officeStatus(KOSTANAY, at('2026-08-12T06:20:00Z'))), 'до 19:00');
+    assert.equal(untilText(officeStatus(KOSTANAY, at('2026-08-12T08:30:00Z'))), 'до 14:00');
+    // 07:00 среды: откроется сегодня же.
+    assert.equal(untilText(officeStatus(KOSTANAY, at('2026-08-12T02:00:00Z'))), 'до 09:00');
+    // 12:00 воскресенья: завтра понедельник — пишем «завтра», а не «понедельника».
+    assert.equal(untilText(officeStatus(KOSTANAY, at('2026-08-16T07:00:00Z'))), 'до завтра 09:00');
+    // 20:00 субботы: до понедельника ещё два дня, «завтра» было бы неправдой.
+    assert.equal(untilText(officeStatus(KOSTANAY, at('2026-08-15T15:00:00Z'))),
+                 'до понедельника 09:00');
+});
+
+test('без графика срока нет — молчим, а не выдумываем', () => {
+    assert.equal(untilText(officeStatus(null)), null);
+    assert.equal(untilText(null), null);
+    assert.equal(untilText({ state: 'closed' }), null);
 });
 
 test('ночная смена через полночь остаётся открытой', () => {

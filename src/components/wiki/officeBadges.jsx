@@ -1,12 +1,17 @@
 import React, { useMemo } from 'react';
 import { Clock, Coffee } from 'lucide-react';
 import { IosBadge } from '../ui/ios';
-import { DAY_STATE_PILL, DAY_STATE_TONE } from './officeDayStatus';
-import { hasSchedule, officeStatus } from './officeSchedule';
+import { DAY_STATE_PILL, DAY_STATE_TONE, statusUntil } from './officeDayStatus';
+import { hasSchedule, officeStatus, untilText } from './officeSchedule';
 
 /* Бейджи состояния офиса — на все три места раздела (карточка, строка таблицы,
  * подробности). Собраны в один файл, потому что выбор между ними — одно
  * правило, и оно должно жить рядом, а не повторяться в каждом месте.
+ *
+ * Во всех трёх рядом со статусом стоит СРОК (задача #236): «Открыто до 19:00»,
+ * «Закрыто до завтра 10:00», «Закрыт до 29.08». Предлог один на оба состояния
+ * намеренно — оператор диктует водителю одну и ту же конструкцию, открыт офис
+ * или закрыт, и переключаться между «до» и «откроется» ему не нужно.
  *
  * Отдельно от officeDayStatus.js: тот модуль — чистые правила без JSX, его
  * читают и тесты, и правило показа не должно тащить за собой React.
@@ -14,35 +19,39 @@ import { hasSchedule, officeStatus } from './officeSchedule';
 
 const STATUS_TONE = { open: 'green', break: 'amber', closed: 'slate' };
 
-/** Живой статус по часам: «Открыто до 19:00». Только для сегодняшнего дня — за
- *  прошедший день это была бы выдумка: что офис закрылся именно в 19:00, никто
- *  не записывал. Отдаёт null, когда графика нет вовсе. */
+const LIVE_LABELS = { open: 'Открыто', break: 'Обед', closed: 'Закрыто' };
+
+/** Живой статус по часам: «Открыто до 19:00», «Закрыто до завтра 10:00».
+ *  Только для сегодняшнего дня — за прошедший это была бы выдумка: что офис
+ *  закрылся именно в 19:00, никто не записывал. Отдаёт null, когда графика
+ *  нет вовсе. */
 export const OfficeLiveBadge = ({ schedule, tick }) => {
     // tick только заставляет пересчитать: время берётся из часов, а не из него.
     const status = useMemo(() => officeStatus(schedule), [schedule, tick]);
 
     if (status.state === 'none') return null;
+    const until = untilText(status);
 
     return (
         <IosBadge tone={STATUS_TONE[status.state]}>
             {status.state === 'break' ? <Coffee size={11} /> : <Clock size={11} />}
-            {status.state === 'open' && `Открыто до ${status.until}`}
-            {status.state === 'break' && `Обед до ${status.until}`}
-            {status.state === 'closed' && (status.opensAt
-                ? `Закрыто · откроется ${status.opensDay ? `${status.opensDay} ` : ''}${status.opensAt}`
-                : 'Закрыто')}
+            {LIVE_LABELS[status.state]}
+            {until ? ` ${until}` : ''}
         </IosBadge>
     );
 };
 
 /** Статус за выбранный день на белом фоне — карточка и подробности. */
-export const OfficeDayBadge = ({ status }) => (
-    <IosBadge tone={DAY_STATE_TONE[status.state]}>
-        {status.state === 'open' && <Clock size={11} />}
-        {status.label}
-        {status.state === 'open' && status.until && ` · ${status.from}–${status.until}`}
-    </IosBadge>
-);
+export const OfficeDayBadge = ({ status, dayISO }) => {
+    const until = statusUntil(status, null, dayISO);
+    return (
+        <IosBadge tone={DAY_STATE_TONE[status.state]}>
+            {status.state === 'open' && <Clock size={11} />}
+            {status.label}
+            {until ? ` ${until}` : ''}
+        </IosBadge>
+    );
+};
 
 /**
  * Бейдж состояния на белом фоне — один вход для карточки и подробностей.
@@ -53,13 +62,17 @@ export const OfficeDayBadge = ({ status }) => (
  * незаполненный график. В карточке из-за этого у Актобе и Костаная не было
  * состояния вообще: пустое место там, где таблица честно писала «Офиса в городе
  * нет» и «Нет графика».
+ *
+ * Закрытие на срок живой расчёт тоже перебивает: офис на ремонте не «откроется
+ * завтра в 10:00» только потому, что так написано в недельном графике.
  */
-export const OfficeStatusBadge = ({ schedule, status, isToday, marked, tick }) => {
-    const live = isToday && !marked
+export const OfficeStatusBadge = ({ schedule, status, isToday, dayISO, tick }) => {
+    const live = isToday
+        && status.source !== 'record' && status.source !== 'closure'
         && status.state !== 'absent' && hasSchedule(schedule);
     return live
         ? <OfficeLiveBadge schedule={schedule} tick={tick} />
-        : <OfficeDayBadge status={status} />;
+        : <OfficeDayBadge status={status} dayISO={dayISO} />;
 };
 
 /** Тот же статус, но для ЗАЛИТОЙ строки таблицы.

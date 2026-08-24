@@ -72,9 +72,6 @@ const draftFrom = (office) => ({
 const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
     const status = officeDayStatus(office, dayISO);
     const absent = status.state === 'absent';
-    // Отметка человека перебивает живой расчёт и в сегодняшнем дне: она и
-    // ставится ровно для этого — «по графику открыт, а фактически закрыт».
-    const marked = office.day?.source === 'manual';
 
     return (
         <div className={`${iosCard} relative overflow-hidden before:absolute before:inset-y-0 before:left-0 before:z-10 before:w-[3px] ${DAY_STATE_EDGE[status.state] || ''}`}>
@@ -120,7 +117,7 @@ const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
                     schedule={office.schedule}
                     status={status}
                     isToday={isToday}
-                    marked={marked}
+                    dayISO={dayISO}
                     tick={tick}
                 />
                 {/* Шеврон — единственное, что отличает карточку от плашки:
@@ -298,19 +295,47 @@ export default function WikiOffices({ base, headers, showToast }) {
         toast('Копирование недоступно в этом браузере', 'error');
     };
 
-    const markDay = (state, note) => {
+    /* Отметка на день и закрытие на срок — два разных ответа на вопрос «офис
+       работает?», и одновременно им висеть нельзя: отметка сильнее срока, и
+       оставленная рядом со сроком она молча перебивала бы его первый день.
+       Поэтому что записываем, то и оставляем, а второе снимаем. */
+    const markDay = (state, note, term) => {
+        const office = dayTarget;
+        const day = `${base}/offices/${office.id}/day/${dayISO}`;
+        const closure = `${base}/offices/${office.id}/closure`;
+        const period = state === 'closed' && term?.kind !== 'day';
+
+        const requests = period
+            ? [axios.put(closure, { from: dayISO, until: term.until || null, note: note || null },
+                         { headers }),
+               axios.delete(day, { headers })]
+            : [axios.put(day, { state, note: note || null }, { headers })];
+        // Снимаем срок, только если он был: лишний DELETE трогал бы updated_at
+        // и колонка «Обновлено» врала бы о правке, которой не было.
+        if (!period && office.closed_from) requests.push(axios.delete(closure, { headers }));
+
         setBusy(true);
-        axios.put(`${base}/offices/${dayTarget.id}/day/${dayISO}`,
-                  { state, note: note || null }, { headers })
-            .then(() => { toast('Статус на дату сохранён', 'success'); setDayTarget(null); load(); })
+        Promise.all(requests)
+            .then(() => {
+                toast(period ? 'Срок закрытия сохранён' : 'Статус на дату сохранён', 'success');
+                setDayTarget(null);
+                load();
+            })
             .catch((e) => toast(errText(e, 'Не удалось сохранить статус'), 'error'))
             .finally(() => setBusy(false));
     };
 
     const clearDay = () => {
+        const office = dayTarget;
         setBusy(true);
-        axios.delete(`${base}/offices/${dayTarget.id}/day/${dayISO}`, { headers })
-            .then(() => { toast('День снова считается по графику', 'success'); setDayTarget(null); load(); })
+        // Для дежурного «считать по графику» — одно действие, а не выбор между
+        // отметкой и сроком: снимаем оба.
+        Promise.all([
+            axios.delete(`${base}/offices/${office.id}/day/${dayISO}`, { headers }),
+            ...(office.closed_from
+                ? [axios.delete(`${base}/offices/${office.id}/closure`, { headers })] : []),
+        ])
+            .then(() => { toast('Офис снова считается по графику', 'success'); setDayTarget(null); load(); })
             .catch((e) => toast(errText(e, 'Не удалось снять отметку'), 'error'))
             .finally(() => setBusy(false));
     };
@@ -580,6 +605,7 @@ export default function WikiOffices({ base, headers, showToast }) {
                     officeCount={officeCount}
                     dayISO={dayISO}
                     isToday={isToday}
+                    tick={tick}
                     canManage={canManage}
                     onOpen={setInfoTarget}
                     onEdit={(item) => setDraft(draftFrom(item))}

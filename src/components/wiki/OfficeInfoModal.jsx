@@ -39,9 +39,6 @@ export default function OfficeInfoModal({
 }) {
     const status = officeDayStatus(office, dayISO);
     const absent = status.state === 'absent';
-    // Отметка человека перебивает живой расчёт и в сегодняшнем дне: она и
-    // ставится ровно для этого — «по графику открыт, а фактически закрыт».
-    const marked = office.day?.source === 'manual';
 
     const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
     const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
@@ -104,7 +101,7 @@ export default function OfficeInfoModal({
                             schedule={office.schedule}
                             status={status}
                             isToday={isToday}
-                            marked={marked}
+                            dayISO={dayISO}
                             tick={tick}
                         />
                         {office.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}

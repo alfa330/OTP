@@ -15,7 +15,7 @@ from urllib.parse import quote
 from wiki import offices as wiki_offices
 from wiki.offices import (
     DAY_CODES, MAX_PHONES_PER_POINT, _day_payload, _office_row, _OFFICE_KEYS,
-    clean_phones, link_phones, normalize_schedule,
+    clean_phones, closure_covers, link_phones, normalize_schedule,
     parse_day, parse_map_coords, parse_page_coords, read_office_day, resolve_map_link,
     schedule_state_on, snapshot_offices_day, tile_is_valid, unwrap_map_link,
 )
@@ -480,7 +480,9 @@ class _SnapshotCursor:
     """
 
     def __init__(self, offices, existing=()):
-        self.offices = list(offices)
+        # Строка снимка: (id, график, закрыт с, открывается). Короткие пары из
+        # старых проверок дополняем пустым периодом.
+        self.offices = [tuple(row) + (None,) * (4 - len(row)) for row in offices]
         self.rows = {key: value for key, value in existing}
         self.rowcount = 0
         self._fetched = []
@@ -617,6 +619,70 @@ class OfficeRowTest(unittest.TestCase):
         office = _office_row(self._row(lat=43.238293, lon=76.945465))
         self.assertIsInstance(office['lat'], float)
         self.assertIsInstance(office['lon'], float)
+
+
+class ClosureCoversTest(unittest.TestCase):
+    """Границы закрытия на срок — буква надписи «закрыт до 29.08».
+
+    Оператор читает её буквально: 28-го ещё закрыт, 29-го работает. Ошибка на
+    сутки здесь — это водитель, приехавший к закрытой двери.
+    """
+
+    FROM = date(2026, 8, 19)
+    UNTIL = date(2026, 8, 29)
+
+    def test_first_day_is_closed(self):
+        self.assertTrue(closure_covers(self.FROM, self.UNTIL, self.FROM))
+
+    def test_day_before_is_not(self):
+        self.assertFalse(closure_covers(self.FROM, self.UNTIL, date(2026, 8, 18)))
+
+    def test_last_closed_day_is_the_one_before_until(self):
+        self.assertTrue(closure_covers(self.FROM, self.UNTIL, date(2026, 8, 28)))
+
+    def test_until_day_is_already_open(self):
+        self.assertFalse(closure_covers(self.FROM, self.UNTIL, self.UNTIL))
+
+    def test_open_ended_closure_has_no_right_edge(self):
+        # «На неопределенный срок» — так и писали руками в причине.
+        self.assertTrue(closure_covers(self.FROM, None, date(2027, 1, 1)))
+
+    def test_no_closure_covers_nothing(self):
+        self.assertFalse(closure_covers(None, self.UNTIL, self.FROM))
+
+    def test_iso_strings_are_accepted(self):
+        self.assertTrue(closure_covers('2026-08-19', '2026-08-29', '2026-08-20'))
+
+    def test_broken_day_is_not_covered(self):
+        self.assertFalse(closure_covers(self.FROM, self.UNTIL, 'позавчера'))
+
+
+class SnapshotWithClosureTest(unittest.TestCase):
+    """Ночной снимок обязан знать про срок.
+
+    Иначе история за время ремонта заполняется расчётом по графику: 24.08.2026
+    Атырау и Костанай показывались открытыми, хотя были закрыты до 28.08 и
+    03.09 — отметка держалась ровно один день, а срок писать было некуда.
+    """
+
+    DAY = date(2026, 8, 17)  # понедельник, рабочий по _KOSTANAY
+
+    def test_closed_period_beats_the_schedule(self):
+        cursor = _SnapshotCursor([(1, _KOSTANAY, date(2026, 8, 15), date(2026, 9, 3))])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 1)
+        self.assertEqual(cursor.rows[(1, self.DAY)], ('auto', 'closed'))
+
+    def test_day_after_the_period_is_back_on_schedule(self):
+        cursor = _SnapshotCursor([(1, _KOSTANAY, date(2026, 8, 15), self.DAY)])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 1)
+        self.assertEqual(cursor.rows[(1, self.DAY)], ('auto', 'open'))
+
+    def test_office_without_schedule_is_still_written_when_closed(self):
+        # График не заполнен — обычно снимок пропускает офис. Но закрытие на
+        # срок это факт, а не расчёт, и его записать есть смысл.
+        cursor = _SnapshotCursor([(1, None, date(2026, 8, 15), None)])
+        self.assertEqual(snapshot_offices_day(cursor, self.DAY), 1)
+        self.assertEqual(cursor.rows[(1, self.DAY)], ('auto', 'closed'))
 
 
 if __name__ == '__main__':

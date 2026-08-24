@@ -2,24 +2,28 @@
  *
  * Порядок ответов важнее самих ответов, поэтому он здесь один на всех:
  *   1. «Офиса в городе нет» — свойство записи, спорить не с чем;
- *   2. отметка человека за этот день («закрыт, прорвало трубу») — она и есть
+ *   2. отметка человека за ЭТОТ день («закрыт, прорвало трубу») — она и есть
  *      причина, по которой раздел появился: в графике временное закрытие не
  *      выразить;
- *   3. ночной снимок за этот день — что зафиксировали в момент, когда день ещё
+ *   3. закрытие на СРОК («ремонт до 3 сентября») — заявление о череде дней;
+ *      слабее отметки за конкретный день, потому что «сегодня всё-таки
+ *      открыли» должно перебивать;
+ *   4. ночной снимок за этот день — что зафиксировали в момент, когда день ещё
  *      был сегодняшним;
- *   4. недельный график — расчёт, когда за день ничего не записано.
+ *   5. недельный график — расчёт, когда за день ничего не записано.
  *
  * Пометки «только по телефону» у офиса больше нет: телефон без офиса теперь
  * заводится на стороне парка («Онлайн — без офиса» в его номерах), и держать
  * то же самое второй записью значило бы снова разводить источники правды.
  *
- * Пункты 2 и 3 приезжают одним полем office.day и различаются source:
- * 'manual' против 'auto'.
+ * Пункты 2 и 4 приезжают одним полем office.day и различаются source:
+ * 'manual' против 'auto'. Пункт 3 живёт на самой записи офиса
+ * (closed_from / closed_until / closed_note).
  */
 
 // С расширением: модуль читают и тесты через node --test, а там ESM без
 // расширения не разрешается (carMatch.js импортирует так же).
-import { officeStatusOn } from './officeSchedule.js';
+import { officeStatusOn, untilText } from './officeSchedule.js';
 
 export const DAY_STATE_LABELS = {
     open: 'Открыт',
@@ -119,9 +123,59 @@ export const formatStampTime = (iso) => {
  *  «Обновлено»: без неё дата не отвечает на вопрос «кто это записал». */
 export const DAY_SOURCE_LABELS = {
     record: 'отметка дежурного',
+    closure: 'закрытие на срок',
     snapshot: 'ночной снимок',
     schedule: 'правка справочника',
 };
+
+/**
+ * Попадает ли день в закрытие на срок.
+ *
+ * Близнец серверного `closure_covers` (wiki/offices.py), границы те же:
+ * closed_from включительно, closed_until — день ОТКРЫТИЯ, то есть не
+ * включительно. Надпись «закрыт до 29.08» читается буквально: 28-го ещё
+ * закрыт, 29-го работает. Пустой closed_until при заполненном closed_from —
+ * «срок не известен».
+ *
+ * Сравнение строк, а не дат: 'ГГГГ-ММ-ДД' сортируется лексикографически ровно
+ * как хронологически, и разбор в Date только добавил бы сюда часовые пояса.
+ */
+export const closureCovers = (office, dayISO) => {
+    const from = office?.closed_from;
+    const day = String(dayISO || '');
+    if (!from || !/^\d{4}-\d{2}-\d{2}$/.test(day) || day < from) return false;
+    const until = office?.closed_until;
+    return !until || day < until;
+};
+
+/** '2026-08-29' → '29.08' в том же году и '29.08.2027' в другом: в таблице
+ *  год — это четыре лишних знака в каждой строке, но соврать им нельзя. */
+export const formatDayShort = (iso, sameYearAs) => {
+    const found = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || '').trim());
+    if (!found) return '—';
+    const year = String(sameYearAs || '').slice(0, 4);
+    return found[1] === year ? `${found[3]}.${found[2]}` : `${found[3]}.${found[2]}.${found[1]}`;
+};
+
+/**
+ * Срок рядом со статусом — то, ради чего заведена задача #236.
+ *
+ * Порядок ответов повторяет порядок правил: закрытие на срок сильнее живого
+ * расчёта по графику, потому что оно его и перебивает. `live` — результат
+ * officeStatus(schedule), он есть только у сегодняшнего дня; за прошедший день
+ * «до завтра 10:00» было бы выдумкой, там остаются лишь часы самого дня.
+ */
+export function statusUntil(status, live, dayISO) {
+    if (!status) return null;
+    if (status.openEnded) return 'срок не известен';
+    if (status.closedUntil) return `до ${formatDayShort(status.closedUntil, dayISO)}`;
+    // Живой расчёт годится только там, где состояние и взято из графика: поверх
+    // ручной отметки «сегодня закрыто» он написал бы «до 19:00», потому что в
+    // графике день рабочий. Отметка на то и ставится, что график тут неправ.
+    if (live && status.source !== 'record') return untilText(live);
+    // Прошедший день: суточный вердикт знает часы, но не минуту закрытия.
+    return status.from && status.until ? `${status.from}–${status.until}` : null;
+}
 
 /**
  * Статус офиса за день.
@@ -152,17 +206,53 @@ export function officeDayStatus(office, dayISO) {
     }
 
     const day = office?.day;
-    if (day?.state) {
+    const marked = day?.state && day.source === 'manual';
+    if (marked) {
         return {
             state: day.state,
             label: DAY_STATE_LABELS[day.state] || DAY_STATE_LABELS.none,
             note: day.note || null,
-            source: day.source === 'manual' ? 'record' : 'snapshot',
+            source: 'record',
             recordedOn: day.recorded_on || null,
             // Отметка старее правки справочника не бывает: её и ставят поверх
             // графика. Но если сервер отметку отдал без времени (старые строки
             // до появления recorded_at), падать на прочерк незачем.
             updatedAt: day.recorded_at || office?.updated_at || null,
+        };
+    }
+
+    // Закрытие на срок — ниже ручной отметки за конкретный день («ремонт до
+    // 3 сентября, но сегодня всё-таки открыли») и выше ночного снимка: снимок
+    // считает по графику, а закрытие — это прямое утверждение человека об этих
+    // днях. Иначе назавтра после отметки офис «открывался» сам, что и было на
+    // проде 24.08.2026 с Атырау и Костанаем.
+    if (closureCovers(office, dayISO)) {
+        return {
+            state: 'closed',
+            label: DAY_STATE_LABELS.closed,
+            note: office.closed_note || null,
+            source: 'closure',
+            recordedOn: null,
+            updatedAt: office?.updated_at || null,
+            closedUntil: office.closed_until || null,
+            openEnded: !office.closed_until,
+        };
+    }
+
+    if (day?.state) {
+        // Снимок хранит только состояние. Часы того дня берём из графика: для
+        // «Открыт» это ответ «до скольки работал», и он не выдумка — снимок и
+        // считался по этому же графику.
+        const hours = day.state === 'open' ? officeStatusOn(office?.schedule, dayISO) : null;
+        return {
+            state: day.state,
+            label: DAY_STATE_LABELS[day.state] || DAY_STATE_LABELS.none,
+            note: day.note || null,
+            source: 'snapshot',
+            recordedOn: day.recorded_on || null,
+            updatedAt: day.recorded_at || office?.updated_at || null,
+            from: hours?.from,
+            until: hours?.until,
         };
     }
 

@@ -371,6 +371,51 @@ def _day_payload(state, note, source, day, recorded_at):
     }
 
 
+def closure_covers(closed_from, closed_until, day):
+    """Попадает ли день в закрытие на срок.
+
+    Границы: `closed_from` включительно, `closed_until` — день ОТКРЫТИЯ, то есть
+    не включительно. Так надпись «закрыт до 29.08» и означает ровно то, что
+    читает оператор: 28-го ещё закрыт, 29-го уже работает. `closed_until` пустой
+    при заполненном `closed_from` — «срок не известен», закрытие длится, пока его
+    не снимут.
+    """
+    day = parse_day(day)
+    start = parse_day(closed_from)
+    if day is None or start is None or day < start:
+        return False
+    end = parse_day(closed_until)
+    return end is None or day < end
+
+
+def set_office_closure(cursor, office_id, closed_from, closed_until, note=None):
+    """Закрытие офиса на срок. Возвращает False, если офиса нет."""
+    cursor.execute(
+        """
+        UPDATE wiki_offices
+           SET closed_from = %s::date, closed_until = %s::date, closed_note = %s,
+               updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+         WHERE id = %s
+        """,
+        (closed_from, closed_until, note, office_id),
+    )
+    return cursor.rowcount > 0
+
+
+def clear_office_closure(cursor, office_id):
+    """Снимает закрытие — офис снова считается по графику."""
+    cursor.execute(
+        """
+        UPDATE wiki_offices
+           SET closed_from = NULL, closed_until = NULL, closed_note = NULL,
+               updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+         WHERE id = %s
+        """,
+        (office_id,),
+    )
+    return cursor.rowcount > 0
+
+
 def read_office_day(cursor, office_id, day):
     cursor.execute(
         'SELECT state, note, source, day, recorded_at FROM wiki_office_days '
@@ -421,12 +466,18 @@ def snapshot_offices_day(cursor, day):
         return 0
 
     cursor.execute(
-        "SELECT id, schedule FROM wiki_offices "
+        "SELECT id, schedule, closed_from, closed_until FROM wiki_offices "
         " WHERE status = 'active' AND NOT no_office"
     )
     written = 0
-    for office_id, schedule in cursor.fetchall():
-        state = schedule_state_on(schedule, day)
+    for office_id, schedule, closed_from, closed_until in cursor.fetchall():
+        # Закрытие на срок сильнее графика: в эти дни офис не работал, что бы
+        # ни говорил недельный график. Без этой ветки история за время ремонта
+        # заполнялась бы «открыт» и расходилась с тем, что видели операторы.
+        if closure_covers(closed_from, closed_until, day):
+            state = 'closed'
+        else:
+            state = schedule_state_on(schedule, day)
         if state is None:
             # График не заполнен — фиксировать нечего. Иначе офис «ОНЛАЙН»
             # каждый день попадал бы в историю закрытым.
@@ -620,13 +671,15 @@ def set_park_online_phones(cursor, park_id, phones):
 _OFFICE_KEYS = ('id', 'slug', 'name', 'city', 'address', 'address_note', 'phone',
                 'map_url', 'map_resolved_url', 'lat', 'lon', 'schedule',
                 'is_online', 'all_parks', 'kind', 'partner_label', 'status', 'position',
-                'no_office', 'updated_at')
+                'no_office', 'updated_at',
+                'closed_from', 'closed_until', 'closed_note')
 
 _OFFICE_COLUMNS = """
     o.id, o.slug, o.name, o.city, o.address, o.address_note, o.phone,
     o.map_url, o.map_resolved_url, o.lat, o.lon, o.schedule,
     o.is_online, o.all_parks, o.kind, o.partner_label, o.status, o.position,
-    o.no_office, o.updated_at
+    o.no_office, o.updated_at,
+    o.closed_from, o.closed_until, o.closed_note
 """
 
 
@@ -640,6 +693,9 @@ def _office_row(row):
     # 2026 …»), и клиенту пришлось бы разбирать английские месяцы.
     if office['updated_at'] is not None:
         office['updated_at'] = office['updated_at'].isoformat()
+    for key in ('closed_from', 'closed_until'):
+        if office.get(key) is not None:
+            office[key] = office[key].isoformat()
     return office
 
 

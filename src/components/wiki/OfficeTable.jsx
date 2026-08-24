@@ -4,8 +4,9 @@ import { iosCard, IosBadge } from '../ui/ios';
 import { OfficeDayPill } from './officeBadges';
 import {
     DAY_SOURCE_LABELS, DAY_STATE_ROW, DAY_STATE_TEXT, formatStamp, formatStampTime,
-    officeDayStatus,
+    officeDayStatus, statusUntil,
 } from './officeDayStatus';
+import { officeStatus } from './officeSchedule';
 
 /* Таблица ТЗ «Статус офисов по городам»: город, адрес, статус на дату и дата
  * актуальности — двадцать городов одним экраном.
@@ -77,7 +78,7 @@ const CityBand = ({ city, count, span, first }) => (
 );
 
 export default function OfficeTable({
-    offices, groups = null, officeCount = (n) => n, dayISO, isToday, canManage,
+    offices, groups = null, officeCount = (n) => n, dayISO, isToday, tick, canManage,
     onOpen, onEdit, onArchive, onRestore, onMarkDay,
 }) {
     const span = 5 + (canManage ? 1 : 0);
@@ -134,6 +135,12 @@ export default function OfficeTable({
                             const status = officeDayStatus(office, dayISO);
                             const absent = status.state === 'absent';
                             const text = DAY_STATE_TEXT[status.state] || DAY_STATE_TEXT.none;
+                            // Живой расчёт нужен только сегодняшнему дню: за
+                            // прошедший «до завтра 10:00» было бы выдумкой.
+                            // tick в зависимостях не нужен — он и так перерисовывает
+                            // таблицу раз в минуту, а officeStatus берёт время из часов.
+                            const until = statusUntil(
+                                status, isToday ? officeStatus(office.schedule) : null, dayISO);
                             return (
                                 <tr
                                     key={office.id}
@@ -207,8 +214,18 @@ export default function OfficeTable({
                                         )}
                                     </td>
 
+                                    {/* Срок — второй строкой, а не внутри бейджа:
+                                        бейдж отвечает на вопрос ТЗ «открыт или
+                                        закрыт» и должен читаться одним взглядом
+                                        по всей колонке, а «до завтра 10:00»
+                                        растянуло бы его втрое и сломало колонку. */}
                                     <td className={CELL}>
                                         <OfficeDayPill state={status.state} label={status.label} />
+                                        {until && (
+                                            <div className={`mt-1 text-[11.5px] tabular-nums ${text.meta}`}>
+                                                {until}
+                                            </div>
+                                        )}
                                     </td>
 
                                     {/* «Обновлено» в тон строке: в макете дата у

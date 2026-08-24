@@ -221,6 +221,69 @@ def register(bp, wiki_route, db, log_ip):
                            details={'fields': sorted(fields.keys())}, ip_address=log_ip())
         return jsonify({"status": "ok"})
 
+    @wiki_route('/offices/<int:office_id>/closure', methods=('PUT', 'DELETE'))
+    def wiki_office_closure(cursor, ctx, office_id):
+        """Закрытие офиса на срок: «закрыт до 29.08» и «срок не известен».
+
+        Отдельно от отметки дня, потому что отвечает на другой вопрос. Отметка
+        дня — это факт за один прошедший день, её и наперёд ставить нельзя.
+        Закрытие — заявление о будущем: офис не работает с такого-то числа и до
+        такого-то, и все дни между ними считаются закрытыми сами.
+
+        До этого срок закрытия писать было некуда, и дежурные писали его словами
+        в причину («с 17.08 по 03.09 по тех.причинам»), а отметка действовала
+        один день — назавтра офис «открывался» сам по графику.
+
+        until — день ОТКРЫТИЯ (не включается в закрытие): «закрыт до 29.08»
+        значит «28-го ещё закрыт, 29-го работает». Пустой until — срок не
+        известен, закрытие держится, пока его не снимут.
+        """
+        if not _may_edit(ctx):
+            return _forbidden()
+        if not wiki_offices.get_office(cursor, office_id):
+            return jsonify({"error": "Офис не найден"}), 404
+
+        if request.method == 'DELETE':
+            # Идемпотентно: закрытия не было — офис и так по графику.
+            wiki_offices.clear_office_closure(cursor, office_id)
+            queries.log_action(cursor, actor_id=ctx['user_id'], action='office.closure.clear',
+                               entity_type='office', entity_id=office_id,
+                               details={}, ip_address=log_ip())
+            return jsonify({"status": "cleared", "closure": None})
+
+        data = _body()
+        today = wiki_offices.office_today()
+        # Начало по умолчанию — сегодня: дежурный отмечает то, что происходит.
+        # Задним числом разрешено (ремонт начался в понедельник, отметили в
+        # среду), наперёд — нет: это уже не «закрыт», а план, а планы живут в
+        # графике.
+        start = wiki_offices.parse_day(data.get('from')) if data.get('from') else today
+        if start is None:
+            return jsonify({"error": "Неверная дата начала"}), 400
+        if start > today:
+            return jsonify({"error": "Закрыть можно с сегодняшнего или прошедшего дня"}), 400
+
+        until = wiki_offices.parse_day(data.get('until')) if data.get('until') else None
+        if data.get('until') and until is None:
+            return jsonify({"error": "Неверная дата открытия"}), 400
+        # Открытие в день начала или раньше — закрытие нулевой длины, то есть
+        # его нет. Молча записать такое значило бы показать офис работающим
+        # там, где дежурный только что отметил закрытие.
+        if until is not None and until <= start:
+            return jsonify({"error": "Офис должен открыться позже дня закрытия"}), 400
+
+        wiki_offices.set_office_closure(cursor, office_id, start, until,
+                                        note=_clean(data.get('note'), 500))
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='office.closure.set',
+                           entity_type='office', entity_id=office_id,
+                           details={'from': start.isoformat(),
+                                    'until': until.isoformat() if until else None},
+                           ip_address=log_ip())
+        return jsonify({"status": "ok", "closure": {
+            "from": start.isoformat(),
+            "until": until.isoformat() if until else None,
+        }})
+
     @wiki_route('/offices/<int:office_id>/day/<day>', methods=('PUT', 'DELETE'))
     def wiki_office_day(cursor, ctx, office_id, day):
         """Отметка «в этот день офис был открыт / закрыт» и снятие отметки.

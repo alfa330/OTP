@@ -16,6 +16,14 @@ export const DAY_LABELS = {
     mon: 'Пн', tue: 'Вт', wed: 'Ср', thu: 'Чт', fri: 'Пт', sat: 'Сб', sun: 'Вс',
 };
 
+/* Родительный падеж — для надписи «закрыт до понедельника 09:00». Сокращения
+ * из DAY_LABELS тут не годятся: «до Пн 09:00» читается как обрывок строки
+ * расписания, а не как ответ водителю. */
+export const DAY_LABELS_UNTIL = {
+    mon: 'понедельника', tue: 'вторника', wed: 'среды', thu: 'четверга',
+    fri: 'пятницы', sat: 'субботы', sun: 'воскресенья',
+};
+
 const OFFICE_TIME_ZONE = 'Asia/Almaty';
 
 const MINUTES_IN_DAY = 1440;
@@ -118,10 +126,34 @@ export function officeStatus(schedule, now = new Date()) {
         return {
             state: 'closed',
             opensAt: fmt(interval.from),
-            opensDay: offset === 0 ? null : DAY_LABELS[DAY_CODES[(dayIndex + offset) % 7]],
+            // Код дня и сдвиг, а не готовая подпись: «завтра» отличается от
+            // «во вторник» только сдвигом, и решать это должен тот, кто пишет
+            // фразу, а не тот, кто считает расписание.
+            opensCode: DAY_CODES[(dayIndex + offset) % 7],
+            opensIn: offset,
         };
     }
     return { state: 'closed' };
+}
+
+/**
+ * Срок из живого статуса словами: «до 19:00», «до завтра 10:00»,
+ * «до понедельника 09:00». null — сказать нечего (график не заполнен).
+ *
+ * Это и есть просьба задачи #236: рядом со статусом должен стоять срок, а не
+ * одно слово «Закрыт». Формулировка «до …» одна на оба состояния — и на
+ * «открыт до 19:00», и на «закрыт до завтра 10:00»: оператор диктует водителю
+ * одну и ту же конструкцию.
+ */
+export function untilText(status) {
+    if (!status) return null;
+    if (status.state === 'open' || status.state === 'break') {
+        return status.until ? `до ${status.until}` : null;
+    }
+    if (status.state !== 'closed' || !status.opensAt) return null;
+    if (status.opensIn === 0) return `до ${status.opensAt}`;
+    if (status.opensIn === 1) return `до завтра ${status.opensAt}`;
+    return `до ${DAY_LABELS_UNTIL[status.opensCode] || ''} ${status.opensAt}`.replace('  ', ' ');
 }
 
 /** Индекс дня недели (0 = понедельник) у даты «ГГГГ-ММ-ДД». null — не дата. */
