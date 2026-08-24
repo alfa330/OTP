@@ -315,14 +315,33 @@ class Api:
                     if payload is not None else None)
             headers = self._headers({'Content-Type': 'application/json'})
 
-        request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                raw = response.read().decode('utf-8', 'replace')
-                return json.loads(raw) if raw.strip().startswith(('{', '[')) else {}
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode('utf-8', 'replace')[:300]
-            raise RuntimeError('%s %s -> %s %s' % (method, path, error.code, detail))
+        # Перенос идёт больше часа, а токен портала живёт меньше: на первом
+        # боевом прогоне второй проход целиком лёг на TOKEN_EXPIRED, и 164
+        # статьи остались без текста. Поэтому 401 — не ошибка, а повод войти
+        # заново; 502/503/504 у Render случаются на холодном старте и лечатся
+        # повтором. Оба случая обязаны обрабатываться ЗДЕСЬ, а не в вызывающем:
+        # мест вызова четыре, и в каждом это одна и та же обвязка.
+        for attempt in range(4):
+            request = urllib.request.Request(url, data=data, headers=headers,
+                                             method=method)
+            try:
+                with urllib.request.urlopen(request, timeout=300) as response:
+                    raw = response.read().decode('utf-8', 'replace')
+                    return json.loads(raw) if raw.strip().startswith(('{', '[')) else {}
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode('utf-8', 'replace')[:300]
+                retriable = (error.code == 401 and 'TOKEN_EXPIRED' in detail)                     or error.code in (429, 502, 503, 504)
+                if not retriable or attempt == 3:
+                    raise RuntimeError('%s %s -> %s %s'
+                                       % (method, path, error.code, detail))
+                if error.code == 401:
+                    self.authenticate()
+                    headers = self._headers(
+                        {k: v for k, v in headers.items()
+                         if k.lower() == 'content-type'})
+                else:
+                    time.sleep(3 * (attempt + 1))
+        raise RuntimeError('%s %s — не удалось после повторов' % (method, path))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,10 +475,17 @@ def rewrite_images(api, content, article_id, stats):
         else:
             continue
 
-        answer = api.call('POST', '/api/wiki/upload',
-                          payload={'article_id': str(article_id)},
-                          files={'file': (name, blob, content_type)},
-                          label='(картинка %d КБ)' % (len(blob) // 1024), quiet=True)
+        try:
+            answer = api.call('POST', '/api/wiki/upload',
+                              payload={'article_id': str(article_id)},
+                              files={'file': (name, blob, content_type)},
+                              label='(картинка %d КБ)' % (len(blob) // 1024),
+                              quiet=True)
+        except RuntimeError:
+            # Одна не уехавшая картинка не повод потерять статью целиком: текст
+            # доедет, а ссылка останется прежней — битой, как была в источнике.
+            stats['image_failed'] += 1
+            continue
         url = answer.get('url')
         if url:
             result = result.replace(source, url)
@@ -533,7 +559,7 @@ def plain_text(content):
 def transfer(api, pages, sections, only=None, links_only=False):
     stats = {'created': 0, 'reused': 0, 'skipped': 0, 'images': 0,
              'image_failed': 0, 'links': 0, 'patched': 0, 'failed': 0,
-             'duplicate': 0, 'similar': 0}
+             'duplicate': 0, 'similar': 0, 'already_filled': 0, 'source_empty': 0}
     root_id, section_of_branch = sections
     slug_of_source, id_of_source = {}, {}
 
@@ -582,15 +608,20 @@ def transfer(api, pages, sections, only=None, links_only=False):
             page['source_id'], mark, (page['title'] or page['path'])[:44],
             article_id, page['path'][:30]))
 
-    if links_only and not id_of_source:
-        # Второй проход отдельным запуском: статьи уже есть, а карту слагов надо
-        # собрать заново — из очереди переноса, а не из ответов первого прохода.
-        log('   (статьи не создавались, беру карту из очереди переноса)')
+    # Размер уже залитого текста — чтобы второй проход не переписывал то, что
+    # доехало. Это не оптимизация: повторный PATCH добавил бы каждой статье
+    # лишнюю версию в историю и залил бы ВТОРУЮ копию каждой картинки в
+    # хранилище. Знать размеры можно только у сервера, поэтому спрашиваем
+    # очередь — она их и отдаёт.
+    filled = {}
+    if links_only:
+        log('   (беру карту и размеры из очереди переноса)')
         queue = api.call('GET', '/api/wiki/migration?all=1').get('items') or []
         for row in queue:
+            filled[row['article_id']] = row.get('size') or 0
             if row.get('source_id') is not None:
-                id_of_source[row['source_id']] = row['article_id']
-                slug_of_source[row['source_id']] = row['slug']
+                id_of_source.setdefault(row['source_id'], row['article_id'])
+                slug_of_source.setdefault(row['source_id'], row['slug'])
 
     log('\n=== ПРОХОД 2: ТЕКСТ, КАРТИНКИ, ССЫЛКИ ===')
     mapping = link_map(pages, slug_of_source)
@@ -598,6 +629,15 @@ def transfer(api, pages, sections, only=None, links_only=False):
     for page in pages:
         article_id = id_of_source.get(page['source_id'])
         if not article_id or (only and page['source_id'] not in only):
+            continue
+        if filled.get(article_id):
+            stats['already_filled'] += 1
+            continue
+        # Пустая страница источника: патчить нечем, и сервер честно ответил бы
+        # «Нечего обновлять». Считаем отдельно, а не как ошибку, — таких
+        # страниц-заглушек в источнике полтора десятка.
+        if not plain_text(page['content']):
+            stats['source_empty'] += 1
             continue
         content = rewrite_images(api, page['content'], article_id, stats)
         content = rewrite_links(content, mapping, stats)
@@ -662,6 +702,8 @@ def main():
                        ('duplicate', 'из них ИИ считает дублями'),
                        ('similar', 'из них похожи на существующие'),
                        ('patched', 'текст залит'),
+                       ('already_filled', 'текст уже был на месте'),
+                       ('source_empty', 'пустых страниц в источнике'),
                        ('images', 'картинок перенесено к нам'),
                        ('image_failed', 'картинок не перенеслось'),
                        ('links', 'ссылок переписано на наши статьи'),
