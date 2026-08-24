@@ -2909,7 +2909,9 @@
 
 .wt-hands__phone {
     position: relative;
-    width: clamp(180px, 15vw, 232px);
+    /* Шире, чем было: на экране появился список из семи плиток с подписями, и
+       на прежней ширине подписи становились нечитаемым мелким шрифтом. */
+    width: clamp(196px, 17vw, 262px);
     aspect-ratio: 9 / 18.5;
     max-height: min(56vh, 440px);
     /* Корпус нарисован РАМКОЙ, а не заливкой: экран должен остаться окном, в
@@ -2924,6 +2926,9 @@
         0 0 0 1px rgba(255, 255, 255, .1) inset;
     pointer-events: auto;
 }
+/* Список кадров — экран непрозрачный, поэтому корпус на нём перестаёт быть
+   окном во двор и становится обычным телефоном. */
+.wt-hands__phone.is-lit { background: #000; }
 
 /* Большие пальцы по бокам корпуса. Без них телефон висит в воздухе сам по
    себе, а нужно, чтобы читалось «я держу его в руках». */
@@ -2939,95 +2944,169 @@
 .wt-hands__thumb--left { left: -26px; transform: rotate(9deg); }
 .wt-hands__thumb--right { right: -26px; transform: rotate(-9deg); }
 
-/* Интерфейс камеры поверх прозрачного экрана. */
+/* ── Экран телефона ──────────────────────────────────────────────────────
+   Общая коробка для обоих состояний: списка кадров и видоискателя. Отдельным
+   элементом, а не самим корпусом, потому что по ней сцена меряет прямоугольник,
+   в который рисует кадр объектива, — и рамка корпуса в этот замер попадать
+   не должна.
+   */
+.wt-phone-screen {
+    position: relative;
+    height: 100%;
+    border-radius: 22px;
+    overflow: hidden;
+}
+
+/* Интерфейс камеры поверх прозрачного экрана: сквозь него видно ту же сцену. */
 .wt-cam {
     position: relative;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
     height: 100%;
-    border-radius: 22px;
-    overflow: hidden;
     /* Прозрачно намеренно: экран — окно в ту же сцену, а не второй рендер. */
     background: transparent;
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, .16) inset;
 }
 
-.wt-cam__top {
-    padding: 7px 10px;
-    font-size: 10.5px;
-    font-weight: 600;
-    color: #f8fafc;
-    text-align: center;
-    background: linear-gradient(rgba(15, 23, 42, .62), rgba(15, 23, 42, 0));
-}
-
-/* Рамка-подсказка, как в Таксометре: она и говорит, что машина должна
-   попадать в кадр целиком. Краснеет, когда встали не на той дистанции. */
-.wt-cam__frame {
-    position: absolute;
-    inset: 16% 8% 22%;
-    pointer-events: none;
-}
-.wt-cam__frame i {
-    position: absolute;
-    width: 22px;
-    height: 22px;
-    border: 2.5px solid rgba(255, 255, 255, .92);
-    transition: border-color .18s;
-}
-.wt-cam__frame i:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-radius: 6px 0 0 0; }
-.wt-cam__frame i:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-radius: 0 6px 0 0; }
-.wt-cam__frame i:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-radius: 0 0 0 6px; }
-.wt-cam__frame i:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-radius: 0 0 6px 0; }
-.wt-cam__frame.is-warn i { border-color: #fb7185; }
-
-.wt-cam__read {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 62px;
+.wt-cam__head {
+    position: relative;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 2px;
+    justify-content: center;
+    padding: 9px 10px 0;
+    /* Тень под верхом: белый крестик на светлом дворе иначе теряется. */
+    background: linear-gradient(rgba(15, 23, 42, .45), rgba(15, 23, 42, 0));
+}
+
+.wt-cam__close {
+    display: inline-flex;
+    padding: 0;
+    border: 0;
+    color: #fff;
+    background: transparent;
+    cursor: pointer;
+    filter: drop-shadow(0 1px 3px rgba(15, 23, 42, .7));
+}
+
+/* Салонные кадры: крестик слева, подпись по центру — как в приложении. */
+.wt-cam--portrait .wt-cam__head { justify-content: flex-start; gap: 10px; }
+.wt-cam__title {
     font-size: 11px;
-    color: #f8fafc;
+    font-weight: 700;
+    color: #fff;
     text-shadow: 0 1px 4px rgba(15, 23, 42, .8);
+}
+
+/* Кузовные кадры: крестик в правом углу, а подпись стоит вдоль правого края и
+   читается сверху вниз. Развёрнутая подпись — и есть просьба приложения
+   повернуть телефон: других слов про это оно не говорит. */
+.wt-cam--landscape .wt-cam__head { justify-content: flex-end; }
+.wt-cam__side {
+    position: absolute;
+    top: 50%;
+    right: 9px;
+    transform: translateY(-50%);
+    writing-mode: vertical-rl;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .2px;
+    color: #fff;
+    text-shadow: 0 1px 4px rgba(15, 23, 42, .85);
     pointer-events: none;
 }
-.wt-cam__read span { color: #fda4af; font-weight: 600; }
 
+/* Силуэт: в него надо вписать машину. Линия белая с тенью — двор бывает
+   светлым, и без тени контур на нём пропадает. */
+.wt-cam__outline {
+    position: absolute;
+    inset: 9% 6% 15%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+}
+.wt-cam__outline svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    filter: drop-shadow(0 1px 3px rgba(15, 23, 42, .55));
+}
+.wt-cam__outline svg path {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 2.4;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+}
+/* Бледная подложка — машина под ярким контуром того, что должно быть открыто. */
+.wt-cam__outline svg path.is-dim { stroke: rgba(255, 255, 255, .34); stroke-width: 1.8; }
+
+/* Развёрнутый силуэт. Поворот делает САМ рисунок — внутри своего viewBox, — и
+   коробка честно становится высокой и узкой. Поворот через CSS так не умеет:
+   transform не меняет размеров коробки, и развёрнутая машина либо вылезала за
+   края экрана, либо жалась в четверть его высоты. CSS остаются отступы. */
+.wt-cam__outline.is-turned { inset: 5% 6% 9%; }
+
+/* Ряд кнопок. В развёрнутом кадре затвор уходит к левому краю, в вертикальном
+   стоит по центру, а вспышка и переключение камеры прижаты вправо — так их
+   расставляет приложение. */
 .wt-cam__bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 14px 12px;
-    background: linear-gradient(rgba(15, 23, 42, 0), rgba(15, 23, 42, .66));
+    padding: 8px 12px 12px;
+    background: linear-gradient(rgba(15, 23, 42, 0), rgba(15, 23, 42, .5));
 }
-.wt-cam__icon {
-    display: inline-flex;
-    padding: 6px;
-    border: 0;
-    border-radius: 10px;
-    color: rgba(248, 250, 252, .72);
-    background: transparent;
-    cursor: pointer;
-    transition: color .14s, background .14s;
+.wt-cam--portrait .wt-cam__bar {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    justify-items: center;
+    gap: 8px;
 }
-.wt-cam__icon:hover { color: #fff; background: rgba(248, 250, 252, .16); }
+.wt-cam--portrait .wt-cam__bar > :first-child { justify-self: start; }
+.wt-cam--portrait .wt-cam__bar > :nth-child(3) { justify-self: end; }
+.wt-cam--portrait .wt-cam__bar > :last-child { display: none; }
+/* Четвёртая кнопка в вертикальном кадре кладётся рядом с третьей: сетка из
+   трёх колонок держит затвор по центру, а вспышка и переворот идут парой. */
+.wt-cam--portrait .wt-cam__bar { grid-template-columns: 1fr auto 1fr auto; }
+.wt-cam--portrait .wt-cam__bar > :last-child { display: inline-flex; }
 
-/* Затвор — единственная активная кнопка на экране, поэтому он же и цель шага. */
+.wt-cam__pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    color: #fff;
+    background: rgba(15, 23, 42, .46);
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+    transition: background .14s, color .14s;
+}
+.wt-cam__pill:hover { background: rgba(15, 23, 42, .66); }
+/* Включённые ширик и вспышка приложение подсвечивает БЕЛЫМ кругом с тёмной
+   надписью — жёлтый у него только на кнопках действий вроде «Далее». */
+.wt-cam__pill.is-on { color: #1a1a1a; background: rgba(255, 255, 255, .94); }
+
+/* Затвор — единственная кнопка, которой снимают, поэтому он же и цель шага.
+   Внутри пусто: в приложении это белый круг без значка. */
 .wt-shutter {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 46px;
     height: 46px;
+    padding: 0;
     border: 3px solid rgba(255, 255, 255, .92);
     border-radius: 50%;
-    color: #0f172a;
-    background: #f8fafc;
+    background: #fff;
+    box-shadow: 0 0 0 2px rgba(15, 23, 42, .28);
     cursor: pointer;
     transition: transform .12s, box-shadow .16s;
 }
@@ -3037,6 +3116,160 @@
 .wt-shutter.is-target {
     box-shadow: 0 0 0 4px rgba(79, 70, 229, .55), 0 0 22px rgba(79, 70, 229, .5);
 }
+
+/* ── Экран «Фотоконтроль машины» ─────────────────────────────────────────
+   Список того, что приложение запрашивает. Экран непрозрачный: в приложении
+   это обычный тёмный список, и сквозь него двор не виден. */
+.wt-pc {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    color: #fff;
+    background: #000;
+    text-align: left;
+}
+
+/* Часы и значки связи: размер и цвет задаются здесь, разметку рисует
+   PhoneChrome — тот же, что в остальных тренажёрах. */
+.wt-pc__status {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 14px 0;
+    font-size: 9.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+}
+
+.wt-pc__head { padding: 8px 12px 2px; }
+.wt-pc__back {
+    display: inline-flex;
+    padding: 0;
+    border: 0;
+    color: #fff;
+    background: transparent;
+    cursor: pointer;
+}
+
+.wt-pc__scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 6px 12px 10px;
+    /* Полосу прокрутки прячем: на телефоне её нет, а нарисованная выдаёт, что
+       это не телефон. */
+    scrollbar-width: none;
+}
+.wt-pc__scroll::-webkit-scrollbar { display: none; }
+
+.wt-pc__title {
+    margin: 0 0 8px;
+    font-size: 17px;
+    font-weight: 800;
+    line-height: 1.15;
+    color: #fff;
+}
+.wt-pc__lead {
+    margin: 0 0 12px;
+    font-size: 9.5px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, .82);
+}
+
+.wt-pc__grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 8px;
+}
+.wt-pc__cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.wt-pc__cell small {
+    font-size: 8px;
+    line-height: 1.2;
+    color: rgba(255, 255, 255, .88);
+}
+
+.wt-pc__slot {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    aspect-ratio: 16 / 9;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #262626;
+    cursor: pointer;
+    transition: background .16s, box-shadow .16s;
+}
+.wt-pc__slot:hover { background: #313131; }
+.wt-pc__slot img { width: 100%; height: 100%; object-fit: cover; }
+.wt-pc__slot.is-done { background: #1b1b1b; }
+/* Подсветка следующей плитки — учебная: в приложении подсказки нет, но без неё
+   человек ищет нужную подпись глазами по всему списку. */
+.wt-pc__slot.is-next { box-shadow: 0 0 0 1.5px rgba(252, 224, 0, .6) inset; }
+.wt-pc__slot.is-target { box-shadow: 0 0 0 2.5px rgba(79, 70, 229, .8), 0 0 18px rgba(79, 70, 229, .45); }
+
+.wt-pc__plus {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1;
+    color: #d4d4d4;
+    background: #3a3a3a;
+}
+.wt-pc__plus.is-done { color: #1a1a1a; background: #fce000; }
+
+/* Жёлтая кнопка приложения: цвет фирменный, не наш. */
+.wt-pc__next {
+    flex: 0 0 auto;
+    margin: 0 12px 14px;
+    padding: 10px 0;
+    border: 0;
+    border-radius: 10px;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    color: #1a1a1a;
+    background: #fce000;
+    cursor: pointer;
+    transition: box-shadow .16s, filter .16s;
+}
+.wt-pc__next:hover { filter: brightness(1.04); }
+.wt-pc__next.is-target { box-shadow: 0 0 0 3px rgba(79, 70, 229, .6), 0 0 20px rgba(79, 70, 229, .45); }
+
+/* Учебная подсказка про кадр — НАША, поэтому она снаружи корпуса телефона и
+   говорит нашим языком. В приложении такой строки нет. */
+.wt-world__read {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 160px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    color: #f8fafc;
+    background: rgba(15, 23, 42, .55);
+    backdrop-filter: blur(6px);
+    pointer-events: none;
+}
+.wt-world__read span { color: #fda4af; font-weight: 600; }
+.wt-world__read.is-warn { background: rgba(76, 5, 25, .6); }
 
 /* Вступление и финал в режиме мира — обычная карточка по центру: показывать их
    «в телефоне» незачем, телефон здесь часть сцены, а не рамка для любого текста. */
@@ -3059,7 +3292,7 @@
 @media (max-width: 1023px) {
     .wt-root--world { grid-template-columns: minmax(0, 1fr); }
     .wt-world { min-height: 380px; }
-    .wt-hands__phone { width: clamp(150px, 34vw, 200px); }
+    .wt-hands__phone { width: clamp(168px, 38vw, 224px); }
     .wt-hands__thumb { display: none; }
     .wt-tool__full { display: none; }
     .wt-tool__short { display: inline; }

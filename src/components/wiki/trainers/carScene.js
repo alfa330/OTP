@@ -55,6 +55,11 @@ const WORLD_AXIS = {
    модель может приехать в дюймах, и деление молча промахнётся. */
 const CAR_LENGTH = 4.4;
 
+/* Углы обзора телефона: сверхширик 0,5x и основной модуль 1x. Фотоконтроль
+   снимают шириком — только с ним машина влезает целиком с трёх метров. */
+const PHONE_FOV_WIDE = 64;
+const PHONE_FOV_MAIN = 42;
+
 const EYE_HEIGHT = 1.55;      // рост человека с телефоном в руках
 const LOOK_HEIGHT = 0.75;     // смотрим в середину борта, а не в крышу
 export const MIN_DISTANCE = 1.6;
@@ -150,7 +155,14 @@ const shadowTexture = () => {
  */
 export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate = '000 XXX 02',
     onReady, onError } = {}) {
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    /* preserveDrawingBuffer нужен ради миниатюр: плитка снятого кадра в списке
+       показывает НАСТОЯЩИЙ снимок из объектива, а без сохранённого буфера
+       toDataURL после отрисовки отдаёт пустое изображение. Платим за это
+       лишней копией кадра в памяти, и только — рендер здесь по требованию,
+       непрерывного цикла нет. */
+    const renderer = new THREE.WebGLRenderer({
+        canvas, antialias: true, alpha: false, preserveDrawingBuffer: true,
+    });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
@@ -178,7 +190,7 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
      * Рисуем её вторым проходом в прямоугольник экрана через scissor: это
      * дешевле отдельного холста (один контекст WebGL вместо двух) и дешевле
      * рендера в текстуру с последующей выдачей её в DOM. */
-    const phoneCamera = new THREE.PerspectiveCamera(64, 0.46, 0.1, 120);
+    const phoneCamera = new THREE.PerspectiveCamera(PHONE_FOV_WIDE, 0.46, 0.1, 120);
     let phoneRect = null;
     const root = new THREE.Group();
     scene.add(root);
@@ -258,28 +270,37 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
 
         if (needsRender || animating) {
             needsRender = false;
-            applyCamera();
-
-            const width = canvas.clientWidth || 1;
-            const height = canvas.clientHeight || 1;
-            renderer.setScissorTest(false);
-            renderer.setViewport(0, 0, width, height);
-            renderer.render(scene, camera);
-
-            /* Кадр внутри телефона. Прямоугольник приходит из разметки, а
-               WebGL считает Y снизу — отсюда переворот. */
-            if (phoneRect && phoneRect.w > 8 && phoneRect.h > 8) {
-                const bottom = height - (phoneRect.y + phoneRect.h);
-                renderer.setScissorTest(true);
-                renderer.setViewport(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
-                renderer.setScissor(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
-                phoneCamera.aspect = phoneRect.w / phoneRect.h;
-                phoneCamera.updateProjectionMatrix();
-                renderer.render(scene, phoneCamera);
-                renderer.setScissorTest(false);
-            }
+            renderNow();
         }
         if (animating) frame = requestAnimationFrame(tick);
+    }
+
+    /* Отрисовка одним проходом мира и вторым — экрана телефона. Отдельной
+       функцией, потому что её зовут двое: цикл кадров и снимок затвора. Снимок
+       обязан рисовать СЕЙЧАС, а не ждать следующего requestAnimationFrame:
+       иначе миниатюра приезжала бы на кадр позже нажатия, то есть с уже
+       изменившимся ракурсом. */
+    function renderNow() {
+        applyCamera();
+
+        const width = canvas.clientWidth || 1;
+        const height = canvas.clientHeight || 1;
+        renderer.setScissorTest(false);
+        renderer.setViewport(0, 0, width, height);
+        renderer.render(scene, camera);
+
+        /* Кадр внутри телефона. Прямоугольник приходит из разметки, а
+           WebGL считает Y снизу — отсюда переворот. */
+        if (phoneRect && phoneRect.w > 8 && phoneRect.h > 8) {
+            const bottom = height - (phoneRect.y + phoneRect.h);
+            renderer.setScissorTest(true);
+            renderer.setViewport(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
+            renderer.setScissor(phoneRect.x, bottom, phoneRect.w, phoneRect.h);
+            phoneCamera.aspect = phoneRect.w / phoneRect.h;
+            phoneCamera.updateProjectionMatrix();
+            renderer.render(scene, phoneCamera);
+            renderer.setScissorTest(false);
+        }
     }
 
     function resize() {
@@ -596,6 +617,46 @@ export function createCarScene(canvas, { modelUrl, bodyColor = 0xeef0f3, plate =
                 ? { x: rect.x, y: rect.y, w: rect.w, h: rect.h } : null;
             invalidate();
         },
+        /* Зум телефонной камеры: 0,5x — сверхширик, каким фотоконтроль и
+           снимают (иначе машина не помещается), 1x — обычный объектив.
+           Меняем угол обзора, а не расстояние: человек стоит там же, где стоял,
+           а в кадр попадает больше или меньше — как на настоящем телефоне. */
+        setPhoneWide(isWide) {
+            phoneCamera.fov = isWide ? PHONE_FOV_WIDE : PHONE_FOV_MAIN;
+            phoneCamera.updateProjectionMatrix();
+            invalidate();
+        },
+
+        /** Снимок с экрана телефона — тот, что ляжет в плитку списка.
+         *
+         *  Берём область экрана из уже отрисованного холста: у нас нет второго
+         *  контекста, а рисовать кадр в текстуру ради миниатюры дороже, чем
+         *  скопировать готовые пиксели. JPEG, потому что миниатюра едет в
+         *  состояние React строкой, и PNG раздул бы её в разы. */
+        snapshot(width = 168) {
+            if (!state.ready || !phoneRect) return null;
+            renderNow();
+            const ratio = renderer.getPixelRatio();
+            const out = document.createElement('canvas');
+            out.width = width;
+            out.height = Math.max(1, Math.round(width * (phoneRect.h / phoneRect.w)));
+            const ctx = out.getContext('2d');
+            if (!ctx) return null;
+            ctx.drawImage(
+                canvas,
+                phoneRect.x * ratio, phoneRect.y * ratio,
+                phoneRect.w * ratio, phoneRect.h * ratio,
+                0, 0, out.width, out.height,
+            );
+            try {
+                return out.toDataURL('image/jpeg', 0.72);
+            } catch {
+                // Холст «испачкан» чужой текстурой — миниатюры не будет, но
+                // урок из-за этого прерываться не должен.
+                return null;
+            }
+        },
+
         /** Где стоит человек — это уходит в правила кадра. */
         camera: () => ({ azimuth: state.azimuth, distance: state.distance }),
         isReady: () => state.ready,

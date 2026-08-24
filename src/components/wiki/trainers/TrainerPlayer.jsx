@@ -93,8 +93,9 @@ const SCREENS = {
     'photo-control-car': {
         intro: IntroScreen,
         result: ResultScreen,
-        // Экран pc_camera — не экран телефона, а трёхмерная сцена вокруг него,
-        // поэтому он живёт не здесь, а в ветке world ниже.
+        // Экраны pc_list и pc_camera — не экраны телефона, а телефон В РУКАХ
+        // человека, стоящего у трёхмерной машины, поэтому они живут не здесь,
+        // а в ветке world ниже.
     },
     'sapar-site-avr': {
         intro: IntroScreen,
@@ -731,7 +732,11 @@ export function TrainerPlayer({
                        и финал в обоих режимах — обычные карточки: показывать их
                        «в телефоне» незачем, телефон здесь часть сцены (или его
                        нет вовсе), а не рамка для любого текста. */
-                    step.screen === 'pc_camera' ? (
+                    step.screen === 'pc_camera' || step.screen === 'pc_list' ? (
+                        /* Оба экрана фотоконтроля рисует одна и та же сцена:
+                           человек стоит у машины и там, где выбирает кадр в
+                           списке, и там, где его снимает. Пересоздавать сцену
+                           между ними нельзя — модель грузится секундами. */
                         <Suspense fallback={<div className="wt-world__load">Готовим машину…</div>}>
                             <CarStage
                                 world={run.world}
@@ -739,6 +744,8 @@ export function TrainerPlayer({
                                 toggle={doToggle}
                                 browse={doBrowse}
                                 target={target}
+                                screen={step.screen}
+                                car={run.world.car?.model}
                                 plate={run.world.car?.plate}
                             />
                         </Suspense>
