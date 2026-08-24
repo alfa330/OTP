@@ -119,6 +119,21 @@ class UsageTests(unittest.TestCase):
 
 
 class PostBodyTests(unittest.TestCase):
+    """Границу «сеть + авторизация» подменяем целиком.
+
+    Первый заход подменял только `_post`, а адрес запроса собирался по-настоящему —
+    то есть тест требовал сервисного аккаунта. Локально он есть в .env.codex.local, и
+    тесты проходили; в CI его нет, и три теста упали на `нет
+    GOOGLE_APPLICATION_CREDENTIALS_CONTENT`. Проверяем поведение адаптера, а не наличие
+    ключей, поэтому базовый адрес тоже фиксируем.
+    """
+
+    def setUp(self):
+        base = mock.patch.object(providers._VERTEX, "base",
+                                 return_value="https://example.invalid/v1beta1/projects/p/locations/global")
+        base.start()
+        self.addCleanup(base.stop)
+
     def _answer(self, text="{}"):
         return {"candidates": [{"finishReason": "STOP",
                                 "content": {"parts": [{"text": text}]}}],
