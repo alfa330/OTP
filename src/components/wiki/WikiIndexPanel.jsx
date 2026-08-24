@@ -235,7 +235,13 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
             // раздела, ни у его потомков.
             if (needle && !visibleSections.has(section.id)) { hideDeeperThan = depth; return; }
 
-            const count = own.length || section.readable_count || 0;
+            /* Считаем ТОЛЬКО загруженные статьи раздела. Запасной
+               section.readable_count отсюда убран: он приходит с сервера по
+               всему периметру и потому не знал про обрезанное оглавление —
+               раздел показывал «(29)» и раскрывался пустым. Пока цифра
+               считается по тому же списку, который раскрывается, разойтись
+               им негде. */
+            const count = own.length;
 
             /* Нажатие ТОЛЬКО раскрывает раздел. Фильтровать им главный экран
                было ошибкой: человек искал, какие статьи ему подходят, а вместо
@@ -258,7 +264,8 @@ export default function WikiIndexPanel({ tree, articles, onOpen, loading }) {
                         : <Folder size={14} className="shrink-0 text-amber-500" />}
                     <span className="min-w-0 flex-1 truncate">{section.name}</span>
                     {/* Счётчик — по видимым статьям: цифра рядом с названием
-                        обязана совпасть с тем, что раскроется по нажатию. */}
+                        обязана совпасть с тем, что раскроется по нажатию, и
+                        считается ровно из них (см. count выше). */}
                     {count > 0 && (
                         <span className="shrink-0 text-[11px] font-medium tabular-nums text-slate-400">({count})</span>
                     )}

@@ -11,6 +11,7 @@ import { markedWord } from './WikiSearch';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
+import { fetchArticleIndex } from './articleIndex';
 import { selectableSections } from './sectionPicker';
 import { typeBadge } from './articleTypes';
 
@@ -128,6 +129,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     const [query, setQuery] = useState('');
     const [index, setIndex] = useState([]);         // весь периметр — для оглавления
     const [indexLoading, setIndexLoading] = useState(true);
+    /* Номер захода за оглавлением: оно собирается из НЕСКОЛЬКИХ ответов, и за
+       это время человек успевает переключить пространство в шапке. Без метки
+       медленная старая сборка дописала бы в правую колонку чужие статьи. */
+    const indexRun = useRef(0);
     const [home, setHome] = useState(null);
     const [homeLoading, setHomeLoading] = useState(true);
     const [parks, setParks] = useState([]);
@@ -275,16 +280,23 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
         return () => clearTimeout(timer);
     }, [load, query]);
 
-    /* Оглавление — весь периметр разом. Потолок сервера 200 статей; на большем
-       содержимом список станет длинным, но не обрежется молча: разделы сверху
-       остаются рабочим способом сузить выборку. */
+    /* Оглавление — весь периметр, СТРАНИЦАМИ по потолку сервера.
+       Раньше здесь стоял один запрос с limit: 200, и это молча обрезало правую
+       колонку, как только статей стало больше: на бою из 292 статей витрины в
+       оглавление доезжали 200, а разделы «Общий сотрудник» и «Оператор»
+       показывали свою цифру и раскрывались пустыми. Сколько страниц забрать,
+       считает fetchArticleIndex по total_visible из первого же ответа. */
     const loadIndex = useCallback(() => {
+        const run = indexRun.current + 1;
+        indexRun.current = run;
+        const mine = () => indexRun.current === run;
         setIndexLoading(true);
-        return axios.get(`${base}/articles`,
-                         { headers, params: { limit: 200, space_id: spaceId } })
-            .then((r) => setIndex(r.data?.items || []))
-            .catch(() => setIndex([]))
-            .finally(() => setIndexLoading(false));
+        return fetchArticleIndex((offset, limit) => axios
+            .get(`${base}/articles`, { headers, params: { limit, offset, space_id: spaceId } })
+            .then((r) => ({ items: r.data?.items || [], total: r.data?.total_visible })))
+            .then((items) => { if (mine()) setIndex(items); })
+            .catch(() => { if (mine()) setIndex([]); })
+            .finally(() => { if (mine()) setIndexLoading(false); });
     }, [base, headers, spaceId]);
 
     const loadHome = useCallback(() => {
@@ -299,13 +311,18 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
     useEffect(() => { loadHome(); }, [loadHome]);
 
     /* Парки нужны двум местам главной — рельсу и плитке-счётчику. Если в
-       пространстве выключено и то, и другое, запрос не делаем вовсе: справочник
-       общий на портал, и вика без парков тянула бы чужие пятнадцать штук ради
-       того, чтобы их не показать. */
+       пространстве выключено и то, и другое, запрос не делаем вовсе: лишний
+       запрос ради того, чтобы ничего не показать.
+       space_id обязателен: справочник принадлежит пространству, и без него
+       рельс собрался бы из парков соседней вики. */
     const parksWanted = features?.parks !== false || features?.library_park_rail !== false;
     useEffect(() => {
         if (!parksWanted) { setParks([]); setParksCanManage(false); return; }
-        axios.get(`${base}/parks`, { headers })
+        // Пока ping не назвал пространство, не спрашиваем: у того, кому выдано
+        // два, сервер честно ответит «укажите пространство», и на главной
+        // мигнула бы ошибка вместо рельса.
+        if (!spaceId) return;
+        axios.get(`${base}/parks`, { headers, params: { space_id: spaceId } })
             .then((r) => {
                 // Архивные парки сервер отдаёт управляющему справочником —
                 // в рельсе им не место, это витрина «куда звонить сейчас».
@@ -313,7 +330,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 setParksCanManage(!!r.data?.can_manage);
             })
             .catch(() => setParks([]));
-    }, [base, headers, parksWanted]);
+    }, [base, headers, parksWanted, spaceId]);
 
     /* В дереве — только разделы своего периметра и только живые. Сервер отдаёт
        и чужие (вкладке «Структура» они нужны), помечая их accessible=false, и
@@ -402,6 +419,7 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                 base={base}
                 headers={headers}
                 slug={openParkSlug}
+                spaceId={spaceId}
                 onBack={() => setOpenParkSlug(null)}
                 onOpenParks={onOpenParks}
             />
