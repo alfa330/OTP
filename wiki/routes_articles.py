@@ -229,6 +229,32 @@ def register(bp, wiki_route, db, log_ip, gcs):
             limit=limit,
             with_trigram=wiki_schema.trigram_available(cursor),
         )
+
+        # Запрос — в журнал. Под савпоинтом: поиск и запись идут в ОДНОЙ
+        # транзакции, и падение INSERT'а иначе превратило бы рабочую выдачу в
+        # 500 «Внутренняя ошибка раздела». Журнал — приставка к поиску, и цена
+        # его поломки не должна быть выше цены самой поломки.
+        #
+        # Размер периметра пишется рядом с числом находок намеренно: ноль
+        # находок при периметре в три статьи и при периметре в тридцать шесть —
+        # разные диагнозы, и лечатся они по-разному (написать статью против
+        # выдать доступ).
+        cursor.execute('SAVEPOINT wiki_search_log')
+        try:
+            wiki_search.log_query(
+                cursor,
+                user_id=ctx['user_id'],
+                query=query,
+                results_count=len(items),
+                perimeter_size=len(visible),
+                department_id=ctx.get('department_id'),
+                space_id=_int_or_none(request.args.get('space_id')),
+            )
+        except Exception:
+            cursor.execute('ROLLBACK TO SAVEPOINT wiki_search_log')
+        else:
+            cursor.execute('RELEASE SAVEPOINT wiki_search_log')
+
         return jsonify({"items": items, "query": query})
 
     @wiki_route('/suggest')
@@ -289,7 +315,9 @@ def register(bp, wiki_route, db, log_ip, gcs):
                 details={'slug': article['slug'], 'reason': permissions['_reason']},
                 ip_address=log_ip())
 
-        wiki_articles.register_view(cursor, article['id'], ctx['user_id'], log_ip())
+        wiki_articles.register_view(cursor, article['id'], ctx['user_id'], log_ip(),
+                                    department_id=ctx.get('department_id'),
+                                    role=ctx.get('otp_role'))
 
         article['permissions'] = wiki_access.permissions_only(permissions)
         article['why'] = permissions['_reason']

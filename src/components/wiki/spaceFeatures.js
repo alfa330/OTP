@@ -38,6 +38,7 @@ export const SPACE_TABS = [
     { key: 'overview', label: 'Обзор' },
     { key: 'parks', label: 'Парки' },
     { key: 'offices', label: 'Офисы' },
+    { key: 'analytics', label: 'Аналитика' },
     { key: 'audit', label: 'Журнал' },
 ];
 

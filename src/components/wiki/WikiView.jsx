@@ -5,8 +5,8 @@ import {
     AlertCircle, ArrowDownToLine, BookOpen, FileText, FolderTree, Gamepad2, Home, KeyRound,
     Layers, MapPin,
     Network,
-    Building2, ChevronDown, Loader2, Pencil, Plus, RefreshCw, ScrollText, ShieldCheck,
-    Sparkles, Users,
+    Building2, ChevronDown, LineChart, Loader2, Pencil, Plus, RefreshCw, ScrollText,
+    ShieldCheck, Sparkles, Users,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, IosBadge,
@@ -19,6 +19,7 @@ import WikiStructure from './WikiStructure';
 import WikiTrainers from './WikiTrainers';
 import WikiMigration from './WikiMigration';
 import WikiAudit from './WikiAudit';
+import WikiAnalytics from './WikiAnalytics';
 import WikiSearch from './WikiSearch';
 import WikiSpaceModal from './WikiSpaceModal';
 import { effectiveFeatures } from './spaceFeatures';
@@ -408,6 +409,15 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // внутрь «Статей» переключателем, а права выдаются из строки раздела
         // там же. Раздел выбран тем, что человек на него нажал, а не селектом
         // из плоского списка, где ветки СЗоВ и ОП одноимённые.
+        /* Аналитика — редактору: отчёт про базу знаний нужен тому, кто её
+           ведёт, а не только администратору доступов (решение владельца).
+           Формула редактора тут та же, что у каталога и у сервера
+           (routes_analytics: _is_editor), — иначе вкладка появлялась бы в меню
+           у того, кому сервер отвечает 403. Администратора доступов без прав
+           правки пропускаем отдельно: вкладка у него уже была.
+           Стоит перед журналом: отчёт открывают регулярно, аудит — по поводу. */
+        { key: 'analytics', label: 'Аналитика', icon: LineChart,
+          show: features.analytics && (isEditor || canManageAccess) },
         { key: 'audit', label: 'Журнал', icon: ScrollText,
           show: features.audit && canManageAccess },
     ].filter((t) => t.show)),
@@ -549,6 +559,7 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         <WikiSearch
                             base={base}
                             headers={headers}
+                            spaceId={activeSpace?.id || null}
                             onOpenArticle={(slug, highlight) => {
                                 setTab('library');
                                 setSearchTarget({ slug, highlight });
@@ -929,12 +940,34 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </div>
                 )}
 
+                {/* Справочники парков и офисов принадлежат пространству: адрес
+                    и телефон офиса Таксопарков не должны доезжать до Тез. Поэтому
+                    spaceId — не уточнение выборки, а сам доступ, и сервер без
+                    него отвечает 400 (wiki/routes_structure.request_space). */}
                 {tab === 'parks' && (
-                    <WikiParks base={base} headers={headers} showToast={showToast} />
+                    <WikiParks base={base} headers={headers} showToast={showToast}
+                               spaceId={activeSpace?.id || null} />
                 )}
 
                 {tab === 'offices' && (
-                    <WikiOffices base={base} headers={headers} showToast={showToast} />
+                    <WikiOffices base={base} headers={headers} showToast={showToast}
+                                 spaceId={activeSpace?.id || null} />
+                )}
+
+                {tab === 'analytics' && (
+                    <WikiAnalytics
+                        base={base}
+                        headers={headers}
+                        showToast={showToast}
+                        /* Пространство сужает отчёт: в отличие от журнала, где
+                           запись о чужой вике всё равно нужна, аналитика
+                           отвечает на вопрос про КОНКРЕТНУЮ базу знаний. */
+                        spaceId={activeSpace?.id || null}
+                        onOpenArticle={(slug) => {
+                            setTab('library');
+                            setSearchTarget({ slug });
+                        }}
+                    />
                 )}
 
                 {tab === 'audit' && (

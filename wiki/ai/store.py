@@ -17,8 +17,8 @@
 """
 
 _CREATE_CHAT = """
-INSERT INTO wiki_ai_chats (user_id, title)
-VALUES (%(user_id)s, %(title)s)
+INSERT INTO wiki_ai_chats (user_id, title, space_id)
+VALUES (%(user_id)s, %(title)s, %(space_id)s)
 RETURNING id, title, created_at
 """
 
@@ -139,8 +139,9 @@ def _title_from(question, limit=60):
     return text[:limit] if text else 'Новый вопрос'
 
 
-def create_chat(cursor, user_id, *, title=''):
-    cursor.execute(_CREATE_CHAT, {'user_id': user_id, 'title': title[:255]})
+def create_chat(cursor, user_id, *, title='', space_id=None):
+    cursor.execute(_CREATE_CHAT, {'user_id': user_id, 'title': title[:255],
+                                  'space_id': space_id})
     chat_id, chat_title, created_at = cursor.fetchone()
     return {'id': chat_id, 'title': chat_title, 'message_count': 0,
             'created_at': created_at.isoformat() if created_at else None}

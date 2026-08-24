@@ -5,6 +5,10 @@ import {
 } from 'lucide-react';
 
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
+/* Плитка и таблица — общие с «Аналитикой» (reportKit.jsx). Раньше они жили
+   здесь и никуда не экспортировались; со вторым отчётом раздела копия
+   разошлась бы с оригиналом на первой же правке. */
+import { Metric, Table, Td, Th } from './reportKit';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 
 /* Статистика одного тренажёра.
@@ -56,50 +60,6 @@ const duration = (ms) => {
     const total = Math.round(ms / 1000);
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 };
-
-const Metric = ({ label, value, hint = null }) => (
-    <div className="rounded-xl bg-slate-50 px-3 py-2.5">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-        <div className="mt-0.5 text-[19px] font-semibold leading-none text-slate-900">{value}</div>
-        {hint && <div className="mt-1 text-[11.5px] text-slate-400">{hint}</div>}
-    </div>
-);
-
-const Th = ({ children, right = false }) => (
-    <th className={`whitespace-nowrap px-3 py-2 text-[11.5px] font-medium uppercase
-                    tracking-wide text-slate-400 ${right ? 'text-right' : 'text-left'}`}>
-        {children}
-    </th>
-);
-
-const Td = ({ children, right = false, muted = false }) => (
-    <td className={`px-3 py-2 text-[12.5px] ${right ? 'text-right tabular-nums' : ''}
-                    ${muted ? 'text-slate-400' : 'text-slate-700'}`}>
-        {children}
-    </td>
-);
-
-/** Таблица с подписью и «пусто», одна на все три разреза. */
-const Table = ({ title, icon: Icon, count, empty, head, children }) => (
-    <section className="space-y-1.5">
-        <div className={iosGroupLabel}>
-            {Icon && <Icon size={12} className="mr-1 inline align-[-1px]" />}
-            {title}{count !== undefined ? ` · ${count}` : ''}
-        </div>
-        <div className={`${iosCard} overflow-hidden`}>
-            {count === 0 ? (
-                <p className="px-4 py-3 text-[12.5px] text-slate-400">{empty}</p>
-            ) : (
-                <div className="overflow-x-auto">
-                    <table className="w-full border-collapse">
-                        <thead className="border-b border-slate-100">{head}</thead>
-                        <tbody className="divide-y divide-slate-50">{children}</tbody>
-                    </table>
-                </div>
-            )}
-        </div>
-    </section>
-);
 
 export default function WikiTrainerStats({
     base, headers, trainer, onBack, onOpenArticle = null, showToast = null,

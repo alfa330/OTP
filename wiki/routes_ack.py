@@ -1,4 +1,10 @@
-"""Эндпоинты обязательного ознакомления и аналитики раздела."""
+"""Эндпоинты обязательного ознакомления.
+
+Аналитика раздела переехала в wiki/routes_analytics.py: сводка, которая
+здесь лежала, считала пять показателей, не сужалась по пространству и не
+вызывалась с фронта ни разу. Держать отчёт по чтению и поиску внутри
+модуля ознакомлений — та же ошибка, только дороже.
+"""
 
 from flask import jsonify, request
 
@@ -109,84 +115,4 @@ def register(bp, wiki_route, db, log_ip):
         return jsonify({
             "summary": wiki_ack.summary(cursor, article_id),
             "items": wiki_ack.report(cursor, article_id),
-        })
-
-    # ── Аналитика раздела ────────────────────────────────────────────────
-    @wiki_route('/analytics', capability='can_manage_access')
-    def wiki_analytics(cursor, ctx):
-        """Сводка по разделу.
-
-        Считается одним запросом на показатель, но без N+1: в оригинале
-        аналитика делала десять тяжёлых SELECT'ов в Promise.all, здесь их пять
-        и все ограничены периметром вызывающего.
-        """
-        visible = _visible(cursor, ctx)
-        if not visible:
-            return jsonify({"articles": {}, "top": [], "stale": [], "authors": []})
-        ids = list(visible)
-        days = min(max(_int_or_none(request.args.get('days')) or 30, 1), 365)
-
-        cursor.execute(
-            """
-            SELECT count(*),
-                   count(*) FILTER (WHERE status = 'published'),
-                   count(*) FILTER (WHERE status = 'draft'),
-                   COALESCE(sum(views), 0)
-              FROM wiki_articles WHERE id = ANY(%s)
-            """, (ids,))
-        total, published, drafts, views = cursor.fetchone()
-
-        cursor.execute(
-            """
-            SELECT a.id, a.slug, a.title, count(v.id) AS hits
-              FROM wiki_articles a
-              LEFT JOIN wiki_article_views_log v
-                     ON v.article_id = a.id
-                    AND v.viewed_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                                       - make_interval(days => %s)
-             WHERE a.id = ANY(%s)
-             GROUP BY a.id, a.slug, a.title
-             ORDER BY hits DESC, a.views DESC LIMIT 10
-            """, (days, ids))
-        top = [dict(zip(('id', 'slug', 'title', 'hits'), row)) for row in cursor.fetchall()]
-
-        # Статьи, которых давно не касались, — то, ради чего аналитика и нужна.
-        cursor.execute(
-            """
-            SELECT id, slug, title, updated_at
-              FROM wiki_articles
-             WHERE id = ANY(%s) AND status = 'published'
-               AND updated_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
-                                 - interval '180 days'
-             ORDER BY updated_at LIMIT 10
-            """, (ids,))
-        stale = [dict(zip(('id', 'slug', 'title', 'updated_at'), row))
-                 for row in cursor.fetchall()]
-
-        cursor.execute(
-            """
-            SELECT u.id, u.name, count(*) AS articles
-              FROM wiki_articles a JOIN users u ON u.id = a.author_id
-             WHERE a.id = ANY(%s)
-             GROUP BY u.id, u.name ORDER BY articles DESC LIMIT 10
-            """, (ids,))
-        authors = [dict(zip(('id', 'name', 'articles'), row)) for row in cursor.fetchall()]
-
-        cursor.execute(
-            """
-            SELECT count(*),
-                   count(*) FILTER (WHERE status = 'acknowledged'),
-                   count(*) FILTER (WHERE due_at IS NOT NULL AND acknowledged_at IS NULL
-                                      AND due_at < (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
-              FROM wiki_ack_assignments
-             WHERE article_id = ANY(%s) AND status <> 'superseded'
-            """, (ids,))
-        ack_total, ack_done, ack_overdue = cursor.fetchone()
-
-        return jsonify({
-            "articles": {"total": total, "published": published,
-                         "drafts": drafts, "views": views},
-            "acknowledgements": {"total": ack_total, "done": ack_done,
-                                 "overdue": ack_overdue},
-            "top": top, "stale": stale, "authors": authors, "days": days,
         })

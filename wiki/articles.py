@@ -387,11 +387,18 @@ def get_article(cursor, *, article_id=None, slug=None):
     return item
 
 
-def register_view(cursor, article_id, user_id, ip_address):
+def register_view(cursor, article_id, user_id, ip_address,
+                  department_id=None, role=None):
     """Инкремент счётчика и запись в лог — ОДНИМ запросом.
 
     В оригинале это были два отдельных запроса без транзакции, и счётчик
     articles.views расходился с article_views_log.
+
+department_id и role — снимок отдела и должности читателя на момент
+    чтения, как в тренажёрах и в ознакомлениях. Берутся из уже посчитанного
+    контекста запроса, поэтому стоят ноль запросов; смысл их в том, что отчёт
+    «кто читает» обязан показывать отдел, в котором человек был ТОГДА (см.
+    шапку колонок в schema.py).
     """
     cursor.execute(
         """
@@ -399,10 +406,12 @@ def register_view(cursor, article_id, user_id, ip_address):
             UPDATE wiki_articles SET views = views + 1 WHERE id = %(id)s
             RETURNING id
         )
-        INSERT INTO wiki_article_views_log (article_id, user_id, ip_address)
-        SELECT id, %(user)s, %(ip)s FROM bump
+        INSERT INTO wiki_article_views_log (article_id, user_id, ip_address,
+                                            snapshot_department_id, snapshot_role)
+        SELECT id, %(user)s, %(ip)s, %(dept)s, %(role)s FROM bump
         """,
-        {'id': article_id, 'user': user_id, 'ip': ip_address},
+        {'id': article_id, 'user': user_id, 'ip': ip_address,
+         'dept': department_id, 'role': role},
     )
     cursor.execute(
         """

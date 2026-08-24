@@ -434,7 +434,7 @@ export function ResultsPane({
 }
 
 export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassifier,
-                                     onAskAssistant = null }) {
+                                     onAskAssistant = null, spaceId = null }) {
     const [query, setQuery] = useState('');
     const [items, setItems] = useState([]);
     const [loading, setLoading] = useState(false);
@@ -507,7 +507,13 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         setLoading(true);
         const seq = ++requestSeq.current;
         const timer = setTimeout(() => {
-            axios.get(`${base}/search`, { headers, params: { q: term } })
+            /* Пространство уходит вместе с запросом, хотя выдачу в шапке оно
+               почти не меняет: поле ищет по личному периметру, а он у
+               большинства и так в одной вике. Нужно оно ЖУРНАЛУ — без него
+               половина строк отчёта «что ищут» осталась бы без пространства,
+               и «чего не хватает в Тез» было бы не отделить от «чего не
+               хватает в Таксопарках». */
+            axios.get(`${base}/search`, { headers, params: { q: term, space_id: spaceId } })
                 .then((r) => {
                     if (requestSeq.current !== seq) return;
                     setItems(r.data?.items || []);
@@ -525,7 +531,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
                 .finally(() => { if (requestSeq.current === seq) setLoading(false); });
         }, 250);
         return () => { clearTimeout(timer); requestSeq.current += 1; };
-    }, [active, term, base, headers, retryTick]);
+    }, [active, term, base, headers, retryTick, spaceId]);
 
     const matchedCar = useMemo(
         () => (classifier ? matchCar(classifier.cars, term) : null),

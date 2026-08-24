@@ -382,6 +382,83 @@ def suggest(cursor, visible_ids, query, *, limit=5, with_trigram=True):
     return search(cursor, visible_ids, query, limit=limit, with_trigram=with_trigram)
 
 
+# ── Журнал запросов ──────────────────────────────────────────────────────────
+#
+# Живёт здесь, а не в роуте, по тому же правилу, по которому просмотр статьи
+# пишет articles.register_view: у записи и у самого поиска должна быть одна
+# нормализация. Разъедься они — «Қазына» в логе перестанет склеиваться с
+# «казына» в отчёте, и обнаружится это через месяц на пустом топе.
+#
+# Свёртка префиксов (см. шапку таблицы в schema.py) сделана UPDATE'ом вместо
+# INSERT'а: строка того же человека за последние 30 секунд переписывается, если
+# один запрос — начало другого. Проверка идёт через left(длинный, длина
+# короткого) = короткий, а НЕ через LIKE norm || '%': psycopg2 в запросе с
+# параметрами считает % плейсхолдером, и LIKE сломался бы ещё и о символы _ и %
+# внутри самого запроса пользователя.
+
+# Шесть цифр подряд и длиннее — телефон или ИИН. В вике есть статья про смену
+# номера, и ищут по ней именно так. Для отчёта конкретный номер не нужен.
+_DIGITS = re.compile(r'\d{6,}')
+
+# Окно свёртки. Тридцати секунд хватает на дописывание фразы и не хватает,
+# чтобы склеить два разных вопроса подряд.
+_COLLAPSE_WINDOW = "interval '30 seconds'"
+
+_COLLAPSE_SQL = """
+UPDATE wiki_search_log
+   SET query = %(query)s, query_norm = %(norm)s, results_count = %(found)s,
+       perimeter_size = %(perimeter)s, steps = steps + 1,
+       created_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+ WHERE id = (
+     SELECT id FROM wiki_search_log
+      WHERE user_id = %(user)s
+        AND created_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') - """ + _COLLAPSE_WINDOW + """
+        AND (left(%(norm)s, length(query_norm)) = query_norm
+             OR left(query_norm, length(%(norm)s)) = %(norm)s)
+      ORDER BY created_at DESC
+      LIMIT 1
+ )
+RETURNING id
+"""
+
+_INSERT_SQL = """
+INSERT INTO wiki_search_log (user_id, department_id, space_id, query, query_norm,
+                             results_count, perimeter_size)
+VALUES (%(user)s, %(department)s, %(space)s, %(query)s, %(norm)s, %(found)s, %(perimeter)s)
+"""
+
+
+def log_query(cursor, *, user_id, query, results_count, perimeter_size,
+              department_id=None, space_id=None):
+    """Записать поисковый запрос. Возвращает True, если строка легла в журнал.
+
+    Вызывающий обязан обернуть вызов савпоинтом: запись идёт в ТОЙ ЖЕ
+    транзакции, что и сам поиск, и падение INSERT'а иначе превратило бы рабочую
+    выдачу в 500. Журнал — приставка к поиску, а не его часть.
+    """
+    trimmed = str(query or '').strip()[:MAX_QUERY_CHARS]
+    if len(trimmed) < 2:
+        return False
+    masked = _DIGITS.sub('#', trimmed)
+    params = {
+        'user': user_id,
+        'department': department_id,
+        'space': space_id,
+        'query': masked,
+        'norm': wiki_text.fold_kazakh(masked.lower()),
+        'found': min(int(results_count or 0), 32767),
+        'perimeter': min(int(perimeter_size or 0), 32767),
+    }
+    # Свернуть можно только у известного человека: у анонимного запроса нет
+    # владельца, и «предыдущая строка за 30 секунд» склеила бы разных людей.
+    if user_id:
+        cursor.execute(_COLLAPSE_SQL, params)
+        if cursor.fetchone():
+            return True
+    cursor.execute(_INSERT_SQL, params)
+    return True
+
+
 def refresh_aliases(cursor, article_id):
     """Пересчитать search_aliases статьи.
 

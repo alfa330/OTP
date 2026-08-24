@@ -182,7 +182,12 @@ def register(bp, wiki_route, db, log_ip):
 
     @wiki_route('/ai/chats', methods=('POST',))
     def wiki_ai_chat_create(cursor, ctx):
-        return jsonify({'chat': ai_store.create_chat(cursor, ctx['user_id'])})
+        # Пространство фронт присылал телом и раньше — просто никто его не
+        # читал. Ответу оно и не нужно (периметр сужается на каждом вопросе),
+        # а вот отчёту «о чём спрашивают, а в вике нет» без него не отличить
+        # вопрос к «Тез» от вопроса к «Таксопаркам».
+        return jsonify({'chat': ai_store.create_chat(cursor, ctx['user_id'],
+                                                     space_id=_space_id())})
 
     @wiki_route('/ai/chats/<int:chat_id>')
     def wiki_ai_chat_read(cursor, ctx, chat_id):
