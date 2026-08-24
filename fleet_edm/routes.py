@@ -121,6 +121,10 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     # ── фоновая выгрузка ─────────────────────────────────────────────────────
 
+    # Живые выгрузки этого процесса: номер задания → его пульс со стоп-краном.
+    _lives = {}
+    _lives_lock = threading.Lock()
+
     def make_progress(job_id, requests_before=0):
         """requests_before — запросы прошлых попыток. Обход считает свои с нуля
         (клиент новый), а карточка обязана показывать, чего выгрузка стоила
@@ -212,10 +216,20 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             self._thread = None
 
         def start(self):
+            # Записываемся в реестр живых: кнопка «Остановить» приходит в ТОТ ЖЕ
+            # процесс, и дёрнуть стоп-кран напрямую куда быстрее, чем ждать
+            # следующего удара пульса (замерено на проде: 15 секунд лишней работы
+            # в чужом кабинете). Пульс остаётся страховкой на случай, когда
+            # инстансов станет два и поток окажется в другом.
+            with _lives_lock:
+                _lives[self.job_id] = self
             self._thread = threading.Thread(
                 target=self._beat, name='fleet-edm-beat-{}'.format(self.job_id),
                 daemon=True)
             self._thread.start()
+
+        def request_stop(self):
+            self._stop.set()
 
         def _beat(self):
             while not self._done.wait(HEARTBEAT_SECONDS):
@@ -240,6 +254,9 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
         def close(self):
             self._done.set()
+            with _lives_lock:
+                if _lives.get(self.job_id) is self:
+                    _lives.pop(self.job_id, None)
 
     def run_job(job_id):
         """Тело фоновой выгрузки. Живёт в потоке, поэтому не трогает ни request,
@@ -285,7 +302,10 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                     job_id,
                     requests_done=lambda: requests_before + client.requests_count),
                 resume=state,
-                should_stop=life.should_stop,
+                # Секунда, а не пять: обход спрашивает «нас ещё ждут?» у флажка в
+                # памяти, а не у базы, — дорогого здесь ничего нет, зато кнопка
+                # «Остановить» перестаёт стоить лишних запросов в чужой кабинет.
+                should_stop=engine.Stopper(life.should_stop, interval=1.0),
             )
             requests_count = requests_before + (resolution.get('requests')
                                                 or client.requests_count)
@@ -610,8 +630,14 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                                 "code": "NOT_RUNNING"}), 409
             queries.stop_job(cursor, job_id, (requester or {}).get('name'))
             job = queries.get_job(cursor, job_id)
-        logging.info("Провайдер ЭДО: выгрузку %s остановил пользователь %s",
-                     job_id, requester_id)
+        # Поток этой выгрузки живёт в нашем же процессе — дёргаем стоп-кран сразу,
+        # не дожидаясь, пока он сам заметит закрытую карточку пульсом.
+        with _lives_lock:
+            life = _lives.get(job_id)
+        if life:
+            life.request_stop()
+        logging.info("Провайдер ЭДО: выгрузку %s остановил пользователь %s%s",
+                     job_id, requester_id, '' if life else ' (поток в другом процессе)')
         return jsonify({'status': 'success', 'job': job}), 200
 
     @section_route('/jobs/<int:job_id>/repeat', methods=('POST',))
