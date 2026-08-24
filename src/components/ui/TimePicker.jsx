@@ -134,6 +134,13 @@ export function IosTimePicker({
     const hourColRef = useRef(null);
     const minuteColRef = useRef(null);
     const focusedRef = useRef(false);
+    /* Значение, которое было ДО живой отдачи НЕОКОНЧЕННОГО набора; null — отдавать
+       нечего. Набор из трёх цифр («240») уже разбирается как 02:40 и уходит наверх,
+       хотя человек лишь на пути к «2400» — привычной записи полуночи. Когда дожатое
+       оказывается негодным (час 24), откатываться надо к тому, что было ДО этой
+       догадки: иначе поле «откатится» к собственной догадке, и в расписании офиса
+       молча осядет 02:40 — время, которого никто не набирал. */
+    const guessedFromRef = useRef(null);
 
     const minTotal = timeToMinutes(min);
     const maxTotal = timeToMinutes(max);
@@ -234,31 +241,60 @@ export function IosTimePicker({
     /* Набранное отдаём наверх, как только оно ПОЛНОЕ (набраны минуты), не дожидаясь
        ухода из поля: в расписании офиса кнопка «Сохранить» стоит рядом, и значение
        не должно зависеть от того, успел ли сработать blur до клика. Текст при этом
-       не переписываем — доводим до ЧЧ:ММ на blur и Enter, чтобы не прыгал курсор. */
+       не переписываем — доводим до ЧЧ:ММ на blur и Enter, чтобы не прыгал курсор.
+       Но «полное» бывает двух сортов: «0930» и «9:30» дочитать нельзя, а три цифры
+       без разделителя — ДОГАДКА на полпути: «240» это и 02:40, и начало «2400».
+       Догадку отдаём (иначе «930» не сохранится по клику мимо поля), но запоминаем,
+       к чему возвращаться, если следующая цифра сделает набор негодным. */
     const typed = (raw) => {
         const text = raw.replace(/[^\d:.\-\s]/g, '').slice(0, 5);
         setDraft(text);
-        if (!text.trim()) { if (allowEmpty) emit(null); return; }
-        const complete = /^\d{1,2}\s*[:.\-]\s*\d{2}$/.test(text) || /^\d{4}$/.test(text) || /^\d{3}$/.test(text);
-        if (!complete) return;
+        if (!text.trim()) { if (allowEmpty) { guessedFromRef.current = null; emit(null); } return; }
+        const exact = /^\d{1,2}\s*[:.\-]\s*\d{2}$/.test(text) || /^\d{4}$/.test(text);
+        const guess = !exact && /^\d{3}$/.test(text);
+        if (!exact && !guess) return;
         const total = parseTimeInput(text);
-        if (total !== null) emit(total);
+        if (total === null) return;
+        if (!guess) guessedFromRef.current = null;
+        else if (guessedFromRef.current === null) guessedFromRef.current = value || '';
+        emit(total);
+    };
+
+    /* Последнее ПОДТВЕРЖДЁННОЕ значение: props, а если наверх успела уйти догадка по
+       неоконченному набору — то, что было до неё. */
+    const confirmed = () => (guessedFromRef.current === null ? (value || '') : guessedFromRef.current);
+
+    /* Откат негодного набора. Возвращаем не только текст поля, но и значение НАВЕРХ:
+       догадка уже дошла до формы, и без этого расписание сохранилось бы с ней. */
+    const rollback = () => {
+        const back = confirmed();
+        guessedFromRef.current = null;
+        if (back !== (value || '')) onChange(back);
+        setDraft(back);
     };
 
     // Приведение к ЧЧ:ММ. Непонятный набор откатываем к прежнему значению.
     const commit = () => {
         const text = draft.trim();
         if (!text) {
-            if (allowEmpty) { emit(null); setDraft(''); } else setDraft(value || '');
+            if (allowEmpty) { guessedFromRef.current = null; emit(null); setDraft(''); } else rollback();
             return;
         }
         const total = parseTimeInput(text);
-        if (total === null) { setDraft(value || ''); return; }
+        if (total === null) { rollback(); return; }
+        guessedFromRef.current = null;
         setDraft(emit(total));
     };
 
     const nudge = (delta) => {
-        const base = current === null ? (timeToMinutes(defaultTime) ?? 0) : current + delta;
+        /* Считаем от того, что СЕЙЧАС в поле, а не от props: набор из одной-двух цифр
+           («10») наверх ещё не ушёл, props держат прежние 09:00 — и стрелка выбрасывала
+           бы набранное, ставя время, к которому человек не прикасался. Если в поле
+           набрано негодное, отталкиваемся от подтверждённого значения. */
+        const typedTotal = parseTimeInput(draft);
+        const from = typedTotal !== null ? typedTotal : timeToMinutes(confirmed());
+        const base = from === null ? (timeToMinutes(defaultTime) ?? 0) : from + delta;
+        guessedFromRef.current = null;
         setDraft(emit(base));
     };
 
@@ -274,10 +310,10 @@ export function IosTimePicker({
         if (e.key === 'Escape') {
             /* Панель закрыта, но набор не закончен — Esc отменяет НАБОР и дальше не
                идёт. Если отменять нечего, Esc отдаём наверх: там его ждёт модалка. */
-            if (draft !== (value || '')) {
+            if (draft !== confirmed() || guessedFromRef.current !== null) {
                 e.stopPropagation();
                 e.preventDefault();
-                setDraft(value || '');
+                rollback();
             }
         }
     };
@@ -306,7 +342,7 @@ export function IosTimePicker({
                         isOff: (h) => minutes.every((m) => outOfRange(h * 60 + m)),
                         isOn: (h) => current !== null && Math.floor(current / 60) === h,
                         text: (h) => pad(h),
-                        pick: (h) => { setDraft(emit(h * 60 + (anchor % 60))); },
+                        pick: (h) => { guessedFromRef.current = null; setDraft(emit(h * 60 + (anchor % 60))); },
                     },
                     {
                         key: 'm',
@@ -316,7 +352,7 @@ export function IosTimePicker({
                         isOff: (m) => outOfRange(Math.floor(anchor / 60) * 60 + m),
                         isOn: (m) => current !== null && current % 60 === m,
                         text: (m) => pad(m),
-                        pick: (m) => { setDraft(emit(Math.floor(anchor / 60) * 60 + m)); setOpen(false); },
+                        pick: (m) => { guessedFromRef.current = null; setDraft(emit(Math.floor(anchor / 60) * 60 + m)); setOpen(false); },
                     },
                 ].map((col) => (
                     <div key={col.key} className="min-w-0 flex-1">
@@ -355,7 +391,7 @@ export function IosTimePicker({
                         type="button"
                         className="w-full rounded-lg py-1.5 text-[12px] font-semibold text-slate-500 transition hover:bg-slate-100"
                         onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => { emit(null); setDraft(''); setOpen(false); }}
+                        onClick={() => { guessedFromRef.current = null; emit(null); setDraft(''); setOpen(false); }}
                     >
                         Очистить
                     </button>
@@ -381,7 +417,7 @@ export function IosTimePicker({
                 value={draft}
                 onChange={(e) => typed(e.target.value)}
                 onKeyDown={onKeyDown}
-                onFocus={(e) => { focusedRef.current = true; e.target.select(); }}
+                onFocus={(e) => { focusedRef.current = true; guessedFromRef.current = null; e.target.select(); }}
                 onBlur={() => { focusedRef.current = false; commit(); }}
                 /* Отступы слева и справа одинаковые, хотя шеврон стоит только
                    справа: иначе «09:30» съезжало бы влево от центра поля. */

@@ -39,7 +39,14 @@ export const fmtDotted = (iso) => {
 };
 
 const PANEL_WIDTH = 268;   // ширина карточки календаря, задана в IosDateRangeCalendar
-const PANEL_HEIGHT = 330;  // на глаз: месяц + сетка + пресеты. Нужна только чтобы решить, куда раскрывать
+/* Высота карточки НЕ постоянна: месяц занимает пять или шесть недель (разница
+   ~38px), плюс необязательная кнопка «Очистить». Поэтому здесь только первая
+   прикидка — на неё опираемся, пока карточка ещё не в DOM; дальше меряем её
+   по-настоящему (см. измеряющий эффект ниже). Прикидка взята по самому
+   высокому варианту: недооценка означала бы раскрытие вниз там, где места нет. */
+const PANEL_HEIGHT = 372;
+const EDGE_GAP = 8;        // минимальный отступ панели от края окна
+const TRIGGER_GAP = 6;     // зазор между кнопкой и панелью
 
 export default function IosDatePicker({
     value,
@@ -64,29 +71,79 @@ export default function IosDatePicker({
        document.body главного окна — чужой документ, панель просто не появится. */
     const ownerDocument = () => btnRef.current?.ownerDocument || document;
 
+    /* Настоящая высота карточки календаря. Панель — обёртка вокруг неё, у самой
+       обёртки высота может быть уже ограничена, поэтому меряем именно карточку. */
+    const cardHeight = () => panelRef.current?.firstElementChild?.offsetHeight || PANEL_HEIGHT;
+    const measured = useRef(0);   // высота, по которой посчитана текущая позиция
+
     const recompute = () => {
         const el = btnRef.current;
         if (!el) return;
         const view = el.ownerDocument?.defaultView || window;
         const r = el.getBoundingClientRect();
-        const spaceBelow = view.innerHeight - r.bottom;
-        const openUp = spaceBelow < PANEL_HEIGHT && r.top > spaceBelow;
+        const h = cardHeight();
+        measured.current = h;
+        const spaceBelow = view.innerHeight - r.bottom - TRIGGER_GAP - EDGE_GAP;
+        const spaceAbove = r.top - TRIGGER_GAP - EDGE_GAP;
+        const openUp = spaceBelow < h && spaceAbove > spaceBelow;
         /* Панель шире кнопки, поэтому её левый край считаем сами: у правого
            края экрана раскрытие от левого края кнопки уводило бы календарь
            за экран. Прижимаем к правому краю кнопки и держим отступ от окна. */
         let left = r.left;
-        if (left + PANEL_WIDTH > view.innerWidth - 8) left = r.right - PANEL_WIDTH;
-        setCoords({
-            left: Math.round(Math.max(8, left)),
-            top: openUp ? undefined : Math.round(r.bottom + 6),
-            bottom: openUp ? Math.round(view.innerHeight - r.top + 6) : undefined,
-        });
+        if (left + PANEL_WIDTH > view.innerWidth - EDGE_GAP) left = r.right - PANEL_WIDTH;
+        // Выше окна панель не бывает: в совсем низком окне карточку придётся прокручивать.
+        const height = Math.min(h, view.innerHeight - EDGE_GAP * 2);
+        let top = openUp ? r.top - TRIGGER_GAP - height : r.bottom + TRIGGER_GAP;
+        /* Главное: не дать панели уехать за край окна. Она fixed — то, что вышло
+           за экран, не прокрутить ничем, и для человека этого просто нет
+           (так пропадали ряд пресетов и последняя неделя месяца у поля посреди
+           отцентрованной модалки на ноутбуке 1366×768). Если места не хватает
+           ни вниз, ни вверх — сдвигаем панель внутрь окна, пусть даже она
+           наедет на саму кнопку: закрытая кнопка лучше обрубленного календаря. */
+        top = Math.max(EDGE_GAP, Math.min(top, view.innerHeight - EDGE_GAP - height));
+        const next = {
+            left: Math.round(Math.max(EDGE_GAP, left)),
+            top: Math.round(top),
+            /* Потолок считаем от места, а не от текущей высоты карточки: внутри
+               панели человек листает месяцы, и шестинедельный месяц не должен
+               вылезать за окно. */
+            maxHeight: Math.round(view.innerHeight - EDGE_GAP - top),
+        };
+        // Прокрутка внутри — только когда карточка правда не влезла: постоянный
+        // overflow срезал бы тень карточки.
+        next.scroll = h > next.maxHeight;
+        setCoords((prev) => (prev
+            && prev.left === next.left && prev.top === next.top
+            && prev.maxHeight === next.maxHeight && prev.scroll === next.scroll
+            ? prev : next));
     };
 
     useLayoutEffect(() => {
         if (open) recompute();
+        else measured.current = 0;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
+
+    /* Первый расчёт делается ещё до того, как карточка попала в DOM, — по
+       прикидке PANEL_HEIGHT. Как только она нарисована, меряем её и уточняем
+       позицию (layout-эффект, до отрисовки — человек скачка не увидит). Дальше
+       за высотой следит ResizeObserver: она меняется от месяца к месяцу и от
+       появления кнопки «Очистить», а перерисовки самого пикера при этом нет. */
+    useLayoutEffect(() => {
+        if (!open || !coords) return undefined;
+        const card = panelRef.current?.firstElementChild;
+        if (!card) return undefined;
+        const sync = () => {
+            if (Math.abs(card.offsetHeight - measured.current) > 1) recompute();
+        };
+        sync();
+        const RO = (btnRef.current?.ownerDocument?.defaultView || window).ResizeObserver;
+        if (!RO) return undefined;
+        const ro = new RO(sync);
+        ro.observe(card);
+        return () => ro.disconnect();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [open, coords]);
 
     useEffect(() => {
         if (!open) return undefined;
@@ -156,7 +213,14 @@ export default function IosDatePicker({
         <div
             ref={panelRef}
             role="dialog"
-            style={{ position: 'fixed', left: coords.left, top: coords.top, bottom: coords.bottom, zIndex: 99999 }}
+            style={{
+                position: 'fixed',
+                left: coords.left,
+                top: coords.top,
+                maxHeight: coords.maxHeight,
+                overflowY: coords.scroll ? 'auto' : 'visible',
+                zIndex: 99999,
+            }}
         >
             <IosDateRangeCalendar
                 single
