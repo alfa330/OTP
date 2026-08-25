@@ -5,6 +5,7 @@ import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSegmented, IosSection,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import IosDatePicker from '../ui/DatePicker';
 import {
     KIND_META, PARCEL_KINDS, extractAccountId, fmtPhone, officeChoiceFor, todayISO,
 } from './parcelMeta';
@@ -59,6 +60,16 @@ const draftFromParcel = (parcel) => ({
     order_number: parcel.order_number || '',
     comment: parcel.comment || '',
 });
+
+/* Вид кнопки календаря — как у остального поля формы, а не чипом: в одном ряду
+   с селектором города чип читался бы как кнопка, а не как поле. Класс взят
+   дословно из OfficeDayModal (вики): второй способ одеть тот же примитив
+   разошёлся бы с первым на первой же правке отступа. `[&>span]:flex-1` нужен
+   потому, что triggerClassName ЗАМЕНЯЕТ класс кнопки целиком — без него дата
+   не растягивается и шеврон уезжает к тексту. */
+const dateTrigger = 'flex w-full items-center gap-2 rounded-xl bg-slate-100 px-3.5 py-2.5 '
+    + 'text-[14px] tabular-nums text-slate-900 border-0 transition hover:bg-slate-200/70 '
+    + 'focus:outline-none focus:ring-2 focus:ring-blue-500/70 [&>span]:flex-1 [&>span]:text-left';
 
 const Field = ({ label, hint, children, required = false }) => (
     <label className="block space-y-1.5">
@@ -246,13 +257,19 @@ const ParcelForm = ({
             <div className="space-y-5">
                 <IosSection title="Где и когда">
                     <div className="grid gap-3 sm:grid-cols-2">
+                        {/* Календарь раздела, а не системный `input[type=date]`:
+                            раскрытый системный рисует браузер — своя шапка, свои
+                            кнопки «Удалить / Сегодня», деталь из другой программы
+                            рядом с rounded-2xl. Примитив уходит в портал, поэтому
+                            внутри модалки его не обрезает. */}
                         <Field label="Дата приёма" required>
-                            <input
-                                type="date"
-                                className={iosInput}
-                                max={todayISO()}
+                            <IosDatePicker
                                 value={draft.received_on}
-                                onChange={(event) => set({ received_on: event.target.value })}
+                                max={todayISO()}
+                                onChange={(iso) => set({ received_on: iso })}
+                                placeholder="Выберите день"
+                                triggerClassName={dateTrigger}
+                                ariaLabel="Дата приёма посылки"
                             />
                         </Field>
                         <Field label="Город" required>

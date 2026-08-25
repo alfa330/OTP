@@ -2,7 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PARCEL_STATUSES,
+  ROW_TONES,
   STALE_AFTER_DAYS,
+  STATE_FILTERS,
+  STATUS_META,
+  TONE_EDGE,
+  TONE_PILL,
+  TONE_ROW,
+  TONE_TEXT,
   daysInOffice,
   describeEvent,
   extractAccountId,
@@ -12,7 +20,12 @@ import {
   isStale,
   officeChoiceFor,
   pluralDays,
+  rowTone,
   statusMeta,
+  toneEdge,
+  tonePill,
+  toneRow,
+  toneText,
 } from '../src/components/parcels/parcelMeta.js';
 
 /* Правила раздела «Посылки», которые раньше были бы разметкой.
@@ -136,17 +149,112 @@ test('дни склоняются', () => {
 
 /* ── Показ ──────────────────────────────────────────────────────────────── */
 
-test('статус «В офисе» нейтральный, переданные — приглушённые', () => {
-  assert.equal(statusMeta('in_office').tone, null);
-  assert.equal(statusMeta('given_to_recipient').tone, 'muted');
-  assert.equal(statusMeta('given_to_sender').tone, 'muted');
+test('закрытость статуса — отдельный вопрос от его цвета', () => {
   assert.equal(isClosed('in_office'), false);
+  assert.equal(isClosed('given_to_recipient'), true);
   assert.equal(isClosed('given_to_sender'), true);
 });
 
 test('незнакомый статус не роняет строку', () => {
   assert.equal(statusMeta('нечто').label, 'нечто');
   assert.equal(statusMeta(null).label, '—');
+  assert.equal(statusMeta('нечто').action, 'нечто');
+  assert.equal(statusMeta(null).hint, '');
+});
+
+/* ── Оттенок строки: заливка по статусу ─────────────────────────────────── */
+
+const AT = (received_on, status) => ({ received_on, status });
+const TODAY = '2026-08-25';
+
+test('каждый статус даёт свой оттенок строки', () => {
+  assert.equal(rowTone(AT('2026-08-24', 'in_office'), TODAY), 'waiting');
+  assert.equal(rowTone(AT('2026-06-01', 'given_to_recipient'), TODAY), 'recipient');
+  assert.equal(rowTone(AT('2026-06-01', 'given_to_sender'), TODAY), 'sender');
+});
+
+test('«в офисе» делится на «лежит» и «залежалась» ровно на пороге', () => {
+  const daysAgo = (days) => new Date(Date.UTC(2026, 7, 25) - days * 86400000)
+    .toISOString().slice(0, 10);
+  assert.equal(rowTone(AT(daysAgo(STALE_AFTER_DAYS - 1), 'in_office'), TODAY), 'waiting');
+  assert.equal(rowTone(AT(daysAgo(STALE_AFTER_DAYS), 'in_office'), TODAY), 'stale');
+});
+
+test('залежаться может только лежащая — переданная остаётся своего цвета', () => {
+  // Иначе посылка, отданная полгода назад, красилась бы как «пора разбирать».
+  assert.equal(rowTone(AT('2026-01-01', 'given_to_recipient'), TODAY), 'recipient');
+  assert.equal(rowTone(AT('2026-01-01', 'given_to_sender'), TODAY), 'sender');
+});
+
+test('незнакомый статус и мусор красятся как ожидающие, а не как закрытые', () => {
+  // Непрочитанное состояние честнее показать ждущим: «закрыто» — утверждение.
+  assert.equal(rowTone(AT('2026-08-24', 'нечто'), TODAY), 'waiting');
+  assert.equal(rowTone(null, TODAY), 'waiting');
+  assert.equal(rowTone({}, TODAY), 'waiting');
+});
+
+test('палитра заполнена на все оттенки и ничего не подставляет молча', () => {
+  for (const tone of ROW_TONES) {
+    for (const [name, table] of [['ROW', TONE_ROW], ['TEXT', TONE_TEXT],
+      ['PILL', TONE_PILL], ['EDGE', TONE_EDGE]]) {
+      assert.ok(table[tone], `${name} без оттенка ${tone}`);
+    }
+  }
+  // Незнакомый оттенок не роняет разметку, а откатывается к ожидающему.
+  assert.equal(toneRow('нечто'), TONE_ROW.waiting);
+  assert.equal(toneText('нечто'), TONE_TEXT.waiting);
+  assert.equal(tonePill('нечто'), TONE_PILL.waiting);
+  assert.equal(toneEdge('нечто'), TONE_EDGE.waiting);
+});
+
+test('четыре оттенка различимы: ни одна заливка не повторяется', () => {
+  const fills = ROW_TONES.map((tone) => TONE_ROW[tone]);
+  assert.equal(new Set(fills).size, ROW_TONES.length);
+  const dots = ROW_TONES.map((tone) => TONE_PILL[tone].dot);
+  assert.equal(new Set(dots).size, ROW_TONES.length);
+});
+
+/* ── Подписи статуса ───────────────────────────────────────────────────────
+ *
+ * Три вида подписи на статус — не дубли: полная фраза в реестре, глагол на
+ * кнопке, пояснение под ней. Тест сторожит, что ни один вид не забыт: пустая
+ * подпись на кнопке — это безымянный вариант выбора.
+ */
+test('у каждого статуса есть все три подписи', () => {
+  for (const code of PARCEL_STATUSES) {
+    const meta = STATUS_META[code];
+    assert.ok(meta, `нет подписей у ${code}`);
+    for (const key of ['label', 'action', 'hint']) {
+      assert.ok(meta[key] && meta[key].trim().length > 0, `${code}.${key} пустая`);
+    }
+  }
+});
+
+test('«вернули» и «отдали» — разные глаголы, а не два дательных падежа', () => {
+  // Ровно та путаница, из-за которой подписи и переписывались: «Получателю» и
+  // «Отправителю» рядом читались как выбор адресата, а не как итог.
+  assert.match(STATUS_META.given_to_recipient.action, /Отдали/);
+  assert.match(STATUS_META.given_to_sender.action, /Вернули/);
+  assert.match(STATUS_META.given_to_sender.label, /Вернули/);
+});
+
+test('легенда покрывает все статусы, «Все» идёт первым и без цвета', () => {
+  assert.equal(STATE_FILTERS[0].key, 'all');
+  assert.equal(STATE_FILTERS[0].status, '');
+  assert.equal(STATE_FILTERS[0].tone, null);
+  const covered = STATE_FILTERS.slice(1).map((item) => item.status);
+  assert.deepEqual(covered, PARCEL_STATUSES);
+  // Кружок легенды берётся из палитры строки — иначе легенда учила бы неверно.
+  for (const item of STATE_FILTERS.slice(1)) {
+    assert.ok(TONE_PILL[item.tone], `сегмент ${item.key} без оттенка`);
+  }
+});
+
+test('подпись сегмента совпадает с подписью статуса в реестре', () => {
+  // Разойдись они — легенда называла бы состояние иначе, чем сама строка.
+  for (const item of STATE_FILTERS.slice(1)) {
+    assert.equal(item.label, statusMeta(item.status).label, item.key);
+  }
 });
 
 test('телефон из CRM показывается группами, чужой формат остаётся как есть', () => {

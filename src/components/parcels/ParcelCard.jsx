@@ -1,12 +1,12 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Loader2, Pencil, Trash2 } from 'lucide-react';
+import { Check, Loader2, Pencil, Trash2 } from 'lucide-react';
 import {
-    iosBtnGhost, iosBtnPrimary, iosBtnSecondary, IosModal, IosSegmented,
+    iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosModal,
 } from '../ui/ios';
 import {
     PARCEL_STATUSES, daysInOffice, describeEvent, fmtDate, fmtDateTime, fmtPhone,
-    isStale, kindMeta, pluralDays, statusMeta,
+    kindMeta, pluralDays, rowTone, statusMeta, tonePill, toneRow, toneText,
 } from './parcelMeta';
 
 /*
@@ -16,10 +16,16 @@ import {
  * необходимо отобразить историю изменений»), и на вопрос «кому отдали коробку»
  * через месяц отвечает именно она.
  *
- * Смена статуса — сегментный контрол прямо в карточке, а не отдельная модалка:
- * это единственное частое действие над посылкой, и прятать его за вторым
- * нажатием незачем. У читателя (СЗоВ) контрол не рендерится вовсе — кнопка,
- * которая всегда отвечает отказом, хуже её отсутствия.
+ * Смена статуса — прямо в карточке, а не отдельной модалкой: это единственное
+ * частое действие над посылкой, и прятать его за вторым нажатием незачем. У
+ * читателя (СЗоВ) выбор не рендерится вовсе — кнопка, которая всегда отвечает
+ * отказом, хуже её отсутствия.
+ *
+ * Карточка читается сверху вниз как ответ на четыре вопроса: в каком она
+ * состоянии (сводка), что с ней делать (выбор), что это за посылка и где она,
+ * кто её оставил, что с ней было. До правки 25.08.2026 поля лежали двумя
+ * безымянными панелями, а состояние приходилось собирать из сегментного
+ * контрола и строчки под ним.
  */
 
 const Row = ({ label, children }) => {
@@ -40,7 +46,11 @@ const ParcelCard = ({
     const [confirmDelete, setConfirmDelete] = useState(false);
 
     const lying = useMemo(() => daysInOffice(parcel), [parcel]);
-    const stale = useMemo(() => isStale(parcel), [parcel]);
+    /* Оттенок берём тем же правилом, что реестр: нажал янтарную строку —
+       открылась янтарная карточка, и сверять, ту ли открыл, не нужно. */
+    const tone = useMemo(() => rowTone(parcel), [parcel]);
+    const text = toneText(tone);
+    const pill = tonePill(tone);
 
     const changeStatus = useCallback(async (status) => {
         if (!parcel || busy || status === parcel.status) return;
@@ -82,8 +92,12 @@ const ParcelCard = ({
         <IosModal
             open={open}
             onClose={onClose}
+            /* Подзаголовком — дата приёма, а не описание: описание целиком стоит
+               в секции «Посылка», и в шапке оно было бы тем же текстом второй
+               раз на одном экране (да ещё обрезанным). Дата коротка, не
+               обрезается и отвечает на вопрос «давно ли». */
             title={`${kindMeta(parcel.kind).label} · №${parcel.id}`}
-            subtitle={`${parcel.city}${parcel.office_name ? ` · ${parcel.office_name}` : ''}`}
+            subtitle={`Принята ${fmtDate(parcel.received_on)}`}
             maxWidth="max-w-xl"
             footer={canEdit ? (
                 <>
@@ -127,74 +141,132 @@ const ParcelCard = ({
             )}
         >
             <div className="space-y-5">
-                {/* Статус. У того, кто вправе его менять, это контрол; у читателя —
-                    строка. Одна и та же информация, разная роль. */}
-                <section className="space-y-2">
-                    <div className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Статус</div>
-                    {canEdit ? (
-                        <IosSegmented
-                            value={parcel.status}
-                            onChange={changeStatus}
-                            options={PARCEL_STATUSES.map((code) => ({
-                                value: code, label: statusMeta(code).short,
-                            }))}
-                            stretch
-                            ariaLabel="Статус посылки"
-                        />
-                    ) : (
-                        <div className="rounded-xl bg-slate-100 px-3.5 py-2.5 text-[13.5px] text-slate-900">
+                {/* Сводка: в каком состоянии запись — одним взглядом, до всех полей.
+                    Панель тонируется тем же оттенком, что строка в реестре, поэтому
+                    человек, нажавший янтарную строку, видит янтарную карточку и не
+                    сверяет, ту ли он открыл. */}
+                <section className={`rounded-2xl px-3.5 py-3 ${toneRow(tone)} ring-1 ring-slate-900/[0.06]`}>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[13px] font-semibold ${pill.fill}`}>
+                            <span className={`h-2 w-2 rounded-full ${pill.dot}`} />
                             {statusMeta(parcel.status).label}
-                        </div>
-                    )}
-                    <p className="px-1 text-[12px] text-slate-500">
-                        {parcel.status_changed_at
-                            ? <>Изменён {fmtDateTime(parcel.status_changed_at)}
-                                {parcel.status_changed_by_name && <> · {parcel.status_changed_by_name}</>}</>
-                            : 'Статус ещё не менялся'}
-                    </p>
-                </section>
-
-                <section className="rounded-2xl bg-white px-3.5 py-2 ring-1 ring-slate-200/70">
-                    <Row label="Дата приёма">
-                        <span className="tabular-nums">{fmtDate(parcel.received_on)}</span>
+                        </span>
                         {lying !== null && (
-                            <span className={stale ? 'ml-2 text-[12.5px] text-amber-600' : 'ml-2 text-[12.5px] text-slate-500'}>
+                            <span className={`text-[12.5px] ${text.meta} ${tone === 'stale' ? 'font-medium' : ''}`}>
                                 лежит {pluralDays(lying)}
                             </span>
                         )}
-                    </Row>
-                    <Row label="Офис">
-                        {parcel.office_name}
-                        {parcel.office_address && <span className="text-slate-500">, {parcel.office_address}</span>}
-                    </Row>
-                    <Row label="Тип">{kindMeta(parcel.kind).label}</Row>
-                    <Row label="Описание">{parcel.description}</Row>
-                    <Row label="Отправитель">{parcel.sender}</Row>
-                    <Row label="Получатель">{parcel.recipient}</Row>
-                    <Row label="Номер заказа"><span className="tabular-nums">{parcel.order_number}</span></Row>
-                    <Row label="Комментарий">{parcel.comment}</Row>
-                </section>
-
-                <section className="rounded-2xl bg-white px-3.5 py-2 ring-1 ring-slate-200/70">
-                    <Row label="Водитель">{parcel.driver_name || '—'}</Row>
-                    <Row label="Телефон">
-                        {parcel.driver_phone && (
-                            <a href={`tel:${parcel.driver_phone}`} className="tabular-nums text-blue-600 hover:underline">
-                                {fmtPhone(parcel.driver_phone)}
-                            </a>
+                    </div>
+                    <p className={`mt-1.5 text-[12px] ${text.meta}`}>
+                        {/* Расшифровку статуса словами показываем только читателю:
+                            у того, кто может статус менять, она стоит строкой ниже,
+                            у выбранного варианта — и повторять её здесь значило бы
+                            написать одно и то же дважды на одном экране. */}
+                        {!canEdit && statusMeta(parcel.status).hint}
+                        {!canEdit && parcel.status_changed_at && ' · '}
+                        {parcel.status_changed_at && (
+                            <>
+                                Изменён{' '}
+                                <span className="tabular-nums">{fmtDateTime(parcel.status_changed_at)}</span>
+                                {parcel.status_changed_by_name && `, ${parcel.status_changed_by_name}`}
+                            </>
                         )}
-                    </Row>
-                    <Row label="Таксопарк">{parcel.driver_park}</Row>
-                    <Row label="Машина">{parcel.driver_car}</Row>
-                    <Row label="Позывной">{parcel.driver_callsign}</Row>
-                    <Row label="ID во Флите">
-                        <span className="break-all font-mono text-[12px] text-slate-500">{parcel.driver_account_id}</span>
-                    </Row>
+                        {!parcel.status_changed_at && canEdit && 'Статус ещё не менялся'}
+                    </p>
+                    {/* Где лежит — здесь же, а не отдельной секцией: «в каком
+                        состоянии» и «где искать» оператор читает одним движением,
+                        а тремя строками в своей панели место повторяло бы то, что
+                        и так стоит в реестре. */}
+                    <p className={`mt-1 border-t border-slate-900/[0.06] pt-1.5 text-[12.5px] ${text.body}`}>
+                        {parcel.city}
+                        {parcel.office_name && ` · ${parcel.office_name}`}
+                        {parcel.office_address && (
+                            <span className={text.meta}>, {parcel.office_address}</span>
+                        )}
+                    </p>
                 </section>
 
-                <section className="space-y-2">
-                    <div className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">История</div>
-                    <ol className="space-y-2.5">
+                {/* Смена статуса — СПИСОК с подписями, а не сегментный контрол.
+                    В сегментах помещались только «Получателю | Отправителю»: два
+                    дательных падежа, различающиеся корнем, читались как выбор
+                    адресата, а не как итог. Здесь у каждого варианта глагол и
+                    строка «кто именно забрал», так что выбор не требует догадки.
+                    Читателю (СЗоВ) список не рисуется вовсе — состояние он уже
+                    прочитал в сводке выше. */}
+                {canEdit && (
+                    <section className="space-y-1.5">
+                        <div className={iosGroupLabel}>Что с посылкой</div>
+                        <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
+                            {PARCEL_STATUSES.map((code, index) => {
+                                const meta = statusMeta(code);
+                                const chosen = parcel.status === code;
+                                return (
+                                    <button
+                                        key={code}
+                                        type="button"
+                                        disabled={busy}
+                                        onClick={() => changeStatus(code)}
+                                        aria-pressed={chosen}
+                                        className={`flex w-full items-start gap-3 px-3.5 py-2.5 text-left transition disabled:opacity-60 ${
+                                            index > 0 ? 'border-t border-slate-100' : ''
+                                        } ${chosen ? 'bg-slate-50' : 'hover:bg-slate-50'}`}
+                                    >
+                                        <span className={`mt-[3px] grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full transition ${
+                                            chosen ? 'bg-blue-600' : 'ring-1 ring-slate-300'
+                                        }`}>
+                                            {chosen && <Check size={12} className="text-white" strokeWidth={3} />}
+                                        </span>
+                                        <span className="min-w-0">
+                                            <span className={`block text-[13.5px] ${chosen ? 'font-semibold text-slate-900' : 'text-slate-800'}`}>
+                                                {meta.action}
+                                            </span>
+                                            <span className="block text-[12px] text-slate-500">{meta.hint}</span>
+                                        </span>
+                                        {busy && chosen && (
+                                            <Loader2 size={14} className="ml-auto mt-[3px] shrink-0 animate-spin text-slate-400" />
+                                        )}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </section>
+                )}
+
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>Посылка</div>
+                    <div className="rounded-2xl bg-white px-3.5 py-2 ring-1 ring-slate-200/70">
+                        <Row label="Тип">{kindMeta(parcel.kind).label}</Row>
+                        <Row label="Описание">{parcel.description}</Row>
+                        <Row label="Отправитель">{parcel.sender}</Row>
+                        <Row label="Получатель">{parcel.recipient}</Row>
+                        <Row label="Номер заказа"><span className="tabular-nums">{parcel.order_number}</span></Row>
+                        <Row label="Комментарий">{parcel.comment}</Row>
+                    </div>
+                </section>
+
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>Водитель</div>
+                    <div className="rounded-2xl bg-white px-3.5 py-2 ring-1 ring-slate-200/70">
+                        <Row label="ФИО">{parcel.driver_name || '—'}</Row>
+                        <Row label="Телефон">
+                            {parcel.driver_phone && (
+                                <a href={`tel:${parcel.driver_phone}`} className="tabular-nums text-blue-600 hover:underline">
+                                    {fmtPhone(parcel.driver_phone)}
+                                </a>
+                            )}
+                        </Row>
+                        <Row label="Таксопарк">{parcel.driver_park}</Row>
+                        <Row label="Машина">{parcel.driver_car}</Row>
+                        <Row label="Позывной">{parcel.driver_callsign}</Row>
+                        <Row label="ID во Флите">
+                            <span className="break-all font-mono text-[12px] text-slate-500">{parcel.driver_account_id}</span>
+                        </Row>
+                    </div>
+                </section>
+
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>История</div>
+                    <ol className="space-y-2.5 rounded-2xl bg-white px-3.5 py-3 ring-1 ring-slate-200/70">
                         {(events || []).map((event) => (
                             <li key={event.id} className="flex gap-3">
                                 <span className="mt-[6px] h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
@@ -226,12 +298,17 @@ const ParcelCard = ({
                         {!(events || []).length && (
                             <li className="text-[13px] text-slate-500">История пуста</li>
                         )}
+                        <li className="flex gap-3 border-t border-slate-100 pt-2.5 text-[12px] text-slate-500">
+                            <span className="min-w-0">
+                                Добавил {parcel.created_by_name || '—'}
+                                {' · '}
+                                <span className="tabular-nums">{fmtDateTime(parcel.created_at)}</span>
+                            </span>
+                        </li>
                     </ol>
-                    <p className="px-1 text-[12px] text-slate-500">
-                        Добавил {parcel.created_by_name || '—'} · <span className="tabular-nums">{fmtDateTime(parcel.created_at)}</span>
-                    </p>
                 </section>
             </div>
+
         </IosModal>
     );
 };

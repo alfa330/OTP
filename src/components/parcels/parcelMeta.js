@@ -1,22 +1,52 @@
 /*
  * Правила раздела «Посылки», вынесенные из JSX.
  *
- * Здесь всё, что можно проверить без браузера: подписи статусов, разбор ссылки
- * на аккаунт водителя, правило «спрашивать офис или подставить сам», сборка
- * строки истории. Тесты — tests/parcel_meta.test.mjs.
+ * Здесь всё, что можно проверить без браузера: подписи и цвет статусов, разбор
+ * ссылки на аккаунт водителя, правило «спрашивать офис или подставить сам»,
+ * сборка строки истории. Тесты — tests/parcel_meta.test.mjs.
  *
- * Про цвет. Красим ТОЛЬКО то, что требует действия. «В офисе» — рабочее
- * состояние, оно нейтральное; «Передали» — закрытое, оно приглушённое. Цвет
- * появляется в одном месте: посылка лежит слишком долго, а раздел ровно про
- * это — «невостребованные».
+ * Про цвет. Строка реестра окрашивается ПО СТАТУСУ целиком — тем же приёмом и
+ * теми же весами, что строки офисов в вики (officeDayStatus.js): состояние
+ * записи должно читаться, не доходя глазами до колонки «Статус». Приём взят
+ * оттуда намеренно, а не изобретён заново: два раздела портала, красящих строку
+ * по-разному, читались бы как две разные программы.
+ *
+ * Оттенков ЧЕТЫРЕ на три статуса: «В офисе» разделено на «лежит» и
+ * «залежалась» (от STALE_AFTER_DAYS дней). Раздел называется
+ * «невостребованные», и вопрос «что уже пора разбирать» — главный в нём.
  */
 
 export const PARCEL_STATUSES = ['in_office', 'given_to_recipient', 'given_to_sender'];
 
+/* Подписи статуса. Их ТРИ вида, и это не дубли:
+ *   label  — в реестре и в легенде: полная фраза, читается сама по себе;
+ *   action — на кнопке смены статуса: ГЛАГОЛ, потому что человек нажимает её,
+ *            чтобы что-то сделать, а не чтобы назвать состояние;
+ *   hint   — под кнопкой: кто именно забрал посылку.
+ *
+ * Почему «Вернули отправителю», а не «Передали отправителю» из ТЗ: два дательных
+ * падежа рядом («получателю» / «отправителю») различаются одним корнем, и в
+ * сегментном контроле «Получателю | Отправителю» человек читал их как выбор
+ * адресата, а не как итог. Отправитель — тот, кто посылку и оставил, поэтому
+ * верный глагол здесь «вернули»; он же снимает вопрос «а зачем отправителю
+ * передавать то, что он сам принёс».
+ */
 export const STATUS_META = {
-    in_office: { label: 'В офисе', short: 'В офисе', tone: null },
-    given_to_recipient: { label: 'Передали получателю', short: 'Получателю', tone: 'muted' },
-    given_to_sender: { label: 'Передали отправителю', short: 'Отправителю', tone: 'muted' },
+    in_office: {
+        label: 'В офисе',
+        action: 'В офисе',
+        hint: 'Лежит в офисе, за ней ещё не пришли',
+    },
+    given_to_recipient: {
+        label: 'Передали получателю',
+        action: 'Отдали получателю',
+        hint: 'Забрал тот, кому посылка предназначалась',
+    },
+    given_to_sender: {
+        label: 'Вернули отправителю',
+        action: 'Вернули отправителю',
+        hint: 'Забрал тот, кто её оставил',
+    },
 };
 
 export const PARCEL_KINDS = ['parcel', 'document', 'other'];
@@ -27,13 +57,17 @@ export const KIND_META = {
     other: { label: 'Другое' },
 };
 
-// Сегменты фильтра — «Все/В офисе/Передали получателю/Передали отправителю»
-// дословно из ТЗ, в том же порядке.
+/* Полоса-легенда, она же фильтр — «Все / В офисе / …» в порядке ТЗ.
+ *
+ * Кружок берётся из той же палитры, что заливка строки (TONE_PILL), а не
+ * назначается рядом второй раз: легенда учит читать цвет в таблице, и разойдись
+ * эти два места на полтона — она бы этому и мешала. Ровно так же собрана
+ * легенда офисов в вики. */
 export const STATE_FILTERS = [
-    { key: 'all', label: 'Все', status: '' },
-    { key: 'in_office', label: 'В офисе', status: 'in_office' },
-    { key: 'given_to_recipient', label: 'Передали получателю', status: 'given_to_recipient' },
-    { key: 'given_to_sender', label: 'Передали отправителю', status: 'given_to_sender' },
+    { key: 'all', label: 'Все', status: '', tone: null },
+    { key: 'in_office', label: 'В офисе', status: 'in_office', tone: 'waiting' },
+    { key: 'given_to_recipient', label: 'Передали получателю', status: 'given_to_recipient', tone: 'recipient' },
+    { key: 'given_to_sender', label: 'Вернули отправителю', status: 'given_to_sender', tone: 'sender' },
 ];
 
 // Сколько дней посылка считается «просто лежит», а не «залежалась». Месяц —
@@ -42,10 +76,71 @@ export const STATE_FILTERS = [
 // N дней» обязаны срабатывать одновременно.
 export const STALE_AFTER_DAYS = 30;
 
-export const statusMeta = (code) => STATUS_META[code] || { label: code || '—', short: code || '—', tone: null };
+export const statusMeta = (code) => STATUS_META[code]
+    || { label: code || '—', action: code || '—', hint: '' };
 export const kindMeta = (code) => KIND_META[code] || { label: code || '—' };
 
 export const isClosed = (status) => status === 'given_to_recipient' || status === 'given_to_sender';
+
+/* ── Оттенок строки ──────────────────────────────────────────────────────────
+ *
+ * Один вход на всё: строку таблицы, карточку на телефоне, бейдж и легенду.
+ * Правило считается ЗДЕСЬ, а не в разметке, потому что оно живёт в четырёх
+ * местах — ровно та ошибка, из-за которой в вики у офиса без графика бейджа не
+ * было вовсе: условие переписывали в каждом месте отдельно.
+ */
+export const ROW_TONES = ['waiting', 'stale', 'recipient', 'sender'];
+
+export const rowTone = (parcel, today = todayISO()) => {
+    if (parcel?.status === 'given_to_recipient') return 'recipient';
+    if (parcel?.status === 'given_to_sender') return 'sender';
+    // Остаётся «в офисе» — и незнакомый статус тоже: непрочитанное состояние
+    // честнее показать ожидающим, чем закрытым.
+    return isStale(parcel, today) ? 'stale' : 'waiting';
+};
+
+/* Заливка строки. Веса — как у офисов в вики: заметно, что строка не белая, но
+ * таблица из тридцати «в офисе» не превращается в жёлтое поле. Янтарь у
+ * ожидающих, а не у закрытых: ждёт — это то, с чем надо что-то делать. */
+export const TONE_ROW = {
+    waiting: 'bg-amber-50',
+    stale: 'bg-amber-100/70',
+    recipient: 'bg-emerald-50/70',
+    sender: 'bg-slate-100/80',
+};
+
+/* Цвет ТЕКСТА в залитой строке, а не только фона: серый slate-500 на янтаре и
+ * на зелени читается как выцветший. Тонируем вслед за заливкой. */
+export const TONE_TEXT = {
+    waiting: { main: 'text-slate-900', body: 'text-slate-700', meta: 'text-amber-700' },
+    stale: { main: 'text-slate-900', body: 'text-amber-900', meta: 'text-amber-700' },
+    recipient: { main: 'text-emerald-900', body: 'text-emerald-800', meta: 'text-emerald-700' },
+    sender: { main: 'text-slate-800', body: 'text-slate-600', meta: 'text-slate-500' },
+};
+
+/* Бейдж в залитой строке. IosBadge здесь не годится по той же причине, что в
+ * вики: его тона светлее самой строки, и бейдж в заливке пропадает. */
+export const TONE_PILL = {
+    waiting: { fill: 'bg-amber-200/80 text-amber-900', dot: 'bg-amber-500' },
+    stale: { fill: 'bg-amber-300/80 text-amber-950', dot: 'bg-amber-600' },
+    recipient: { fill: 'bg-emerald-200 text-emerald-900', dot: 'bg-emerald-600' },
+    sender: { fill: 'bg-slate-300/70 text-slate-800', dot: 'bg-slate-500' },
+};
+
+/* Кант слева у карточки на телефоне: там заливка всей карточки читается как
+ * тревога, а не как состояние (то же решение, что у карточек офисов). */
+export const TONE_EDGE = {
+    waiting: 'before:bg-amber-400',
+    stale: 'before:bg-amber-500',
+    recipient: 'before:bg-emerald-400',
+    sender: 'before:bg-slate-400',
+};
+
+export const toneRow = (tone) => TONE_ROW[tone] || TONE_ROW.waiting;
+export const toneText = (tone) => TONE_TEXT[tone] || TONE_TEXT.waiting;
+export const tonePill = (tone) => TONE_PILL[tone] || TONE_PILL.waiting;
+export const toneEdge = (tone) => TONE_EDGE[tone] || TONE_EDGE.waiting;
+
 
 /* ── Ссылка на аккаунт водителя ───────────────────────────────────────────────
  *

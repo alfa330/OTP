@@ -2,13 +2,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { Loader2, Package, Plus, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-react';
 import {
-    APPLE_FONT, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput,
+    APPLE_FONT, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, iosGroupLabel,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import ParcelCard from './ParcelCard';
 import ParcelForm from './ParcelForm';
 import {
-    STATE_FILTERS, daysInOffice, fmtDate, fmtPhone, isStale, kindMeta, pluralDays, statusMeta,
+    STATE_FILTERS, daysInOffice, fmtDate, fmtPhone, isStale, kindMeta, pluralDays, rowTone,
+    statusMeta, toneEdge, tonePill, toneRow, toneText,
 } from './parcelMeta';
 
 /*
@@ -27,9 +29,17 @@ import {
  * нужны редко, а на экране постоянно занимали бы строку из четырёх пустых
  * селекторов.
  *
- * Про цвет. Красим одно — посылку, которая лежит слишком долго. Статусы
- * нейтральны: «В офисе» это рабочее состояние, а не тревога, и раскрашенный
- * реестр перестал бы отвечать на вопрос «что требует внимания».
+ * Про цвет. Строка окрашивается ПО СТАТУСУ целиком (просьба владельца
+ * 25.08.2026) — тем же приёмом, что строки офисов в вики. Оттенков четыре, а не
+ * три: «в офисе» делится на «лежит» и «залежалась», потому что раздел про
+ * невостребованное, и вопрос «что пора разбирать» в нём главный. Палитра и
+ * правило выбора — в parcelMeta.js, чтобы таблица, карточки на телефоне,
+ * бейджи и легенда красились из ОДНОГО места.
+ *
+ * Легенда над таблицей — она же фильтр по статусу: цветовую кодировку человек
+ * читает без обучения, а «покажи только залежавшиеся» находится одним
+ * нажатием. Две отдельные полосы (легенда и фильтр) были бы двумя строками про
+ * одно и то же.
  */
 
 const PAGE_SIZE = 50;
@@ -41,19 +51,35 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 const EMPTY_FILTERS = { city: '', office_id: null, manager_id: null, date_from: '', date_to: '' };
 
-const activeFilterCount = (filters) => (
-    (filters.city ? 1 : 0) + (filters.office_id ? 1 : 0) + (filters.manager_id ? 1 : 0)
-    + (filters.date_from ? 1 : 0) + (filters.date_to ? 1 : 0)
-);
+/* Пресеты диапазона. Объявлены МОДУЛЬНОЙ константой: инлайновый литерал —
+   новый массив на каждый рендер, а он уходит пропсом в пикер.
+   «Весь период» пикер добавляет сам, поэтому здесь только рабочие окна: за
+   месяц посылку ищут чаще всего, «залежавшиеся» начинаются после 30 дней. */
+const shiftDays = (days) => {
+    const value = new Date();
+    value.setDate(value.getDate() - days);
+    return isoDate(value);
+};
 
-const DriverCell = ({ parcel }) => (
+const DATE_PRESETS = [
+    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
+    { label: 'Неделя', range: () => ({ from: shiftDays(6), to: isoDate(new Date()) }) },
+    { label: 'Месяц', range: () => ({ from: shiftDays(29), to: isoDate(new Date()) }) },
+];
+
+
+/* Водитель в строке. Цвет приходит пропсом, а не берётся из slate: строка
+   залита по статусу, и «серый по умолчанию» на янтаре и зелени выглядит
+   выцветшим. Телефон остаётся ссылкой tel: — по нему звонят прямо из реестра,
+   поэтому щелчок по нему не должен открывать карточку (stopPropagation). */
+const DriverCell = ({ parcel, text }) => (
     <>
-        <div className="truncate text-slate-900">{parcel.driver_name || '—'}</div>
+        <div className={`truncate ${text.main}`}>{parcel.driver_name || '—'}</div>
         {parcel.driver_phone && (
             <a
                 href={`tel:${parcel.driver_phone}`}
                 onClick={(event) => event.stopPropagation()}
-                className="tabular-nums text-[12.5px] text-slate-500 hover:text-blue-600 hover:underline"
+                className={`tabular-nums text-[12.5px] underline decoration-transparent underline-offset-2 transition hover:decoration-inherit ${text.body}`}
             >
                 {fmtPhone(parcel.driver_phone)}
             </a>
@@ -191,17 +217,81 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }
     }, [apiBaseUrl, headers]);
 
+    /* Что делать после сохранения — заведения, правки или смены статуса.
+     *
+     * Два шага, и оба нужны. Сначала кладём свежую запись на место старой:
+     * строка перекрашивается и статус меняется мгновенно, без мигания списка.
+     * Потом перезапрашиваем список — потому что счётчики «Все / В офисе / …»,
+     * общее число и сам СОСТАВ выборки считает сервер по текущим фильтрам, и
+     * посчитать их у себя нельзя: посылка, у которой сменился статус, может
+     * вообще выпасть из выбранного сегмента.
+     *
+     * Раньше второго шага не было — и счётчики стояли на прежних числах до
+     * перезагрузки страницы, хотя строка уже показывала новый статус.
+     */
     const applySaved = useCallback((saved) => {
-        if (!saved) { load(); return; }
-        setItems((prev) => {
-            const known = prev.some((item) => item.id === saved.id);
-            return known
-                ? prev.map((item) => (item.id === saved.id ? saved : item))
-                : [saved, ...prev];
-        });
-        setOpened((prev) => (prev && prev.id === saved.id ? saved : prev));
+        if (saved) {
+            setItems((prev) => {
+                const known = prev.some((item) => item.id === saved.id);
+                return known
+                    ? prev.map((item) => (item.id === saved.id ? saved : item))
+                    : [saved, ...prev];
+            });
+            setOpened((prev) => (prev && prev.id === saved.id ? saved : prev));
+        }
+        load({ append: false, from: 0 });
         loadFilters();
     }, [load, loadFilters]);
+
+    /* Удаление — тот же порядок: убрали строку, пересчитали сводку. */
+    const applyDeleted = useCallback((id) => {
+        setItems((prev) => prev.filter((item) => item.id !== id));
+        setTotal((prev) => Math.max(0, prev - 1));
+        load({ append: false, from: 0 });
+        loadFilters();
+    }, [load, loadFilters]);
+
+    /* Сколько на экране залежавшихся. Считаем по загруженной странице, а не
+       запросом: это подсказка «есть чем заняться», а не число из отчёта, и
+       ради неё ходить на сервер незачем. Поэтому и подпись без «из N». */
+    const staleCount = useMemo(
+        () => items.reduce((sum, parcel) => sum + (isStale(parcel) ? 1 : 0), 0),
+        [items],
+    );
+
+    /* Человекочитаемые чипы активных фильтров. Собираются здесь, а не в
+       разметке: каждому нужен и текст, и способ снять именно его. */
+    const activeFilterChips = useMemo(() => {
+        const chips = [];
+        if (filters.city) {
+            chips.push({
+                key: 'city', name: 'Город', label: filters.city,
+                clear: () => setFilters((prev) => ({ ...prev, city: '', office_id: null })),
+            });
+        }
+        if (filters.office_id) {
+            const office = offices.find((item) => item.id === filters.office_id);
+            chips.push({
+                key: 'office', name: 'Офис', label: office?.name || `№${filters.office_id}`,
+                clear: () => setFilters((prev) => ({ ...prev, office_id: null })),
+            });
+        }
+        if (filters.manager_id) {
+            const manager = managers.find((item) => item.id === filters.manager_id);
+            chips.push({
+                key: 'manager', name: 'Менеджер', label: manager?.name || `№${filters.manager_id}`,
+                clear: () => setFilters((prev) => ({ ...prev, manager_id: null })),
+            });
+        }
+        if (filters.date_from || filters.date_to) {
+            chips.push({
+                key: 'dates', name: 'Приняты',
+                label: rangeLabel(filters.date_from || '', filters.date_to || ''),
+                clear: () => setFilters((prev) => ({ ...prev, date_from: '', date_to: '' })),
+            });
+        }
+        return chips;
+    }, [filters, managers, offices]);
 
     const officeOptions = useMemo(() => {
         const list = filters.city
@@ -213,7 +303,7 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
         }));
     }, [filters.city, offices]);
 
-    const filtersActive = activeFilterCount(filters);
+    const filtersActive = activeFilterChips.length;
 
     if (capabilities && !capabilities.can_open) {
         return (
@@ -288,7 +378,10 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 </div>
                 <button
                     type="button"
-                    className={`${filtersActive ? iosBtnPrimary : iosBtnSecondary} shrink-0`}
+                    /* На телефоне кнопка жмётся к своему тексту (self-start), а не
+                       растягивается на всю строку: широкая пустая кнопка читается
+                       как главное действие экрана, а это не так. */
+                    className={`${filtersActive ? iosBtnPrimary : iosBtnSecondary} shrink-0 self-start sm:self-auto`}
                     onClick={() => setFiltersOpen((prev) => !prev)}
                 >
                     <SlidersHorizontal size={15} />
@@ -297,10 +390,14 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 </button>
             </div>
 
-            {/* Легенда статусов — она же фильтр. Счётчики приходят с сервера и
-                считаются по ТЕКУЩИМ фильтрам без учёта статуса, поэтому сегмент
-                «В офисе» честно показывает, сколько уже передали. */}
-            <div className="mt-3 flex flex-wrap gap-1.5">
+            {/* Полоса-легенда, она же фильтр по статусу. Залитая полоса, а не
+                россыпь чипов по белому полю: три подписи вразброс читаются как
+                случайные слова над таблицей, а не как ключ к её цветам. Кружок
+                берётся из той же палитры, что заливка строки — легенда учит
+                читать цвет, и разойдись они на полтона, мешала бы этому.
+                Счётчики считает сервер по ТЕКУЩИМ фильтрам без учёта статуса,
+                поэтому на сегменте «В офисе» видно и сколько уже передали. */}
+            <div className="mt-3 flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
                 {STATE_FILTERS.map((item) => {
                     const count = item.key === 'all' ? counters.all : counters[item.key];
                     const active = state === item.key;
@@ -309,92 +406,120 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                             key={item.key}
                             type="button"
                             onClick={() => setState(item.key)}
-                            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12.5px] font-medium transition active:scale-[0.98] ${
+                            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12.5px] transition ${
                                 active
-                                    ? 'bg-slate-900 text-white'
-                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    ? 'bg-slate-900 font-medium text-white'
+                                    : 'text-slate-700 hover:bg-white'
                             }`}
                         >
+                            {item.tone && (
+                                <span className={`h-2 w-2 shrink-0 rounded-full ${tonePill(item.tone).dot}`} />
+                            )}
                             {item.label}
                             {count !== undefined && (
-                                <span className={`tabular-nums ${active ? 'text-white/70' : 'text-slate-400'}`}>
-                                    {count}
-                                </span>
+                                <span className="font-semibold tabular-nums">{count}</span>
                             )}
                         </button>
                     );
                 })}
+                {/* «Залежались» — не статус, а срез внутри «в офисе», поэтому стоит
+                    справкой в конце полосы, а не четвёртым сегментом: сегменты
+                    обязаны складываться в «Все». */}
+                {staleCount > 0 && (
+                    <span className="ml-auto flex items-center gap-1.5 px-1.5 text-[12px] text-amber-700">
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${tonePill('stale').dot}`} />
+                        залежались
+                        <span className="font-semibold tabular-nums">{staleCount}</span>
+                    </span>
+                )}
             </div>
 
+            {/* Что отобрано — видно, не открывая панель. Раньше набор фильтров
+                прятался за кнопкой и наружу торчало только число: человек видел
+                «Фильтры · 2» и не помнил, какие именно. Чип снимается крестиком
+                по одному, а не «сбросить всё». */}
+            {filtersActive > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    {activeFilterChips.map((chip) => (
+                        <button
+                            key={chip.key}
+                            type="button"
+                            onClick={chip.clear}
+                            title={`Убрать: ${chip.label}`}
+                            className="group inline-flex max-w-full items-center gap-1.5 rounded-full bg-white px-2.5 py-1 text-[12.5px] text-slate-700 ring-1 ring-slate-200/80 transition hover:ring-slate-300 active:scale-[0.98]"
+                        >
+                            <span className="text-slate-400">{chip.name}</span>
+                            <span className="truncate font-medium">{chip.label}</span>
+                            <X size={12} className="shrink-0 text-slate-400 group-hover:text-slate-600" />
+                        </button>
+                    ))}
+                    <button
+                        type="button"
+                        onClick={() => setFilters(EMPTY_FILTERS)}
+                        className="px-1.5 text-[12.5px] text-slate-500 underline decoration-slate-300 underline-offset-2 transition hover:text-slate-700"
+                    >
+                        сбросить всё
+                    </button>
+                </div>
+            )}
+
             {filtersOpen && (
-                <div className={`${iosCard} mt-3 grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-4`}>
-                    <label className="block space-y-1.5">
-                        <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Город</span>
-                        <CustomSelect
-                            value={filters.city}
-                            onChange={(value) => setFilters((prev) => ({ ...prev, city: value, office_id: null }))}
-                            options={[{ value: '', label: 'Все города' },
-                                ...filterCities.map((item) => ({ value: item.city, label: `${item.city} · ${item.parcels}` }))]}
-                            placeholder="Все города"
-                            variant="ios"
-                            ariaLabel="Город"
-                        />
-                    </label>
-                    <label className="block space-y-1.5">
-                        <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Офис</span>
-                        <CustomSelect
-                            value={filters.office_id}
-                            onChange={(value) => setFilters((prev) => ({ ...prev, office_id: value || null }))}
-                            options={[{ value: null, label: 'Все офисы' }, ...officeOptions]}
-                            placeholder="Все офисы"
-                            variant="ios"
-                            searchable
-                            ariaLabel="Офис"
-                        />
-                    </label>
-                    <label className="block space-y-1.5">
-                        <span className="px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Менеджер</span>
-                        <CustomSelect
-                            value={filters.manager_id}
-                            onChange={(value) => setFilters((prev) => ({ ...prev, manager_id: value || null }))}
-                            options={[{ value: null, label: 'Все менеджеры' },
-                                ...managers.map((item) => ({ value: item.id, label: `${item.name} · ${item.parcels}` }))]}
-                            placeholder="Все менеджеры"
-                            variant="ios"
-                            searchable
-                            ariaLabel="Менеджер"
-                        />
-                    </label>
-                    <div className="space-y-1.5">
-                        <span className="block px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">Дата приёма</span>
-                        <div className="flex items-center gap-1.5">
-                            <input
-                                type="date"
-                                className={iosInput}
-                                value={filters.date_from}
-                                onChange={(event) => setFilters((prev) => ({ ...prev, date_from: event.target.value }))}
-                                aria-label="Дата приёма: с"
+                <div className={`${iosCard} mt-3 p-3.5`}>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <label className="block space-y-1.5">
+                            <span className={iosGroupLabel}>Город</span>
+                            <CustomSelect
+                                value={filters.city}
+                                onChange={(value) => setFilters((prev) => ({ ...prev, city: value, office_id: null }))}
+                                options={[{ value: '', label: 'Все города' },
+                                    ...filterCities.map((item) => ({ value: item.city, label: `${item.city} · ${item.parcels}` }))]}
+                                placeholder="Все города"
+                                variant="ios"
+                                ariaLabel="Город"
                             />
-                            <span className="text-slate-400">—</span>
-                            <input
-                                type="date"
-                                className={iosInput}
-                                value={filters.date_to}
-                                onChange={(event) => setFilters((prev) => ({ ...prev, date_to: event.target.value }))}
-                                aria-label="Дата приёма: по"
+                        </label>
+                        <label className="block space-y-1.5">
+                            <span className={iosGroupLabel}>Офис</span>
+                            <CustomSelect
+                                value={filters.office_id}
+                                onChange={(value) => setFilters((prev) => ({ ...prev, office_id: value || null }))}
+                                options={[{ value: null, label: 'Все офисы' }, ...officeOptions]}
+                                placeholder="Все офисы"
+                                variant="ios"
+                                searchable
+                                ariaLabel="Офис"
+                            />
+                        </label>
+                        <label className="block space-y-1.5">
+                            <span className={iosGroupLabel}>Менеджер</span>
+                            <CustomSelect
+                                value={filters.manager_id}
+                                onChange={(value) => setFilters((prev) => ({ ...prev, manager_id: value || null }))}
+                                options={[{ value: null, label: 'Все менеджеры' },
+                                    ...managers.map((item) => ({ value: item.id, label: `${item.name} · ${item.parcels}` }))]}
+                                placeholder="Все менеджеры"
+                                variant="ios"
+                                searchable
+                                ariaLabel="Менеджер"
+                            />
+                        </label>
+                        {/* Дата приёма — ОДИН чип с диапазоном вместо двух системных
+                            полей. Раскрытый системный календарь рисует браузер: своя
+                            шапка, свои кнопки, чужая деталь рядом с rounded-2xl.
+                            Здесь тот же примитив, что в аналитике вики и в чатах. */}
+                        <div className="space-y-1.5">
+                            <span className={`block ${iosGroupLabel}`}>Дата приёма</span>
+                            <IosDateRangePicker
+                                from={filters.date_from || ''}
+                                to={filters.date_to || ''}
+                                max={isoDate(new Date())}
+                                onChange={({ from, to }) => setFilters((prev) => ({
+                                    ...prev, date_from: from || '', date_to: to || '',
+                                }))}
+                                presets={DATE_PRESETS}
                             />
                         </div>
                     </div>
-                    {filtersActive > 0 && (
-                        <button
-                            type="button"
-                            className={`${iosBtnGhost} justify-self-start`}
-                            onClick={() => setFilters(EMPTY_FILTERS)}
-                        >
-                            <X size={14} />
-                            Сбросить фильтры
-                        </button>
-                    )}
                 </div>
             )}
 
@@ -408,7 +533,7 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 выборка, разная подача. Рамка прокручивается по горизонтали —
                 иначе колонка «Описание» выдавливает статус за край. */}
             <div className={`${iosCard} mt-4 hidden overflow-x-auto md:block`}>
-                <table className="w-full min-w-[900px] border-collapse text-[13.5px]">
+                <table className="w-full min-w-[940px] border-collapse text-[13.5px]">
                     <thead>
                         <tr className="border-b border-slate-200/70 bg-slate-50 text-left text-[11.5px] uppercase tracking-wider text-slate-500">
                             <th className="px-3.5 py-2.5 font-semibold">Принята</th>
@@ -420,45 +545,67 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                         </tr>
                     </thead>
                     <tbody>
-                        {items.map((parcel) => {
+                        {items.map((parcel, index) => {
                             const lying = daysInOffice(parcel);
-                            const stale = isStale(parcel);
+                            const tone = rowTone(parcel);
+                            const text = toneText(tone);
+                            const pill = tonePill(tone);
                             return (
                                 <tr
                                     key={parcel.id}
                                     onClick={() => openParcel(parcel)}
-                                    className="cursor-pointer border-b border-slate-100 transition last:border-0 hover:bg-slate-50"
+                                    /* Волосок затемнением, а не серой линией: он обязан
+                                       читаться и на янтарной строке, и на зелёной.
+                                       Первой строке он не нужен — её сверху держит
+                                       граница шапки. Заливка идёт по статусу, поэтому
+                                       hover не перекрашивает строку, а притемняет её:
+                                       hover:bg-slate-50 стирал бы состояние. */
+                                    /* Высота на СТРОКЕ, а не в отступах ячейки:
+                                       у закрытых записей под бейджем стоит имя
+                                       сотрудника, и ряды получались рваными
+                                       (62/62/65/65) — на залитых строках это
+                                       видно сразу. */
+                                    className={`h-[64px] cursor-pointer transition hover:brightness-[0.97] ${
+                                        index > 0 ? 'border-t border-slate-900/[0.06]' : ''
+                                    } ${toneRow(tone)}`}
                                 >
                                     <td className="px-3.5 py-2.5 align-top whitespace-nowrap">
-                                        <div className="tabular-nums text-slate-900">{fmtDate(parcel.received_on)}</div>
+                                        <div className={`tabular-nums ${text.main}`}>{fmtDate(parcel.received_on)}</div>
                                         {lying !== null && (
-                                            <div className={`text-[12px] ${stale ? 'font-medium text-amber-600' : 'text-slate-400'}`}>
+                                            <div className={`text-[12px] leading-4 ${text.meta} ${tone === 'stale' ? 'font-medium' : ''}`}>
                                                 лежит {pluralDays(lying)}
                                             </div>
                                         )}
                                     </td>
                                     <td className="px-3.5 py-2.5 align-top">
-                                        <div className="text-slate-900">{parcel.city}</div>
-                                        <div className="text-[12.5px] text-slate-500">{parcel.office_name || '—'}</div>
+                                        <div className={text.main}>{parcel.city}</div>
+                                        <div className={`text-[12.5px] ${text.body}`}>{parcel.office_name || '—'}</div>
                                     </td>
                                     <td className="max-w-[220px] px-3.5 py-2.5 align-top">
-                                        <DriverCell parcel={parcel} />
+                                        <DriverCell parcel={parcel} text={text} />
                                     </td>
                                     <td className="max-w-[260px] px-3.5 py-2.5 align-top">
-                                        <div className="text-slate-900">{kindMeta(parcel.kind).label}</div>
-                                        <div className="truncate text-[12.5px] text-slate-500">{parcel.description}</div>
+                                        <div className={text.main}>{kindMeta(parcel.kind).label}</div>
+                                        <div className={`truncate text-[12.5px] ${text.body}`}>{parcel.description}</div>
                                     </td>
-                                    <td className="max-w-[200px] px-3.5 py-2.5 align-top text-[12.5px] text-slate-600">
+                                    <td className={`max-w-[200px] px-3.5 py-2.5 align-top text-[12.5px] ${text.body}`}>
                                         {parcel.sender && <div className="truncate">от {parcel.sender}</div>}
                                         {parcel.recipient && <div className="truncate">для {parcel.recipient}</div>}
-                                        {!parcel.sender && !parcel.recipient && <span className="text-slate-400">—</span>}
+                                        {!parcel.sender && !parcel.recipient && <span className={text.meta}>—</span>}
                                     </td>
                                     <td className="px-3.5 py-2.5 align-top whitespace-nowrap">
-                                        <div className={statusMeta(parcel.status).tone === 'muted' ? 'text-slate-500' : 'text-slate-900'}>
+                                        {/* Бейдж, а не просто текст: в залитой строке
+                                            подпись сливается с фоном, а плашка держит
+                                            статус читаемым и повторяет цвет строки —
+                                            то же решение, что у офисов в вики. */}
+                                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${pill.fill}`}>
+                                            <span className={`h-1.5 w-1.5 rounded-full ${pill.dot}`} />
                                             {statusMeta(parcel.status).label}
-                                        </div>
+                                        </span>
                                         {parcel.status !== 'in_office' && parcel.status_changed_by_name && (
-                                            <div className="text-[12px] text-slate-400">{parcel.status_changed_by_name}</div>
+                                            <div className={`mt-0.5 text-[12px] leading-4 ${text.meta}`}>
+                                                {parcel.status_changed_by_name}
+                                            </div>
                                         )}
                                     </td>
                                 </tr>
@@ -476,23 +623,27 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 )}
             </div>
 
+            {/* Телефон: кант слева вместо заливки всей карточки. Двадцать
+                полностью залитых карточек читаются как тревога, а не как
+                состояние — то же решение, что у карточек офисов в вики. */}
             <div className="mt-4 space-y-2 md:hidden">
                 {items.map((parcel) => {
                     const lying = daysInOffice(parcel);
-                    const stale = isStale(parcel);
+                    const tone = rowTone(parcel);
+                    const pill = tonePill(tone);
                     return (
                         <button
                             key={parcel.id}
                             type="button"
                             onClick={() => openParcel(parcel)}
-                            className={`${iosCard} w-full p-3.5 text-left transition active:scale-[0.99]`}
+                            className={`${iosCard} relative w-full overflow-hidden p-3.5 pl-4 text-left transition active:scale-[0.99] before:absolute before:inset-y-0 before:left-0 before:w-[3px] ${toneEdge(tone)}`}
                         >
                             <div className="flex items-baseline justify-between gap-2">
                                 <span className="truncate text-[14px] font-medium text-slate-900">
                                     {parcel.driver_name || '—'}
                                 </span>
-                                <span className={`shrink-0 text-[12px] ${statusMeta(parcel.status).tone === 'muted' ? 'text-slate-400' : 'text-slate-600'}`}>
-                                    {statusMeta(parcel.status).short}
+                                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11.5px] font-medium ${pill.fill}`}>
+                                    {statusMeta(parcel.status).label}
                                 </span>
                             </div>
                             {parcel.driver_phone && (
@@ -505,7 +656,9 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                                 <span>{parcel.city}{parcel.office_name ? ` · ${parcel.office_name}` : ''}</span>
                                 <span className="tabular-nums">{fmtDate(parcel.received_on)}</span>
                                 {lying !== null && (
-                                    <span className={stale ? 'font-medium text-amber-600' : ''}>лежит {pluralDays(lying)}</span>
+                                    <span className={tone === 'stale' ? 'font-medium text-amber-700' : ''}>
+                                        лежит {pluralDays(lying)}
+                                    </span>
                                 )}
                             </div>
                         </button>
@@ -564,10 +717,7 @@ const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
                 canDelete={canDelete}
                 onEdit={(parcel) => { setOpened(null); setEditing(parcel); setFormOpen(true); }}
                 onChanged={(saved, events) => { applySaved(saved); setOpenedEvents(events || []); }}
-                onDeleted={(id) => {
-                    setItems((prev) => prev.filter((item) => item.id !== id));
-                    setTotal((prev) => Math.max(0, prev - 1));
-                }}
+                onDeleted={applyDeleted}
                 showToast={showToast}
             />
         </div>
