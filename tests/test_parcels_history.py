@@ -15,6 +15,7 @@
 База здесь не нужна: курсор подменён и запоминает запросы.
 """
 
+import datetime
 import json
 import unittest
 
@@ -214,3 +215,52 @@ class CreateTests(_Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RowMappingTests(unittest.TestCase):
+    """SELECT и разбор строки собираются из ОДНОГО списка полей.
+
+    Раскладка по номерам колонок на тридцати полях — ошибка, которая ждёт своего
+    часа. 25.08.2026 она и случилась: `order_url` и `driver_park_id` дописали в
+    середину SELECT, а читали по индексам с конца — статус уехал на место ссылки,
+    в `status_changed_at` попал id парка, и прод ответил
+    «'str' object has no attribute 'isoformat'» на каждое заведение посылки.
+
+    Тест подставляет строку, где значение каждой колонки — ЕЁ ЖЕ имя: любой
+    сдвиг виден сразу, а не через типовую ошибку в одном поле из тридцати.
+    """
+
+    def test_select_and_row_parser_agree_on_the_field_list(self):
+        columns = [part.strip() for part in queries._PARCEL_COLUMNS.split(',')]
+        self.assertEqual(len(columns), len(queries._PARCEL_FIELDS))
+        self.assertEqual(columns, ['p.%s' % name for name in queries._PARCEL_FIELDS])
+
+    def test_no_field_lands_on_a_neighbours_place(self):
+        row = [
+            datetime.datetime(2026, 8, 25, 12, 30)
+            if name in queries._PARCEL_DATE_FIELDS else name
+            for name in queries._PARCEL_FIELDS
+        ]
+        parsed = queries._parcel_row(row)
+        shifted = {
+            name: parsed[name] for name in queries._PARCEL_FIELDS
+            if name not in queries._PARCEL_DATE_FIELDS and parsed[name] != name
+        }
+        self.assertEqual(shifted, {}, 'поля съехали относительно SELECT')
+
+    def test_dates_come_out_as_iso_strings(self):
+        """jsonify превратил бы datetime в RFC 1123 с английским месяцем."""
+        row = [
+            datetime.datetime(2026, 8, 25, 12, 30)
+            if name in queries._PARCEL_DATE_FIELDS else name
+            for name in queries._PARCEL_FIELDS
+        ]
+        parsed = queries._parcel_row(row)
+        for name in queries._PARCEL_DATE_FIELDS:
+            self.assertEqual(parsed[name], '2026-08-25T12:30:00', name)
+
+    def test_new_columns_are_actually_selected(self):
+        """Колонка, добавленная в базу и забытая в SELECT, до фронта не доедет."""
+        for name in ('order_url', 'driver_park_id'):
+            self.assertIn(name, queries._PARCEL_FIELDS)
+            self.assertIn('p.%s' % name, queries._PARCEL_COLUMNS)

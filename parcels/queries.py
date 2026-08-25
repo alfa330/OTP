@@ -146,15 +146,30 @@ def offices_in_city(cursor, city):
 # Реестр
 # ─────────────────────────────────────────────────────────────────────────────
 
-_PARCEL_COLUMNS = """
-    p.id, p.received_on, p.city, p.office_id, p.office_name, p.office_address,
-    p.driver_account_id, p.driver_name, p.driver_phone, p.driver_park,
-    p.driver_license, p.driver_callsign, p.driver_car, p.driver_synced_at,
-    p.kind, p.description, p.sender, p.recipient, p.order_number,
-    p.order_url, p.driver_park_id,
-    p.status, p.status_changed_at, p.status_changed_by, p.status_changed_by_name,
-    p.comment, p.created_by, p.created_by_name, p.created_at, p.updated_at
-"""
+# Поля карточки в порядке выборки. Список ОДИН: и SELECT, и разбор строки
+# собираются из него, поэтому колонку нельзя добавить в запрос и забыть в
+# разборе — ровно это и случилось 25.08.2026, когда `order_url` и
+# `driver_park_id` дописали в середину SELECT, а читали по индексам с конца:
+# статус поехал на место ссылки, а в `status_changed_at` попал id парка, и прод
+# ответил «'str' object has no attribute 'isoformat'». Позиционная раскладка на
+# тридцати колонках — это ошибка, которая ждёт своего часа, а не случайность.
+_PARCEL_FIELDS = (
+    'id', 'received_on', 'city', 'office_id', 'office_name', 'office_address',
+    'driver_account_id', 'driver_name', 'driver_phone', 'driver_park',
+    'driver_park_id', 'driver_license', 'driver_callsign', 'driver_car',
+    'driver_synced_at', 'kind', 'description', 'sender', 'recipient',
+    'order_url', 'order_number', 'status', 'status_changed_at',
+    'status_changed_by', 'status_changed_by_name', 'comment',
+    'created_by', 'created_by_name', 'created_at', 'updated_at',
+)
+
+_PARCEL_COLUMNS = ', '.join('p.%s' % name for name in _PARCEL_FIELDS)
+
+# Что отдаётся строкой ISO, а не как есть: jsonify превратил бы datetime в
+# RFC 1123 с английским месяцем.
+_PARCEL_DATE_FIELDS = frozenset({
+    'received_on', 'driver_synced_at', 'status_changed_at', 'created_at', 'updated_at',
+})
 
 
 def _iso(value):
@@ -163,36 +178,8 @@ def _iso(value):
 
 def _parcel_row(row):
     return {
-        'id': row[0],
-        'received_on': _iso(row[1]),
-        'city': row[2],
-        'office_id': row[3],
-        'office_name': row[4],
-        'office_address': row[5],
-        'driver_account_id': row[6],
-        'driver_name': row[7],
-        'driver_phone': row[8],
-        'driver_park': row[9],
-        'driver_license': row[10],
-        'driver_callsign': row[11],
-        'driver_car': row[12],
-        'driver_synced_at': _iso(row[13]),
-        'kind': row[14],
-        'description': row[15],
-        'sender': row[16],
-        'recipient': row[17],
-        'order_number': row[18],
-        'status': row[19],
-        'status_changed_at': _iso(row[20]),
-        'status_changed_by': row[21],
-        'status_changed_by_name': row[22],
-        'comment': row[23],
-        'created_by': row[24],
-        'created_by_name': row[25],
-        'created_at': _iso(row[26]),
-        'updated_at': _iso(row[27]),
-        'order_url': row[28],
-        'driver_park_id': row[29],
+        name: (_iso(value) if name in _PARCEL_DATE_FIELDS else value)
+        for name, value in zip(_PARCEL_FIELDS, row)
     }
 
 
