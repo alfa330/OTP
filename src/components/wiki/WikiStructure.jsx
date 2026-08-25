@@ -118,15 +118,23 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
     // Ветка отдела и должность внутри неё — разные сущности, и на глаз они
     // должны отличаться так же, как отличаются по смыслу.
     const isBranch = !!section.department_id;
-    const orphan = section.visibility_scope !== 'public' && !section.rules_count;
+    /* Раздел, приехавший ТОЛЬКО ради структуры: человек его не читает и не
+       настраивает, а строка стоит, чтобы ветка не оторвалась от пространства
+       (см. wiki/routes_structure.py — «ветка обязана остаться веткой»). */
+    const structural = !!section.context_only;
+    /* «Доступа нет» на такой строке было бы неправдой: правила у раздела могут
+       быть, просто не для этого человека, и rules_count у него — общее число. */
+    const orphan = !structural
+        && section.visibility_scope !== 'public' && !section.rules_count;
 
     return (
         <div
             style={{ '--depth': depth }}
             className={`flex items-center gap-2 py-2.5 pr-2 transition hover:bg-slate-50 ${rowIndent} ${
-                /* Строка-предок найденного бледнее: она здесь ответом на вопрос
-                   «который из двух Операторов», а не сама по себе результатом. */
-                context ? 'opacity-55' : ''
+                /* Строка-предок бледнее: и найденного при поиске («который из
+                   двух Операторов»), и того, что стоит выше по структуре, — в
+                   обоих случаях она здесь ради ветки, а не сама по себе. */
+                context || structural ? 'opacity-55' : ''
             }`}
         >
             {childCount > 0 ? (
@@ -192,6 +200,16 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
                     {orphan && (
                         <IosBadge tone="amber" title="Ни одного правила: раздел не виден никому, кроме администраторов">
                             доступа нет
+                        </IosBadge>
+                    )}
+                    {/* Почему строка бледная и без меню — словами, а не намёком
+                        через цвет: иначе это выглядит как «сломалось». */}
+                    {structural && (
+                        <IosBadge
+                            tone="slate"
+                            title="Раздел выше по вашей ветке: показан, чтобы было видно место в оргструктуре. Доступа и настроек в нём нет"
+                        >
+                            выше по структуре
                         </IosBadge>
                     )}
                 </div>

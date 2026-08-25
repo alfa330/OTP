@@ -28,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     Flask = None
 
+from wiki import articles as wiki_articles  # noqa: E402
 from wiki import queries, structure  # noqa: E402
 from wiki.routes import build_wiki_blueprint  # noqa: E402
 
@@ -469,6 +470,135 @@ class SectionDepartmentBranchTest(_RouteHarness, unittest.TestCase):
         # раздавал только носитель мастер-ключа.
         self.assertEqual(
             client.post('/api/wiki/access/section-rules', json={}).status_code, 400)
+
+
+# Боевое дерево «Таксопарков» на 25.08.2026, сверху вниз. Ровно на нём и
+# сломалась картинка: у супервайзера СЗоВ из ответа выпал «Руководитель группы»
+# посередине ветки, клиент поднял осиротевшего «Супервайзера» в корень
+# пространства, и оргструктуры на экране не осталось.
+_TREE_ROWS = (
+    (32, None, 'Коммерческий отдел', None),
+    (1, 32, 'Коммерческий директор', None),
+    (19, 1, 'СЗоВ', 1),
+    (2, 19, 'Руководитель группы', None),
+    (3, 2, 'Супервайзер', None),
+    (4, 3, 'Оператор', None),
+)
+
+
+def _section_row(ident, parent, name, department_id):
+    """Строка в том же виде, в каком её отдаёт structure.list_sections."""
+    return {
+        'id': ident, 'space_id': 11, 'parent_section_id': parent, 'name': name,
+        'slug': str(ident), 'description': None, 'icon': None,
+        'visibility_scope': 'rules', 'owner_user_id': None, 'owner_name': None,
+        'status': 'active', 'position': ident, 'department_id': department_id,
+        'department_name': 'СЗоВ' if department_id else None,
+        'section_kind': 'department' if department_id else 'common',
+        'articles_count': 0, 'rules_count': 1,
+    }
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class StructureTreeShapeTest(_RouteHarness, unittest.TestCase):
+    """Дерево обязано оставаться деревом, что бы человек ни видел.
+
+    Проверяется форма ОТВЕТА, а не картинка: клиент поднимает раздел, чей
+    родитель не приехал, в корень пространства (structureTree.js), поэтому
+    пропуск в середине ветки — это не «одной строкой меньше», а неверная
+    оргструктура на экране.
+    """
+
+    def _stub_tree(self, *, allowed=(), role_levels=None):
+        rows = [_section_row(*row) for row in _TREE_ROWS]
+        for name, value in (
+            ('list_sections', lambda cursor, **kw: [dict(r) for r in rows]),
+            ('list_spaces', lambda cursor, **kw: [{'id': 11, 'name': 'Таксопарки'}]),
+            ('public_departments_by_section', lambda cursor, ids: {}),
+            ('article_counts_by_section', lambda cursor, ids: {}),
+            ('section_role_levels', lambda cursor: dict(role_levels or {})),
+        ):
+            self.addCleanup(setattr, structure, name, getattr(structure, name))
+            setattr(structure, name, value)
+
+        self.addCleanup(setattr, queries, 'allowed_section_ids', queries.allowed_section_ids)
+        queries.allowed_section_ids = lambda cursor, ctx, subjects, **kw: set(allowed)
+        self.addCleanup(setattr, queries, 'section_rules_for_user',
+                        queries.section_rules_for_user)
+        queries.section_rules_for_user = lambda *a, **kw: {}
+        self.addCleanup(setattr, wiki_articles, 'visible_article_ids',
+                        wiki_articles.visible_article_ids)
+        wiki_articles.visible_article_ids = lambda *a, **kw: set()
+
+    def _sections(self, response):
+        self.assertEqual(response.status_code, 200)
+        return {s['id']: s for s in response.get_json()['sections']}
+
+    def test_supervisor_keeps_the_whole_chain_to_the_space(self):
+        """Ветка «СЗоВ → Руководитель → Супервайзер → Оператор» приезжает целиком.
+
+        Читает супервайзер два нижних раздела, настраивает три — а видит всю
+        цепочку, потому что иначе она оторвётся от пространства.
+        """
+        self._stub_tree(allowed=(3, 4), role_levels={2: 40, 3: 30, 4: 20})
+        client, _ = self.build(make_context('sv', department_id=1))
+        sections = self._sections(client.get('/api/wiki/structure'))
+
+        self.assertEqual(set(sections), {32, 1, 19, 2, 3, 4})
+        for ident, section in sections.items():
+            parent = section['parent_section_id']
+            self.assertTrue(parent is None or parent in sections,
+                            'раздел %s повис без родителя' % ident)
+
+    def test_sections_above_arrive_as_context_only(self):
+        """Предок приезжает БЕЗ прав: имя и место в дереве, больше ничего."""
+        self._stub_tree(allowed=(3, 4), role_levels={2: 40, 3: 30, 4: 20})
+        client, _ = self.build(make_context('sv', department_id=1))
+        sections = self._sections(client.get('/api/wiki/structure'))
+
+        for ident in (32, 1, 2):
+            section = sections[ident]
+            self.assertTrue(section['context_only'], ident)
+            self.assertFalse(section['accessible'], ident)
+            self.assertFalse(section['can_grant_access'], ident)
+            self.assertFalse(any(section['permissions'].values()), ident)
+
+        # Раздел руководителя — та самая строка, ради которой всё затевалось:
+        # виден как часть структуры, но выдать в нём доступ нельзя.
+        self.assertFalse(sections[2]['can_grant_access'])
+
+    def test_own_branch_stays_actionable(self):
+        """Свои разделы контекстом не становятся — иначе лечение хуже болезни.
+
+        «СЗоВ» человек не читает (правил на чтение ему не выписывали), но
+        настраивает: порога у ветки отдела нет, и строка обязана остаться живой.
+        """
+        self._stub_tree(allowed=(3, 4), role_levels={2: 40, 3: 30, 4: 20})
+        client, _ = self.build(make_context('sv', department_id=1))
+        sections = self._sections(client.get('/api/wiki/structure'))
+
+        for ident in (19, 3, 4):
+            self.assertFalse(sections[ident]['context_only'], ident)
+            self.assertTrue(sections[ident]['can_grant_access'], ident)
+
+    def test_order_survives_the_added_ancestors(self):
+        """Предки встают на свои места, а не в хвост списка.
+
+        Соседи по ветке рисуются в том порядке, в каком приехали: предок,
+        приклеенный последним, оказался бы в дереве ниже собственных детей.
+        """
+        self._stub_tree(allowed=(4,), role_levels={2: 40, 3: 30, 4: 20})
+        client, _ = self.build(make_context('sv', department_id=1))
+        order = [s['id'] for s in client.get('/api/wiki/structure').get_json()['sections']]
+        self.assertEqual(order, [32, 1, 19, 2, 3, 4])
+
+    def test_director_sees_the_same_tree_without_context_rows(self):
+        """У кого границ нет, у того и строк «выше по структуре» не бывает."""
+        self._stub_tree(allowed=(1, 2, 3, 4, 19, 32), role_levels={2: 40, 3: 30, 4: 20})
+        client, _ = self.build(make_context('super_admin', department_id=1))
+        sections = self._sections(client.get('/api/wiki/structure'))
+        self.assertEqual(set(sections), {32, 1, 19, 2, 3, 4})
+        self.assertFalse(any(s['context_only'] for s in sections.values()))
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')

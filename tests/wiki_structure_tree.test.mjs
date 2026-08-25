@@ -105,6 +105,20 @@ test('публичный раздел под фильтр «без доступ�
     assert.deepEqual(ids(filterRows(rowsOf(5), { focus: 'public' })), [8]);
 });
 
+test('строка «выше по структуре» не попадает ни в один быстрый фильтр', () => {
+    /* Такую строку сервер шлёт ради ветки: человек её не читает и не
+       настраивает (context_only). В счётчике «Без доступа» она выглядела бы
+       задачей, которой не существует, — ветка отдела правил не имеет по
+       определению, чинить там нечего. */
+    const above = SECTIONS.map((s) => (
+        s.id === 19 ? { ...s, context_only: true } : s));
+    const rows = filterRows(rowsOf(1, above), { focus: 'orphan' });
+    assert.deepEqual(rows.filter((r) => r.matched).map((r) => r.section.id), [28, 29]);
+    // Из дерева она при этом не исчезает — остаётся контекстом найденного.
+    assert.ok(ids(filterRows(rowsOf(1, above),
+        { needles: structureNeedles('супервайзер') })).includes(19));
+});
+
 test('поиск и фильтр действуют вместе, а не по очереди', () => {
     const rows = filterRows(rowsOf(1), { needles: structureNeedles('оператор'), focus: 'grant' });
     assert.deepEqual(rows.filter((r) => r.matched).map((r) => r.section.id), [4]);

@@ -109,10 +109,14 @@ export function sectionHaystack(section, spaceName = '') {
 /** Быстрые фильтры вкладки. Взаимоисключающие: «и публичный, и без доступа» —
  *  пустой ответ по определению, а не полезный срез. */
 export const FOCUS_TESTS = {
+    /* Строки «выше по структуре» (context_only) не считаются ни одним фильтром:
+       они приехали ради дерева, действий над ними нет, и в счётчике «Без
+       доступа» ветка отдела выглядела бы задачей, которой не существует. */
     // Раздел без единого правила не видит никто, кроме администраторов.
-    orphan: (s) => s.visibility_scope !== 'public' && !s.rules_count,
-    public: (s) => s.visibility_scope === 'public',
-    // can_grant_access считает сервер: потолок должности и граница отдела.
+    orphan: (s) => !s.context_only && s.visibility_scope !== 'public' && !s.rules_count,
+    public: (s) => !s.context_only && s.visibility_scope === 'public',
+    // can_grant_access считает сервер: потолок должности, граница отдела и
+    // высота самого раздела.
     grant: (s) => !!s.can_grant_access,
 };
 
