@@ -280,6 +280,49 @@ export function breakLines(schedule) {
     }));
 }
 
+/* Обед по всей неделе — один тумблер формы, а не десять полей руками: в
+ * справочнике обед у всех офисов один и тот же, и в тех городах, где обеда нет,
+ * его приходилось стирать в каждом рабочем дне отдельно.
+ *
+ * Значения по умолчанию живут здесь, а не в форме: их спрашивают пресеты,
+ * переключатель дня, подпись тумблера и стрелки пустого поля обеда —
+ * разъехаться им нельзя.
+ */
+export const DEFAULT_BREAK = { from: '13:00', to: '14:00' };
+
+/** Стоит ли обед хотя бы в одном дне недели. */
+export function hasBreaks(schedule) {
+    return !!schedule && DAY_CODES.some((code) => breakInterval(schedule[code]));
+}
+
+/**
+ * Ставит (on) или снимает (off) обед во всех рабочих днях недели.
+ *
+ * Правится только то, что в графике уже есть: выходной остаётся выходным, а
+ * день с одной набранной границей часов обеда не получает — сервер такой день
+ * всё равно не считает рабочим (`normalize_schedule` в wiki/offices.py).
+ *
+ * Обратной операции «вернуть, как было» нет намеренно: снятый обед — это
+ * отсутствие пары значений, и хранить рядом «а раньше был 12:00–13:00» значит
+ * заводить второй график, о котором форма ничего не говорит.
+ */
+export function setBreaks(schedule, on, { from, to } = DEFAULT_BREAK) {
+    const result = { ...(schedule || {}) };
+    DAY_CODES.forEach((code) => {
+        const day = result[code];
+        if (!day) return;
+        const next = { ...day };
+        delete next.break_from;
+        delete next.break_to;
+        if (on && day.from && day.to) {
+            next.break_from = from;
+            next.break_to = to;
+        }
+        result[code] = next;
+    });
+    return result;
+}
+
 /** Разворачивает пресет формы («Пн-Пт 09:00-19:00») в полную неделю. */
 export function buildSchedule({ days, from, to, breakFrom, breakTo }) {
     const result = {};

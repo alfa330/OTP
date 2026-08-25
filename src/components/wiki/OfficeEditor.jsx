@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { Loader2, MapPin, MapPinOff, Phone } from 'lucide-react';
+import { Loader2, MapPin, MapPinOff, Phone, Utensils } from 'lucide-react';
 import { iosInput, iosBtnSecondary, IosBadge, IosToggle } from '../ui/ios';
 import IosTimePicker from '../ui/TimePicker';
 import OfficeMap from './OfficeMap';
-import { DAY_CODES, DAY_LABELS, buildSchedule } from './officeSchedule';
+import {
+    DAY_CODES, DAY_LABELS, DEFAULT_BREAK,
+    breakLines, buildSchedule, hasBreaks, hasSchedule, setBreaks,
+} from './officeSchedule';
 import { Field, CitySelect } from './formField';
 
 /* Форма офиса: адрес, карта и график.
@@ -23,14 +26,19 @@ const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallb
 
 const WORKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri'];
 
-/* Пресеты собраны по боевым данным: в справочнике офисов ровно три сочетания
- * часов и один и тот же обед 13:00–14:00. Ручная неделя остаётся ниже — она
- * нужна Костанаю и Караганде, где суббота короткая. */
+/* Пресеты собраны по боевым данным: в справочнике офисов часы повторяются
+ * горсткой сочетаний. Пн–Пт 09:00–18:00 добавлен по просьбе владельца
+ * 25.08.2026 — офисы с таким днём заводили руками по всей неделе.
+ *
+ * Обеда в пресете нет: он приезжает из тумблера рядом, потому что офис без
+ * обеда — такой же обычный случай, как офис с обедом 13:00–14:00. Ручная
+ * неделя остаётся ниже — она нужна Костанаю и Караганде, где суббота короткая. */
 const PRESETS = [
     { label: 'Пн–Пт 09:00–19:00', days: WORKDAYS, from: '09:00', to: '19:00' },
+    { label: 'Пн–Пт 09:00–18:00', days: WORKDAYS, from: '09:00', to: '18:00' },
+    { label: 'Пн–Пт 10:00–19:00', days: WORKDAYS, from: '10:00', to: '19:00' },
     { label: 'Пн–Сб 09:00–19:00', days: [...WORKDAYS, 'sat'], from: '09:00', to: '19:00' },
     { label: 'Пн–Вс 09:00–19:00', days: DAY_CODES, from: '09:00', to: '19:00' },
-    { label: 'Пн–Пт 10:00–19:00', days: WORKDAYS, from: '10:00', to: '19:00' },
 ];
 
 /* Поле времени расписания. Снаружи сигнатура прежняя, внутри — пикер раздела
@@ -68,6 +76,30 @@ const TimeInput = ({ value, onChange, disabled, allowEmpty = false, defaultTime,
 );
 
 function ScheduleEditor({ schedule, onChange }) {
+    /* Обед — один тумблер на всю неделю: стирать его в десяти полях там, где
+       обеда нет, дольше, чем заполнить сам график.
+
+       Состояние тумблера читается из НЕДЕЛИ, пока в ней есть рабочие дни, —
+       иначе после ручной правки полей он показывал бы своё, а не то, что
+       сохранится. Отдельная память нужна ровно для пустого графика: снимать
+       там нечего, а выбор обязан дожить до нажатия пресета. */
+    const [breakPref, setBreakPref] = useState(true);
+    const breakOn = hasSchedule(schedule) ? hasBreaks(schedule) : breakPref;
+
+    /* Подпись тумблера — та же свёртка, что в карточке офиса: одинаковый во всей
+       неделе обед показывается временем, разный — словом. */
+    const breakRuns = breakLines(schedule);
+    const breakNote = !breakOn ? 'без обеда'
+        : breakRuns.length === 1 && !breakRuns[0].days ? breakRuns[0].time
+            : breakRuns.length ? 'по дням'
+                : `${DEFAULT_BREAK.from}–${DEFAULT_BREAK.to}`;
+
+    // Новый день заводится с обедом ровно тогда, когда обед включён: иначе
+    // включённая суббота возвращала бы в неделю только что снятый обед.
+    const newDay = breakOn
+        ? { from: '09:00', to: '19:00', break_from: DEFAULT_BREAK.from, break_to: DEFAULT_BREAK.to }
+        : { from: '09:00', to: '19:00' };
+
     const setDay = (code, patch) => {
         const current = schedule[code] || {};
         onChange({ ...schedule, [code]: patch === null ? null : { ...current, ...patch } });
@@ -81,7 +113,9 @@ function ScheduleEditor({ schedule, onChange }) {
                         key={preset.label}
                         type="button"
                         onClick={() => onChange(buildSchedule({
-                            ...preset, breakFrom: '13:00', breakTo: '14:00',
+                            ...preset,
+                            breakFrom: breakOn ? DEFAULT_BREAK.from : null,
+                            breakTo: breakOn ? DEFAULT_BREAK.to : null,
                         }))}
                         className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11.5px] font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-600"
                     >
@@ -97,6 +131,21 @@ function ScheduleEditor({ schedule, onChange }) {
                 </button>
             </div>
 
+            {/* Тумблер стоит НАД неделей, а не в строке дня: он про весь график
+                сразу, а обед одного дня по-прежнему правится или стирается
+                своими полями ниже. */}
+            <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                <span className="flex items-center gap-2 text-[13px] text-slate-700">
+                    <Utensils size={15} className="text-slate-400" />
+                    Обед
+                    <IosBadge tone="slate">{breakNote}</IosBadge>
+                </span>
+                <IosToggle
+                    checked={breakOn}
+                    onChange={(next) => { setBreakPref(next); onChange(setBreaks(schedule, next)); }}
+                />
+            </label>
+
             <div className="divide-y divide-slate-100 rounded-xl border border-slate-200">
                 {DAY_CODES.map((code) => {
                     const day = schedule[code];
@@ -108,9 +157,7 @@ function ScheduleEditor({ schedule, onChange }) {
                             </span>
                             <IosToggle
                                 checked={isOpen}
-                                onChange={(next) => setDay(code, next
-                                    ? { from: '09:00', to: '19:00', break_from: '13:00', break_to: '14:00' }
-                                    : null)}
+                                onChange={(next) => setDay(code, next ? newDay : null)}
                             />
                             {isOpen ? (
                                 <>
@@ -132,7 +179,7 @@ function ScheduleEditor({ schedule, onChange }) {
                                     <TimeInput
                                         value={day.break_from}
                                         allowEmpty
-                                        defaultTime="13:00"
+                                        defaultTime={DEFAULT_BREAK.from}
                                         ariaLabel={`${DAY_LABELS[code]}, начало обеда`}
                                         onChange={(v) => setDay(code, { break_from: v })}
                                     />
@@ -140,7 +187,7 @@ function ScheduleEditor({ schedule, onChange }) {
                                     <TimeInput
                                         value={day.break_to}
                                         allowEmpty
-                                        defaultTime="14:00"
+                                        defaultTime={DEFAULT_BREAK.to}
                                         ariaLabel={`${DAY_LABELS[code]}, конец обеда`}
                                         onChange={(v) => setDay(code, { break_to: v })}
                                     />

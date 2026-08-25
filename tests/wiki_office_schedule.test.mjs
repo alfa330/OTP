@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    breakLines, dayHoursOn, dayIndexOf, officeNow, officeStatus, officeStatusOn,
-    officeTodayISO,
-    scheduleLines, untilText,
+    DEFAULT_BREAK,
+    breakLines, buildSchedule, dayHoursOn, dayIndexOf, hasBreaks, officeNow,
+    officeStatus, officeStatusOn, officeTodayISO,
+    scheduleLines, setBreaks, untilText,
 } from '../src/components/wiki/officeSchedule.js';
 
 /* График офиса считается по времени офиса, а не браузера: оператор может
@@ -210,4 +211,72 @@ test('в выходной и без графика часов нет', () => {
     assert.equal(dayHoursOn(KOSTANAY, '2026-08-16'), null);
     assert.equal(dayHoursOn(null, '2026-08-17'), null);
     assert.equal(dayHoursOn(KOSTANAY, 'вчера'), null);
+});
+
+/* Тумблер обеда в форме офиса: правило целиком здесь, чтобы его можно было
+ * проверить без JSX (так же, как правила номеров парка в parkPoints.js). */
+
+test('обед в неделе виден, только когда набраны обе границы', () => {
+    assert.equal(hasBreaks(KOSTANAY), true);
+    // Суббота Костаная без обеда — сама по себе неделя без обеда.
+    assert.equal(hasBreaks({ sat: { from: '10:00', to: '13:00' } }), false);
+    // Одна граница — опечатка, а не перерыв: сервер её тоже не сохранит.
+    assert.equal(hasBreaks({ mon: { from: '09:00', to: '19:00', break_from: '13:00' } }), false);
+    assert.equal(hasBreaks({}), false);
+    assert.equal(hasBreaks(null), false);
+});
+
+test('обед снимается со всей недели, выходные остаются выходными', () => {
+    const off = setBreaks(KOSTANAY, false);
+    assert.equal(hasBreaks(off), false);
+    assert.deepEqual(off.mon, { from: '09:00', to: '19:00' });
+    assert.deepEqual(off.sat, { from: '10:00', to: '13:00' });
+    assert.equal(off.sun, null);
+    // Часы недели не тронуты — снимали обед, а не график.
+    assert.deepEqual(scheduleLines(off), scheduleLines(KOSTANAY));
+});
+
+test('обед ставится во все рабочие дни разом', () => {
+    const on = setBreaks(setBreaks(KOSTANAY, false), true);
+    assert.deepEqual(breakLines(on), [{ days: null, time: '13:00–14:00' }]);
+    // Короткая суббота тоже рабочий день — обед достаётся и ей.
+    assert.deepEqual(on.sat,
+        { from: '10:00', to: '13:00', break_from: '13:00', break_to: '14:00' });
+    assert.equal(on.sun, null);
+});
+
+test('обед не достаётся дню с недобранными часами', () => {
+    const half = setBreaks({ mon: { from: '09:00' } }, true);
+    assert.deepEqual(half.mon, { from: '09:00' });
+});
+
+test('пустой график тумблер не заполняет', () => {
+    assert.deepEqual(setBreaks({}, true), {});
+    assert.deepEqual(setBreaks(null, false), {});
+});
+
+test('время обеда по умолчанию — одно на форму', () => {
+    const week = setBreaks({ mon: { from: '09:00', to: '18:00' } }, true);
+    assert.deepEqual(week.mon, {
+        from: '09:00', to: '18:00',
+        break_from: DEFAULT_BREAK.from, break_to: DEFAULT_BREAK.to,
+    });
+});
+
+test('пресет собирается и с обедом, и без него', () => {
+    const days = ['mon', 'tue', 'wed', 'thu', 'fri'];
+    const withBreak = buildSchedule({
+        days, from: '09:00', to: '18:00',
+        breakFrom: DEFAULT_BREAK.from, breakTo: DEFAULT_BREAK.to,
+    });
+    assert.deepEqual(scheduleLines(withBreak), [
+        { days: 'Пн–Пт', time: '09:00–18:00', isDayOff: false },
+        { days: 'Сб–Вс', time: 'выходной', isDayOff: true },
+    ]);
+    assert.deepEqual(breakLines(withBreak), [{ days: null, time: '13:00–14:00' }]);
+
+    // Тумблер выключен — пресет отдаёт те же часы и ни одного обеда.
+    const bare = buildSchedule({ days, from: '09:00', to: '18:00', breakFrom: null, breakTo: null });
+    assert.deepEqual(scheduleLines(bare), scheduleLines(withBreak));
+    assert.deepEqual(breakLines(bare), []);
 });
