@@ -406,18 +406,6 @@ class IncomingReplyTest(ServiceCase):
         self.assertEqual(added['author_name'], 'Аружан')
         self.assertEqual(queries.find('touch_inbound')[0]['unread_kind'], 'reply')
 
-    def test_first_reply_gets_a_receipt_and_the_rest_stay_quiet(self):
-        """Расписка один раз на обращение: дальше в группе идёт живой разговор."""
-        _queries, _transport = self.wire(found=dict(self.FOUND, status='open'))
-        first = service.ingest_group_reply(
-            self.db, chat_id=-1001, reply_to_message_id=555, message=self.message())
-        self.assertTrue(first['announce'])
-
-        self.wire(found=dict(self.FOUND, status='answered'))
-        later = service.ingest_group_reply(
-            self.db, chat_id=-1001, reply_to_message_id=555, message=self.message())
-        self.assertFalse(later['announce'])
-
     def test_duplicate_update_does_not_wake_the_author_again(self):
         """Telegram штатно повторяет апдейт — второй звонок был бы ложным."""
         queries, _transport = self.wire(found=dict(self.FOUND), message_id=None)
@@ -425,7 +413,6 @@ class IncomingReplyTest(ServiceCase):
             self.db, chat_id=-1001, reply_to_message_id=555, message=self.message())
 
         self.assertEqual(accepted['ticket_id'], 42)
-        self.assertFalse(accepted['announce'])
         self.assertEqual(queries.find('touch_inbound'), [])
         self.assertEqual(queries.find('add_event'), [])
 

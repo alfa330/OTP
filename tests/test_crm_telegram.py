@@ -6,10 +6,13 @@
 сети и проверяются тестами, а не глазами в живой группе.
 """
 
+import asyncio
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 from crm import bot as crm_bot
-from crm import telegram
+from crm import telegram, transport
 
 
 class TicketMessageTest(unittest.TestCase):
@@ -220,6 +223,148 @@ class BotFilterTest(unittest.TestCase):
         message = self.message(text=None)
         message['caption'] = None
         self.assertTrue(crm_bot._is_group_reply(message))
+
+
+class FakeDispatcher:
+    """Диспетчер aiogram в том объёме, который нужен register(): декоратор."""
+
+    def __init__(self):
+        self.handler = None
+
+    def message_handler(self, *_filters, **_kwargs):
+        def keep(func):
+            self.handler = func
+            return func
+        return keep
+
+
+class FakeTypes:
+    class ContentTypes:
+        ANY = 'any'
+
+
+class ReplyReceiptTest(unittest.TestCase):
+    """Расписка за принятый ответ: реакция на сообщение, а не текст в чат.
+
+    Гоняется НАСТОЯЩИЙ обработчик (crm.bot.register), а не его пересказ: именно
+    он решает, чем расписываться, и именно он раньше писал в группу «✅ Ответ
+    отправлен оператору по обращению №N». aiogram для этого не нужен — из него
+    обработчику нужен только декоратор.
+    """
+
+    # Набор реакций у Telegram закрытый (ReactionTypeEmoji, Bot API 7.0+).
+    # Список держим в тесте, а не в коде раздела: он нужен ровно затем, чтобы
+    # поймать правку эмодзи на то, которое Telegram отвергнет целиком
+    # (REACTION_INVALID) — например на «✅», как было в прежнем тексте расписки.
+    ALLOWED_REACTIONS = (
+        '👍', '👎', '❤', '🔥', '🥰', '👏', '😁', '🤔', '🤯', '😱', '🤬', '😢',
+        '🎉', '🤩', '🤮', '💩', '🙏', '👌', '🕊', '🤡', '🥱', '🥴', '😍', '🐳',
+        '❤‍🔥', '🌚', '🌭', '💯', '🤣', '⚡', '🍌', '🏆', '💔', '🤨', '😐',
+        '🍓', '🍾', '💋', '🖕', '😈', '😴', '😭', '🤓', '👻', '👨‍💻', '👀',
+        '🎃', '🙈', '😇', '😨', '🤝', '✍', '🤗', '🫡', '🎅', '🎄', '☃', '💅',
+        '🤪', '🗿', '🆒', '💘', '🙉', '🦄', '😘', '💊', '🙊', '😎', '👾',
+        '🤷‍♂', '🤷', '🤷‍♀', '😡',
+    )
+
+    def setUp(self):
+        self.dispatcher = FakeDispatcher()
+        # Пул настоящий: обработчик уносит и приём ответа, и расписку в
+        # исполнителя, и подмена этого не проверила бы.
+        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.addCleanup(self.pool.shutdown)
+        self.replies = []
+        self.reactions = []
+        self.accepted = {'ticket_id': 42}
+        self.reaction_error = None
+        crm_bot.register(self.dispatcher, object(), self.pool, FakeTypes)
+
+    def message(self, message_id=900):
+        async def reply(text, **_kwargs):
+            self.replies.append(text)
+
+        return Message(
+            chat=Message(id=-1001, type='supergroup'),
+            reply_to_message=Message(message_id=555),
+            message_id=message_id, text='ответили', reply=reply,
+        )
+
+    def _ingest(self, _db, **_kwargs):
+        return self.accepted
+
+    def _set_reaction(self, chat_id, message_id, emoji):
+        self.reactions.append({'chat_id': chat_id, 'message_id': message_id,
+                               'emoji': emoji})
+        if self.reaction_error:
+            return None, self.reaction_error
+        return True, None
+
+    def handle(self, message):
+        with mock.patch.object(crm_bot.service, 'ingest_group_reply', self._ingest),                 mock.patch.object(crm_bot.transport, 'set_message_reaction',
+                                  self._set_reaction):
+            asyncio.run(self.dispatcher.handler(message))
+
+    def test_accepted_reply_is_marked_with_a_reaction(self):
+        """Расписка ставится на сообщение сотрудника, а не пишется в чат."""
+        self.handle(self.message())
+        self.assertEqual(self.reactions, [{'chat_id': -1001, 'message_id': 900,
+                                           'emoji': telegram.REPLY_REACTION}])
+        self.assertEqual(self.replies, [])
+
+    def test_every_reply_gets_a_reaction_not_only_the_first(self):
+        """Гейта «раз на обращение» больше нет: реакция чат не засоряет.
+
+        У текста он был обязателен, иначе расписки заняли бы половину переписки.
+        Реакция не занимает строки, а подтверждение нужно на КАЖДЫЙ ответ —
+        иначе сотрудник со второго раза не знает, дошло ли до системы.
+        """
+        for message_id in (900, 901, 902):
+            self.handle(self.message(message_id))
+        self.assertEqual([item['message_id'] for item in self.reactions],
+                         [900, 901, 902])
+        self.assertEqual(self.replies, [])
+
+    def test_foreign_reply_is_not_marked(self):
+        """Реплай на отчёт другого раздела: ни реакции, ни ответа."""
+        self.accepted = None
+        try:
+            self.handle(self.message())
+        except BaseException as error:  # SkipHandler, если aiogram установлен
+            if crm_bot.SkipHandler is None or not isinstance(error, crm_bot.SkipHandler):
+                raise
+        self.assertEqual(self.reactions, [])
+        self.assertEqual(self.replies, [])
+
+    def test_refused_reaction_is_logged_and_not_replaced_by_text(self):
+        """Отказ реакции слышно в логах, но в чат раздел всё равно не пишет."""
+        self.reaction_error = 'REACTION_INVALID'
+        with self.assertLogs(level='WARNING') as logs:
+            self.handle(self.message())
+        self.assertEqual(self.replies, [])
+        self.assertTrue(any('реакция' in line for line in logs.output), logs.output)
+
+    def test_reaction_emoji_is_one_telegram_allows(self):
+        """«✅» и любое незнакомое эмодзи Telegram отвергает целиком."""
+        self.assertIn(telegram.REPLY_REACTION, self.ALLOWED_REACTIONS)
+
+
+class ReactionPayloadTest(unittest.TestCase):
+    """Вызов setMessageReaction: форму запроса Telegram проверяет строго."""
+
+    def call_with(self, emoji):
+        with mock.patch.object(transport, '_call', return_value=(True, None)) as call:
+            transport.set_message_reaction(-1001, '900', emoji)
+        self.assertEqual(call.call_args[0][0], 'setMessageReaction')
+        return call.call_args[1]['json_payload']
+
+    def test_reaction_goes_as_a_list_of_reaction_type(self):
+        payload = self.call_with('👍')
+        self.assertEqual(payload['reaction'], [{'type': 'emoji', 'emoji': '👍'}])
+        self.assertEqual(payload['chat_id'], -1001)
+        # id сообщения приходит из апдейта — Telegram ждёт число.
+        self.assertEqual(payload['message_id'], 900)
+
+    def test_empty_emoji_removes_the_reaction(self):
+        self.assertEqual(self.call_with(None)['reaction'], [])
 
 
 class ReplyMessageTest(unittest.TestCase):

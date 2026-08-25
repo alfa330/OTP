@@ -83,6 +83,29 @@ def send_message(chat_id, text, *, reply_to_message_id=None, parse_mode='HTML'):
     return _call('sendMessage', json_payload=payload)
 
 
+def set_message_reaction(chat_id, message_id, emoji):
+    """Ставит реакцию на сообщение. Пустое emoji — снимает.
+
+    Так раздел расписывается за принятый ответ. Отдельный метод Bot API, а не
+    сообщение в чат: реакция не добавляет строку в переписку группы — она стоит на
+    самом сообщении и адресована его автору (crm.telegram.REPLY_REACTION).
+
+    Идёт по HTTP, а не через aiogram: setMessageReaction появился в Bot API 7.0,
+    а на боте aiogram 2.25 — этого метода он не знает.
+
+    Реакция идемпотентна: повтор тем же эмодзи ничего не меняет, поэтому
+    повторный апдейт Telegram можно не отличать.
+    """
+    payload = {
+        'chat_id': chat_id,
+        'message_id': int(message_id),
+        # Bot API ждёт МАССИВ ReactionType, а не строку: одиночное эмодзи он
+        # отвергает целиком.
+        'reaction': [{'type': 'emoji', 'emoji': emoji}] if emoji else [],
+    }
+    return _call('setMessageReaction', json_payload=payload)
+
+
 # Предел подписи к медиа у Telegram — 1024 символа, HTML-теги считаются тоже.
 # Режем с запасом, как и текст сообщения.
 CAPTION_LIMIT = 1000

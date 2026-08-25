@@ -258,14 +258,14 @@ def post_operator_reply(db, ticket_id, body, *, author_user_id, author_name,
 def ingest_group_reply(db, *, chat_id, reply_to_message_id, message):
     """Ответ сотрудника в группе → сообщение в нити + уведомление автору.
 
-    Возвращает {'ticket_id', 'announce'} либо None, если ответ не привязался:
-    реплай на постороннее сообщение бота (скажем, на отчёт другого раздела) —
-    не ошибка, просто не наше дело.
+    Возвращает {'ticket_id'} либо None, если ответ не привязался: реплай на
+    постороннее сообщение бота (скажем, на отчёт другого раздела) — не ошибка,
+    просто не наше дело.
 
-    announce отвечает на вопрос «отбиваться ли в чат». Расписку бот даёт РОВНО
-    ОДИН раз на обращение — на первый ответ. Дальше в группе идёт живое
-    обсуждение, и «✅ ответ отправлен оператору» после каждой реплики
-    превратилось бы в половину переписки.
+    Расписку за принятый ответ даёт уже crm.bot — реакцией на сообщение. Здесь
+    про неё решать нечего: раньше был флаг announce («отбиваться ли текстом в
+    чат, но только на первый ответ»), а реакция ничего не засоряет и ставится
+    на каждый ответ.
     """
     body = telegram.message_text(message)
     attachment = telegram.extract_attachment(message)
@@ -282,8 +282,6 @@ def ingest_group_reply(db, *, chat_id, reply_to_message_id, message):
         if not found:
             return None
         ticket_id = found['ticket_id']
-        # Первый ответ — тот, что застал обращение ещё не отвеченным.
-        first_reply = found.get('status') in ('open', 'in_progress')
         message_id = queries.add_message(
             cursor, ticket_id=ticket_id, direction='in', body=body,
             author_name=author,
@@ -302,11 +300,11 @@ def ingest_group_reply(db, *, chat_id, reply_to_message_id, message):
         # Дубль апдейта — молча выходим: нить уже содержит этот ответ, и
         # повторно звонить автору не за что.
         if message_id is None:
-            return {'ticket_id': ticket_id, 'announce': False}
+            return {'ticket_id': ticket_id}
         queries.touch_inbound(cursor, ticket_id, unread_kind=queries.UNREAD_REPLY)
         queries.add_event(cursor, ticket_id=ticket_id, kind='reply_received',
                           actor_name=author, payload={'from_id': get('id') if from_user else None})
-    return {'ticket_id': ticket_id, 'announce': first_reply}
+    return {'ticket_id': ticket_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

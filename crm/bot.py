@@ -21,7 +21,7 @@ import asyncio
 import functools
 import logging
 
-from . import service, telegram
+from . import service, telegram, transport
 
 try:  # aiogram 2: позволяет вернуть сообщение следующему обработчику
     from aiogram.dispatcher.handler import SkipHandler
@@ -77,18 +77,25 @@ def register(dp, db, pool, types_module):
                 raise SkipHandler()
             return
 
-        # Расписка вместо тишины, но ровно один раз на обращение (см. announce
-        # в service.ingest_group_reply): сотрудник должен один раз убедиться,
-        # что механизм работает, а не читать её после каждой своей реплики.
-        if not accepted.get('announce'):
-            return
+        # Расписка — РЕАКЦИЯ на само сообщение сотрудника (telegram.REPLY_REACTION).
+        # Текстом в чат её больше нет: «✅ Ответ отправлен оператору по обращению
+        # №N» видела вся группа, и даже раз на обращение это читалось как лишняя
+        # реплика (владелец, 25.08.2026). Поэтому и гейта «только первый ответ»
+        # тут нет — реакция ничего не засоряет и подтверждает КАЖДЫЙ ответ,
+        # включая повторный апдейт Telegram: она идемпотентна.
         try:
-            await message.reply(
-                '✅ Ответ отправлен оператору по обращению %s'
-                % telegram.ticket_number(accepted['ticket_id']),
-                disable_notification=True,
+            _result, error = await _run(
+                transport.set_message_reaction,
+                message.chat.id,
+                message.message_id,
+                telegram.REPLY_REACTION,
             )
+            if error:
+                # Не в debug: реакция — единственная расписка раздела, и её
+                # отказ значит, что сотрудник в группе больше не видит
+                # подтверждений и начнёт дублировать ответы.
+                logging.warning('crm: реакция на ответ не поставилась: %s', error)
         except Exception:
-            logging.debug('crm: расписка об ответе не ушла', exc_info=True)
+            logging.exception('crm: реакция на ответ не поставилась')
 
     logging.info('Раздел «Обращения»: обработчики бота подключены')
