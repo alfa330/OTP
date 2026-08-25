@@ -79,11 +79,11 @@ test('окно номеров — пять штук и всегда содерж
 test('пейджер стоит НАД списком сессий', () => {
     // Под списком до него пришлось бы прокручивать десяток карточек — ровно то,
     // от чего страницы и заводились.
-    const pager = source.indexOf('<Pager');
+    const pager = source.indexOf('<IosPager');
     const cards = source.indexOf('{pageSessions.map(');
     assert.ok(pager > 0 && cards > 0, 'разметка изменилась — проверь тест');
     assert.ok(pager < cards, 'пейджер обязан идти раньше карточек сессий');
-    assert.equal(source.split('<Pager').length - 1, 1, 'ровно одно место отрисовки — иначе пейджеров два');
+    assert.equal(source.split('<IosPager').length - 1, 1, 'ровно одно место отрисовки — иначе пейджеров два');
 });
 
 test('порог страницы объявлен явно и равен десяти', () => {
