@@ -17595,7 +17595,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                         startMin,
                         endMin,
                         stateKey: `__credited_${kind}__`,
-                        stateName: isOfflineWork ? 'Оффлайн работа' : (isTraining ? 'Тренинг' : 'Тех причина (обоснованная)'),
+                        stateName: isOfflineWork ? 'Офлайн работа' : (isTraining ? 'Тренинг' : 'Тех причина (обоснованная)'),
                         isWork: isOfflineWork,
                         isBreak: false,
                         isTraining,
@@ -17981,7 +17981,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                 const summaryRows = [];
                 summaryRows.push(rowXml([cell(`Отчет соответствия статусов графику: ${groupModeLabel}`, 'String', 'Title', 'ss:MergeAcross="14"')], '', 'ss:Height="28"'));
                 summaryRows.push(rowXml([textCell('Период', 'MetaLabel'), cell(periodLabel, 'String', 'MetaValue', 'ss:MergeAcross="3"'), textCell('Группировка', 'MetaLabel'), cell(groupModeLabel, 'String', 'MetaValue'), textCell('Операторов', 'MetaLabel'), numberCell(report.totalOperatorRows, 'MetaValueNumber')]));
-                summaryRows.push(rowXml([cell('Проценты считаются по минутам: совпавшие плановые минуты / плановые минуты. Оффлайн-работа, тренинг и обоснованная техпричина засчитываются как совпадение.', 'String', 'Muted', 'ss:MergeAcross="14"')]));
+                summaryRows.push(rowXml([cell('Проценты считаются по минутам: совпавшие плановые минуты / плановые минуты. Офлайн-работа, тренинг и обоснованная техпричина засчитываются как совпадение.', 'String', 'Muted', 'ss:MergeAcross="14"')]));
                 summaryRows.push(rowXml([cell('', 'String', 'Blank')]));
                 summaryRows.push(rowXml(summaryHeaders.map(headerCell), 'HeaderRow'));
                 report.groupRows.forEach(group => {
@@ -28823,7 +28823,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         className={`w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 ${accentFocusClass}`}
                                     >
                                         <option value="training">Тренинг</option>
-                                        <option value="offline_activity">Оффлайн активность</option>
+                                        <option value="offline_activity">Офлайн активность</option>
                                         <option value="technical_reason">Тех причина</option>
                                     </select>
                                 </div>
@@ -39586,7 +39586,7 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
                                         База: {formatFixed2(selectedDay.baseHours)} ч
                                         {` + `}Тренинг: {formatFixed2(selectedDay.trainingHours)} ч
                                         {` + `}Тех. сбой: {formatFixed2(selectedDay.technicalHours)} ч
-                                        {` + `}Оффлайн: {formatFixed2(selectedDay.offlineHours)} ч
+                                        {` + `}Офлайн: {formatFixed2(selectedDay.offlineHours)} ч
                                     </p>
                                     )}
                                 </div>

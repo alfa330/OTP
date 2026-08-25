@@ -43231,14 +43231,14 @@ async def start_command(message: types.Message):
         if _is_admin_role(user[3]):
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="<b>Бобро пожаловать!</b>\nЭто бот для прослушки прослушек.",
+                text="<b>Добро пожаловать!</b>\nЭто бот для прослушки прослушек.",
                 parse_mode='HTML',
                 reply_markup=get_admin_keyboard()
             )
         elif user[3] == 'sv':
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text=f"<b>Бобро пожаловать, {user[2]}!</b>",
+                text=f"<b>Добро пожаловать, {user[2]}!</b>",
                 parse_mode='HTML',
                 reply_markup=get_sv_keyboard()
             )
@@ -43255,7 +43255,7 @@ async def start_command(message: types.Message):
         kb.add(KeyboardButton('Вход👤'))
         await bot.send_message(
             chat_id=message.from_user.id,
-            text=f"<b>Бобро пожаловать!</b>\n\nНажмите <b>Вход👤</b>, чтобы подключиться к <b>OTP dashboard</b>. 👥",
+            text=f"<b>Добро пожаловать!</b>\n\nНажмите <b>Вход👤</b>, чтобы подключиться к <b>OTP dashboard</b>. 👥",
             parse_mode='HTML',
             reply_markup=kb
         )
@@ -43363,13 +43363,13 @@ async def process_password(message: types.Message, state: FSMContext):
         name = user['name']
         if _is_admin_role(role):
             await message.answer(
-                "<b>Бобро пожаловать!</b>\nЭто бот для управления прослушками.",
+                "<b>Добро пожаловать!</b>\nЭто бот для управления прослушками.",
                 parse_mode='HTML',
                 reply_markup=get_admin_keyboard()
             )
         elif role == 'sv':
             await message.answer(
-                f"<b>Бобро пожаловать, {name}!</b>",
+                f"<b>Добро пожаловать, {name}!</b>",
                 parse_mode='HTML',
                 reply_markup=get_sv_keyboard()
             )
@@ -45861,7 +45861,7 @@ def _lms_build_bold_split_certificate_html(certificate_number, learner_name, cou
         else ""
     )
 
-    text_official = "\u0412\u041d\u0423\u0422\u0420\u0415\u041d\u0418\u0418\u0419"
+    text_official = "\u0412\u041d\u0423\u0422\u0420\u0415\u041d\u041d\u0418\u0419"
     text_cert_title = "\u0421\u0435\u0440\u0442\u0438&shy;\u0444\u0438\u043a\u0430\u0442"
     text_training = "\u043e \u043f\u0440\u043e\u0445\u043e\u0436\u0434\u0435\u043d\u0438\u0438 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f"
     text_cert_num = "\u041d\u043e\u043c\u0435\u0440 \u0441\u0435\u0440\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u0430"
@@ -46473,7 +46473,7 @@ def _lms_build_bold_split_certificate_pdf(certificate_number, learner_name, cour
     info_value_font = _lms_certificate_font(S(11), bold=True)
 
     block_y = canvas_h - S(280)
-    draw.text((left_pad_x, block_y), "ВНУТРЕНИИЙ", font=left_label_font, fill=col_y)
+    draw.text((left_pad_x, block_y), "ВНУТРЕННИЙ", font=left_label_font, fill=col_y)
     draw.text((left_pad_x, block_y + S(22)), "Сертификат", font=left_title_font, fill=col_w)
     draw.text((left_pad_x, block_y + S(88)), "о прохождении обучения", font=left_sub_font, fill=(255, 255, 255, 89))
     draw.rectangle((left_pad_x, block_y + S(116), left_pad_x + S(40), block_y + S(119)), fill=col_y)

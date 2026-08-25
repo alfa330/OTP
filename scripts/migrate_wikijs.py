@@ -63,7 +63,7 @@ SNAPSHOT_DIR = os.path.join(tempfile.gettempdir(), 'otp_wikijs_snapshot')
 # Куда кладём перенесённое. Раздел заводится ЗАКРЫТЫМ и без единого правила,
 # кроме поимённого для тех, кто модерирует: доступ расширить можно в любой
 # момент, отозвать прочитанное — нельзя.
-ROOT_SECTION = 'Старая вика'
+ROOT_SECTION = 'Старая вики'
 
 # Подразделы делаем только под КРУПНЫЕ ветви источника. У старой вики 70 ветвей
 # верхнего уровня, и 60 из них — по одной странице: подраздел на каждую превратил
@@ -155,7 +155,7 @@ class OldWiki:
         node = (((answer.get('data') or {}).get('authentication') or {}).get('login') or {})
         result = node.get('responseResult') or {}
         if not result.get('succeeded'):
-            raise SystemExit('Старая вика не пустила: %s' % result.get('message'))
+            raise SystemExit('Старая вики не пустила: %s' % result.get('message'))
         self.token = node.get('jwt')
         return self.token
 

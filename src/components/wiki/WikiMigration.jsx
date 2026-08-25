@@ -134,7 +134,7 @@ const Row = ({ item, busy, locked, onOpen, onApprove, onDiscard }) => {
 
                     <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-slate-400">
                         <span className="tabular-nums">
-                            старая вика
+                            старая вики
                             {item.source_id != null ? ` #${item.source_id}` : ''}
                         </span>
                         <span className="tabular-nums">{fmtSize(item.size)}</span>

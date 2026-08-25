@@ -185,7 +185,7 @@ const Login = ({ go, emit }) => (
                 </svg>
                 oktell
             </div>
-            <label>Логин<input type="text" defaultValue="stажёр" aria-label="Логин" /></label>
+            <label>Логин<input type="text" defaultValue="стажёр" aria-label="Логин" /></label>
             <label>Пароль<input type="password" defaultValue="демо" aria-label="Пароль" /></label>
             <label className="wt-ok__login-save"><i aria-hidden="true">✓</i> Сохранить пароль</label>
             <button type="submit" className="wt-ok__login-btn">Войти</button>
