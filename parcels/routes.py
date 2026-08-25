@@ -17,6 +17,7 @@ OPTIONS и первым делом отдаётся preflight, авториза�
 """
 
 import logging
+import re
 from datetime import date
 from functools import wraps
 
@@ -28,8 +29,8 @@ from . import access, drivers, queries, schema
 # отвечала понятным «слишком длинно», а не «внутренняя ошибка» из-под INSERT.
 _MAX_LENGTHS = {
     'city': 120, 'driver_account_id': 64, 'driver_name': 200, 'driver_phone': 32,
-    'sender': 200, 'recipient': 200, 'order_number': 64, 'description': 4000,
-    'comment': 4000,
+    'sender': 200, 'recipient': 200, 'order_number': 64, 'order_url': 2000,
+    'description': 4000, 'comment': 4000,
 }
 
 # Насколько назад можно поставить дату приёма. Год — с запасом на «разгребли
@@ -307,6 +308,50 @@ def _date_or_none(value):
         return None
 
 
+# Схемы, которые вообще могут быть у ссылки. Всё остальное — включая
+# `javascript:` и `data:` — не ссылка, а способ выполнить код в браузере того,
+# кто её откроет. Проверка ЗДЕСЬ, а не только во фронте: в базу ссылка попадает
+# через API, а показывать её будут как <a href>.
+_LINK_SCHEMES = ('http', 'https')
+
+
+def _clean_link(value, limit):
+    """Ссылка на заказ: приводим к единому виду или отвечаем отказом.
+
+    Возвращает (url, error). `('', None)` — поля нет, это законно.
+
+    Схему достраиваем сами: сотрудник копирует адресную строку, и
+    «fleet.yandex.kz/orders/…» без http:// — обычная копипаста, отказывать на
+    ней было бы придиркой. Хост обязателен: строка без него ссылкой не станет
+    ни в каком браузере.
+    """
+    text = str(value or '').strip()
+    if not text:
+        return '', None
+    if len(text) > limit:
+        return None, 'Ссылка слишком длинная'
+
+    # Схему проверяем ДО достройки. Иначе `javascript:alert(1)` уходит в ветку
+    # «схемы нет», получает приставку https:// и отсеивается уже правилом про
+    # хост — то есть по случайной причине, которую легко потерять при правке.
+    scheme = re.match(r'^([a-zA-Z][a-zA-Z0-9+.\-]*):', text)
+    if scheme and scheme.group(1).lower() not in _LINK_SCHEMES:
+        return None, 'Ссылка должна начинаться с http:// или https://'
+
+    candidate = text if '://' in text else 'https://' + text.lstrip('/')
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(candidate)
+    except Exception:  # noqa: BLE001 — мусор во входе не должен ронять запрос
+        return None, 'Не удалось разобрать ссылку'
+    if parsed.scheme.lower() not in _LINK_SCHEMES:
+        return None, 'Ссылка должна начинаться с http:// или https://'
+    if not parsed.netloc or '.' not in parsed.netloc:
+        return None, 'В ссылке нет адреса сайта'
+    return candidate, None
+
+
 def _clean(value, limit):
     text = str(value or '').strip()
     if not text:
@@ -437,6 +482,17 @@ def _validate(cursor, data, existing=None):
         if given(name):
             fields[name] = _clean(data.get(name), _MAX_LENGTHS.get(name, 200))
 
+    # ── Ссылка на заказ ──────────────────────────────────────────────────
+    # Заказ прикрепляется ссылкой (решение владельца 25.08.2026): API отдаёт по
+    # водителю последние три заказа, но без адресов — одни id, цены и пробеги,
+    # и показывать их в карточке владелец счёл лишними данными. Сотрудник
+    # вставляет адрес карточки заказа, и по нему же заказ потом ищется.
+    if given('order_url'):
+        order_url, error = _clean_link(data.get('order_url'), _MAX_LENGTHS['order_url'])
+        if error:
+            return None, (error, 'ORDER_URL_INVALID')
+        fields['order_url'] = order_url or None
+
     # ── Статус ───────────────────────────────────────────────────────────
     # Только при заведении: у существующей карточки статус меняет свой роут,
     # чтобы «кто изменил статус» не смешивалось с правкой опечатки.
@@ -465,6 +521,7 @@ def _driver_snapshot(account_id):
         'driver_name': None,
         'driver_phone': None,
         'driver_park': None,
+        'driver_park_id': None,
         'driver_license': None,
         'driver_callsign': None,
         'driver_car': None,
@@ -480,6 +537,7 @@ def _driver_snapshot(account_id):
         'driver_name': summary.get('name'),
         'driver_phone': summary.get('phone'),
         'driver_park': summary.get('park'),
+        'driver_park_id': summary.get('park_id'),
         'driver_license': summary.get('license'),
         'driver_callsign': summary.get('callsign'),
         'driver_car': summary.get('car'),

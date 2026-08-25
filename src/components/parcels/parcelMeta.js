@@ -194,6 +194,69 @@ export const extractAccountId = (value) => {
     return null;
 };
 
+/* ── Ссылки ──────────────────────────────────────────────────────────────────
+ *
+ * Две ссылки уходят наружу: на аккаунт водителя во Флите и на заказ.
+ *
+ * Аккаунт мы СОБИРАЕМ сами из id водителя и id парка — это тот самый вид
+ * ссылки, которым владелец пользуется сам:
+ *   https://fleet.yandex.kz/contractors/<водитель>/details?park_id=<парк>
+ * Без парка Флит карточку не открывает, поэтому у записи без `driver_park_id`
+ * ссылки нет вовсе (у заведённых до 25.08.2026 парк подтягивается миграцией из
+ * снимка CRM, но у тех, где снимок не приехал, его нет и взять негде).
+ *
+ * Ссылку на заказ мы НЕ собираем: её вставляет сотрудник, и показывать её можно
+ * только проверив схему. `javascript:` в href — это выполнение кода у того, кто
+ * по ссылке щёлкнет; сервер такую не примет (parcels/routes.py::_clean_link), но
+ * в базе могут лежать записи, заведённые до этой проверки, и рисует их всё
+ * равно фронт.
+ */
+const FLEET_BASE = 'https://fleet.yandex.kz';
+
+const HEX32 = /^[0-9a-f]{32}$/i;
+
+export const driverAccountUrl = (parcel) => {
+    const driver = String(parcel?.driver_account_id || '').trim();
+    const park = String(parcel?.driver_park_id || '').trim();
+    if (!HEX32.test(driver) || !HEX32.test(park)) return null;
+    return `${FLEET_BASE}/contractors/${driver.toLowerCase()}/details`
+        + `?park_id=${park.toLowerCase()}`;
+};
+
+// Близнец серверного `_clean_link`: наружу отдаём ссылку, только если она
+// http(s) и с хостом. Всё остальное показываем текстом, а не ссылкой.
+export const safeLink = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(raw);
+    if (scheme && !['http', 'https'].includes(scheme[1].toLowerCase())) return null;
+    try {
+        const parsed = new URL(raw.includes('://') ? raw : `https://${raw.replace(/^\/+/, '')}`);
+        if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+        if (!parsed.hostname || !parsed.hostname.includes('.')) return null;
+        return parsed.href;
+    } catch {
+        return null;
+    }
+};
+
+/* Как показать ссылку человеку. Полный адрес заказа — это 80 символов служебного
+   текста, поэтому в подписи оставляем хост и последний осмысленный кусок пути
+   («fleet.yandex.kz · 401220d7…»): по нему видно, куда ведёт, и он не разрывает
+   строку карточки. */
+export const linkLabel = (value) => {
+    const href = safeLink(value);
+    if (!href) return String(value ?? '').trim() || null;
+    try {
+        const parsed = new URL(href);
+        const tail = parsed.pathname.split('/').filter(Boolean).pop() || '';
+        const short = tail.length > 12 ? `${tail.slice(0, 8)}…` : tail;
+        return short ? `${parsed.hostname} · ${short}` : parsed.hostname;
+    } catch {
+        return href;
+    }
+};
+
 /* ── Город → офис ────────────────────────────────────────────────────────────
  *
  * «Офис выбирается, только если в городе несколько офисов, в ином случае

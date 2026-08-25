@@ -151,6 +151,7 @@ _PARCEL_COLUMNS = """
     p.driver_account_id, p.driver_name, p.driver_phone, p.driver_park,
     p.driver_license, p.driver_callsign, p.driver_car, p.driver_synced_at,
     p.kind, p.description, p.sender, p.recipient, p.order_number,
+    p.order_url, p.driver_park_id,
     p.status, p.status_changed_at, p.status_changed_by, p.status_changed_by_name,
     p.comment, p.created_by, p.created_by_name, p.created_at, p.updated_at
 """
@@ -190,6 +191,8 @@ def _parcel_row(row):
         'created_by_name': row[25],
         'created_at': _iso(row[26]),
         'updated_at': _iso(row[27]),
+        'order_url': row[28],
+        'driver_park_id': row[29],
     }
 
 
@@ -199,8 +202,11 @@ def _parcel_row(row):
 # коробку» помнят.
 _SEARCH_COLUMNS = (
     'p.driver_account_id', 'p.driver_phone', 'p.driver_name', 'p.driver_callsign',
-    'p.order_number', 'p.sender', 'p.recipient', 'p.city', 'p.office_name',
-    'p.description',
+    # По заказу ищут, вставляя его id: он лежит внутри ссылки, поэтому «содержит»
+    # по самой ссылке и есть поиск по заказу. `order_number` остался ради
+    # записей первой версии формы — заново он не заполняется.
+    'p.order_url', 'p.order_number', 'p.sender', 'p.recipient', 'p.city',
+    'p.office_name', 'p.description',
 )
 
 
@@ -384,9 +390,9 @@ def _log_event(cursor, parcel_id, kind, actor, payload=None):
 _INSERT_FIELDS = (
     'received_on', 'city', 'office_id', 'office_name', 'office_address',
     'driver_account_id', 'driver_name', 'driver_phone', 'driver_park',
-    'driver_license', 'driver_callsign', 'driver_car', 'driver_info',
-    'driver_synced_at', 'kind', 'description', 'sender', 'recipient',
-    'order_number', 'status', 'comment',
+    'driver_park_id', 'driver_license', 'driver_callsign', 'driver_car',
+    'driver_info', 'driver_synced_at', 'kind', 'description', 'sender',
+    'recipient', 'order_url', 'order_number', 'status', 'comment',
 )
 
 
@@ -432,9 +438,9 @@ def create_parcel(cursor, *, fields, actor):
 _EDITABLE_FIELDS = (
     'received_on', 'city', 'office_id', 'office_name', 'office_address',
     'driver_account_id', 'driver_name', 'driver_phone', 'driver_park',
-    'driver_license', 'driver_callsign', 'driver_car', 'driver_info',
-    'driver_synced_at', 'kind', 'description', 'sender', 'recipient',
-    'order_number', 'comment',
+    'driver_park_id', 'driver_license', 'driver_callsign', 'driver_car',
+    'driver_info', 'driver_synced_at', 'kind', 'description', 'sender',
+    'recipient', 'order_url', 'order_number', 'comment',
 )
 
 # Что показываем в истории правок. Служебный снимок CRM и производные от него
@@ -450,6 +456,7 @@ _DIFF_LABELS = {
     'description': 'Описание',
     'sender': 'Отправитель',
     'recipient': 'Получатель',
+    'order_url': 'Ссылка на заказ',
     'order_number': 'Номер заказа',
     'comment': 'Комментарий',
 }

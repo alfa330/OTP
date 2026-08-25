@@ -88,6 +88,10 @@ _STATEMENTS = [
         driver_license         VARCHAR(64),
         driver_callsign        VARCHAR(120),
         driver_car             VARCHAR(200),
+        -- id таксопарка во Флите. Держим колонкой, а не только внутри снимка:
+        -- по нему собирается ссылка на аккаунт водителя, а ссылка нужна и в
+        -- СТРОКЕ реестра — список же снимок `driver_info` не отдаёт, он тяжёлый.
+        driver_park_id         VARCHAR(64),
         driver_info            JSONB,
         driver_synced_at       TIMESTAMP,
 
@@ -97,6 +101,14 @@ _STATEMENTS = [
 
         sender                 VARCHAR(200),
         recipient              VARCHAR(200),
+        -- Ссылка на заказ, по которому посылка. Сотрудник вставляет адрес
+        -- карточки заказа; TEXT, а не VARCHAR — длину ссылки во внешнем
+        -- сервисе мы не контролируем.
+        order_url              TEXT,
+        -- `order_number` остался от первой версии формы: свободный номер
+        -- заказа спрашивали, пока не было чем сослаться на сам заказ. Поле
+        -- больше не заполняется (в форме его нет), но колонка живёт — уже
+        -- записанное терять нельзя, а на проде она пуста у всех записей.
         order_number           VARCHAR(64),
 
         status                 VARCHAR(24) NOT NULL DEFAULT 'in_office'
@@ -168,6 +180,10 @@ _STATEMENTS = [
         ON parcels USING gin (order_number gin_trgm_ops)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_parcels_trgm_order_url
+        ON parcels USING gin (order_url gin_trgm_ops)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_parcels_trgm_office_name
         ON parcels USING gin (office_name gin_trgm_ops)
     """,
@@ -176,10 +192,27 @@ _STATEMENTS = [
 ]
 
 
-# Миграции по живой базе. Пока пусто — раздел новый; список объявлен, чтобы
-# порядок «таблицы → ALTER'ы → индексы» в init_parcels_schema не пришлось
-# вводить задним числом (у «Обращений» именно это уронило прод 17.08.2026).
-_MIGRATIONS = []
+# Миграции по живой базе. Идут ПОСЛЕ таблиц и ПЕРЕД индексами — порядок держит
+# init_parcels_schema, иначе индекс по новому столбцу выполняется раньше самого
+# столбца и падает (у «Обращений» именно это уронило прод 17.08.2026).
+_MIGRATIONS = [
+    # Ссылка на заказ (25.08.2026). Раньше спрашивали свободный «номер заказа»,
+    # потому что сослаться на сам заказ было нечем.
+    "ALTER TABLE parcels ADD COLUMN IF NOT EXISTS order_url TEXT",
+
+    # id парка во Флите — для ссылки на аккаунт водителя из строки реестра.
+    "ALTER TABLE parcels ADD COLUMN IF NOT EXISTS driver_park_id VARCHAR(64)",
+
+    # Бэкфилл парка из уже снятых снимков CRM: у записей, заведённых до этой
+    # правки, парк лежит внутри `driver_info`. Условие `IS NULL` делает бэкфилл
+    # идемпотентным — повторный старт ничего не перезаписывает.
+    """
+    UPDATE parcels
+       SET driver_park_id = driver_info->'park'->>'yandex_id'
+     WHERE driver_park_id IS NULL
+       AND driver_info->'park'->>'yandex_id' IS NOT NULL
+    """,
+]
 
 
 def _is_table(statement):

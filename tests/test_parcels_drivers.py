@@ -201,6 +201,8 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(summary['phone'], '+77719736925')
         self.assertEqual(summary['license'], 'BB222764')
         self.assertEqual(summary['park'], 'iTaxi Туркестан')
+        # id парка нужен для ссылки на аккаунт: Флит без park_id её не откроет.
+        self.assertEqual(summary['park_id'], PARK_ID)
         self.assertEqual(summary['callsign'], 'Kuatova')
         self.assertEqual(summary['car'], 'LADA (ВАЗ) Priora · 252АЕN13')
 

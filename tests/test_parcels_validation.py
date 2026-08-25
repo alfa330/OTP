@@ -40,7 +40,10 @@ OTHER_DRIVER_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
 
 CRM_ANSWER = {
     'account_id': DRIVER_ID,
-    'park': {'name': 'iTaxi Туркестан'},
+    # `yandex_id` у парка — как в живом ответе: из него собирается ссылка на
+    # аккаунт водителя во Флите.
+    'park': {'name': 'iTaxi Туркестан', 'id': 74,
+             'yandex_id': 'cb1562e507f34940bef13b8d19a9221b'},
     'driver': {'last_name': 'Abdikarim', 'first_name': 'Nurkanat',
                'middle_name': 'Izbasaruly', 'phone': '+77719736925',
                'driver_license': 'BB222764'},
@@ -338,3 +341,61 @@ class ContentTests(_Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class OrderLinkTests(_Base):
+    """Заказ прикрепляется ССЫЛКОЙ (решение владельца 25.08.2026).
+
+    Проверка схемы здесь не формальность: значение уходит в карточку как
+    `<a href>`, и `javascript:` в нём — это выполнение кода у того, кто по
+    ссылке щёлкнет. Правило продублировано во фронте (`safeLink`), но ЗАПИСЬ
+    закрывает только сервер: в базу ссылка попадает через API.
+    """
+
+    def test_link_is_optional(self):
+        fields, error = self.validate(valid_payload())
+        self.assertIsNone(error)
+        self.assertNotIn('order_url', fields)
+
+    def test_link_is_stored_as_is(self):
+        url = 'https://fleet.yandex.kz/orders/401220d7ef4bebb78b02303530848695?park_id=cb15'
+        fields, error = self.validate(valid_payload(order_url=url))
+        self.assertIsNone(error)
+        self.assertEqual(fields['order_url'], url)
+
+    def test_scheme_is_added_when_pasted_without_it(self):
+        """«fleet.yandex.kz/orders/…» из адресной строки — обычная копипаста."""
+        fields, error = self.validate(valid_payload(order_url='fleet.yandex.kz/orders/1'))
+        self.assertIsNone(error)
+        self.assertEqual(fields['order_url'], 'https://fleet.yandex.kz/orders/1')
+
+    def test_dangerous_schemes_are_refused(self):
+        for value in ('javascript:alert(1)', 'JavaScript:alert(1)',
+                      'javascript://x.com/%0aalert(1)', 'data:text/html,x',
+                      'vbscript:msgbox(1)', 'mailto:a@b.kz'):
+            fields, error = self.validate(valid_payload(order_url=value))
+            self.assertIsNone(fields, value)
+            self.assertEqual(error[1], 'ORDER_URL_INVALID', value)
+
+    def test_value_without_a_host_is_refused(self):
+        for value in ('не ссылка', 'https://', 'просто текст с пробелами'):
+            fields, error = self.validate(valid_payload(order_url=value))
+            self.assertIsNone(fields, value)
+            self.assertEqual(error[1], 'ORDER_URL_INVALID', value)
+
+    def test_absurdly_long_link_is_refused(self):
+        fields, error = self.validate(valid_payload(
+            order_url='https://fleet.yandex.kz/orders/' + 'a' * 2100))
+        self.assertIsNone(fields)
+        self.assertEqual(error[1], 'ORDER_URL_INVALID')
+
+    def test_emptying_the_link_stores_null_not_an_empty_string(self):
+        fields, error = self.validate({'order_url': '   '}, existing=existing_parcel())
+        self.assertIsNone(error)
+        self.assertIsNone(fields['order_url'])
+
+    def test_park_id_is_snapshotted_for_the_account_link(self):
+        """Без id парка ссылку на аккаунт водителя не собрать."""
+        fields, error = self.validate(valid_payload())
+        self.assertIsNone(error)
+        self.assertEqual(fields['driver_park_id'], 'cb1562e507f34940bef13b8d19a9221b')

@@ -26,10 +26,17 @@ import {
  */
 
 // Необязательные поля. Порядок — как в ТЗ.
+/* «Номер заказа» заменён ссылкой на заказ (решение владельца 25.08.2026).
+   Свободный номер спрашивали, пока сослаться на сам заказ было нечем; API по
+   водителю отдаёт последние три заказа, но без адресов — одни id, цены и
+   пробеги, — и владелец счёл их лишними данными в карточке. Колонка
+   `order_number` в базе осталась: заполнять её больше нечем, но записанное
+   раньше карточка по-прежнему покажет. */
 const EXTRA_FIELDS = [
     { key: 'sender', label: 'Отправитель', placeholder: 'Если известен' },
     { key: 'recipient', label: 'Получатель', placeholder: 'Если известен' },
-    { key: 'order_number', label: 'Номер заказа', placeholder: 'Если известен' },
+    { key: 'order_url', label: 'Ссылка на заказ', placeholder: 'https://fleet.yandex.kz/orders/…',
+      hint: 'Вставьте адрес карточки заказа — по нему посылка потом найдётся' },
     { key: 'comment', label: 'Комментарий', placeholder: 'Дополнительная информация', multiline: true },
 ];
 
@@ -43,7 +50,7 @@ const emptyDraft = (defaultCity = '') => ({
     description: '',
     sender: '',
     recipient: '',
-    order_number: '',
+    order_url: '',
     comment: '',
 });
 
@@ -57,7 +64,7 @@ const draftFromParcel = (parcel) => ({
     description: parcel.description || '',
     sender: parcel.sender || '',
     recipient: parcel.recipient || '',
-    order_number: parcel.order_number || '',
+    order_url: parcel.order_url || '',
     comment: parcel.comment || '',
 });
 
@@ -217,7 +224,7 @@ const ParcelForm = ({
             description: draft.description.trim(),
             sender: draft.sender.trim(),
             recipient: draft.recipient.trim(),
-            order_number: draft.order_number.trim(),
+            order_url: draft.order_url.trim(),
             comment: draft.comment.trim(),
         };
         try {
@@ -393,7 +400,7 @@ const ParcelForm = ({
                     </Field>
 
                     {EXTRA_FIELDS.filter((field) => extras.includes(field.key)).map((field) => (
-                        <Field key={field.key} label={field.label}>
+                        <Field key={field.key} label={field.label} hint={field.hint}>
                             <div className="flex gap-2">
                                 {field.multiline ? (
                                     <textarea

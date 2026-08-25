@@ -9,8 +9,8 @@ import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import ParcelCard from './ParcelCard';
 import ParcelForm from './ParcelForm';
 import {
-    STATE_FILTERS, daysInOffice, fmtDate, fmtPhone, isStale, kindMeta, pluralDays, rowTone,
-    statusMeta, toneEdge, tonePill, toneRow, toneText,
+    STATE_FILTERS, daysInOffice, driverAccountUrl, fmtDate, fmtPhone, isStale, kindMeta,
+    pluralDays, rowTone, statusMeta, toneEdge, tonePill, toneRow, toneText,
 } from './parcelMeta';
 
 /*
@@ -83,22 +83,43 @@ const DATE_PRESETS = [
 
 /* Водитель в строке. Цвет приходит пропсом, а не берётся из slate: строка
    залита по статусу, и «серый по умолчанию» на янтаре и зелени выглядит
-   выцветшим. Телефон остаётся ссылкой tel: — по нему звонят прямо из реестра,
-   поэтому щелчок по нему не должен открывать карточку (stopPropagation). */
-const DriverCell = ({ parcel, text }) => (
-    <>
-        <div className={`truncate ${text.main}`}>{parcel.driver_name || '—'}</div>
-        {parcel.driver_phone && (
-            <a
-                href={`tel:${parcel.driver_phone}`}
-                onClick={(event) => event.stopPropagation()}
-                className={`tabular-nums text-[12.5px] underline decoration-transparent underline-offset-2 transition hover:decoration-inherit ${text.body}`}
-            >
-                {fmtPhone(parcel.driver_phone)}
-            </a>
-        )}
-    </>
-);
+   выцветшим.
+ *
+ * ФИО ведёт в аккаунт водителя во Флите, телефон — звонок. Оба щелчка гасят
+ * всплытие: иначе поверх ссылки открывалась бы ещё и карточка посылки, и человек
+ * получал бы новую вкладку И модалку на один щелчок. Подчёркивание проявляется
+ * при наведении — постоянное превращало бы колонку в частокол линий. */
+const DriverCell = ({ parcel, text }) => {
+    const account = driverAccountUrl(parcel);
+    const name = parcel.driver_name || '—';
+    return (
+        <>
+            {account ? (
+                <a
+                    href={account}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(event) => event.stopPropagation()}
+                    title="Открыть аккаунт водителя во Флите"
+                    className={`block truncate underline decoration-transparent underline-offset-2 transition hover:decoration-inherit ${text.main}`}
+                >
+                    {name}
+                </a>
+            ) : (
+                <div className={`truncate ${text.main}`}>{name}</div>
+            )}
+            {parcel.driver_phone && (
+                <a
+                    href={`tel:${parcel.driver_phone}`}
+                    onClick={(event) => event.stopPropagation()}
+                    className={`tabular-nums text-[12.5px] underline decoration-transparent underline-offset-2 transition hover:decoration-inherit ${text.body}`}
+                >
+                    {fmtPhone(parcel.driver_phone)}
+                </a>
+            )}
+        </>
+    );
+};
 
 const ParcelsView = ({ apiBaseUrl, withAccessTokenHeader, showToast }) => {
     const headers = useCallback(

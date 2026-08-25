@@ -13,14 +13,17 @@ import {
   TONE_TEXT,
   daysInOffice,
   describeEvent,
+  driverAccountUrl,
   extractAccountId,
   fmtDate,
   fmtPhone,
   isClosed,
   isStale,
   officeChoiceFor,
+  linkLabel,
   pluralDays,
   rowTone,
+  safeLink,
   statusMeta,
   toneEdge,
   tonePill,
@@ -290,4 +293,78 @@ test('комментарий без смены статуса не выдаёт 
   // Такие строки мог оставить прежний сервер: «В офисе → В офисе» — неправда.
   assert.equal(describeEvent({ kind: 'status', payload: { from: 'in_office', to: 'in_office' } }),
     'Статус подтверждён');
+});
+
+/* ── Ссылки наружу ────────────────────────────────────────────────────────
+ *
+ * Здесь два разных риска. Ссылку на АККАУНТ мы собираем сами, и её легко
+ * собрать неправильно — Флит без park_id карточку не открывает. Ссылку на ЗАКАЗ
+ * вставляет человек, и её легко принять опасную: `javascript:` в href — это
+ * выполнение кода у того, кто по ней щёлкнет. Серверную проверку дублируем во
+ * фронте намеренно: рисует ссылку он, а в базе могут лежать записи, заведённые
+ * до появления проверки.
+ */
+
+const DRIVER = '9b139a9dbe8d49bfbf8521b619c89198';
+const PARK = 'cb1562e507f34940bef13b8d19a9221b';
+
+test('ссылка на аккаунт собирается из водителя И парка', () => {
+  const url = driverAccountUrl({ driver_account_id: DRIVER, driver_park_id: PARK });
+  assert.equal(url, `https://fleet.yandex.kz/contractors/${DRIVER}/details?park_id=${PARK}`);
+});
+
+test('регистр в id не мешает — ссылка всегда в нижнем', () => {
+  const url = driverAccountUrl({
+    driver_account_id: DRIVER.toUpperCase(), driver_park_id: PARK.toUpperCase(),
+  });
+  assert.ok(url.includes(DRIVER));
+  assert.ok(url.includes(PARK));
+});
+
+test('без парка ссылки на аккаунт НЕТ — Флит её не откроет', () => {
+  assert.equal(driverAccountUrl({ driver_account_id: DRIVER }), null);
+  assert.equal(driverAccountUrl({ driver_account_id: DRIVER, driver_park_id: '' }), null);
+  assert.equal(driverAccountUrl({ driver_account_id: DRIVER, driver_park_id: 'не-id' }), null);
+});
+
+test('без водителя и на мусоре ссылка не собирается', () => {
+  assert.equal(driverAccountUrl({ driver_park_id: PARK }), null);
+  assert.equal(driverAccountUrl({ driver_account_id: '123456', driver_park_id: PARK }), null);
+  assert.equal(driverAccountUrl(null), null);
+  assert.equal(driverAccountUrl({}), null);
+});
+
+test('ссылка на заказ проходит, схема достраивается', () => {
+  const full = 'https://fleet.yandex.kz/orders/401220d7ef4bebb78b02303530848695?park_id=cb15';
+  assert.equal(safeLink(full), full);
+  assert.equal(safeLink('fleet.yandex.kz/orders/401220'), 'https://fleet.yandex.kz/orders/401220');
+  assert.equal(safeLink('  https://example.kz/order/1  '), 'https://example.kz/order/1');
+});
+
+test('опасная схема ссылкой НЕ становится', () => {
+  for (const value of ['javascript:alert(1)', 'JavaScript:alert(1)',
+    'javascript://x.com/%0aalert(1)', 'data:text/html,<script>x</script>',
+    'vbscript:msgbox(1)', 'mailto:a@b.kz']) {
+    assert.equal(safeLink(value), null, value);
+  }
+});
+
+test('не-ссылка и пустое значение не превращаются в href', () => {
+  for (const value of ['', '   ', null, undefined, 'не ссылка вовсе', 'https://', 'http://x']) {
+    assert.equal(safeLink(value), null, JSON.stringify(value));
+  }
+});
+
+test('подпись ссылки короткая, но узнаваемая', () => {
+  assert.equal(
+    linkLabel('https://fleet.yandex.kz/orders/401220d7ef4bebb78b02303530848695?park_id=cb15'),
+    'fleet.yandex.kz · 401220d7…',
+  );
+  assert.equal(linkLabel('https://fleet.yandex.kz'), 'fleet.yandex.kz');
+});
+
+test('небезопасную ссылку подпись отдаёт ТЕКСТОМ, а не адресом', () => {
+  // Иначе строка выглядела бы ссылкой, которой нет.
+  assert.equal(linkLabel('javascript:alert(1)'), 'javascript:alert(1)');
+  assert.equal(linkLabel(''), null);
 });

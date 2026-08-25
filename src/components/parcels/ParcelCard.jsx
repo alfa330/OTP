@@ -1,12 +1,13 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import axios from 'axios';
-import { Check, Loader2, Pencil, Trash2 } from 'lucide-react';
+import { Check, ExternalLink, Loader2, Pencil, Trash2 } from 'lucide-react';
 import {
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel, IosModal,
 } from '../ui/ios';
 import {
-    PARCEL_STATUSES, daysInOffice, describeEvent, fmtDate, fmtDateTime, fmtPhone,
-    kindMeta, pluralDays, rowTone, statusMeta, tonePill, toneRow, toneText,
+    PARCEL_STATUSES, daysInOffice, describeEvent, driverAccountUrl, fmtDate, fmtDateTime,
+    fmtPhone, kindMeta, linkLabel, pluralDays, rowTone, safeLink, statusMeta, tonePill,
+    toneRow, toneText,
 } from './parcelMeta';
 
 /*
@@ -28,8 +29,32 @@ import {
  * контрола и строчки под ним.
  */
 
+/* Внешняя ссылка в карточке: подпись + иконка «откроется в новой вкладке».
+   Иконка не украшение — без неё человек не отличает ссылку наружу от перехода
+   внутри портала и теряет карточку, из которой уходил. `noopener` обязателен:
+   без него открытая страница получает доступ к нашему окну. */
+const OutLink = ({ href, children, title }) => (
+    <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={title}
+        className="inline-flex max-w-full items-center gap-1 text-blue-600 underline decoration-blue-200 underline-offset-2 transition hover:decoration-blue-500"
+    >
+        <span className="truncate">{children}</span>
+        <ExternalLink size={12} className="shrink-0 text-blue-400" />
+    </a>
+);
+
 const Row = ({ label, children }) => {
-    if (children === null || children === undefined || children === '') return null;
+    /* `false` в этом списке не для красоты: `{value && <span>…</span>}` при
+       пустом значении отдаёт именно false, и без него строка рисовалась пустой.
+       Обёртка в элемент (`<span>{value}</span>`) не спасает вовсе — элемент
+       никогда не null, поэтому такие значения передаём сюда СЫРЫМИ, а
+       оформление вешаем внутри. Так и пряталась пустая строка «Номер заказа». */
+    if (children === null || children === undefined || children === '' || children === false) {
+        return null;
+    }
     return (
         <div className="flex gap-3 py-1.5">
             <div className="w-[132px] shrink-0 text-[12.5px] text-slate-500">{label}</div>
@@ -51,6 +76,8 @@ const ParcelCard = ({
     const tone = useMemo(() => rowTone(parcel), [parcel]);
     const text = toneText(tone);
     const pill = tonePill(tone);
+    const account = useMemo(() => driverAccountUrl(parcel), [parcel]);
+    const orderHref = useMemo(() => safeLink(parcel?.order_url), [parcel]);
 
     const changeStatus = useCallback(async (status) => {
         if (!parcel || busy || status === parcel.status) return;
@@ -239,7 +266,26 @@ const ParcelCard = ({
                         <Row label="Описание">{parcel.description}</Row>
                         <Row label="Отправитель">{parcel.sender}</Row>
                         <Row label="Получатель">{parcel.recipient}</Row>
-                        <Row label="Номер заказа"><span className="tabular-nums">{parcel.order_number}</span></Row>
+                        {/* Заказ прикреплён ссылкой — её и открываем. Битую или
+                            не-http ссылку (могла попасть до проверки на сервере)
+                            показываем текстом: ссылка, ведущая непонятно куда,
+                            хуже, чем её отсутствие. */}
+                        <Row label="Заказ">
+                            {orderHref
+                                ? <OutLink href={orderHref} title={parcel.order_url}>
+                                    {linkLabel(parcel.order_url)}
+                                </OutLink>
+                                : (parcel.order_url
+                                    ? <span className="break-all text-slate-500">{parcel.order_url}</span>
+                                    : null)}
+                        </Row>
+                        {/* Свободный номер заказа больше не спрашивается; строка
+                            остаётся ради записей, где он был заполнен. */}
+                        <Row label="Номер заказа">
+                            {parcel.order_number
+                                ? <span className="tabular-nums">{parcel.order_number}</span>
+                                : null}
+                        </Row>
                         <Row label="Комментарий">{parcel.comment}</Row>
                     </div>
                 </section>
@@ -247,7 +293,13 @@ const ParcelCard = ({
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Водитель</div>
                     <div className="rounded-2xl bg-white px-3.5 py-2 ring-1 ring-slate-200/70">
-                        <Row label="ФИО">{parcel.driver_name || '—'}</Row>
+                        <Row label="ФИО">
+                            {account
+                                ? <OutLink href={account} title="Открыть аккаунт водителя во Флите">
+                                    {parcel.driver_name || 'Аккаунт водителя'}
+                                </OutLink>
+                                : (parcel.driver_name || '—')}
+                        </Row>
                         <Row label="Телефон">
                             {parcel.driver_phone && (
                                 <a href={`tel:${parcel.driver_phone}`} className="tabular-nums text-blue-600 hover:underline">
@@ -258,9 +310,14 @@ const ParcelCard = ({
                         <Row label="Таксопарк">{parcel.driver_park}</Row>
                         <Row label="Машина">{parcel.driver_car}</Row>
                         <Row label="Позывной">{parcel.driver_callsign}</Row>
-                        <Row label="ID во Флите">
-                            <span className="break-all font-mono text-[12px] text-slate-500">{parcel.driver_account_id}</span>
-                        </Row>
+                        {/* id показываем только там, где ссылки нет: при живой
+                            ссылке это тот же адрес второй раз, а по 32 символам
+                            всё равно ничего не находят руками. */}
+                        {!account && (
+                            <Row label="ID во Флите">
+                                <span className="break-all font-mono text-[12px] text-slate-500">{parcel.driver_account_id}</span>
+                            </Row>
+                        )}
                     </div>
                 </section>
 

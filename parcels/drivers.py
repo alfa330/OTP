@@ -281,6 +281,10 @@ def summarize(data):
         'phone': _text(driver.get('phone'), 32),
         'license': _text(driver.get('driver_license'), 64),
         'park': _text(park.get('name'), 160),
+        # id парка во Флите — из него и из account_id собирается ссылка на
+        # аккаунт водителя. Держим отдельным полем, а не только внутри `info`:
+        # ссылка нужна и в строке реестра, а туда снимок не отдаётся.
+        'park_id': _text(park.get('yandex_id'), 64),
         'callsign': _text(car.get('callsign'), 120),
         'car': _text(_car_title(car), 200),
         'info': data,
