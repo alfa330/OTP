@@ -1,6 +1,7 @@
 import React from 'react';
 import { Plus } from 'lucide-react';
 import { iosCard } from '../ui/ios';
+import ParkLogoImage from './ParkLogoImage';
 
 /* Рельс таксопарков — левая колонка витрины статей.
  *
@@ -66,7 +67,7 @@ export default function WikiParkRail({ parks, canManage, onOpenPark, onOpenParks
                             className="relative grid h-[38px] w-[38px] place-items-center overflow-hidden rounded-xl bg-slate-100 text-[10.5px] font-bold text-slate-500 transition hover:bg-slate-200 active:scale-[0.96]"
                         >
                             {park.logo_url
-                                ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
+                                ? <ParkLogoImage url={park.logo_url} frame={park.logo_frame} />
                                 : parkInitials(park.name)}
                             {park.promotions_count > 0 && (
                                 <span className="absolute -right-0.5 -top-0.5 h-3 w-3 rounded-full border-2 border-white bg-amber-400" />

@@ -14,8 +14,8 @@ _scope_directories_to_space), поэтому space_id — обязательны
 # Телефона среди полей нет: номера парка живут в wiki_park_phones — по одному
 # на точку (офис или «онлайн»), потому что в одном офисе их бывает несколько.
 _PARK_KEYS = ('id', 'slug', 'name', 'description', 'city', 'address',
-              'website', 'commission', 'logo_file_id', 'status', 'position',
-              'promotions_count', 'head_office_id', 'head_office_name',
+              'website', 'commission', 'logo_file_id', 'logo_frame', 'status',
+              'position', 'promotions_count', 'head_office_id', 'head_office_name',
               'head_office_city', 'head_office_address')
 
 # Адрес парка — ссылка на офис, а не текст: свободное поле повторяло адрес,
@@ -34,6 +34,10 @@ def _park_row(row):
     park = dict(zip(_PARK_KEYS, row))
     park['commission'] = float(park['commission']) if park['commission'] is not None else None
     park['logo_url'] = ('/api/wiki/file/%s' % park['logo_file_id']) if park['logo_file_id'] else None
+    # Ракурс без логотипа — мусор от прежней картинки: показывать нечего, и
+    # форма, открыв такой парк, предложила бы правку несуществующего кадра.
+    if not park['logo_file_id']:
+        park['logo_frame'] = None
     name = park.pop('head_office_name', None)
     city = park.pop('head_office_city', None)
     address = park.pop('head_office_address', None)
@@ -47,7 +51,8 @@ def list_parks(cursor, include_archived=False, query=None, *, space_id):
     cursor.execute(
         """
         SELECT p.id, p.slug, p.name, p.description, p.city, p.address,
-               p.website, p.commission, p.logo_file_id, p.status, p.position,
+               p.website, p.commission, p.logo_file_id, p.logo_frame,
+               p.status, p.position,
                (SELECT count(*) FROM wiki_promotion_taxi_parks pp
                  JOIN wiki_promotions pr ON pr.id = pp.promotion_id
                 WHERE pp.park_id = p.id AND pr.status = 'active'),
@@ -74,7 +79,8 @@ def get_park(cursor, slug, *, space_id):
     cursor.execute(
         """
         SELECT p.id, p.slug, p.name, p.description, p.city, p.address,
-               p.website, p.commission, p.logo_file_id, p.status, p.position, 0,
+               p.website, p.commission, p.logo_file_id, p.logo_frame,
+               p.status, p.position, 0,
                p.head_office_id, ho.name, ho.city, ho.address
           FROM wiki_taxi_parks p
           LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id
@@ -107,10 +113,10 @@ def create_park(cursor, *, slug, name, fields, created_by, space_id):
     cursor.execute(
         """
         INSERT INTO wiki_taxi_parks (space_id, slug, name, description, city, address,
-                                     website, commission, logo_file_id, head_office_id,
-                                     position, created_by)
+                                     website, commission, logo_file_id, logo_frame,
+                                     head_office_id, position, created_by)
         VALUES (%(space)s, %(slug)s, %(name)s, %(description)s, %(city)s, %(address)s,
-                %(website)s, %(commission)s, %(logo)s, %(head_office)s,
+                %(website)s, %(commission)s, %(logo)s, %(frame)s, %(head_office)s,
                 -- Позиция — внутри пространства: общий max сдвигал бы первый
                 -- парк новой вики за все чужие.
                 COALESCE((SELECT max(position) + 1 FROM wiki_taxi_parks
@@ -121,14 +127,15 @@ def create_park(cursor, *, slug, name, fields, created_by, space_id):
          'description': fields.get('description'), 'city': fields.get('city'),
          'address': fields.get('address'),
          'website': fields.get('website'), 'commission': fields.get('commission'),
-         'logo': fields.get('logo_file_id'), 'head_office': fields.get('head_office_id')},
+         'logo': fields.get('logo_file_id'), 'frame': fields.get('logo_frame'),
+         'head_office': fields.get('head_office_id')},
     )
     return cursor.fetchone()[0]
 
 
 _PARK_UPDATABLE = ('name', 'description', 'city', 'address', 'website',
-                   'commission', 'logo_file_id', 'status', 'position', 'slug',
-                   'head_office_id')
+                   'commission', 'logo_file_id', 'logo_frame', 'status',
+                   'position', 'slug', 'head_office_id')
 
 
 def update_park(cursor, park_id, fields, *, space_id):

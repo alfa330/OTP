@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 import { absoluteFileUrl } from './fileUrls';
+import ParkLogoImage from './ParkLogoImage';
 
 /* Страница таксопарка — открывается из рельса витрины.
  *
@@ -129,9 +130,9 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks,
             <article className={`${iosCard} overflow-clip`}>
                 <header className="border-b border-slate-100 px-5 py-4 sm:px-7 sm:py-6">
                     <div className="flex items-start gap-4">
-                        <div className="grid h-14 w-14 shrink-0 place-items-center overflow-hidden rounded-2xl bg-indigo-50 text-indigo-600">
+                        <div className="relative grid h-14 w-14 shrink-0 place-items-center overflow-hidden rounded-2xl bg-indigo-50 text-indigo-600">
                             {park.logo_url
-                                ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
+                                ? <ParkLogoImage url={park.logo_url} frame={park.logo_frame} />
                                 : <Building2 size={24} />}
                         </div>
                         <div className="min-w-0 flex-1">

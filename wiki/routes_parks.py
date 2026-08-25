@@ -7,6 +7,7 @@
 (см. шапку wiki/parks.py).
 """
 
+import json
 import uuid
 
 from flask import jsonify, request
@@ -130,6 +131,52 @@ def _logo_file(cursor, value, *, user_id, space_id):
     return file_id if cursor.fetchone() else None
 
 
+# Ракурс логотипа. Увеличение до четырёх крат: дальше видна одна буква
+# вывески, а плитка в рельсе всего 38 px — там это уже не логотип, а пятно.
+_LOGO_ZOOM_MAX = 4.0
+_LOGO_FRAME_DEFAULT = {'zoom': 1.0, 'x': 0.5, 'y': 0.5, 'ratio': 1.0}
+
+
+def _logo_frame(value):
+    """Ракурс из тела запроса → словарь для JSONB или None.
+
+    Четыре числа: zoom — во сколько раз картинка крупнее «вписанной» (1 — как
+    было, целиком по короткой стороне), x и y — какая доля лишнего срезана
+    слева и сверху, ratio — соотношение сторон исходника. Ratio хранится
+    вместе с остальными, а не выводится при показе: без него плитка не знает
+    геометрии, пока картинка не загрузилась, и логотип на долю секунды прыгал
+    бы из центра в выбранное место при каждом заходе.
+
+    Чужие ключи и мусор отбрасываются молча, числа зажимаются в границы: сюда
+    приходит тело запроса, а не свои данные, и «ракурс» с zoom=1e9 нарисовал бы
+    в плитке один пиксель.
+    """
+    if not isinstance(value, dict):
+        return None
+
+    def number(key, default, low, high):
+        try:
+            result = float(value.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        if result != result or result in (float('inf'), float('-inf')):
+            return default
+        return round(min(high, max(low, result)), 4)
+
+    frame = {'zoom': number('zoom', 1.0, 1.0, _LOGO_ZOOM_MAX),
+             'x': number('x', 0.5, 0.0, 1.0),
+             'y': number('y', 0.5, 0.0, 1.0),
+             'ratio': number('ratio', 1.0, 0.05, 20.0)}
+    # «Середина без увеличения» — это и есть отсутствие ракурса. Хранить его
+    # значением значило бы держать в базе две записи одного и того же.
+    return None if frame == _LOGO_FRAME_DEFAULT else frame
+
+
+def _frame_json(frame):
+    """Ракурс в параметр для JSONB-колонки: psycopg словарь сам не адаптирует."""
+    return json.dumps(frame) if frame else None
+
+
 def _decimal_or_none(value):
     try:
         number = float(value)
@@ -226,6 +273,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
         if error:
             return jsonify({"error": error}), 400
 
+        # Ракурс без логотипа не имеет смысла: показывать нечего.
+        logo_file_id = _logo_file(cursor, data.get('logo_file_id'),
+                                  user_id=ctx['user_id'], space_id=space_id)
+        logo_frame = _frame_json(_logo_frame(data.get('logo_frame'))) if logo_file_id else None
+
         slug = _clean(data.get('slug'), 120) or _slugify(name)
         base, suffix = slug, 2
         while not wiki_parks.slug_is_free(cursor, slug, space_id=space_id):
@@ -240,9 +292,8 @@ def register(bp, wiki_route, db, log_ip, gcs):
                                              'address': _clean(data.get('address'), 500),
                                              'website': _clean(data.get('website'), 500),
                                              'commission': _decimal_or_none(data.get('commission')),
-                                             'logo_file_id': _logo_file(
-                                                 cursor, data.get('logo_file_id'),
-                                                 user_id=ctx['user_id'], space_id=space_id),
+                                             'logo_file_id': logo_file_id,
+                                             'logo_frame': logo_frame,
                                              'head_office_id': _head_office(cursor, data, space_id),
                                          })
         _write_numbers(cursor, park_id, numbers, links, data, space_id=space_id)
@@ -306,6 +357,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
             fields['logo_file_id'] = _logo_file(cursor, data['logo_file_id'],
                                                 user_id=ctx['user_id'],
                                                 space_id=space_id)
+        if 'logo_frame' in data:
+            fields['logo_frame'] = _frame_json(_logo_frame(data['logo_frame']))
+        # Логотип сняли — ракурс уходит вместе с ним, даже если форма прислала
+        # его по инерции: кадр без картинки достался бы следующей загрузке.
+        if 'logo_file_id' in fields and not fields['logo_file_id']:
+            fields['logo_frame'] = None
         # Ключ есть, а значение пустое — «адрес снят», а не «поле не прислали».
         if 'head_office_id' in data:
             fields['head_office_id'] = _head_office(cursor, data, space_id)

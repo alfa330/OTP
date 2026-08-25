@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
-    Building2, ImagePlus, Loader2, MapPin, Phone, Plus, StickyNote, Trash2,
+    Building2, Crop, ImagePlus, Loader2, MapPin, Phone, Plus, RotateCcw,
+    StickyNote, Trash2,
 } from 'lucide-react';
 import { iosInput, iosGroupLabel, iosBtnGhost, IosBadge } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
@@ -8,7 +9,10 @@ import { Field, CitySelect } from './formField';
 import {
     PHONE_DIGITS, digitsOf, emptyNumber, formatDigits, parkDraftIssue, toPhone,
 } from './parkPoints';
-import { LOGO_MAX_BYTES, LOGO_TYPES } from './parkLogo';
+import {
+    LOGO_MAX_BYTES, LOGO_TYPES, ZOOM_MAX, ZOOM_MIN, makeFrame, panFrame, zoomFrame,
+} from './parkLogo';
+import ParkLogoImage from './ParkLogoImage';
 
 /* Форма таксопарка: о парке, номера по точкам, условия.
  *
@@ -181,6 +185,136 @@ const NumberRow = ({ number, offices, onChange, onRemove, onAdd, canRemove, isLa
     );
 };
 
+/* Окошко выбора ракурса: тянут картинку, ползунком приближают.
+ *
+ * Тянут именно КАРТИНКУ, а не рамку: рамка на месте — это плитка, какой её
+ * увидят в рельсе, — и человек двигает под ней вывеску, как двигал бы
+ * фотографию под трафаретом.
+ *
+ * Соотношение сторон уточняется по загруженной картинке: в ракурс оно попадает
+ * из обработки файла, но у браузера без canvas его взять неоткуда, а у
+ * логотипов, загруженных до появления ракурса, его нет вовсе.
+ */
+const LogoFraming = ({ draft, setDraft }) => {
+    const boxRef = useRef(null);
+    const point = useRef(null);
+    const frame = draft.logo_frame || makeFrame(1);
+
+    const boxSize = () => boxRef.current?.getBoundingClientRect().width || 176;
+
+    const move = (dx, dy) => setDraft((prev) => ({
+        ...prev,
+        logo_frame: panFrame(prev.logo_frame || makeFrame(1), dx, dy, boxSize()),
+    }));
+
+    const onPointerDown = (event) => {
+        point.current = { x: event.clientX, y: event.clientY };
+        event.currentTarget.setPointerCapture(event.pointerId);
+    };
+
+    const onPointerMove = (event) => {
+        if (!point.current) return;
+        move(event.clientX - point.current.x, event.clientY - point.current.y);
+        point.current = { x: event.clientX, y: event.clientY };
+    };
+
+    const onPointerUp = () => { point.current = null; };
+
+    /* Стрелками — тот же сдвиг: мышь не единственный способ дойти до окошка,
+       а ползунок увеличения с клавиатуры работает и так. */
+    const onKeyDown = (event) => {
+        const step = event.shiftKey ? 24 : 8;
+        const shift = {
+            ArrowLeft: [step, 0], ArrowRight: [-step, 0],
+            ArrowUp: [0, step], ArrowDown: [0, -step],
+        }[event.key];
+        if (!shift) return;
+        event.preventDefault();
+        move(shift[0], shift[1]);
+    };
+
+    return (
+        <div className="space-y-2 rounded-2xl bg-slate-50 p-3">
+            <div className="flex flex-wrap items-start gap-3">
+                <div
+                    ref={boxRef}
+                    role="application"
+                    tabIndex={0}
+                    aria-label="Ракурс логотипа: тяните картинку, стрелки сдвигают"
+                    onPointerDown={onPointerDown}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={onPointerUp}
+                    onPointerCancel={onPointerUp}
+                    onKeyDown={onKeyDown}
+                    className="relative h-[176px] w-[176px] shrink-0 cursor-grab touch-none overflow-hidden rounded-2xl bg-slate-200 ring-1 ring-slate-300/70 active:cursor-grabbing focus:outline-none focus:ring-2 focus:ring-blue-500/70"
+                >
+                    <ParkLogoImage
+                        url={draft.logo_url}
+                        frame={frame}
+                        className="select-none"
+                    />
+                    {/* Невидимая картинка рядом — только чтобы узнать настоящее
+                        соотношение сторон: у самой плитки оно уже применено, и
+                        naturalWidth по ней пришлось бы читать сквозь стили. */}
+                    <img
+                        src={draft.logo_url}
+                        alt=""
+                        className="hidden"
+                        onLoad={(event) => {
+                            const { naturalWidth: width, naturalHeight: height } = event.currentTarget;
+                            if (!width || !height) return;
+                            const ratio = width / height;
+                            setDraft((prev) => {
+                                const current = prev.logo_frame;
+                                if (current && Math.abs(current.ratio - ratio) < 0.01) return prev;
+                                return { ...prev, logo_frame: makeFrame(ratio, current || {}) };
+                            });
+                        }}
+                    />
+                </div>
+
+                <div className="min-w-[180px] flex-1 space-y-2">
+                    <p className="text-[11.5px] leading-relaxed text-slate-500">
+                        Потяните картинку — в плитке останется то, что видно в окошке.
+                        Так же логотип покажется в рельсе на главной.
+                    </p>
+                    <div>
+                        <div className="mb-1 flex items-center justify-between px-0.5">
+                            <span className="text-[11.5px] text-slate-500">Приближение</span>
+                            <span className="text-[11.5px] tabular-nums text-slate-400">
+                                ×{frame.zoom.toFixed(1)}
+                            </span>
+                        </div>
+                        <input
+                            type="range"
+                            className="w-full accent-blue-600"
+                            min={ZOOM_MIN}
+                            max={ZOOM_MAX}
+                            step="0.01"
+                            value={frame.zoom}
+                            aria-label="Приближение логотипа"
+                            onChange={(e) => setDraft((prev) => ({
+                                ...prev,
+                                logo_frame: zoomFrame(prev.logo_frame || makeFrame(1),
+                                                      Number(e.target.value)),
+                            }))}
+                        />
+                    </div>
+                    <button
+                        type="button"
+                        className={`${iosBtnGhost} px-2 py-1 text-[12px]`}
+                        onClick={() => setDraft((prev) => ({
+                            ...prev, logo_frame: makeFrame(prev.logo_frame?.ratio || 1),
+                        }))}
+                    >
+                        <RotateCcw size={13} /> Как было
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 /* Логотип парка.
  *
  * Плитка, а не строка «выберите файл»: тем же квадратом логотип и показывается
@@ -192,10 +326,15 @@ const NumberRow = ({ number, offices, onChange, onRemove, onAdd, canRemove, isLa
  * пришлось бы тащить в теле сохранения парка вместе с номерами и адресом —
  * то есть держать в форме файл и обрабатывать отказ загрузки как отказ всей
  * правки, хотя это разные события.
+ *
+ * Сразу после загрузки раскрывается выбор ракурса: у широкой вывески середина
+ * — это кусок фона между словами, и «загрузил, а в плитке не то» человек
+ * увидел бы уже на главной.
  */
 const ParkLogo = ({ draft, setDraft, onUpload }) => {
     const inputRef = useRef(null);
     const [busy, setBusy] = useState(false);
+    const [framing, setFraming] = useState(false);
 
     const pick = (file) => {
         if (!file) return;
@@ -203,8 +342,15 @@ const ParkLogo = ({ draft, setDraft, onUpload }) => {
         Promise.resolve(onUpload(file))
             .then((result) => {
                 if (!result) return;
-                setDraft((prev) => ({ ...prev, logo_file_id: result.file_id,
-                                      logo_url: result.url }));
+                setDraft((prev) => ({
+                    ...prev,
+                    logo_file_id: result.file_id,
+                    logo_url: result.url,
+                    // Новая картинка — новый ракурс: чужой кадр от прежней
+                    // показал бы у новой вывески случайный угол.
+                    logo_frame: makeFrame(result.ratio || 1),
+                }));
+                setFraming(true);
             })
             .finally(() => {
                 setBusy(false);
@@ -214,67 +360,91 @@ const ParkLogo = ({ draft, setDraft, onUpload }) => {
             });
     };
 
+    const remove = () => {
+        setFraming(false);
+        setDraft((prev) => ({
+            ...prev, logo_file_id: null, logo_url: null, logo_frame: null,
+        }));
+    };
+
     return (
-        <div className="flex items-center gap-3">
-            <input
-                ref={inputRef}
-                type="file"
-                className="hidden"
-                accept={LOGO_TYPES.join(',')}
-                onChange={(e) => pick(e.target.files?.[0])}
-            />
+        <div className="space-y-2">
+            <div className="flex items-center gap-3">
+                <input
+                    ref={inputRef}
+                    type="file"
+                    className="hidden"
+                    accept={LOGO_TYPES.join(',')}
+                    onChange={(e) => pick(e.target.files?.[0])}
+                />
 
-            <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                disabled={busy}
-                className="group relative grid h-[68px] w-[68px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-slate-100 text-slate-400 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-60"
-                aria-label={draft.logo_url ? 'Заменить логотип' : 'Загрузить логотип'}
-            >
-                {draft.logo_url && !busy && (
-                    <img src={draft.logo_url} alt="" className="h-full w-full object-cover" />
-                )}
-                {busy && <Loader2 size={20} className="animate-spin text-slate-500" />}
-                {!draft.logo_url && !busy && <Building2 size={22} />}
-                {/* Подсказка «сюда можно нажать» появляется поверх готовой
-                    картинки: без неё плитка с логотипом выглядит картинкой, а
-                    не кнопкой. */}
-                {draft.logo_url && !busy && (
-                    <span className="absolute inset-0 grid place-items-center bg-slate-900/45 text-white opacity-0 transition group-hover:opacity-100">
-                        <ImagePlus size={18} />
-                    </span>
-                )}
-            </button>
+                <button
+                    type="button"
+                    onClick={() => inputRef.current?.click()}
+                    disabled={busy}
+                    className="group relative grid h-[68px] w-[68px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-slate-100 text-slate-400 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-60"
+                    aria-label={draft.logo_url ? 'Заменить логотип' : 'Загрузить логотип'}
+                >
+                    {draft.logo_url && !busy && (
+                        <ParkLogoImage url={draft.logo_url} frame={draft.logo_frame} />
+                    )}
+                    {busy && <Loader2 size={20} className="animate-spin text-slate-500" />}
+                    {!draft.logo_url && !busy && <Building2 size={22} />}
+                    {/* Подсказка «сюда можно нажать» появляется поверх готовой
+                        картинки: без неё плитка с логотипом выглядит картинкой, а
+                        не кнопкой. */}
+                    {draft.logo_url && !busy && (
+                        <span className="absolute inset-0 grid place-items-center bg-slate-900/45 text-white opacity-0 transition group-hover:opacity-100">
+                            <ImagePlus size={18} />
+                        </span>
+                    )}
+                </button>
 
-            <div className="min-w-0">
-                <div className="text-[13px] font-medium text-slate-900">Логотип</div>
-                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
-                    Виден на главной в рельсе парков и в карточке.
-                    PNG, JPEG или WebP до {Math.round(LOGO_MAX_BYTES / (1024 * 1024))} МБ.
-                </p>
-                <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                    <button
-                        type="button"
-                        className={`${iosBtnGhost} px-2 py-1 text-[12px] text-blue-600 hover:bg-blue-50`}
-                        onClick={() => inputRef.current?.click()}
-                        disabled={busy}
-                    >
-                        <ImagePlus size={13} /> {draft.logo_url ? 'Заменить' : 'Загрузить'}
-                    </button>
-                    {draft.logo_url && (
+                <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-slate-900">Логотип</div>
+                    <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+                        Виден на главной в рельсе парков и в карточке. Принимаем
+                        PNG, JPEG и WebP до {Math.round(LOGO_MAX_BYTES / (1024 * 1024))} МБ,
+                        храним в WebP — так плитки на витрине весят десятки килобайт.
+                    </p>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
                         <button
                             type="button"
-                            className={`${iosBtnGhost} px-2 py-1 text-[12px] hover:bg-rose-50 hover:text-rose-500`}
-                            onClick={() => setDraft((prev) => ({
-                                ...prev, logo_file_id: null, logo_url: null,
-                            }))}
+                            className={`${iosBtnGhost} px-2 py-1 text-[12px] text-blue-600 hover:bg-blue-50`}
+                            onClick={() => inputRef.current?.click()}
                             disabled={busy}
                         >
-                            <Trash2 size={13} /> Убрать
+                            <ImagePlus size={13} /> {draft.logo_url ? 'Заменить' : 'Загрузить'}
                         </button>
-                    )}
+                        {draft.logo_url && (
+                            <button
+                                type="button"
+                                className={`${iosBtnGhost} px-2 py-1 text-[12px] ${
+                                    framing ? 'bg-blue-50 text-blue-600' : ''
+                                }`}
+                                onClick={() => setFraming((open) => !open)}
+                                disabled={busy}
+                            >
+                                <Crop size={13} /> Ракурс
+                            </button>
+                        )}
+                        {draft.logo_url && (
+                            <button
+                                type="button"
+                                className={`${iosBtnGhost} px-2 py-1 text-[12px] hover:bg-rose-50 hover:text-rose-500`}
+                                onClick={remove}
+                                disabled={busy}
+                            >
+                                <Trash2 size={13} /> Убрать
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
+
+            {framing && draft.logo_url && !busy && (
+                <LogoFraming draft={draft} setDraft={setDraft} />
+            )}
         </div>
     );
 };

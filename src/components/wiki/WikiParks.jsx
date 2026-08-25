@@ -10,6 +10,7 @@ import {
 } from '../ui/ios';
 import useStableCallback from './useStableCallback';
 import ParkEditor from './ParkEditor';
+import ParkLogoImage from './ParkLogoImage';
 import { numbersFromPark, numbersPayload, parkDraftIssue } from './parkPoints';
 import { logoIssue, shrinkLogo } from './parkLogo';
 import { absoluteFileUrl } from './fileUrls';
@@ -30,7 +31,7 @@ const fmtDate = (iso) => (iso
 
 const emptyPark = () => ({
     name: '', city: '', address: '', website: '', commission: '', description: '',
-    head_office_id: undefined, logo_file_id: null, logo_url: null,
+    head_office_id: undefined, logo_file_id: null, logo_url: null, logo_frame: null,
     // Одна пустая строка сразу: номер у парка обязателен, и форма должна
     // показывать это полем, а не пустым местом с кнопкой.
     numbers: numbersFromPark({}),
@@ -49,9 +50,9 @@ const ParkCard = ({ park, canManage, onEdit, onArchive, onRestore }) => {
     return (
         <div className={`${iosCard} p-4`}>
             <div className="flex items-start gap-3">
-                <div className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 text-indigo-600">
+                <div className="relative grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-indigo-50 text-indigo-600">
                     {park.logo_url
-                        ? <img src={park.logo_url} alt="" className="h-full w-full object-cover" />
+                        ? <ParkLogoImage url={park.logo_url} frame={park.logo_frame} />
                         : <Building2 size={18} />}
                 </div>
                 <div className="min-w-0 flex-1">
@@ -199,13 +200,16 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
         const issue = logoIssue(file);
         if (issue) { toast(issue, 'error'); return null; }
         try {
-            const { blob, name } = await shrinkLogo(file);
+            const { blob, name, ratio } = await shrinkLogo(file);
             const form = new FormData();
             form.append('file', blob, name);
             const response = await axios.post(`${base}/parks/logo`, form, req);
             return {
                 file_id: response.data?.file_id,
                 url: absoluteFileUrl(response.data?.url, base),
+                // Соотношение сторон исходника — основа ракурса: по нему плитка
+                // знает геометрию картинки ещё до её загрузки.
+                ratio,
             };
         } catch (e) {
             toast(errText(e, 'Не удалось загрузить логотип'), 'error');
@@ -225,6 +229,8 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
             // null снимает логотип: ключ есть всегда, иначе «Убрать» ничего бы
             // не меняло — сервер читает именно наличие ключа.
             logo_file_id: draft.logo_file_id || null,
+            // Ракурс едет рядом с логотипом: null — «как раньше», середина.
+            logo_frame: draft.logo_file_id ? (draft.logo_frame || null) : null,
             numbers: numbersPayload(draft.numbers),
         };
         setBusy(true);
@@ -346,6 +352,7 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
                                     commission: p.commission ?? '',
                                     logo_file_id: p.logo_file_id || null,
                                     logo_url: p.logo_url || null,
+                                    logo_frame: p.logo_frame || null,
                                     numbers: numbersFromPark(p),
                                 })}
                                 onArchive={archive}

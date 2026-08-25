@@ -15,6 +15,7 @@
 """
 
 import io
+import json
 import sys
 import unittest
 from contextlib import contextmanager
@@ -123,14 +124,53 @@ def _capabilities_setter(capabilities):
     return load
 
 
+class LogoFrameTest(unittest.TestCase):
+    """Ракурс: какая часть картинки видна в плитке.
+
+    Приезжает из тела запроса, то есть от человека, — значит проверяется здесь,
+    а не рисованием: «ракурс» с zoom=1e9 показал бы в плитке один пиксель.
+    """
+
+    def test_frame_is_taken_as_four_numbers(self):
+        frame = routes_parks._logo_frame({'zoom': 1.6, 'x': 0.32, 'y': 0.6, 'ratio': 1.5})
+        self.assertEqual(frame, {'zoom': 1.6, 'x': 0.32, 'y': 0.6, 'ratio': 1.5})
+
+    def test_numbers_are_clamped(self):
+        frame = routes_parks._logo_frame({'zoom': 1e9, 'x': -5, 'y': 42, 'ratio': 1e9})
+        self.assertEqual(frame, {'zoom': routes_parks._LOGO_ZOOM_MAX, 'x': 0.0,
+                                 'y': 1.0, 'ratio': 20.0})
+
+    def test_garbage_falls_back_to_the_defaults(self):
+        """Мусор в одном ключе не должен ронять весь ракурс: остальные числа
+        осмысленные, и отбросить их значило бы потерять уже выбранный кадр."""
+        self.assertEqual(routes_parks._logo_frame({'zoom': 'близко', 'x': 0.2,
+                                                   'y': None, 'ratio': 2}),
+                         {'zoom': 1.0, 'x': 0.2, 'y': 0.5, 'ratio': 2.0})
+
+    def test_center_without_zoom_is_no_frame_at_all(self):
+        """Иначе в базе лежали бы две записи одного и того же: NULL и «ракурс»,
+        который ничего не меняет."""
+        self.assertIsNone(routes_parks._logo_frame({'zoom': 1, 'x': 0.5, 'y': 0.5,
+                                                    'ratio': 1}))
+        self.assertIsNone(routes_parks._logo_frame({}))
+        self.assertIsNone(routes_parks._logo_frame('ракурс'))
+
+    def test_frame_goes_to_the_database_as_json(self):
+        """psycopg словарь в JSONB сам не адаптирует — молча упало бы при
+        сохранении первого же ракурса."""
+        self.assertEqual(json.loads(routes_parks._frame_json({'zoom': 2})), {'zoom': 2})
+        self.assertIsNone(routes_parks._frame_json(None))
+
+
 class _Harness:
     """Блюпринт вики на подменённом курсоре, с заданными правами и бакетом."""
 
-    def build(self, *, capabilities=WRITER, spaces=(SPACE,), fetchone=None):
+    def build(self, *, capabilities=WRITER, spaces=(SPACE,), fetchone=None,
+              rowcount=0):
         cursor = MagicMock()
         cursor.fetchone.return_value = fetchone if fetchone is not None else (FILE_ID,)
         cursor.fetchall.return_value = []
-        cursor.rowcount = 0
+        cursor.rowcount = rowcount
 
         db = MagicMock()
 
@@ -239,6 +279,41 @@ class LogoUploadRouteTest(_Harness, unittest.TestCase):
                   if 'INSERT INTO wiki_files' in ' '.join(str(call.args[0]).split())]
         self.assertEqual(len(insert), 1)
         self.assertIsNone(insert[0].args[1][0])
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class LogoFrameRouteTest(_Harness, unittest.TestCase):
+    """Ракурс живёт рядом с логотипом и уходит вместе с ним."""
+
+    def _patch(self, body, *, park_exists=True):
+        # rowcount=1 — «строка обновилась»: иначе роут честно отвечает
+        # «Нечего обновлять», и до проверки самого ракурса дело не доходит.
+        client, cursor = self.build(fetchone=(1,) if park_exists else None,
+                                    rowcount=1)
+        response = client.patch('/api/wiki/parks/3?space_id=%d' % SPACE, json=body)
+        updates = [' '.join(str(call.args[0]).split()) for call in cursor.execute.call_args_list
+                   if 'UPDATE wiki_taxi_parks' in ' '.join(str(call.args[0]).split())]
+        values = [call.args[1] for call in cursor.execute.call_args_list
+                  if 'UPDATE wiki_taxi_parks' in ' '.join(str(call.args[0]).split())]
+        return response, (updates[0] if updates else ''), (values[0] if values else [])
+
+    def test_frame_is_written_next_to_the_logo(self):
+        response, sql, values = self._patch({'logo_file_id': FILE_ID,
+                                             'logo_frame': {'zoom': 1.8, 'x': 0.2,
+                                                            'y': 0.4, 'ratio': 2}})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('logo_frame = %s', sql)
+        self.assertIn(json.dumps({'zoom': 1.8, 'x': 0.2, 'y': 0.4, 'ratio': 2.0}), values)
+
+    def test_removing_the_logo_removes_the_frame(self):
+        """Кадр без картинки достался бы следующей загрузке — и она открылась
+        бы в чужом ракурсе."""
+        _response, sql, values = self._patch({'logo_file_id': None,
+                                              'logo_frame': {'zoom': 2, 'x': 0.1,
+                                                             'y': 0.1, 'ratio': 2}})
+        self.assertIn('logo_frame = %s', sql)
+        self.assertIsNone(values[list(values).index(None)])
+        self.assertEqual([v for v in values if isinstance(v, str) and 'zoom' in v], [])
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
