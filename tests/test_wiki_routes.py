@@ -93,7 +93,9 @@ class _RouteHarness:
         self.addCleanup(setattr, queries, 'granted_rule_rights', self._orig_granted)
 
         self._orig_spaces = queries.spaces_for_user
-        queries.spaces_for_user = lambda _c, _ctx: list(spaces)
+        # **_k — под include_guest: справочники спрашивают пространства без
+        # гостевой прибавки, и заглушка обязана принять этот аргумент.
+        queries.spaces_for_user = lambda _c, _ctx, **_k: list(spaces)
         self.addCleanup(setattr, queries, 'spaces_for_user', self._orig_spaces)
 
         app = Flask(__name__)
@@ -214,6 +216,12 @@ class ArticleCreateStatusTest(_RouteHarness, unittest.TestCase):
 
         patches = [
             patch.object(wiki_edit, 'slug_is_free', return_value=True),
+            # Запасной раздел: тесты класса про СТАТУС, и разделов в теле запроса
+            # нет. С 25.08.2026 статью без единого целевого раздела заводить
+            # нельзя вовсе (WIKI_NO_TARGET_SECTION), поэтому запасной обязан
+            # находиться — и это должен быть раздел из allowed_section_ids ниже,
+            # иначе сработает уже проверка прав на раздел.
+            patch.object(wiki_edit, 'default_section_id', return_value=1),
             patch.object(wiki_edit, 'create_article', return_value=777),
             patch.object(wiki_edit, 'update_article',
                          side_effect=lambda _c, aid, fields, **kw:

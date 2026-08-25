@@ -16,9 +16,9 @@
  */
 
 import {
-    Archive, ArrowRightLeft, Building2, CheckCircle2, Copy, FileDown, FilePlus2,
-    FileText, FolderPlus, KeyRound, Layers, MapPin, PenLine, RotateCcw,
-    ShieldAlert, Sparkles, Star, UserCheck,
+    Archive, ArrowRightLeft, Building2, CalendarClock, CheckCircle2, Copy, FileDown,
+    FilePlus2, FileText, FolderPlus, KeyRound, Layers, MapPin, PenLine, RotateCcw,
+    ShieldAlert, ShieldOff, Sparkles, Star, UserCheck, UserPlus,
 } from 'lucide-react';
 
 /* Тон несёт смысл, а не украшает: зелёный — появилось, янтарный — убрали или
@@ -39,6 +39,12 @@ export const ACTION_META = {
     'article_rule.deny': { label: 'Запрет на статью', tone: REMOVED, icon: ShieldAlert },
     'article_rule.delete': { label: 'Право на статью отозвано', tone: REMOVED, icon: KeyRound },
     'article.strict_bypass': { label: 'Обход закрытого доступа', tone: ALARM, icon: ShieldAlert },
+    /* Гостевой доступ — тоже выдача, поэтому тон синий, как у правил. Отзыв и
+       истечение различаются: отзыв — событие и попадает в журнал, истечение
+       наступает само и записывать его нечем. */
+    'guest.grant': { label: 'Выдан гостевой доступ', tone: GRANTED, icon: UserPlus },
+    'guest.extend': { label: 'Гостевой доступ продлён', tone: GRANTED, icon: CalendarClock },
+    'guest.revoke': { label: 'Гостевой доступ отозван', tone: REMOVED, icon: ShieldOff },
 
     // ── Структура ───────────────────────────────────────────────────────
     'space.create': { label: 'Создано пространство', tone: CREATED, icon: Layers },
@@ -195,6 +201,9 @@ const CONSUMED = {
     'article.ai_update': ['file', 'kind', 'changes', 'questions', 'model'],
     'article.ai_edit': ['changes', 'instruction', 'model'],
     'article.strict_bypass': ['reason'],
+    'guest.grant': ['expires_at', 'include_subsections', 'reason', 'user_name'],
+    'guest.extend': ['expires_at', 'include_subsections', 'reason', 'user_name'],
+    'guest.revoke': ['grant_id'],
     'section.create': ['space_id', 'visibility_scope', 'department_id'],
     'section.move': ['from_space_id', 'to_space_id', 'parent_section_id',
                      'sections_moved'],
@@ -356,6 +365,26 @@ export function auditFacts(item, nameOf = null) {
         case 'article.strict_bypass':
             facts.push('статья открыта в обход правил доступа');
             if (details.reason) facts.push(String(details.reason));
+            break;
+
+        /* У гостевой выдачи два обязательных факта: КОМУ и ДО КОГДА. Без срока
+           запись неотличима от обычного правила, а срок — единственное, чем
+           гостевой доступ от правила и отличается. Причину показываем следом:
+           через две недели по ней понятно, зачем доступ давали. */
+        case 'guest.grant':
+        case 'guest.extend': {
+            if (details.user_name) facts.push(String(details.user_name));
+            const until = String(details.expires_at || '').slice(0, 10);
+            if (until) {
+                const [year, month, day] = until.split('-');
+                facts.push(`до ${day}.${month}.${year}`);
+            }
+            if (details.include_subsections) facts.push('вместе с подразделами');
+            if (details.reason) facts.push(String(details.reason));
+            break;
+        }
+        case 'guest.revoke':
+            facts.push('доступ прекращён до истечения срока');
             break;
 
         case 'article.create':

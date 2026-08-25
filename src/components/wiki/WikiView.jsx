@@ -17,6 +17,8 @@ import WikiParks from './WikiParks';
 import WikiOffices from './WikiOffices';
 import WikiStructure from './WikiStructure';
 import WikiTrainers from './WikiTrainers';
+import WikiGuests from './WikiGuests';
+import WikiGuestBanner from './WikiGuestBanner';
 import WikiMigration from './WikiMigration';
 import WikiAudit from './WikiAudit';
 import WikiAnalytics from './WikiAnalytics';
@@ -72,6 +74,11 @@ const MODES = [
        и «чем это отрабатывают». Отдельным пунктом меню они стали бы четвёртой
        вкладкой с двумя карточками внутри. */
     { key: 'trainers', label: 'Тренажёры', icon: Gamepad2 },
+    /* Гостевой доступ — четвёртая половина той же работы. «Что лежит», «как
+       разложено», «чем это отрабатывают» и «кому ещё это показать». Отдельным
+       пунктом меню он стал бы пятой вкладкой с одной таблицей внутри, и
+       открывали бы его так же редко, как любой пункт, который надо вспомнить. */
+    { key: 'guests', label: 'Гостевой доступ', icon: KeyRound },
     /* Перенос — половина ВРЕМЕННАЯ: она есть, только пока в очереди есть
        неразобранные статьи из старой вики (см. catalogModes ниже). Разберут
        очередь — половина исчезнет сама, и переключатель вернётся к трём
@@ -281,6 +288,15 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        ни can_manage_structure, ни can_manage_access, но операторов он раздаёт —
        значит вкладку «Структура» ему показать надо, пусть и без правки дерева. */
     const canGrantAccess = state?.grant_ceiling != null;
+    /* Право выдавать ГОСТЕВОЙ доступ. Считает сервер и присылает готовым
+       признаком: право адресное — оно выписано на конкретной ветке правилом
+       (wiki_section_access_rules.can_grant_guest), — и в словаре способностей
+       его нет вовсе. Вывести его здесь было бы вторым источником истины. */
+    const canGrantGuest = !!state?.can_grant_guest;
+    /* Что открыто МНЕ и до какого срока. Едет тем же ответом /ping: срок обязан
+       быть виден на любой вкладке, а второй запрос ради подписи в шапке дал бы
+       вкладку, на которой подпись почему-то не появляется. */
+    const guestGrants = useMemo(() => state?.guest_access || [], [state]);
     const canEdit = !!(capabilities.can_edit || capabilities.can_publish);
     /* Каталог — инструмент того, кто ведёт базу знаний: он показывает разом
        черновики, архив и объём каждого раздела. Читателю всё это не нужно, и
@@ -401,7 +417,13 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
            между ними приходилось прыгать по вкладкам. Внутри — переключатель.
            Показываем тому, у кого есть хоть одна из половин. */
         { key: 'catalog', label: 'Статьи', icon: BookOpen,
-          show: features.catalog && (isEditor || canManageStructure || canGrantAccess) },
+          /* canGrantGuest — четвёртый вход, и он не лишний: право выдавать
+             гостевой доступ выписывают правилом раздела кому угодно, в том
+             числе тренеру, у которого нет ни одной из трёх остальных дверей.
+             Без него вкладка не появилась бы, а половина внутри неё — тем
+             более. */
+          show: features.catalog && (isEditor || canManageStructure
+                                     || canGrantAccess || canGrantGuest) },
         { key: 'overview', label: 'Обзор', icon: ShieldCheck, show: features.overview },
         { key: 'parks', label: 'Парки', icon: Building2, show: features.parks },
         { key: 'offices', label: 'Офисы', icon: MapPin, show: features.offices },
@@ -421,7 +443,8 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         { key: 'audit', label: 'Журнал', icon: ScrollText,
           show: features.audit && canManageAccess },
     ].filter((t) => t.show)),
-    [canManageStructure, canManageAccess, canGrantAccess, isEditor, features]);
+    [canManageStructure, canManageAccess, canGrantAccess, canGrantGuest,
+     isEditor, features]);
 
     /* Поиск предлагает спросить помощника ровно тогда, когда вкладка помощника
        вообще есть: у пространства без неё это была бы кнопка в никуда.
@@ -449,12 +472,23 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
         // Тренажёры — редактору: это инструмент того, кто СТАВИТ тренажёр в
         // статью. Читателю он не нужен, тренажёр к нему приходит кнопкой в тексте.
         ...(isEditor && features.catalog_trainers ? ['trainers'] : []),
+        /* Гостевой доступ — тому, кто РАЗДАЁТ, а не тому, кто пишет: это выдача
+           доступа, и редактор без права выдавать ничего бы здесь не сделал.
+           Право адресное и живёт в правиле раздела, поэтому его считает сервер
+           и присылает признаком can_grant_guest — вывести его из способностей
+           нельзя. Администратора доступов пропускаем отдельно: у него мастер-ключ,
+           и половина ему нужна независимо от правил.
+           Половина видна и тому, у кого право уже сняли: свои прошлые выдачи
+           надо иметь возможность отозвать. */
+        ...((canGrantGuest || canManageAccess) && features.catalog_guests
+            ? ['guests'] : []),
         /* Перенос — по ОСТАТКУ работы, а не по тумблеру пространства: это разовая
            процедура, а не часть раздела, и настраивать её видимость незачем.
            Число берём из каталога — он уже посчитал периметр, и половина
            появляется ровно тогда, когда за ней есть что показать. */
         ...(isEditor && (catalog?.migration?.pending || 0) > 0 ? ['migration'] : []),
-    ], [isEditor, canManageStructure, canGrantAccess, features, catalog]);
+    ], [isEditor, canManageStructure, canGrantAccess, canGrantGuest, canManageAccess,
+        features, catalog]);
 
     /* Сторона, с которой въезжает выбранная половина. Предыдущую держим в ref,
        а не в состоянии: она нужна только для стартового смещения анимации, и
@@ -586,7 +620,14 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                             возвращения на главную. Место у кнопки при этом одно
                             и то же — на другие вкладки она не выходит, потому
                             что редактор принадлежит витрине статей. */}
-                        {capabilities.can_create
+                        {/* В ГОСТЕВОМ пространстве кнопки нет. Способность
+                            can_create приходит от должности (тренер, СВ и выше)
+                            и отдела не знает, а гостя позвали ПРОЧИТАТЬ один
+                            раздел: правил на запись у него там нет, и сервер
+                            ответит «нет права создавать статьи в …». Кнопка,
+                            которая всегда отказывает, — это и есть мёртвая
+                            кнопка. */}
+                        {capabilities.can_create && !activeSpace?.guest_only
                             && (tab === 'library'
                                 || (tab === 'catalog' && catalogMode === 'catalog')) && (
                             <button
@@ -600,6 +641,11 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                     </div>
                 </header>
 
+                {/* Свой срок человек видит РАНЬШЕ вкладок и независимо от них:
+                    гость приходит по ссылке в одну статью, и вопрос «до какого
+                    числа это у меня открыто» у него возникает там же, а не на
+                    той вкладке, куда он, может быть, и не зайдёт. */}
+                <WikiGuestBanner grants={guestGrants} />
 
                 {tabs.length > 1 && (
                     <div className="flex gap-1 overflow-x-auto rounded-2xl bg-slate-100 p-1">
@@ -759,8 +805,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                         catalog={catalog}
                         features={features}
                         spaceId={activeSpace?.id || null}
-                        canCreate={!!capabilities.can_create}
-                        canEdit={canEdit}
+                        /* В гостевом пространстве человек — читатель, какая
+                           бы должность у него ни была: правил на запись ему
+                           там не выписывали, и «Режим редактора» в шапке
+                           витрины обещал бы то, чего сервер не даст. */
+                        canCreate={!!capabilities.can_create && !activeSpace?.guest_only}
+                        canEdit={canEdit && !activeSpace?.guest_only}
                         createRequest={createRequest}
                         onCreateConsumed={() => setCreateRequest(null)}
                         editTarget={editTarget}
@@ -889,6 +939,13 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
                                         setTab('library');
                                         setSearchTarget({ slug });
                                     }}
+                                    showToast={showToast}
+                                />
+                            ) : catalogMode === 'guests' ? (
+                                <WikiGuests
+                                    base={base}
+                                    headers={headers}
+                                    space={activeSpace}
                                     showToast={showToast}
                                 />
                             ) : catalogMode === 'catalog' ? (

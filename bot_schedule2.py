@@ -1061,8 +1061,12 @@ def _get_user_payload(user):
         # дверь снаружи ключом, который лежит внутри.
         if wiki_enabled and str(role or '').strip().lower() != 'super_admin':
             try:
+                # user_id — ради гостевого доступа: он выдаётся поимённо и
+                # мимо отдела, поэтому «есть ли что показывать» отвечает не
+                # только состав пространств (database.py).
                 wiki_enabled = db.department_has_wiki_space(
-                    ([department_id] if department_id else []) + list(headed_department_ids))
+                    ([department_id] if department_id else []) + list(headed_department_ids),
+                    user_id=user_id)
             except Exception:
                 wiki_enabled = True
     return {

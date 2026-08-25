@@ -224,6 +224,30 @@ class EditGuardTest(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json().get('code'), 'WIKI_SECTION_FORBIDDEN')
 
+    def test_create_without_any_target_is_refused(self):
+        """Некуда положить — значит не заводим, а не заводим «в никуда».
+
+        Запасной раздел не находится у того, у кого нет ни одного СВОЕГО
+        пространства. Раньше пустой список разделов проходил проверку насквозь
+        (запрещать нечего), и на свет появлялась статья БЕЗ раздела — «ловушка,
+        а не свобода» из шапки wiki_edit.default_section_id: наследовать права
+        ей не от чего, и не видит её никто, кроме автора; на проде так залипли
+        три штуки.
+
+        С 25.08.2026 таких людей стало больше: гостевой доступ пускает в вику
+        сотрудника, которому пространство не выдавали вовсе, а кнопка «Новая
+        статья» приходит от должности и отдела не знает.
+        """
+        self.addCleanup(setattr, wiki_edit, 'default_section_id',
+                        wiki_edit.default_section_id)
+        wiki_edit.default_section_id = lambda *a, **k: None
+
+        client = self.build(make_context('sv', [EDITOR_ROLE]),
+                            section_rules=[self.FULL_RULE])
+        response = client.post('/api/wiki/articles', json={'title': 'Новая'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json().get('code'), 'WIKI_NO_TARGET_SECTION')
+
     def test_move_to_a_foreign_section_is_refused(self):
         """Статью нельзя молча увезти в раздел, к которому прав нет."""
         client = self.build(make_context('sv', [EDITOR_ROLE]),

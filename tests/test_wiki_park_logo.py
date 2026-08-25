@@ -191,7 +191,7 @@ class _Harness:
             # подмена обязана делать то же, иначе гейт справочника не найдёт
             # способностей и упадёт вместо ответа.
             ('load_capabilities', _capabilities_setter(capabilities)),
-            ('spaces_for_user', lambda _c, _ctx: list(spaces)),
+            ('spaces_for_user', lambda _c, _ctx, **_k: list(spaces)),
         ):
             original = getattr(queries, name)
             setattr(queries, name, value)

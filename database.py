@@ -14893,7 +14893,7 @@ class Database:
             row = cursor.fetchone()
             return bool(row[0]) if row else True
 
-    def department_has_wiki_space(self, department_ids):
+    def department_has_wiki_space(self, department_ids, user_id=None):
         """Есть ли хоть одно пространство вики, выданное этим отделам.
 
         Тумблер departments.wiki_enabled отвечает на вопрос «раздел выдан?», а
@@ -14901,6 +14901,13 @@ class Database:
         Тез КЦ, не указанный ни в одном пространстве, видел раздел в меню и
         открывал пустую вику: тумблер у него включён, а содержимого нет и быть
         не может.
+
+        ГОСТЬ — второй законный ответ «да» (решение владельца 25.08.2026).
+        Гостевой доступ выдают любому сотруднику компании, в том числе из отдела,
+        которому вика не предназначена вовсе; периметр такого человека сервер
+        считает как гостевой (wiki/queries.py: исключение в _SPACE_GATE_SQL), но
+        пункта меню он без этой ветки не увидит — и придёт к разделу разве что
+        по прямой ссылке. Признак живёт ровно столько, сколько выдача.
 
         Пустой список отделов у пространства = видно всем, соглашение то же, что
         в периметре (wiki/queries.py). Нет таблицы (база до миграции) — считаем,
@@ -14921,10 +14928,16 @@ class Database:
                                              WHERE sd.space_id = sp.id)
                                 OR EXISTS (SELECT 1 FROM wiki_space_departments sd
                                             WHERE sd.space_id = sp.id
-                                              AND sd.department_id = ANY(%s)))
+                                              AND sd.department_id = ANY(%(depts)s)))
+                    ) OR EXISTS (
+                        SELECT 1 FROM wiki_guest_access g
+                         WHERE %(user)s::int IS NOT NULL
+                           AND g.user_id = %(user)s::int
+                           AND g.revoked_at IS NULL
+                           AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                     )
                     """,
-                    (wanted,),
+                    {'depts': wanted, 'user': user_id},
                 )
             except Exception:
                 return True

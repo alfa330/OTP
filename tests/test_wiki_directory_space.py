@@ -334,7 +334,7 @@ class _SpaceHarness:
         for name, value in (
             ('load_access_context', lambda _c, _u: dict(context)),
             ('granted_rule_rights', lambda _c, _s, _u: ({}, [])),
-            ('spaces_for_user', lambda _c, _ctx: list(spaces)),
+            ('spaces_for_user', lambda _c, _ctx, **_k: list(spaces)),
         ):
             original = getattr(queries, name)
             setattr(queries, name, value)

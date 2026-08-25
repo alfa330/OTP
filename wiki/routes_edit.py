@@ -255,8 +255,31 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
         targets = list(section_ids)
         if not targets:
             fallback = wiki_edit.default_section_id(
-                cursor, queries.spaces_for_user(cursor, ctx))
+                cursor,
+                # Запасной раздел ищем только в СВОИХ пространствах: гостевое
+                # человеку открыли на чтение, и складывать туда новые статьи
+                # он не должен даже случайно (queries.spaces_for_user).
+                queries.spaces_for_user(cursor, ctx, include_guest=False))
             targets = [fallback] if fallback else []
+        # Ни выбранного раздела, ни запасного — значит класть статью НЕКУДА, и
+        # заводить её нельзя. Раньше она заводилась: пустой список разделов
+        # проходил _forbidden_sections насквозь (запрещать нечего), и на свет
+        # появлялась статья без раздела — та самая «ловушка, а не свобода» из
+        # шапки wiki_edit.default_section_id: наследовать права ей не от чего,
+        # и не видит её НИКТО, кроме автора. На проде так залипли три штуки.
+        #
+        # Запасной раздел не находится ровно у того, у кого нет ни одного
+        # СВОЕГО пространства, — и с 25.08.2026 таких людей стало больше:
+        # гостевой доступ пускает в вику сотрудника, которому пространство не
+        # выдавали вовсе. Права писать у него нет ни на один раздел, а кнопка
+        # «Новая статья» приходит от должности и отдела не знает.
+        if not targets:
+            return jsonify({
+                "error": "Статью некуда положить: у вас нет ни одного раздела, "
+                         "в который вы вправе писать",
+                "code": "WIKI_NO_TARGET_SECTION",
+            }), 403
+
         denied = _forbidden_sections(cursor, ctx, targets)
         if denied:
             return _section_forbidden(denied, 'создавать статьи в')
@@ -290,7 +313,7 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             # Запасной раздел ищется только в пространствах автора: без этой
             # границы статья без раздела уехала бы в «Общий сотрудник» чужого
             # пространства (см. wiki_edit.default_section_id).
-            space_ids=queries.spaces_for_user(cursor, ctx),
+            space_ids=queries.spaces_for_user(cursor, ctx, include_guest=False),
         )
         # СТАТУС ПРИ СОЗДАНИИ. Раньше он игнорировался молча: create_article
         # всегда пишет 'draft', а кнопка «Опубликовать» в редакторе присылала
@@ -426,7 +449,8 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
             if denied:
                 return _section_forbidden(denied, 'переносить статьи в')
             wiki_edit.set_sections(cursor, article_id, data['section_ids'],
-                                   queries.spaces_for_user(cursor, ctx))
+                                   queries.spaces_for_user(cursor, ctx,
+                                                           include_guest=False))
             changed = True
         if 'tags' in data:
             wiki_edit.set_tags(cursor, article_id, data['tags'])

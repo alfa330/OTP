@@ -445,10 +445,14 @@ def move_section_to_space(cursor, section_id, *, space_id, parent_section_id=Non
 # Правила доступа к разделам
 # ─────────────────────────────────────────────────────────────────────────────
 
+# can_grant_guest стоит РЯДОМ с grant_subsections, а не в ряду прав, и порядок
+# здесь не косметика: это второй тумблер правила («на подразделы тоже» и «и
+# гостевой доступ пусть выдаёт»), а не седьмое право на содержимое. Ровно так же
+# он разложен в форме и в схеме — см. schema.GUEST_GRANT_COLUMN.
 _RULE_KEYS = ('id', 'section_id', 'section_name', 'subject_type', 'subject_id',
               'subject_role', 'can_read', 'can_create', 'can_edit', 'can_delete',
-              'can_publish', 'can_approve', 'grant_subsections', 'min_role_level',
-              'subject_label')
+              'can_publish', 'can_approve', 'grant_subsections', 'can_grant_guest',
+              'min_role_level', 'subject_label')
 
 
 def list_section_rules(cursor, section_id=None):
@@ -462,7 +466,8 @@ def list_section_rules(cursor, section_id=None):
         """
         SELECT r.id, r.section_id, s.name AS section_name, r.subject_type, r.subject_id,
                r.subject_role, r.can_read, r.can_create, r.can_edit, r.can_delete,
-               r.can_publish, r.can_approve, r.grant_subsections, r.min_role_level,
+               r.can_publish, r.can_approve, r.grant_subsections, r.can_grant_guest,
+               r.min_role_level,
                CASE r.subject_type
                    WHEN 'department'      THEN (SELECT name FROM departments WHERE id = r.subject_id)
                    WHEN 'department_head' THEN (SELECT 'Глава: ' || name FROM departments WHERE id = r.subject_id)
@@ -484,17 +489,29 @@ def list_section_rules(cursor, section_id=None):
 
 def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject_role,
                         permissions, grant_subsections, created_by,
-                        min_role_level=None):
-    """Создать или обновить правило. Уникальность — по паре (раздел, субъект)."""
+                        min_role_level=None, can_grant_guest=None):
+    """Создать или обновить правило. Уникальность — по паре (раздел, субъект).
+
+    can_grant_guest — право выдавать ГОСТЕВОЙ доступ на этот раздел. Отдельным
+    аргументом, а не седьмым ключом в permissions: словарь permissions целиком
+    уходит в способности (access.capabilities_from_grants), и лишний ключ в нём
+    превратился бы в право правки справочников (schema.GUEST_GRANT_COLUMN).
+
+    Значений у него ТРИ: True, False и None — «поле не прислали, не трогать».
+    Третье обязательно, потому что правило пересохраняют из двух разных форм
+    (матрица прав и точечное правило), и та из них, что про тумблер не знает,
+    молча гасила бы его на каждом сохранении. Молча — это 201 и «Правило
+    сохранено», а право выдавать доступ исчезло.
+    """
     cursor.execute(
         """
         INSERT INTO wiki_section_access_rules
             (section_id, subject_type, subject_id, subject_role,
              can_read, can_create, can_edit, can_delete, can_publish, can_approve,
-             grant_subsections, min_role_level, created_by)
+             grant_subsections, can_grant_guest, min_role_level, created_by)
         VALUES (%(section)s, %(stype)s, %(sid)s, %(srole)s,
                 %(read)s, %(create)s, %(edit)s, %(delete)s, %(publish)s, %(approve)s,
-                %(deep)s, %(level)s, %(by)s)
+                %(deep)s, COALESCE(%(guest)s, FALSE), %(level)s, %(by)s)
         ON CONFLICT (section_id, subject_type,
                      COALESCE(subject_id, -1), COALESCE(subject_role, ''),
                      COALESCE(min_role_level, -1))
@@ -505,6 +522,10 @@ def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject
                       can_publish       = EXCLUDED.can_publish,
                       can_approve       = EXCLUDED.can_approve,
                       grant_subsections = EXCLUDED.grant_subsections,
+                      -- Не EXCLUDED, а COALESCE по СТАРОМУ значению: NULL
+                      -- здесь означает «поле не прислали» (см. докстринг).
+                      can_grant_guest   = COALESCE(
+                          %(guest)s, wiki_section_access_rules.can_grant_guest),
                       min_role_level    = EXCLUDED.min_role_level,
                       updated_at        = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
         RETURNING id
@@ -517,7 +538,9 @@ def upsert_section_rule(cursor, *, section_id, subject_type, subject_id, subject
          'delete': permissions.get('can_delete', False),
          'publish': permissions.get('can_publish', False),
          'approve': permissions.get('can_approve', False),
-         'deep': grant_subsections, 'level': min_role_level, 'by': created_by},
+         'deep': grant_subsections,
+         'guest': None if can_grant_guest is None else bool(can_grant_guest),
+         'level': min_role_level, 'by': created_by},
     )
     return cursor.fetchone()[0]
 
@@ -562,6 +585,44 @@ def section_branch_department(cursor, section_id):
     )
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def branch_department_map(cursor):
+    """Отдел ветки для ВСЕХ активных разделов разом: {section_id: department_id}.
+
+    То же правило, что и в section_branch_department выше — собственный отдел
+    раздела или ближайшего предка, — но одним запросом вместо запроса на раздел.
+    Понадобилось гостевому доступу: там граница отдела применяется не к одному
+    разделу, а к списку («что я вправе открыть гостю»), и поштучный обход дерева
+    стоил бы сотни запросов на открытие формы.
+
+    Две реализации одного правила — риск, и он здесь осознанный: набор-версию
+    нельзя выразить через поштучную без N запросов. Держать их в согласии обязан
+    тест tests/test_wiki_guests.py — он гоняет обе по одному дереву.
+
+    Раздел без отдела в ключах ОТСУТСТВУЕТ, а не лежит со значением None:
+    «отдела нет» и «отдел неизвестен» здесь одно и то же, и оба означают отказ
+    для раздающего с границей (access.may_grant_to_subject).
+    """
+    cursor.execute(
+        """
+        WITH RECURSIVE up AS (
+            SELECT s.id AS root, s.parent_section_id, s.department_id, 0 AS depth
+              FROM wiki_sections s
+             WHERE s.status = 'active'
+            UNION ALL
+            SELECT up.root, p.parent_section_id, p.department_id, up.depth + 1
+              FROM wiki_sections p
+              JOIN up ON p.id = up.parent_section_id
+             -- Вверх идём только пока отдел не найден: первая же ветка с
+             -- отделом и есть ответ. Ограничитель глубины — как в
+             -- section_branch_department, на случай битого дерева.
+             WHERE up.department_id IS NULL AND up.depth < 50
+        )
+        SELECT root, department_id FROM up WHERE department_id IS NOT NULL
+        """
+    )
+    return {row[0]: row[1] for row in cursor.fetchall()}
 
 
 def grantable_people(cursor, *, max_role_level, department_ids=None):

@@ -54,6 +54,19 @@ my_wiki_roles AS (
       FROM wiki_roles r
       JOIN wiki_user_roles ur ON ur.wiki_role_id = r.id
      WHERE ur.user_id = %(user_id)s
+),
+-- Есть ли у человека хоть одна ДЕЙСТВУЮЩАЯ гостевая выдача. Одним признаком, а
+-- не списком: списком его спрашивает /ping ради подписи в шапке, а здесь он
+-- нужен как ключ от двери — тумблер отдела «Вики выдана» гостя не касается
+-- (wiki/routes.py). Без этого выдача сотруднику отдела, которому вики не
+-- выдали, оборачивалась бы 403 на каждом запросе: доступ есть, войти нельзя.
+my_guest_access AS (
+    SELECT 1
+      FROM wiki_guest_access g
+     WHERE g.user_id = %(user_id)s
+       AND g.revoked_at IS NULL
+       AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+     LIMIT 1
 )
 SELECT
     (SELECT role          FROM me)                                   AS otp_role,
@@ -64,7 +77,8 @@ SELECT
     COALESCE((SELECT array_agg(group_id) FROM my_groups),  '{}')     AS group_ids,
     COALESCE((SELECT json_agg(row_to_json(my_wiki_roles)) FROM my_wiki_roles), '[]') AS wiki_roles,
     COALESCE((SELECT access_mode FROM wiki_user_access_settings
-               WHERE user_id = %(user_id)s), 'auto')                 AS access_mode
+               WHERE user_id = %(user_id)s), 'auto')                 AS access_mode,
+    EXISTS (SELECT 1 FROM my_guest_access)                           AS has_guest_access
 """
 
 
@@ -80,7 +94,7 @@ def load_access_context(cursor, user_id):
         return None
 
     (otp_role, department_id, direction_id, wiki_enabled,
-     headed, groups, wiki_roles, access_mode) = row
+     headed, groups, wiki_roles, access_mode, has_guest_access) = row
     return {
         'user_id': int(user_id),
         'otp_role': otp_role,
@@ -91,6 +105,7 @@ def load_access_context(cursor, user_id):
         'group_ids': list(groups or []),
         'wiki_roles': list(wiki_roles or []),
         'access_mode': access_mode or 'auto',
+        'has_guest_access': bool(has_guest_access),
     }
 
 
@@ -159,23 +174,90 @@ def subject_params(subjects, user_id):
 # Граница пространства — ПОСЛЕДНЕЕ слово о том, что человек видит.
 #
 # Накладывается поверх любого способа получить раздел: правила, публичность,
-# собственный раздел, гостевой доступ, ручная выдача. Именно поэтому она
-# оформлена отдельным фильтром снаружи, а не ещё одним условием в каждой ветке
-# UNION: ветку добавят, условие забудут — и граница протечёт ровно там.
+# собственный раздел, ручная выдача. Именно поэтому она оформлена отдельным
+# фильтром снаружи, а не ещё одним условием в каждой ветке UNION: ветку добавят,
+# условие забудут — и граница протечёт ровно там.
 #
 # Пустой список отделов у пространства = видно всем (обратная совместимость,
-# см. wiki/schema.py). Собственный раздел и гостевая ссылка границу НЕ обходят:
-# пространство закрыли от отдела целиком, и «но это же его раздел» здесь не
-# аргумент — иначе Тез КЦ вернул бы себе доступ через любую из этих щелей.
+# см. wiki/schema.py). Собственный раздел границу НЕ обходит: пространство
+# закрыли от отдела целиком, и «но это же его раздел» здесь не аргумент.
+#
+# ЕДИНСТВЕННОЕ ИСКЛЮЧЕНИЕ — ИМЕННАЯ ГОСТЕВАЯ ВЫДАЧА (решение владельца
+# 25.08.2026). До неё исключений не было вовсе, и это было правильно: тогда
+# гостевую выдачу нельзя было СДЕЛАТЬ — двери не существовало, механика лежала
+# в схеме мёртвой, и «гостевая ссылка границу не обходит» стоило ровно ничего.
+#
+# Теперь владелец попросил обратного дословно: «чтобы можно было ЛЮБОМУ
+# сотруднику из icore предоставить гостевой доступ… отделом ограничен объект».
+# Сосед из другого отдела — это и есть весь смысл механики: коллеге по отделу
+# раздел и так открыт правилом. Оставь мы границу абсолютной — выдача сохранялась
+# бы, в списке значилась «действующей», /ping честно отдавал бы срок, а человек
+# видел бы пустой экран. Молчаливый отказ, от которого этот раздел лечили дважды.
+#
+# Щель узкая по построению, и расширить её нельзя случайно:
+#   * только разделы, выданные ЭТОМУ человеку поимённо (g.user_id), — общего
+#     послабления отделу или роли здесь нет и быть не может;
+#   * только пока выдача жива: revoked_at IS NULL и срок не вышел, потолок
+#     срока — 14 дней (schema.MAX_GUEST_DAYS);
+#   * только сам выданный раздел и его подразделы, если выдававший это отметил;
+#     соседние ветки того же пространства не открываются.
+# Всё остальное — публичные разделы чужого пространства, собственные разделы,
+# правила — границу по-прежнему не проходит.
 _SPACE_GATE_SQL = """
 SELECT p.id
   FROM picked p
   JOIN wiki_sections s ON s.id = p.id
- WHERE NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
+ WHERE p.id IN (SELECT id FROM guest_seed UNION SELECT id FROM guest_tree)
+    OR NOT EXISTS (SELECT 1 FROM wiki_space_departments sd
                     WHERE sd.space_id = s.space_id)
     OR EXISTS (SELECT 1 FROM wiki_space_departments sd
                 WHERE sd.space_id = s.space_id
                   AND sd.department_id = ANY(%(departments)s))
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ГОСТЕВАЯ ВЫДАЧА НА РАЗДЕЛ
+#
+# Раскрывается на подразделы, если так решил выдававший
+# (wiki_guest_access.include_subsections). Раскрытие нужно потому, что человек,
+# открывающий гостю «Регламент СЗоВ», имеет в виду раздел со всем, что в нём
+# лежит, — ровно как соседний тумблер grant_subsections у правила.
+#
+# Определение ОДНО на оба режима, автоматический и ручной. Скопированное в оба
+# запроса, оно однажды разойдётся: в исходной вике два вычислителя доступа
+# разошлись именно так, и дерево разделов со списком статей показывали разное
+# (см. шапку модуля). Границу пространства раскрытие не трогает — она наложена
+# снаружи union'а (_SPACE_GATE_SQL) и подразделами не обходится.
+#
+# Архивные подразделы не подхватываются (status = 'active' в обходе), а сам
+# выданный раздел берётся как есть — так же, как было до раскрытия: отзывать
+# гостю доступ к разделу, убранному в архив, незачем, он и так пуст.
+# ─────────────────────────────────────────────────────────────────────────────
+_GUEST_SECTIONS_CTE = """
+guest_seed AS (
+    SELECT g.section_id AS id, g.include_subsections AS deep
+      FROM wiki_guest_access g
+     WHERE g.user_id = %(user_id)s
+       AND g.section_id IS NOT NULL
+       AND g.revoked_at IS NULL
+       AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+),
+guest_tree AS (
+    SELECT id FROM guest_seed WHERE deep
+    UNION
+    SELECT child.id
+      FROM wiki_sections child
+      JOIN guest_tree parent ON child.parent_section_id = parent.id
+     WHERE child.status = 'active'
+),
+"""
+
+_GUEST_SECTIONS_PICK = """
+UNION
+SELECT id FROM guest_seed
+UNION
+SELECT id FROM guest_tree
 """
 
 
@@ -212,6 +294,7 @@ subtree AS (
       JOIN subtree parent ON child.parent_section_id = parent.id
      WHERE child.status = 'active'
 ),
+"""  + _GUEST_SECTIONS_CTE + """
 picked AS (
 SELECT id FROM subtree
 UNION
@@ -229,13 +312,7 @@ SELECT s.id FROM wiki_sections s
    )
 UNION
 SELECT id FROM wiki_sections WHERE status = 'active' AND owner_user_id = %(user_id)s
-UNION
-SELECT g.section_id
-  FROM wiki_guest_access g
- WHERE g.user_id = %(user_id)s
-   AND g.section_id IS NOT NULL
-   AND g.revoked_at IS NULL
-   AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+"""  + _GUEST_SECTIONS_PICK + """
 )
 """ + _SPACE_GATE_SQL
 
@@ -262,6 +339,7 @@ subtree AS (
       JOIN subtree parent ON child.parent_section_id = parent.id
      WHERE child.status = 'active'
 ),
+"""  + _GUEST_SECTIONS_CTE + """
 picked AS (
 SELECT id FROM subtree
 UNION
@@ -277,13 +355,7 @@ SELECT s.id FROM wiki_sections s
    )
 UNION
 SELECT id FROM wiki_sections WHERE status = 'active' AND owner_user_id = %(user_id)s
-UNION
-SELECT g.section_id
-  FROM wiki_guest_access g
- WHERE g.user_id = %(user_id)s
-   AND g.section_id IS NOT NULL
-   AND g.revoked_at IS NULL
-   AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+"""  + _GUEST_SECTIONS_PICK + """
 )
 """ + _SPACE_GATE_SQL
 
@@ -362,7 +434,7 @@ def articles_of_space(cursor, article_ids, space_id):
     return {row[0] for row in cursor.fetchall()}
 
 
-def spaces_for_user(cursor, ctx):
+def spaces_for_user(cursor, ctx, include_guest=True):
     """Пространства, которые человеку можно предложить в переключателе.
 
     Считается ПО ГРАНИЦЕ ПРОСТРАНСТВА, а не по разделам: пустое пространство,
@@ -371,6 +443,21 @@ def spaces_for_user(cursor, ctx):
     раздел, и конструктор окажется бесполезен ровно в момент создания.
 
     Супер-админ видит все активные — он и настраивает границы.
+
+    ГОСТЬ. Пространство, в котором человеку выдали раздел или статью, попадает
+    в переключатель, даже если его отдел за границей этого пространства. Иначе
+    исключение в _SPACE_GATE_SQL осталось бы половинчатым: разделы посчитаны,
+    а прийти к ним некуда — переключатель пуст, и вика открывается пустой.
+    Пространство появляется ровно на срок выдачи и исчезает вместе с ней.
+
+    include_guest=False убирает эту прибавку и отвечает на ДРУГОЙ вопрос — не
+    «куда человек может прийти», а «какое пространство ему ВЫДАНО». Разница не
+    косметическая: по второму списку пускают к справочникам «Парки» и «Офисы»
+    (routes_structure._space_scope), а гостя туда не звали. Его пригласили
+    прочитать один раздел, и открывать ему заодно телефоны парков — тем более
+    на правку, если по должности он редактор, — значит выдать сверх выданного.
+    Ровно это и случилось на первом прогоне 25.08.2026: тренер из отдела без
+    вики, получив гостевой доступ к одному разделу, завёл парк в справочнике.
     """
     if from_super_admin(ctx) or ctx['capabilities'].get('can_manage_access'):
         cursor.execute("SELECT id FROM wiki_spaces WHERE status = 'active'")
@@ -387,10 +474,24 @@ def spaces_for_user(cursor, ctx):
                              WHERE sd.space_id = sp.id)
                 OR EXISTS (SELECT 1 FROM wiki_space_departments sd
                             WHERE sd.space_id = sp.id
-                              AND sd.department_id = ANY(%s)))
+                              AND sd.department_id = ANY(%(departments)s))
+                -- Действующая именная выдача в этом пространстве. Раздел гостя
+                -- ищем и напрямую, и через разделы выданной статьи: выдать
+                -- можно и то и другое, а пространство у них общее.
+                OR (%(with_guest)s AND EXISTS (
+                    SELECT 1
+                      FROM wiki_guest_access g
+                      LEFT JOIN wiki_sections gs ON gs.id = g.section_id
+                      LEFT JOIN wiki_article_sections gas ON gas.article_id = g.article_id
+                      LEFT JOIN wiki_sections gass ON gass.id = gas.section_id
+                     WHERE g.user_id = %(user_id)s
+                       AND g.revoked_at IS NULL
+                       AND g.expires_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                       AND COALESCE(gs.space_id, gass.space_id) = sp.id)))
          ORDER BY sp.position, sp.id
         """,
-        (departments or [-1],),
+        {'departments': departments or [-1], 'user_id': ctx['user_id'],
+         'with_guest': bool(include_guest)},
     )
     return [row[0] for row in cursor.fetchall()]
 

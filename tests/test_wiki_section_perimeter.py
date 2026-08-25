@@ -45,8 +45,10 @@ wiki_sections AS (
 ),
 wiki_guest_access AS (
     SELECT section_id::int, user_id::int,
-           revoked_at::timestamp, expires_at::timestamp
-      FROM (VALUES {guests}) AS t(section_id, user_id, revoked_at, expires_at)
+           revoked_at::timestamp, expires_at::timestamp,
+           include_subsections::boolean
+      FROM (VALUES {guests}) AS t(section_id, user_id, revoked_at, expires_at,
+                                  include_subsections)
 ),
 -- Кому видно ПРОСТРАНСТВО. Пустая заглушка = видно всем, прежнее поведение;
 -- граница проверяется только там, где её наполняют. Стоит она снаружи всех
@@ -67,7 +69,8 @@ wiki_section_public_departments AS (
 ),
 """
 
-_EMPTY_GUESTS = "(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp)"
+_EMPTY_GUESTS = ("(NULL::int, NULL::int, NULL::timestamp, NULL::timestamp, "
+                 "NULL::boolean)")
 
 # Дерево без единого правила: VALUES не бывает пустым, поэтому «правил нет»
 # выражается строкой из NULL — она не совпадёт ни с одним разделом.
@@ -291,13 +294,105 @@ class SectionPerimeterSqlTest(unittest.TestCase):
                             space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
         self.assertNotIn(COMMON, got)
 
-    def test_space_border_beats_guest_access(self):
-        """Действующая гостевая ссылка тоже не пробивает границу пространства."""
-        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp)" % COMMON]
+    def test_guest_access_is_the_one_exception_to_the_space_border(self):
+        """ИМЕННАЯ гостевая выдача — единственное, что пробивает границу.
+
+        До 25.08.2026 здесь проверялось обратное, и это было правильно: выдать
+        гостевой доступ было НЕЧЕМ — двери не существовало, механика лежала в
+        схеме мёртвой, и «гостевая ссылка границу не обходит» стоило ровно
+        ничего.
+
+        Решение владельца 25.08.2026 обратное и дословное: «чтобы можно было
+        ЛЮБОМУ сотруднику из icore предоставить гостевой доступ… отделом
+        ограничен объект». Сосед из другого отдела — весь смысл механики:
+        коллеге по своему отделу раздел и так открыт правилом. Оставь мы границу
+        абсолютной, выдача сохранялась бы, в списке значилась «действующей»,
+        /ping отдавал бы срок — а человек видел бы пустой экран.
+
+        Щель узкая: только этому человеку, только выданный раздел, только пока
+        выдача жива. Соседние ветки того же пространства проверяются ниже.
+        """
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE)" % COMMON]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertIn(COMMON, got)
+
+    def test_guest_opens_only_what_was_granted_across_the_border(self):
+        """За границей открывается ВЫДАННЫЙ раздел, а не пространство целиком.
+
+        Главная проверка узости щели: раздел 7 выдан, публичный он или нет —
+        неважно, а разделы 1–6 того же пространства обязаны остаться закрытыми,
+        хотя граница у них одна и та же.
+        """
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE)" % COMMON]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertEqual({COMMON}, got)
+
+    def test_revoked_guest_grant_does_not_cross_the_border(self):
+        """Отозванная выдача границу не пробивает — щель закрывается вместе с ней."""
+        guests = ["(%d, 10, CURRENT_TIMESTAMP::timestamp, "
+                  "'2099-01-01'::timestamp, FALSE)" % COMMON]
         got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
                             rules=[], guests=guests,
                             space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
         self.assertNotIn(COMMON, got)
+
+    def test_guest_grant_opens_subsections_when_asked(self):
+        """Гостевая выдача на раздел раскрывается на подразделы.
+
+        Так тумблер в форме выдачи ведёт себя как соседний с ним
+        grant_subsections у правила: человек, открывающий гостю «Оператор»,
+        имеет в виду раздел со всем, что в нём лежит. До 25.08.2026 ветка была
+        плоской, и гость видел один узел дерева без содержимого.
+        """
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, TRUE)" % OPERATOR]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests)
+        self.assertIn(OPERATOR, got)
+        self.assertIn(BRANCH_OP, got)
+        self.assertIn(BRANCH_OTP, got)
+
+    def test_guest_grant_without_flag_stays_on_one_section(self):
+        """Снятый тумблер оставляет выдачу ровно на одном разделе.
+
+        Частный случай, ради которого галочка и оставлена в форме: открыть один
+        раздел, не открывая всё, что под ним.
+        """
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, FALSE)" % OPERATOR]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests)
+        self.assertIn(OPERATOR, got)
+        self.assertNotIn(BRANCH_OP, got)
+        self.assertNotIn(BRANCH_OTP, got)
+
+    def test_expired_guest_grant_opens_no_subsections(self):
+        """Истёкшая выдача не раскрывается ни на раздел, ни на подразделы.
+
+        Проверяем отдельно: рекурсия могла бы утащить подразделы за собой,
+        отфильтруй мы срок ПОСЛЕ обхода, а не до него.
+        """
+        guests = ["(%d, 10, NULL::timestamp, '2000-01-01'::timestamp, TRUE)" % OPERATOR]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests)
+        self.assertNotIn(OPERATOR, got)
+        self.assertNotIn(BRANCH_OP, got)
+
+    def test_guest_subsections_cross_the_border_too(self):
+        """Раскрытие на подразделы проходит границу вместе с самой выдачей.
+
+        Иначе исключение оказалось бы половинчатым: выданный раздел открылся бы,
+        а его содержимое — нет, и гость из чужого отдела видел бы пустую папку.
+        Ветка BRANCH_OTP тут тоже открывается — она подраздел выданного; чужие
+        ветки того же пространства проверены выше отдельным сценарием.
+        """
+        guests = ["(%d, 10, NULL::timestamp, '2099-01-01'::timestamp, TRUE)" % OPERATOR]
+        got = self.sections(role='operator', department_id=DEPT_OTP, user_id=10,
+                            rules=[], guests=guests,
+                            space_departments=['(%d, %d)' % (SPACE, DEPT_OP)])
+        self.assertEqual({OPERATOR, BRANCH_OP, BRANCH_OTP}, got)
 
     def test_other_space_border_does_not_touch_this_one(self):
         """Список, выставленный ЧУЖОМУ пространству, на наше не действует."""

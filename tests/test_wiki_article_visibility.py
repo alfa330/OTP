@@ -336,6 +336,75 @@ class ArticleVisibilitySqlTest(unittest.TestCase):
         )
         self.assertEqual(got, set())
 
+    # ── Гостевой доступ и граница пространства ───────────────────────────
+    #
+    # Границ ДВЕ, и они независимы: одна отсекает разделы (queries), вторая —
+    # сами статьи (этот запрос). Решение владельца 25.08.2026 открыло гостю
+    # чужое пространство, и открыть его надо в ОБЕИХ: пусти мы гостя только к
+    # разделам, раздел из чужого отдела появился бы в дереве, а статьи в нём
+    # остались бы отфильтрованы здесь. Пустая папка вместо регламента — тот же
+    # молчаливый отказ, ради которого исключение и делали.
+    def test_guest_article_grant_crosses_the_space_border(self):
+        """Выданную СТАТЬЮ гость видит, даже если пространство закрыто его отделу."""
+        got = self.visible(
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
+            sections=["(1, 5)"],
+            guests=["(1, 10, NULL::timestamp, (CURRENT_TIMESTAMP + interval '1 day')::timestamp)"],
+            space_departments=['(1, 367)'],
+        )
+        self.assertEqual(got, {1})
+
+    def test_guest_section_grant_crosses_the_space_border(self):
+        """И статьи выданного РАЗДЕЛА тоже.
+
+        Раздел сюда приезжает уже посчитанным (allowed_sections): его пустила
+        гостевая выдача, пробившая границу разделов. Здесь проверяется, что
+        вторая граница на этом же не споткнётся.
+        """
+        got = self.visible(
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
+            sections=["(1, 5)"], allowed_sections=[5],
+            space_departments=['(1, 367)'],
+        )
+        self.assertEqual(got, {1})
+
+    def test_article_rule_still_does_not_cross_the_space_border(self):
+        """А ПРАВИЛО на статью — по-прежнему нет. Это и есть смысл границы.
+
+        Тот самый инцидент, ради которого границу на статью и завели:
+        статья-классификатор роздана всем ролям OTP (restricted, семь grant-правил),
+        разделы у неё игнорируются по определению режима — и она открывалась Тез
+        КЦ, которому вика не выдана ни одним пространством. Исключение для гостя
+        эту дверь открыть не должно: гостевая выдача именная и с часами, а
+        правило на должность действует по всей компании и бессрочно.
+        """
+        got = self.visible(
+            articles=["(1, 'published', 'restricted', false, 99, NULL, NULL)"],
+            sections=["(1, 5)"],
+            rules=["(1, 'otp_role', NULL, 'operator', 'grant', true, NULL)"],
+            space_departments=['(1, 367)'],
+        )
+        self.assertEqual(got, set())
+
+    def test_authorship_still_does_not_cross_the_space_border(self):
+        """Авторство — тоже нет: «но это же моя статья» границу не отменяет."""
+        got = self.visible(
+            articles=["(1, 'published', 'inherit', false, 10, NULL, NULL)"],
+            sections=["(1, 5)"],
+            space_departments=['(1, 367)'],
+        )
+        self.assertEqual(got, set())
+
+    def test_expired_guest_grant_does_not_cross_the_space_border(self):
+        """Щель закрывается вместе с выдачей, а не остаётся открытой навсегда."""
+        got = self.visible(
+            articles=["(1, 'published', 'inherit', false, 99, NULL, NULL)"],
+            sections=["(1, 5)"],
+            guests=["(1, 10, NULL::timestamp, (CURRENT_TIMESTAMP - interval '1 day')::timestamp)"],
+            space_departments=['(1, 367)'],
+        )
+        self.assertEqual(got, set())
+
     # ── Субъекты ─────────────────────────────────────────────────────────
     def test_grant_by_department(self):
         got = self.visible(

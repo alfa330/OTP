@@ -114,7 +114,7 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers):
         targets = list(section_ids)
         if not targets:
             fallback = wiki_edit.default_section_id(
-                cursor, queries.spaces_for_user(cursor, ctx))
+                cursor, queries.spaces_for_user(cursor, ctx, include_guest=False))
             targets = [fallback] if fallback else []
         denied = forbidden_sections(cursor, ctx, targets)
         if denied:
@@ -133,7 +133,7 @@ def register(bp, wiki_route, db, log_ip, session_id_provider, helpers):
             article_type='general',
             section_ids=section_ids, tags=data.get('tags') or [],
             author_id=ctx['user_id'],
-            space_ids=queries.spaces_for_user(cursor, ctx),
+            space_ids=queries.spaces_for_user(cursor, ctx, include_guest=False),
         )
 
         wiki_migration.record(

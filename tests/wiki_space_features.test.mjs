@@ -53,6 +53,27 @@ test('«Главная» не выключается, но её половины
     assert.equal(flags.library_park_rail, false);
 });
 
+test('в гостевом пространстве нет справочников, отчётов и журнала', () => {
+    // Гостя позвали прочитать один раздел на две недели. Справочники парков и
+    // офисов, аналитика и журнал в приглашение не входят, и сервер их такому
+    // человеку не отдаёт (routes_structure._space_scope). Вкладка, которая
+    // отвечает отказом, — тот же молчаливый отказ, только наоборот.
+    const guest = effectiveFeatures({ guest_only: true, features: {} });
+    for (const key of ['parks', 'offices', 'analytics', 'audit', 'overview']) {
+        assert.equal(guest[key], false, key);
+    }
+    // Витрина и помощник остаются: без них приглашение бессмысленно — прийти
+    // будет некуда, а показывают они ровно то, что человеку выдали.
+    assert.equal(guest.assistant, true);
+    assert.equal(guest.catalog, true);
+
+    // В своём пространстве всё на месте.
+    const own = effectiveFeatures({ features: {} });
+    for (const key of ['parks', 'offices', 'analytics', 'audit', 'overview']) {
+        assert.equal(own[key], true, key);
+    }
+});
+
 test('ключи совпадают с SPACE_FEATURES на сервере', () => {
     // Разъехавшись, списки дают тумблер, выключающий то, чего сервер не знает,
     // и наоборот — вкладку, которую сервер уже считает выключенной.

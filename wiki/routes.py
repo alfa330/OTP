@@ -21,6 +21,7 @@ from functools import wraps
 from flask import Blueprint, jsonify, request
 
 from . import access as wiki_access
+from . import guests as wiki_guests
 from . import queries, structure
 from .schema import CAPABILITY_TITLES
 
@@ -129,9 +130,18 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         # Супер-админа и администратора структуры тумблер не
                         # касается: иначе, закрыв раздел своему отделу, они
                         # потеряли бы доступ к настройке самого тумблера.
+                        # ГОСТЯ тумблер не касается тоже (решение владельца
+                        # 25.08.2026): выдать доступ можно любому сотруднику
+                        # компании, а вика выдана не каждому отделу. Иначе
+                        # выдача сотруднику такого отдела молча оборачивалась бы
+                        # 403 на каждом запросе — доступ есть, войти нельзя.
+                        # Внутрь он попадает именно как гость: периметр ему
+                        # считают те же запросы, и сверх выданного не откроется
+                        # ничего.
                         if not context.get('wiki_enabled', True) and not (
                                 wiki_access.normalize_role(context['otp_role']) == 'super_admin'
-                                or capabilities.get('can_manage_structure')):
+                                or capabilities.get('can_manage_structure')
+                                or context.get('has_guest_access')):
                             return jsonify({
                                 "error": "Раздел «Вики» не выдан вашему отделу",
                                 "code": "WIKI_DEPARTMENT_DISABLED",
@@ -221,17 +231,58 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
             "subjects": ctx['subjects'],
         }
         if ready:
+            # Гостевой доступ отвечает на два разных вопроса, и оба — здесь.
+            #
+            # guest_access — «до какого срока это открыто МНЕ». Срок обязан быть
+            # виден на ЛЮБОЙ вкладке вики, а ping запрашивается на каждом заходе
+            # в раздел; отдельная ручка означала бы второй запрос ради подписи в
+            # шапке и вкладку, на которой подпись почему-то не появляется.
+            #
+            # can_grant_guest — «вправе ли я выдавать», по нему рисуется половина
+            # «Гостевой доступ». Способностью это право не выражается: оно
+            # адресное и живёт в правиле раздела, поэтому и считается запросом,
+            # а не читается из ctx['capabilities'].
+            #
+            # Оба вызова под try: они читают колонки, добавленные миграцией
+            # 25.08.2026, а init_wiki_schema идёт одним савпоинтом — чужая
+            # падающая миграция унесла бы и эти две колонки (инцидент описан в
+            # wiki/schema.py про CREATE UNIQUE INDEX). Ронять на этом /ping
+            # нельзя по его же смыслу: диагностика, которая сама отдаёт 500,
+            # бесполезна ровно тогда, когда она нужна. Без гостевых полей раздел
+            # выглядит как до 25.08.2026, а не сломанным.
+            try:
+                payload['guest_access'] = wiki_guests.my_active_grants(
+                    cursor, ctx['user_id'])
+                payload['can_grant_guest'] = (
+                    wiki_access.normalize_role(ctx['otp_role']) == 'super_admin'
+                    or (bool(ctx['wiki_roles'])
+                        and bool(ctx['capabilities'].get('can_manage_access')))
+                    or wiki_guests.may_grant_guest_anywhere(
+                        cursor, ctx['subjects'], ctx['user_id']))
+            except Exception:  # noqa: BLE001 — см. комментарий выше
+                import logging
+                logging.exception('wiki: гостевой доступ недоступен в /ping')
+                payload['guest_access'] = []
+                payload['can_grant_guest'] = False
             payload['counters'] = queries.counters(cursor)
             # Пространства для переключателя — вместе с тумблерами вкладок.
             # Именно здесь, а не в /structure: набор вкладок нужен раньше, чем
             # дерево разделов, и вкладка «Помощник» не должна мигнуть у того,
             # кому её выключили. Порядок и границу считает сервер.
             allowed = set(queries.spaces_for_user(cursor, ctx))
+            # Пространства, ВЫДАННЫЕ человеку, — без гостевой прибавки. Разница
+            # между списками и есть «я здесь в гостях»: по ней интерфейс не
+            # показывает гостю справочники и отчёты пространства, куда его
+            # позвали прочитать один раздел. Сервер их и так не отдаст
+            # (routes_structure._space_scope), но вкладка, которая отвечает
+            # отказом, — это тот же молчаливый отказ, только наоборот.
+            own = set(queries.spaces_for_user(cursor, ctx, include_guest=False))
             # Счётчик пространств — по СВОИМ, а не по всем: «Пространств: 2» у
             # сотрудника Тез КЦ сообщало бы, что рядом живёт чужая вика.
             payload['counters']['spaces'] = len(allowed)
             payload['spaces'] = [
-                {k: sp[k] for k in ('id', 'name', 'code', 'icon', 'features')}
+                dict({k: sp[k] for k in ('id', 'name', 'code', 'icon', 'features')},
+                     guest_only=sp['id'] not in own)
                 for sp in structure.list_spaces(cursor)
                 if sp['id'] in allowed
             ]
@@ -256,6 +307,12 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     # про каркас Blueprint'а, а не превратился во второй bot_schedule2.py.
     from . import routes_structure
     routes_structure.register(bp, wiki_route, db, _ip)
+
+    # Гостевой доступ — сразу за структурой: право выдавать живёт в правиле
+    # раздела (wiki_section_access_rules.can_grant_guest), и читают его обе
+    # стороны — «Структура» ставит тумблер, а этот модуль по нему пускает.
+    from . import routes_guests
+    routes_guests.register(bp, wiki_route, db, _ip)
 
     from . import routes_articles
     routes_articles.register(bp, wiki_route, db, _ip, gcs or {})

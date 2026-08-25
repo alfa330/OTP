@@ -63,6 +63,7 @@ SPACE_FEATURES = (
     'catalog_articles',   #   └ половина «Статьи»
     'catalog_structure',  #   └ половина «Структура»
     'catalog_trainers',   #   └ половина «Тренажёры»
+    'catalog_guests',     #   └ половина «Гостевой доступ»
     'overview',           # вкладка «Обзор»
     'parks',              # вкладка «Парки»
     'offices',            # вкладка «Офисы»
@@ -128,6 +129,22 @@ CAPABILITY_COLUMNS = (
     'can_read', 'can_create', 'can_edit', 'can_delete', 'can_publish', 'can_approve',
     'can_manage_users', 'can_manage_structure', 'can_manage_access',
 )
+
+# Право выдавать ГОСТЕВОЙ доступ на раздел. Отдельной константой, а не седьмым
+# элементом PERMISSION_COLUMNS, и это не косметика: те шесть прав описывают, что
+# человек делает С СОДЕРЖИМЫМ, и из них выводятся способности
+# (access.capabilities_from_grants), а любая способность сверх чтения открывает
+# справочники «Парки» и «Офисы» (access.has_write_capability). Попади это право
+# в общий список — и тумблер «пусть выдаёт гостевой доступ» молча раздал бы
+# правку телефонов парков. Страж стоит в tests/test_wiki_guests.py.
+GUEST_GRANT_COLUMN = 'can_grant_guest'
+
+# Потолок срока гостевого доступа — решение владельца 25.08.2026: «думаю,
+# макс — 14 дней». Выдача на полгода перестаёт быть гостевой и подменяет собой
+# правило раздела: правило видно в «Структуре» и объясняет себя, выдача — нет.
+# Потолок действует и на продление: продлевают от «сейчас», а не от прежнего
+# срока, иначе тем же нажатием набирается любой горизонт.
+MAX_GUEST_DAYS = 14
 
 # Человекочитаемые названия прав — для внятного отказа. Живут здесь, рядом с
 # самими колонками, а не в routes.py: их читают и декоратор роута, и оба места,
@@ -1544,6 +1561,50 @@ _ORG_STATEMENTS = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ГОСТЕВОЙ ДОСТУП
+#
+# Таблица wiki_guest_access заведена вместе с базовыми (см. _STATEMENTS выше), и
+# ЧИТАЮЩАЯ сторона по ней работала с самого начала: выданный раздел попадает в
+# периметр (queries._AUTO_SECTIONS_SQL), выданная статья — в витрину
+# (articles._VISIBLE_ARTICLES_SQL). Не было ВЫДАЮЩЕЙ стороны: ни двери, ни
+# права, ни срока в интерфейсе — доступ существовал только в схеме. Здесь
+# появляются две недостающие колонки.
+#
+# can_grant_guest — право выдавать гостевой доступ на ЭТОТ раздел. Живёт в
+# правиле раздела, а не в способностях: решение владельца 25.08.2026 — «в
+# структуре, кто видит раздел, добавить переключатель гостевой доступ». Право
+# адресное: его дают человеку, отделу, группе или направлению на конкретной
+# ветке, а не выписывают должностью на всю вику. Почему колонка не входит в
+# PERMISSION_COLUMNS — см. GUEST_GRANT_COLUMN выше.
+#
+# include_subsections — раскрывается ли выдача на подразделы. По умолчанию TRUE,
+# потому что человек, выдающий «Регламент СЗоВ», имеет в виду раздел со всем,
+# что в нём лежит; ровно один узел дерева — частный случай, и он остаётся
+# галочкой в форме. Прежним строкам TRUE ничего не расширяет сверх ожидаемого:
+# подразделы того же раздела и есть то, за чем гостя посылали. Граница
+# пространства при этом на месте — она наложена снаружи union'а
+# (queries._SPACE_GATE_SQL) и подразделами не обходится.
+# ─────────────────────────────────────────────────────────────────────────────
+_GUEST_STATEMENTS = [
+    "ALTER TABLE wiki_section_access_rules ADD COLUMN IF NOT EXISTS "
+    "can_grant_guest BOOLEAN NOT NULL DEFAULT FALSE;",
+
+    "ALTER TABLE wiki_guest_access ADD COLUMN IF NOT EXISTS "
+    "include_subsections BOOLEAN NOT NULL DEFAULT TRUE;",
+
+    # Список выдач читается с двух сторон: «кому открыт этот раздел» и «что я
+    # раздал». Индекс по получателю уже есть (idx_wiki_guest_active), а этих
+    # трёх не было вовсе — в оригинале у таблицы не было ни одного.
+    "CREATE INDEX IF NOT EXISTS idx_wiki_guest_section "
+    "ON wiki_guest_access (section_id) WHERE section_id IS NOT NULL;",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_guest_article "
+    "ON wiki_guest_access (article_id) WHERE article_id IS NOT NULL;",
+    "CREATE INDEX IF NOT EXISTS idx_wiki_guest_granted_by "
+    "ON wiki_guest_access (granted_by, created_at DESC);",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ПРОСТРАНСТВО КАК ГРАНИЦА
 #
 # Раньше пространство было буфером ВНУТРИ одной вики: «Коммерческий отдел»,
@@ -2056,6 +2117,11 @@ def init_wiki_schema(cursor):
         cursor.execute(statement)
     for table in ('wiki_section_access_rules', 'wiki_article_access_rules'):
         cursor.execute(_subject_type_check_statement(table))
+
+    # Гостевой доступ — сразу за правилами разделов: одна из колонок ALTER'ится
+    # именно в wiki_section_access_rules, и до неё таблица обязана существовать.
+    for statement in _GUEST_STATEMENTS:
+        cursor.execute(statement)
 
     # Пространства — после _ORG_STATEMENTS: список отделов ссылается на
     # departments, а переезд читает wiki_section_public_departments, которая

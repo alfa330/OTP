@@ -23,6 +23,7 @@
     "test:wiki-section-picker": "node --test tests/wiki_section_picker.test.mjs",
     "test:wiki-structure-tree": "node --test tests/wiki_structure_tree.test.mjs",
     "test:wiki-space-features": "node --test tests/wiki_space_features.test.mjs",
+    "test:wiki-guest-access": "node --test tests/wiki_guest_access.test.mjs",
     "test:wiki-api-base": "node --test tests/wiki_api_base.test.mjs",
     "test:wiki-article-index": "node --test tests/wiki_article_index.test.mjs",
   "test:wiki-section-grants": "node --test tests/wiki_section_grants.test.mjs",

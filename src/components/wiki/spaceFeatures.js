@@ -33,6 +33,7 @@ export const SPACE_TABS = [
             { key: 'catalog_articles', label: 'Статьи' },
             { key: 'catalog_structure', label: 'Структура' },
             { key: 'catalog_trainers', label: 'Тренажёры' },
+            { key: 'catalog_guests', label: 'Гостевой доступ' },
         ],
     },
     { key: 'overview', label: 'Обзор' },
@@ -58,11 +59,24 @@ export const spaceFeatures = (raw) => {
  *  ответил, раздел обязан выглядеть как обычно, а не мигать пустой шапкой. */
 export const featureOn = (space, key) => (space ? spaceFeatures(space.features)[key] : true);
 
+/* Чего нет у ГОСТЯ.
+ *
+ * Пространство, в котором человеку выдали один раздел на две недели, приходит
+ * с признаком guest_only (см. /api/wiki/ping). Гостя позвали ПРОЧИТАТЬ статью —
+ * справочники парков и офисов, отчёт по базе знаний и журнал в приглашение не
+ * входят, и сервер их такому человеку не отдаёт. Вкладка, которая отвечает
+ * отказом, — тот же молчаливый отказ, только с обратной стороны стола.
+ *
+ * Витрина и помощник остаются: обе показывают ровно то, что человеку выдали,
+ * и без них приглашение бессмысленно — прийти будет некуда. */
+const GUEST_HIDDEN = ['parks', 'offices', 'analytics', 'audit', 'overview'];
+
 /* Родитель выключен — выключены и его половины. Возвращаем именно это, а не
  * «как записано»: половина, оставшаяся включённой под выключенной вкладкой,
  * однажды всплывёт где-нибудь ещё (в фильтре типов, в подборке, в счётчике). */
 export const effectiveFeatures = (space) => {
     const flags = spaceFeatures(space?.features);
+    if (space?.guest_only) GUEST_HIDDEN.forEach((key) => { flags[key] = false; });
     SPACE_TABS.forEach((tab) => {
         if (tab.locked || flags[tab.key]) return;
         (tab.children || []).forEach((child) => { flags[child.key] = false; });

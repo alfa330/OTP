@@ -10,6 +10,7 @@ from flask import jsonify, redirect, request
 
 from . import access as wiki_access
 from . import articles as wiki_articles
+from . import guests as wiki_guests
 from . import migration as wiki_migration
 from . import parks as wiki_parks
 from . import perimeter as wiki_perimeter
@@ -297,6 +298,16 @@ def register(bp, wiki_route, db, log_ip, gcs):
         article_rules = wiki_articles.article_rules_for_user(
             cursor, [article['id']], subjects, ctx['user_id']).get(article['id'], [])
 
+        # Гостевая выдача: до какого срока статья открыта этому человеку.
+        # Считается ДО прав, потому что она и есть основание читать, когда
+        # других оснований нет: правил на человека не выписано, автором он не
+        # является, и без этой строки resolve_article_permissions вернул бы
+        # can_read=False на статье, которую витрина ему уже показала (гость
+        # попадает в _VISIBLE_ARTICLES_SQL своей веткой). Расхождение витрины и
+        # прав читалось бы как «статья открылась пустой».
+        guest_until = wiki_guests.article_grant_expiry(
+            cursor, ctx['user_id'], article['id'], article['section_ids'])
+
         permissions = wiki_access.resolve_article_permissions(
             capabilities=ctx['capabilities'],
             visibility_mode=article['visibility_mode'],
@@ -306,6 +317,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
             otp_role=ctx['otp_role'],
             is_article_owner=(article['author_id'] == ctx['user_id']
                               or article['owner_user_id'] == ctx['user_id']),
+            guest_allows_read=bool(guest_until),
         )
 
         # Обход строгого режима обязан попасть в журнал: это и есть смысл режима.
@@ -322,6 +334,15 @@ def register(bp, wiki_route, db, log_ip, gcs):
 
         article['permissions'] = wiki_access.permissions_only(permissions)
         article['why'] = permissions['_reason']
+        # Срок кладём в ответ, только если гостевая выдача и ЕСТЬ основание
+        # читать (reason сказал именно это). У человека, которому статья открыта
+        # и правилом тоже, подпись «доступ до 5 сентября» была бы неправдой:
+        # пятого он её увидит как обычно, и предупреждение об исчезновении
+        # доступа читалось бы как сбой.
+        article['guest_access'] = (
+            {'expires_at': guest_until.isoformat(),
+             'days_left': wiki_guests.days_left(guest_until, wiki_guests.now_almaty())}
+            if guest_until and permissions['_reason'] == 'гостевой доступ' else None)
         article['backlinks'] = wiki_articles.backlinks(cursor, article['id'], visible)
         article['is_favorite'] = wiki_articles.is_favorite(
             cursor, ctx['user_id'], article['id'])
@@ -369,7 +390,11 @@ def register(bp, wiki_route, db, log_ip, gcs):
             # витрины стояла бы битая картинка. Границей служит то же
             # пространство, что и у самого справочника.
             spaces = wiki_parks.logo_space_ids(cursor, record['id'])
-            if not spaces or not (spaces & set(queries.spaces_for_user(cursor, ctx))):
+            # include_guest=False: логотип парка — часть СПРАВОЧНИКА, а его
+            # гостю не открывают (routes_structure.request_space). Границей
+            # служит то же пространство и то же правило, что у справочника.
+            if not spaces or not (spaces & set(queries.spaces_for_user(
+                    cursor, ctx, include_guest=False))):
                 return jsonify({"error": "Файл не найден"}), 404
 
         url = gcs['signed_url'](
