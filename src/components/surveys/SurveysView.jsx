@@ -6,14 +6,27 @@ import {
     APPLE_FONT,
     IosHint,
     IosMenu,
+    IosModal,
     IosSection,
     IosSegmented,
     IosToggle,
     iosBtnGhost,
+    iosBtnPrimary,
+    iosBtnSecondary,
     iosCard,
     iosInput
 } from '../ui/ios';
 import { buildAnswerRuns, surveyRunLabel } from './surveyRuns';
+import {
+    buildDraftRecord,
+    clearSurveyDraft,
+    describeDraftRecord,
+    getBrowserStorage,
+    isDraftMeaningful,
+    readSurveyDraft,
+    surveyDraftStorageKey,
+    writeSurveyDraft
+} from './builderDraft';
 
 const QUESTION_TYPES = [
     { value: 'single', label: 'Один вариант' },
@@ -504,6 +517,9 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     // Выбранный запуск на вкладке «Ответы»: null — показываем карточки запусков.
     const [openedRunSurveyId, setOpenedRunSurveyId] = useState(null);
     const [departmentFilter, setDepartmentFilter] = useState('');
+    // Незаконченный черновик, найденный в браузере: пока он здесь, показываем
+    // напоминание и ждём решения человека — продолжить или начать заново.
+    const [pendingDraftRecord, setPendingDraftRecord] = useState(null);
     const showToastRef = useRef(showToast);
     const onSurveyProgressChangedRef = useRef(onSurveyProgressChanged);
 
@@ -1506,6 +1522,34 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         });
     };
 
+    /* ─── Черновик конструктора ───
+        Форма создания длинная, а страница может уехать из-под рук: приложение
+        само уходит в перезагрузку, когда не удалось обновить токен, да и
+        обычное обновление вкладки раньше стирало всё введённое. Поэтому
+        незаконченный черновик лежит рядом с браузером, а при следующем заходе
+        в конструктор человека спрашивают, продолжать его или начинать заново.
+
+        Слот один: последний открытый конструктор перезаписывает предыдущий
+        черновик. Двух незаконченных опросов сразу не бывает, а выбор «какой из
+        двух черновиков продолжить» стоил бы дороже, чем помогает. */
+    const draftStorage = useMemo(() => (canManage ? getBrowserStorage() : null), [canManage]);
+    const draftStorageKey = useMemo(() => surveyDraftStorageKey(user?.id), [user?.id]);
+    const draftSaveTimerRef = useRef(null);
+    // Пока флаг поднят, отложенная запись не сработает: иначе «Начать заново»
+    // и успешное создание тут же вернули бы стёртый черновик обратно.
+    const draftPersistPausedRef = useRef(false);
+    const flushDraftSaveRef = useRef(null);
+
+    const forgetStoredDraft = useCallback(() => {
+        draftPersistPausedRef.current = true;
+        if (draftSaveTimerRef.current) {
+            window.clearTimeout(draftSaveTimerRef.current);
+            draftSaveTimerRef.current = null;
+        }
+        flushDraftSaveRef.current = null;
+        clearSurveyDraft(draftStorage, draftStorageKey);
+    }, [draftStorage, draftStorageKey]);
+
     const resetBuilder = useCallback(() => {
         setRepeatSourceSurveyId(null);
         setEditingSurveyId(null);
@@ -1514,9 +1558,104 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
     }, []);
 
     const closeBuilder = useCallback(() => {
+        // Закрыли конструктор руками — это и есть ответ «не продолжать»:
+        // держать черновик дальше значило бы спрашивать о нём при каждом
+        // заходе. Правка уже созданного опроса чужой черновик не трогает —
+        // там источник истины сервер, и хранить нечего.
+        if (editingSurveyId == null) forgetStoredDraft();
         setShowBuilder(false);
         resetBuilder();
+    }, [editingSurveyId, forgetStoredDraft, resetBuilder]);
+
+    // Пишем с задержкой: каждая буква в названии — не повод трогать хранилище.
+    useEffect(() => {
+        if (!draftStorage || !canManage || !showBuilder || isEditMode) return undefined;
+        if (draftPersistPausedRef.current) return undefined;
+
+        const persist = () => {
+            if (draftSaveTimerRef.current) {
+                window.clearTimeout(draftSaveTimerRef.current);
+                draftSaveTimerRef.current = null;
+            }
+            flushDraftSaveRef.current = null;
+            if (draftPersistPausedRef.current) return;
+            if (!isDraftMeaningful(draft)) {
+                clearSurveyDraft(draftStorage, draftStorageKey);
+                return;
+            }
+            writeSurveyDraft(draftStorage, draftStorageKey, buildDraftRecord({
+                draft,
+                repeatSourceSurveyId,
+                savedAt: Date.now()
+            }));
+        };
+
+        const timerId = window.setTimeout(persist, 500);
+        draftSaveTimerRef.current = timerId;
+        // Страница может закрыться внутри этой задержки — тогда пишем сразу.
+        flushDraftSaveRef.current = persist;
+        return () => {
+            window.clearTimeout(timerId);
+            if (draftSaveTimerRef.current === timerId) draftSaveTimerRef.current = null;
+            if (flushDraftSaveRef.current === persist) flushDraftSaveRef.current = null;
+        };
+    }, [canManage, draft, draftStorage, draftStorageKey, isEditMode, repeatSourceSurveyId, showBuilder]);
+
+    // Перезагрузка не ждёт таймеров, поэтому отложенную запись досылаем на
+    // выгрузке страницы. Обработчик ничего не возвращает — браузерного
+    // «Уйти со страницы?» здесь не появляется.
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const flush = () => {
+            if (typeof flushDraftSaveRef.current === 'function') flushDraftSaveRef.current();
+        };
+        window.addEventListener('pagehide', flush);
+        window.addEventListener('beforeunload', flush);
+        return () => {
+            window.removeEventListener('pagehide', flush);
+            window.removeEventListener('beforeunload', flush);
+        };
+    }, []);
+
+    // Открыть конструктор «с нуля»: сюда сходятся кнопка создания и оба ответа
+    // на напоминание о черновике.
+    const openEmptyBuilder = useCallback(() => {
+        resetBuilder();
+        draftPersistPausedRef.current = false;
+        setShowBuilder(true);
     }, [resetBuilder]);
+
+    const requestBuilder = useCallback(() => {
+        const stored = readSurveyDraft(draftStorage, draftStorageKey, { now: Date.now() });
+        if (stored) {
+            setPendingDraftRecord(stored);
+            return;
+        }
+        openEmptyBuilder();
+    }, [draftStorage, draftStorageKey, openEmptyBuilder]);
+
+    const continueStoredDraft = useCallback(() => {
+        const record = pendingDraftRecord;
+        if (!record) return;
+        setPendingDraftRecord(null);
+        setEditingSurveyId(null);
+        setRepeatSourceSurveyId(record.repeatSourceSurveyId == null ? null : record.repeatSourceSurveyId);
+        setDraft(record.draft);
+        setOperatorQuery('');
+        draftPersistPausedRef.current = false;
+        setShowBuilder(true);
+    }, [pendingDraftRecord]);
+
+    const discardStoredDraft = useCallback(() => {
+        setPendingDraftRecord(null);
+        forgetStoredDraft();
+        openEmptyBuilder();
+    }, [forgetStoredDraft, openEmptyBuilder]);
+
+    const pendingDraftInfo = useMemo(
+        () => (pendingDraftRecord ? describeDraftRecord(pendingDraftRecord) : null),
+        [pendingDraftRecord]
+    );
 
     // Escape закрывает конструктор. Прокрутку страницы больше НЕ блокируем:
     // конструктор — обычная панель, а не оверлей, и заблокированный body
@@ -1594,6 +1733,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
         setOperatorQuery('');
         setEditingSurveyId(null);
         setRepeatSourceSurveyId(sourceId);
+        draftPersistPausedRef.current = false;
         setShowBuilder(true);
         if (removedDismissedCount > 0) {
             notify(`Из повтора исключены уволенные операторы: ${removedDismissedCount}`, 'success');
@@ -2146,8 +2286,7 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                                         closeBuilder();
                                         return;
                                     }
-                                    if (!isRepeatMode) resetBuilder();
-                                    setShowBuilder(true);
+                                    requestBuilder();
                                 }}
                                 className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-[13.5px] font-semibold shadow-sm transition-all active:scale-[0.98] ${
                                     showBuilder
@@ -2162,6 +2301,50 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
                     )}
                 </div>
             </div>
+
+            {/* ── Напоминание о незаконченном черновике ──
+                Показывается только по нажатию «Создать опрос»: человек уже
+                собрался что-то создавать, и вопрос про черновик здесь по делу.
+                Встречать этим окном каждого, кто просто зашёл в раздел, — шум. */}
+            {canManage && pendingDraftInfo && (
+                <IosModal
+                    open
+                    onClose={() => setPendingDraftRecord(null)}
+                    title="Незаконченный черновик"
+                    subtitle={pendingDraftInfo.isTest ? 'Тест так и не был создан' : 'Опрос так и не был создан'}
+                    maxWidth="max-w-md"
+                    footer={(
+                        <>
+                            <button type="button" className={iosBtnSecondary} onClick={discardStoredDraft}>
+                                <FaIcon className="fas fa-rotate-left text-xs" />
+                                Начать заново
+                            </button>
+                            <button type="button" className={iosBtnPrimary} onClick={continueStoredDraft} autoFocus>
+                                <FaIcon className="fas fa-pen text-xs" />
+                                Продолжить
+                            </button>
+                        </>
+                    )}
+                >
+                    <div className="flex items-start gap-3">
+                        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-amber-100">
+                            <FaIcon className="fas fa-file-signature text-[15px] text-amber-600" />
+                        </div>
+                        <div className="min-w-0 space-y-2">
+                            <p className="text-[14px] font-semibold leading-snug text-slate-900">
+                                {pendingDraftInfo.headline}
+                            </p>
+                            <p className="text-[12.5px] tabular-nums text-slate-500">
+                                {pendingDraftInfo.summary}
+                            </p>
+                            <p className="text-[12.5px] leading-relaxed text-slate-500">
+                                Черновик остался в этом браузере после того, как страница обновилась.
+                                Продолжить с того же места или начать {pendingDraftInfo.isTest ? 'новый тест' : 'новый опрос'} с чистого листа?
+                            </p>
+                        </div>
+                    </div>
+                </IosModal>
+            )}
 
             {/* ── Конструктор опроса ──
                 Не модалка: конструктор — это отдельный режим работы, а не
