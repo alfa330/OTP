@@ -1,4 +1,7 @@
-import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles';
+// Расширение в пути обязательно: этот модуль грузит напрямую Node в
+// tests/back_office_department_views.test.mjs, а ESM без расширения путь не
+// разрешает (Vite разрешает и так, поэтому сборка не замечает разницы).
+import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles.js';
 
 const TEZ_OPERATOR_VIEWS = ['profile', 'evaluation', 'hours', 'work_schedules', 'surveys', 'salary'];
 const TEZ_MANAGER_VIEWS = [
@@ -52,6 +55,28 @@ const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedule
 // появится, и подтвердить доступ станет физически некому.
 const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access'];
 
+// Бэк-офис (Бухгалтерия, HR): отделы без телефонии, направлений, графиков и
+// оценок. Им оставлены только «Учёт сотрудников» и «Вики».
+//
+// «Вики» в этой карте не значится намеренно: раздел выдаётся ОТДЕЛУ тумблером
+// departments.wiki_enabled вместе с пространством и гейтится wikiEnabledFor в
+// App.jsx, а не allowlist'ом — вписав его сюда, мы бы завели вторую, молчаливо
+// расходящуюся проверку.
+//
+// «QR доступ» у главы — по той же причине, что у фронт-офисов: сотрудник с
+// ролью «оператор» открывает «Вики» только после подтверждения QR
+// (sensitiveSectionQrRequiredFor), а подтверждает админ, супервайзер или глава
+// отдела (_sensitive_access_approval_error). Супервайзеров в бэк-офисе нет —
+// без этой строки пункта у главы не будет и подтвердить доступ станет некому.
+//
+// Роли 'trainer' в конфиге нет намеренно: у такого отдела не осталось бы ни
+// одного раздела из TRAINER_ALLOWED_VIEWS, и два гарда в App.jsx — тренерский
+// (выкидывает в 'surveys') и отдельский (выкидывает в 'profile') — гоняли бы
+// вид друг другу без остановки.
+const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile'];
+const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators'];
+const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];
+
 const VIEW_ALIASES = {
     sv_list: 'manage_operators',
     manage_users: 'manage_operators',
@@ -98,6 +123,18 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
         head: FRONT_OFFICE_HEAD_VIEWS,
         sv: FRONT_OFFICE_MANAGER_VIEWS,
     },
+    accounting: {
+        operator: BACK_OFFICE_EMPLOYEE_VIEWS,
+        trainee: BACK_OFFICE_EMPLOYEE_VIEWS,
+        head: BACK_OFFICE_HEAD_VIEWS,
+        sv: BACK_OFFICE_MANAGER_VIEWS,
+    },
+    hr: {
+        operator: BACK_OFFICE_EMPLOYEE_VIEWS,
+        trainee: BACK_OFFICE_EMPLOYEE_VIEWS,
+        head: BACK_OFFICE_HEAD_VIEWS,
+        sv: BACK_OFFICE_MANAGER_VIEWS,
+    },
 };
 
 export const departmentCodeOf = (user) => {
@@ -117,8 +154,10 @@ export const departmentHidesColleagueSchedules = (user) => {
 
 // Отделы с упрощённым «Учётом сотрудников» у главы: без пунктов «Супервайзеры»
 // и «Тренеры» — сразу список сотрудников (manage_users), в разделе они
-// называются «Сотрудники», а не «Операторы».
-const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office']);
+// называются «Сотрудники», а не «Операторы». Бэк-офис здесь по той же причине,
+// что и фронт-офисы: ни супервайзеров, ни тренеров в этих отделах нет, и оба
+// пункта выпадашки открывали бы заведомо пустые списки.
+const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr']);
 
 export const departmentUsesSimpleEmployeeAccounting = (user) => {
     const code = departmentCodeOf(user);

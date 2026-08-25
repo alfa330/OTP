@@ -79,7 +79,12 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
     def test_simple_employee_accounting_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
 
-        self.assertIn("const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office']);", source)
+        # Множество растёт вместе с бэк-офисом (Бухгалтерия, HR): там тоже нет
+        # ни супервайзеров, ни тренеров, см. test_back_office_department_scope.
+        self.assertIn(
+            "const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = "
+            "new Set(['front_office', 'accounting', 'hr']);", source
+        )
         self.assertIn("export const departmentUsesSimpleEmployeeAccounting = (user) =>", source)
         self.assertIn("SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code)", source)
 
