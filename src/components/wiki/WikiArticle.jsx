@@ -2,8 +2,8 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    Archive, ArrowLeft, Clock, Eye, Link2, List, Loader2, Maximize2, Minimize2,
-    Pencil, Star, User,
+    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, Link2, List,
+    Loader2, Maximize2, Minimize2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 // fmtDate под своим именем: в файле уже есть свой — «5 сентября 2026» для
@@ -28,6 +28,73 @@ import WikiAckPanel from './WikiAckPanel';
    ровно как раньше, когда он был отдельным разделом. */
 export const CLASSIFIER_SLUG = 'klassifikator-avto';
 const ClassifierView = lazy(() => import('../classifier/ClassifierView'));
+
+/* Статусы, которые обязаны быть подписаны в списках связей.
+ *
+ * Опубликованная статья подписи не получает — это норма, и метка у каждой
+ * строки превратилась бы в шум. А вот черновик и архив подписать НУЖНО: в проде
+ * сегодня ни одна цель внутренней ссылки не опубликована (238 черновиков и 15
+ * архивных на 253 пары), и строка без оговорки обещала бы готовый документ там,
+ * где его нет. Читателю без права видеть черновики такие статьи не покажутся
+ * вовсе — их отсекает периметр на сервере. */
+const LINK_STATUS_NOTE = {
+    draft: { label: 'Черновик', tone: 'amber' },
+    on_approval: { label: 'На согласовании', tone: 'amber' },
+    requires_verification: { label: 'Требует проверки', tone: 'amber' },
+    archived: { label: 'Архив', tone: 'slate' },
+    expired: { label: 'Устарела', tone: 'slate' },
+};
+
+/* Список связанных статей.
+ *
+ * Строка — настоящая <a href>, а не кнопка, и это не формальность. Ссылку в
+ * ТЕКСТЕ статьи можно открыть в новой вкладке (Ctrl/Cmd-клик, средняя кнопка,
+ * «Открыть в новой вкладке» из контекстного меню) — обработчик тела намеренно
+ * пропускает такие клики браузеру. Сделай мы здесь <button>, соседний блок
+ * повёл бы себя иначе, чем текст над ним, и молча: ничего не сломано, просто
+ * привычное действие перестало работать.
+ *
+ * Индиго, а не синий: в разделе синим помечены ДЕЙСТВИЯ, а индиго
+ * (--wiki-accent) — содержимое. Ссылка на статью — содержимое. */
+const ArticleLinkList = ({ icon: Icon, title, hint, rows, onOpen }) => (
+    <section>
+        <div className={`${iosGroupLabel} mb-1 flex items-center gap-1.5`}>
+            <Icon size={12} /> {title}
+        </div>
+        {/* Оговорка стоит У ЗАГОЛОВКА, а не подвалом: список сужен правами
+            читателя, и у двух людей он честно разный. Без пояснения это
+            читается как расхождение данных. */}
+        <p className="mb-2 px-1 text-[11.5px] leading-relaxed text-slate-500">{hint}</p>
+        <div className="flex flex-col gap-1">
+            {rows.map((row) => {
+                const note = LINK_STATUS_NOTE[row.status];
+                return (
+                    <a
+                        key={row.id}
+                        href={buildArticleLink(row.slug)}
+                        onClick={(event) => {
+                            // Модификаторы и средняя кнопка — браузеру: человек
+                            // просит новую вкладку, а не переход внутри портала.
+                            if (event.metaKey || event.ctrlKey || event.shiftKey
+                                || event.altKey || event.button !== 0) return;
+                            if (!onOpen) return;
+                            event.preventDefault();
+                            onOpen(row.slug);
+                        }}
+                        className="group flex items-center gap-2 rounded-xl px-2 py-1.5 text-[13px]
+                                   text-indigo-700 transition hover:bg-indigo-50/70"
+                    >
+                        <span className="min-w-0 flex-1 truncate group-hover:underline">
+                            {row.title}
+                        </span>
+                        {row.mutual && <IosBadge tone="slate">Взаимная</IosBadge>}
+                        {note && <IosBadge tone={note.tone}>{note.label}</IosBadge>}
+                    </a>
+                );
+            })}
+        </div>
+    </section>
+);
 
 /* Тренажёр — отдельный чанк: экраны двух приложений, барс и своя таблица стилей
    весят прилично, а открывают их только в статьях-тренажёрах. Грузим по нажатию
@@ -311,6 +378,25 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         [article?.content, base],
     );
 
+    /* Два блока связей — и ни одной статьи в обоих сразу.
+     *
+     * Взаимная пара (я ссылаюсь на неё, она на меня) попала бы и в «Связанные
+     * материалы», и в «Сюда ссылаются» — две одинаковые строки в десяти
+     * сантиметрах друг от друга читаются как ошибка данных. Поэтому статья
+     * остаётся в ПЕРВОМ блоке (он ближе к тексту, из которого ссылка и растёт)
+     * с пометкой «Взаимная», а из второго убирается.
+     */
+    const related = useMemo(() => {
+        const back = new Set((article?.backlinks || []).map((row) => row.id));
+        return (article?.related || []).map(
+            (row) => (back.has(row.id) ? { ...row, mutual: true } : row));
+    }, [article?.related, article?.backlinks]);
+
+    const backlinks = useMemo(() => {
+        const forward = new Set((article?.related || []).map((row) => row.id));
+        return (article?.backlinks || []).filter((row) => !forward.has(row.id));
+    }, [article?.related, article?.backlinks]);
+
     /* Кнопка тренажёра приходит из базы обычным div'ом: тега button там быть не
        может — санитайзер его не пропускает (и правильно: в тексте статьи кнопке
        с обработчиком не место). Значит, нажимаемой с клавиатуры её надо сделать
@@ -324,6 +410,31 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             node.setAttribute('tabindex', '0');
             const label = node.getAttribute('data-label') || node.textContent?.trim();
             if (label) node.setAttribute('aria-label', `${label}. Откроется тренажёр`);
+        });
+    }, [safeHtml, bodyReady]);
+
+    /* Пометка внутренних ссылок — ПРИ ЧТЕНИИ, а не в сохранённом тексте.
+     *
+     * Соблазн хранить класс прямо в теле статьи большой, но класс на <a>
+     * переживает оба санитайзера, а значит ПОДДЕЛЫВАЕТСЯ: автор пишет
+     * <a class="wiki-link-internal" href="//чужой-сайт/…">Тарифы</a> — и внешняя
+     * ссылка получает знак доверия «это статья нашей вики», а открывается наружу.
+     * Поэтому решение принимается здесь и только здесь, той же функцией, которой
+     * решает переход по клику (readArticleSlugFromHref), а класс, притащенный из
+     * тела, снимается принудительно.
+     *
+     * Работает по готовому DOM, после DOMPurify — мимо санитайзера ничего не
+     * проносит. Зависимость от bodyReady обязательна: без неё эффект сработал бы
+     * на рендере, где тела ещё нет в DOM, и больше не повторился.
+     */
+    useEffect(() => {
+        if (!safeHtml || !bodyRef.current) return;
+        bodyRef.current.querySelectorAll('a[href]').forEach((node) => {
+            const target = readArticleSlugFromHref(node.getAttribute('href'));
+            node.classList.remove('wiki-link-internal');
+            if (target && node.target !== '_blank') {
+                node.classList.add('wiki-link-internal');
+            }
         });
     }, [safeHtml, bodyReady]);
 
@@ -724,16 +835,26 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     )}
                 </div>
 
-                {article.backlinks?.length > 0 && (
-                    <footer className="border-t border-slate-100 px-5 py-4 sm:px-7">
-                        <div className={`${iosGroupLabel} mb-2 flex items-center gap-1.5`}>
-                            <Link2 size={12} /> Сюда ссылаются
-                        </div>
-                        <div className="flex flex-wrap gap-1.5">
-                            {article.backlinks.map((link) => (
-                                <IosBadge key={link.id} tone="blue">{link.title}</IosBadge>
-                            ))}
-                        </div>
+                {(related.length > 0 || backlinks.length > 0) && (
+                    <footer className="space-y-4 border-t border-slate-100 px-5 py-4 sm:px-7">
+                        {related.length > 0 && (
+                            <ArticleLinkList
+                                icon={ArrowUpRight}
+                                title="Связанные материалы"
+                                hint="Статьи, на которые ссылается этот текст."
+                                rows={related}
+                                onOpen={onOpenArticle}
+                            />
+                        )}
+                        {backlinks.length > 0 && (
+                            <ArticleLinkList
+                                icon={CornerDownLeft}
+                                title="Сюда ссылаются"
+                                hint="Статьи, в тексте которых есть ссылка на эту."
+                                rows={backlinks}
+                                onOpen={onOpenArticle}
+                            />
+                        )}
                     </footer>
                 )}
             </article>

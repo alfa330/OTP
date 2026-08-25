@@ -2227,6 +2227,56 @@ def init_wiki_schema(cursor):
     if _row:
         _refresh_aliases(cursor, _row[0])
 
+    # ── Разовая заливка внутренних ссылок ────────────────────────────────
+    # Таблица wiki_article_links лежит в схеме с первого дня раздела, и всё это
+    # время в неё НИКТО не писал: обратные ссылки читались из пустоты, то есть
+    # блок «Сюда ссылаются» не показывался никогда и ни у кого. Тела статей при
+    # этом ссылки содержат — на момент правки 253 пары в 53 статьях.
+    #
+    # Разбор — тот же питоновский, что и при сохранении (wiki/links.py). Второй
+    # разбор, написанный на SQL, неизбежно разошёлся бы с первым: в Postgres нет
+    # urldecode, а слагов с кириллицей в проде 25 — каждая четвёртая ссылка
+    # потерялась бы молча.
+    #
+    # Только когда таблица ПУСТА. Дальше её поддерживает сохранение статьи
+    # (edit.link_content_articles во всех четырёх путях записи тела), и разбирать
+    # все тела на каждом старте незачем.
+    cursor.execute('SAVEPOINT wiki_links_backfill')
+    try:
+        cursor.execute('SELECT 1 FROM wiki_article_links LIMIT 1')
+        if cursor.fetchone() is None:
+            from .links import article_slugs
+            cursor.execute(
+                "SELECT id, content FROM wiki_articles WHERE content LIKE '%article=%'")
+            _sources = {}          # слаг цели -> id статей, которые на неё ссылаются
+            for _article_id, _content in cursor.fetchall():
+                for _slug in article_slugs(_content):
+                    _sources.setdefault(_slug, set()).add(_article_id)
+            if _sources:
+                cursor.execute(
+                    'SELECT slug, id FROM wiki_articles WHERE slug = ANY(%s::text[])',
+                    (list(_sources),))
+                _pairs = sorted({(_src, _target)
+                                 for _slug, _target in cursor.fetchall()
+                                 for _src in _sources[_slug]
+                                 if _src != _target})
+                if _pairs:
+                    cursor.execute(
+                        """
+                        INSERT INTO wiki_article_links (source_id, target_id)
+                        SELECT s, t FROM unnest(%s::int[], %s::int[]) AS u(s, t)
+                        ON CONFLICT (source_id, target_id) DO NOTHING
+                        """,
+                        ([_p[0] for _p in _pairs], [_p[1] for _p in _pairs]),
+                    )
+    except Exception:
+        cursor.execute('ROLLBACK TO SAVEPOINT wiki_links_backfill')
+        import logging
+        logging.warning('Раздел «Вики»: разовая заливка внутренних ссылок не удалась — '
+                        '«Сюда ссылаются» наполнится по мере правки статей')
+    else:
+        cursor.execute('RELEASE SAVEPOINT wiki_links_backfill')
+
     # Триграммы — под собственным савпоинтом. Расширение может быть недоступно
     # по правам; тогда поиск остаётся полнотекстовым (без опечаток), а схема
     # раздела не откатывается целиком.

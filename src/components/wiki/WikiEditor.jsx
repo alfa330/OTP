@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
-import { EditorContent, useEditor, useEditorState } from '@tiptap/react';
+// mergeAttributes берём из @tiptap/react, а не из @tiptap/core: core стоит
+// транзитивно и в package.json не заявлен, а на нетронутый транзитивный пакет
+// опираться нельзя — он переедет при первой же переустановке зависимостей.
+import { EditorContent, mergeAttributes, useEditor, useEditorState } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Image from '@tiptap/extension-image';
@@ -12,7 +15,7 @@ import Highlight from '@tiptap/extension-highlight';
 import { Color, TextStyle } from '@tiptap/extension-text-style';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
 import {
-    AlignCenter, AlignLeft, AlignRight, Bold, Code, Heading1, Heading2, Heading3,
+    AlignCenter, AlignLeft, AlignRight, Bold, Code, FileSymlink, Heading1, Heading2, Heading3,
     Gamepad2, Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
     Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
     Underline as UnderlineIcon, Undo2, Upload,
@@ -26,6 +29,8 @@ import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE, TRAINER_TYPE } from './article
 import WikiTrainerNode from './trainers/TrainerNode';
 import { TRAINER_CARDS, defaultButtonLabel, findTrainer } from './trainers/registry';
 import SectionTreeSelect from './SectionTreeSelect';
+import ArticlePicker from './ArticlePicker';
+import { buildRelativeArticleLink, linkAttrsForSaving } from './articleLink';
 import WikiAiDraft from './WikiAiDraft';
 import WikiTableMenu from './WikiTableMenu';
 
@@ -68,10 +73,41 @@ const ToolButton = ({ active, disabled, title, onClick, children }) => (
 
 const Divider = () => <span className="mx-0.5 h-5 w-px shrink-0 bg-slate-200" />;
 
+/* Ссылка, которая знает, своя она или чужая.
+ *
+ * Расширение Link по умолчанию ставит КАЖДОЙ ссылке target="_blank"
+ * (@tiptap/extension-link, options.HTMLAttributes.target), а витрина статьи
+ * ровно на этот признак отказывается открывать статью внутри портала
+ * (WikiArticle: `if (!anchor || anchor.target === '_blank') return`). Беда не
+ * только в новых ссылках: TipTap разбирает тело статьи и собирает его обратно,
+ * поэтому при ПЕРВОМ ЖЕ сохранении target="_blank" дописался бы всем уже
+ * лежащим в базе внутренним ссылкам — а их в проде 253. Фича сломала бы то, что
+ * работало, раньше, чем добавила новое.
+ *
+ * Поэтому: своим ссылкам target не ставим вовсе (портал откроет статью сам, без
+ * перезагрузки приложения и потери места), чужим оставляем как было — внешний
+ * сайт поверх портала открываться не должен.
+ *
+ * Решение «своя или чужая» берём у readArticleSlugFromHref — той самой функции,
+ * которой это же решает витрина. Двух правил тут быть не может.
+ */
+const WikiLink = Link.extend({
+    renderHTML({ HTMLAttributes }) {
+        // Само правило живёт в articleLink.js чистой функцией: без браузера
+        // расширение TipTap не проверить, а это самое дорогое место фичи.
+        return ['a', linkAttrsForSaving(
+            mergeAttributes(this.options.HTMLAttributes, HTMLAttributes)), 0];
+    },
+});
+
 export default function WikiEditor({
     base, headers, showToast, article, sections, spaces = [], onClose, onSaved,
     pendingUpdateFile = null, onPendingUsed = null, onUpdateExisting = null,
     features = null,
+    /* Оглавление витрины — источник для пикера внутренних ссылок. Приходит уже
+       загруженным и уже суженным по пространству; своего запроса пикер не
+       делает (см. ArticlePicker.jsx). */
+    articles = [],
 }) {
     const isNew = !article?.id;
     // Статус берём из статьи, а не из «новизны»: существующий черновик тоже
@@ -95,6 +131,7 @@ export default function WikiEditor({
     const [saving, setSaving] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [importing, setImporting] = useState(false);
+    const [pickerOpen, setPickerOpen] = useState(false);
     /* Выбор в селекторе тренажёров держим пустым: селектор здесь — не поле со
        значением, а команда «вставить». Останься в нём выбранный тренажёр, второе
        нажатие по тому же пункту не считалось бы изменением, и вставить одну и ту
@@ -160,7 +197,7 @@ export default function WikiEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
             Underline,
-            Link.configure({ openOnClick: false, autolink: true }),
+            WikiLink.configure({ openOnClick: false, autolink: true }),
             Image.configure({ inline: false, allowBase64: true }),
             TextAlign.configure({ types: ['heading', 'paragraph'] }),
             TextStyle,
@@ -326,6 +363,41 @@ export default function WikiEditor({
             return;
         }
         editor.chain().focus().extendMarkRange('link').setLink({ href: url.trim() }).run();
+    };
+
+    /* Вставка ссылки на статью вики.
+     *
+     * Два случая, и путать их нельзя. Если человек выделил текст — превращаем
+     * выделенное в ссылку. Если не выделил (а это типовой случай: «поставь тут
+     * ссылку на Тарифы»), setLink не сделал бы НИЧЕГО видимого: он ставит метку
+     * на пустой диапазон, а текста в документе не появляется. Поэтому вставляем
+     * название статьи текстом и уже его помечаем ссылкой.
+     *
+     * unsetMark в конце — из-за autolink: с ним метка ссылки «включающая»
+     * (inclusive), и текст, набранный сразу после вставки, продолжал бы быть
+     * частью ссылки. Выглядит это как «полстроки уехало в чужую статью».
+     */
+    const insertArticleLink = (row) => {
+        setPickerOpen(false);
+        const href = buildRelativeArticleLink(row?.slug);
+        if (!href) {
+            showToast?.('У этой статьи неподходящий адрес', 'error');
+            return;
+        }
+        const { from, to } = editor.state.selection;
+        if (from !== to) {
+            editor.chain().focus().extendMarkRange('link').setLink({ href }).run();
+            return;
+        }
+        editor.chain().focus()
+            .insertContent({
+                type: 'text',
+                text: row.title,
+                marks: [{ type: 'link', attrs: { href } }],
+            })
+            .unsetMark('link')
+            .run();
+        setDirty(true);
     };
 
     /* Вставка кнопки тренажёра. Подпись по умолчанию содержит название
@@ -586,6 +658,14 @@ export default function WikiEditor({
                         <ToolButton title="Ссылка" active={active?.link} onClick={setLink}>
                             <Link2 size={15} />
                         </ToolButton>
+                        {/* Ссылка на статью вики — отдельной кнопкой от обычной
+                            ссылки. Складывать их в одну («сначала спросим адрес,
+                            потом предложим статью») значит прятать главный
+                            случай за диалогом про адрес. */}
+                        <ToolButton title="Ссылка на статью вики"
+                                    onClick={() => setPickerOpen(true)}>
+                            <FileSymlink size={15} />
+                        </ToolButton>
                         <ToolButton
                             title="Таблица 3×3 — строки и столбцы добавляются панелью у таблицы"
                             onClick={() => editor.chain().focus()
@@ -660,6 +740,14 @@ export default function WikiEditor({
                     </div>
                 </div>
             </section>
+
+            <ArticlePicker
+                open={pickerOpen}
+                articles={articles}
+                currentId={article?.id || null}
+                onPick={insertArticleLink}
+                onClose={() => setPickerOpen(false)}
+            />
         </div>
     );
 }

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   buildArticleLink,
+  buildRelativeArticleLink,
+  linkAttrsForSaving,
   normalizeArticleSlug,
   readArticleSlugFromHref,
   readArticleSlugFromSearch,
@@ -60,7 +62,9 @@ test('слаг проверяем: значение уходит в путь з�
   assert.equal(normalizeArticleSlug('klassifikator-avto'), 'klassifikator-avto');
   assert.equal(normalizeArticleSlug('  auto_list  '), 'auto_list');
   assert.equal(normalizeArticleSlug('../../api/admin/users'), '');
-  assert.equal(normalizeArticleSlug('a'.repeat(201)), '');
+  // Потолок — 255, как VARCHAR(255) у wiki_articles.slug. Стояло 200, и это
+  // расходилось со схемой молча (см. отдельную проверку ниже).
+  assert.equal(normalizeArticleSlug('a'.repeat(256)), '');
   assert.equal(normalizeArticleSlug(''), '');
   assert.equal(normalizeArticleSlug(null), '');
   // Служебные символы не пускаем ни в каком алфавите.
@@ -141,4 +145,83 @@ test('слаг из строки запроса читаем без окна б�
   assert.equal(readArticleSlugFromSearch('?view=wiki'), '');
   assert.equal(readArticleSlugFromSearch('?article=../secret'), '');
   assert.equal(readArticleSlugFromSearch(''), '');
+});
+
+/* ── Ссылка ДЛЯ ТЕКСТА СТАТЬИ ──────────────────────────────────────────────
+   То, что уходит в тело статьи, остаётся в базе навсегда, поэтому оно обязано
+   быть относительным: абсолютный адрес забетонировал бы там сегодняшний домен
+   фронта (github.io — чужое пространство имён), и после переезда портала все
+   внутренние ссылки разом повели бы на старое место. */
+
+test('ссылка для текста статьи — относительная, без домена', () => {
+  useLocation(PORTAL);
+  assert.equal(buildRelativeArticleLink('tarify-2026'), '?view=wiki&article=tarify-2026');
+});
+
+test('кириллица в теле статьи остаётся читаемой, а не уезжает в проценты', () => {
+  useLocation(PORTAL);
+  assert.equal(buildRelativeArticleLink('тарифы'), '?view=wiki&article=тарифы');
+});
+
+test('битый слаг ссылки не даёт', () => {
+  useLocation(PORTAL);
+  for (const bad of ['', null, 'a/b', 'a.b', 'a%20b']) {
+    assert.equal(buildRelativeArticleLink(bad), '');
+  }
+});
+
+test('относительную ссылку из тела портал узнаёт как свою', () => {
+  useLocation(PORTAL);
+  assert.equal(readArticleSlugFromHref(buildRelativeArticleLink('тарифы')), 'тарифы');
+});
+
+test('слаг длиной до 255 — как VARCHAR(255) у статьи', () => {
+  /* Раньше потолок был 200 и молча расходился со схемой: у статьи со слагом
+     длиннее ссылка не строилась и не разбиралась, без единой ошибки. */
+  assert.equal(normalizeArticleSlug('a'.repeat(255)), 'a'.repeat(255));
+  assert.equal(normalizeArticleSlug('a'.repeat(256)), '');
+});
+
+/* ── target="_blank" у ВНУТРЕННЕЙ ссылки ──────────────────────────────────
+   Расширение Link в TipTap ставит target="_blank" каждой ссылке, а витрина
+   ровно на этот признак отказывается открывать статью внутри портала. TipTap
+   разбирает тело статьи и собирает обратно, поэтому без правки при первом же
+   сохранении признак дописался бы всем 253 внутренним ссылкам, уже лежащим в
+   базе: фича сломала бы работающее раньше, чем добавила новое. */
+
+test('своя ссылка сохраняется без target — портал откроет статью сам', () => {
+  useLocation(PORTAL);
+  assert.deepEqual(
+    linkAttrsForSaving({ href: '?view=wiki&article=tarify', target: '_blank', rel: 'noopener noreferrer' }),
+    { href: '?view=wiki&article=tarify' }
+  );
+});
+
+test('чужой ссылке новая вкладка полагается — target остаётся', () => {
+  useLocation(PORTAL);
+  assert.deepEqual(
+    linkAttrsForSaving({ href: 'https://example.com/docs', target: '_blank', rel: 'noopener noreferrer' }),
+    { href: 'https://example.com/docs', target: '_blank', rel: 'noopener noreferrer' }
+  );
+});
+
+test('абсолютная ссылка на свой же портал — тоже своя', () => {
+  useLocation(PORTAL);
+  const attrs = linkAttrsForSaving({
+    href: 'https://alfa330.github.io/OTP?view=wiki&article=tarify', target: '_blank',
+  });
+  assert.equal(attrs.target, undefined);
+});
+
+test('якорь оглавления не трогаем: это не ссылка на статью', () => {
+  useLocation(PORTAL);
+  assert.equal(linkAttrsForSaving({ href: '#glava-2', target: '_blank' }).target, '_blank');
+});
+
+test('прочие атрибуты ссылки переживают правку, исходный объект не портится', () => {
+  useLocation(PORTAL);
+  const original = { href: '?article=tarify', target: '_blank', class: 'x' };
+  const attrs = linkAttrsForSaving(original);
+  assert.equal(attrs.class, 'x');
+  assert.equal(original.target, '_blank', 'входной объект менять нельзя');
 });

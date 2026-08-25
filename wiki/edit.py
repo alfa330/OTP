@@ -2,6 +2,7 @@
 
 import re
 
+from . import links as wiki_links
 from .sanitize import sanitize_html, to_plain_text
 from .search import refresh_aliases
 
@@ -35,6 +36,70 @@ def link_content_files(cursor, article_id, content):
     return cursor.rowcount
 
 
+def link_content_articles(cursor, article_id, content, *, editor_id=None):
+    """Пересобирает связи «эта статья ссылается на ту». Возвращает (добавлено, снято).
+
+    Зачем таблица, если тело статьи и так есть. Прямые ссылки («Связанные
+    материалы») из таблицы НЕ читаются — их собирает витрина прямо из тела,
+    поэтому блок физически не может разойтись с текстом. Таблица нужна ровно
+    одной стороне — ОБРАТНОЙ: чтобы ответить «кто ссылается на меня», иначе
+    пришлось бы прочитать и разобрать тела всех статей портала на каждое
+    открытие статьи.
+
+    Периметра здесь нет НАМЕРЕННО. Связь — объективный факт текста, а не мнение
+    того, кто нажал «Сохранить». Стой периметр на записи, один и тот же текст,
+    сохранённый супервайзером и администратором вики, дал бы разный набор строк,
+    а пересохранение более узким человеком МОЛЧА СНОСИЛО БЫ связи, записанные
+    широким. Кому какую связь показывать, решает чтение (wiki_articles.backlinks
+    фильтрует по visible_ids).
+
+    Идемпотентно: повторное сохранение того же текста возвращает (0, 0).
+    """
+    slugs = wiki_links.article_slugs(content)
+
+    targets = []
+    if slugs:
+        # Самоссылку отсекаем здесь (id <> %s), а не при разборе: слаг статьи в
+        # собственном теле — обычное дело у оглавления, но «статья связана сама
+        # с собой» не значит ничего ни в одном из двух блоков.
+        cursor.execute(
+            'SELECT id FROM wiki_articles WHERE slug = ANY(%s::text[]) AND id <> %s',
+            (list(slugs), article_id),
+        )
+        targets = [row[0] for row in cursor.fetchall()]
+
+    # Снимаем связи, которых в тексте больше нет. Ручные (is_manual) не трогаем:
+    # колонка заведена под подборку, которую ведёт человек, и пересборка по
+    # тексту не имеет права её стирать. Пустой список целей — законный случай
+    # («убрали все ссылки»), и `<> ALL('{}')` честно истинно для всех строк.
+    cursor.execute(
+        'DELETE FROM wiki_article_links '
+        ' WHERE source_id = %s AND NOT is_manual AND target_id <> ALL(%s::int[])',
+        (article_id, targets),
+    )
+    removed = cursor.rowcount or 0
+
+    added = 0
+    if targets:
+        # ON CONFLICT DO NOTHING, а НЕ DO UPDATE. Во-первых, DO UPDATE на паре,
+        # уже помеченной ручной, молча снял бы этот признак. Во-вторых, он
+        # падает с «cannot affect row a second time», если одна цель попадёт в
+        # список дважды, — а в проде внутри одного тела 42 повторных ссылки.
+        # Повторы снимает article_slugs, но полагаться на две защиты дешевле,
+        # чем на одну: сохранение статьи не имеет права падать из-за связей.
+        cursor.execute(
+            """
+            INSERT INTO wiki_article_links (source_id, target_id, created_by)
+            SELECT %s, t, %s FROM unnest(%s::int[]) AS t
+            ON CONFLICT (source_id, target_id) DO NOTHING
+            """,
+            (article_id, editor_id, targets),
+        )
+        added = cursor.rowcount or 0
+
+    return added, removed
+
+
 def _next_version(cursor, article_id):
     cursor.execute(
         'SELECT COALESCE(max(version_number), 0) + 1 FROM wiki_article_versions WHERE article_id = %s',
@@ -65,6 +130,7 @@ def create_article(cursor, *, slug, title, summary, content, article_type,
     # в четыре обращения к движку.
     set_tags(cursor, article_id, tags)
     link_content_files(cursor, article_id, clean)
+    link_content_articles(cursor, article_id, clean, editor_id=author_id)
     snapshot_version(cursor, article_id, editor_id=author_id, session_id=None,
                      comment='Создание статьи')
     return article_id
@@ -90,6 +156,7 @@ def update_article(cursor, article_id, fields, *, editor_id, session_id, comment
             sets.append(key + ' = %s')
             values.append(fields[key])
 
+    clean = None
     if 'content' in fields:
         clean = sanitize_html(fields['content'])
         sets.append('content = %s')
@@ -109,10 +176,15 @@ def update_article(cursor, article_id, fields, *, editor_id, session_id, comment
     values.append(article_id)
     cursor.execute('UPDATE wiki_articles SET ' + ', '.join(sets) + ' WHERE id = %s', values)
     changed = cursor.rowcount > 0
+    if changed and clean is not None:
+        # Разбираем ОЧИЩЕННОЕ тело, а не присланное. В базу ложится clean, и
+        # производные данные обязаны описывать именно его: санитайзер экранирует
+        # амперсанд ('&' → '&amp;') и может выбросить ссылку целиком. Разбор
+        # сырого текста дал бы связи на то, чего в сохранённой статье уже нет.
+        link_content_files(cursor, article_id, clean)
+        link_content_articles(cursor, article_id, clean, editor_id=editor_id)
     if changed:
         refresh_aliases(cursor, article_id)
-        if 'content' in fields:
-            link_content_files(cursor, article_id, fields['content'])
     return changed
 
 
@@ -224,6 +296,14 @@ def restore_version(cursor, article_id, version_id, *, editor_id, session_id):
     # Заголовок и текст только что заменились — алиасы обязаны следовать за
     # ними, иначе после отката транслит/синонимы ищут по прошлой редакции.
     refresh_aliases(cursor, article_id)
+    # …и по той же причине — файлы и связи. Восстановление было ЕДИНСТВЕННЫМ
+    # путём, где тело статьи меняется, а производные от него данные остаются от
+    # прошлой редакции. Для картинок это живой дефект и сейчас: откат к версии с
+    # непривязанным файлом оставлял его видимым только загрузившему. Для связей
+    # это значило бы, что «Сюда ссылаются» у чужой статьи показывает ссылку из
+    # текста, который человек только что откатил.
+    link_content_files(cursor, article_id, version['content'])
+    link_content_articles(cursor, article_id, version['content'], editor_id=editor_id)
     return True
 
 
@@ -342,6 +422,11 @@ def fork_article(cursor, source_id, *, section_id, author_id, slug, title):
     # Файлы перепривязываются к копии: без этого картинки остались бы видны
     # только тому, кто их когда-то загрузил в исходную статью.
     link_content_files(cursor, article_id, content)
+    # Тело копируется байт в байт, значит копия наследует и все ссылки на другие
+    # статьи. Свой набор связей ей нужен собственный: без него у общей цели в
+    # «Сюда ссылаются» осталась бы только исходная статья, а копия ссылалась бы
+    # на неё молча.
+    link_content_articles(cursor, article_id, content, editor_id=author_id)
     snapshot_version(cursor, article_id, editor_id=author_id, session_id=None,
                      comment='Копия статьи №%s' % source_id)
     return article_id

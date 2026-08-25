@@ -344,6 +344,13 @@ def register(bp, wiki_route, db, log_ip, gcs):
              'days_left': wiki_guests.days_left(guest_until, wiki_guests.now_almaty())}
             if guest_until and permissions['_reason'] == 'гостевой доступ' else None)
         article['backlinks'] = wiki_articles.backlinks(cursor, article['id'], visible)
+        # «Связанные материалы» считаются из ТЕЛА, которое уже здесь, а не из
+        # таблицы связей: блок обязан совпадать с тем, что человек видит в
+        # тексте. Отдельного роута нет намеренно — периметр в этом обработчике
+        # уже посчитан, и вторая дверь стоила бы второго его расчёта и второго
+        # места, где правило «404 вместо 403» пришлось бы повторить руками.
+        article['related'] = wiki_articles.related_articles(
+            cursor, article.get('content'), article['id'], visible)
         article['is_favorite'] = wiki_articles.is_favorite(
             cursor, ctx['user_id'], article['id'])
         return jsonify(article)

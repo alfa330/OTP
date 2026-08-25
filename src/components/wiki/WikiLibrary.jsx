@@ -384,6 +384,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                     sections={sections}
                     spaces={spaces}
                     features={features}
+                    /* Оглавление для пикера внутренних ссылок. Оно уже здесь и
+                       уже сужено по пространству — своего запроса пикер не
+                       делает. */
+                    articles={index}
                     pendingUpdateFile={pendingUpdateFile}
                     onPendingUsed={() => setPendingUpdateFile(null)}
                     /* Документ оказался новой версией другой статьи: открываем

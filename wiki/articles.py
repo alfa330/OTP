@@ -32,6 +32,7 @@
 # с разделами, из wiki/queries.py. Двух определений быть не должно:
 # в оригинальной вике они разошлись, и список статей с деревом разделов
 # показывали разное.
+from . import links as wiki_links
 from . import schema as wiki_schema
 from .queries import SUBJECT_MATCH as _SUBJECT_MATCH, subject_params
 
@@ -542,25 +543,68 @@ def trainer_usages(cursor, visible_ids):
     return {key: list(items.values()) for key, items in usages.items()}
 
 
+_LINK_KEYS = ('id', 'slug', 'title', 'status')
+
+
 def backlinks(cursor, article_id, visible_ids):
     """Кто ссылается на статью — только среди доступных пользователю.
 
     Без фильтра по периметру обратные ссылки раскрыли бы существование и
     заголовок закрытой статьи.
+
+    Статус едет вместе с заголовком НЕ для красоты. В проде сегодня ни одна цель
+    внутренней ссылки не опубликована (238 черновиков и 15 архивных на 253 пары),
+    то есть у тех, кто вправе видеть черновики, список будет состоять из
+    недописанного. Без подписи «Черновик» такая строка читается как обещание
+    готовой статьи.
     """
     if not visible_ids:
         return []
     cursor.execute(
         """
-        SELECT a.id, a.slug, a.title
+        SELECT a.id, a.slug, a.title, a.status
           FROM wiki_article_links l
           JOIN wiki_articles a ON a.id = l.source_id
-         WHERE l.target_id = %s AND a.id = ANY(%s)
+         WHERE l.target_id = %s AND a.id = ANY(%s) AND a.id <> %s
          ORDER BY a.title
         """,
-        (article_id, list(visible_ids)),
+        (article_id, list(visible_ids), article_id),
     )
-    return [dict(zip(('id', 'slug', 'title'), row)) for row in cursor.fetchall()]
+    return [dict(zip(_LINK_KEYS, row)) for row in cursor.fetchall()]
+
+
+def related_articles(cursor, content, article_id, visible_ids):
+    """«Связанные материалы» — статьи, на которые ссылается ТЕКСТ этой статьи.
+
+    Собирается из тела, а НЕ из wiki_article_links, и это главное решение всей
+    фичи. Тело уже лежит в памяти обработчика (get_article выбирает a.content),
+    поэтому блок стоит ровно один добавочный запрос — и при этом физически не
+    может разойтись с тем, что человек видит в тексте. Читай мы таблицу, блок
+    начал бы врать в тот же день, когда кто-нибудь добавит пятый путь записи
+    тела и забудет позвать пересборку, — а один такой путь (restore_version)
+    в разделе уже был.
+
+    Порядок — как в тексте: список читается как оглавление к статье, и
+    сортировка по алфавиту оторвала бы его от места, где ссылка встретилась.
+    """
+    if not visible_ids:
+        return []
+    slugs = wiki_links.article_slugs(content)
+    if not slugs:
+        return []
+    # Периметр здесь обязателен ровно по той же причине, что и в backlinks:
+    # иначе блок раскрыл бы заголовок статьи, которую человеку видеть нельзя.
+    # Ссылка в тексте при этом остаётся — по ней он получит честные 404.
+    cursor.execute(
+        """
+        SELECT a.id, a.slug, a.title, a.status
+          FROM wiki_articles a
+         WHERE a.slug = ANY(%s::text[]) AND a.id = ANY(%s) AND a.id <> %s
+        """,
+        (list(slugs), list(visible_ids), article_id),
+    )
+    found = {row[1]: dict(zip(_LINK_KEYS, row)) for row in cursor.fetchall()}
+    return [found[slug] for slug in slugs if slug in found]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
