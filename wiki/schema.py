@@ -656,6 +656,67 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wiki_audit_actor ON wiki_audit_log(actor_id, created_at DESC);",
 ]
 
+# Пространство записи журнала. Формула одна на всех: по ней проставляет
+# space_id новая запись (queries.log_action) и по ней же разобрана история
+# (_scope_audit_to_space). Разъедься они — и журнал разложил бы прошлое и
+# настоящее по разным правилам, а заметить это можно было бы только сверкой
+# двух выборок вручную.
+#
+# Ступени по убыванию достоверности:
+#   1. сам объект — у раздела, парка, офиса и акции пространство лежит
+#      колонкой, у статьи выводится через её разделы (статья без разделов не
+#      принадлежит никакому пространству — то же правило, что в
+#      queries.articles_of_space);
+#   2. details->>'space_id' — часть действий пишется ДО того, как объект
+#      появился (импорт документа, загрузка логотипа), и пространство у них
+#      названо только там;
+#   3. ничего — NULL. Такая запись видна в журнале ЛЮБОГО пространства:
+#      спрятать её везде значило бы потерять запись, а придумать ей хозяина
+#      нельзя. Ступень существует, потому что объект бывает уже удалён.
+#
+# Внешний SELECT по wiki_spaces — не украшение: и details, и явный аргумент
+# приходят снаружи, а несуществующий id уронил бы саму запись по внешнему
+# ключу. Действие при этом уже совершено, и падать на его протоколировании
+# нельзя.
+AUDIT_SPACE_SQL = """
+        SELECT s.id FROM wiki_spaces s WHERE s.id = COALESCE(
+            CASE %(etype)s
+                WHEN 'space'     THEN (SELECT x.id       FROM wiki_spaces     x WHERE x.id = %(eid)s)
+                WHEN 'section'   THEN (SELECT x.space_id FROM wiki_sections   x WHERE x.id = %(eid)s)
+                WHEN 'park'      THEN (SELECT x.space_id FROM wiki_taxi_parks x WHERE x.id = %(eid)s)
+                WHEN 'office'    THEN (SELECT x.space_id FROM wiki_offices    x WHERE x.id = %(eid)s)
+                WHEN 'promotion' THEN (SELECT x.space_id FROM wiki_promotions x WHERE x.id = %(eid)s)
+                WHEN 'article'   THEN (SELECT sec.space_id
+                                         FROM wiki_article_sections link
+                                         JOIN wiki_sections sec ON sec.id = link.section_id
+                                        WHERE link.article_id = %(eid)s
+                                        ORDER BY sec.space_id LIMIT 1)
+            END,
+            CASE WHEN %(details)s::jsonb->>'space_id' ~ '^[0-9]+$'
+                 THEN (%(details)s::jsonb->>'space_id')::int END
+        )
+"""
+
+# Типы объектов, для которых формула умеет назвать пространство. Список
+# отдельно от самого SQL, чтобы страж (tests/test_wiki_audit_space.py) мог
+# сверить его с типами, которые пишут роуты: забытый тип не ломается, он молча
+# кладёт запись в журнал ВСЕХ пространств — тише, чем ошибка, и хуже.
+AUDIT_SPACE_ENTITIES = ('space', 'section', 'park', 'office', 'promotion', 'article')
+
+
+def audit_space_sql(entity_type, entity_id, details):
+    """Формула с подставленными выражениями.
+
+    Запись подставляет свои плейсхолдеры и остаётся с ними (%(etype)s и
+    соседи — имена параметров её INSERT), разбор истории — колонки таблицы.
+    Через .replace, а не вторым аргументом execute: у UPDATE на месте
+    параметров стоят колонки, а не значения.
+    """
+    return (AUDIT_SPACE_SQL
+            .replace('%(etype)s', entity_type)
+            .replace('%(eid)s', entity_id)
+            .replace('%(details)s', details))
+
 # Сид системных ролей. ON CONFLICT DO NOTHING, а НЕ DO UPDATE: в оригинале сид
 # при каждом рестарте затирал права, отредактированные через интерфейс.
 _SEED_ROLES = [
@@ -1026,6 +1087,70 @@ def _scope_directories_to_space(cursor):
 # Проверка идёт по подстроке правила, а не по всему выражению: постгрес хранит
 # его в своём нормализованном виде (кавычки, приведения типов), и сравнивать
 # тексты целиком значило бы пересобирать колонку на каждом запуске.
+def _scope_audit_to_space(cursor):
+    """Привязывает записи журнала к пространству.
+
+    Журнал был один на всю вику: у «Таксопарков» и «Теза» вкладка «Журнал»
+    показывала одни и те же 1080 записей, то есть кто в чужой вике что правил.
+    Это та же болезнь, от которой лечились справочники
+    (_scope_directories_to_space), и лечится она так же — колонкой на записи.
+
+    Почему колонка, а не вычисление на чтении: объект записи бывает удалён
+    (на проде 41 запись об офисах, которых больше нет, и 15 о пространствах,
+    слитых в «Таксопарки»), и вычисленное на лету пространство у них было бы
+    NULL — журнал терял бы историю ровно там, где она и нужна.
+
+    ON DELETE SET NULL, а не CASCADE: у справочников каскад означает «запись
+    уехала вместе с пространством», а у журнала он означал бы «удалили
+    пространство — и следов не осталось». Запись без пространства видна везде,
+    и это честнее пустоты.
+
+    Разбор истории — РАЗОВЫЙ, только в тот запуск, когда колонка появилась.
+    Иначе каждый деплой доразмечал бы записи, которым пространство не
+    досталось намеренно, и «ничьё» превращалось бы в «чьё-то» само собой.
+    """
+    cursor.execute(
+        """
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'wiki_audit_log' AND column_name = 'space_id'
+        """)
+    first_run = cursor.fetchone() is None
+
+    cursor.execute('ALTER TABLE wiki_audit_log ADD COLUMN IF NOT EXISTS space_id '
+                   'INTEGER REFERENCES wiki_spaces(id) ON DELETE SET NULL')
+    # Порядок колонок индекса — как читают журнал: сначала своё пространство,
+    # потом сверху вниз по id (ORDER BY a.id DESC в structure.list_audit).
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_wiki_audit_space '
+                   'ON wiki_audit_log(space_id, id DESC)')
+    if not first_run:
+        return
+
+    cursor.execute(
+        'UPDATE wiki_audit_log a SET space_id = ('
+        + audit_space_sql('a.entity_type', 'a.entity_id', 'a.details') +
+        ') WHERE a.space_id IS NULL')
+
+    # Что не разобралось — единственному пространству, которое существовало в
+    # тот момент. Это не догадка: пока пространство одно, вся вика и есть оно,
+    # и записи старше второго пространства другому принадлежать не могли.
+    # Записи МОЛОЖЕ второго пространства остаются без хозяина: там угадывание
+    # уже настоящее, а неверно приписанная запись хуже записи, видимой везде.
+    cursor.execute('SELECT id FROM wiki_spaces WHERE code = %s', (DEFAULT_SPACE_CODE,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    cursor.execute(
+        """
+        UPDATE wiki_audit_log a
+           SET space_id = %(space)s
+         WHERE a.space_id IS NULL
+           AND a.created_at < COALESCE(
+                 (SELECT min(s.created_at) FROM wiki_spaces s WHERE s.id <> %(space)s),
+                 'infinity'::timestamp)
+        """,
+        {'space': row[0]})
+
+
 def _regenerate_folded_columns(cursor):
     """Вернуть список колонок, которые пришлось пересобрать."""
     from .text import SQL_FOLD_FROM
@@ -1976,6 +2101,11 @@ def init_wiki_schema(cursor):
     # и парки, и офисы, и акции, и читает wiki_spaces, которую к этому моменту
     # уже завёл _merge_legacy_spaces.
     _scope_directories_to_space(cursor)
+
+    # Граница пространства у журнала — здесь же и по той же причине: функция
+    # разбирает историю по разделам, паркам и офисам, а значит все три таблицы
+    # к этому моменту должны существовать.
+    _scope_audit_to_space(cursor)
 
     # Выражение генерируемой колонки менять через ALTER нельзя — только
     # пересоздать; «ADD COLUMN IF NOT EXISTS» молча оставит старое определение.

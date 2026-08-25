@@ -11,6 +11,7 @@
 """
 
 from . import access as wiki_access
+from . import schema as wiki_schema
 from .access import normalize_role
 
 # Один запрос вместо пяти: профиль, возглавляемые отделы, активные группы
@@ -569,23 +570,40 @@ def load_capabilities(cursor, ctx, subjects):
 
 
 def log_action(cursor, *, actor_id, action, entity_type=None, entity_id=None,
-               target_user_id=None, details=None, ip_address=None):
+               target_user_id=None, details=None, ip_address=None, space_id=None):
     """Запись в журнал раздела.
 
     В оригинале журналов было два (security_audit_logs и access_audit_logs),
     почти одинаковых, и ни один не читался ни API, ни интерфейсом. Здесь один,
     и к нему сразу будет эндпоинт чтения.
+
+    ПРОСТРАНСТВО записи проставляется здесь же, а не вызывающим: log_action
+    зовут из сорока с лишним мест, и требовать от каждого назвать пространство
+    значит завести правило, которое новое место забудет молча — запись просто
+    оказалась бы в журнале всех пространств сразу. Считаем по объекту одной
+    формулой (schema.AUDIT_SPACE_SQL) прямо в INSERT: второго рейса в базу это
+    не стоит, а расходиться с разбором истории не может.
+
+    space_id аргументом — для тех, кто пространство точно знает, а объекта ещё
+    нет (импорт документа заводит статью позже, чем пишет о нём в журнал).
     """
     import json
 
     cursor.execute(
         """
         INSERT INTO wiki_audit_log (actor_id, action, entity_type, entity_id,
-                                    target_user_id, details, ip_address)
-        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+                                    target_user_id, details, ip_address, space_id)
+        SELECT %(actor)s, %(action)s, %(etype)s, %(eid)s, %(target)s,
+               %(details)s::jsonb, %(ip)s,
+               COALESCE(
+                   (SELECT s.id FROM wiki_spaces s WHERE s.id = %(space)s::int),
+                   (""" + wiki_schema.audit_space_sql(
+                       '%(etype)s', '%(eid)s', '%(details)s') + """))
         """,
-        (actor_id, action, entity_type, entity_id, target_user_id,
-         json.dumps(details or {}, ensure_ascii=False), ip_address),
+        {'actor': actor_id, 'action': action, 'etype': entity_type,
+         'eid': entity_id, 'target': target_user_id, 'ip': ip_address,
+         'space': space_id,
+         'details': json.dumps(details or {}, ensure_ascii=False)},
     )
 
 

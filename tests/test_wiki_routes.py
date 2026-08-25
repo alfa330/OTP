@@ -819,9 +819,45 @@ class AuditReadTest(_RouteHarness, unittest.TestCase):
         client, cursor = self._client()
         client.get('/api/wiki/audit?group=нет-такой')
         # Слово WHERE есть и внутри подзапросов, разворачивающих имя субъекта,
-        # поэтому смотрим не на текст, а на параметры: кроме окна их быть не
-        # должно.
-        self.assertEqual([100, 0], self._list_query(cursor)[1])
+        # поэтому смотрим не на текст, а на параметры: кроме пространства и
+        # окна их быть не должно. Пространство здесь всегда: журнал у каждой
+        # вики свой, и это граница, а не фильтр (harness выдаёт одно — 11).
+        self.assertEqual([11, 100, 0], self._list_query(cursor)[1])
+
+    def test_journal_belongs_to_its_space(self):
+        """У «Таксопарков» и «Теза» журнал свой, а не общий на двоих.
+
+        Раньше вкладка показывала все записи разом: сотрудник одной вики видел,
+        кто что правил в чужой. Граница держится сервером, а не фронтом, —
+        параметр доезжает до самого запроса.
+        """
+        client, cursor = self._client()
+        client.get('/api/wiki/audit?space_id=11')
+        self.assertIn('a.space_id', self._list_query(cursor)[0])
+        self.assertEqual(11, self._list_query(cursor)[1][0])
+
+    def test_foreign_space_is_not_found(self):
+        """Чужое пространство — 404, как у справочников.
+
+        Не 403: «доступ запрещён» подтвердило бы, что такое пространство есть.
+        """
+        client, _ = self.build(make_context('admin', wiki_roles=[ADMIN_ROLE]),
+                               spaces=(11,))
+        r = client.get('/api/wiki/audit?space_id=12')
+        self.assertEqual(404, r.status_code)
+        self.assertEqual('WIKI_SPACE_NOT_FOUND', r.get_json().get('code'))
+
+    def test_two_spaces_require_naming_one(self):
+        """У кого пространств несколько — тот обязан назвать, чей журнал открыт.
+
+        Молча выбрать первое значило бы показать журнал, которого не спрашивали.
+        """
+        client, cursor = self.build(make_context('admin', wiki_roles=[ADMIN_ROLE]),
+                                    spaces=(11, 12))
+        cursor.fetchall.return_value = [self.ROW]
+        cursor.fetchone.return_value = (1,)
+        self.assertEqual(400, client.get('/api/wiki/audit').status_code)
+        self.assertEqual(200, client.get('/api/wiki/audit?space_id=12').status_code)
 
     def test_one_letter_search_is_ignored(self):
         """По одной букве ILIKE перебирает всю таблицу и возвращает почти всё."""

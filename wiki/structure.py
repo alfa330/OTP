@@ -741,13 +741,25 @@ _AUDIT_SUBJECT_NAME = """
 """.format(sid=_AUDIT_SUBJECT_ID)
 
 
-def _audit_filters(group=None, query=None, date_from=None, date_to=None):
+def _audit_filters(group=None, query=None, date_from=None, date_to=None,
+                   space_id=None):
     """Условия WHERE и параметры к ним.
 
     Один код на выборку, счётчик и раскладку по группам: разъехавшись, они
     дают «показано 20 из 3» и чипы с чужими числами.
+
+    space_id — граница пространства, и она же первая: журнал у «Таксопарков» и
+    «Теза» свой, а не общий на двоих. Запись БЕЗ пространства видна в любом
+    журнале — так живут записи об объектах, которых уже нет, и о действиях,
+    сделанных раньше, чем появился объект (см. schema.AUDIT_SPACE_SQL).
+    Спрятать их везде значило бы вычеркнуть из аудита то, что аудит и должен
+    помнить.
     """
     where, params = [], []
+
+    if space_id:
+        where.append('(a.space_id = %s OR a.space_id IS NULL)')
+        params.append(int(space_id))
 
     actions = AUDIT_GROUPS.get(group)
     if actions:

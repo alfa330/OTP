@@ -204,7 +204,7 @@ const AuditRow = ({ item, nameOf, onOpenArticle }) => {
     );
 };
 
-export default function WikiAudit({ base, headers, showToast, structure, onOpenArticle }) {
+export default function WikiAudit({ base, headers, showToast, structure, spaceId, onOpenArticle }) {
     const toast = useStableCallback(showToast);
 
     const [items, setItems] = useState(null);
@@ -243,6 +243,10 @@ export default function WikiAudit({ base, headers, showToast, structure, onOpenA
             params: {
                 limit: PAGE_SIZE,
                 offset: append ? loadedRef.current : 0,
+                /* Журнал у пространства свой. Параметр обязателен ровно так же,
+                   как у справочников: сервер по нему и границу ставит, и
+                   отказывает в чужом. */
+                space_id: spaceId || undefined,
                 group: group === 'all' ? undefined : group,
                 q: search || undefined,
                 from: range.from || undefined,
@@ -280,7 +284,7 @@ export default function WikiAudit({ base, headers, showToast, structure, onOpenA
                 setAppending(false);
                 setBusy(false);
             });
-    }, [base, headers, group, search, range.from, range.to, toast]);
+    }, [base, headers, spaceId, group, search, range.from, range.to, toast]);
 
     useEffect(() => { load(false); }, [load]);
 

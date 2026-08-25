@@ -1008,11 +1008,18 @@ def register(bp, wiki_route, db, log_ip):
         # Поиск от двух символов: по одной букве ILIKE перебирает всю таблицу
         # и всё равно возвращает почти всё.
         query = (request.args.get('q') or '').strip()[:120]
+        # Пространство спрашивается так же, как у справочников: журнал у
+        # каждого свой, и «покажи чужой» здесь не уточнение выборки, а доступ.
+        # Отсюда и 404 на чужой id — тот же request_space, что у офисов.
+        space_id, space_error = request_space(cursor, ctx)
+        if space_error:
+            return space_error
         filters = {
             'group': (request.args.get('group') or '').strip() or None,
             'query': query if len(query) >= 2 else None,
             'date_from': _day_or_none(request.args.get('from')),
             'date_to': _day_or_none(request.args.get('to')),
+            'space_id': space_id,
         }
 
         payload = {"items": structure.list_audit(cursor, limit=limit, offset=offset,
