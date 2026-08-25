@@ -2,8 +2,8 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
-    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, Link2, List,
-    Loader2, Maximize2, Minimize2, Pencil, Star, User,
+    Archive, ArrowLeft, ArrowUpRight, Clock, CornerDownLeft, Eye, History, Link2,
+    List, Loader2, Maximize2, Minimize2, Pencil, Star, User,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 // fmtDeadline под своим именем: в файле уже есть свой fmtDate — «5 сентября
@@ -11,13 +11,14 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 // с часом, и разбирать наивную дату через new Date() ему нельзя (см.
 // guestAccess.js).
 import { daysLeftLabel, fmtDeadline as fmtGuestDeadline } from './guestAccess';
-import { typeBadge } from './articleTypes';
+import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 import { findTrainer } from './trainers/registry';
 import { scrollToElement } from './scrollContainer';
 import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import WikiAckPanel from './WikiAckPanel';
+import WikiHistory from './WikiHistory';
 
 /* Классификатор авто — статья вики с ПУСТЫМ телом: вместо текста рисуется
    интерактивный калькулятор. Раньше он был отдельным разделом портала, но по
@@ -115,24 +116,6 @@ const TrainerModal = lazy(() => import('./trainers/TrainerPlayer'));
  * Санитизация на клиенте — второй рубеж. Первый (серверный) появится вместе с
  * редактором на этапе 4; сейчас содержимое создаётся только миграцией.
  */
-
-const STATUS_LABELS = {
-    draft: 'Черновик',
-    on_approval: 'На согласовании',
-    published: 'Опубликована',
-    requires_verification: 'Требует проверки',
-    archived: 'В архиве',
-    expired: 'Устарела',
-};
-
-const STATUS_TONES = {
-    draft: 'slate',
-    on_approval: 'amber',
-    published: 'green',
-    requires_verification: 'amber',
-    archived: 'slate',
-    expired: 'red',
-};
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
 
@@ -253,6 +236,12 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
         setBodyReady(!!node);
     }, []);
     const [archiving, setArchiving] = useState(false);
+    const [historyOpen, setHistoryOpen] = useState(false);
+    /* Счётчик перезагрузки статьи. Нужен откату: после восстановления редакции
+       в базе лежит другой текст, а на экране остался прежний — и человек видит,
+       что «ничего не произошло». Отдельное состояние, а не перечитывание по
+       slug: slug при откате не меняется, и эффект загрузки сам бы не сработал. */
+    const [reloadKey, setReloadKey] = useState(0);
     /* Открытый тренажёр — сценарий, а не флаг: в одной статье кнопок может быть
        несколько (например, «через приложение» и «через сайт»), и открыться
        обязан именно тот, по которому нажали. */
@@ -365,7 +354,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             .catch((e) => { if (!cancelled) setError(errText(e, 'Статья не найдена')); })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, [base, headers, slug]);
+    }, [base, headers, slug, reloadKey]);
 
     /* Адреса файлов раскрываем до абсолютных ПОСЛЕ санитайзера: фронт и API на
        разных доменах, и относительный `/api/wiki/file/<id>` браузер искал бы на
@@ -681,6 +670,22 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                         {immersive ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
                         {immersive ? 'Свернуть' : 'Во весь экран'}
                     </button>
+                    {/* История — рядом с «Править» и ЛЕВЕЕ её: вопрос «кто это
+                        написал» возникает у читателя, а не только у того, кто
+                        правит, поэтому кнопка не гейтится правом на правку.
+                        Гостю её не показываем: гостевой доступ открывает статью,
+                        а не всё, что из неё когда-то убрали (сервер такой запрос
+                        тоже отклоняет — wiki/routes_edit.py: _history_denied). */}
+                    {!article.guest_access && (
+                        <button
+                            type="button"
+                            className={iosBtnSecondary}
+                            title="Кто и когда менял статью, сравнение и откат"
+                            onClick={() => setHistoryOpen(true)}
+                        >
+                            <History size={14} /> История
+                        </button>
+                    )}
                     {onEdit && article.permissions?.can_edit && (
                         <button type="button" className={iosBtnSecondary}
                                 onClick={() => onEdit(article)}>
@@ -689,6 +694,16 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                     )}
                 </div>
             </div>
+
+            <WikiHistory
+                base={base}
+                headers={headers}
+                article={article}
+                open={historyOpen}
+                onClose={() => setHistoryOpen(false)}
+                onRestored={() => setReloadKey((value) => value + 1)}
+                showToast={showToast}
+            />
 
             {/* Панель ознакомления идёт ПЕРЕД статьёй: требование надо видеть
                 до чтения, а не найти под текстом. */}

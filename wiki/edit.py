@@ -242,6 +242,59 @@ def list_versions(cursor, article_id):
     return [dict(zip(_VERSION_KEYS, row)) for row in cursor.fetchall()]
 
 
+# Шапки версий — без тела. Тело самой большой статьи прода весит 90 КБ, и
+# десять таких строк ради списка редакций тянуть в память незачем: список
+# сравнивает состояния, а для сравнения хватает отпечатка.
+_VERSION_HEAD_KEYS = ('id', 'version_number', 'title', 'summary', 'status',
+                      'content_hash', 'content_len', 'change_comment',
+                      'editor_id', 'editor_name', 'created_at',
+                      'restored_from_version_id')
+
+
+def version_headers(cursor, article_id):
+    """Строки истории по возрастанию номера — сырьё для wiki/history.py."""
+    cursor.execute(
+        """
+        SELECT v.id, v.version_number, v.title, v.summary, v.status,
+               md5(COALESCE(v.content, '')), length(COALESCE(v.content, '')),
+               v.change_comment, v.editor_id, u.name, v.created_at,
+               v.restored_from_version_id
+          FROM wiki_article_versions v
+          LEFT JOIN users u ON u.id = v.editor_id
+         WHERE v.article_id = %s
+         ORDER BY v.version_number
+        """,
+        (article_id,),
+    )
+    return [dict(zip(_VERSION_HEAD_KEYS, row)) for row in cursor.fetchall()]
+
+
+_CURRENT_STATE_KEYS = ('title', 'summary', 'status', 'content_hash', 'content_len',
+                       'updated_by', 'updated_by_name', 'updated_at')
+
+
+def current_state(cursor, article_id):
+    """Текущее состояние статьи в том же виде, что и шапка версии.
+
+    Отдельный запрос, а не поле из get_article: там нет имени последнего
+    редактора, а сравнивать состояния надо по отпечатку тела, а не по самому
+    телу.
+    """
+    cursor.execute(
+        """
+        SELECT a.title, a.summary, a.status,
+               md5(COALESCE(a.content, '')), length(COALESCE(a.content, '')),
+               a.updated_by, u.name, a.updated_at
+          FROM wiki_articles a
+          LEFT JOIN users u ON u.id = a.updated_by
+         WHERE a.id = %s
+        """,
+        (article_id,),
+    )
+    row = cursor.fetchone()
+    return dict(zip(_CURRENT_STATE_KEYS, row)) if row else None
+
+
 def get_version(cursor, article_id, version_id):
     cursor.execute(
         """
@@ -269,8 +322,18 @@ def restore_version(cursor, article_id, version_id, *, editor_id, session_id):
     if not version:
         return False
 
+    # Формулировка важна дважды. Во-первых, комментарий строки описывает ПРАВКУ,
+    # а в истории версий он подписывает редакцию, которую эта правка создала
+    # (wiki/history.py), — «Перед восстановлением версии №1» на самой
+    # восстановленной редакции читалось бы задом наперёд. Во-вторых, номера
+    # версии здесь нет намеренно: version_number считает СОХРАНЕНИЯ, а не
+    # редакции, человеку он нигде не показан, и «версия №5» в подписи означала
+    # бы не то, что он видит в списке. Куда именно вернули, записано точно —
+    # в restored_from_version_id, и экран подписывает это датой той редакции.
+    # Прежних записей с другим текстом нет: до появления экрана истории
+    # восстановлением не пользовались ни разу.
     snapshot_version(cursor, article_id, editor_id=editor_id, session_id=session_id,
-                     comment='Перед восстановлением версии №%s' % version['version_number'])
+                     comment='Восстановление прежней редакции')
 
     cursor.execute(
         """

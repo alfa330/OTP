@@ -5,7 +5,7 @@ import {
     MousePointerClick, PenLine, Pencil, Search, User, X,
 } from 'lucide-react';
 import { iosCard, IosBadge, IosMenu } from '../ui/ios';
-import { typeBadge } from './articleTypes';
+import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 
 /* Вкладка «Статьи» — каталог: дерево разделов слева, статьи выбранного справа.
  *
@@ -82,22 +82,6 @@ const fmtAgo = (iso) => {
     if (days < 7) return `обновлена ${days} дн. назад`;
     return `обновлена ${then.toLocaleDateString('ru-RU',
         { day: '2-digit', month: '2-digit', year: '2-digit' })}`;
-};
-
-/* Подписи статусов совпадают с шапкой статьи (WikiArticle): один и тот же
-   статус обязан называться одинаково в списке и на самой статье. */
-const STATUS_LABELS = {
-    draft: 'Черновик',
-    on_approval: 'На согласовании',
-    published: 'Опубликована',
-    requires_verification: 'Требует проверки',
-    archived: 'В архиве',
-    expired: 'Устарела',
-};
-
-const STATUS_TONES = {
-    draft: 'slate', on_approval: 'amber', published: 'green',
-    requires_verification: 'amber', archived: 'slate', expired: 'red',
 };
 
 const toggled = (set, key) => {

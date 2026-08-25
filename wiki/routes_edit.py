@@ -11,6 +11,8 @@ from flask import jsonify, request
 from . import access as wiki_access
 from . import articles as wiki_articles
 from . import edit as wiki_edit
+from . import guests as wiki_guests
+from . import history as wiki_history
 from . import queries
 from .schema import ARTICLE_TYPES, CAPABILITY_TITLES, SUBJECT_TYPES
 from .ai import embed as ai_embed
@@ -530,6 +532,98 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
                            entity_type='article', entity_id=article_id,
                            details={'version_id': version_id}, ip_address=log_ip())
         return jsonify({"status": "restored"})
+
+    # ── История версий ───────────────────────────────────────────────────
+    #
+    # Отдельная дверь рядом с /versions, а не замена ей: /versions отдаёт строки
+    # таблицы как есть, и на них держатся сторонние вызовы. Здесь же строки
+    # превращаются в РЕДАКЦИИ — с правильным авторством и без повторов (почему
+    # это не одно и то же, разобрано в шапке wiki/history.py).
+
+    def _history_denied(cursor, ctx, article, permissions):
+        """Гостю история не показывается.
+
+        Гостевой доступ выдаётся человеку со стороны и на один раздел
+        (wiki/guests.py). Статью он читать вправе, а прошлые редакции — нет: в
+        них лежит ровно то, что из статьи УБРАЛИ, и «две недели на один раздел»
+        такого не обещали.
+
+        Условие дословно совпадает с тем, по которому витрина рисует бейдж
+        «Гостевой доступ до …» (routes_articles): выдача на эту статью есть, а
+        другого основания читать нет. Совпадение обязательно — человек с
+        бейджем не должен получать историю, а человек без бейджа не должен
+        получать отказ.
+
+        Проверять `permissions['_reason'] == 'гостевой доступ'` здесь НЕЛЬЗЯ,
+        хотя на витрине признак именно такой: сюда права приходят из
+        effective_permissions, а он считает их БЕЗ гостевой поправки
+        (permissions_for_articles не передаёт guest_allows_read), и такое
+        основание тут не появляется никогда. Проверено на стенде: гость получал
+        полную историю статьи, к которой у него доступ на неделю.
+        """
+        guest_until = wiki_guests.article_grant_expiry(
+            cursor, ctx['user_id'], article['id'], article.get('section_ids') or [])
+        if not guest_until or permissions.get('can_read'):
+            return None
+        return jsonify({"error": "История версий гостевым доступом не открывается",
+                        "code": "WIKI_FORBIDDEN"}), 403
+
+    @wiki_route('/articles/<int:article_id>/history')
+    def wiki_article_history(cursor, ctx, article_id):
+        article, permissions, error = _load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+        denied = _history_denied(cursor, ctx, article, permissions)
+        if denied:
+            return denied
+        items = wiki_history.build_history(
+            wiki_edit.version_headers(cursor, article_id),
+            wiki_edit.current_state(cursor, article_id))
+        # can_restore рядом со списком, а не отдельным запросом: кнопка отката
+        # решается тем же правом, что и правка, и спрашивать его вторым кругом
+        # значило бы второй раз считать периметр.
+        return jsonify({"items": items,
+                        "can_restore": bool(permissions.get('can_edit'))})
+
+    def _history_state(cursor, article, key):
+        """Состояние по ключу из истории: «current» — тело статьи, иначе версия."""
+        if key == 'current':
+            return {'key': 'current', 'title': article['title'],
+                    'summary': article['summary'], 'status': article['status'],
+                    'content': article['content']}
+        version_id = _int_or_none(key)
+        if not version_id:
+            return None
+        version = wiki_edit.get_version(cursor, article['id'], version_id)
+        if not version:
+            return None
+        version['key'] = 'v%s' % version['id']
+        return version
+
+    @wiki_route('/articles/<int:article_id>/history/diff')
+    def wiki_article_history_diff(cursor, ctx, article_id):
+        article, permissions, error = _load_with_permissions(cursor, ctx, article_id)
+        if error:
+            return error
+        denied = _history_denied(cursor, ctx, article, permissions)
+        if denied:
+            return denied
+
+        before = _history_state(cursor, article, str(request.args.get('from') or ''))
+        after = _history_state(cursor, article, str(request.args.get('to') or 'current'))
+        if not before or not after:
+            return jsonify({"error": "Версия не найдена"}), 404
+        # Сравнение считает СЕРВЕР, а не браузер. Тело самой большой статьи
+        # прода — 90 КБ, и отдавать два таких ради разницы в одну строку значило
+        # бы гонять по сети в тысячу раз больше, чем показываем.
+        diff = wiki_history.diff_states(before, after)
+        diff['from'] = {'key': before['key'], 'title': before['title'],
+                        'created_at': (before.get('created_at').isoformat()
+                                       if before.get('created_at') else None)}
+        diff['to'] = {'key': after['key'], 'title': after['title'],
+                      'created_at': (after.get('created_at').isoformat()
+                                     if after.get('created_at') else None)}
+        return jsonify(diff)
 
     # ── Права на конкретную статью ───────────────────────────────────────
     @wiki_route('/articles/<int:article_id>/access-rules', methods=('GET', 'POST'),
