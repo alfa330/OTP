@@ -81,10 +81,11 @@ def make_context(otp_role='operator', department_id=None, wiki_role=True, **caps
 
 
 # Сколько значений отдаёт fetchone на каждый запрос отчёта, в порядке вызова:
-# итоги чтения (6), итоги ознакомлений (6), итоги поиска (4), дата начала
-# журнала (1), итоги помощника (5). Считать их «как получится» нельзя —
-# распаковка кортежа не той длины падает, и падает она уже внутри роута.
-REPORT_FETCHONE = [(0,) * 6, (0,) * 6, (0,) * 4, (None,), (0,) * 5]
+# итоги чтения (6), счётчик устаревших (1), итоги ознакомлений (6), итоги
+# поиска (4), дата начала журнала (1), итоги помощника (5). Считать их «как
+# получится» нельзя — распаковка кортежа не той длины падает, и падает она уже
+# внутри роута.
+REPORT_FETCHONE = [(0,) * 6, (0,), (0,) * 6, (0,) * 4, (None,), (0,) * 5]
 
 
 def build_client(test, context, *, fetchone=None, fetchall=()):
@@ -163,7 +164,8 @@ class GateTest(unittest.TestCase):
         response = client.get('/api/wiki/analytics')
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        for block in ('reading', 'acknowledgements', 'demand', 'notes', 'period'):
+        for block in ('reading', 'content', 'acknowledgements', 'demand',
+                      'notes', 'period'):
             self.assertIn(block, payload)
 
     def test_period_reaches_every_query(self):
@@ -437,6 +439,157 @@ class HeadcountTest(unittest.TestCase):
         # Штат: работающий и отпускник. Уволенный и уволившийся — нет.
         self.assertEqual(row[5], 2)
         self.assertEqual(row[3], 1, 'читатель один')
+
+
+_ROSTER_STUB = """
+wiki_article_views_log AS (
+    SELECT article_id::int, user_id::int, viewed_at::timestamp,
+           snapshot_department_id::int
+      FROM (VALUES {rows}) AS t(article_id, user_id, viewed_at,
+                                snapshot_department_id)
+),
+users AS (
+    SELECT id::int, department_id::int, name::text
+      FROM (VALUES (5, 1, 'Ахметова Асель'), (6, 2, 'Ким Владислав')) AS t(id, department_id, name)
+),
+departments AS (
+    SELECT id::int, name::text
+      FROM (VALUES (1, 'СЗоВ'), (2, 'Отдел продаж')) AS t(id, name)
+)
+"""
+
+
+@unittest.skipIf(not prod_db.available(), 'нет доступа к базе для прогона SQL')
+class ReadersRosterTest(unittest.TestCase):
+    """Перепись читателей: человек одной строкой, отдел — последний из его чтений."""
+
+    @classmethod
+    def setUpClass(cls):
+        reason = prod_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.conn = prod_db.connection()
+
+    def tearDown(self):
+        prod_db.rollback()
+
+    def _rows(self, views, depts=None):
+        # Заглушка своя, а не общая: переписи нужны ИМЕНА людей, а в общей
+        # users только отдел и статус. Дописывать колонку в общую значило бы
+        # править арность фикстур во всех остальных тестах файла.
+        stubs = _ROSTER_STUB.format(rows=', '.join(views))
+        sql = _stub(wiki_analytics._READERS_SQL, stubs)
+        with self.conn.cursor() as cursor:
+            cursor.execute(sql, {'visible': [1], 'since': None, 'until': None,
+                                 'roster': 100, 'depts': depts})
+            return cursor.fetchall()
+
+    def test_mover_is_one_row_with_the_latest_department(self):
+        """Перешедший между отделами не должен рваться на две строки."""
+        rows = self._rows([
+            "(1, 5, '2026-08-01 10:00:00'::timestamp, 2)",   # тогда — второй отдел
+            "(1, 5, '2026-08-10 10:00:00'::timestamp, 1)",   # теперь — первый
+            "(1, 5, '2026-08-11 10:00:00'::timestamp, 1)",
+        ])
+        self.assertEqual(len(rows), 1, 'человек обязан быть одной строкой')
+        _uid, _name, department, reads, articles, _last = rows[0]
+        self.assertEqual(reads, 3)
+        self.assertEqual(articles, 1)
+        self.assertEqual(department, 'СЗоВ', 'отдел берётся из последнего чтения')
+
+    def test_department_boundary_cuts_the_roster(self):
+        """Супервайзеру видны читатели только своих отделов."""
+        views = ["(1, 5, '2026-08-10 10:00:00'::timestamp, 1)",
+                 "(1, 6, '2026-08-10 10:00:00'::timestamp, 2)"]
+        self.assertEqual(len(self._rows(views)), 2, 'без границы видны оба')
+        limited = self._rows(views, depts=[1])
+        self.assertEqual(len(limited), 1)
+        self.assertEqual(limited[0][0], 5)
+
+
+_SECTIONS_STUB = """
+wiki_sections AS (
+    SELECT id::int, parent_section_id::int, name::text, status::text,
+           position::int
+      FROM (VALUES {sections}) AS t(id, parent_section_id, name, status, position)
+),
+wiki_article_sections AS (
+    SELECT article_id::int, section_id::int
+      FROM (VALUES {links}) AS t(article_id, section_id)
+),
+wiki_articles AS (
+    SELECT id::int, slug::text, title::text, status::text,
+           updated_at::timestamp, review_due_at::timestamp,
+           updated_by::int, author_id::int
+      FROM (VALUES {articles}) AS t(id, slug, title, status, updated_at,
+                                    review_due_at, updated_by, author_id)
+),
+users AS (
+    SELECT id::int, name::text FROM (VALUES (5, 'Иванов'), (6, 'Петров')) AS t(id, name)
+)
+"""
+
+
+@unittest.skipIf(not prod_db.available(), 'нет доступа к базе для прогона SQL')
+class SectionsAndStaleTest(unittest.TestCase):
+    """Разделы считают только видимые статьи, устаревшее — только опубликованное."""
+
+    SECTIONS = ("(10, NULL, 'Регламенты', 'active', 0), "
+                "(11, 10, 'Фотоконтроль', 'active', 1), "
+                "(12, NULL, 'Пустой', 'active', 2), "
+                "(13, NULL, 'В архиве', 'archived', 3)")
+    LINKS = "(1, 10), (2, 10), (3, 11), (99, 12)"
+    ARTICLES = (
+        "(1, 'a', 'Первая', 'published', '2026-08-20'::timestamp, NULL, 5, 5), "
+        "(2, 'b', 'Вторая', 'draft', '2026-08-24'::timestamp, NULL, 6, 6), "
+        "(3, 'c', 'Третья', 'published', '2020-01-01'::timestamp, "
+        "'2020-06-01'::timestamp, 5, 5), "
+        "(99, 'x', 'Чужая', 'published', '2026-08-24'::timestamp, NULL, 5, 5)")
+
+    @classmethod
+    def setUpClass(cls):
+        reason = prod_db.skip_reason()
+        if reason:
+            raise unittest.SkipTest(reason)
+        cls.conn = prod_db.connection()
+
+    def tearDown(self):
+        prod_db.rollback()
+
+    def _stubs(self):
+        return _SECTIONS_STUB.format(sections=self.SECTIONS, links=self.LINKS,
+                                     articles=self.ARTICLES)
+
+    def _run(self, sql, params):
+        with self.conn.cursor() as cursor:
+            cursor.execute(_stub(sql, self._stubs()), params)
+            return cursor.fetchall()
+
+    def test_section_counts_only_visible_articles(self):
+        """Статья 99 не в периметре — раздел «Пустой» обязан остаться пустым."""
+        rows = self._run(wiki_analytics._SECTIONS_SQL,
+                         {'visible': [1, 2, 3], 'sections': [10, 11, 12, 13],
+                          'roster': 100})
+        by_name = {r[1]: r for r in rows}
+        self.assertNotIn('В архиве', by_name, 'архивный раздел не показываем')
+        self.assertEqual(by_name['Регламенты'][3], 2, 'две статьи')
+        self.assertEqual(by_name['Регламенты'][4], 1, 'опубликована одна')
+        self.assertEqual(by_name['Пустой'][3], 0)
+        self.assertIsNone(by_name['Пустой'][5], 'у пустого нет даты правки')
+        self.assertEqual(by_name['Фотоконтроль'][2], 'Регламенты',
+                         'у вложенного раздела виден родитель')
+
+    def test_stale_takes_published_older_than_threshold(self):
+        """Черновик и свежая статья в устаревшие не попадают."""
+        params = {'visible': [1, 2, 3, 99], 'days': 180, 'limit': 10}
+        rows = self._run(wiki_analytics._STALE_SQL, params)
+        self.assertEqual([r[2] for r in rows], ['Третья'])
+        row = rows[0]
+        self.assertGreater(row[4], 180, 'дней без правки больше порога')
+        self.assertTrue(row[5], 'срок пересмотра прошёл — признак поднят')
+        self.assertEqual(row[7], 'Фотоконтроль', 'раздел статьи подписан')
+        count = self._run(wiki_analytics._STALE_COUNT_SQL, params)
+        self.assertEqual(count[0][0], 1)
 
 
 _ACK_STUB = """

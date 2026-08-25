@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    AlertCircle, BookOpen, EyeOff, Loader2, RefreshCw, Search, ShieldAlert,
-    ShieldCheck, TrendingUp, Users,
+    AlertCircle, BookOpen, EyeOff, FolderTree, History, Library, Loader2,
+    RefreshCw, Search, ShieldAlert, ShieldCheck, TrendingUp, Users,
 } from 'lucide-react';
 import {
     Bar as RBar, CartesianGrid, ComposedChart, Line, ResponsiveContainer,
@@ -16,18 +16,24 @@ import useStableCallback from './useStableCallback';
 
 /* Вкладка «Аналитика» — отчёт о том, работает ли база знаний.
  *
- * Три блока и жёсткий порядок, потому что вопросов ровно три: пользуются ли
- * викой (ЧТЕНИЕ), выполнено ли обязательное (ОЗНАКОМЛЕНИЯ) и чего в ней не
- * хватает (ЧЕГО НЕ ХВАТАЕТ). Первые два отвечают на «работает ли», третий —
- * на «что делать дальше», и третий читают, только поверив первым двум.
- * Вопрос блока написан подзаголовком: заголовок «Чтение и охват» называет
- * тему, но не говорит, зачем сюда смотреть.
+ * Четыре блока и жёсткий порядок, потому что вопросов четыре: пользуются ли
+ * викой (ЧТЕНИЕ), в каком состоянии её содержимое (СОДЕРЖИМОЕ), выполнено ли
+ * обязательное (ОЗНАКОМЛЕНИЯ) и чего в ней не хватает (ЧЕГО НЕ ХВАТАЕТ).
+ * Первые три отвечают на «работает ли», последний — на «что делать дальше»,
+ * и его читают, только поверив предыдущим. Вопрос блока написан подзаголовком:
+ * заголовок «Чтение и охват» называет тему, но не говорит, зачем сюда смотреть.
  *
  * ЧЕГО ЗДЕСЬ НЕТ СОЗНАТЕЛЬНО. Ни «среднего числа находок», ни «медианы
  * подтверждения», ни «токенов помощника», ни топа цитируемых статей. Всё это
  * считается, всё это красиво и ни одно не меняет ничьих действий. Отчёт, где
  * половина таблиц — «просто цифры», перестают открывать целиком, и вместе с
- * цифрами теряются те пять разрезов, ради которых он и сделан.
+ * цифрами теряются те разрезы, ради которых он и сделан.
+ *
+ * ДВА СПИСКА ЗДЕСЬ ПОИМЁННЫЕ — перепись читателей (постановка 4.6: «какие
+ * сотрудники пользовались Wiki за период») и просрочка ознакомлений. Оба
+ * сужаются границей отдела на сервере и оба помечены бейджем: у супервайзера
+ * и у директора числа в них РАЗНЫЕ, и без пометки это читается как расхождение
+ * данных. Остальные разрезы сводные и не сужаются.
  *
  * ГДЕ ЖИВУТ ОБЪЯСНЕНИЯ. Оговорка стоит у того числа, которое объясняет, а не
  * подвалом «как это посчитано» внизу страницы: подвал был набором верных
@@ -182,6 +188,20 @@ const ArticleLink = ({ row, onOpen }) => (onOpen ? (
         {row.title}
     </button>
 ) : <span>{row.title}</span>);
+
+/* Переписи (кто пользовался викой, какие есть разделы) приходят целиком, а
+ * показываются первой десяткой: сотня строк посреди отчёта отодвигает всё
+ * следующее за горизонт экрана, и до блоков ниже просто не доходят. Число в
+ * кнопке названо прямо — «показать всех, 96», а не «показать ещё»: иначе
+ * неясно, десять там дальше или тысяча.
+ */
+const ROSTER_HEAD = 10;
+
+const MoreButton = ({ total, expanded, onToggle, word }) => (
+    <button type="button" onClick={onToggle} className={`${iosBtnGhost} ml-auto`}>
+        {expanded ? 'Свернуть' : `Показать ${word}, ${num(total)}`}
+    </button>
+);
 
 /* Расшифровка причин под таблицей.
  *
@@ -407,6 +427,11 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
         to: isoDate(new Date()),
     }));
 
+    /* Развёрнутость переписей — состояние ЭКРАНА, а не запроса: строки уже
+       пришли, и разворачивание не должно дёргать сервер. */
+    const [allPeople, setAllPeople] = useState(false);
+    const [allSections, setAllSections] = useState(false);
+
     /* Зависимости — примитивы, а не сам `range`: календарь отдаёт новый объект
        на каждый выбор, и по ссылке запрос уходил бы даже за тем же периодом. */
     const params = useMemo(() => ({
@@ -438,6 +463,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
     const reading = data?.reading;
     const ack = data?.acknowledgements;
     const demand = data?.demand;
+    const content = data?.content;
 
     if (loading && !data) {
         return (
@@ -470,6 +496,20 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
     const ds = demand?.search || {};
     const da = demand?.assistant || {};
     const notes = data?.notes || {};
+
+    /* Бейдж сужения повторяется у ОБОИХ поимённых списков — переписи читателей
+       и просрочки: числа в них у супервайзера и у директора разные, и увидеть
+       пометку надо там, где смотришь, а не там, где вспомнил. */
+    const scopedBadge = data?.scoped ? (
+        <span className="flex items-center gap-1.5">
+            <IosBadge tone="blue">только ваши отделы</IosBadge>
+            <IosHint text={notes.scoped} align="right" label="Почему список сужен" />
+        </span>
+    ) : null;
+
+    const people = reading?.people || [];
+    const sections = content?.sections || [];
+    const stale = content?.stale || [];
 
     return (
         <div className="space-y-6">
@@ -647,9 +687,141 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                         );
                     })}
                 </Table>
+
+                {/* Перепись читателей — требование 4.6 «какие сотрудники
+                    пользовались Wiki за период». Поимённо, поэтому сужается
+                    границей отдела так же, как просрочка ознакомлений, и по
+                    той же причине потолок строк подписывается только там, где
+                    сужения нет. */}
+                <Table
+                    title="Кто пользовался викой" icon={Users}
+                    count={people.length}
+                    total={data?.scoped ? null : t.readers}
+                    badge={scopedBadge}
+                    empty="За период викой никто не пользовался."
+                    help="Поимённо: кто открывал вику за выбранный период. Прочтение — человек, статья и минута, поэтому обновление страницы не удваивает счёт. Отдел показан тот, в котором человек был на момент последнего чтения: перешедший не уносит прошлые чтения в новый отдел."
+                    footer={people.length > ROSTER_HEAD && (
+                        <div className="flex px-1">
+                            <MoreButton
+                                total={people.length} expanded={allPeople}
+                                word="всех" onToggle={() => setAllPeople((v) => !v)}
+                            />
+                        </div>
+                    )}
+                    head={(
+                        <tr>
+                            <Th>Человек</Th>
+                            <Th>Отдел</Th>
+                            <Th right>Прочтений</Th>
+                            <Th right>Статей</Th>
+                            <Th right>Последний заход</Th>
+                        </tr>
+                    )}
+                >
+                    {(allPeople ? people : people.slice(0, ROSTER_HEAD)).map((row) => (
+                        <tr key={row.user_id}>
+                            <Td>{row.name}</Td>
+                            <Td muted>{row.department}</Td>
+                            <Td right>{num(row.reads)}</Td>
+                            <Td right>{num(row.articles)}</Td>
+                            <Td right muted>{day(row.last_at)}</Td>
+                        </tr>
+                    ))}
+                </Table>
             </Group>
 
-            {/* ── Блок 2. Ознакомления ───────────────────────────────────── */}
+            {/* ── Блок 2. Содержимое базы ────────────────────────────────── */}
+            <Group
+                title="Содержимое базы" icon={Library} scope="на сейчас"
+                subtitle="В каком состоянии сама база: что где лежит, кто её ведёт и что давно не трогали."
+            >
+                <Table
+                    title="Разделы" icon={FolderTree}
+                    count={sections.length}
+                    empty="Разделов в этом пространстве вам не видно."
+                    help="Считаются статьи раздела, которые видны вам, — вместе с черновиками; «Опубликовано» из них выделено отдельно. «Правили за период» — кто сохранял версии статей раздела за выбранный период, тройка самых частых. Пустой раздел показан намеренно: «завели и не наполнили» — это находка."
+                    footer={sections.length > ROSTER_HEAD && (
+                        <div className="flex px-1">
+                            <MoreButton
+                                total={sections.length} expanded={allSections}
+                                word="все" onToggle={() => setAllSections((v) => !v)}
+                            />
+                        </div>
+                    )}
+                    head={(
+                        <tr>
+                            <Th>Раздел</Th>
+                            <Th right>Статей</Th>
+                            <Th right>Опубликовано</Th>
+                            <Th right>Последняя правка</Th>
+                            <Th>Правили за период</Th>
+                        </tr>
+                    )}
+                >
+                    {(allSections ? sections : sections.slice(0, ROSTER_HEAD)).map((row) => (
+                        <tr key={row.id}>
+                            <Td>
+                                {row.parent && (
+                                    <span className="text-slate-400">{row.parent} / </span>
+                                )}
+                                {row.name}
+                            </Td>
+                            <Td right>{num(row.articles)}</Td>
+                            <Td right muted={!row.published}>{num(row.published)}</Td>
+                            <Td right muted={!row.last_update}>
+                                {row.last_update ? day(row.last_update) : 'не правили'}
+                            </Td>
+                            <Td muted={!(row.editors || []).length}>
+                                {(row.editors || []).length
+                                    ? row.editors.map((e) => `${e.name} · ${e.edits}`).join(', ')
+                                    : '—'}
+                            </Td>
+                        </tr>
+                    ))}
+                </Table>
+
+                {/* Устаревшее ≠ непрочитанное. Там статью не ЧИТАЛИ, здесь её не
+                    ПИСАЛИ: первую надо показать людям, вторую перечитать автору. */}
+                <Table
+                    title="Давно не обновляли" icon={History}
+                    count={stale.length}
+                    total={content?.stale_total}
+                    empty={`Статей старше ${num(content?.stale_days)} дней нет — базу обновляют.`}
+                    hint={`Устаревшей считается опубликованная статья, которую не правили дольше ${num(content?.stale_days)} дней. Первыми идут самые давние.`}
+                    help="Отдельный признак «просрочен пересмотр» появляется у статей, которым проставили срок пересмотра и он прошёл. Срок заполняют не у всех статей, поэтому отбор идёт по дате последней правки, а не по нему."
+                    head={(
+                        <tr>
+                            <Th>Статья</Th>
+                            <Th>Раздел</Th>
+                            <Th>Правил последним</Th>
+                            <Th right>Не обновляли</Th>
+                        </tr>
+                    )}
+                >
+                    {stale.map((row) => (
+                        <tr key={row.id}>
+                            <Td>
+                                <ArticleLink row={row} onOpen={onOpenArticle} />
+                                {row.review_overdue && (
+                                    <IosBadge tone="amber" className="ml-2">
+                                        просрочен пересмотр
+                                    </IosBadge>
+                                )}
+                            </Td>
+                            <Td muted>{row.section || '—'}</Td>
+                            <Td muted>{row.editor}</Td>
+                            <Td right>
+                                {num(row.days)} дн.
+                                <div className="text-[11px] text-slate-400">
+                                    {day(row.updated_at)}
+                                </div>
+                            </Td>
+                        </tr>
+                    ))}
+                </Table>
+            </Group>
+
+            {/* ── Блок 3. Ознакомления ───────────────────────────────────── */}
             <Group
                 title="Ознакомления" icon={ShieldAlert} scope="на сейчас"
                 subtitle={['Выполнено ли обязательное: кто не подтвердил назначенные статьи.',
@@ -727,13 +899,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             title="Просрочено поимённо" icon={ShieldAlert}
                             count={ack?.overdue?.length}
                             total={data?.scoped ? null : at.overdue}
-                            badge={data?.scoped ? (
-                                <span className="flex items-center gap-1.5">
-                                    <IosBadge tone="blue">только ваши отделы</IosBadge>
-                                    <IosHint text={notes.scoped} align="right"
-                                             label="Почему список сужен" />
-                                </span>
-                            ) : null}
+                            badge={scopedBadge}
                             empty="Просроченных ознакомлений нет."
                             head={(
                                 <tr>
@@ -769,7 +935,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                 )}
             </Group>
 
-            {/* ── Блок 3. Спрос, на который вика не отвечает ─────────────── */}
+            {/* ── Блок 4. Спрос, на который вика не отвечает ─────────────── */}
             <Group
                 title="Чего не хватает в базе" icon={Search} scope="за выбранный период"
                 subtitle="Что искали и о чём спрашивали помощника, но ответа не нашли, — темы для новых статей."

@@ -68,9 +68,12 @@ export const Td = ({ children, right = false, muted = false }) => (
  *  строк, и без этого обрез читается как «просрочек ровно двадцать».
  *  `badge` — состояние выборки (например, сужение по отделу) справа.
  *  `help`  — длинное пояснение под «i»; `hint` — короткая строка под таблицей.
+ *  `footer` — управление под таблицей (например, «показать всех»): переписи
+ *  показываются свёрнутыми, иначе сотня строк раздвигает всё остальное.
  */
 export const Table = ({ title, icon: Icon, count, total = null, empty, head,
-                        children, hint = null, help = null, badge = null }) => (
+                        children, hint = null, help = null, badge = null,
+                        footer = null }) => (
     <section className="space-y-1.5">
         <div className="flex items-center gap-1.5 pr-1">
             <div className={iosGroupLabel}>
@@ -94,6 +97,7 @@ export const Table = ({ title, icon: Icon, count, total = null, empty, head,
                 </div>
             )}
         </div>
+        {footer}
         {hint && <div className="px-1 text-[11.5px] leading-relaxed text-slate-500">{hint}</div>}
     </section>
 );

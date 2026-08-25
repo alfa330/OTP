@@ -162,13 +162,51 @@ SELECT r.department_id,
 """
 
 
-def reading(cursor, visible_ids, *, since=None, until=None, limit=10):
-    """Блок «Чтение и охват»."""
+# Кто пользовался викой — ПОИМЁННО. Отчёт для кадров: требование 4.6 просит
+# «какие сотрудники пользовались Wiki за период», то есть перепись, а не топ.
+# Поэтому у списка свой потолок строк, а не общий с топами: обрезанная на
+# двадцати перепись отвечает не на тот вопрос, который задавали.
+#
+# Отдел — тот, что был у человека на ПОСЛЕДНЕМ его чтении, а не наибольший по
+# алфавиту и не нынешний: у перешедшего между отделами снимки в строках разные,
+# и группировка по паре (человек, отдел) разорвала бы его на две строки с
+# половиной прочтений в каждой.
+#
+# Граница отдела применяется ЗДЕСЬ же: список поимённый, и супервайзеру нельзя
+# показывать читателей чужого отдела (см. шапку роута).
+_READERS_SQL = _READS_CTE + """
+SELECT r.user_id,
+       COALESCE(u.name, '—')                                  AS name,
+       (array_agg(COALESCE(d.name, 'Без отдела')
+                  ORDER BY r.at DESC))[1]                     AS department,
+       count(*)                                               AS reads,
+       count(DISTINCT r.article_id)                           AS articles,
+       max(r.at)                                              AS last_at
+  FROM reads r
+  LEFT JOIN users u ON u.id = r.user_id
+  LEFT JOIN departments d ON d.id = r.department_id
+ WHERE r.user_id IS NOT NULL
+   AND (%(depts)s::int[] IS NULL OR r.department_id = ANY(%(depts)s))
+ GROUP BY r.user_id, u.name
+ ORDER BY count(*) DESC, COALESCE(u.name, '—')
+ LIMIT %(roster)s
+"""
+
+
+def reading(cursor, visible_ids, *, since=None, until=None, limit=10,
+            depts=None, roster=100):
+    """Блок «Чтение и охват».
+
+    depts — границы, внутри которых можно показывать людей поимённо (None =
+    без границы). Касается ТОЛЬКО переписи читателей: сводные разрезы по
+    отделам отвечают на вопрос про всю вику и не сужаются.
+    """
     if not visible_ids:
         return {'totals': _empty_reading_totals(), 'days': [], 'top': [],
-                'unread': [], 'departments': []}
+                'unread': [], 'departments': [], 'people': []}
     params = {'visible': list(visible_ids), 'since': since, 'until': until,
-              'limit': limit}
+              'limit': limit, 'roster': roster,
+              'depts': list(depts) if depts is not None else None}
 
     cursor.execute(_TOTALS_SQL, params)
     reads, readers, articles_read, opens, published, published_read = cursor.fetchone()
@@ -204,13 +242,153 @@ def reading(cursor, visible_ids, *, since=None, until=None, limit=10):
                          'articles_read', 'headcount'), row)
                    for row in cursor.fetchall()]
 
+    cursor.execute(_READERS_SQL, params)
+    people = [_row(('user_id', 'name', 'department', 'reads', 'articles',
+                    'last_at'), row) for row in cursor.fetchall()]
+
     return {'totals': totals, 'days': days, 'top': top, 'unread': unread,
-            'departments': departments}
+            'departments': departments, 'people': people}
 
 
 def _empty_reading_totals():
     return {'reads': 0, 'opens': 0, 'readers': 0, 'articles_read': 0,
             'published': 0, 'unread': 0, 'coverage': None}
+
+
+# ── Содержимое базы: разделы и свежесть ──────────────────────────────────────
+#
+# Требование 4.6: «статистика по разделам — количество статей, последнее
+# обновление, самые активные авторы» и «отчёт по необновляемым статьям».
+#
+# ПЕРИОД ДЕЙСТВУЕТ ЗДЕСЬ РОВНО НА ОДНУ КОЛОНКУ — «кто правил». Всё остальное
+# состояние на сейчас: сколько статей в разделе и когда его последний раз
+# трогали — это не «за март», это факт. Смешение подписано на экране именами
+# колонок, иначе читатель приложит выбранный месяц ко всей таблице.
+#
+# РАЗДЕЛЫ БЕРУТСЯ ИЗ ПЕРИМЕТРА, а статьи — из видимых. Второй реализации
+# доступа здесь нет: и то и другое приходит готовым из wiki/perimeter.py.
+# Пустой раздел показывается намеренно — «завели и не наполнили» это находка,
+# ради которой отчёт и открывают.
+_SECTIONS_SQL = """
+SELECT s.id,
+       s.name,
+       p.name                        AS parent,
+       count(m.article_id)           AS articles,
+       count(m.article_id) FILTER (WHERE a.status = 'published') AS published,
+       max(a.updated_at)             AS last_update
+  FROM wiki_sections s
+  LEFT JOIN wiki_sections p ON p.id = s.parent_section_id
+  LEFT JOIN wiki_article_sections m
+         ON m.section_id = s.id AND m.article_id = ANY(%(visible)s)
+  LEFT JOIN wiki_articles a ON a.id = m.article_id
+ WHERE s.id = ANY(%(sections)s) AND s.status = 'active'
+ GROUP BY s.id, s.name, p.name
+ ORDER BY count(m.article_id) DESC, s.name
+ LIMIT %(roster)s
+"""
+
+# Кто правил статьи раздела за период. Считается по ВЕРСИЯМ, а не по
+# wiki_articles.author_id: «самый активный автор» — это тот, кто пишет сейчас,
+# а author_id помнит того, кто завёл статью три года назад и с тех пор её не
+# открывал. Сразу тремя на раздел — row_number поверх агрегата режет хвост в
+# базе, а не в питоне.
+#
+# Группировка включает editor_id, а не только имя: два однофамильца иначе
+# слились бы в одного «самого активного».
+_SECTION_EDITORS_SQL = """
+SELECT section_id, name, edits
+  FROM (
+    SELECT m.section_id,
+           COALESCE(u.name, 'Неизвестно')                    AS name,
+           count(*)                                          AS edits,
+           row_number() OVER (PARTITION BY m.section_id
+                              ORDER BY count(*) DESC,
+                                       COALESCE(u.name, '')) AS rn
+      FROM wiki_article_versions v
+      JOIN wiki_article_sections m ON m.article_id = v.article_id
+      LEFT JOIN users u ON u.id = v.editor_id
+     WHERE m.section_id = ANY(%(sections)s)
+       AND v.article_id = ANY(%(visible)s)
+       AND v.editor_id IS NOT NULL
+""" + _period('v.created_at') + """
+     GROUP BY m.section_id, v.editor_id, u.name
+  ) t
+ WHERE rn <= 3
+"""
+
+# Устаревшее: опубликованное, чего не трогали дольше порога.
+#
+# ЭТО НЕ ТО ЖЕ, ЧТО «не открывали»: там статью не ЧИТАЛИ, здесь её не ПИСАЛИ.
+# Диагнозы разные и лечатся разным — первую надо показать людям, вторую
+# перечитать автору, — поэтому и таблицы разные.
+#
+# Порог в днях приходит параметром и написан на экране: «устаревшая» без
+# указания срока — это оценка, а не факт.
+#
+# review_due_at — отдельный признак, а не второе условие отбора: срок пересмотра
+# заполняют не у всех статей, и попади он в WHERE, отчёт молча сжался бы до
+# горстки статей, у которых поле не пустое.
+_STALE_SQL = """
+SELECT a.id, a.slug, a.title, a.updated_at,
+       (""" + _NOW + """)::date - a.updated_at::date       AS days,
+       a.review_due_at IS NOT NULL
+         AND a.review_due_at < """ + _NOW + """            AS review_overdue,
+       COALESCE(u.name, '—')                               AS editor,
+       (SELECT s.name FROM wiki_article_sections m
+          JOIN wiki_sections s ON s.id = m.section_id
+         WHERE m.article_id = a.id
+         ORDER BY s.position, s.id LIMIT 1)                AS section
+  FROM wiki_articles a
+  LEFT JOIN users u ON u.id = COALESCE(a.updated_by, a.author_id)
+ WHERE a.id = ANY(%(visible)s)
+   AND a.status = 'published'
+   AND a.updated_at < """ + _NOW + """ - make_interval(days => %(days)s)
+ ORDER BY a.updated_at
+ LIMIT %(limit)s
+"""
+
+_STALE_COUNT_SQL = """
+SELECT count(*)
+  FROM wiki_articles a
+ WHERE a.id = ANY(%(visible)s)
+   AND a.status = 'published'
+   AND a.updated_at < """ + _NOW + """ - make_interval(days => %(days)s)
+"""
+
+
+def content(cursor, section_ids, visible_ids, *, since=None, until=None,
+            limit=10, roster=100, stale_days=180):
+    """Блок «Содержимое базы»: разрезы по разделам и устаревшие статьи."""
+    if not visible_ids and not section_ids:
+        return {'sections': [], 'stale': [], 'stale_total': 0,
+                'stale_days': stale_days}
+    params = {'visible': list(visible_ids), 'sections': list(section_ids),
+              'since': since, 'until': until, 'limit': limit, 'roster': roster,
+              'days': stale_days}
+
+    cursor.execute(_SECTIONS_SQL, params)
+    sections = [_row(('id', 'name', 'parent', 'articles', 'published',
+                      'last_update'), row) for row in cursor.fetchall()]
+
+    editors = {}
+    if section_ids and visible_ids:
+        cursor.execute(_SECTION_EDITORS_SQL, params)
+        for section_id, name, edits in cursor.fetchall():
+            editors.setdefault(section_id, []).append({'name': name, 'edits': edits})
+    for row in sections:
+        row['editors'] = editors.get(row['id'], [])
+
+    stale, stale_total = [], 0
+    if visible_ids:
+        cursor.execute(_STALE_SQL, params)
+        stale = [_row(('id', 'slug', 'title', 'updated_at', 'days',
+                       'review_overdue', 'editor', 'section'), row)
+                 for row in cursor.fetchall()]
+        cursor.execute(_STALE_COUNT_SQL, params)
+        stale_total = (cursor.fetchone() or [0])[0] or 0
+
+    return {'sections': sections, 'stale': stale, 'stale_total': stale_total,
+            'stale_days': stale_days}
 
 
 # ── Ознакомления ─────────────────────────────────────────────────────────────
