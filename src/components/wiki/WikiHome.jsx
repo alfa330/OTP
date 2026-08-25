@@ -1,6 +1,6 @@
 import React from 'react';
 import { Building2, Clock, Eye, FileText, FolderTree, PenLine, Star } from 'lucide-react';
-import { iosCard } from '../ui/ios';
+import { iosCard, IosPager } from '../ui/ios';
 
 /* Центральная колонка витрины, когда человек ничего не ищет: счётчики, два
  * коротких списка «про меня» и популярные статьи.
@@ -64,7 +64,13 @@ const MiniCard = ({ title, subtitle, meta, onClick }) => (
     </button>
 );
 
-const Panel = ({ icon: Icon, title, empty, items, children }) => (
+/* `footer` — управление под полкой; туда полка «Продолжить чтение» кладёт
+   пейджер. На пустой полке подвала нет: листать «Пусто» нечего.
+   Пейджер стоит вплотную к карточкам, а не прижат к низу карточки: на
+   последней, неполной странице прижатый оставлял под двумя карточками пустой
+   ряд, и полка читалась как недогруженная. Полка на такой странице просто
+   ниже — ровно так же ведут себя таблицы отчётов (PagedTable). */
+const Panel = ({ icon: Icon, title, empty, items, children, footer = null }) => (
     <div className={`${iosCard} flex min-w-0 flex-col`}>
         <div className="flex items-center gap-1.5 px-3 pb-1.5 pt-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-500">
             <Icon size={12} /> {title}
@@ -72,8 +78,14 @@ const Panel = ({ icon: Icon, title, empty, items, children }) => (
         {items.length === 0
             ? <div className="px-3 pb-4 pt-2 text-[11.5px] leading-relaxed text-slate-400">{empty}</div>
             : <div className="grid grid-cols-2 gap-2 px-2.5 pb-2.5">{children}</div>}
+        {footer && <div className="border-t border-slate-100 px-2 pb-1.5 pt-1.5">{footer}</div>}
     </div>
 );
+
+/* Четыре карточки на страницу — ровно два ряда сетки в два столбца.
+   Полка стоит бок о бок с «Избранным», и её высота задаёт высоту ряда:
+   пять карточек оставили бы полупустой третий ряд у обеих. */
+const RECENT_PER_PAGE = 4;
 
 const POP_TONES = [
     'bg-indigo-50 text-indigo-600',
@@ -85,8 +97,23 @@ const POP_TONES = [
 export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
                                    home, onOpen, onOpenCatalog, onOpenParks }) {
     const favorites = (home?.favorites || []).slice(0, 4);
-    const recent = (home?.recent || []).slice(0, 4);
     const popular = (home?.popular || []).slice(0, 4);
+
+    /* История чтения листается, а не режется четвёркой: раньше пятая по счёту
+       статья была недостижима с витрины вовсе. Сколько её всего — решает
+       сервер (десять), здесь только страницы: держать глубину в двух местах
+       значит однажды показать пейджер из трёх страниц над шестью строками. */
+    const recent = home?.recent || [];
+    const [recentPage, setRecentPage] = React.useState(1);
+    const recentPages = Math.max(1, Math.ceil(recent.length / RECENT_PER_PAGE));
+    /* Прочтений стало меньше (сменили пространство) — страница за концом
+       списка показала бы пустую полку с рабочим пейджером. */
+    const safePage = Math.min(recentPage, recentPages);
+    React.useEffect(() => {
+        if (recentPage !== safePage) setRecentPage(safePage);
+    }, [recentPage, safePage]);
+    const recentFrom = (safePage - 1) * RECENT_PER_PAGE;
+    const recentShown = recent.slice(recentFrom, recentFrom + RECENT_PER_PAGE);
 
     return (
         <>
@@ -172,8 +199,19 @@ export default function WikiHome({ isEditor, totals, sectionsTotal, parksCount,
                     title="Продолжить чтение"
                     items={recent}
                     empty="Здесь появятся статьи, которые вы открывали."
+                    footer={recent.length > RECENT_PER_PAGE ? (
+                        <IosPager
+                            page={safePage}
+                            pageCount={recentPages}
+                            total={recent.length}
+                            from={recentFrom + 1}
+                            to={recentFrom + recentShown.length}
+                            onPage={setRecentPage}
+                            unit="статьи"
+                        />
+                    ) : null}
                 >
-                    {recent.map((article) => (
+                    {recentShown.map((article) => (
                         <MiniCard
                             key={article.id}
                             title={article.title}

@@ -447,8 +447,14 @@ department_id и role — снимок отдела и должности чит
     )
 
 
-def recent_and_popular(cursor, visible_ids, user_id, limit=6):
-    """Недавно просмотренное пользователем и популярное — в границах его периметра."""
+def recent_and_popular(cursor, visible_ids, user_id, limit=6, recent_limit=10):
+    """Недавно просмотренное пользователем и популярное — в границах его периметра.
+
+    У истории чтения свой потолок, и он глубже общего: полка «Продолжить
+    чтение» листается страницами по четыре, и шесть строк дали бы полторы
+    страницы вместо обещанного десятка. Популярное страниц не имеет — ему
+    хватает шести.
+    """
     if not visible_ids:
         return {'recent': [], 'popular': [], 'favorites': []}
     ids = list(visible_ids)
@@ -461,7 +467,7 @@ def recent_and_popular(cursor, visible_ids, user_id, limit=6):
          WHERE h.user_id = %s AND a.id = ANY(%s)
          ORDER BY h.viewed_at DESC LIMIT %s
         """,
-        (user_id, ids, limit),
+        (user_id, ids, recent_limit),
     )
     keys = ('id', 'slug', 'title', 'summary', 'viewed_at')
     recent = [dict(zip(keys, row)) for row in cursor.fetchall()]

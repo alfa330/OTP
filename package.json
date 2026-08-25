@@ -25,6 +25,7 @@
     "test:wiki-space-features": "node --test tests/wiki_space_features.test.mjs",
     "test:wiki-guest-access": "node --test tests/wiki_guest_access.test.mjs",
     "test:wiki-api-base": "node --test tests/wiki_api_base.test.mjs",
+    "test:wiki-home-paging": "node --test tests/wiki_home_recent_paging.test.mjs",
     "test:wiki-article-index": "node --test tests/wiki_article_index.test.mjs",
   "test:wiki-section-grants": "node --test tests/wiki_section_grants.test.mjs",
   "test:wiki-section-access": "node --test tests/wiki_section_access_render.test.mjs",
