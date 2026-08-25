@@ -1,5 +1,5 @@
 import React from 'react';
-import { iosCard, iosGroupLabel, IosHint } from '../ui/ios';
+import { iosCard, iosGroupLabel, IosHint, IosPager } from '../ui/ios';
 
 /* Кирпичи отчётных экранов раздела «Вики»: плитка-показатель и таблица.
  *
@@ -68,8 +68,7 @@ export const Td = ({ children, right = false, muted = false }) => (
  *  строк, и без этого обрез читается как «просрочек ровно двадцать».
  *  `badge` — состояние выборки (например, сужение по отделу) справа.
  *  `help`  — длинное пояснение под «i»; `hint` — короткая строка под таблицей.
- *  `footer` — управление под таблицей (например, «показать всех»): переписи
- *  показываются свёрнутыми, иначе сотня строк раздвигает всё остальное.
+ *  `footer` — управление под таблицей; туда PagedTable кладёт пейджер.
  */
 export const Table = ({ title, icon: Icon, count, total = null, empty, head,
                         children, hint = null, help = null, badge = null,
@@ -101,6 +100,54 @@ export const Table = ({ title, icon: Icon, count, total = null, empty, head,
         {hint && <div className="px-1 text-[11.5px] leading-relaxed text-slate-500">{hint}</div>}
     </section>
 );
+
+/* Сколько строк таблицы видно за раз.
+ *
+ * Пять — решение владельца 25.08.2026. Отчёт из девяти таблиц по два десятка
+ * строк это лента, по которой листают мышью и в которой блоки ниже не находят
+ * вовсе; с пятёркой каждая таблица занимает один взгляд, а глубина уходит в
+ * пейджер. Число одно на весь отчёт: таблицы разной высоты рвут ритм страницы
+ * сильнее, чем помогает лишняя строка в какой-то одной. */
+export const PAGE_SIZE = 5;
+
+/** Таблица со страницами.
+ *
+ *  Отдельный компонент, а не флаг у Table: страница — СОСТОЯНИЕ, и держать его
+ *  надо там же, где режется список. Разложи это по вызывающему коду — и на
+ *  экране с девятью таблицами появятся девять почти одинаковых useState.
+ *
+ *  `rows` — весь список, `renderRow` — как рисовать строку (ключ на ней).
+ *  Остальные свойства уходят в Table как есть.
+ */
+export const PagedTable = ({ rows = [], perPage = PAGE_SIZE, renderRow, ...rest }) => {
+    const [page, setPage] = React.useState(1);
+    const pageCount = Math.max(1, Math.ceil(rows.length / perPage));
+    /* Список стал короче (сменили период) — страница за его концом показала бы
+       пустую таблицу с рабочим пейджером. Прижимаем к последней существующей. */
+    const safePage = Math.min(page, pageCount);
+    React.useEffect(() => { if (page !== safePage) setPage(safePage); }, [page, safePage]);
+    /* Сменились сами данные — возвращаемся к первой странице: третья страница
+       прошлого месяца к нынешнему отношения не имеет. React гасит повторную
+       установку того же значения сам, поэтому лишних перерисовок здесь нет. */
+    React.useEffect(() => { setPage(1); }, [rows]);
+
+    const start = (safePage - 1) * perPage;
+    const shown = rows.slice(start, start + perPage);
+    return (
+        <Table
+            {...rest}
+            count={rows.length}
+            footer={rows.length > perPage ? (
+                <IosPager
+                    page={safePage} pageCount={pageCount} total={rows.length}
+                    from={start + 1} to={start + shown.length} onPage={setPage}
+                />
+            ) : null}
+        >
+            {shown.map(renderRow)}
+        </Table>
+    );
+};
 
 /** Доля в виде тонкой полосы. Число рядом обязательно: полоса показывает
  *  соотношение, но не величину, и «почти полная» при трёх строках из четырёх

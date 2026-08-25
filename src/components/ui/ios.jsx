@@ -185,6 +185,65 @@ export const IosHint = ({ text, label = 'Подробнее', align = 'left' }) 
 };
 
 /**
+ * Пейджер: «6–10 из 96» слева, номера страниц справа.
+ *
+ * Жил внутри карточки сессий и оттуда не экспортировался. Со вторым местом,
+ * которому понадобилось листание (таблицы «Аналитики» вики), выбор был из двух:
+ * скопировать или вынести. Скопировать значило бы завести два пейджера с
+ * одинаковым видом и разной вёрсткой — расходиться они начали бы с первой же
+ * правки отступа.
+ *
+ * Окно из пяти номеров вокруг текущей страницы: десяток кнопок сам по себе шум.
+ * Диапазон слева обязателен — без него «страница 3» не говорит, сколько строк
+ * уже позади и сколько их всего.
+ *
+ * `unit` — существительное для screen reader'а («Предыдущие сессии»,
+ * «Предыдущие строки»): стрелка без подписи для него просто «кнопка ›».
+ */
+export const IosPager = ({ page, pageCount, total, from, to, onPage, unit = 'строки' }) => {
+    if (pageCount <= 1) return null;
+    const numbers = [];
+    const first = Math.max(1, Math.min(page - 2, pageCount - 4));
+    for (let i = first; i < first + 5 && i <= pageCount; i += 1) numbers.push(i);
+
+    const arrow = (dir, target, disabled) => (
+        <button
+            type="button"
+            onClick={() => onPage(target)}
+            disabled={disabled}
+            className="grid h-7 w-7 place-items-center rounded-lg text-[15px] leading-none text-slate-500 transition hover:bg-slate-100 disabled:opacity-30"
+            aria-label={dir === 'prev' ? `Предыдущие ${unit}` : `Следующие ${unit}`}
+        >
+            {dir === 'prev' ? '\u2039' : '\u203a'}
+        </button>
+    );
+
+    return (
+        <div className="flex items-center justify-between gap-3 px-1 pb-0.5">
+            <span className="text-[12px] tabular-nums text-slate-500">{from}–{to} из {total}</span>
+            <div className="flex items-center gap-0.5">
+                {arrow('prev', page - 1, page <= 1)}
+                {numbers.map((n) => (
+                    <button
+                        key={n}
+                        type="button"
+                        onClick={() => onPage(n)}
+                        className={`h-7 min-w-[1.75rem] rounded-lg px-2 text-[13px] tabular-nums transition ${
+                            n === page
+                                ? 'bg-slate-900 font-medium text-white'
+                                : 'text-slate-500 hover:bg-slate-100'
+                        }`}
+                    >
+                        {n}
+                    </button>
+                ))}
+                {arrow('next', page + 1, page >= pageCount)}
+            </div>
+        </div>
+    );
+};
+
+/**
  * Сегментный контрол iOS: выбор одного из нескольких режимов.
  *
  * size='lg' — когда контрол работает панелью вкладок и должен читаться как

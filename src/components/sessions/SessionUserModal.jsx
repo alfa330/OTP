@@ -1,5 +1,5 @@
 import React from 'react';
-import { IosModal, iosCard } from '../ui/ios';
+import { IosModal, IosPager, iosCard } from '../ui/ios';
 import { DEVICE_LABELS, parseUserAgent, roleLabel, sessionWord, sessionWordAcc } from './userAgent';
 
 /**
@@ -62,50 +62,6 @@ const employmentLabel = (status) => EMPLOYMENT_LABELS[status] || dash(status);
    в бесконечную ленту: до подвала с «Прервать все» не дойти. Порог низкий
    намеренно — десяток карточек сессий это уже два экрана. */
 export const SESSIONS_PAGE_SIZE = 10;
-
-const Pager = ({ page, pageCount, total, from, to, onPage }) => {
-    if (pageCount <= 1) return null;
-    // Окно из пяти номеров вокруг текущего: десяток кнопок сам по себе шум.
-    const numbers = [];
-    const first = Math.max(1, Math.min(page - 2, pageCount - 4));
-    for (let i = first; i < first + 5 && i <= pageCount; i += 1) numbers.push(i);
-
-    const arrow = (dir, target, disabled) => (
-        <button
-            type="button"
-            onClick={() => onPage(target)}
-            disabled={disabled}
-            className="grid h-7 w-7 place-items-center rounded-lg text-[15px] leading-none text-slate-500 transition hover:bg-slate-100 disabled:opacity-30"
-            aria-label={dir === 'prev' ? 'Предыдущие сессии' : 'Следующие сессии'}
-        >
-            {dir === 'prev' ? '\u2039' : '\u203a'}
-        </button>
-    );
-
-    return (
-        <div className="flex items-center justify-between gap-3 px-1 pb-0.5">
-            <span className="text-[12px] tabular-nums text-slate-400">{from}–{to} из {total}</span>
-            <div className="flex items-center gap-0.5">
-                {arrow('prev', page - 1, page <= 1)}
-                {numbers.map((n) => (
-                    <button
-                        key={n}
-                        type="button"
-                        onClick={() => onPage(n)}
-                        className={`h-7 min-w-[1.75rem] rounded-lg px-2 text-[13px] tabular-nums transition ${
-                            n === page
-                                ? 'bg-slate-900 font-medium text-white'
-                                : 'text-slate-500 hover:bg-slate-100'
-                        }`}
-                    >
-                        {n}
-                    </button>
-                ))}
-                {arrow('next', page + 1, page >= pageCount)}
-            </div>
-        </div>
-    );
-};
 
 const grantedByText = (name, role) => (
     name ? `${name} · ${roleLabel(role)}` : 'неизвестно — доступ выдан до того, как завели журнал'
@@ -399,13 +355,14 @@ const SessionUserModal = ({
                                     прокручивать десяток карточек — ровно то, от чего
                                     страницы и заводились. Сверху он ещё и оставляет
                                     начало новой страницы прямо под собой. */}
-                                <Pager
+                                <IosPager
                                     page={safePage}
                                     pageCount={pageCount}
                                     total={sessions.length}
                                     from={pageStart + 1}
                                     to={pageStart + pageSessions.length}
                                     onPage={setPage}
+                                    unit="сессии"
                                 />
                                 {pageSessions.map((session) => (
                                     <SessionCard

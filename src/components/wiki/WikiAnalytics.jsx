@@ -11,7 +11,7 @@ import {
 
 import { iosCard, iosBtnGhost, IosBadge, IosHint, IosSegmented } from '../ui/ios';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
-import { Bar, Metric, Table, Td, Th } from './reportKit';
+import { Bar, Metric, PagedTable, Td, Th } from './reportKit';
 import useStableCallback from './useStableCallback';
 
 /* Вкладка «Аналитика» — отчёт о том, работает ли база знаний.
@@ -28,6 +28,12 @@ import useStableCallback from './useStableCallback';
  * считается, всё это красиво и ни одно не меняет ничьих действий. Отчёт, где
  * половина таблиц — «просто цифры», перестают открывать целиком, и вместе с
  * цифрами теряются те разрезы, ради которых он и сделан.
+ *
+ * ТАБЛИЦЫ ЛИСТАЮТСЯ ПО ПЯТЬ СТРОК (PagedTable). Отчёт из девяти таблиц по два
+ * десятка строк — это лента, в которой блоки ниже не находят вовсе; с пятёркой
+ * каждая таблица занимает один взгляд, а глубина уходит в пейджер. Поэтому же
+ * с сервера берётся не двадцать строк, а сотня: длина списка больше не равна
+ * длине страницы, и подробность ничего не стоит.
  *
  * ДВА СПИСКА ЗДЕСЬ ПОИМЁННЫЕ — перепись читателей (постановка 4.6: «какие
  * сотрудники пользовались Wiki за период») и просрочка ознакомлений. Оба
@@ -52,6 +58,9 @@ import useStableCallback from './useStableCallback';
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
+
+/** Одна пустота на все таблицы — см. комментарий у списков ниже. */
+const EMPTY = [];
 
 /* Почему спрос остался без ответа. Пять причин, и лечатся они РАЗНЫМ: первая —
    написать статью, вторая и третья — выдать доступ, остальные про качество
@@ -188,20 +197,6 @@ const ArticleLink = ({ row, onOpen }) => (onOpen ? (
         {row.title}
     </button>
 ) : <span>{row.title}</span>);
-
-/* Переписи (кто пользовался викой, какие есть разделы) приходят целиком, а
- * показываются первой десяткой: сотня строк посреди отчёта отодвигает всё
- * следующее за горизонт экрана, и до блоков ниже просто не доходят. Число в
- * кнопке названо прямо — «показать всех, 96», а не «показать ещё»: иначе
- * неясно, десять там дальше или тысяча.
- */
-const ROSTER_HEAD = 10;
-
-const MoreButton = ({ total, expanded, onToggle, word }) => (
-    <button type="button" onClick={onToggle} className={`${iosBtnGhost} ml-auto`}>
-        {expanded ? 'Свернуть' : `Показать ${word}, ${num(total)}`}
-    </button>
-);
 
 /* Расшифровка причин под таблицей.
  *
@@ -427,18 +422,20 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
         to: isoDate(new Date()),
     }));
 
-    /* Развёрнутость переписей — состояние ЭКРАНА, а не запроса: строки уже
-       пришли, и разворачивание не должно дёргать сервер. */
-    const [allPeople, setAllPeople] = useState(false);
-    const [allSections, setAllSections] = useState(false);
-
     /* Зависимости — примитивы, а не сам `range`: календарь отдаёт новый объект
-       на каждый выбор, и по ссылке запрос уходил бы даже за тем же периодом. */
+       на каждый выбор, и по ссылке запрос уходил бы даже за тем же периодом.
+
+       Потолок строк ВЫСОКИЙ, потому что на экране всё равно видно пять: до
+       пейджера длина списка была длиной страницы, и двадцать строк были
+       компромиссом между «видно достаточно» и «не отодвигает всё остальное».
+       Теперь глубина не стоит места, а долистать до конца сотни — это и есть
+       та подробность, за которой сюда приходят. Сотня — потолок сервера
+       (MAX_ROWS), больше он всё равно не отдаст. */
     const params = useMemo(() => ({
         since: range.from || undefined,
         until: range.to || undefined,
         space_id: spaceId || undefined,
-        limit: 20,
+        limit: 100,
     }), [range.from, range.to, spaceId]);
 
     const load = useCallback(() => {
@@ -507,9 +504,19 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
         </span>
     ) : null;
 
-    const people = reading?.people || [];
-    const sections = content?.sections || [];
-    const stale = content?.stale || [];
+    /* Массивы для таблиц — ОДНОЙ ссылкой на пустоту (EMPTY), а не `|| []`:
+       PagedTable возвращается к первой странице, когда меняется ссылка на
+       список, и новый литерал на каждом рендере сбрасывал бы страницу
+       постоянно — например, от тика загрузки соседнего блока. */
+    const departments = reading?.departments || EMPTY;
+    const top = reading?.top || EMPTY;
+    const unread = reading?.unread || EMPTY;
+    const people = reading?.people || EMPTY;
+    const sections = content?.sections || EMPTY;
+    const stale = content?.stale || EMPTY;
+    const ackDepartments = ack?.departments || EMPTY;
+    const ackOverdue = ack?.overdue || EMPTY;
+    const demandItems = demand?.items || EMPTY;
 
     return (
         <div className="space-y-6">
@@ -596,9 +603,9 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                     рядом с процентом: «Из штата» с одной лишь полосой не
                     говорило, от какого числа доля считается, и 30 % у отдела
                     из шести человек читались как 30 % у отдела из ста. */}
-                <Table
+                <PagedTable
                     title="Кто читает: по отделам" icon={Users}
-                    count={reading?.departments?.length}
+                    rows={departments}
                     empty="За период никто не читал."
                     help="«Доля отдела» — сколько человек из штата отдела заходили в вику хотя бы раз за период. Уволенные и уволившиеся в знаменатель не входят, отпуск, больничный и Б/С — входят: человек в отпуске остаётся сотрудником, которому вика адресована. Отдел берётся тот, в котором человек был на момент чтения."
                     head={(
@@ -610,8 +617,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th right>Статей</Th>
                         </tr>
                     )}
-                >
-                    {(reading?.departments || []).map((row) => (
+                    renderRow={(row) => (
                         <tr key={row.department_id ?? 'none'}>
                             <Td>{row.name}</Td>
                             <Td right>{num(row.readers)}</Td>
@@ -628,12 +634,12 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Td right>{num(row.reads)}</Td>
                             <Td right>{num(row.articles_read)}</Td>
                         </tr>
-                    ))}
-                </Table>
+                    )}
+                />
 
-                <Table
+                <PagedTable
                     title="Что читают чаще всего" icon={BookOpen}
-                    count={reading?.top?.length}
+                    rows={top}
                     empty="За период не открыли ни одной статьи."
                     help="Самые читаемые за период статьи из тех, что видны вам. Черновики сюда тоже попадают — их открывают редакторы, и такая строка помечена."
                     head={(
@@ -644,8 +650,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th right>Обновлена</Th>
                         </tr>
                     )}
-                >
-                    {(reading?.top || []).map((row) => (
+                    renderRow={(row) => (
                         <tr key={row.id}>
                             <Td>
                                 <ArticleLink row={row} onOpen={onOpenArticle} />
@@ -657,12 +662,12 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Td right>{num(row.readers)}</Td>
                             <Td right muted>{day(row.updated_at)}</Td>
                         </tr>
-                    ))}
-                </Table>
+                    )}
+                />
 
-                <Table
+                <PagedTable
                     title="Не открывали ни разу за период" icon={EyeOff}
-                    count={reading?.unread?.length}
+                    rows={unread}
                     total={t.unread}
                     empty="За период открывали каждую опубликованную статью."
                     help="Только опубликованные статьи: черновик без просмотров — это норма, а не находка. Первыми идут те, которых не открывали никогда, дальше — по давности последнего чтения. Дата последнего чтения берётся за всё время, а не за период: «читали в марте» и «не читали никогда» — разные диагнозы."
@@ -673,8 +678,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th right>Обновлена</Th>
                         </tr>
                     )}
-                >
-                    {(reading?.unread || []).map((row) => {
+                    renderRow={(row) => {
                         const days = ago(row.last_at);
                         return (
                             <tr key={row.id}>
@@ -685,29 +689,21 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                 <Td right muted>{day(row.updated_at)}</Td>
                             </tr>
                         );
-                    })}
-                </Table>
+                    }}
+                />
 
                 {/* Перепись читателей — требование 4.6 «какие сотрудники
                     пользовались Wiki за период». Поимённо, поэтому сужается
                     границей отдела так же, как просрочка ознакомлений, и по
                     той же причине потолок строк подписывается только там, где
                     сужения нет. */}
-                <Table
+                <PagedTable
                     title="Кто пользовался викой" icon={Users}
-                    count={people.length}
+                    rows={people}
                     total={data?.scoped ? null : t.readers}
                     badge={scopedBadge}
                     empty="За период викой никто не пользовался."
                     help="Поимённо: кто открывал вику за выбранный период. Прочтение — человек, статья и минута, поэтому обновление страницы не удваивает счёт. Отдел показан тот, в котором человек был на момент последнего чтения: перешедший не уносит прошлые чтения в новый отдел."
-                    footer={people.length > ROSTER_HEAD && (
-                        <div className="flex px-1">
-                            <MoreButton
-                                total={people.length} expanded={allPeople}
-                                word="всех" onToggle={() => setAllPeople((v) => !v)}
-                            />
-                        </div>
-                    )}
                     head={(
                         <tr>
                             <Th>Человек</Th>
@@ -717,8 +713,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th right>Последний заход</Th>
                         </tr>
                     )}
-                >
-                    {(allPeople ? people : people.slice(0, ROSTER_HEAD)).map((row) => (
+                    renderRow={(row) => (
                         <tr key={row.user_id}>
                             <Td>{row.name}</Td>
                             <Td muted>{row.department}</Td>
@@ -726,8 +721,8 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Td right>{num(row.articles)}</Td>
                             <Td right muted>{day(row.last_at)}</Td>
                         </tr>
-                    ))}
-                </Table>
+                    )}
+                />
             </Group>
 
             {/* ── Блок 2. Содержимое базы ────────────────────────────────── */}
@@ -735,19 +730,11 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                 title="Содержимое базы" icon={Library} scope="на сейчас"
                 subtitle="В каком состоянии сама база: что где лежит, кто её ведёт и что давно не трогали."
             >
-                <Table
+                <PagedTable
                     title="Разделы" icon={FolderTree}
-                    count={sections.length}
+                    rows={sections}
                     empty="Разделов в этом пространстве вам не видно."
                     help="Считаются статьи раздела, которые видны вам, — вместе с черновиками; «Опубликовано» из них выделено отдельно. «Правили за период» — кто сохранял версии статей раздела за выбранный период, тройка самых частых. Пустой раздел показан намеренно: «завели и не наполнили» — это находка."
-                    footer={sections.length > ROSTER_HEAD && (
-                        <div className="flex px-1">
-                            <MoreButton
-                                total={sections.length} expanded={allSections}
-                                word="все" onToggle={() => setAllSections((v) => !v)}
-                            />
-                        </div>
-                    )}
                     head={(
                         <tr>
                             <Th>Раздел</Th>
@@ -757,8 +744,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th>Правили за период</Th>
                         </tr>
                     )}
-                >
-                    {(allSections ? sections : sections.slice(0, ROSTER_HEAD)).map((row) => (
+                    renderRow={(row) => (
                         <tr key={row.id}>
                             <Td>
                                 {row.parent && (
@@ -777,14 +763,14 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                     : '—'}
                             </Td>
                         </tr>
-                    ))}
-                </Table>
+                    )}
+                />
 
                 {/* Устаревшее ≠ непрочитанное. Там статью не ЧИТАЛИ, здесь её не
                     ПИСАЛИ: первую надо показать людям, вторую перечитать автору. */}
-                <Table
+                <PagedTable
                     title="Давно не обновляли" icon={History}
-                    count={stale.length}
+                    rows={stale}
                     total={content?.stale_total}
                     empty={`Статей старше ${num(content?.stale_days)} дней нет — базу обновляют.`}
                     hint={`Устаревшей считается опубликованная статья, которую не правили дольше ${num(content?.stale_days)} дней. Первыми идут самые давние.`}
@@ -797,8 +783,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th right>Не обновляли</Th>
                         </tr>
                     )}
-                >
-                    {stale.map((row) => (
+                    renderRow={(row) => (
                         <tr key={row.id}>
                             <Td>
                                 <ArticleLink row={row} onOpen={onOpenArticle} />
@@ -812,13 +797,13 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Td muted>{row.editor}</Td>
                             <Td right>
                                 {num(row.days)} дн.
-                                <div className="text-[11px] text-slate-400">
+                                <div className="text-[11px] text-slate-500">
                                     {day(row.updated_at)}
                                 </div>
                             </Td>
                         </tr>
-                    ))}
-                </Table>
+                    )}
+                />
             </Group>
 
             {/* ── Блок 3. Ознакомления ───────────────────────────────────── */}
@@ -860,9 +845,9 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             />
                         </Tiles>
 
-                        <Table
+                        <PagedTable
                             title="Ознакомления по отделам" icon={Users}
-                            count={ack?.departments?.length}
+                            rows={ackDepartments}
                             empty="Назначений нет."
                             help="Отдел берётся из снимка на момент назначения, а не из нынешней карточки: перешедший человек не уносит просрочку в новый отдел — назначали ему тогда, когда он был здесь. Отменённые и перевыпущенные назначения не считаются."
                             head={(
@@ -873,8 +858,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                     <Th right>Просрочено</Th>
                                 </tr>
                             )}
-                        >
-                            {(ack?.departments || []).map((row) => (
+                            renderRow={(row) => (
                                 <tr key={row.department_id ?? 'none'}>
                                     <Td>{row.name}</Td>
                                     <Td right>{num(row.total)}</Td>
@@ -882,11 +866,11 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                     <Td right>
                                         {row.overdue > 0
                                             ? <span className="font-medium text-rose-600">{num(row.overdue)}</span>
-                                            : <span className="text-slate-400">0</span>}
+                                            : <span className="text-slate-500">0</span>}
                                     </Td>
                                 </tr>
-                            ))}
-                        </Table>
+                            )}
+                        />
 
                         {/* Список сужен по отделу — и это видно рядом с ним,
                             а не только оговоркой внизу страницы: у супервайзера
@@ -895,9 +879,9 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             строк подписан там же («· 20 из 57»), но только
                             когда сужения нет: иначе обрез по правам и обрез по
                             потолку слились бы в одно число. */}
-                        <Table
+                        <PagedTable
                             title="Просрочено поимённо" icon={ShieldAlert}
-                            count={ack?.overdue?.length}
+                            rows={ackOverdue}
                             total={data?.scoped ? null : at.overdue}
                             badge={scopedBadge}
                             empty="Просроченных ознакомлений нет."
@@ -910,8 +894,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                     <Th right>Дней</Th>
                                 </tr>
                             )}
-                        >
-                            {(ack?.overdue || []).map((row) => (
+                            renderRow={(row) => (
                                 <tr key={`${row.user_id}-${row.article_id}`}>
                                     <Td>
                                         {row.name || '—'}
@@ -929,8 +912,8 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                         <span className="font-medium text-rose-600">{num(row.days)}</span>
                                     </Td>
                                 </tr>
-                            ))}
-                        </Table>
+                            )}
+                        />
                     </>
                 )}
             </Group>
@@ -972,13 +955,13 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                     />
                 </Tiles>
 
-                <Table
-                    title="Темы без ответа" count={demand?.items?.length}
+                <PagedTable
+                    title="Темы без ответа" rows={demandItems}
                     empty={ds.logging_since
                         ? 'За период всё, что искали и спрашивали, находилось.'
                         : 'Журнал поиска пуст — запросы начали записываться только что.'}
                     help="Кто именно спрашивал, здесь не показано намеренно: список отвечает на вопрос «какой статьи не хватает», а не «кто не знал». Одинаковые запросы разных людей склеены в одну строку, поэтому «Спрашивали» больше, чем «Людей»."
-                    hint={<ReasonLegend items={demand?.items} />}
+                    hint={<ReasonLegend items={demandItems} />}
                     head={(
                         <tr>
                             <Th>Запрос или вопрос</Th>
@@ -989,8 +972,7 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                             <Th right>Последний раз</Th>
                         </tr>
                     )}
-                >
-                    {(demand?.items || []).map((row) => {
+                    renderRow={(row) => {
                         const reason = REASON[row.reason] || { label: row.reason, tone: 'slate' };
                         return (
                             <tr key={`${row.channel}-${row.key}`}>
@@ -1002,8 +984,8 @@ export default function WikiAnalytics({ base, headers, showToast, spaceId = null
                                 <Td right muted>{day(row.last_at)}</Td>
                             </tr>
                         );
-                    })}
-                </Table>
+                    }}
+                />
             </Group>
         </div>
     );
