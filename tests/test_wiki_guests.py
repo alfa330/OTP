@@ -33,6 +33,7 @@
 import re
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from wiki import guests, queries, structure
 from wiki.access import (
@@ -355,11 +356,15 @@ class GuestSqlAgreementTest(unittest.TestCase):
 
         Читаем ИСХОДНИК ветки UPDATE: проверить это на объекте нечем — функция
         ходит в базу, а страж нужен именно на текст запроса.
-        """
-        import inspect
 
-        source = inspect.getsource(guests.create_grant)
-        update = re.search(r'UPDATE wiki_guest_access.*?RETURNING id', source, re.S)
+        Файл читаем с диска и режем по именам функций, а НЕ через
+        inspect.getsource: тот берёт строки по номерам, запомненным при импорте,
+        и стоит поправить модуль во время долгого прогона — отдаёт чужой кусок.
+        Ровно так этот тест и покраснел на ровном месте 25.08.2026.
+        """
+        text = (Path(guests.__file__).read_text(encoding='utf-8')
+                .split('def create_grant(')[1].split('\ndef ')[0])
+        update = re.search(r'UPDATE wiki_guest_access.*?RETURNING id', text, re.S)
         self.assertIsNotNone(update, 'ветка продления исчезла из create_grant')
         self.assertNotIn('granted_by', _normalize(update.group(0)))
 
