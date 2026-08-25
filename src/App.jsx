@@ -219,6 +219,14 @@ const ICORE_PHONE_DEPARTMENT_IDS = new Set([367]);
 // Та же константа на бэкенде (AI_QA_HEAD_DEPARTMENT_CODES в bot_schedule2.py).
 const AI_QA_HEAD_DEPARTMENT_CODES = new Set(['op', 'szov', 'marketing']);
 const AI_QA_EXTRA_ACCESS_USER_IDS = new Set([183]);
+// «Настройки SIP» — телефония: адрес сервера, пароли, автодозвон и SIP-номера
+// операторов. Раздел НЕ «для любого главы отдела»: бэк-офис (Бухгалтерия, HR)
+// и фронт-офисы звонков не принимают, и панель с паролями SIP им не нужна.
+// Список — отделы, у которых телефония есть на деле: sip_department_config
+// заполнен у ОП и ТЭЗ, users.sip_number — у СЗоВ, ОП и ТЭЗ, и правки в
+// sip_config_history приходили только оттуда. Ту же границу держит
+// _can_manage_sip_config на бэкенде.
+const SIP_SETTINGS_DEPARTMENT_CODES = new Set(['szov', 'op', 'tez']);
 const DEFAULT_USERS_REPORT_OPTIONS = {
     sheetMode: 'summary_and_supervisors',
     includeFired: false,
@@ -1436,6 +1444,11 @@ const aiQaHeadDepartmentCodesOf = (userLike) => {
     const singular = userLike?.headed_department_code ?? userLike?.headedDepartmentCode;
     return [...values, singular].map(normalizeDepartmentCode).filter(Boolean);
 };
+
+const isSipSettingsDepartmentHead = (userLike) => (
+    isDepartmentHead(userLike)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => SIP_SETTINGS_DEPARTMENT_CODES.has(code))
+);
 
 const isAiQaDepartmentHead = (userLike) => (
     isDepartmentHead(userLike) && (
@@ -35834,7 +35847,11 @@ if (typeof axios !== 'undefined' && typeof window !== 'undefined') {
             const [szovWallboardWidget, setSzovWallboardWidget] = useState(null);
             const canAccessFourYouSection = canAccessFourYouForUser(user);
             // Панель «Настройки SIP» (iCORE Phone): админ / глава отдела / СВ отдела продаж
-            const canAccessSipSettings = isAdminLikeRole || isDepartmentHeadUser || isOpSalesSupervisorForAiQa(user);
+            // Глава отдела — только с телефонией (SIP_SETTINGS_DEPARTMENT_CODES):
+            // главе бэк-офиса и фронт-офисов показывать в разделе нечего.
+            const canAccessSipSettings = isAdminLikeRole
+                || isSipSettingsDepartmentHead(user)
+                || isOpSalesSupervisorForAiQa(user);
             // Программа iCORE Phone: отдел продаж и админы (решение владельца).
             // Правило дублируется на бэкенде, и там оно решающее: за подписанной
             // ссылкой приходят и кнопка отсюда, и автообновление самого телефона.

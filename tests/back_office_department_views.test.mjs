@@ -4,15 +4,19 @@ import test from 'node:test';
 import {
     DEPARTMENT_VIEW_ALLOWLIST,
     departmentAllowsView,
+    departmentCodeHidesFrontOfficeTraining,
+    departmentCodeHidesOperatorFields,
+    departmentCodeUsesEmployeeCity,
+    departmentHidesOperatorFields,
     departmentRestrictsViews,
     departmentUsesSimpleEmployeeAccounting,
     firstAllowedView,
 } from '../src/utils/departmentViews.js';
 
 /* Бэк-офис — отделы «Бухгалтерия» (accounting) и «HR» (hr). По решению
-   владельца им оставлены ровно два раздела: «Учёт сотрудников» и «Вики».
-   Проверяем не текст файла, а поведение предикатов: allowlist — карта из
-   литералов, и опечатка в ключе роли не ломает синтаксис, она молча снимает
+   владельца им оставлены «Учёт сотрудников», «Задачи» и «Вики» — и больше
+   ничего. Проверяем не текст файла, а поведение предикатов: allowlist — карта
+   из литералов, и опечатка в ключе роли не ломает синтаксис, она молча снимает
    ограничение (роли нет в конфиге => ограничений нет вовсе). */
 
 const BACK_OFFICE_CODES = ['accounting', 'hr'];
@@ -25,7 +29,7 @@ const supervisor = (code) => ({ id: 2, role: 'sv', department_code: code });
 const employee = (code, role = 'operator') => ({ id: 3, role, department_code: code });
 
 for (const code of BACK_OFFICE_CODES) {
-    test(`${code}: у главы только учёт сотрудников и QR доступ`, () => {
+    test(`${code}: у главы учёт сотрудников, задачи и QR доступ`, () => {
         const user = head(code);
         assert.equal(departmentRestrictsViews(user), true);
 
@@ -36,9 +40,10 @@ for (const code of BACK_OFFICE_CODES) {
         // «QR доступ» — не украшение: без него оператору бэк-офиса не открыть
         // «Вики» (подтверждает админ, СВ или глава, а СВ в отделе нет).
         assert.equal(departmentAllowsView(user, 'qr_access'), true);
+        assert.equal(departmentAllowsView(user, 'tasks'), true);
 
         for (const denied of [
-            'work_schedules', 'sv_hours', 'groups', 'tasks', 'salary', 'surveys',
+            'work_schedules', 'sv_hours', 'groups', 'salary', 'surveys',
             'call_evaluation', 'call_division', 'monitoring_scale', 'ai_qa',
             'trainings', 'technical_issues', 'shift_auction', 'contests',
             'resource_fte', 'departments', 'manage_admins',
@@ -61,7 +66,7 @@ for (const code of BACK_OFFICE_CODES) {
 
             for (const denied of [
                 'hours', 'work_schedules', 'salary', 'evaluation', 'surveys',
-                'manage_operators', 'manage_users', 'sv_list', 'qr_access',
+                'manage_operators', 'manage_users', 'sv_list', 'qr_access', 'tasks',
             ]) {
                 assert.equal(departmentAllowsView(user, denied), false, `${role}/${denied}`);
             }
@@ -75,6 +80,7 @@ for (const code of BACK_OFFICE_CODES) {
         const user = supervisor(code);
         assert.equal(departmentRestrictsViews(user), true);
         assert.equal(departmentAllowsView(user, 'manage_operators'), true);
+        assert.equal(departmentAllowsView(user, 'tasks'), true);
         assert.equal(departmentAllowsView(user, 'qr_access'), false);
         assert.equal(departmentAllowsView(user, 'groups'), false);
         assert.equal(departmentAllowsView(user, 'work_schedules'), false);
@@ -100,6 +106,18 @@ for (const code of BACK_OFFICE_CODES) {
         for (const roleViews of Object.values(DEPARTMENT_VIEW_ALLOWLIST[code])) {
             assert.equal(roleViews.includes('wiki'), false);
         }
+    });
+
+    test(`${code}: в карточке нет операторских полей и отметки об обучении`, () => {
+        // Группа, направление и SIP-номер — поля человека на линии; их в
+        // бэк-офисе нет вовсе, и валидация «Группа обязательна» не давала бы
+        // завести сотрудника. Отметку «Был во фронт офисе на обучении» тоже не
+        // спрашиваем: бэк-офис на линию не выходит.
+        assert.equal(departmentCodeHidesOperatorFields(code), true);
+        assert.equal(departmentHidesOperatorFields(employee(code)), true);
+        assert.equal(departmentCodeHidesFrontOfficeTraining(code), true);
+        // «Город» — только у фронт-офисов: бэк-офис сидит в головном офисе.
+        assert.equal(departmentCodeUsesEmployeeCity(code), false);
     });
 
     test(`${code}: админ без своего отдела и супер-админ не ограничиваются`, () => {
@@ -130,4 +148,9 @@ test('бэк-офис не задел остальные отделы', () => {
     // Регистр кода отдела не важен: departmentCodeOf приводит его к нижнему.
     assert.equal(departmentUsesSimpleEmployeeAccounting(head('HR')), true);
     assert.equal(departmentAllowsView(head('Accounting'), 'manage_operators'), true);
+    // Отделы на линии операторские поля сохраняют: скрытие адресное, а не
+    // «у всех, кроме ОП».
+    for (const code of ['szov', 'op', 'tez', 'front_office']) {
+        assert.equal(departmentCodeHidesOperatorFields(code), false, code);
+    }
 });

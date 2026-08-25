@@ -74,7 +74,7 @@ const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_acc
 // (выкидывает в 'surveys') и отдельский (выкидывает в 'profile') — гоняли бы
 // вид друг другу без остановки.
 const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile'];
-const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators'];
+const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks'];
 const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];
 
 const VIEW_ALIASES = {
@@ -178,9 +178,11 @@ export const departmentCodeUsesEmployeeCity = (code) => {
 export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCity(departmentCodeOf(user));
 
 // Отделы, у сотрудников которых не спрашиваем «Был во фронт офисе на обучении»:
-// сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна.
-// Скрываем только ввод — уже сохранённое значение сохраняется как есть.
-const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office']);
+// сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна, а
+// бухгалтерия и HR на линию не выходят вовсе — обучать их работе в офисе
+// продаж незачем. Скрываем только ввод — уже сохранённое значение сохраняется
+// как есть.
+const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr']);
 
 export const departmentCodeHidesFrontOfficeTraining = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -188,6 +190,27 @@ export const departmentCodeHidesFrontOfficeTraining = (code) => {
 };
 
 export const departmentHidesFrontOfficeTraining = (user) => departmentCodeHidesFrontOfficeTraining(departmentCodeOf(user));
+
+// Отделы без операторских полей в карточке сотрудника: «Группа», «Направление»
+// и «SIP номер». У бэк-офиса нет ни групп, ни направлений, ни телефонии —
+// сотрудники не сидят на линии и по направлениям не делятся, а пустые
+// выпадашки только просят выбрать то, чего нет.
+//
+// Скрываем не только ввод: с этих отделов снимается и обязательность группы и
+// направления при создании сотрудника (UserEditModal.handleSave). Без этого
+// глава бэк-офиса не смог бы завести человека вовсе — валидация требовала
+// выбрать группу и направление, которых в отделе не существует.
+//
+// Уже сохранённые значения (сотрудника перевели из отдела с линией) остаются
+// как есть: поле не показываем, но и не затираем.
+const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr']);
+
+export const departmentCodeHidesOperatorFields = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized && OPERATOR_FIELDS_HIDDEN_DEPARTMENTS.has(normalized));
+};
+
+export const departmentHidesOperatorFields = (user) => departmentCodeHidesOperatorFields(departmentCodeOf(user));
 
 // Возвращает массив разрешённых разделов для пользователя, либо null (без ограничений).
 const allowlistFor = (user) => {

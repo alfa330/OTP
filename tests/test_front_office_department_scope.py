@@ -215,7 +215,12 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
             source,
         )
 
-        self.assertIn("const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office']);", source)
+        # Множество растёт вместе с бэк-офисом (Бухгалтерия, HR): они на линию
+        # не выходят, см. test_back_office_department_scope.
+        self.assertIn(
+            "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
+            "new Set(['front_office', 'accounting', 'hr']);", source
+        )
         self.assertIn("export const departmentCodeHidesFrontOfficeTraining = (code) => {", source)
         self.assertIn(
             "export const departmentHidesFrontOfficeTraining = (user) ="
@@ -227,8 +232,8 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         modal = _read(MODAL_PATH)
 
         self.assertIn(
-            "import { departmentCodeHidesFrontOfficeTraining, departmentCodeUsesEmployeeCity }"
-            " from '../../utils/departmentViews';",
+            "import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
+            " departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';",
             modal,
         )
         self.assertIn("const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);", modal)

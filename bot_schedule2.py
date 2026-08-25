@@ -23080,12 +23080,48 @@ def call_distribution_settings_endpoint():
         return jsonify({"error": "Internal server error"}), 500
 
 
+# Коды отделов, чьим главам открыты настройки SIP. Раздел не «для любого главы
+# отдела»: бэк-офис (Бухгалтерия, HR) и фронт-офисы звонков не принимают, и
+# панель с паролями SIP-сервера им не нужна. Список — отделы, у которых
+# телефония есть на деле: sip_department_config заполнен у ОП и ТЭЗ,
+# users.sip_number — у СЗоВ, ОП и ТЭЗ. Зеркало на фронте —
+# SIP_SETTINGS_DEPARTMENT_CODES в src/App.jsx.
+SIP_SETTINGS_DEPARTMENT_CODES = frozenset({'szov', 'op', 'tez'})
+
+
+def _is_sip_settings_department_head(requester_id):
+    """Глава отдела с телефонией (см. SIP_SETTINGS_DEPARTMENT_CODES)."""
+    if requester_id is None:
+        return False
+    headed_ids = set(_headed_department_ids(requester_id))
+    headed = _headed_department_id(requester_id)
+    if headed is not None:
+        try:
+            headed_ids.add(int(headed))
+        except (TypeError, ValueError):
+            pass
+    for department_id in headed_ids:
+        try:
+            department = db.get_department_by_id(department_id) or {}
+        except Exception:
+            continue
+        if str(department.get('code') or '').strip().lower() in SIP_SETTINGS_DEPARTMENT_CODES:
+            return True
+    return False
+
+
 def _can_manage_sip_config(requester_id, role) -> bool:
     """Кто управляет настройками SIP (панель «Настройки SIP» в iCORE):
-    админ/супер-админ, глава отдела или супервайзер отдела продаж (367)."""
-    if _is_admin_role(role):
+    глобальный админ, глава отдела С ТЕЛЕФОНИЕЙ или супервайзер отдела продаж (367).
+
+    Роль главы отдела ЗАМЕНЯЕТ базовую: глава с role='admin' сюда проходит не
+    как глобальный админ, а только если его отдел есть в
+    SIP_SETTINGS_DEPARTMENT_CODES. Та же граница, что у ChatApp, табло СЗоВ и
+    правил перерывов.
+    """
+    if _is_global_admin_requester(role, requester_id):
         return True
-    if _headed_department_id(requester_id) is not None:
+    if _is_sip_settings_department_head(requester_id):
         return True
     if _is_supervisor_role(role) and requester_id:
         try:

@@ -1,7 +1,7 @@
 ﻿import React, { useEffect, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHidesFrontOfficeTraining, departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';
+import { departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import CustomSelect from '../ui/CustomSelect';
 
@@ -300,6 +300,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         ?? (isDeptScoped && Number(effectiveDeptId) === Number(requesterScopeDeptId) ? requesterScopeDeptCode : null);
     const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);
     const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);
+    // Группа, направление и SIP-номер — поля человека НА ЛИНИИ. У бэк-офиса
+    // (Бухгалтерия, HR) ни групп, ни направлений, ни телефонии нет: выпадашки
+    // всегда пустые, а валидация требовала выбрать из них значение и не давала
+    // завести сотрудника вовсе. Отдел берём у СОТРУДНИКА, не у того, кто его
+    // заводит.
+    const showOperatorLineFields = !departmentCodeHidesOperatorFields(effectiveDeptCode);
     // Город раньше вводили текстом: значение вне справочника не выбрасываем,
     // а подмешиваем отдельной опцией — иначе сохранение стёрло бы его.
     const currentCity = String(editedUser?.city ?? '').trim();
@@ -737,12 +743,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         return;
         }
 
-        if (isCreateMode && isOperatorUser && !editedUser.group_id) {
+        if (isCreateMode && isOperatorUser && showOperatorLineFields && !editedUser.group_id) {
         setModalError("Группа обязательна: супервайзер назначается по группе.");
         return;
         }
 
-        if (isOperatorUser && !editedUser.direction_id) {
+        if (isOperatorUser && showOperatorLineFields && !editedUser.direction_id) {
         setModalError("Направление обязательно.");
         return;
         }
@@ -1611,7 +1617,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {isOperatorDraft(editedUser) && (
+                    {isOperatorDraft(editedUser) && showOperatorLineFields && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
                         <CustomSelect
@@ -1660,7 +1666,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
-                    {isOperatorDraft(editedUser) && (
+                    {isOperatorDraft(editedUser) && showOperatorLineFields && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                         <CustomSelect
@@ -1732,6 +1738,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         <span>Наличие водительских прав</span>
                         </label>
                     </div>
+                    {showOperatorLineFields && (
                     <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
                         <input
@@ -1742,6 +1749,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         disabled={isLoading || !!createdCredentials}
                         />
                     </div>
+                    )}
                     </>
                     )}
                     </>
@@ -2293,7 +2301,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <div className="grid grid-cols-1 gap-4">
                                 {/* Группу оператора меняет и обычный СВ: у него это заменило
                                     прежнюю смену направления (задача #228). */}
-                                {isOperatorDraft(editedUser) && (
+                                {isOperatorDraft(editedUser) && showOperatorLineFields && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Группа</label>
                                     <select
@@ -2364,7 +2372,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
 
                             {/* Направление сотрудника меняют админ и глава отдела; у СВ
                                 вместо него смена группы (задача #228). */}
-                            {isOperatorDraft(editedUser) && !isPureSupervisorRequester && (
+                            {isOperatorDraft(editedUser) && !isPureSupervisorRequester && showOperatorLineFields && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">Направление</label>
                                 <select
@@ -2440,6 +2448,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <span>Наличие водительских прав</span>
                                 </label>
                             </div>
+                            {showOperatorLineFields && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-200 mb-1">SIP номер</label>
                                 <input
@@ -2449,7 +2458,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 dark:bg-slate-800 text-gray-900 dark:text-gray-100"
                                 disabled={isLoading}
                                 />
-                    </div>
+                            </div>
+                            )}
                     </>
                     )}
                     </>
