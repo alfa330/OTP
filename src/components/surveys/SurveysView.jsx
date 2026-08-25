@@ -6,7 +6,6 @@ import {
     APPLE_FONT,
     IosHint,
     IosMenu,
-    IosModal,
     IosSection,
     IosSegmented,
     IosToggle,
@@ -2303,47 +2302,67 @@ const SurveysView = ({ user, operators = [], directions = [], departments = [], 
             </div>
 
             {/* ── Напоминание о незаконченном черновике ──
+                Не окно и не оверлей: в разделе их нет намеренно (см. заметку
+                у конструктора ниже), и короткий вопрос — не повод заводить
+                исключение. Полоса на своём месте в потоке страницы: список
+                под ней виден, на телефоне она просто складывается в столбик.
+
                 Показывается только по нажатию «Создать опрос»: человек уже
                 собрался что-то создавать, и вопрос про черновик здесь по делу.
-                Встречать этим окном каждого, кто просто зашёл в раздел, — шум. */}
+                Встречать этим каждого, кто просто зашёл в раздел, — шум. */}
             {canManage && pendingDraftInfo && (
-                <IosModal
-                    open
-                    onClose={() => setPendingDraftRecord(null)}
-                    title="Незаконченный черновик"
-                    subtitle={pendingDraftInfo.isTest ? 'Тест так и не был создан' : 'Опрос так и не был создан'}
-                    maxWidth="max-w-md"
-                    footer={(
-                        <>
-                            <button type="button" className={iosBtnSecondary} onClick={discardStoredDraft}>
-                                <FaIcon className="fas fa-rotate-left text-xs" />
-                                Начать заново
-                            </button>
-                            <button type="button" className={iosBtnPrimary} onClick={continueStoredDraft} autoFocus>
-                                <FaIcon className="fas fa-pen text-xs" />
-                                Продолжить
-                            </button>
-                        </>
-                    )}
-                >
-                    <div className="flex items-start gap-3">
-                        <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-amber-100">
-                            <FaIcon className="fas fa-file-signature text-[15px] text-amber-600" />
+                <div className="relative flex animate-[fadeIn_.22s_ease-out] flex-col gap-3 rounded-2xl border border-amber-200/70 bg-amber-50/70 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between sm:gap-5">
+                    <div className="flex min-w-0 items-start gap-3 pr-8 sm:pr-0">
+                        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100">
+                            <FaIcon className="fas fa-file-signature text-[14px] text-amber-600" />
                         </div>
-                        <div className="min-w-0 space-y-2">
-                            <p className="text-[14px] font-semibold leading-snug text-slate-900">
+                        <div className="min-w-0 space-y-1">
+                            <p className="text-[13.5px] font-semibold leading-snug text-slate-900">
                                 {pendingDraftInfo.headline}
                             </p>
-                            <p className="text-[12.5px] tabular-nums text-slate-500">
+                            <p className="text-[12px] tabular-nums text-slate-500">
                                 {pendingDraftInfo.summary}
                             </p>
-                            <p className="text-[12.5px] leading-relaxed text-slate-500">
+                            <p className="text-[12.5px] leading-relaxed text-slate-600">
                                 Черновик остался в этом браузере после того, как страница обновилась.
                                 Продолжить с того же места или начать {pendingDraftInfo.isTest ? 'новый тест' : 'новый опрос'} с чистого листа?
                             </p>
                         </div>
                     </div>
-                </IosModal>
+                    {/* На телефоне обе кнопки во всю ширину и в столбик: в одну
+                        строку они не помещаются, и подписи либо ломались на две
+                        строки, либо ряд выезжал за поля карточки. */}
+                    <div className="flex w-full shrink-0 flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center sm:justify-end">
+                        <button
+                            type="button"
+                            className={`${iosBtnSecondary} w-full whitespace-nowrap sm:w-auto`}
+                            onClick={discardStoredDraft}
+                        >
+                            <FaIcon className="fas fa-rotate-left text-xs" />
+                            Начать заново
+                        </button>
+                        <button
+                            type="button"
+                            className={`${iosBtnPrimary} w-full whitespace-nowrap sm:w-auto`}
+                            onClick={continueStoredDraft}
+                            autoFocus
+                        >
+                            <FaIcon className="fas fa-pen text-xs" />
+                            Продолжить
+                        </button>
+                    </div>
+                    {/* Отложить решение: полоса уходит, черновик остаётся, вопрос
+                        вернётся при следующем «Создать опрос». На телефоне крестик
+                        уходит в угол карточки — в столбик кнопок он не встаёт. */}
+                    <button
+                        type="button"
+                        onClick={() => setPendingDraftRecord(null)}
+                        className="absolute right-2 top-2 shrink-0 rounded-full p-2 text-slate-400 transition-colors hover:bg-amber-100 hover:text-slate-600 sm:static"
+                        aria-label="Скрыть напоминание"
+                    >
+                        <FaIcon className="fas fa-times text-sm" />
+                    </button>
+                </div>
             )}
 
             {/* ── Конструктор опроса ──
