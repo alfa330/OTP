@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { ArrowRight, Loader2, RotateCcw, User } from 'lucide-react';
+import { ArrowRight, Loader2, RotateCcw, Users } from 'lucide-react';
 import {
     IosBadge, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary,
 } from '../ui/ios';
@@ -18,8 +18,12 @@ import { CHANGE_LABELS, comparePair, fmtStamp, plural, stateKey } from './histor
  *
  * Номеров у редакций нет намеренно: «редакция №N» уже занята ознакомлениями
  * (WikiAckPanel), где номер значит другое. Два разных числа под одним словом на
- * соседних экранах хуже, чем отсутствие числа; редакция опознаётся датой и
- * автором.
+ * соседних экранах хуже, чем отсутствие числа; редакция опознаётся автором и
+ * датой.
+ *
+ * Главным в строке стоит ИМЯ, а не время. Экран открывают с вопросом «кто это
+ * написал» — на него и должен отвечать первый взгляд; время отвечает на
+ * «когда», и это второй вопрос, а не первый.
  */
 
 const errText = (e, fallback) => e?.response?.data?.error || e?.message || fallback;
@@ -42,17 +46,37 @@ const Parts = ({ parts, tone }) => (
     </>
 );
 
-const LINE_BASE = 'whitespace-pre-wrap break-words px-3 py-1.5 text-[13px] leading-relaxed';
+/* Строка сравнения. Знак в отдельной колонке слева, а не цветом одним: цвет
+   различают не все, и при печати он пропадает вовсе. */
+const Marked = ({ sign, tone, children }) => (
+    <div className={`flex gap-2.5 px-3 py-1.5 ${
+        tone === 'del' ? 'border-l-2 border-rose-300 bg-rose-50/70'
+            : 'border-l-2 border-emerald-400 bg-emerald-50/70'}`}
+    >
+        <span
+            aria-hidden
+            className={`w-3 shrink-0 select-none text-center text-[13px] font-semibold leading-relaxed ${
+                tone === 'del' ? 'text-rose-400' : 'text-emerald-500'}`}
+        >
+            {sign}
+        </span>
+        <span className={`min-w-0 flex-1 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed ${
+            tone === 'del' ? 'text-slate-700' : 'text-slate-800'}`}
+        >
+            {children}
+        </span>
+    </div>
+);
 
-/* Экспортируется ради теста: рендер модалки через react-dom/server
-   эффектов не выполняет, то есть данные в неё не попадают, и строки
-   сравнения иначе не проверить ничем. */
+/* Экспортируется ради теста: рендер модалки через react-dom/server эффектов не
+   выполняет, то есть данные в неё не попадают, и строки сравнения иначе не
+   проверить ничем. */
 export const DiffLine = ({ row }) => {
     if (row.op === 'gap') {
         return (
-            <div className="flex items-center gap-2 px-3 py-1.5">
+            <div className="flex items-center gap-3 px-3 py-2">
                 <span className="h-px flex-1 bg-slate-200" />
-                <span className="text-[11.5px] text-slate-400">
+                <span className="whitespace-nowrap text-[11.5px] text-slate-400">
                     {row.skipped} {plural(row.skipped, 'строка', 'строки', 'строк')} без изменений
                 </span>
                 <span className="h-px flex-1 bg-slate-200" />
@@ -60,113 +84,141 @@ export const DiffLine = ({ row }) => {
         );
     }
     if (row.op === 'same') {
-        return <div className={`${LINE_BASE} text-slate-500`}>{row.text}</div>;
-    }
-    if (row.op === 'del') {
         return (
-            <div className={`${LINE_BASE} border-l-2 border-rose-300 bg-rose-50/70 text-slate-700`}>
-                {row.text}
+            <div className="flex gap-2.5 px-3 py-1.5">
+                <span aria-hidden className="w-3 shrink-0" />
+                <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-slate-400">
+                    {row.text}
+                </span>
             </div>
         );
     }
-    if (row.op === 'ins') {
-        return (
-            <div className={`${LINE_BASE} border-l-2 border-emerald-400 bg-emerald-50/70 text-slate-800`}>
-                {row.text}
-            </div>
-        );
-    }
+    if (row.op === 'del') return <Marked sign="−" tone="del">{row.text}</Marked>;
+    if (row.op === 'ins') return <Marked sign="+" tone="ins">{row.text}</Marked>;
     // change — та же строка до и после, с подсветкой изменённых слов.
     return (
-        <div>
-            <div className={`${LINE_BASE} border-l-2 border-rose-300 bg-rose-50/70 text-slate-700`}>
-                <Parts parts={row.before_parts} tone="del" />
-            </div>
-            <div className={`${LINE_BASE} border-l-2 border-emerald-400 bg-emerald-50/70 text-slate-800`}>
-                <Parts parts={row.after_parts} tone="ins" />
-            </div>
+        <div className="my-0.5 overflow-hidden rounded-lg">
+            <Marked sign="−" tone="del"><Parts parts={row.before_parts} tone="del" /></Marked>
+            <Marked sign="+" tone="ins"><Parts parts={row.after_parts} tone="ins" /></Marked>
         </div>
     );
 };
 
-/** Изменение отдельного поля: заголовок, аннотация, статус. */
+/** Изменение отдельного поля: заголовок или аннотация. */
 const FieldChange = ({ label, before, after }) => (
-    <div className="rounded-xl bg-white px-3 py-2 ring-1 ring-slate-200/70">
-        <div className="text-[11.5px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-        <div className="mt-1 space-y-1">
-            <div className="whitespace-pre-wrap break-words rounded-lg bg-rose-50/70 px-2 py-1 text-[13px] text-slate-600">
+    <div className="rounded-2xl bg-white p-3 ring-1 ring-slate-200/70">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+        <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
+            <div className="whitespace-pre-wrap break-words rounded-xl bg-rose-50/70 px-2.5 py-1.5 text-[13px] text-slate-600">
                 {before || <span className="text-slate-400">пусто</span>}
             </div>
-            <div className="whitespace-pre-wrap break-words rounded-lg bg-emerald-50/70 px-2 py-1 text-[13px] text-slate-800">
+            <div className="whitespace-pre-wrap break-words rounded-xl bg-emerald-50/70 px-2.5 py-1.5 text-[13px] text-slate-800">
                 {after || <span className="text-slate-400">пусто</span>}
             </div>
         </div>
     </div>
 );
 
+/** Точка на ленте: цветом отмечены события, а не порядок. */
+const dotTone = (item) => {
+    if (item.is_current) return 'bg-emerald-500';
+    if (item.restored_from_version_id) return 'bg-amber-500';
+    if (item.is_first) return 'bg-blue-500';
+    return 'bg-slate-300';
+};
+
 /** Строка списка редакций. Экспортируется ради теста — см. DiffLine. */
 export const HistoryRow = ({ item, active, onSelect, restoredFrom = null }) => {
     const extra = item.extra_saves || [];
     return (
-        <button
-            type="button"
-            onClick={() => onSelect(item.key)}
-            className={`w-full rounded-2xl px-3 py-2.5 text-left transition ${
-                active
-                    ? 'bg-white ring-2 ring-blue-500/70'
-                    : 'bg-white/60 ring-1 ring-slate-200/70 hover:bg-white'
-            }`}
-        >
-            <div className="flex items-center justify-between gap-2">
-                <span className="text-[13px] font-semibold tabular-nums text-slate-900">
+        <li className="relative pl-6">
+            <span
+                aria-hidden
+                className={`absolute left-[4px] top-[18px] h-2.5 w-2.5 rounded-full ring-[3px] ring-slate-50 ${dotTone(item)}`}
+            />
+            <button
+                type="button"
+                onClick={() => onSelect(item.key)}
+                aria-current={active ? 'true' : undefined}
+                className={`w-full rounded-2xl px-3.5 py-3 text-left transition ${
+                    active
+                        ? 'bg-white shadow-[0_1px_3px_rgba(15,23,42,0.08)] ring-2 ring-blue-500/70'
+                        : 'bg-white/70 ring-1 ring-slate-200/70 hover:bg-white hover:ring-slate-300'
+                }`}
+            >
+                <div className="flex items-start justify-between gap-2">
+                    <span className="min-w-0 truncate text-[13.5px] font-semibold text-slate-900">
+                        {item.editor_name || 'Неизвестно'}
+                    </span>
+                    {item.is_current && <IosBadge tone="green">Текущая</IosBadge>}
+                </div>
+                <div className="mt-0.5 text-[12px] tabular-nums text-slate-500">
                     {fmtStamp(item.created_at)}
-                </span>
-                {item.is_current && <IosBadge tone="green">Текущая</IosBadge>}
-            </div>
-            <div className="mt-0.5 flex items-center gap-1 text-[12px] text-slate-500">
-                <User size={11} className="shrink-0" />
-                <span className="truncate">{item.editor_name || 'Неизвестно'}</span>
-            </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                {item.is_first && <IosBadge tone="blue">Создание</IosBadge>}
-                {(item.changed || []).map((field) => (
-                    <IosBadge key={field} tone="slate">{CHANGE_LABELS[field] || field}</IosBadge>
-                ))}
-                {item.restored_from_version_id && <IosBadge tone="amber">Откат</IosBadge>}
-            </div>
-            {/* Куда именно вернули — датой той редакции, а не номером версии:
-                номеров в этом списке нет вовсе, и «версия №5» отсылала бы к
-                счётчику, которого человек нигде не видит. */}
-            {item.restored_from_version_id && (
-                <p className="mt-1.5 text-[12px] leading-snug text-amber-700">
-                    Вернули редакцию{restoredFrom ? ` от ${restoredFrom}` : ''}
-                </p>
-            )}
-            {/* У отката комментарий свой, служебный («Восстановление прежней
-                редакции»), и рядом со строкой выше он повторял бы её же более
-                общими словами. Человек комментарий откату не пишет: поле
-                заполняет сама операция (wiki/edit.py: restore_version). */}
-            {item.comment && !item.restored_from_version_id && (
-                <p className="mt-1.5 line-clamp-2 text-[12px] leading-snug text-slate-500">
-                    {item.comment}
-                </p>
-            )}
-            {/* Сохранения, не тронувшие ни текст, ни заголовок, ни статус:
-                перенос статьи в другой раздел, смена тегов. Отдельными строками
-                они бы заполнили список наполовину, а совсем без них пропало бы
-                «кто ещё сюда заходил». */}
-            {extra.length > 0 && (
-                <p
-                    className="mt-1 text-[11.5px] leading-snug text-slate-400"
-                    title={extra.map((save) => `${fmtStamp(save.created_at)} — ${save.editor_name || 'Неизвестно'}`).join('\n')}
-                >
-                    + ещё {extra.length} {plural(extra.length, 'сохранение', 'сохранения', 'сохранений')} без
-                    изменений в тексте
-                </p>
-            )}
-        </button>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                    {item.is_first && <IosBadge tone="blue">Создание</IosBadge>}
+                    {(item.changed || []).map((field) => (
+                        <IosBadge key={field} tone="slate">{CHANGE_LABELS[field] || field}</IosBadge>
+                    ))}
+                    {item.restored_from_version_id && <IosBadge tone="amber">Откат</IosBadge>}
+                </div>
+                {/* Куда именно вернули — датой той редакции, а не номером версии:
+                    номеров в этом списке нет вовсе, и «версия №5» отсылала бы к
+                    счётчику, которого человек нигде не видит. */}
+                {item.restored_from_version_id && (
+                    <p className="mt-2 text-[12px] leading-snug text-amber-700">
+                        Вернули редакцию{restoredFrom ? ` от ${restoredFrom}` : ''}
+                    </p>
+                )}
+                {/* У отката комментарий свой, служебный («Восстановление прежней
+                    редакции»), и рядом со строкой выше он повторял бы её же более
+                    общими словами. Человек комментарий откату не пишет: поле
+                    заполняет сама операция (wiki/edit.py: restore_version). */}
+                {item.comment && !item.restored_from_version_id && (
+                    <p className="mt-2 line-clamp-2 text-[12.5px] leading-snug text-slate-600">
+                        {item.comment}
+                    </p>
+                )}
+                {/* Сохранения, не тронувшие ни текст, ни заголовок, ни статус:
+                    перенос статьи в другой раздел, смена тегов. Отдельными
+                    строками они заполнили бы список наполовину, а совсем без них
+                    пропало бы «кто ещё сюда заходил». */}
+                {extra.length > 0 && (
+                    <p
+                        className="mt-1.5 text-[11.5px] leading-snug text-slate-400"
+                        title={extra.map((save) => `${fmtStamp(save.created_at)} — ${save.editor_name || 'Неизвестно'}`).join('\n')}
+                    >
+                        + ещё {extra.length} {plural(extra.length, 'сохранение', 'сохранения', 'сохранений')} без
+                        изменений в тексте
+                    </p>
+                )}
+            </button>
+        </li>
     );
 };
+
+/** Одна сторона сравнения: «что было» и «что стало». */
+const CompareSide = ({ label, tone, entry }) => (
+    <div className={`min-w-0 flex-1 rounded-2xl bg-white px-3.5 py-2.5 ring-1 ${
+        tone === 'del' ? 'ring-rose-200' : 'ring-emerald-200'}`}
+    >
+        <div className="flex items-center justify-between gap-2">
+            <span className={`text-[11px] font-semibold uppercase tracking-wide ${
+                tone === 'del' ? 'text-rose-500' : 'text-emerald-600'}`}
+            >
+                {label}
+            </span>
+            {/* Какая из двух сторон — нынешний текст статьи. Без пометки «Было
+                Иванов, стало Иванов» не отвечает на вопрос, куда смотреть: обе
+                стороны выглядят одинаково прошлыми. */}
+            {entry?.is_current && <IosBadge tone="green">Текущая</IosBadge>}
+        </div>
+        <div className="mt-0.5 truncate text-[13.5px] font-semibold text-slate-900">
+            {entry?.editor_name || 'Неизвестно'}
+        </div>
+        <div className="text-[12px] tabular-nums text-slate-500">{fmtStamp(entry?.created_at)}</div>
+    </div>
+);
 
 export default function WikiHistory({ base, headers, article, open, onClose,
                                       onRestored = null, showToast = null }) {
@@ -176,14 +228,14 @@ export default function WikiHistory({ base, headers, article, open, onClose,
     const [against, setAgainst] = useState('prev');
     const [diff, setDiff] = useState({});
     const [restoring, setRestoring] = useState(false);
+    /* Счётчик перезагрузки: после отката история другая — в ней появилась и
+       редакция-откат, и снимок того, что было до него. */
+    const [reload, setReload] = useState(0);
     /* На телефоне список редакций стоит НАД сравнением, и после нажатия по
        строке правая колонка остаётся за нижним краем: экран выглядит так,
        будто нажатие ничего не сделало. На широком экране колонки рядом, и
        подкручивать нечего. */
     const diffRef = useRef(null);
-    /* Счётчик перезагрузки: после отката история другая — в ней появилась и
-       редакция-откат, и снимок того, что было до него. */
-    const [reload, setReload] = useState(0);
 
     useEffect(() => {
         if (!open || !articleId) return undefined;
@@ -226,6 +278,22 @@ export default function WikiHistory({ base, headers, article, open, onClose,
         };
     }, [items]);
 
+    /* Сводка над списком отвечает на вопрос «что тут вообще происходило»
+       раньше, чем человек начнёт читать строки. Людей считаем вместе с теми,
+       чьи сохранения слиты в приписку: они статью тоже трогали. Времени
+       последней правки здесь нет намеренно — оно стоит строкой ниже, первым
+       пунктом ленты, и повторять его значило бы занять место ничем. */
+    const summary = useMemo(() => {
+        const people = new Set();
+        items.forEach((item) => {
+            if (item.editor_name) people.add(item.editor_name);
+            (item.extra_saves || []).forEach((save) => {
+                if (save.editor_name) people.add(save.editor_name);
+            });
+        });
+        return { revisions: items.length, people: people.size };
+    }, [items]);
+
     const fromKey = pair.from ? stateKey(pair.from) : null;
     const toKey = pair.to ? stateKey(pair.to) : null;
 
@@ -245,7 +313,7 @@ export default function WikiHistory({ base, headers, article, open, onClose,
 
     useEffect(() => {
         if (!open || !selected || !diffRef.current) return;
-        if (!window.matchMedia?.('(max-width: 639px)')?.matches) return;
+        if (!window.matchMedia?.('(max-width: 767px)')?.matches) return;
         diffRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, [open, selected]);
 
@@ -273,6 +341,7 @@ export default function WikiHistory({ base, headers, article, open, onClose,
     };
 
     const body = diff.data?.body;
+    const hasFields = !!(diff.data && (diff.data.title || diff.data.summary || diff.data.status));
 
     return (
         <IosModal
@@ -280,7 +349,7 @@ export default function WikiHistory({ base, headers, article, open, onClose,
             onClose={onClose}
             title="История версий"
             subtitle={article?.title}
-            maxWidth="max-w-5xl"
+            maxWidth="max-w-6xl"
             footer={(
                 <>
                     <button type="button" className={iosBtnSecondary} onClick={onClose}>
@@ -302,39 +371,55 @@ export default function WikiHistory({ base, headers, article, open, onClose,
             )}
         >
             {state.loading && (
-                <div className="flex items-center justify-center gap-2 py-12 text-slate-400">
+                <div className="flex items-center justify-center gap-2 py-16 text-slate-400">
                     <Loader2 size={18} className="animate-spin" />
                     <span className="text-[13px]">Собираем историю…</span>
                 </div>
             )}
 
             {state.error && (
-                <div className="rounded-xl bg-rose-50 px-3 py-2.5 text-[13px] text-rose-700">
+                <div className="rounded-2xl bg-rose-50 px-3.5 py-3 text-[13px] text-rose-700">
                     {state.error}
                 </div>
             )}
 
             {!state.loading && !state.error && (
-                <div className="grid gap-4 sm:grid-cols-[minmax(0,270px)_minmax(0,1fr)]">
-                    <div className="flex flex-col gap-1.5 sm:max-h-[62vh] sm:overflow-y-auto sm:pr-1">
-                        {items.map((item) => (
-                            <HistoryRow
-                                key={item.key}
-                                item={item}
-                                active={item.key === selected}
-                                onSelect={setSelected}
-                                restoredFrom={restoredFrom(item)}
-                            />
-                        ))}
+                <div className="grid gap-5 md:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
+                    <div className="min-w-0">
+                        <div className="mb-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-[12px] text-slate-500">
+                            <span className="font-medium text-slate-700">
+                                {summary.revisions} {plural(summary.revisions, 'редакция', 'редакции', 'редакций')}
+                            </span>
+                            <span className="flex items-center gap-1">
+                                <Users size={12} /> {summary.people} {plural(summary.people, 'человек', 'человека', 'человек')}
+                            </span>
+                        </div>
+                        <ol className="relative md:max-h-[58vh] md:overflow-y-auto md:pr-1.5">
+                            {/* Лента слева: история читается как лента событий, а
+                                не как таблица. Линия рисуется от первой точки до
+                                последней, поэтому отступы сверху и снизу. */}
+                            <span aria-hidden className="absolute left-[8px] top-5 bottom-5 w-px bg-slate-200" />
+                            <div className="flex flex-col gap-1.5">
+                                {items.map((item) => (
+                                    <HistoryRow
+                                        key={item.key}
+                                        item={item}
+                                        active={item.key === selected}
+                                        onSelect={setSelected}
+                                        restoredFrom={restoredFrom(item)}
+                                    />
+                                ))}
+                            </div>
+                        </ol>
                     </div>
 
                     <div className="min-w-0 scroll-mt-2" ref={diffRef}>
                         {items.length < 2 && (
-                            <div className="rounded-2xl bg-white px-4 py-8 text-center ring-1 ring-slate-200/70">
-                                <div className="text-[14px] font-semibold text-slate-900">
+                            <div className="rounded-2xl bg-white px-4 py-12 text-center ring-1 ring-slate-200/70">
+                                <div className="text-[15px] font-semibold text-slate-900">
                                     Статью ещё не правили
                                 </div>
-                                <p className="mx-auto mt-1 max-w-xs text-[13px] leading-relaxed text-slate-500">
+                                <p className="mx-auto mt-1.5 max-w-xs text-[13px] leading-relaxed text-slate-500">
                                     В истории одна редакция — та, с которой статью создали.
                                     Сравнивать пока не с чем.
                                 </p>
@@ -342,18 +427,9 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                         )}
 
                         {items.length >= 2 && entry && (
-                            <>
-                                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                                    <div className="min-w-0 text-[12.5px] text-slate-500">
-                                        {pair.from && pair.to ? (
-                                            <>
-                                                Сравнение: <span className="tabular-nums text-slate-700">{fmtStamp(pair.from?.created_at)}</span>
-                                                {' → '}
-                                                <span className="tabular-nums text-slate-700">{fmtStamp(pair.to?.created_at)}</span>
-                                            </>
-                                        ) : 'Сравнивать не с чем'}
-                                    </div>
-                                    {canPrev && canCurrent && (
+                            <div className="space-y-3">
+                                {canPrev && canCurrent && (
+                                    <div className="flex justify-end">
                                         <IosSegmented
                                             value={mode}
                                             onChange={setAgainst}
@@ -363,25 +439,37 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                                                 { value: 'current', label: 'С текущей' },
                                             ]}
                                         />
-                                    )}
-                                </div>
+                                    </div>
+                                )}
+
+                                {pair.from && pair.to ? (
+                                    <div className="flex items-center gap-2">
+                                        <CompareSide label="Было" tone="del" entry={pair.from} />
+                                        <ArrowRight size={16} className="shrink-0 text-slate-400" />
+                                        <CompareSide label="Стало" tone="ins" entry={pair.to} />
+                                    </div>
+                                ) : (
+                                    <div className="rounded-2xl bg-white px-3.5 py-3 text-[13px] text-slate-500 ring-1 ring-slate-200/70">
+                                        Сравнивать не с чем: это единственная редакция.
+                                    </div>
+                                )}
 
                                 {diff.loading && (
-                                    <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
+                                    <div className="flex items-center justify-center gap-2 py-12 text-slate-400">
                                         <Loader2 size={16} className="animate-spin" />
                                         <span className="text-[13px]">Считаем различия…</span>
                                     </div>
                                 )}
 
                                 {diff.error && (
-                                    <div className="rounded-xl bg-rose-50 px-3 py-2.5 text-[13px] text-rose-700">
+                                    <div className="rounded-2xl bg-rose-50 px-3.5 py-3 text-[13px] text-rose-700">
                                         {diff.error}
                                     </div>
                                 )}
 
                                 {diff.data && (
-                                    <div className="space-y-3">
-                                        {(diff.data.title || diff.data.summary || diff.data.status) && (
+                                    <>
+                                        {hasFields && (
                                             <div className="space-y-2">
                                                 {diff.data.title && (
                                                     <FieldChange label="Заголовок"
@@ -394,8 +482,8 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                                                                  after={diff.data.summary.after} />
                                                 )}
                                                 {diff.data.status && (
-                                                    <div className="flex flex-wrap items-center gap-2 rounded-xl bg-white px-3 py-2 ring-1 ring-slate-200/70">
-                                                        <span className="text-[11.5px] font-medium uppercase tracking-wide text-slate-400">
+                                                    <div className="flex flex-wrap items-center gap-2 rounded-2xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
+                                                        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
                                                             Статус
                                                         </span>
                                                         <IosBadge tone={STATUS_TONES[diff.data.status.before] || 'slate'}>
@@ -411,7 +499,7 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                                         )}
 
                                         {diff.data.identical && (
-                                            <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[13px] text-slate-500">
+                                            <div className="rounded-2xl bg-slate-100/70 px-3.5 py-3 text-[13px] text-slate-500">
                                                 Эти редакции полностью совпадают.
                                             </div>
                                         )}
@@ -420,50 +508,52 @@ export default function WikiHistory({ base, headers, article, open, onClose,
                                             экран сказал бы «различий нет» там, где в списке слева
                                             стоит бейдж «Текст», — и выглядело бы это поломкой. */}
                                         {diff.data.markup_only && (
-                                            <div className="rounded-xl bg-amber-50 px-3 py-2.5 text-[13px] leading-relaxed text-amber-800">
+                                            <div className="rounded-2xl bg-amber-50 px-3.5 py-3 text-[13px] leading-relaxed text-amber-800">
                                                 Слова не менялись — правка тронула только оформление:
                                                 выделение, цитату, разбивку абзацев или таблицу.
                                             </div>
                                         )}
 
-                                        {/* Изменились только поля — тело осталось прежним.
-                                            Без этой строки правый столбец под
-                                            «Статус: черновик → опубликована» просто
-                                            пуст, и читается это как незагрузившееся
-                                            сравнение, а не как «текст не трогали». */}
+                                        {/* Изменились только поля — тело осталось прежним. Без
+                                            этой строки правый столбец под «Статус: черновик →
+                                            опубликована» просто пуст, и читается это как
+                                            незагрузившееся сравнение, а не как «текст не трогали». */}
                                         {body && !body.added && !body.removed
                                             && !diff.data.identical && !diff.data.markup_only && (
-                                            <div className="rounded-xl bg-slate-50 px-3 py-2.5 text-[13px] text-slate-500">
+                                            <div className="rounded-2xl bg-slate-100/70 px-3.5 py-3 text-[13px] text-slate-500">
                                                 Текст статьи не менялся — различие только в полях выше.
                                             </div>
                                         )}
 
                                         {body && (body.added > 0 || body.removed > 0) && (
-                                            <>
-                                                <div className="flex items-center gap-3 px-1 text-[12px]">
-                                                    <span className="text-emerald-600">
+                                            <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
+                                                <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-3.5 py-2.5">
+                                                    <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                        Текст статьи
+                                                    </span>
+                                                    <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[12px] font-medium text-emerald-700">
                                                         + {body.added} {plural(body.added, 'строка', 'строки', 'строк')}
                                                     </span>
-                                                    <span className="text-rose-600">
+                                                    <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[12px] font-medium text-rose-600">
                                                         − {body.removed} {plural(body.removed, 'строка', 'строки', 'строк')}
                                                     </span>
                                                 </div>
-                                                <div className="overflow-hidden rounded-2xl bg-white py-1 ring-1 ring-slate-200/70">
+                                                <div className="py-1">
                                                     {body.rows.map((row, position) => (
                                                         <DiffLine key={position} row={row} />
                                                     ))}
                                                 </div>
                                                 {body.truncated && (
-                                                    <p className="px-1 text-[12px] text-slate-500">
-                                                        Показаны первые {body.rows.length} строк сравнения — различий
-                                                        больше, чем помещается на экран.
+                                                    <p className="border-t border-slate-100 px-3.5 py-2.5 text-[12px] text-slate-500">
+                                                        Показаны первые {body.rows.length} строк сравнения —
+                                                        различий больше, чем помещается на экран.
                                                     </p>
                                                 )}
-                                            </>
+                                            </div>
                                         )}
-                                    </div>
+                                    </>
                                 )}
-                            </>
+                            </div>
                         )}
                     </div>
                 </div>
