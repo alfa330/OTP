@@ -77,6 +77,15 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
         visible = wiki_articles.visible_article_ids(cursor, ctx, subjects, sections)
         return subjects, sections, visible
 
+    def _section_space(cursor, section_id):
+        """Пространство раздела. Нужно журналу — см. запись о создании статьи."""
+        if not section_id:
+            return None
+        cursor.execute('SELECT space_id FROM wiki_sections WHERE id = %s',
+                       (int(section_id),))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
     def _forbidden_sections(cursor, ctx, section_ids):
         """Разделы из списка, куда этот человек класть статьи не вправе.
 
@@ -340,11 +349,19 @@ def register(bp, wiki_route, db, log_ip, session_id_provider):
 
         indexed = _sync_ai_index(cursor, article_id)
 
+        # Пространство записи называем ЯВНО, разделом, в который статья и легла.
+        # Без этого оно выводится по связи статьи с разделом
+        # (schema.AUDIT_SPACE_SQL), а на боевой базе три записи о создании
+        # остались без пространства — и «ничья» запись показывается в журнале
+        # ОБОИХ пространств сразу (structure._audit_filters). Так журнал Теза и
+        # оказался в «Таксопарках». Раздел здесь уже известен и проверен на
+        # право писать, второй раз спрашивать базу незачем.
         queries.log_action(cursor, actor_id=ctx['user_id'], action='article.create',
                            entity_type='article', entity_id=article_id,
                            details={'title': title, 'slug': slug,
                                     'status': status or 'draft',
                                     'ai_index': indexed.get('action')},
+                           space_id=_section_space(cursor, targets[0]),
                            ip_address=log_ip())
         # Статус возвращается ВСЕГДА: интерфейс должен говорить о том, что
         # получилось, а не о том, что просили.

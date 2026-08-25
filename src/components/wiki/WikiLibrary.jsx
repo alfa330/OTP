@@ -384,6 +384,10 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
                     sections={sections}
                     spaces={spaces}
                     features={features}
+                    /* Пространство работы — для журнала: пока статьи нет, её
+                       пространство серверу вывести не из чего, и запись о
+                       черновике попадала в журнал обоих пространств сразу. */
+                    spaceId={spaceId}
                     /* Оглавление для пикера внутренних ссылок. Оно уже здесь и
                        уже сужено по пространству — своего запроса пикер не
                        делает. */

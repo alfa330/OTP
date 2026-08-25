@@ -108,6 +108,11 @@ export default function WikiAiDraft({
     base, headers, showToast, enabled, onEnabledChange, onDraft, onContent,
     getSnapshot, excludeId = null, pendingUpdateFile = null, onPendingUsed = null,
     onUpdateExisting = null,
+    /* Пространство работы — ТОЛЬКО для журнала. Статьи ещё нет (черновик из
+       документа) или она не сохранена (правка по указанию), и вывести её
+       пространство сервер не может ни из чего: запись оказывается «ничьей»,
+       а такие видны в журнале обоих пространств сразу. */
+    spaceId = null,
 }) {
     const [busy, setBusy] = useState(null);
     const [result, setResult] = useState(null);
@@ -129,7 +134,8 @@ export default function WikiAiDraft({
         if (excludeId) form.append('article_id', String(excludeId));
         setBusy('update');
         setResult(null);
-        axios.post(`${base}/articles/ai/update`, form, { headers })
+        axios.post(`${base}/articles/ai/update`, form,
+                   { headers, params: { space_id: spaceId || undefined } })
             .then((r) => {
                 const data = r.data || {};
                 onContent?.(data.content);
@@ -160,7 +166,8 @@ export default function WikiAiDraft({
         setBusy('draft');
         setResult(null);
         setDuplicates(null);
-        axios.post(`${base}/import/ai`, form, { headers })
+        axios.post(`${base}/import/ai`, form,
+                   { headers, params: { space_id: spaceId || undefined } })
             .then((r) => {
                 const data = r.data || {};
                 onDraft?.(data);
@@ -179,6 +186,7 @@ export default function WikiAiDraft({
         axios.post(`${base}/articles/ai/edit`, {
             content: snapshot.content || '', title: snapshot.title || '',
             instruction, article_id: excludeId, ai_support: enabled,
+            space_id: spaceId || undefined,
         }, { headers })
             .then((r) => {
                 const data = r.data || {};

@@ -104,6 +104,12 @@ export default function WikiEditor({
     base, headers, showToast, article, sections, spaces = [], onClose, onSaved,
     pendingUpdateFile = null, onPendingUsed = null, onUpdateExisting = null,
     features = null,
+    /* Пространство, в котором человек сейчас работает. Нужно ЖУРНАЛУ: пока
+       статьи нет, её пространство вывести не из чего, и запись о черновике
+       из документа оказывалась «ничьей» — а «ничья» запись показывается в
+       журнале И «Таксопарков», И «Теза» (wiki/structure.py: _audit_filters).
+       Отсюда и жалоба «журналы перемешались». */
+    spaceId = null,
     /* Оглавление витрины — источник для пикера внутренних ссылок. Приходит уже
        загруженным и уже суженным по пространству; своего запроса пикер не
        делает (см. ArticlePicker.jsx). */
@@ -289,6 +295,9 @@ export default function WikiEditor({
             article_type: articleType,
             section_ids: sectionIds.map(Number).filter(Boolean),
             ai_support: aiSupport,
+            // Для журнала: сервер запишет действие в это пространство, даже
+            // если раздел статье достался запасной.
+            space_id: spaceId || undefined,
         };
         if (status) payload.status = status;
 
@@ -322,7 +331,7 @@ export default function WikiEditor({
         const form = new FormData();
         form.append('file', file);
         setImporting(true);
-        axios.post(`${base}/import`, form, { headers })
+        axios.post(`${base}/import`, form, { headers, params: { space_id: spaceId || undefined } })
             .then((r) => {
                 const data = r.data || {};
                 if (!title.trim() && data.title) setTitle(data.title);
@@ -545,6 +554,7 @@ export default function WikiEditor({
                 base={base}
                 headers={headers}
                 showToast={showToast}
+                spaceId={spaceId}
                 enabled={aiSupport}
                 onEnabledChange={(value) => { setAiSupport(value); setDirty(true); }}
                 excludeId={article?.id || null}

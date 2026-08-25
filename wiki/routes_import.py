@@ -59,6 +59,37 @@ _TRUE = ('1', 'true', 'yes', 'on', 'да')
 _VISION_MAX_BYTES = 12 * 1024 * 1024
 
 
+def _log_space(cursor, ctx):
+    """Пространство, в котором сделан запрос, — ДЛЯ ЖУРНАЛА, и только.
+
+    Не request_space: та отвечает за ДОСТУП и при двух пространствах без
+    параметра отказывает 400. Здесь отказывать нельзя — импорт и черновик из
+    документа никакого пространства не проверяют, они просто должны попасть в
+    правильный журнал. Нет параметра — вернём None, запись останется как была.
+
+    Зачем вообще: пока статьи нет (черновик из документа) или она не сохранена
+    (правка по указанию), пространство записи вывести НЕ ИЗ ЧЕГО —
+    schema.AUDIT_SPACE_SQL считает его по объекту. Такая запись остаётся без
+    пространства, а «ничья» запись показывается в журнале И «Таксопарков», И
+    «Теза» (structure._audit_filters). Именно так журналы двух вик и
+    перемешались: 25.08.2026 в журнале «Таксопарков» лежали черновики Теза.
+
+    Чужой id не принимаем: пространство проверяется по выданным человеку, иначе
+    запись о его действии уехала бы в чужой журнал по одному параметру строки.
+    """
+    raw = request.args.get('space_id')
+    if raw is None:
+        body = request.get_json(silent=True) or {}
+        raw = body.get('space_id') if isinstance(body, dict) else None
+    if raw is None:
+        raw = request.form.get('space_id')
+    space_id = _int_or_none(raw)
+    if space_id is None:
+        return None
+    allowed = queries.spaces_for_user(cursor, ctx, include_guest=False)
+    return space_id if space_id in allowed else None
+
+
 def register(bp, wiki_route, db, log_ip, gcs):
 
     def _store_file(cursor, *, data, filename, content_type, uploaded_by,
@@ -107,6 +138,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
                            entity_type='article', entity_id=None,
                            details={'file': uploaded.filename, 'kind': result['kind'],
                                     'images': len(result['images'])},
+                           space_id=_log_space(cursor, ctx),
                            ip_address=log_ip())
         return jsonify(result)
 
@@ -214,6 +246,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
                      'tables': draft['tables'], 'warnings': len(draft['warnings']),
                      'duplicate_verdict': duplicates.get('verdict'),
                      'provider': meta.get('provider'), 'model': meta.get('model')},
+            space_id=_log_space(cursor, ctx),
             ip_address=log_ip())
 
         return jsonify({
@@ -306,6 +339,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
                      "changes": len(result["changes"]),
                      "questions": len(result["questions"]),
                      "model": meta.get("model")},
+            space_id=_log_space(cursor, ctx),
             ip_address=log_ip())
         return jsonify({"content": result["content"], "changes": result["changes"],
                         "questions": result["questions"],
@@ -341,6 +375,7 @@ def register(bp, wiki_route, db, log_ip, gcs):
             entity_type="article", entity_id=_int_or_none(data.get("article_id")),
             details={"instruction": instruction[:200],
                      "changes": len(result["changes"]), "model": meta.get("model")},
+            space_id=_log_space(cursor, ctx),
             ip_address=log_ip())
         return jsonify({"content": result["content"], "changes": result["changes"],
                         "questions": result["questions"],

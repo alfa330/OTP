@@ -168,6 +168,76 @@ class AuditSpaceGuardTest(unittest.TestCase):
             'формула пространства не знает типы %s — запись уйдёт в журнал всех '
             'пространств сразу (wiki/schema.py: AUDIT_SPACE_SQL)' % sorted(unknown))
 
+    def test_writers_without_object_name_the_space(self):
+        """Запись, у которой объекта ещё нет, обязана назвать пространство САМА.
+
+        Пространство записи считается ПО ОБЪЕКТУ (AUDIT_SPACE_SQL). Пока статьи
+        нет — черновик из документа, импорт, правка несохранённого текста —
+        считать не по чему, и запись остаётся ничьей. А ничья запись видна в
+        журнале ОБОИХ пространств (structure._audit_filters): 25.08.2026 в
+        журнале «Таксопарков» лежали черновики Теза, и владелец это увидел.
+
+        Поэтому в routes_import каждая запись обязана передавать space_id.
+        """
+        source = io.open(str(WIKI / 'routes_import.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        missing = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'log_action'):
+                continue
+            kwargs = {kw.arg for kw in node.keywords}
+            action = next((ast.literal_eval(kw.value) for kw in node.keywords
+                           if kw.arg == 'action'
+                           and isinstance(kw.value, ast.Constant)), '?')
+            if 'space_id' not in kwargs:
+                missing.append('%s (строка %s)' % (action, node.lineno))
+        self.assertEqual(missing, [],
+                         'без space_id запись уйдёт в журнал обоих пространств: %s'
+                         % ', '.join(missing))
+        self.assertTrue(source.count('_log_space(cursor, ctx)') >= 4,
+                        'пространство берётся одной функцией на все записи')
+
+    def test_article_create_names_the_space_of_its_section(self):
+        """Создание статьи называет пространство разделом, а не связью статьи.
+
+        Связь статьи с разделом на боевой базе появлялась ПОЗЖЕ записи, и три
+        записи о создании остались ничьими навсегда.
+        """
+        source = io.open(str(WIKI / 'routes_edit.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'log_action'
+                    and any(kw.arg == 'action' and isinstance(kw.value, ast.Constant)
+                            and kw.value.value == 'article.create'
+                            for kw in node.keywords)):
+                kwargs = {kw.arg for kw in node.keywords}
+                self.assertIn('space_id', kwargs,
+                              'запись о создании обязана назвать пространство')
+                return
+        self.fail('запись о создании статьи не найдена — проверь тест')
+
+    def test_object_backfill_runs_every_start(self):
+        """Разбор по объекту повторяется, догадка по дате — нет.
+
+        Повтор безопасен: разобрать можно только запись, объект которой есть.
+        Намеренно ничья (объекта нет и не было) не разберётся никогда.
+        """
+        source = io.open(str(WIKI / 'schema.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and 'first_run = ' in (
+                    ast.get_source_segment(source, node) or ''):
+                func = ast.get_source_segment(source, node)
+        self.assertIsNotNone(func, 'миграция журнала не найдена — проверь тест')
+        backfill = func.index('UPDATE wiki_audit_log a SET space_id = (')
+        guard = func.index('if not first_run:')
+        self.assertLess(backfill, guard,
+                        'разбор по объекту обязан идти ДО возврата: иначе запись, '
+                        'у которой пространство появилось позже, останется ничьей')
+
     def test_audit_route_asks_for_space(self):
         source = io.open(str(WIKI / 'routes_structure.py'), encoding='utf-8').read()
         tree = ast.parse(source)
@@ -206,6 +276,46 @@ class AuditSpaceGuardTest(unittest.TestCase):
         ping = io.open(str(WIKI / 'routes.py'), encoding='utf-8').read()
         self.assertIn('"can_read_audit": wiki_access.may_read_audit(', ping,
                       '/ping обязан отдавать признак той же функцией')
+
+
+class LogSpaceTest(unittest.TestCase):
+    """Пространство для журнала берётся мягко и только своё.
+
+    Мягко — потому что это НЕ доступ: импорт документа никакого пространства не
+    проверяет, и отказывать 400 на отсутствующий параметр здесь нельзя (иначе
+    старый бандл после деплоя перестал бы собирать черновики). Только своё —
+    потому что иначе запись о действии уехала бы в чужой журнал по одному
+    параметру строки запроса.
+    """
+
+    def _space(self, args=None, form=None, body=None, allowed=(11, 12)):
+        from flask import Flask
+        from wiki import queries as wiki_queries
+        from wiki import routes_import
+
+        original = wiki_queries.spaces_for_user
+        wiki_queries.spaces_for_user = lambda _c, _ctx, **_k: list(allowed)
+        self.addCleanup(setattr, wiki_queries, 'spaces_for_user', original)
+
+        app = Flask(__name__)
+        with app.test_request_context('/?' + (args or ''), data=form,
+                                      json=body if body is not None else None):
+            return routes_import._log_space(object(), {'user_id': 1})
+
+    def test_query_parameter_wins(self):
+        self.assertEqual(self._space(args='space_id=12'), 12)
+
+    def test_form_field_is_read_too(self):
+        """Черновик из документа уходит формой, а не строкой запроса."""
+        self.assertEqual(self._space(form={'space_id': '11'}), 11)
+
+    def test_foreign_space_is_ignored(self):
+        """Чужой id не принимаем: запись уехала бы в чужой журнал."""
+        self.assertIsNone(self._space(args='space_id=99'))
+
+    def test_absent_parameter_is_not_an_error(self):
+        """Нет параметра — нет пространства, но и отказа нет."""
+        self.assertIsNone(self._space())
 
 
 if __name__ == '__main__':
