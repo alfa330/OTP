@@ -12,6 +12,7 @@ import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import useStableCallback from './useStableCallback';
 import { syncArticleDeepLink } from './articleLink';
 import { fetchArticleIndex } from './articleIndex';
+import { absoluteFileUrl } from './fileUrls';
 import { selectableSections } from './sectionPicker';
 import { typeBadge } from './articleTypes';
 
@@ -326,7 +327,12 @@ export default function WikiLibrary({ base, headers, showToast, structure, catal
             .then((r) => {
                 // Архивные парки сервер отдаёт управляющему справочником —
                 // в рельсе им не место, это витрина «куда звонить сейчас».
-                setParks((r.data?.items || []).filter((p) => p.status === 'active'));
+                // Логотип раскрываем до абсолютного адреса: страница и API на
+                // разных доменах, и относительный /api/wiki/file/<id> браузер
+                // искал бы на Pages (fileUrls.js).
+                setParks((r.data?.items || [])
+                    .filter((p) => p.status === 'active')
+                    .map((p) => ({ ...p, logo_url: absoluteFileUrl(p.logo_url, base) })));
                 setParksCanManage(!!r.data?.can_manage);
             })
             .catch(() => setParks([]));

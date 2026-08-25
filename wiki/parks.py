@@ -240,6 +240,33 @@ def set_promotion_parks(cursor, promotion_id, park_ids, *, space_id):
         )
 
 
+def logo_space_ids(cursor, file_id):
+    """Пространства, в которых этот файл — логотип парка или баннер акции.
+
+    Пусто — файл справочнику не принадлежит.
+
+    Единственная функция модуля без аргумента space_id, и это не забывчивость:
+    пространство здесь ОТВЕТ, а не условие выборки. Спрашивают ровно затем,
+    чтобы роут /file/<id> сверил его с пространствами читателя. Без этого
+    логотип видел бы один загрузивший: непривязанный к статье файл роут отдаёт
+    только автору загрузки, и в рельсе витрины у всех остальных стояла бы
+    битая картинка.
+
+    Баннер акции здесь же, хотя грузить его пока неоткуда: колонка
+    banner_file_id живёт в схеме с самого начала, и первая же форма для неё
+    наступила бы на ту же яму.
+    """
+    cursor.execute(
+        """
+        SELECT space_id FROM wiki_taxi_parks WHERE logo_file_id = %(file)s
+         UNION
+        SELECT space_id FROM wiki_promotions WHERE banner_file_id = %(file)s
+        """,
+        {'file': file_id},
+    )
+    return {row[0] for row in cursor.fetchall()}
+
+
 def slug_is_free(cursor, slug, exclude_id=None, *, space_id):
     """Свободен ли слаг В ЭТОМ пространстве (уникальность там же — см. схему)."""
     cursor.execute(

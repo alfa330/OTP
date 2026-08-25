@@ -1,11 +1,14 @@
-import React, { useMemo, useState } from 'react';
-import { MapPin, Phone, Plus, StickyNote, Trash2 } from 'lucide-react';
-import { iosInput, iosGroupLabel, IosBadge } from '../ui/ios';
+import React, { useMemo, useRef, useState } from 'react';
+import {
+    Building2, ImagePlus, Loader2, MapPin, Phone, Plus, StickyNote, Trash2,
+} from 'lucide-react';
+import { iosInput, iosGroupLabel, iosBtnGhost, IosBadge } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { Field, CitySelect } from './formField';
 import {
     PHONE_DIGITS, digitsOf, emptyNumber, formatDigits, parkDraftIssue, toPhone,
 } from './parkPoints';
+import { LOGO_MAX_BYTES, LOGO_TYPES } from './parkLogo';
 
 /* Форма таксопарка: о парке, номера по точкам, условия.
  *
@@ -178,6 +181,104 @@ const NumberRow = ({ number, offices, onChange, onRemove, onAdd, canRemove, isLa
     );
 };
 
+/* Логотип парка.
+ *
+ * Плитка, а не строка «выберите файл»: тем же квадратом логотип и показывается
+ * — в рельсе витрины, в карточке справочника и в шапке страницы парка, — и
+ * форма обязана показывать результат, а не обещание. Нажатие на саму плитку
+ * открывает выбор файла: это первое, что человек пробует сделать с аватаркой.
+ *
+ * Файл уходит на сервер СРАЗУ, а в парк потом ложится один id. Иначе картинку
+ * пришлось бы тащить в теле сохранения парка вместе с номерами и адресом —
+ * то есть держать в форме файл и обрабатывать отказ загрузки как отказ всей
+ * правки, хотя это разные события.
+ */
+const ParkLogo = ({ draft, setDraft, onUpload }) => {
+    const inputRef = useRef(null);
+    const [busy, setBusy] = useState(false);
+
+    const pick = (file) => {
+        if (!file) return;
+        setBusy(true);
+        Promise.resolve(onUpload(file))
+            .then((result) => {
+                if (!result) return;
+                setDraft((prev) => ({ ...prev, logo_file_id: result.file_id,
+                                      logo_url: result.url }));
+            })
+            .finally(() => {
+                setBusy(false);
+                // Сбрасываем значение поля: без этого повторный выбор ТОГО ЖЕ
+                // файла (после «Убрать») не даёт события change вовсе.
+                if (inputRef.current) inputRef.current.value = '';
+            });
+    };
+
+    return (
+        <div className="flex items-center gap-3">
+            <input
+                ref={inputRef}
+                type="file"
+                className="hidden"
+                accept={LOGO_TYPES.join(',')}
+                onChange={(e) => pick(e.target.files?.[0])}
+            />
+
+            <button
+                type="button"
+                onClick={() => inputRef.current?.click()}
+                disabled={busy}
+                className="group relative grid h-[68px] w-[68px] shrink-0 place-items-center overflow-hidden rounded-2xl bg-slate-100 text-slate-400 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-60"
+                aria-label={draft.logo_url ? 'Заменить логотип' : 'Загрузить логотип'}
+            >
+                {draft.logo_url && !busy && (
+                    <img src={draft.logo_url} alt="" className="h-full w-full object-cover" />
+                )}
+                {busy && <Loader2 size={20} className="animate-spin text-slate-500" />}
+                {!draft.logo_url && !busy && <Building2 size={22} />}
+                {/* Подсказка «сюда можно нажать» появляется поверх готовой
+                    картинки: без неё плитка с логотипом выглядит картинкой, а
+                    не кнопкой. */}
+                {draft.logo_url && !busy && (
+                    <span className="absolute inset-0 grid place-items-center bg-slate-900/45 text-white opacity-0 transition group-hover:opacity-100">
+                        <ImagePlus size={18} />
+                    </span>
+                )}
+            </button>
+
+            <div className="min-w-0">
+                <div className="text-[13px] font-medium text-slate-900">Логотип</div>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-slate-400">
+                    Виден на главной в рельсе парков и в карточке.
+                    PNG, JPEG или WebP до {Math.round(LOGO_MAX_BYTES / (1024 * 1024))} МБ.
+                </p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                    <button
+                        type="button"
+                        className={`${iosBtnGhost} px-2 py-1 text-[12px] text-blue-600 hover:bg-blue-50`}
+                        onClick={() => inputRef.current?.click()}
+                        disabled={busy}
+                    >
+                        <ImagePlus size={13} /> {draft.logo_url ? 'Заменить' : 'Загрузить'}
+                    </button>
+                    {draft.logo_url && (
+                        <button
+                            type="button"
+                            className={`${iosBtnGhost} px-2 py-1 text-[12px] hover:bg-rose-50 hover:text-rose-500`}
+                            onClick={() => setDraft((prev) => ({
+                                ...prev, logo_file_id: null, logo_url: null,
+                            }))}
+                            disabled={busy}
+                        >
+                            <Trash2 size={13} /> Убрать
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const ParkNumbers = ({ draft, setDraft }) => {
     const numbers = draft.numbers || [];
 
@@ -222,7 +323,7 @@ const ParkNumbers = ({ draft, setDraft }) => {
     );
 };
 
-export default function ParkEditor({ draft, setDraft, offices }) {
+export default function ParkEditor({ draft, setDraft, offices, onUploadLogo }) {
     const set = (key) => (e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }));
     const issue = parkDraftIssue(draft);
     const numbers = draft.numbers || [];
@@ -232,6 +333,9 @@ export default function ParkEditor({ draft, setDraft, offices }) {
         <div className="space-y-5">
             <section className="space-y-3">
                 <div className={iosGroupLabel}>О парке</div>
+                {onUploadLogo && (
+                    <ParkLogo draft={draft} setDraft={setDraft} onUpload={onUploadLogo} />
+                )}
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Field label="Название">
                         <input

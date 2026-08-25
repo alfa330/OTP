@@ -11,6 +11,7 @@ from flask import jsonify, redirect, request
 from . import access as wiki_access
 from . import articles as wiki_articles
 from . import migration as wiki_migration
+from . import parks as wiki_parks
 from . import perimeter as wiki_perimeter
 from . import queries
 from . import schema as wiki_schema
@@ -360,7 +361,16 @@ def register(bp, wiki_route, db, log_ip, gcs):
             # Файл ещё не привязан к статье (загружен в редактор или пришёл из
             # импорта). Пока привязки нет, проверять нечего — значит доступ
             # только у того, кто его загрузил.
-            return jsonify({"error": "Файл не найден"}), 404
+            #
+            # Кроме одного случая: файл может быть картинкой СПРАВОЧНИКА —
+            # логотипом парка. Статьи у него нет и не будет, а видеть его
+            # обязаны все, кому видно само пространство: иначе аватарка парка
+            # открывалась бы у одного загрузившего, а у остальных в рельсе
+            # витрины стояла бы битая картинка. Границей служит то же
+            # пространство, что и у самого справочника.
+            spaces = wiki_parks.logo_space_ids(cursor, record['id'])
+            if not spaces or not (spaces & set(queries.spaces_for_user(cursor, ctx))):
+                return jsonify({"error": "Файл не найден"}), 404
 
         url = gcs['signed_url'](
             record['bucket'], record['blob_path'],

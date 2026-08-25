@@ -11,6 +11,8 @@ import {
 import useStableCallback from './useStableCallback';
 import ParkEditor from './ParkEditor';
 import { numbersFromPark, numbersPayload, parkDraftIssue } from './parkPoints';
+import { logoIssue, shrinkLogo } from './parkLogo';
+import { absoluteFileUrl } from './fileUrls';
 
 /* Таксопарки и акции.
  *
@@ -28,7 +30,7 @@ const fmtDate = (iso) => (iso
 
 const emptyPark = () => ({
     name: '', city: '', address: '', website: '', commission: '', description: '',
-    head_office_id: undefined,
+    head_office_id: undefined, logo_file_id: null, logo_url: null,
     // Одна пустая строка сразу: номер у парка обязателен, и форма должна
     // показывать это полем, а не пустым местом с кнопкой.
     numbers: numbersFromPark({}),
@@ -170,7 +172,12 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
             axios.get(`${base}/offices`, req),
         ])
             .then(([parksResponse, promoResponse, officeResponse]) => {
-                setParks(parksResponse.data?.items || []);
+                /* Логотип приезжает относительным адресом (/api/wiki/file/<id>),
+                   а страница отдаётся с другого домена, чем API, — без
+                   раскрытия браузер искал бы картинку на Pages (fileUrls.js). */
+                setParks((parksResponse.data?.items || []).map((park) => ({
+                    ...park, logo_url: absoluteFileUrl(park.logo_url, base),
+                })));
                 setCanManage(!!parksResponse.data?.can_manage);
                 setPromotions(promoResponse.data?.items || []);
                 setOffices((officeResponse.data?.items || [])
@@ -185,6 +192,27 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
         return () => clearTimeout(timer);
     }, [load, query]);
 
+    /* Логотип уходит на сервер сразу, отдельным запросом, а в парк ложится
+       один id. Возврат null — отказ: форма оставляет прежнюю картинку, а
+       причину человек уже прочитал тостом. */
+    const uploadLogo = async (file) => {
+        const issue = logoIssue(file);
+        if (issue) { toast(issue, 'error'); return null; }
+        try {
+            const { blob, name } = await shrinkLogo(file);
+            const form = new FormData();
+            form.append('file', blob, name);
+            const response = await axios.post(`${base}/parks/logo`, form, req);
+            return {
+                file_id: response.data?.file_id,
+                url: absoluteFileUrl(response.data?.url, base),
+            };
+        } catch (e) {
+            toast(errText(e, 'Не удалось загрузить логотип'), 'error');
+            return null;
+        }
+    };
+
     const save = () => {
         const payload = {
             name: draft.name,
@@ -194,6 +222,9 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
             website: draft.website || null,
             description: draft.description || null,
             commission: draft.commission === '' ? null : Number(draft.commission),
+            // null снимает логотип: ключ есть всегда, иначе «Убрать» ничего бы
+            // не меняло — сервер читает именно наличие ключа.
+            logo_file_id: draft.logo_file_id || null,
             numbers: numbersPayload(draft.numbers),
         };
         setBusy(true);
@@ -313,6 +344,8 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
                                     head_office_id: p.head_office?.id ?? undefined,
                                     website: p.website || '', description: p.description || '',
                                     commission: p.commission ?? '',
+                                    logo_file_id: p.logo_file_id || null,
+                                    logo_url: p.logo_url || null,
                                     numbers: numbersFromPark(p),
                                 })}
                                 onArchive={archive}
@@ -350,7 +383,8 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
                 )}
             >
                 {draft && (
-                    <ParkEditor draft={draft} setDraft={setDraft} offices={offices} />
+                    <ParkEditor draft={draft} setDraft={setDraft} offices={offices}
+                                onUploadLogo={uploadLogo} />
                 )}
             </IosModal>
         </div>

@@ -38,6 +38,7 @@ from . import importer as wiki_importer
 from . import migration as wiki_migration
 from . import queries
 from . import sanitize as wiki_sanitize
+from . import storage as wiki_storage
 from .routes_structure import _int_or_none
 from .ai import authoring as ai_authoring
 from .ai import providers as ai_providers
@@ -62,28 +63,16 @@ def register(bp, wiki_route, db, log_ip, gcs):
 
     def _store_file(cursor, *, data, filename, content_type, uploaded_by,
                     article_id=None):
-        """Кладёт файл в GCS и заводит запись, возвращая постоянный адрес.
+        """Постоянный адрес файла или None, если хранилище не настроено.
 
-        Постоянный, а не подписанный: подпись живёт часы, а статья — годами.
-        Именно поэтому картинки внутри уроков LMS со временем перестают
-        открываться.
+        Сама укладка — в wiki/storage.py: логотип парка грузится другим роутом,
+        а ложится туда же, и второй экземпляр той же логики разошёлся бы с этим
+        на первой правке.
         """
-        bucket = gcs['bucket_name']() if gcs.get('bucket_name') else None
-        if not bucket:
-            return None
-
-        blob_path = wiki_importer.blob_path_for(filename, content_type)
-        client = gcs['client']()
-        client.bucket(bucket).blob(blob_path).upload_from_string(
-            data, content_type=content_type or 'application/octet-stream')
-
-        file_id = wiki_articles.register_file(
-            cursor, article_id=article_id, bucket=bucket, blob_path=blob_path,
-            original_name=str(filename or 'file')[:255],
-            content_type=content_type, file_size=len(data),
-            width=None, height=None, uploaded_by=uploaded_by,
-        )
-        return '/api/wiki/file/%s' % file_id
+        _file_id, url = wiki_storage.store_file(
+            cursor, gcs, data=data, filename=filename, content_type=content_type,
+            uploaded_by=uploaded_by, article_id=article_id)
+        return url
 
     # ── Импорт документа ─────────────────────────────────────────────────
     #

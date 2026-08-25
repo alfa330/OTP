@@ -275,7 +275,8 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     routes_analytics.register(bp, wiki_route, db, _ip)
 
     from . import routes_parks
-    routes_parks.register(bp, wiki_route, db, _ip)
+    # gcs — ради логотипа парка: он ложится в тот же бакет, что картинки статей.
+    routes_parks.register(bp, wiki_route, db, _ip, gcs or {})
 
     from . import routes_offices
     routes_offices.register(bp, wiki_route, db, _ip)

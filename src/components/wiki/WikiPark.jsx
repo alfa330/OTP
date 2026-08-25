@@ -4,6 +4,7 @@ import {
     AlertCircle, ArrowLeft, Building2, Globe, Loader2, MapPin, Percent, Phone, Tag,
 } from 'lucide-react';
 import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { absoluteFileUrl } from './fileUrls';
 
 /* Страница таксопарка — открывается из рельса витрины.
  *
@@ -69,7 +70,10 @@ export default function WikiPark({ base, headers, slug, onBack, onOpenParks,
            без space_id запрос спрашивал бы «парк с таким слагом где угодно». */
         axios.get(`${base}/parks/${encodeURIComponent(slug)}`,
                   { headers, params: { space_id: spaceId || undefined } })
-            .then((r) => setPark(r.data))
+            /* Логотип — абсолютным адресом: в теле ответа он относительный,
+               а страница отдаётся с другого домена, чем API (fileUrls.js). */
+            .then((r) => setPark({ ...r.data,
+                                   logo_url: absoluteFileUrl(r.data?.logo_url, base) }))
             .catch((e) => { setPark(null); setError(errText(e, 'Не удалось открыть парк')); })
             .finally(() => setLoading(false));
     }, [base, headers, slug, spaceId]);

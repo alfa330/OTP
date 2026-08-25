@@ -7,13 +7,25 @@
 (см. шапку wiki/parks.py).
 """
 
+import uuid
+
 from flask import jsonify, request
 
 from . import access as wiki_access
 from . import offices as wiki_offices
 from . import parks as wiki_parks
 from . import queries
+from . import storage as wiki_storage
 from .routes_structure import _clean, _int_or_none, _slugify, request_space
+
+# Логотип парка. Пять мегабайт, а не двадцать пять, как у импорта документа:
+# это аватарка 38×38 в рельсе витрины, и всё, что больше, — недоразумение,
+# которое лучше отклонить сразу. Форма к тому же уменьшает картинку до 512 px
+# ещё в браузере (src/components/wiki/parkLogo.js).
+_LOGO_MAX_BYTES = 5 * 1024 * 1024
+# SVG в списке нет намеренно: это исполняемый документ, а не картинка, и
+# отдавать его по ссылке справочника, который правит половина отдела, незачем.
+_LOGO_TYPES = ('image/png', 'image/jpeg', 'image/webp')
 
 
 def _body():
@@ -84,6 +96,40 @@ def _head_office(cursor, data, space_id):
         cursor, [office_id], space_id=space_id) else None
 
 
+def _logo_file(cursor, value, *, user_id, space_id):
+    """uuid логотипа из тела запроса или None (в том числе на мусор).
+
+    Проверка нужна, потому что id файла — это ключ доступа: роут /file/<id>
+    открывает логотип каждому, кому видно пространство. Без неё редактор
+    справочника вписал бы сюда uuid картинки из чужой статьи и раздал бы её
+    своему пространству, ничего не загружая.
+
+    Свой файл — тот, что человек только что загрузил (/parks/logo), либо тот,
+    что УЖЕ стоит логотипом в этом пространстве: правку телефона у чужого парка
+    делают чаще, чем смену логотипа, и форма присылает картинку обратно как
+    есть — не признать её значило бы стирать логотип чужой правкой.
+
+    Привязанный к статье файл не подходит никогда: у него своя граница
+    (периметр разделов), и справочник её не воспроизведёт.
+    """
+    try:
+        file_id = str(uuid.UUID(str(value).strip()))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+    cursor.execute(
+        """
+        SELECT 1 FROM wiki_files f
+         WHERE f.id = %(file)s AND f.article_id IS NULL
+           AND (f.uploaded_by = %(user)s
+                OR EXISTS (SELECT 1 FROM wiki_taxi_parks p
+                            WHERE p.logo_file_id = f.id AND p.space_id = %(space)s))
+        """,
+        {'file': file_id, 'user': user_id, 'space': space_id},
+    )
+    return file_id if cursor.fetchone() else None
+
+
 def _decimal_or_none(value):
     try:
         number = float(value)
@@ -114,7 +160,7 @@ def _write_numbers(cursor, park_id, numbers, links, data, *, space_id):
     return wrote
 
 
-def register(bp, wiki_route, db, log_ip):
+def register(bp, wiki_route, db, log_ip, gcs):
 
     def _may_edit(ctx):
         """Справочники правит всякий, у кого есть что-то сверх чтения.
@@ -194,7 +240,9 @@ def register(bp, wiki_route, db, log_ip):
                                              'address': _clean(data.get('address'), 500),
                                              'website': _clean(data.get('website'), 500),
                                              'commission': _decimal_or_none(data.get('commission')),
-                                             'logo_file_id': data.get('logo_file_id') or None,
+                                             'logo_file_id': _logo_file(
+                                                 cursor, data.get('logo_file_id'),
+                                                 user_id=ctx['user_id'], space_id=space_id),
                                              'head_office_id': _head_office(cursor, data, space_id),
                                          })
         _write_numbers(cursor, park_id, numbers, links, data, space_id=space_id)
@@ -253,8 +301,11 @@ def register(bp, wiki_route, db, log_ip):
                 fields[key] = _clean(data[key], limit)
         if 'commission' in data:
             fields['commission'] = _decimal_or_none(data['commission'])
+        # Ключ есть, а значение пустое — «логотип сняли».
         if 'logo_file_id' in data:
-            fields['logo_file_id'] = data['logo_file_id'] or None
+            fields['logo_file_id'] = _logo_file(cursor, data['logo_file_id'],
+                                                user_id=ctx['user_id'],
+                                                space_id=space_id)
         # Ключ есть, а значение пустое — «адрес снят», а не «поле не прислали».
         if 'head_office_id' in data:
             fields['head_office_id'] = _head_office(cursor, data, space_id)
@@ -281,6 +332,59 @@ def register(bp, wiki_route, db, log_ip):
                            entity_type='park', entity_id=park_id,
                            details=fields, ip_address=log_ip())
         return jsonify({"status": "ok"})
+
+    # ── Логотип парка ────────────────────────────────────────────────────
+    #
+    # Отдельная дверь, а не общий /upload редактора: тот гейтится can_create
+    # («может завести статью»), а справочник правит всякий, у кого есть что-то
+    # сверх чтения. Через /upload супервайзер с одним правом на правку получил
+    # бы отказ уже ПОСЛЕ выбора файла — то есть молчаливый отказ этажом ниже,
+    # ровно та болезнь, от которой гейт справочника и уходил.
+    #
+    # Правило статическое, поэтому /parks/logo разбирается раньше /parks/<slug>;
+    # GET по этому адресу до него всё равно доедет — методы у роутов разные.
+    @wiki_route('/parks/logo', methods=('POST',))
+    def wiki_park_logo(cursor, ctx):
+        if not _may_edit(ctx):
+            return _forbidden()
+        # Пространство спрашиваем и здесь, хотя файл пока ничей: парк может быть
+        # ещё не сохранён. Право грузить выдаётся в пространстве, и журнал
+        # обязан знать, в чьём справочнике это случилось.
+        space_id, space_error = request_space(cursor, ctx)
+        if space_error:
+            return space_error
+
+        uploaded = request.files.get('file')
+        if not uploaded or not uploaded.filename:
+            return jsonify({"error": "Файл не выбран"}), 400
+
+        content_type = (uploaded.mimetype or '').strip().lower()
+        if content_type not in _LOGO_TYPES:
+            return jsonify({"error": "Логотип — картинка PNG, JPEG или WebP"}), 400
+
+        data = uploaded.read()
+        if not data:
+            return jsonify({"error": "Файл пустой"}), 400
+        if len(data) > _LOGO_MAX_BYTES:
+            return jsonify({"error": "Файл больше %d МБ" % (_LOGO_MAX_BYTES // (1024 * 1024))}), 400
+
+        # Без привязки к статье: у логотипа её нет и не будет. Видимость ему
+        # даёт сам справочник — parks.logo_space_ids, которую спрашивает
+        # /file/<id>.
+        file_id, url = wiki_storage.store_file(
+            cursor, gcs, data=data, filename=uploaded.filename,
+            content_type=content_type, uploaded_by=ctx['user_id'])
+        if not file_id:
+            return jsonify({"error": "Хранилище файлов не настроено"}), 503
+
+        queries.log_action(cursor, actor_id=ctx['user_id'], action='park.logo_upload',
+                           entity_type='park', entity_id=None,
+                           details={'space_id': space_id, 'file_id': str(file_id),
+                                    'size': len(data), 'content_type': content_type},
+                           ip_address=log_ip())
+        # file_id отдаём отдельно от адреса: форма кладёт в парк именно его, а
+        # url ей нужен только чтобы показать картинку до сохранения.
+        return jsonify({"file_id": file_id, "url": url}), 201
 
     # ── Акции ────────────────────────────────────────────────────────────
     @wiki_route('/promotions', methods=('GET', 'POST'))
