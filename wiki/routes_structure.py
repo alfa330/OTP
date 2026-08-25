@@ -1122,8 +1122,23 @@ def register(bp, wiki_route, db, log_ip):
         })
 
     # ── Журнал ───────────────────────────────────────────────────────────
-    @wiki_route('/audit', capability='can_manage_access')
+    #
+    # Гейт стоит в ТЕЛЕ, а не параметром capability= на роуте: журнал открыт
+    # «с должности СВ и выше» (решение владельца 25.08.2026), а параметр
+    # проверяет способность, которой это право не выражается вовсе. Формула
+    # одна — wiki_access.may_read_audit; фронт не выводит её у себя, а получает
+    # готовый признак can_read_audit из /ping.
+    @wiki_route('/audit')
     def wiki_audit(cursor, ctx):
+        if not wiki_access.may_read_audit(
+                ctx['otp_role'],
+                is_wiki_admin=bool(ctx['wiki_roles'])
+                and bool(ctx['capabilities'].get('can_manage_access'))):
+            return jsonify({
+                "error": "Журнал открыт супервайзерам и выше",
+                "code": "WIKI_AUDIT_FORBIDDEN",
+            }), 403
+
         limit = min(max(_int_or_none(request.args.get('limit')) or 100, 1), 500)
         offset = max(_int_or_none(request.args.get('offset')) or 0, 0)
         # Поиск от двух символов: по одной букве ILIKE перебирает всю таблицу

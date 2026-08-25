@@ -57,3 +57,28 @@ test('колбэки родителя не попадают в зависимо�
     const leaky = deps.filter((d) => /showToast|onReviewed|onOpenArticle/.test(d));
     assert.deepEqual(leaky, [], `нестабильные колбэки в зависимостях: ${leaky}`);
 });
+
+/* Журнал открыт «с должности СВ и выше» (решение владельца 25.08.2026), и
+ * лестница должностей живёт ТОЛЬКО на сервере (wiki/access.py: may_read_audit),
+ * а фронт получает готовый признак can_read_audit из /ping.
+ *
+ * Проверка текстовая и сторожит ровно одно: чтобы вкладку не начали показывать
+ * по своей формуле. Стоит вывести её здесь по роли — и появится второй источник
+ * истины: у супервайзера вкладка есть, а роут отвечает 403. Так уже расходился
+ * гейт «Аналитики», пока формулу редактора не свели в одно место.
+ */
+test('вкладка «Журнал» рисуется по признаку сервера, а не по своей лестнице', () => {
+    const view = readFileSync(new URL('WikiView.jsx', DIR), 'utf8');
+    const tab = view.match(/\{ key: 'audit',[\s\S]{0,200}?\},/);
+    assert.ok(tab, 'вкладка журнала не найдена — проверь тест');
+    assert.match(tab[0], /canReadAudit/, 'журнал обязан спрашивать can_read_audit');
+    assert.doesNotMatch(tab[0], /canManageAccess/,
+                        'способность больше не открывает журнал — иначе супервайзер его не увидит');
+    assert.match(view, /const canReadAudit = !!state\?\.can_read_audit;/,
+                 'признак берётся из ответа /ping, а не выводится по роли');
+    // Ролевых слов во фронте быть не должно вовсе: лестница — серверная.
+    const audit = view.slice(Math.max(0, view.indexOf("key: 'audit'") - 400),
+                             view.indexOf("key: 'audit'") + 400);
+    assert.doesNotMatch(audit, /'sv'|super_admin|role_level/,
+                        'лестница должностей во фронте — второй источник истины');
+});

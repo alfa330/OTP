@@ -293,6 +293,12 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
        (wiki_section_access_rules.can_grant_guest), — и в словаре способностей
        его нет вовсе. Вывести его здесь было бы вторым источником истины. */
     const canGrantGuest = !!state?.can_grant_guest;
+    /* Журнал — с должности СВ и выше (решение владельца 25.08.2026). Признак,
+       как и гостевой, приходит с сервера готовым: право живёт в ДОЛЖНОСТИ, в
+       словаре способностей его нет, а лестница ролей, выведенная здесь второй
+       раз, разошлась бы с серверной молча — вкладка появлялась бы у того, кому
+       роут отвечает 403. */
+    const canReadAudit = !!state?.can_read_audit;
     /* Что открыто МНЕ и до какого срока. Едет тем же ответом /ping: срок обязан
        быть виден на любой вкладке, а второй запрос ради подписи в шапке дал бы
        вкладку, на которой подпись почему-то не появляется. */
@@ -440,11 +446,14 @@ export default function WikiView({ apiBaseUrl, withAccessTokenHeader, showToast,
            Стоит перед журналом: отчёт открывают регулярно, аудит — по поводу. */
         { key: 'analytics', label: 'Аналитика', icon: LineChart,
           show: features.analytics && (isEditor || canManageAccess) },
+        /* Журнал видит супервайзер и выше — и администратор доступов, у
+           которого он был и раньше: обе двери сложены в один признак на
+           сервере (access.may_read_audit). */
         { key: 'audit', label: 'Журнал', icon: ScrollText,
-          show: features.audit && canManageAccess },
+          show: features.audit && canReadAudit },
     ].filter((t) => t.show)),
     [canManageStructure, canManageAccess, canGrantAccess, canGrantGuest,
-     isEditor, features]);
+     canReadAudit, isEditor, features]);
 
     /* Поиск предлагает спросить помощника ровно тогда, когда вкладка помощника
        вообще есть: у пространства без неё это была бы кнопка в никуда.

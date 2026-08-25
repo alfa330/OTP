@@ -228,6 +228,16 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 is_wiki_admin=bool(ctx['wiki_roles'])
                 and bool(ctx['capabilities'].get('can_manage_access')),
             ),
+            # Журнал открыт с должности СВ и выше (access.may_read_audit).
+            # Признак считает сервер и отдаёт готовым по той же причине, что и
+            # can_grant_guest ниже: право живёт в ДОЛЖНОСТИ, способностью не
+            # выражается, а вторая формула во фронте однажды разойдётся с этой
+            # — и вкладка появится у того, кому роут отвечает 403.
+            "can_read_audit": wiki_access.may_read_audit(
+                ctx['otp_role'],
+                is_wiki_admin=bool(ctx['wiki_roles'])
+                and bool(ctx['capabilities'].get('can_manage_access')),
+            ),
             "subjects": ctx['subjects'],
         }
         if ready:

@@ -182,6 +182,31 @@ class AuditSpaceGuardTest(unittest.TestCase):
         self.assertIn('request_space', route)
         self.assertIn("'space_id': space_id", route)
 
+    def test_audit_route_asks_the_role_ladder(self):
+        """Дверь журнала — должность, и проверяет её ОДНА формула.
+
+        Решение владельца 25.08.2026: журнал открыт «с должности СВ и выше».
+        Способностью это право не выражается, поэтому на роуте больше нет
+        capability=can_manage_access, а гейт стоит в теле. Выведи ту же
+        лестницу вторым местом (здесь, в /ping или во фронте) — и места
+        однажды разойдутся: вкладка появится у того, кому роут отвечает 403.
+        """
+        source = io.open(str(WIKI / 'routes_structure.py'), encoding='utf-8').read()
+        tree = ast.parse(source)
+        route = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == 'wiki_audit':
+                route = ast.get_source_segment(source, node)
+        self.assertIsNotNone(route, 'роут журнала не найден')
+        self.assertIn('may_read_audit', route,
+                      'журнал обязан спрашивать лестницу должностей')
+        self.assertNotIn("capability='can_manage_access'", source.split('def wiki_audit')[0][-400:],
+                         'способность больше не открывает журнал')
+        # Тот же ответ уходит фронту готовым признаком — иначе он выведет свой.
+        ping = io.open(str(WIKI / 'routes.py'), encoding='utf-8').read()
+        self.assertIn('"can_read_audit": wiki_access.may_read_audit(', ping,
+                      '/ping обязан отдавать признак той же функцией')
+
 
 if __name__ == '__main__':
     unittest.main()

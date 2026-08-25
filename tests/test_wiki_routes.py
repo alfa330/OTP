@@ -145,8 +145,12 @@ class WikiRouteGuardTest(_RouteHarness, unittest.TestCase):
     # ── Супервайзер: правит, но не раздаёт права ─────────────────────────
     def test_supervisor_cannot_manage_access(self):
         client, _ = self.build(make_context('sv'))
-        self.assertEqual(client.get('/api/wiki/audit').status_code, 403)
         self.assertEqual(client.post('/api/wiki/spaces', json={'name': 'x'}).status_code, 403)
+        # А журнал супервайзеру ОТКРЫТ — решение владельца 25.08.2026 («с
+        # должности СВ и выше»). До него эта же строка проверяла обратное:
+        # дверь открывала способность can_manage_access. Вся лестница —
+        # в AuditLadderTest ниже.
+        self.assertEqual(client.get('/api/wiki/audit').status_code, 200)
 
     # ── Администратор вики ───────────────────────────────────────────────
     def test_wiki_admin_passes_guards(self):
@@ -990,6 +994,58 @@ class AuditReadTest(_RouteHarness, unittest.TestCase):
         self.assertIn('counts', first)
         more = client.get('/api/wiki/audit?offset=50').get_json()
         self.assertNotIn('total', more)
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class AuditLadderTest(_RouteHarness, unittest.TestCase):
+    """Кому открыт журнал.
+
+    Решение владельца 25.08.2026: «начиная с должности СВ и выше». До этого
+    дверь открывала способность can_manage_access, то есть журнал видел
+    администратор доступов и супер-админ с мастер-ключом, а супервайзер — нет.
+
+    Право живёт в ДОЛЖНОСТИ, и проверяется здесь именно по ней: способностью
+    оно не выражается, правилом раздела не поднимается (can_manage_access нет в
+    PERMISSION_COLUMNS), а значит и подменить его выдачей прав нельзя.
+    """
+
+    def _audit(self, context):
+        client, cursor = self.build(context)
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = (0,)
+        return client.get('/api/wiki/audit')
+
+    def test_supervisor_and_above_read_the_journal(self):
+        # 'supervisor' здесь не для симметрии: в ROLE_LEVELS этой роли нет
+        # (уровень 0), хотя в CHECK на users.role она есть. Носитель такого
+        # написания обязан пройти — иначе «СВ и выше» зависит от того, каким
+        # словом должность записали в базе.
+        for role in ('sv', 'supervisor', 'admin', 'super_admin'):
+            self.assertEqual(self._audit(make_context(role)).status_code, 200, role)
+
+    def test_operator_and_trainer_are_refused(self):
+        """Тренер — ниже супервайзера по лестнице, и журнал ему не открыт."""
+        for role in ('operator', 'trainee', 'trainer', 'кладовщик'):
+            response = self._audit(make_context(role))
+            self.assertEqual(response.status_code, 403, role)
+            self.assertEqual(response.get_json()['code'], 'WIKI_AUDIT_FORBIDDEN', role)
+
+    def test_wiki_access_admin_keeps_the_journal(self):
+        """У администратора доступов журнал был и остаётся — при любой должности."""
+        response = self._audit(make_context('operator', wiki_roles=[ADMIN_ROLE]))
+        self.assertEqual(response.status_code, 200)
+
+    def test_ping_carries_the_same_answer(self):
+        """Фронт рисует вкладку по признаку из /ping, а не по своей лестнице.
+
+        Разъедься эти две формулы — и вкладка появилась бы у того, кому роут
+        отвечает 403 (ровно так уже расходился гейт «Аналитики»).
+        """
+        for role, expected in (('sv', True), ('trainer', False), ('admin', True)):
+            client, cursor = self.build(make_context(role))
+            cursor.fetchone.return_value = (0,)
+            payload = client.get('/api/wiki/ping').get_json()
+            self.assertEqual(payload['can_read_audit'], expected, role)
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')
